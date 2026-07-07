@@ -1,86 +1,207 @@
 # TradingView-MCP
 
-TradingView デスクトップアプリ(macOS)に Chrome DevTools Protocol で接続し、AI がチャートを分析・操作できるようにする MCP サーバー。
+**TradingView デスクトップアプリを AI に見せて、チャート分析を手伝ってもらうためのツールです。**
 
-## 仕組み
+AI エージェント(Claude Code / Codex / Antigravity など)にこのサーバーを登録すると、AI が「あなたが今見ているチャート」をそのまま読めるようになります。ログイン済みのアカウント・保存したレイアウト・購入済みのカスタムインジケーターがそのまま使えます。
 
-TradingView Desktop は Electron 製のため、デバッグポート付きで起動すると CDP でページ内部(`window.TradingViewApi`)にアクセスできる。ユーザーのログインセッション・レイアウト・カスタムインジケーターをそのまま利用できる。
+## できること
+
+AI にこんなお願いができるようになります:
+
+- 「**今のチャートを分析して**」 → チャート画像+ローソク足+インジケーター値を組み合わせて分析
+- 「**このインジケーターのシグナルを読んで**」 → SELL/BUY ラベルやサポレジラインの数値を取得
+- 「**日足と4時間足の両方で環境認識して**」 → チャートを動かさずに複数時間足の指標を一括取得
+- 「**日本株で RSI が30以下の銘柄を探して**」 → スクリーナーで市場を検索
+- 「**ウォッチリストの銘柄を全部チェックして**」 → リストの全銘柄のクォートを取得
+
+## 仕組み(ざっくり)
+
+TradingView のデスクトップアプリは中身がブラウザ(Electron)なので、デバッグ用の入り口を開けて起動すると、外部プログラムからチャートの中身を読み取れます。この MCP サーバーがその橋渡しをします。
 
 ```
-Claude ⇄ (stdio) ⇄ tradingview-mcp ⇄ (CDP :9222) ⇄ TradingView.app
-                                    ⇄ (HTTPS)    ⇄ scanner.tradingview.com
+AIエージェント ⇄ tradingview-mcp ⇄ TradingView デスクトップアプリ(あなたのチャート)
+                                  ⇄ TradingView 公開API(クォート・スクリーナー)
 ```
 
-チャート関連は CDP、クォート・スクリーニングは公開スキャナー API(認証不要)を Node から直接叩く。
+## 必要なもの
 
-詳細は [docs/STRATEGY.md](docs/STRATEGY.md) と docs/ 配下の各フェーズ調査記録(phase0 / phase3 / phase4 / phase5)を参照。今後の改善課題は [docs/BACKLOG.md](docs/BACKLOG.md)。
+- macOS + [TradingView デスクトップアプリ](https://www.tradingview.com/desktop/)(無料プランでOK)
+- [Node.js](https://nodejs.org/) 20以上(`node --version` で確認)
+- AI エージェントいずれか: [Claude Code](https://claude.com/claude-code) / [Codex](https://developers.openai.com/codex) / [Antigravity](https://antigravity.google/) など
 
-## セットアップ
+## セットアップ(3ステップ)
+
+### ステップ1: このツールをインストール
+
+ターミナルで:
 
 ```bash
+git clone https://github.com/tedorigawa001/TradingView-MCP.git
+cd TradingView-MCP
 npm install
 npm run build
 ```
 
-TradingView をデバッグポート付きで起動(通常起動中の場合は一度終了してから):
+### ステップ2: TradingView をデバッグモードで起動
+
+**重要**: 普通にアイコンから起動しても AI からは見えません。TradingView が起動中なら一度終了(Cmd+Q)してから、ターミナルで:
 
 ```bash
 open -a TradingView --args --remote-debugging-port=9222
 ```
 
-MCP サーバーの登録(Claude Code の場合はリポジトリ内の `.mcp.json` で自動登録される。手動なら):
+毎回このコマンドで起動するのが面倒な場合は、エイリアスを登録しておくと `tv` だけで起動できます:
+
+```bash
+echo 'alias tv="open -a TradingView --args --remote-debugging-port=9222"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### ステップ3: AI エージェントに登録
+
+お使いのエージェントに合わせて設定してください。`/path/to/TradingView-MCP` は実際にcloneした場所に置き換えます(このリポジトリ内で `pwd` すると確認できます)。
+
+<details>
+<summary><b>Claude Code の場合</b></summary>
+
+ターミナルで1コマンド:
 
 ```bash
 claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 ```
 
-注意: MCP サーバープロセスは起動時の `build/` を使い続けるため、**再ビルド後は Claude Code セッションの再接続(再起動)が必要**。新ツールはそれまで見えない。
+または、このリポジトリのフォルダで Claude Code を開けば、同梱の `.mcp.json` により自動で登録されます。
 
-## ツール
+確認: Claude Code で `/mcp` を実行し、`tradingview` が表示されればOK。
+
+</details>
+
+<details>
+<summary><b>Codex(OpenAI)の場合</b></summary>
+
+方法1 — CLI で追加:
+
+```bash
+codex mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
+```
+
+方法2 — 設定ファイル `~/.codex/config.toml` に直接追記:
+
+```toml
+[mcp_servers.tradingview]
+command = "node"
+args = ["/path/to/TradingView-MCP/build/index.js"]
+```
+
+確認: Codex の画面で `/mcp` を実行し、`tradingview` が表示されればOK。
+
+</details>
+
+<details>
+<summary><b>Antigravity(Google)の場合</b></summary>
+
+設定ファイル `~/.gemini/config/mcp_config.json` を作成(または追記):
+
+```json
+{
+  "mcpServers": {
+    "tradingview": {
+      "command": "node",
+      "args": ["/path/to/TradingView-MCP/build/index.js"]
+    }
+  }
+}
+```
+
+IDE から編集する場合は、エージェントパネル右上の「...」→「MCP Servers」→「Manage MCP Servers」→「View raw config」で同じファイルが開きます。保存すると自動で再読み込みされます。
+
+</details>
+
+## 使ってみる
+
+TradingView をデバッグモードで起動した状態で、AI エージェントにこう話しかけてみてください:
+
+> 今のチャートを分析して
+
+AI が自動で `get_chart_context`(何が表示されているか)→ `get_chart_screenshot`(見た目)→ `get_ohlcv`(数値)などのツールを組み合わせて分析します。
+
+## ツール一覧(全14種)
+
+AI が状況に応じて自動で使い分けます。手動で覚える必要はありません。
+
+**チャートを読む**
 
 | ツール | 説明 |
 |---|---|
-| `get_chart_screenshot` | チャート画面を画像で取得(視覚分析用)。`chart_index` 指定で1チャートのみをフル解像度で切り出し |
-| `get_chart_context` | 全チャートのシンボル・時間足・インジケーター一覧 |
-| `get_ohlcv` | ロード済みローソク足データ(OHLCV) |
-| `get_indicator_values` | インジケーターのプロット値(シグナルレベル・バンド等)。色・アラート系プロットはデフォルト除外 |
-| `get_indicator_inputs` | インジケーターの入力パラメータ(名前・現在値・デフォルト値・説明) |
-| `get_indicator_graphics` | 描画専用インジケーターのラベル・ライン・ボックス(テキスト+価格+日時。Elliott Wave等) |
-| `load_more_history` | 過去バーの追加ロード(ビューは動かさない)。get_ohlcv等の遡及範囲を拡大 |
-| `list_alerts` | 価格アラート一覧(読み取り専用。作成・変更は非対応) |
-| `get_watchlist` | ウォッチリスト(セクション見出しでグループ化。ログインセッション利用) |
-| `get_quotes` | 任意シンボルのクォート+テクニカルデータ(RSI・総合評価 `Recommend.All` 等。スキャナーAPI) |
-| `get_mtf_overview` | 1シンボルの複数時間足スナップショット(15m/1h/4h/1D等のRSI・MA・評価を1コールで。チャート非干渉) |
-| `scan_market` | 市場スクリーニング(例: 日本市場で RSI<30 を出来高順に検索) |
-| `set_symbol` | アクティブチャートのシンボル変更 |
-| `set_timeframe` | アクティブチャートの時間足変更 |
+| `get_chart_context` | 表示中の全チャートのシンボル・時間足・インジケーター一覧 |
+| `get_chart_screenshot` | チャート画面を画像で取得。`chart_index` 指定で1チャートのみ高解像度切り出し |
+| `get_ohlcv` | ローソク足データ(ISO時刻付き。形成中の足には `forming` フラグ) |
+| `get_indicator_values` | インジケーターのプロット値(シグナルレベル・バンド等) |
+| `get_indicator_inputs` | インジケーターの設定パラメータ(名前・現在値・デフォルト値) |
+| `get_indicator_graphics` | 描画系インジケーターのラベル・ライン・ボックス(Elliott Wave のカウント等) |
+| `load_more_history` | 過去のローソク足を追加ロード(画面は動かさない) |
 
-## テスト
+**チャートを操作する**
+
+| ツール | 説明 |
+|---|---|
+| `set_symbol` | シンボル切替(失敗時は自動で元に戻す) |
+| `set_timeframe` | 時間足切替(同上) |
+
+**チャート外のデータ**
+
+| ツール | 説明 |
+|---|---|
+| `get_quotes` | 任意シンボルのクォート+テクニカル(RSI・総合評価等) |
+| `get_mtf_overview` | 1シンボルの複数時間足スナップショット(チャート非干渉) |
+| `scan_market` | 市場スクリーニング(例: 日本株で RSI<30 を出来高順) |
+| `get_watchlist` | あなたのウォッチリスト |
+| `list_alerts` | あなたの価格アラート一覧(読み取りのみ) |
+
+## よくあるトラブル
+
+| 症状 | 原因と対処 |
+|---|---|
+| 「TradingView desktop app is not reachable」エラー | TradingView がデバッグモードで起動していない。一度終了して**ステップ2のコマンドで**起動し直す |
+| ツールが AI に表示されない | エージェントの再起動(再接続)が必要。また `npm run build` を忘れていないか確認 |
+| ビルドし直したのに動作が変わらない | MCP サーバーは起動時のビルドを使い続けるため、**エージェントのセッションを再接続**する |
+| `no tradingview.com/chart page found` | TradingView でチャート画面を開いていない。チャートタブを開く |
+
+## セキュリティについて
+
+詳細は [docs/security-review.md](docs/security-review.md) を参照。最低限知っておくべきこと:
+
+- デバッグポート開放中は、同じPC上のプログラムから TradingView のログインセッションを操作できる状態になります。**AI と使う時だけ**デバッグモードで起動し、普段は通常起動にしてください。共有PCでは使わないでください
+- このツールは**読み取り中心**です。注文・アラート作成・ウォッチリスト変更などの書き込み機能は意図的に実装していません
+- `get_chart_screenshot` は画面に見えているものすべて(ウォッチリスト等)を AI に送信します
+
+## 開発者向け
+
+### テスト
 
 ```bash
-npm test              # ユニットテスト(アプリ不要。モックCDPサーバーで検証)
-npm run test:integration  # 統合テスト(デバッグポート付きでアプリ起動が必要)
+npm test                   # ユニットテスト(アプリ不要。モックで検証)
+npm run test:integration   # 統合テスト(デバッグモードのアプリが必要)
 ```
 
-統合テストはシンボル・時間足を一時的に変更するが、終了時に元の状態へ復元する。
+統合テストはシンボル・時間足を一時的に変更しますが、終了時に元へ復元します。
 
-## セキュリティ
-
-[docs/security-review.md](docs/security-review.md) を参照。要点:
-
-- デバッグポート開放中は同一マシンの任意プロセスが TradingView セッションを操作できるため、**MCP 利用時のみ**ポート付きで起動すること
-- ページへ渡る入力はすべて `JSON.stringify` + バリデーションでインジェクション対策済み(テストで担保)
-- `get_chart_screenshot` は画面に見えているものすべて(ウォッチリスト等)を AI に送信する
-
-## フォルダ構成
+### フォルダ構成
 
 - `src/` — TypeScript ソース
   - `cdp.ts` — CDP クライアント(接続・evaluate・スクリーンショット)
   - `tradingview.ts` — TradingView ページ内 API 層(チャート・インジケーター・ウォッチリスト)
-  - `scanner.ts` — 公開スキャナー API クライアント(クォート・スクリーニング)
+  - `scanner.ts` — 公開スキャナー API クライアント(クォート・MTF・スクリーニング)
   - `server.ts` — MCP ツール定義(依存注入でテスト可能)
   - `index.ts` — stdio エントリポイント
-- `test/unit/` — ユニットテスト(モック CDP / モックスキャナーで実アプリ不要)
+- `test/unit/` — ユニットテスト(モック CDP / モックスキャナー)
 - `test/smoke.mjs` — 実アプリに対する統合スモークテスト
 - `build/` — tsc 出力(gitignore 済み)
-- `docs/` — 戦略・フェーズ調査記録・セキュリティレビュー
+- `docs/` — 設計・調査ドキュメント
+
+### ドキュメント
+
+- [docs/STRATEGY.md](docs/STRATEGY.md) — 全体戦略と進捗
+- [docs/phase0-findings.md](docs/phase0-findings.md) / [phase3](docs/phase3-findings.md) / [phase4](docs/phase4-findings.md) / [phase5](docs/phase5-findings.md) — 内部API調査の記録
+- [docs/security-review.md](docs/security-review.md) — セキュリティレビュー
+- [docs/BACKLOG.md](docs/BACKLOG.md) — 今後の改善課題
