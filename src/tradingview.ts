@@ -783,6 +783,26 @@ export class TradingView {
           try { return chart.chartModel().mainSeries().bars()._items.length; }
           catch (e) { return null; }
         };
+        // On failure the chart must not be left on a broken symbol: roll it
+        // back to the previous one before rejecting, and report the outcome.
+        const fail = (message) => {
+          if (state().symbol === before) {
+            reject(new Error(message));
+            return;
+          }
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(rt);
+            const restored = state().symbol === before;
+            reject(new Error(message + (restored
+              ? " — the chart was restored to " + before
+              : " — WARNING: the chart could not be restored and may show " + state().symbol)));
+          };
+          const rt = setTimeout(finish, 8000);
+          try { chart.setSymbol(before, finish); } catch (e) { finish(); }
+        };
         let settled = false;
         // Used on BOTH paths: even a fired callback is only trusted if the
         // chart shows the requested symbol AND actually has data.
@@ -792,14 +812,14 @@ export class TradingView {
           clearTimeout(timer);
           const s = state();
           if (!matches(s.symbol)) {
-            reject(new Error("symbol change to " + requested + " did not take effect" +
+            fail("symbol change to " + requested + " did not take effect" +
               (viaCallback ? " (callback fired but chart shows " + s.symbol + ")" : " within 8s (chart still shows " + s.symbol + ")") +
-              " — the symbol may be invalid"));
+              " — the symbol may be invalid");
             return;
           }
           const bars = barCount();
           if (bars === 0) {
-            reject(new Error("symbol was set to " + s.symbol + " but no data loaded (0 bars) — likely an invalid symbol"));
+            fail("symbol was set to " + s.symbol + " but no data loaded (0 bars) — likely an invalid symbol");
             return;
           }
           const result = { ...s, changed: s.symbol !== before, bars };
@@ -849,6 +869,25 @@ export class TradingView {
           try { return chart.chartModel().mainSeries().bars()._items.length; }
           catch (e) { return null; }
         };
+        // Roll the chart back to the previous timeframe before rejecting.
+        const fail = (message) => {
+          if (state().resolution === before) {
+            reject(new Error(message));
+            return;
+          }
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(rt);
+            const restored = state().resolution === before;
+            reject(new Error(message + (restored
+              ? " — the chart was restored to " + before
+              : " — WARNING: the chart could not be restored and may show " + state().resolution)));
+          };
+          const rt = setTimeout(finish, 8000);
+          try { chart.setResolution(before, finish); } catch (e) { finish(); }
+        };
         let settled = false;
         const settle = (viaCallback) => {
           if (settled) return;
@@ -856,13 +895,13 @@ export class TradingView {
           clearTimeout(timer);
           const s = state();
           if (!matches(s.resolution)) {
-            reject(new Error("timeframe change to " + requested + " did not take effect" +
-              (viaCallback ? " (callback fired but chart shows " + s.resolution + ")" : " within 8s (chart still shows " + s.resolution + ")")));
+            fail("timeframe change to " + requested + " did not take effect" +
+              (viaCallback ? " (callback fired but chart shows " + s.resolution + ")" : " within 8s (chart still shows " + s.resolution + ")"));
             return;
           }
           const bars = barCount();
           if (bars === 0) {
-            reject(new Error("timeframe was set to " + s.resolution + " but no data loaded (0 bars)"));
+            fail("timeframe was set to " + s.resolution + " but no data loaded (0 bars)");
             return;
           }
           const result = { ...s, changed: s.resolution !== before, bars };

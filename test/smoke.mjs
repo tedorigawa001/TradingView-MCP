@@ -206,16 +206,26 @@ await check("set_timeframe accepts normalized aliases (D == 1D)", async () => {
   return `requested "D" -> chart shows "${r.resolution}"`;
 });
 
-await check("set_symbol fails loudly for an invalid symbol", async () => {
+await check("set_symbol fails loudly for an invalid symbol and rolls back", async () => {
+  const ctxBefore = await tv.getChartContext();
+  const symbolBefore = ctxBefore.charts[ctxBefore.activeChartIndex ?? 0].symbol;
   const r = await tv.setSymbol("ZZZINVALIDXYZ123").then(
     (v) => v,
     (e) => e,
   );
-  if (r instanceof Error) {
-    if (!/did not take effect|no data loaded/.test(r.message)) throw r;
-    return `rejected: ${r.message.slice(0, 70)}`;
+  if (!(r instanceof Error)) {
+    throw new Error(`invalid symbol did not reject: ${JSON.stringify(r)}`);
   }
-  throw new Error(`invalid symbol did not reject: ${JSON.stringify(r)}`);
+  if (!/did not take effect|no data loaded/.test(r.message)) throw r;
+  const ctxAfter = await tv.getChartContext();
+  const symbolAfter = ctxAfter.charts[ctxAfter.activeChartIndex ?? 0].symbol;
+  if (symbolAfter !== symbolBefore) {
+    throw new Error(`chart left on ${symbolAfter}, expected rollback to ${symbolBefore}`);
+  }
+  if (!/restored to/.test(r.message)) {
+    throw new Error(`rollback happened but was not reported: ${r.message.slice(0, 100)}`);
+  }
+  return `rejected and rolled back to ${symbolAfter}`;
 });
 
 // restore original state

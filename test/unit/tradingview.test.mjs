@@ -82,6 +82,24 @@ test("setSymbol/setResolution reject when the chart has zero bars after the chan
   }
 });
 
+test("setSymbol/setResolution roll the chart back before rejecting", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.setSymbol("BTCUSD");
+  await tv.setResolution("240");
+  const [symExpr, resExpr] = cdp.calls;
+  for (const expr of [symExpr, resExpr]) {
+    assert.ok(expr.includes("the chart was restored to"), "rollback success must be reported");
+    assert.ok(expr.includes("WARNING: the chart could not be restored"), "rollback failure must warn");
+    assert.ok(
+      expr.match(/fail\(/g).length >= 2,
+      "both failure branches must go through the rollback path",
+    );
+  }
+  assert.ok(symExpr.includes("chart.setSymbol(before, finish)"), "symbol rollback uses the previous symbol");
+  assert.ok(resExpr.includes("chart.setResolution(before, finish)"), "resolution rollback uses the previous timeframe");
+});
+
 test("getOhlcv bars carry timeIso and a forming flag heuristic", async () => {
   const cdp = fakeCdp({ symbol: "X", resolution: "1D", count: 0, bars: [] });
   const tv = new TradingView(cdp);
