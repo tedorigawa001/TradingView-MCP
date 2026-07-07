@@ -13,7 +13,7 @@ Claude ⇄ (stdio) ⇄ tradingview-mcp ⇄ (CDP :9222) ⇄ TradingView.app
 
 チャート関連は CDP、クォート・スクリーニングは公開スキャナー API(認証不要)を Node から直接叩く。
 
-詳細は [docs/STRATEGY.md](docs/STRATEGY.md) と docs/ 配下の各フェーズ調査記録(phase0 / phase3 / phase4)を参照。
+詳細は [docs/STRATEGY.md](docs/STRATEGY.md) と docs/ 配下の各フェーズ調査記録(phase0 / phase3 / phase4 / phase5)を参照。今後の改善課題は [docs/BACKLOG.md](docs/BACKLOG.md)。
 
 ## セットアップ
 
@@ -33,6 +33,8 @@ MCP サーバーの登録(Claude Code の場合はリポジトリ内の `.mcp.js
 ```bash
 claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 ```
+
+注意: MCP サーバープロセスは起動時の `build/` を使い続けるため、**再ビルド後は Claude Code セッションの再接続(再起動)が必要**。新ツールはそれまで見えない。
 
 ## ツール
 
