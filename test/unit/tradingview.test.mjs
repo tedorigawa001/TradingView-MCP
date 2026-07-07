@@ -228,6 +228,21 @@ test("listAlerts fetches the alerts API read-only with the app session", async (
   assert.ok(!/create_alert|modify|delete/.test(expr), "must stay read-only");
 });
 
+test("getChartRect validates the index and reads the chart container rect", async () => {
+  const cdp = fakeCdp({ x: 0, y: 0, width: 100, height: 100, devicePixelRatio: 2 });
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getChartRect(-1), /chartIndex must be/);
+  assert.throws(() => tv.getChartRect(1.5), /chartIndex must be/);
+  assert.throws(() => tv.getChartRect("0; hack()"), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.getChartRect(1);
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('querySelectorAll(".chart-container")'));
+  assert.ok(expr.includes("out of range"), "must fail clearly for a missing chart");
+  assert.ok(expr.includes("devicePixelRatio"));
+});
+
 test("getWatchlists fetches the symbols_list API with the app session", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);

@@ -194,13 +194,19 @@ export class CdpClient {
     return result.result?.value as T;
   }
 
-  /** Capture a screenshot of the chart window. Returns base64 image data. */
+  /**
+   * Capture a screenshot of the chart window, optionally clipped to a region
+   * (CSS pixels; scale multiplies the output resolution, e.g. devicePixelRatio
+   * for a retina-sharp crop). Returns base64 image data.
+   */
   async screenshot(
     format: "png" | "jpeg" = "png",
     quality?: number,
+    clip?: { x: number; y: number; width: number; height: number; scale?: number },
   ): Promise<string> {
     const params: Record<string, unknown> = { format };
     if (format === "jpeg") params.quality = quality ?? 80;
+    if (clip) params.clip = { scale: 1, ...clip };
     const result = (await this.send("Page.captureScreenshot", params)) as {
       data?: string;
     };

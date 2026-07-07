@@ -172,6 +172,20 @@ await check("get_chart_screenshot", async () => {
   return `${Math.round((data.length * 3) / 4 / 1024)} KiB jpeg`;
 });
 
+await check("get_chart_screenshot clipped to one chart", async () => {
+  const r = await tv.getChartRect(0);
+  if (r.width < 100 || r.height < 100) throw new Error(`rect too small: ${JSON.stringify(r)}`);
+  const clipped = await cdp.screenshot("jpeg", undefined, {
+    x: r.x, y: r.y, width: r.width, height: r.height, scale: r.devicePixelRatio,
+  });
+  if (clipped.length < 10_000) throw new Error("clipped screenshot suspiciously small");
+  const outOfRange = await tv.getChartRect(99).then(() => null, (e) => e.message);
+  if (!outOfRange || !/out of range/.test(outOfRange)) {
+    throw new Error("out-of-range chart index did not fail clearly");
+  }
+  return `chart0 ${r.width}x${r.height}@${r.devicePixelRatio}x, ${Math.round((clipped.length * 3) / 4 / 1024)} KiB`;
+});
+
 await check("set_symbol", async () => {
   const r = await tv.setSymbol("BTCUSD");
   if (!r.symbol.includes("BTCUSD")) throw new Error(`unexpected symbol: ${r.symbol}`);

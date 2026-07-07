@@ -98,6 +98,13 @@ function makeDeps(overrides = {}) {
           lastError: null,
         },
       ],
+      getChartRect: async (chartIndex) => ({
+        x: 50 + chartIndex * 500,
+        y: 40,
+        width: 500,
+        height: 700,
+        devicePixelRatio: 2,
+      }),
       getWatchlists: async () => [
         {
           id: 1,
@@ -261,6 +268,23 @@ test("get_chart_screenshot returns image content, defaulting to jpeg", async () 
   assert.equal(res.content[0].type, "image");
   assert.equal(res.content[0].mimeType, "image/jpeg");
   assert.equal(res.content[0].data, "aW1n");
+});
+
+test("get_chart_screenshot with chart_index clips to the chart rect at device scale", async () => {
+  let capturedClip;
+  const client = await connectedClient(
+    makeDeps({
+      cdp: {
+        screenshot: async (fmt, quality, clip) => ((capturedClip = clip), "aW1n"),
+      },
+    }),
+  );
+  const whole = await client.callTool({ name: "get_chart_screenshot", arguments: {} });
+  assert.equal(capturedClip, undefined, "no clip without chart_index");
+  assert.equal(whole.content[0].type, "image");
+
+  await client.callTool({ name: "get_chart_screenshot", arguments: { chart_index: 1 } });
+  assert.deepEqual(capturedClip, { x: 550, y: 40, width: 500, height: 700, scale: 2 });
 });
 
 test("get_chart_context returns layout JSON", async () => {

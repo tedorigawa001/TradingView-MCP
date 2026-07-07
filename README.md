@@ -40,7 +40,7 @@ claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 
 | ツール | 説明 |
 |---|---|
-| `get_chart_screenshot` | 表示中のチャート画面を画像で取得(視覚分析用) |
+| `get_chart_screenshot` | チャート画面を画像で取得(視覚分析用)。`chart_index` 指定で1チャートのみをフル解像度で切り出し |
 | `get_chart_context` | 全チャートのシンボル・時間足・インジケーター一覧 |
 | `get_ohlcv` | ロード済みローソク足データ(OHLCV) |
 | `get_indicator_values` | インジケーターのプロット値(シグナルレベル・バンド等)。色・アラート系プロットはデフォルト除外 |
@@ -50,6 +50,7 @@ claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 | `list_alerts` | 価格アラート一覧(読み取り専用。作成・変更は非対応) |
 | `get_watchlist` | ウォッチリスト(セクション見出しでグループ化。ログインセッション利用) |
 | `get_quotes` | 任意シンボルのクォート+テクニカルデータ(RSI・総合評価 `Recommend.All` 等。スキャナーAPI) |
+| `get_mtf_overview` | 1シンボルの複数時間足スナップショット(15m/1h/4h/1D等のRSI・MA・評価を1コールで。チャート非干渉) |
 | `scan_market` | 市場スクリーニング(例: 日本市場で RSI<30 を出来高順に検索) |
 | `set_symbol` | アクティブチャートのシンボル変更 |
 | `set_timeframe` | アクティブチャートの時間足変更 |

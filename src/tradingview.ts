@@ -680,6 +680,39 @@ export class TradingView {
   }
 
   /**
+   * Viewport rectangle of one chart in the layout (CSS pixels), for clipped
+   * screenshots. Chart containers appear in the DOM in chart-index order.
+   */
+  getChartRect(chartIndex: number): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    devicePixelRatio: number;
+  }> {
+    if (!Number.isInteger(chartIndex) || chartIndex < 0) {
+      throw new Error(`chartIndex must be a non-negative integer, got ${chartIndex}`);
+    }
+    return this.cdp.evaluate(`
+      (() => {
+        const els = document.querySelectorAll(".chart-container");
+        if (${chartIndex} >= els.length) {
+          throw new Error("chart index ${chartIndex} out of range — layout has " + els.length + " chart(s)");
+        }
+        const r = els[${chartIndex}].getBoundingClientRect();
+        if (r.width < 10 || r.height < 10) throw new Error("chart container has no visible area");
+        return {
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+          devicePixelRatio: window.devicePixelRatio || 1,
+        };
+      })()
+    `);
+  }
+
+  /**
    * The user's watchlists, fetched with the app's own session via the
    * TradingView REST API (the in-page watchlist widget API is disabled in
    * the desktop build). Symbols beginning with "###" are section headers

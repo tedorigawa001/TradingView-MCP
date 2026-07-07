@@ -69,6 +69,21 @@ test("screenshot returns base64 data and passes jpeg quality", async (t) => {
   assert.equal(typeof msg.params.quality, "number");
 });
 
+test("screenshot forwards the clip region with a default scale", async (t) => {
+  const mock = await startMockCdp();
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  t.after(() => cdp.close());
+
+  await cdp.screenshot("jpeg", undefined, { x: 10, y: 20, width: 300, height: 200, scale: 2 });
+  const msg = mock.state.received.find((m) => m.method === "Page.captureScreenshot");
+  assert.deepEqual(msg.params.clip, { x: 10, y: 20, width: 300, height: 200, scale: 2 });
+
+  await cdp.screenshot("png", undefined, { x: 0, y: 0, width: 100, height: 100 });
+  const msg2 = mock.state.received.filter((m) => m.method === "Page.captureScreenshot")[1];
+  assert.equal(msg2.params.clip.scale, 1, "scale defaults to 1");
+});
+
 test("commands time out when the page never responds", async (t) => {
   const mock = await startMockCdp({ onCommand: () => null }); // swallow commands
   t.after(() => mock.close());

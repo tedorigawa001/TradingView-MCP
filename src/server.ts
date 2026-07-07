@@ -17,6 +17,7 @@ export interface ServerDeps {
     | "loadMoreHistory"
     | "listAlerts"
     | "getWatchlists"
+    | "getChartRect"
     | "setSymbol"
     | "setResolution"
   >;
@@ -55,19 +56,37 @@ export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
     "get_chart_screenshot",
     {
       description:
-        "Capture a screenshot of the TradingView desktop app window (all visible charts, " +
-        "indicators, drawings and watchlist) for visual analysis.",
+        "Capture a screenshot of the TradingView desktop app for visual analysis. By " +
+        "default the whole window (all charts, drawings, watchlist); pass chart_index to " +
+        "capture just one chart of a multi-chart layout at full resolution.",
       inputSchema: {
         format: z
           .enum(["png", "jpeg"])
           .optional()
           .describe("Image format. jpeg is smaller; png is sharper. Default: jpeg"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Capture only this chart (index from get_chart_context). Default: whole window"),
       },
     },
-    async ({ format }) => {
+    async ({ format, chart_index }) => {
       try {
         const fmt = format ?? "jpeg";
-        const data = await cdp.screenshot(fmt);
+        let clip;
+        if (chart_index !== undefined) {
+          const r = await tv.getChartRect(chart_index);
+          clip = {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+            scale: r.devicePixelRatio,
+          };
+        }
+        const data = await cdp.screenshot(fmt, undefined, clip);
         return {
           content: [{ type: "image" as const, data, mimeType: `image/${fmt}` }],
         };
