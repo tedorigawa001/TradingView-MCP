@@ -50,18 +50,25 @@ test("setSymbol rejects empty input", () => {
   assert.throws(() => tv.setSymbol("   "), /non-empty/);
 });
 
-test("setSymbol/setResolution do not report stale state as success on timeout", async () => {
+test("setSymbol/setResolution never report a non-matching state as success", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
   await tv.setSymbol("BTCUSD");
   await tv.setResolution("240");
   for (const expr of cdp.calls) {
     assert.ok(expr.includes("clearTimeout(timer)"), "callback must cancel the timeout");
-    assert.ok(expr.includes("did not take effect"), "timeout with unchanged state must reject");
+    assert.ok(expr.includes("did not take effect"), "non-matching state must reject");
     assert.ok(expr.includes("changed:") || expr.includes("changed "), "result must carry a changed flag");
+    // both the callback and the timeout path must go through the same check
+    assert.ok(expr.includes("settle(true)") && expr.includes("settle(false)"),
+      "callback and timeout must share the verifying settle path");
+    assert.ok(expr.includes("callback fired but chart shows"),
+      "a callback with a non-matching state must reject too");
   }
   // symbol matching must tolerate exchange prefixes the page adds
   assert.ok(cdp.calls[0].includes('a.endsWith(":" + r)'));
+  // resolution matching must normalize D/1D, W/1W, M/1M
+  assert.ok(cdp.calls[1].includes('/^[SDWM]$/.test(u) ? "1" + u : u'));
 });
 
 test("getChartContext exposes study ids alongside names", async () => {

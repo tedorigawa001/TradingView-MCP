@@ -170,6 +170,14 @@ await check("set_timeframe", async () => {
   return `now ${r.resolution}`;
 });
 
+await check("set_timeframe accepts normalized aliases (D == 1D)", async () => {
+  const r = await tv.setResolution("D"); // chart reports "1D" — must not misclassify as failure
+  if (r.resolution.toUpperCase() !== "1D" && r.resolution.toUpperCase() !== "D") {
+    throw new Error(`unexpected resolution: ${r.resolution}`);
+  }
+  return `requested "D" -> chart shows "${r.resolution}"`;
+});
+
 await check("set_symbol fails loudly for an invalid symbol", async () => {
   const r = await tv.setSymbol("ZZZINVALIDXYZ123").then(
     (v) => v,

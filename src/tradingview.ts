@@ -709,24 +709,26 @@ export class TradingView {
           return a === r || a.endsWith(":" + r);
         };
         let settled = false;
-        const timer = setTimeout(() => {
+        // Used on BOTH paths: even a fired callback is only trusted if the
+        // chart actually shows the requested symbol.
+        const settle = (viaCallback) => {
           if (settled) return;
           settled = true;
+          clearTimeout(timer);
           const s = state();
-          if (matches(s.symbol)) {
-            resolve({ ...s, changed: s.symbol !== before, note: "data-ready callback did not fire within 8s" });
-          } else {
-            reject(new Error("symbol change to " + requested + " did not take effect within 8s (chart still shows " + s.symbol + ") — the symbol may be invalid"));
+          if (!matches(s.symbol)) {
+            reject(new Error("symbol change to " + requested + " did not take effect" +
+              (viaCallback ? " (callback fired but chart shows " + s.symbol + ")" : " within 8s (chart still shows " + s.symbol + ")") +
+              " — the symbol may be invalid"));
+            return;
           }
-        }, 8000);
+          const result = { ...s, changed: s.symbol !== before };
+          if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
+          resolve(result);
+        };
+        const timer = setTimeout(() => settle(false), 8000);
         try {
-          chart.setSymbol(requested, () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            const s = state();
-            resolve({ ...s, changed: s.symbol !== before });
-          });
+          chart.setSymbol(requested, () => settle(true));
         } catch (e) {
           settled = true;
           clearTimeout(timer);
@@ -753,26 +755,30 @@ export class TradingView {
         const chart = window.TradingViewApi.activeChart();
         const before = chart.resolution();
         const state = () => ({ symbol: chart.symbol(), resolution: chart.resolution() });
-        const matches = (actual) => String(actual).toUpperCase() === requested.toUpperCase();
+        // Normalize "D"/"1D", "W"/"1W", "M"/"1M", "S"/"1S" before comparing
+        const normalize = (r) => {
+          const u = String(r).toUpperCase();
+          return /^[SDWM]$/.test(u) ? "1" + u : u;
+        };
+        const matches = (actual) => normalize(actual) === normalize(requested);
         let settled = false;
-        const timer = setTimeout(() => {
+        const settle = (viaCallback) => {
           if (settled) return;
           settled = true;
+          clearTimeout(timer);
           const s = state();
-          if (matches(s.resolution)) {
-            resolve({ ...s, changed: s.resolution !== before, note: "data-ready callback did not fire within 8s" });
-          } else {
-            reject(new Error("timeframe change to " + requested + " did not take effect within 8s (chart still shows " + s.resolution + ")"));
+          if (!matches(s.resolution)) {
+            reject(new Error("timeframe change to " + requested + " did not take effect" +
+              (viaCallback ? " (callback fired but chart shows " + s.resolution + ")" : " within 8s (chart still shows " + s.resolution + ")")));
+            return;
           }
-        }, 8000);
+          const result = { ...s, changed: s.resolution !== before };
+          if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
+          resolve(result);
+        };
+        const timer = setTimeout(() => settle(false), 8000);
         try {
-          chart.setResolution(requested, () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            const s = state();
-            resolve({ ...s, changed: s.resolution !== before });
-          });
+          chart.setResolution(requested, () => settle(true));
         } catch (e) {
           settled = true;
           clearTimeout(timer);
