@@ -108,6 +108,49 @@ test("fails clearly when no chart page target exists", async (t) => {
   );
 });
 
+test("concurrent calls on a cold client share one connection", async (t) => {
+  const mock = await startMockCdp();
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  t.after(() => cdp.close());
+
+  const results = await Promise.all([
+    cdp.evaluate("1"),
+    cdp.evaluate("2"),
+    cdp.evaluate("3"),
+  ]);
+  assert.equal(results.length, 3);
+  assert.equal(mock.state.connections, 1, "must not open one socket per caller");
+});
+
+test("a closing socket only rejects its own in-flight requests", async (t) => {
+  // Handler that never responds to "hang", responds normally otherwise.
+  const mock = await startMockCdp({
+    onCommand: (msg, ws) => {
+      if (msg.params?.expression === "hang") return null; // swallow, then we kill the socket
+      return { result: { result: { value: "ok" } } };
+    },
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 5000 });
+  t.after(() => cdp.close());
+
+  const hanging = cdp.evaluate("hang");
+  await new Promise((r) => setTimeout(r, 50));
+  cdp.close(); // drops socket 1 — must reject only the hanging call
+
+  const [hangResult, fresh] = await Promise.all([
+    hanging.then(
+      () => "resolved",
+      (e) => e.message,
+    ),
+    cdp.evaluate("fresh"), // runs on socket 2
+  ]);
+  assert.match(hangResult, /connection closed/);
+  assert.equal(fresh, "ok");
+  assert.equal(mock.state.connections, 2);
+});
+
 test("reconnects after the connection drops", async (t) => {
   const mock = await startMockCdp();
   t.after(() => mock.close());

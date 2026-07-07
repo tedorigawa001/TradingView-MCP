@@ -20,6 +20,14 @@ interface CdpMessage {
   error?: { message: string };
 }
 
+interface Connection {
+  ws: WebSocket;
+  pending: Map<
+    number,
+    { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }
+  >;
+}
+
 export class TradingViewNotAvailableError extends Error {
   constructor(detail: string) {
     super(
@@ -37,12 +45,9 @@ export class TradingViewNotAvailableError extends Error {
 export class CdpClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private ws: WebSocket | null = null;
+  private conn: Connection | null = null;
+  private connecting: Promise<Connection> | null = null;
   private nextId = 1;
-  private pending = new Map<
-    number,
-    { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }
-  >();
 
   constructor(options: CdpClientOptions = {}) {
     this.baseUrl =
@@ -79,27 +84,34 @@ export class CdpClient {
     return chart;
   }
 
-  private async ensureConnected(): Promise<WebSocket> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return this.ws;
-
+  /**
+   * Establish a fresh connection. Each connection owns its pending map, so a
+   * closing socket only rejects its own in-flight requests — never those of
+   * a newer connection.
+   */
+  private async connect(): Promise<Connection> {
     const target = await this.findChartTarget();
     const ws = new WebSocket(target.webSocketDebuggerUrl, {
       maxPayload: 256 * 1024 * 1024,
     });
+    const pending = new Map<
+      number,
+      { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }
+    >();
 
     ws.on("message", (data) => {
       const msg = JSON.parse(data.toString()) as CdpMessage;
-      if (msg.id !== undefined && this.pending.has(msg.id)) {
-        this.pending.get(msg.id)!.resolve(msg);
-        this.pending.delete(msg.id);
+      if (msg.id !== undefined && pending.has(msg.id)) {
+        pending.get(msg.id)!.resolve(msg);
+        pending.delete(msg.id);
       }
     });
     ws.on("close", () => {
-      for (const { reject } of this.pending.values()) {
+      for (const { reject } of pending.values()) {
         reject(new Error("CDP connection closed"));
       }
-      this.pending.clear();
-      if (this.ws === ws) this.ws = null;
+      pending.clear();
+      if (this.conn?.ws === ws) this.conn = null;
     });
     ws.on("error", () => {
       /* surfaced via close */
@@ -112,24 +124,38 @@ export class CdpClient {
       );
     });
 
-    this.ws = ws;
-    return ws;
+    const conn: Connection = { ws, pending };
+    this.conn = conn;
+    return conn;
+  }
+
+  /** Single-flight: concurrent callers share one connection attempt. */
+  private ensureConnected(): Promise<Connection> {
+    if (this.conn && this.conn.ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve(this.conn);
+    }
+    if (!this.connecting) {
+      this.connecting = this.connect().finally(() => {
+        this.connecting = null;
+      });
+    }
+    return this.connecting;
   }
 
   async send(
     method: string,
     params: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
-    const ws = await this.ensureConnected();
+    const { ws, pending } = await this.ensureConnected();
     const id = this.nextId++;
     const msg = await new Promise<CdpMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        pending.delete(id);
         reject(
           new Error(`CDP call ${method} timed out after ${this.timeoutMs}ms`),
         );
       }, this.timeoutMs);
-      this.pending.set(id, {
+      pending.set(id, {
         resolve: (m) => {
           clearTimeout(timer);
           resolve(m);
@@ -183,7 +209,7 @@ export class CdpClient {
   }
 
   close(): void {
-    this.ws?.close();
-    this.ws = null;
+    this.conn?.ws.close();
+    this.conn = null;
   }
 }

@@ -50,6 +50,30 @@ test("setSymbol rejects empty input", () => {
   assert.throws(() => tv.setSymbol("   "), /non-empty/);
 });
 
+test("setSymbol/setResolution do not report stale state as success on timeout", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.setSymbol("BTCUSD");
+  await tv.setResolution("240");
+  for (const expr of cdp.calls) {
+    assert.ok(expr.includes("clearTimeout(timer)"), "callback must cancel the timeout");
+    assert.ok(expr.includes("did not take effect"), "timeout with unchanged state must reject");
+    assert.ok(expr.includes("changed:") || expr.includes("changed "), "result must carry a changed flag");
+  }
+  // symbol matching must tolerate exchange prefixes the page adds
+  assert.ok(cdp.calls[0].includes('a.endsWith(":" + r)'));
+});
+
+test("getChartContext exposes study ids alongside names", async () => {
+  const cdp = fakeCdp({ charts: [] });
+  const tv = new TradingView(cdp);
+  await tv.getChartContext();
+  assert.ok(
+    cdp.calls[0].includes("({ id: s.id, name: s.name })"),
+    "studies must include the id used by get_indicator_* tools",
+  );
+});
+
 test("getOhlcv validates count and chartIndex before touching the page", () => {
   const cdp = fakeCdp();
   const tv = new TradingView(cdp);

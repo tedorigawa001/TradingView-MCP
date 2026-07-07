@@ -82,8 +82,9 @@ export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
     {
       description:
         "Get the current TradingView layout state: every chart's symbol, timeframe and " +
-        "active indicators, plus which chart is active. Call this first to know what the " +
-        "user is looking at.",
+        "active indicators as {id, name} (the id is what get_indicator_* tools accept as " +
+        "study_id), plus which chart is active. Call this first to know what the user is " +
+        "looking at.",
       inputSchema: {},
     },
     async () => {

@@ -39,6 +39,25 @@ await check("get_ohlcv", async () => {
   return `${r.bars.length} bars of ${r.symbol} ${r.resolution}, last close=${last.close}`;
 });
 
+await check("study ids from context filter indicator tools", async () => {
+  const ctx = await tv.getChartContext();
+  const withStudies = ctx.charts.find((c) => c.studies.length > 0);
+  if (!withStudies) return "skipped-ish: no studies on any chart";
+  const ref = withStudies.studies[0];
+  if (!ref || !ref.id || !ref.name) {
+    throw new Error(`context studies must carry {id, name}, got ${JSON.stringify(ref)}`);
+  }
+  const vals = await tv.getIndicatorValues({
+    studyId: ref.id,
+    count: 1,
+    chartIndex: withStudies.index,
+  });
+  if (vals.length !== 1 || vals[0].id !== ref.id) {
+    throw new Error("filtering by a context-provided id failed");
+  }
+  return `${ref.id} -> "${vals[0].name}"`;
+});
+
 await check("get_indicator_values", async () => {
   const studies = await tv.getIndicatorValues({ count: 3 });
   if (!Array.isArray(studies) || studies.length === 0) {
@@ -149,6 +168,19 @@ await check("set_timeframe", async () => {
   const r = await tv.setResolution("240");
   if (r.resolution !== "240") throw new Error(`unexpected resolution: ${r.resolution}`);
   return `now ${r.resolution}`;
+});
+
+await check("set_symbol fails loudly for an invalid symbol", async () => {
+  const r = await tv.setSymbol("ZZZINVALIDXYZ123").then(
+    (v) => v,
+    (e) => e,
+  );
+  if (r instanceof Error) {
+    if (!/did not take effect/.test(r.message)) throw r;
+    return "rejected as expected";
+  }
+  if (r.note || r.changed) return `resolved with signal: changed=${r.changed}, note=${r.note ?? "-"}`;
+  throw new Error(`silent success with stale state: ${JSON.stringify(r)}`);
 });
 
 // restore original state

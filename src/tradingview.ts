@@ -1,10 +1,15 @@
 import type { CdpClient } from "./cdp.js";
 
+export interface StudyRef {
+  id: string;
+  name: string;
+}
+
 export interface ChartInfo {
   index: number;
   symbol: string;
   resolution: string;
-  studies: string[];
+  studies: StudyRef[];
 }
 
 export interface ChartContext {
@@ -169,7 +174,7 @@ export class TradingView {
         for (let i = 0; i < count; i++) {
           const c = api.chart(i);
           let studies = [];
-          try { studies = c.getAllStudies().map((s) => s.name); } catch (e) {}
+          try { studies = c.getAllStudies().map((s) => ({ id: s.id, name: s.name })); } catch (e) {}
           charts.push({ index: i, symbol: c.symbol(), resolution: c.resolution(), studies });
         }
         let layoutName = null;
@@ -680,36 +685,99 @@ export class TradingView {
     `);
   }
 
-  /** Change the active chart's symbol (e.g. "OANDA:EURUSD", "BTCUSD"). */
-  setSymbol(symbol: string): Promise<{ symbol: string; resolution: string }> {
+  /**
+   * Change the active chart's symbol (e.g. "OANDA:EURUSD", "BTCUSD").
+   * Rejects if the change does not take effect (e.g. invalid symbol) rather
+   * than silently returning the old state.
+   */
+  setSymbol(
+    symbol: string,
+  ): Promise<{ symbol: string; resolution: string; changed: boolean; note?: string }> {
     if (typeof symbol !== "string" || symbol.trim() === "") {
       throw new Error("symbol must be a non-empty string");
     }
     return this.cdp.evaluate(`
       new Promise((resolve, reject) => {
+        const requested = ${JSON.stringify(symbol)};
         const chart = window.TradingViewApi.activeChart();
-        const done = () => resolve({ symbol: chart.symbol(), resolution: chart.resolution() });
+        const before = chart.symbol();
+        const state = () => ({ symbol: chart.symbol(), resolution: chart.resolution() });
+        // "EURUSD" resolves to e.g. "OANDA:EURUSD", so match with or without prefix
+        const matches = (actual) => {
+          const a = String(actual).toUpperCase();
+          const r = requested.trim().toUpperCase();
+          return a === r || a.endsWith(":" + r);
+        };
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const s = state();
+          if (matches(s.symbol)) {
+            resolve({ ...s, changed: s.symbol !== before, note: "data-ready callback did not fire within 8s" });
+          } else {
+            reject(new Error("symbol change to " + requested + " did not take effect within 8s (chart still shows " + s.symbol + ") — the symbol may be invalid"));
+          }
+        }, 8000);
         try {
-          chart.setSymbol(${JSON.stringify(symbol)}, done);
-          setTimeout(done, 8000); // fallback if the data-ready callback never fires
-        } catch (e) { reject(e); }
+          chart.setSymbol(requested, () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const s = state();
+            resolve({ ...s, changed: s.symbol !== before });
+          });
+        } catch (e) {
+          settled = true;
+          clearTimeout(timer);
+          reject(e);
+        }
       })
     `);
   }
 
-  /** Change the active chart's timeframe (e.g. "1", "15", "60", "240", "1D", "1W"). */
-  setResolution(resolution: string): Promise<{ symbol: string; resolution: string }> {
+  /**
+   * Change the active chart's timeframe (e.g. "1", "15", "60", "240", "1D", "1W").
+   * Rejects if the change does not take effect rather than silently returning
+   * the old state.
+   */
+  setResolution(
+    resolution: string,
+  ): Promise<{ symbol: string; resolution: string; changed: boolean; note?: string }> {
     if (typeof resolution !== "string" || !/^[0-9]*[SDWM]?$/i.test(resolution) || resolution === "") {
       throw new Error(`resolution must look like "15", "240", "1D", "1W" — got ${JSON.stringify(resolution)}`);
     }
     return this.cdp.evaluate(`
       new Promise((resolve, reject) => {
+        const requested = ${JSON.stringify(resolution)};
         const chart = window.TradingViewApi.activeChart();
-        const done = () => resolve({ symbol: chart.symbol(), resolution: chart.resolution() });
+        const before = chart.resolution();
+        const state = () => ({ symbol: chart.symbol(), resolution: chart.resolution() });
+        const matches = (actual) => String(actual).toUpperCase() === requested.toUpperCase();
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const s = state();
+          if (matches(s.resolution)) {
+            resolve({ ...s, changed: s.resolution !== before, note: "data-ready callback did not fire within 8s" });
+          } else {
+            reject(new Error("timeframe change to " + requested + " did not take effect within 8s (chart still shows " + s.resolution + ")"));
+          }
+        }, 8000);
         try {
-          chart.setResolution(${JSON.stringify(resolution)}, done);
-          setTimeout(done, 8000);
-        } catch (e) { reject(e); }
+          chart.setResolution(requested, () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const s = state();
+            resolve({ ...s, changed: s.resolution !== before });
+          });
+        } catch (e) {
+          settled = true;
+          clearTimeout(timer);
+          reject(e);
+        }
       })
     `);
   }
