@@ -147,6 +147,14 @@ await check("get_quotes (scanner)", async () => {
   return `EURUSD close=${v.close}, rating=${v["Recommend.All"].toFixed(2)}`;
 });
 
+await check("get_mtf_overview (scanner)", async () => {
+  const o = await scanner.getMtfOverview("OANDA:EURUSD", ["60", "1D"], ["close", "RSI"]);
+  for (const tf of ["60", "1D"]) {
+    if (typeof o.timeframes[tf]?.RSI !== "number") throw new Error(`RSI missing for ${tf}`);
+  }
+  return `RSI 60=${o.timeframes["60"].RSI.toFixed(1)}, 1D=${o.timeframes["1D"].RSI.toFixed(1)}`;
+});
+
 await check("scan_market (scanner)", async () => {
   const r = await scanner.scanMarket({
     market: "japan",

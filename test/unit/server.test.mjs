@@ -21,6 +21,12 @@ function makeDeps(overrides = {}) {
         returned: 1,
         rows: [{ symbol: "TSE:9501", values: { options } }],
       }),
+      getMtfOverview: async (symbol, timeframes, fields) => ({
+        symbol,
+        timeframes: Object.fromEntries(
+          (timeframes ?? ["15", "60", "240", "1D"]).map((tf) => [tf, { fields: fields ?? null }]),
+        ),
+      }),
       ...overrides.scanner,
     },
     tv: {
@@ -119,7 +125,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the thirteen expected tools", async () => {
+test("exposes exactly the fourteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -130,6 +136,7 @@ test("exposes exactly the thirteen expected tools", async () => {
       "get_indicator_graphics",
       "get_indicator_inputs",
       "get_indicator_values",
+      "get_mtf_overview",
       "get_ohlcv",
       "get_quotes",
       "get_watchlist",
@@ -140,6 +147,18 @@ test("exposes exactly the thirteen expected tools", async () => {
       "set_timeframe",
     ],
   );
+});
+
+test("get_mtf_overview forwards symbol, timeframes and fields", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_mtf_overview",
+    arguments: { symbol: "OANDA:EURUSD", timeframes: ["60", "1D"], fields: ["RSI"] },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.symbol, "OANDA:EURUSD");
+  assert.deepEqual(Object.keys(parsed.timeframes), ["60", "1D"]);
+  assert.deepEqual(parsed.timeframes["60"].fields, ["RSI"]);
 });
 
 test("get_indicator_graphics forwards options with defaults applied", async () => {
@@ -301,6 +320,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "scan_market", arguments: { market: "JAPAN/../x" } },
     { name: "scan_market", arguments: { market: "japan", filters: [{ field: "RSI", operation: "drop" }] } },
     { name: "scan_market", arguments: { market: "japan", limit: 101 } },
+    { name: "get_mtf_overview", arguments: { symbol: "OANDA:EURUSD", timeframes: ["7"] } },
+    { name: "get_mtf_overview", arguments: {} },
     { name: "get_indicator_graphics", arguments: { study_id: "has space" } },
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },

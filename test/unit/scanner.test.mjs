@@ -107,6 +107,38 @@ test("scanMarket builds filter/sort/range and validates inputs", async (t) => {
   );
 });
 
+test("getMtfOverview builds suffixed columns and regroups by timeframe", async (t) => {
+  const mock = await startMockScanner();
+  t.after(() => mock.close());
+  const scanner = new Scanner(mock.baseUrl);
+
+  const o = await scanner.getMtfOverview("OANDA:EURUSD", ["60", "1D"], ["close", "RSI"]);
+  const req = mock.state.requests[0];
+  assert.deepEqual(req.body.columns, ["close|60", "RSI|60", "close", "RSI"]);
+  assert.deepEqual(req.body.symbols, { tickers: ["OANDA:EURUSD"] });
+  // canned response returns column index as value
+  assert.deepEqual(o.timeframes, {
+    "60": { close: 0, RSI: 1 },
+    "1D": { close: 2, RSI: 3 },
+  });
+});
+
+test("getMtfOverview validates inputs before any request", async (t) => {
+  const mock = await startMockScanner();
+  t.after(() => mock.close());
+  const scanner = new Scanner(mock.baseUrl);
+
+  await assert.rejects(() => scanner.getMtfOverview("bad ticker"), /invalid ticker/);
+  await assert.rejects(() => scanner.getMtfOverview("A:B", ["3"]), /invalid timeframe/);
+  await assert.rejects(() => scanner.getMtfOverview("A:B", ["60"], ["RSI|240"]), /invalid field/);
+  await assert.rejects(() => scanner.getMtfOverview("A:B", [], ["RSI"]), /non-empty/);
+  await assert.rejects(
+    () => scanner.getMtfOverview("A:B", ["1", "5", "15", "30", "60", "120", "240", "1D"], Array(7).fill("RSI")),
+    /too many columns/,
+  );
+  assert.equal(mock.state.requests.length, 0);
+});
+
 test("HTTP errors and malformed responses are surfaced clearly", async (t) => {
   const mock = await startMockScanner((req, res) => {
     if (req.body.columns.includes("boom")) {

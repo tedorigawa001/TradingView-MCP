@@ -45,6 +45,31 @@ export interface ScanResult {
   rows: ScanRow[];
 }
 
+/** Timeframes the scanner accepts as column suffixes (daily is the default, unsuffixed). */
+export const MTF_TIMEFRAMES = ["1", "5", "15", "30", "60", "120", "240", "1D", "1W", "1M"] as const;
+export type MtfTimeframe = (typeof MTF_TIMEFRAMES)[number];
+
+export const DEFAULT_MTF_TIMEFRAMES: MtfTimeframe[] = ["15", "60", "240", "1D"];
+
+export const DEFAULT_MTF_FIELDS = [
+  "close",
+  "RSI",
+  "ADX",
+  "ATR",
+  "EMA20",
+  "SMA50",
+  "SMA200",
+  "Recommend.All",
+  "Recommend.MA",
+  "Recommend.Other",
+];
+
+export interface MtfOverview {
+  symbol: string;
+  /** timeframe -> field -> value; "Recommend.All" is the technical rating in [-1, 1] */
+  timeframes: Record<string, Record<string, unknown>>;
+}
+
 export const DEFAULT_QUOTE_COLUMNS = [
   "description",
   "close",
@@ -148,6 +173,60 @@ export class Scanner {
     }
     assertColumns(columns);
     return this.post("global", { symbols: { tickers }, columns });
+  }
+
+  /**
+   * Multi-timeframe snapshot for one symbol without touching any chart:
+   * the same indicator fields across several timeframes in a single call,
+   * using the scanner's "FIELD|TIMEFRAME" column suffixes.
+   */
+  async getMtfOverview(
+    ticker: string,
+    timeframes: string[] = DEFAULT_MTF_TIMEFRAMES,
+    fields: string[] = DEFAULT_MTF_FIELDS,
+  ): Promise<MtfOverview> {
+    if (typeof ticker !== "string" || !TICKER_PATTERN.test(ticker)) {
+      throw new Error(`invalid ticker: ${JSON.stringify(ticker)} — use EXCHANGE:SYMBOL form`);
+    }
+    if (!Array.isArray(timeframes) || timeframes.length === 0) {
+      throw new Error("timeframes must be a non-empty array");
+    }
+    for (const tf of timeframes) {
+      if (!MTF_TIMEFRAMES.includes(tf as MtfTimeframe)) {
+        throw new Error(
+          `invalid timeframe: ${JSON.stringify(tf)} (allowed: ${MTF_TIMEFRAMES.join(", ")})`,
+        );
+      }
+    }
+    if (!Array.isArray(fields) || fields.length === 0) {
+      throw new Error("fields must be a non-empty array");
+    }
+    for (const f of fields) {
+      if (typeof f !== "string" || !FIELD_PATTERN.test(f) || f.includes("|")) {
+        throw new Error(`invalid field: ${JSON.stringify(f)} (timeframe suffixes are added automatically)`);
+      }
+    }
+    if (timeframes.length * fields.length > 50) {
+      throw new Error(
+        `too many columns: ${timeframes.length} timeframes x ${fields.length} fields > 50 — reduce one of them`,
+      );
+    }
+
+    // Daily values use the plain field name; other timeframes are suffixed.
+    const columnOf = (field: string, tf: string) => (tf === "1D" ? field : `${field}|${tf}`);
+    const columns = timeframes.flatMap((tf) => fields.map((f) => columnOf(f, tf)));
+    const result = await this.post("global", { symbols: { tickers: [ticker] }, columns });
+    if (result.rows.length === 0) {
+      throw new Error(`no data for ${ticker} — is the ticker valid?`);
+    }
+    const values = result.rows[0].values;
+    const out: MtfOverview = { symbol: result.rows[0].symbol, timeframes: {} };
+    for (const tf of timeframes) {
+      const perTf: Record<string, unknown> = {};
+      for (const f of fields) perTf[f] = values[columnOf(f, tf)] ?? null;
+      out.timeframes[tf] = perTf;
+    }
+    return out;
   }
 
   /** Screen a market with field filters, e.g. RSI < 30 sorted by volume. */
