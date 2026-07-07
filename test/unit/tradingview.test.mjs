@@ -71,6 +71,35 @@ test("setSymbol/setResolution never report a non-matching state as success", asy
   assert.ok(cdp.calls[1].includes('/^[SDWM]$/.test(u) ? "1" + u : u'));
 });
 
+test("setSymbol/setResolution reject when the chart has zero bars after the change", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.setSymbol("BTCUSD");
+  await tv.setResolution("240");
+  for (const expr of cdp.calls) {
+    assert.ok(expr.includes("no data loaded (0 bars)"), "zero bars must reject");
+    assert.ok(expr.includes("bars"), "result must report the bar count");
+  }
+});
+
+test("getOhlcv bars carry timeIso and a forming flag heuristic", async () => {
+  const cdp = fakeCdp({ symbol: "X", resolution: "1D", count: 0, bars: [] });
+  const tv = new TradingView(cdp);
+  await tv.getOhlcv(5);
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("toISOString()"), "bars must include ISO time");
+  assert.ok(expr.includes("bar.forming = true"), "last forming bar must be flagged");
+  // minutes, seconds, day, week, month resolutions must all be handled
+  assert.ok(expr.includes("{ S: 1, D: 86400, W: 604800, M: 2592000 }"));
+});
+
+test("getIndicatorValues bars carry timeIso", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorValues({ count: 3 });
+  assert.ok(cdp.calls[0].includes("toISOString()"));
+});
+
 test("getChartContext exposes study ids alongside names", async () => {
   const cdp = fakeCdp({ charts: [] });
   const tv = new TradingView(cdp);

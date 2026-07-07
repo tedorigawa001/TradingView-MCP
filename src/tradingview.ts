@@ -21,11 +21,14 @@ export interface ChartContext {
 
 export interface OhlcvBar {
   time: number;
+  timeIso: string;
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number | null;
+  /** Present on the most recent bar when it is still forming (heuristic). */
+  forming?: boolean;
 }
 
 export interface OhlcvResult {
@@ -47,7 +50,11 @@ export interface IndicatorValues {
   visible?: boolean;
   hasError?: boolean;
   plots: IndicatorPlot[];
-  bars: Array<{ time: number; values: Record<string, number | string | null> }>;
+  bars: Array<{
+    time: number;
+    timeIso: string;
+    values: Record<string, number | string | null>;
+  }>;
   error?: string;
 }
 
@@ -203,17 +210,40 @@ export class TradingView {
         const chart = ${chartExpr};
         const items = chart.chartModel().mainSeries().bars()._items;
         if (!items) throw new Error("no bar data loaded");
-        const bars = items.slice(-${Math.max(1, Math.floor(count))}).map((it) => ({
-          time: it.value[0],
-          open: it.value[1],
-          high: it.value[2],
-          low: it.value[3],
-          close: it.value[4],
-          volume: it.value[5] ?? null,
-        }));
+        const resolution = chart.resolution();
+        // bar duration in seconds, for the forming-bar heuristic
+        const resolutionSeconds = (res) => {
+          const u = String(res).toUpperCase();
+          if (/^\\d+$/.test(u)) return parseInt(u, 10) * 60; // plain numbers are minutes
+          const m = u.match(/^(\\d*)([SDWM])$/);
+          if (!m) return null;
+          const n = parseInt(m[1] || "1", 10);
+          return n * { S: 1, D: 86400, W: 604800, M: 2592000 }[m[2]];
+        };
+        const barSec = resolutionSeconds(resolution);
+        const lastTime = items.length ? items[items.length - 1].value[0] : null;
+        const nowSec = Date.now() / 1000;
+        const lastIsForming =
+          barSec !== null && lastTime !== null && nowSec < lastTime + barSec;
+
+        const bars = items.slice(-${Math.max(1, Math.floor(count))}).map((it, i, arr) => {
+          const bar = {
+            time: it.value[0],
+            timeIso: new Date(it.value[0] * 1000).toISOString(),
+            open: it.value[1],
+            high: it.value[2],
+            low: it.value[3],
+            close: it.value[4],
+            volume: it.value[5] ?? null,
+          };
+          if (lastIsForming && i === arr.length - 1 && it.value[0] === lastTime) {
+            bar.forming = true;
+          }
+          return bar;
+        });
         return {
           symbol: chart.symbol(),
-          resolution: chart.resolution(),
+          resolution,
           count: bars.length,
           bars,
         };
@@ -295,7 +325,11 @@ export class TradingView {
 
           const items = src.data()._items || [];
           out.bars = items.slice(-maxBars).map((it) => {
-            const row = { time: it.value[0], values: {} };
+            const row = {
+              time: it.value[0],
+              timeIso: new Date(it.value[0] * 1000).toISOString(),
+              values: {},
+            };
             for (const k of keep) {
               const v = it.value[k.col];
               row.values[k.title] = v === undefined ? null : v;
@@ -690,9 +724,13 @@ export class TradingView {
    * Rejects if the change does not take effect (e.g. invalid symbol) rather
    * than silently returning the old state.
    */
-  setSymbol(
-    symbol: string,
-  ): Promise<{ symbol: string; resolution: string; changed: boolean; note?: string }> {
+  setSymbol(symbol: string): Promise<{
+    symbol: string;
+    resolution: string;
+    changed: boolean;
+    bars: number | null;
+    note?: string;
+  }> {
     if (typeof symbol !== "string" || symbol.trim() === "") {
       throw new Error("symbol must be a non-empty string");
     }
@@ -708,9 +746,13 @@ export class TradingView {
           const r = requested.trim().toUpperCase();
           return a === r || a.endsWith(":" + r);
         };
+        const barCount = () => {
+          try { return chart.chartModel().mainSeries().bars()._items.length; }
+          catch (e) { return null; }
+        };
         let settled = false;
         // Used on BOTH paths: even a fired callback is only trusted if the
-        // chart actually shows the requested symbol.
+        // chart shows the requested symbol AND actually has data.
         const settle = (viaCallback) => {
           if (settled) return;
           settled = true;
@@ -722,7 +764,12 @@ export class TradingView {
               " — the symbol may be invalid"));
             return;
           }
-          const result = { ...s, changed: s.symbol !== before };
+          const bars = barCount();
+          if (bars === 0) {
+            reject(new Error("symbol was set to " + s.symbol + " but no data loaded (0 bars) — likely an invalid symbol"));
+            return;
+          }
+          const result = { ...s, changed: s.symbol !== before, bars };
           if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
           resolve(result);
         };
@@ -743,9 +790,13 @@ export class TradingView {
    * Rejects if the change does not take effect rather than silently returning
    * the old state.
    */
-  setResolution(
-    resolution: string,
-  ): Promise<{ symbol: string; resolution: string; changed: boolean; note?: string }> {
+  setResolution(resolution: string): Promise<{
+    symbol: string;
+    resolution: string;
+    changed: boolean;
+    bars: number | null;
+    note?: string;
+  }> {
     if (typeof resolution !== "string" || !/^[0-9]*[SDWM]?$/i.test(resolution) || resolution === "") {
       throw new Error(`resolution must look like "15", "240", "1D", "1W" — got ${JSON.stringify(resolution)}`);
     }
@@ -761,6 +812,10 @@ export class TradingView {
           return /^[SDWM]$/.test(u) ? "1" + u : u;
         };
         const matches = (actual) => normalize(actual) === normalize(requested);
+        const barCount = () => {
+          try { return chart.chartModel().mainSeries().bars()._items.length; }
+          catch (e) { return null; }
+        };
         let settled = false;
         const settle = (viaCallback) => {
           if (settled) return;
@@ -772,7 +827,12 @@ export class TradingView {
               (viaCallback ? " (callback fired but chart shows " + s.resolution + ")" : " within 8s (chart still shows " + s.resolution + ")")));
             return;
           }
-          const result = { ...s, changed: s.resolution !== before };
+          const bars = barCount();
+          if (bars === 0) {
+            reject(new Error("timeframe was set to " + s.resolution + " but no data loaded (0 bars)"));
+            return;
+          }
+          const result = { ...s, changed: s.resolution !== before, bars };
           if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
           resolve(result);
         };

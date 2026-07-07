@@ -36,7 +36,13 @@ await check("get_ohlcv", async () => {
   for (const k of ["time", "open", "high", "low", "close"]) {
     if (typeof last[k] !== "number") throw new Error(`bar missing ${k}`);
   }
-  return `${r.bars.length} bars of ${r.symbol} ${r.resolution}, last close=${last.close}`;
+  if (new Date(last.timeIso).getTime() !== last.time * 1000) {
+    throw new Error(`timeIso mismatch: ${last.timeIso} vs ${last.time}`);
+  }
+  for (const bar of r.bars.slice(0, -1)) {
+    if (bar.forming) throw new Error("forming flag on a non-last bar");
+  }
+  return `${r.bars.length} bars of ${r.symbol} ${r.resolution}, last close=${last.close}${last.forming ? " (forming)" : ""}`;
 });
 
 await check("study ids from context filter indicator tools", async () => {
@@ -184,11 +190,10 @@ await check("set_symbol fails loudly for an invalid symbol", async () => {
     (e) => e,
   );
   if (r instanceof Error) {
-    if (!/did not take effect/.test(r.message)) throw r;
-    return "rejected as expected";
+    if (!/did not take effect|no data loaded/.test(r.message)) throw r;
+    return `rejected: ${r.message.slice(0, 70)}`;
   }
-  if (r.note || r.changed) return `resolved with signal: changed=${r.changed}, note=${r.note ?? "-"}`;
-  throw new Error(`silent success with stale state: ${JSON.stringify(r)}`);
+  throw new Error(`invalid symbol did not reject: ${JSON.stringify(r)}`);
 });
 
 // restore original state
