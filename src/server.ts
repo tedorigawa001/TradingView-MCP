@@ -8,7 +8,12 @@ export interface ServerDeps {
   cdp: Pick<CdpClient, "screenshot">;
   tv: Pick<
     TradingView,
-    "getChartContext" | "getOhlcv" | "setSymbol" | "setResolution"
+    | "getChartContext"
+    | "getOhlcv"
+    | "getIndicatorValues"
+    | "getIndicatorInputs"
+    | "setSymbol"
+    | "setResolution"
   >;
 }
 
@@ -107,6 +112,86 @@ export function createServer({ cdp, tv }: ServerDeps): McpServer {
     async ({ count, chart_index }) => {
       try {
         return jsonResult(await tv.getOhlcv(count ?? 100, chart_index));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_indicator_values",
+    {
+      description:
+        "Get recent plot values of indicators (studies) on a TradingView chart — e.g. " +
+        "signal levels, bands, oscillator readings. Plot names come from the indicator's " +
+        "own style titles. Cosmetic plots (colors, alert flags) are excluded by default. " +
+        "Use get_chart_context first to see which indicators exist.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .optional()
+          .describe("Indicator id from get_chart_context. Default: all indicators"),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Number of most recent bars to return per indicator. Default: 10"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+        include_all_plots: z
+          .boolean()
+          .optional()
+          .describe("Include cosmetic plots (colorers, alert conditions). Default: false"),
+      },
+    },
+    async ({ study_id, count, chart_index, include_all_plots }) => {
+      try {
+        return jsonResult(
+          await tv.getIndicatorValues({
+            studyId: study_id,
+            count: count ?? 10,
+            chartIndex: chart_index,
+            includeAllPlots: include_all_plots ?? false,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_indicator_inputs",
+    {
+      description:
+        "Get the input parameters (settings) of indicators on a TradingView chart, with " +
+        "names, current values, defaults and tooltips — e.g. 'Pivot Length: 5'.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .optional()
+          .describe("Indicator id from get_chart_context. Default: all indicators"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ study_id, chart_index }) => {
+      try {
+        return jsonResult(
+          await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart_index }),
+        );
       } catch (err) {
         return errorResult(err);
       }

@@ -24,6 +24,26 @@ function makeDeps(overrides = {}) {
         chartIndex: chartIndex ?? null,
         bars: [{ time: 1, open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }],
       }),
+      getIndicatorValues: async (options) => [
+        {
+          id: "st1",
+          name: "Test Study",
+          options,
+          plots: [{ id: "plot_0", title: "Signal", type: "line" }],
+          bars: [{ time: 1, values: { Signal: 42 } }],
+        },
+      ],
+      getIndicatorInputs: async (options) => [
+        {
+          id: "st1",
+          name: "Test Study",
+          title: "Test Study (5)",
+          options,
+          inputs: [
+            { id: "in_0", name: "Length", type: "integer", value: 5, defval: 14, tooltip: null },
+          ],
+        },
+      ],
       setSymbol: async (symbol) => ({ symbol, resolution: "1D" }),
       setResolution: async (resolution) => ({ symbol: "EURUSD", resolution }),
       ...overrides.tv,
@@ -42,7 +62,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the five expected tools", async () => {
+test("exposes exactly the seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -50,11 +70,37 @@ test("exposes exactly the five expected tools", async () => {
     [
       "get_chart_context",
       "get_chart_screenshot",
+      "get_indicator_inputs",
+      "get_indicator_values",
       "get_ohlcv",
       "set_symbol",
       "set_timeframe",
     ],
   );
+});
+
+test("get_indicator_values forwards options with defaults applied", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_indicator_values",
+    arguments: { study_id: "st1", chart_index: 1 },
+  });
+  const [study] = JSON.parse(res.content[0].text);
+  assert.deepEqual(study.options, {
+    studyId: "st1",
+    count: 10,
+    chartIndex: 1,
+    includeAllPlots: false,
+  });
+  assert.equal(study.bars[0].values.Signal, 42);
+});
+
+test("get_indicator_inputs returns named parameters", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_indicator_inputs", arguments: {} });
+  const [study] = JSON.parse(res.content[0].text);
+  assert.equal(study.inputs[0].name, "Length");
+  assert.equal(study.inputs[0].value, 5);
 });
 
 test("get_chart_screenshot returns image content, defaulting to jpeg", async () => {
@@ -95,6 +141,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
   const spyingDeps = makeDeps({
     tv: {
       getOhlcv: async () => ((handlerRan = true), {}),
+      getIndicatorValues: async () => ((handlerRan = true), []),
+      getIndicatorInputs: async () => ((handlerRan = true), []),
       setSymbol: async () => ((handlerRan = true), {}),
       setResolution: async () => ((handlerRan = true), {}),
     },
@@ -108,6 +156,9 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "set_symbol", arguments: {} },
     { name: "set_timeframe", arguments: { resolution: 42 } },
     { name: "get_chart_screenshot", arguments: { format: "gif" } },
+    { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
+    { name: "get_indicator_values", arguments: { count: 501 } },
+    { name: "get_indicator_inputs", arguments: { study_id: "has space" } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

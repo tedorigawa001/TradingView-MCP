@@ -38,6 +38,8 @@ claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 | `get_chart_screenshot` | 表示中のチャート画面を画像で取得(視覚分析用) |
 | `get_chart_context` | 全チャートのシンボル・時間足・インジケーター一覧 |
 | `get_ohlcv` | ロード済みローソク足データ(OHLCV) |
+| `get_indicator_values` | インジケーターのプロット値(シグナルレベル・バンド等)。色・アラート系プロットはデフォルト除外 |
+| `get_indicator_inputs` | インジケーターの入力パラメータ(名前・現在値・デフォルト値・説明) |
 | `set_symbol` | アクティブチャートのシンボル変更 |
 | `set_timeframe` | アクティブチャートの時間足変更 |
 

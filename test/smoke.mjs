@@ -37,6 +37,36 @@ await check("get_ohlcv", async () => {
   return `${r.bars.length} bars of ${r.symbol} ${r.resolution}, last close=${last.close}`;
 });
 
+await check("get_indicator_values", async () => {
+  const studies = await tv.getIndicatorValues({ count: 3 });
+  if (!Array.isArray(studies) || studies.length === 0) {
+    return "skipped-ish: no indicators on active chart";
+  }
+  const withPlots = studies.find((s) => s.plots.length > 0 && s.bars.length > 0);
+  if (!withPlots) return `${studies.length} studies, none with numeric plots`;
+  const lastBar = withPlots.bars[withPlots.bars.length - 1];
+  if (typeof lastBar.time !== "number") throw new Error("bar has no time");
+  const raw = JSON.stringify(studies);
+  if (raw.includes("pineId") || raw.includes("ILScript")) {
+    throw new Error("internal Pine data leaked into values payload");
+  }
+  return `${withPlots.name}: ${Object.entries(lastBar.values).slice(0, 2).map(([k, v]) => `${k}=${v}`).join(", ")}`;
+});
+
+await check("get_indicator_inputs", async () => {
+  const studies = await tv.getIndicatorInputs();
+  if (!Array.isArray(studies) || studies.length === 0) {
+    return "skipped-ish: no indicators on active chart";
+  }
+  const raw = JSON.stringify(studies);
+  for (const forbidden of ['"id":"text"', '"id":"pineId"', '"id":"pineVersion"', '"id":"pineFeatures"']) {
+    if (raw.includes(forbidden)) throw new Error(`hidden input leaked: ${forbidden}`);
+  }
+  if (raw.length > 100_000) throw new Error(`payload too large: ${raw.length} chars`);
+  const named = studies[0].inputs.find((i) => i.name && i.name !== i.id);
+  return `${studies.length} studies, e.g. ${named ? `${named.name}=${named.value}` : "(no named inputs)"}`;
+});
+
 await check("get_chart_screenshot", async () => {
   const data = await cdp.screenshot("jpeg");
   if (data.length < 10_000) throw new Error("screenshot suspiciously small");

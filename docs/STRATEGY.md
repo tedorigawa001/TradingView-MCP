@@ -96,4 +96,5 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 
 - ✅ **Phase 0 完了**(2026-07-07): CDP 接続・スクリーンショット・構造化データ・OHLCV・操作 API をすべて検証済み。結果は [phase0-findings.md](phase0-findings.md)
 - ✅ **Phase 1 + 2 完了**(2026-07-07): MCP サーバー実装。ツール: `get_chart_screenshot` / `get_chart_context` / `get_ohlcv` / `set_symbol` / `set_timeframe`(操作系 API が単純だったため Phase 2 も同時に実装)
-- ⏭ 次: Phase 3(インジケーター値の取得)、Phase 4(ウォッチリスト・スキャナー)
+- ✅ **Phase 3 完了**(2026-07-07): `get_indicator_values` / `get_indicator_inputs` を追加。調査結果は [phase3-findings.md](phase3-findings.md)
+- ⏭ 次: Phase 4(ウォッチリスト・スキャナー・アラート連携)

@@ -30,6 +30,55 @@ export interface OhlcvResult {
   bars: OhlcvBar[];
 }
 
+export interface IndicatorPlot {
+  id: string;
+  title: string;
+  type: string;
+}
+
+export interface IndicatorValues {
+  id: string;
+  name: string;
+  visible?: boolean;
+  hasError?: boolean;
+  plots: IndicatorPlot[];
+  bars: Array<{ time: number; values: Record<string, number | string | null> }>;
+  error?: string;
+}
+
+export interface IndicatorInput {
+  id: string;
+  name: string;
+  type: string;
+  value: unknown;
+  defval: unknown;
+  tooltip: string | null;
+}
+
+export interface IndicatorInputs {
+  id: string;
+  name: string;
+  title: string | null;
+  inputs: IndicatorInput[];
+  error?: string;
+}
+
+const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
+
+function assertStudyId(studyId: string): void {
+  if (typeof studyId !== "string" || !STUDY_ID_PATTERN.test(studyId)) {
+    throw new Error(
+      `studyId must match ${STUDY_ID_PATTERN} — get ids from get_chart_context`,
+    );
+  }
+}
+
+function assertChartIndex(chartIndex: number | undefined): void {
+  if (chartIndex !== undefined && (!Number.isInteger(chartIndex) || chartIndex < 0)) {
+    throw new Error(`chartIndex must be a non-negative integer, got ${chartIndex}`);
+  }
+}
+
 /**
  * High-level TradingView operations built on the in-page charting API
  * (window.TradingViewApi) exposed by the desktop app.
@@ -68,9 +117,7 @@ export class TradingView {
     if (!Number.isFinite(count) || count < 1) {
       throw new Error(`count must be a positive number, got ${count}`);
     }
-    if (chartIndex !== undefined && (!Number.isInteger(chartIndex) || chartIndex < 0)) {
-      throw new Error(`chartIndex must be a non-negative integer, got ${chartIndex}`);
-    }
+    assertChartIndex(chartIndex);
     const chartExpr =
       chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
     return this.cdp.evaluate<OhlcvResult>(`
@@ -93,6 +140,167 @@ export class TradingView {
           count: bars.length,
           bars,
         };
+      })()
+    `);
+  }
+
+  /**
+   * Recent plot values of indicators (studies) on a chart. By default,
+   * cosmetic plots (colorers, alert conditions) are filtered out.
+   */
+  getIndicatorValues(
+    options: {
+      studyId?: string;
+      count?: number;
+      chartIndex?: number;
+      includeAllPlots?: boolean;
+    } = {},
+  ): Promise<IndicatorValues[]> {
+    const { studyId, count = 10, chartIndex, includeAllPlots = false } = options;
+    if (studyId !== undefined) assertStudyId(studyId);
+    if (!Number.isFinite(count) || count < 1) {
+      throw new Error(`count must be a positive number, got ${count}`);
+    }
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
+    return this.cdp.evaluate<IndicatorValues[]>(`
+      (() => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const studyIdFilter = ${studyId === undefined ? "null" : JSON.stringify(studyId)};
+        const includeAllPlots = ${includeAllPlots ? "true" : "false"};
+        const maxBars = ${Math.floor(count)};
+
+        const sourceById = {};
+        for (const s of chart.chartModel().dataSources()) {
+          if (typeof s.id === "function") sourceById[s.id()] = s;
+        }
+        const studies = chart
+          .getAllStudies()
+          .filter((st) => studyIdFilter === null || st.id === studyIdFilter);
+        if (studies.length === 0) {
+          throw new Error(
+            studyIdFilter === null
+              ? "no indicators on this chart"
+              : "study " + studyIdFilter + " not found; get ids from get_chart_context",
+          );
+        }
+
+        const isNoisePlot = (type) =>
+          /colorer/i.test(type) || type === "alertcondition" || type === "textcolor";
+
+        return studies.map((st) => {
+          const out = { id: st.id, name: st.name, plots: [], bars: [] };
+          const src = sourceById[st.id];
+          if (!src || typeof src.metaInfo !== "function" || typeof src.data !== "function") {
+            out.error = "study has no readable data source";
+            return out;
+          }
+          try {
+            const studyApi = chart.getStudyById(st.id);
+            out.visible = studyApi.isVisible();
+            out.hasError = studyApi.hasError();
+          } catch (e) {}
+
+          const mi = src.metaInfo();
+          const styles = mi.styles || {};
+          const keep = [];
+          const usedTitles = new Set();
+          (mi.plots || []).forEach((p, i) => {
+            if (!includeAllPlots && isNoisePlot(p.type)) return;
+            let title = (styles[p.id] && styles[p.id].title) || p.id;
+            if (usedTitles.has(title)) title = title + " (" + p.id + ")";
+            usedTitles.add(title);
+            keep.push({ col: i + 1, id: p.id, type: p.type, title });
+          });
+          out.plots = keep.map((k) => ({ id: k.id, title: k.title, type: k.type }));
+
+          const items = src.data()._items || [];
+          out.bars = items.slice(-maxBars).map((it) => {
+            const row = { time: it.value[0], values: {} };
+            for (const k of keep) {
+              const v = it.value[k.col];
+              row.values[k.title] = v === undefined ? null : v;
+            }
+            return row;
+          });
+          return out;
+        });
+      })()
+    `);
+  }
+
+  /**
+   * Input parameters of indicators (studies) on a chart, with names, current
+   * values and defaults. Internal Pine inputs (script source, ids) are excluded.
+   */
+  getIndicatorInputs(
+    options: { studyId?: string; chartIndex?: number } = {},
+  ): Promise<IndicatorInputs[]> {
+    const { studyId, chartIndex } = options;
+    if (studyId !== undefined) assertStudyId(studyId);
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
+    return this.cdp.evaluate<IndicatorInputs[]>(`
+      (() => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const studyIdFilter = ${studyId === undefined ? "null" : JSON.stringify(studyId)};
+        // Pine-internal inputs; "text" holds the (possibly protected) script source
+        const HIDDEN = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
+        const MAX_STRING = 200;
+
+        const studies = chart
+          .getAllStudies()
+          .filter((st) => studyIdFilter === null || st.id === studyIdFilter);
+        if (studies.length === 0) {
+          throw new Error(
+            studyIdFilter === null
+              ? "no indicators on this chart"
+              : "study " + studyIdFilter + " not found; get ids from get_chart_context",
+          );
+        }
+
+        return studies.map((st) => {
+          const out = { id: st.id, name: st.name, title: null, inputs: [] };
+          let studyApi;
+          try {
+            studyApi = chart.getStudyById(st.id);
+            out.title = studyApi.title();
+          } catch (e) {
+            out.error = "study API unavailable: " + e.message;
+            return out;
+          }
+          const infoById = {};
+          try {
+            for (const i of studyApi.getInputsInfo()) infoById[i.id] = i;
+          } catch (e) {}
+          try {
+            out.inputs = studyApi
+              .getInputValues()
+              .filter((v) => !HIDDEN.has(v.id))
+              .map((v) => {
+                const meta = infoById[v.id] || {};
+                let value = v.value;
+                if (typeof value === "string" && value.length > MAX_STRING) {
+                  value = value.slice(0, MAX_STRING) + "…(truncated)";
+                }
+                return {
+                  id: v.id,
+                  name: meta.localizedName || meta.name || v.id,
+                  type: meta.type || typeof v.value,
+                  value,
+                  defval: meta.defval === undefined ? null : meta.defval,
+                  tooltip: meta.tooltip || null,
+                };
+              });
+          } catch (e) {
+            out.error = "cannot read inputs: " + e.message;
+          }
+          return out;
+        });
       })()
     `);
   }

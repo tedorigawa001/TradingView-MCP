@@ -75,6 +75,49 @@ test("getOhlcv floors fractional counts and targets the right chart", async () =
   assert.ok(cdp.calls[1].includes("api.activeChart()"), "default is active chart");
 });
 
+test("getIndicatorValues validates studyId, count and chartIndex before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  for (const badId of ['"); hack(); ("', "a b", "x".repeat(65), "évil", ""]) {
+    assert.throws(() => tv.getIndicatorValues({ studyId: badId }), /studyId must match/, badId);
+  }
+  assert.throws(() => tv.getIndicatorValues({ count: 0 }), /count must be/);
+  assert.throws(() => tv.getIndicatorValues({ count: NaN }), /count must be/);
+  assert.throws(() => tv.getIndicatorValues({ chartIndex: -1 }), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
+test("getIndicatorValues embeds studyId as a JSON literal and honors options", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorValues({ studyId: "mlahPw", count: 5.9, chartIndex: 1, includeAllPlots: true });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"mlahPw"'), "studyId should be quoted");
+  assert.ok(expr.includes("const maxBars = 5"), "fractional count should floor");
+  assert.ok(expr.includes("api.chart(1)"), "should target chart 1");
+  assert.ok(expr.includes("const includeAllPlots = true"));
+
+  await tv.getIndicatorValues();
+  const expr2 = cdp.calls[1];
+  assert.ok(expr2.includes("const studyIdFilter = null"), "default is all studies");
+  assert.ok(expr2.includes("api.activeChart()"), "default is active chart");
+  assert.ok(expr2.includes("const includeAllPlots = false"));
+});
+
+test("getIndicatorInputs validates ids and always excludes Pine-internal inputs", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getIndicatorInputs({ studyId: '1"; steal()' }), /studyId must match/);
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.getIndicatorInputs({ studyId: "XfUjdm" });
+  const expr = cdp.calls[0];
+  for (const hidden of ["text", "pineId", "pineVersion", "pineFeatures"]) {
+    assert.ok(expr.includes(`"${hidden}"`), `HIDDEN set must contain ${hidden}`);
+  }
+  assert.ok(expr.includes("truncated"), "long string values must be truncated");
+});
+
 test("getChartContext returns the page value as-is", async () => {
   const ctx = { layoutName: "L", activeChartIndex: 0, chartsCount: 1, charts: [] };
   const tv = new TradingView(fakeCdp(ctx));
