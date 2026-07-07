@@ -23,7 +23,7 @@
 
 ## `window.TradingViewApi` の主な API(将来フェーズ候補)
 
-- `watchlist()` — ウォッチリスト API(Phase 4)
+- `watchlist()` — ウォッチリスト API(Phase 4)⚠️ **Phase 4 で "not implemented" と判明**。REST 経由で代替([phase4-findings.md](phase4-findings.md))
 - `alertService` / `showCreateAlertDialog` — アラート連携(Phase 4)
 - `searchSymbols` — シンボル検索
 - `getStudyInputs` / `getStudyStyles` — インジケーターのパラメータ取得

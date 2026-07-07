@@ -59,21 +59,24 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 ```
 
 - 言語: **TypeScript** + `@modelcontextprotocol/sdk`
-- CDP クライアント: `chrome-remote-interface`(軽量)または Playwright の `connectOverCDP`
+- CDP クライアント: 自前の軽量実装(`src/cdp.ts`、`ws` のみ依存。chrome-remote-interface / Playwright は不要だった)
 - トランスポート: stdio(Claude Code / Claude Desktop からローカル利用)
 
-## 5. MCP ツール設計(案)
+## 5. MCP ツール設計(実装済み・全10ツール)
 
 | ツール | 内容 | 実現手段 |
 |---|---|---|
 | `get_chart_screenshot` | 現在のチャート画像を返す(AI が視覚分析) | CDP `Page.captureScreenshot` |
-| `get_chart_context` | 表示中のシンボル・時間足・インジケーター一覧 | CDP JS 実行 |
-| `set_symbol` / `set_timeframe` | チャートの切替 | CDP JS / キー入力 |
-| `get_ohlcv` | ローソク足データ(数値) | ページ内チャートオブジェクトから抽出 |
-| `get_indicator_values` | 表示中インジケーターの現在値 | 同上 |
-| `get_watchlist` | ウォッチリストの銘柄と価格 | CDP JS 実行 |
-| `scan_market` | スクリーナー(条件でフィルタ) | scanner API |
-| `get_technical_rating` | 買い/売り総合評価 | scanner API |
+| `get_chart_context` | 全チャートのシンボル・時間足・インジケーター一覧 | CDP JS 実行(`TradingViewApi`) |
+| `get_ohlcv` | ローソク足データ(数値) | 内部モデル `mainSeries().bars()`(exportData は無効のため) |
+| `get_indicator_values` | インジケーターのプロット値(ノイズ系は除外可) | 内部モデル `dataSources()` + `metaInfo()` |
+| `get_indicator_inputs` | インジケーターの入力パラメータ(名前・現在値・デフォルト) | `chart.getStudyById()`(Pine 内部入力は除外) |
+| `get_watchlist` | ウォッチリスト(セクション付き) | ページ内 fetch + セッション(`watchlist()` API は無効のため) |
+| `get_quotes` | 任意シンボルのクォート+テクニカル(`Recommend.All` = 総合評価) | scanner API(Node から直接) |
+| `scan_market` | スクリーナー(条件でフィルタ・ソート) | scanner API(Node から直接) |
+| `set_symbol` / `set_timeframe` | チャートの切替 | `chart.setSymbol()` / `chart.setResolution()` |
+
+当初案からの変更: `get_technical_rating` は `get_quotes` の `Recommend.All` カラムに統合。`get_indicator_inputs` と `get_quotes` を追加。
 
 ## 6. フェーズ計画
 
