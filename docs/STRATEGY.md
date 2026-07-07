@@ -101,4 +101,5 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 - ✅ **Phase 1 + 2 完了**(2026-07-07): MCP サーバー実装。ツール: `get_chart_screenshot` / `get_chart_context` / `get_ohlcv` / `set_symbol` / `set_timeframe`(操作系 API が単純だったため Phase 2 も同時に実装)
 - ✅ **Phase 3 完了**(2026-07-07): `get_indicator_values` / `get_indicator_inputs` を追加。調査結果は [phase3-findings.md](phase3-findings.md)
 - ✅ **Phase 4 完了**(2026-07-07): `get_watchlist`(ページ内 fetch + セッション。デスクトップビルドでは `watchlist()` API が無効のため REST 経由)/ `get_quotes` / `scan_market`(scanner.tradingview.com、Node 側から直接)。`get_technical_rating` は独立ツールにせず `get_quotes` の `Recommend.All` カラムとして提供
-- ⏭ 検討中: アラート連携(書き込み系のため確認フロー設計が必要。意図的に未実装)、描画専用スタディのグラフィックス読み取り
+- ✅ **Phase 5 完了**(2026-07-08): 残課題3件を実装 — `get_indicator_graphics`(描画専用スタディのラベル・ライン・ボックス読み取り)/ `load_more_history`(`requestMoreData` 経由の過去バー追加)/ `list_alerts`(読み取り専用)。調査結果は [phase5-findings.md](phase5-findings.md)。**全13ツール**
+- 未実装(意図的): アラート・ウォッチリストの作成/変更/削除(書き込み系は確認フロー設計が前提)、dwgtables(インジケーターの表)読み取り

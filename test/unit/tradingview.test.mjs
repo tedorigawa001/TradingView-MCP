@@ -118,6 +118,56 @@ test("getIndicatorInputs validates ids and always excludes Pine-internal inputs"
   assert.ok(expr.includes("truncated"), "long string values must be truncated");
 });
 
+test("getIndicatorGraphics validates inputs before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getIndicatorGraphics({ studyId: '"); hack(' }), /studyId must match/);
+  assert.throws(() => tv.getIndicatorGraphics({ limitPerKind: 0 }), /limitPerKind must be/);
+  assert.throws(() => tv.getIndicatorGraphics({ limitPerKind: 501 }), /limitPerKind must be/);
+  assert.throws(() => tv.getIndicatorGraphics({ limitPerKind: 2.5 }), /limitPerKind must be/);
+  assert.throws(() => tv.getIndicatorGraphics({ chartIndex: -1 }), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0);
+});
+
+test("getIndicatorGraphics reads both raw and materialized primitive stores", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorGraphics({ studyId: "lSZ7z5", limitPerKind: 10 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"lSZ7z5"'), "studyId quoted as JSON");
+  for (const kind of ["dwglabels", "dwglines", "dwgboxes"]) {
+    assert.ok(expr.includes(kind), `must read ${kind}`);
+  }
+  assert.ok(expr.includes("_primitivesDataById"), "raw store");
+  assert.ok(expr.includes("_primitiveById"), "materialized store");
+  assert.ok(expr.includes("const limit = 10"));
+});
+
+test("loadMoreHistory validates count and builds a requestMoreData call", async () => {
+  const cdp = fakeCdp({ requested: 1, barsBefore: 0, barsAfter: 0, added: 0, earliestTime: null, moreAvailable: null });
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.loadMoreHistory({ count: 0 }), /count must be/);
+  assert.throws(() => tv.loadMoreHistory({ count: 5001 }), /count must be/);
+  assert.throws(() => tv.loadMoreHistory({ count: 1.5 }), /count must be/);
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.loadMoreHistory({ count: 250, chartIndex: 1 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("requestMoreData(requested)"));
+  assert.ok(expr.includes("const requested = 250"));
+  assert.ok(expr.includes("api.chart(1)"));
+});
+
+test("listAlerts fetches the alerts API read-only with the app session", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.listAlerts();
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("https://pricealerts.tradingview.com/list_alerts"));
+  assert.ok(expr.includes('credentials: "include"'));
+  assert.ok(!/create_alert|modify|delete/.test(expr), "must stay read-only");
+});
+
 test("getWatchlists fetches the symbols_list API with the app session", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);

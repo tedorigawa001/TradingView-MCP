@@ -57,6 +57,41 @@ function makeDeps(overrides = {}) {
           ],
         },
       ],
+      getIndicatorGraphics: async (options) => [
+        {
+          id: "st1",
+          name: "Test Study",
+          options,
+          totals: { labels: 1, lines: 0, boxes: 0 },
+          labels: [{ time: 1, price: 1.5, text: "(3)", size: "normal" }],
+          lines: [],
+          boxes: [],
+        },
+      ],
+      loadMoreHistory: async (options) => ({
+        requested: options.count,
+        barsBefore: 300,
+        barsAfter: 300 + options.count,
+        added: options.count,
+        earliestTime: 1,
+        moreAvailable: true,
+      }),
+      listAlerts: async () => [
+        {
+          id: 1,
+          name: null,
+          symbol: "OANDA:USDJPY",
+          resolution: null,
+          condition: null,
+          message: null,
+          active: false,
+          type: "price",
+          createTime: null,
+          lastFireTime: null,
+          expiration: null,
+          lastError: null,
+        },
+      ],
       getWatchlists: async () => [
         {
           id: 1,
@@ -84,7 +119,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the ten expected tools", async () => {
+test("exposes exactly the thirteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -92,16 +127,46 @@ test("exposes exactly the ten expected tools", async () => {
     [
       "get_chart_context",
       "get_chart_screenshot",
+      "get_indicator_graphics",
       "get_indicator_inputs",
       "get_indicator_values",
       "get_ohlcv",
       "get_quotes",
       "get_watchlist",
+      "list_alerts",
+      "load_more_history",
       "scan_market",
       "set_symbol",
       "set_timeframe",
     ],
   );
+});
+
+test("get_indicator_graphics forwards options with defaults applied", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_indicator_graphics",
+    arguments: { study_id: "st1" },
+  });
+  const [study] = JSON.parse(res.content[0].text);
+  assert.deepEqual(study.options, { studyId: "st1", limitPerKind: 50 });
+  assert.equal(study.labels[0].text, "(3)");
+});
+
+test("load_more_history forwards count with default", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "load_more_history", arguments: {} });
+  assert.equal(JSON.parse(res.content[0].text).requested, 300);
+  const res2 = await client.callTool({ name: "load_more_history", arguments: { count: 42 } });
+  assert.equal(JSON.parse(res2.content[0].text).added, 42);
+});
+
+test("list_alerts returns the user's alerts", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "list_alerts", arguments: {} });
+  const [alert] = JSON.parse(res.content[0].text);
+  assert.equal(alert.symbol, "OANDA:USDJPY");
+  assert.equal(alert.active, false);
 });
 
 test("get_watchlist returns the user's lists", async () => {
@@ -207,6 +272,9 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getOhlcv: async () => ((handlerRan = true), {}),
       getIndicatorValues: async () => ((handlerRan = true), []),
       getIndicatorInputs: async () => ((handlerRan = true), []),
+      getIndicatorGraphics: async () => ((handlerRan = true), []),
+      loadMoreHistory: async () => ((handlerRan = true), {}),
+      listAlerts: async () => ((handlerRan = true), []),
       getWatchlists: async () => ((handlerRan = true), []),
       setSymbol: async () => ((handlerRan = true), {}),
       setResolution: async () => ((handlerRan = true), {}),
@@ -233,6 +301,10 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "scan_market", arguments: { market: "JAPAN/../x" } },
     { name: "scan_market", arguments: { market: "japan", filters: [{ field: "RSI", operation: "drop" }] } },
     { name: "scan_market", arguments: { market: "japan", limit: 101 } },
+    { name: "get_indicator_graphics", arguments: { study_id: "has space" } },
+    { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
+    { name: "load_more_history", arguments: { count: 5001 } },
+    { name: "load_more_history", arguments: { count: "many" } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

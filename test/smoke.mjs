@@ -69,6 +69,42 @@ await check("get_indicator_inputs", async () => {
   return `${studies.length} studies, e.g. ${named ? `${named.name}=${named.value}` : "(no named inputs)"}`;
 });
 
+await check("get_indicator_graphics", async () => {
+  const studies = await tv.getIndicatorGraphics({ limitPerKind: 5 });
+  if (!Array.isArray(studies) || studies.length === 0) {
+    return "skipped-ish: no indicators on active chart";
+  }
+  const withGraphics = studies.find(
+    (s) => s.totals.labels + s.totals.lines + s.totals.boxes > 0,
+  );
+  if (!withGraphics) return `${studies.length} studies, none with drawings`;
+  const label = withGraphics.labels[0];
+  if (label && (typeof label.text !== "string" || label.text === "")) {
+    throw new Error("label without text should have been filtered");
+  }
+  return `${withGraphics.name}: ${JSON.stringify(withGraphics.totals)}${label ? `, e.g. "${label.text.replace(/\n/g, " ")}"@${label.price}` : ""}`;
+});
+
+await check("list_alerts", async () => {
+  const alerts = await tv.listAlerts();
+  if (!Array.isArray(alerts)) throw new Error("expected an array");
+  for (const a of alerts) {
+    if (typeof a.symbol !== "string" || a.symbol.startsWith("={")) {
+      throw new Error(`unparsed symbol expression: ${a.symbol}`);
+    }
+  }
+  return `${alerts.length} alert(s)${alerts[0] ? `, e.g. ${alerts[0].symbol} active=${alerts[0].active}` : ""}`;
+});
+
+await check("load_more_history", async () => {
+  const r = await tv.loadMoreHistory({ count: 50 });
+  if (r.barsAfter < r.barsBefore) throw new Error("bar count decreased");
+  if (r.added === 0 && r.moreAvailable !== false) {
+    throw new Error("nothing loaded although more data was available");
+  }
+  return `${r.barsBefore} -> ${r.barsAfter} bars (earliest ${new Date(r.earliestTime * 1000).toISOString().slice(0, 10)})`;
+});
+
 await check("get_watchlist", async () => {
   const lists = await tv.getWatchlists();
   if (!Array.isArray(lists)) throw new Error("expected an array of lists");

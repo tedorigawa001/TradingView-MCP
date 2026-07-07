@@ -13,6 +13,9 @@ export interface ServerDeps {
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
+    | "getIndicatorGraphics"
+    | "loadMoreHistory"
+    | "listAlerts"
     | "getWatchlists"
     | "setSymbol"
     | "setResolution"
@@ -197,6 +200,102 @@ export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
         return jsonResult(
           await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart_index }),
         );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_indicator_graphics",
+    {
+      description:
+        "Get drawing primitives (labels with text+price, trend lines, boxes/zones) that a " +
+        "Pine indicator has drawn on a TradingView chart. This is how to read drawing-only " +
+        "indicators (e.g. Elliott Wave labels, support/resistance lines, order blocks) that " +
+        "have no numeric plots. Most recent primitives first. Times beyond the last bar are " +
+        "extrapolated and flagged timeEstimated.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .optional()
+          .describe("Indicator id from get_chart_context. Default: all indicators"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+        limit_per_kind: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Max labels/lines/boxes each, most recent first. Default: 50"),
+      },
+    },
+    async ({ study_id, chart_index, limit_per_kind }) => {
+      try {
+        return jsonResult(
+          await tv.getIndicatorGraphics({
+            studyId: study_id,
+            chartIndex: chart_index,
+            limitPerKind: limit_per_kind ?? 50,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "load_more_history",
+    {
+      description:
+        "Load more historical bars into a TradingView chart (like scrolling left), so that " +
+        "get_ohlcv and get_indicator_values can see further back. The visible chart view is " +
+        "not changed. Returns how many bars were added and the new earliest bar time.",
+      inputSchema: {
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .optional()
+          .describe("How many additional bars to request. Default: 300"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ count, chart_index }) => {
+      try {
+        return jsonResult(
+          await tv.loadMoreHistory({ count: count ?? 300, chartIndex: chart_index }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_alerts",
+    {
+      description:
+        "List the user's TradingView price alerts (read-only): symbol, condition, active " +
+        "state, last fire time. Creating or modifying alerts is not supported.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return jsonResult(await tv.listAlerts());
       } catch (err) {
         return errorResult(err);
       }
