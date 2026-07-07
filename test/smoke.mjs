@@ -3,9 +3,11 @@
 // and restores the chart to its original state.
 import { CdpClient } from "../build/cdp.js";
 import { TradingView } from "../build/tradingview.js";
+import { Scanner } from "../build/scanner.js";
 
 const cdp = new CdpClient();
 const tv = new TradingView(cdp);
+const scanner = new Scanner();
 
 let failures = 0;
 async function check(name, fn) {
@@ -65,6 +67,34 @@ await check("get_indicator_inputs", async () => {
   if (raw.length > 100_000) throw new Error(`payload too large: ${raw.length} chars`);
   const named = studies[0].inputs.find((i) => i.name && i.name !== i.id);
   return `${studies.length} studies, e.g. ${named ? `${named.name}=${named.value}` : "(no named inputs)"}`;
+});
+
+await check("get_watchlist", async () => {
+  const lists = await tv.getWatchlists();
+  if (!Array.isArray(lists)) throw new Error("expected an array of lists");
+  if (lists.length === 0) return "skipped-ish: no watchlists (not logged in?)";
+  const total = lists.reduce((n, l) => n + l.symbolCount, 0);
+  return `${lists.length} list(s), ${total} symbols, first="${lists[0].name}"`;
+});
+
+await check("get_quotes (scanner)", async () => {
+  const q = await scanner.getQuotes(["OANDA:EURUSD"]);
+  if (q.rows.length !== 1) throw new Error(`expected 1 row, got ${q.rows.length}`);
+  const v = q.rows[0].values;
+  if (typeof v.close !== "number") throw new Error("close is not a number");
+  if (typeof v["Recommend.All"] !== "number") throw new Error("rating missing");
+  return `EURUSD close=${v.close}, rating=${v["Recommend.All"].toFixed(2)}`;
+});
+
+await check("scan_market (scanner)", async () => {
+  const r = await scanner.scanMarket({
+    market: "japan",
+    filters: [{ field: "volume", operation: "greater", value: 0 }],
+    sortBy: "volume",
+    limit: 2,
+  });
+  if (r.rows.length === 0) throw new Error("no screener results");
+  return `${r.totalCount} matches, top: ${r.rows[0].symbol}`;
 });
 
 await check("get_chart_screenshot", async () => {

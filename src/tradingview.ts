@@ -63,6 +63,19 @@ export interface IndicatorInputs {
   error?: string;
 }
 
+export interface WatchlistSection {
+  name: string | null;
+  symbols: string[];
+}
+
+export interface Watchlist {
+  id: number | string;
+  name: string;
+  type: string | null;
+  symbolCount: number;
+  sections: WatchlistSection[];
+}
+
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
 
 function assertStudyId(studyId: string): void {
@@ -300,6 +313,46 @@ export class TradingView {
             out.error = "cannot read inputs: " + e.message;
           }
           return out;
+        });
+      })()
+    `);
+  }
+
+  /**
+   * The user's watchlists, fetched with the app's own session via the
+   * TradingView REST API (the in-page watchlist widget API is disabled in
+   * the desktop build). Symbols beginning with "###" are section headers
+   * and are converted into named sections.
+   */
+  getWatchlists(): Promise<Watchlist[]> {
+    return this.cdp.evaluate<Watchlist[]>(`
+      (async () => {
+        const res = await fetch("https://www.tradingview.com/api/v1/symbols_list/custom/", {
+          credentials: "include",
+        });
+        if (!res.ok) {
+          throw new Error("watchlist API returned HTTP " + res.status + " — is the app logged in?");
+        }
+        const lists = await res.json();
+        if (!Array.isArray(lists)) throw new Error("unexpected watchlist response shape");
+        return lists.map((l) => {
+          const sections = [{ name: null, symbols: [] }];
+          for (const s of Array.isArray(l.symbols) ? l.symbols : []) {
+            if (typeof s !== "string") continue;
+            if (s.startsWith("###")) {
+              sections.push({ name: s.slice(3), symbols: [] });
+            } else {
+              sections[sections.length - 1].symbols.push(s);
+            }
+          }
+          const nonEmpty = sections.filter((sec) => sec.name !== null || sec.symbols.length > 0);
+          return {
+            id: l.id,
+            name: String(l.name ?? ""),
+            type: l.type ?? null,
+            symbolCount: nonEmpty.reduce((n, sec) => n + sec.symbols.length, 0),
+            sections: nonEmpty,
+          };
         });
       })()
     `);

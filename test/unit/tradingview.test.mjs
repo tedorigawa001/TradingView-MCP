@@ -118,6 +118,16 @@ test("getIndicatorInputs validates ids and always excludes Pine-internal inputs"
   assert.ok(expr.includes("truncated"), "long string values must be truncated");
 });
 
+test("getWatchlists fetches the symbols_list API with the app session", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getWatchlists();
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("https://www.tradingview.com/api/v1/symbols_list/custom/"));
+  assert.ok(expr.includes('credentials: "include"'), "must use the logged-in session");
+  assert.ok(expr.includes('startsWith("###")'), "must handle section headers");
+});
+
 test("getChartContext returns the page value as-is", async () => {
   const ctx = { layoutName: "L", activeChartIndex: 0, chartsCount: 1, charts: [] };
   const tv = new TradingView(fakeCdp(ctx));

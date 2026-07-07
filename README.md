@@ -40,6 +40,9 @@ claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
 | `get_ohlcv` | ロード済みローソク足データ(OHLCV) |
 | `get_indicator_values` | インジケーターのプロット値(シグナルレベル・バンド等)。色・アラート系プロットはデフォルト除外 |
 | `get_indicator_inputs` | インジケーターの入力パラメータ(名前・現在値・デフォルト値・説明) |
+| `get_watchlist` | ウォッチリスト(セクション見出しでグループ化。ログインセッション利用) |
+| `get_quotes` | 任意シンボルのクォート+テクニカルデータ(RSI・総合評価 `Recommend.All` 等。スキャナーAPI) |
+| `scan_market` | 市場スクリーニング(例: 日本市場で RSI<30 を出来高順に検索) |
 | `set_symbol` | アクティブチャートのシンボル変更 |
 | `set_timeframe` | アクティブチャートの時間足変更 |
 

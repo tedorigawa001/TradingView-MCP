@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CdpClient } from "./cdp.js";
 import type { TradingView } from "./tradingview.js";
+import { SCAN_OPERATIONS, type Scanner } from "./scanner.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -12,10 +13,14 @@ export interface ServerDeps {
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
+    | "getWatchlists"
     | "setSymbol"
     | "setResolution"
   >;
+  scanner: Pick<Scanner, "getQuotes" | "scanMarket">;
 }
+
+const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
 
 type ToolResult = {
   content: Array<
@@ -37,7 +42,7 @@ function errorResult(err: unknown): ToolResult {
   };
 }
 
-export function createServer({ cdp, tv }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
   const server = new McpServer({
     name: "tradingview-mcp",
     version: "0.1.0",
@@ -191,6 +196,115 @@ export function createServer({ cdp, tv }: ServerDeps): McpServer {
       try {
         return jsonResult(
           await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart_index }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_watchlist",
+    {
+      description:
+        "Get the user's TradingView watchlists: list names and their symbols, grouped by " +
+        "the user's section headers. Uses the app's logged-in session.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return jsonResult(await tv.getWatchlists());
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_quotes",
+    {
+      description:
+        "Get current quotes and technical data for specific symbols via TradingView's " +
+        "scanner API (no chart interaction). Default columns include close, change, " +
+        "volume, RSI and 'Recommend.All' — the overall technical rating in [-1, 1] " +
+        "(-1 strong sell, +1 strong buy). Other fields (e.g. 'MACD.macd', 'EMA50', " +
+        "'price_earnings_ttm') can be requested via columns.",
+      inputSchema: {
+        symbols: z
+          .array(z.string().regex(/^[\w!.:&-]{1,48}$/))
+          .min(1)
+          .max(100)
+          .describe("Symbols in EXCHANGE:SYMBOL form, e.g. ['OANDA:EURUSD', 'NASDAQ:AAPL']"),
+        columns: z
+          .array(FIELD_SCHEMA)
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Data fields to return. Default: description/close/change/volume/RSI/Recommend.All"),
+      },
+    },
+    async ({ symbols, columns }) => {
+      try {
+        return jsonResult(await scanner.getQuotes(symbols, columns));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scan_market",
+    {
+      description:
+        "Screen a market for symbols matching field filters via TradingView's scanner " +
+        "API, e.g. RSI < 30 sorted by volume. Markets: 'america', 'japan', 'crypto', " +
+        "'forex', 'global', etc. Filter fields use scanner names like 'RSI', 'close', " +
+        "'volume', 'change', 'market_cap_basic', 'Recommend.All'.",
+      inputSchema: {
+        market: z
+          .string()
+          .regex(/^[a-z]{2,24}$/)
+          .describe("Market to screen, e.g. 'japan', 'america', 'crypto', 'forex'"),
+        filters: z
+          .array(
+            z.object({
+              field: FIELD_SCHEMA,
+              operation: z.enum(SCAN_OPERATIONS),
+              value: z
+                .union([
+                  z.number(),
+                  z.string().max(100),
+                  z.boolean(),
+                  z.array(z.union([z.number(), z.string().max(100)])).max(2),
+                ])
+                .optional(),
+            }),
+          )
+          .max(20)
+          .optional()
+          .describe("Conditions, e.g. [{field:'RSI', operation:'less', value:30}]"),
+        columns: z
+          .array(FIELD_SCHEMA)
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Data fields to return per match"),
+        sort_by: FIELD_SCHEMA.optional().describe("Field to sort by, e.g. 'volume'"),
+        sort_order: z.enum(["asc", "desc"]).optional().describe("Default: desc"),
+        limit: z.number().int().min(1).max(100).optional().describe("Max results. Default: 20"),
+      },
+    },
+    async ({ market, filters, columns, sort_by, sort_order, limit }) => {
+      try {
+        return jsonResult(
+          await scanner.scanMarket({
+            market,
+            filters,
+            columns,
+            sortBy: sort_by,
+            sortOrder: sort_order,
+            limit,
+          }),
         );
       } catch (err) {
         return errorResult(err);

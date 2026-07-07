@@ -10,6 +10,19 @@ function makeDeps(overrides = {}) {
       screenshot: async (fmt) => "ZmFrZQ==", // "fake"
       ...overrides.cdp,
     },
+    scanner: {
+      getQuotes: async (symbols, columns) => ({
+        totalCount: symbols.length,
+        returned: symbols.length,
+        rows: symbols.map((s) => ({ symbol: s, values: { close: 1, columns } })),
+      }),
+      scanMarket: async (options) => ({
+        totalCount: 1,
+        returned: 1,
+        rows: [{ symbol: "TSE:9501", values: { options } }],
+      }),
+      ...overrides.scanner,
+    },
     tv: {
       getChartContext: async () => ({
         layoutName: "test",
@@ -44,6 +57,15 @@ function makeDeps(overrides = {}) {
           ],
         },
       ],
+      getWatchlists: async () => [
+        {
+          id: 1,
+          name: "Watchlist",
+          type: "custom",
+          symbolCount: 2,
+          sections: [{ name: "Crypto", symbols: ["BITSTAMP:BTCUSD", "OANDA:EURUSD"] }],
+        },
+      ],
       setSymbol: async (symbol) => ({ symbol, resolution: "1D" }),
       setResolution: async (resolution) => ({ symbol: "EURUSD", resolution }),
       ...overrides.tv,
@@ -62,7 +84,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the seven expected tools", async () => {
+test("exposes exactly the ten expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -73,10 +95,52 @@ test("exposes exactly the seven expected tools", async () => {
       "get_indicator_inputs",
       "get_indicator_values",
       "get_ohlcv",
+      "get_quotes",
+      "get_watchlist",
+      "scan_market",
       "set_symbol",
       "set_timeframe",
     ],
   );
+});
+
+test("get_watchlist returns the user's lists", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_watchlist", arguments: {} });
+  const [list] = JSON.parse(res.content[0].text);
+  assert.equal(list.name, "Watchlist");
+  assert.equal(list.sections[0].name, "Crypto");
+});
+
+test("get_quotes forwards symbols and columns", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_quotes",
+    arguments: { symbols: ["OANDA:EURUSD"], columns: ["close", "RSI"] },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.rows[0].symbol, "OANDA:EURUSD");
+  assert.deepEqual(parsed.rows[0].values.columns, ["close", "RSI"]);
+});
+
+test("scan_market forwards options under scanner names", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "scan_market",
+    arguments: {
+      market: "japan",
+      filters: [{ field: "RSI", operation: "less", value: 30 }],
+      sort_by: "volume",
+      limit: 5,
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.deepEqual(parsed.rows[0].values.options, {
+    market: "japan",
+    filters: [{ field: "RSI", operation: "less", value: 30 }],
+    sortBy: "volume",
+    limit: 5,
+  });
 });
 
 test("get_indicator_values forwards options with defaults applied", async () => {
@@ -143,10 +207,15 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getOhlcv: async () => ((handlerRan = true), {}),
       getIndicatorValues: async () => ((handlerRan = true), []),
       getIndicatorInputs: async () => ((handlerRan = true), []),
+      getWatchlists: async () => ((handlerRan = true), []),
       setSymbol: async () => ((handlerRan = true), {}),
       setResolution: async () => ((handlerRan = true), {}),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
+    scanner: {
+      getQuotes: async () => ((handlerRan = true), {}),
+      scanMarket: async () => ((handlerRan = true), {}),
+    },
   });
   const client = await connectedClient(spyingDeps);
   for (const args of [
@@ -159,6 +228,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
     { name: "get_indicator_values", arguments: { count: 501 } },
     { name: "get_indicator_inputs", arguments: { study_id: "has space" } },
+    { name: "get_quotes", arguments: { symbols: [] } },
+    { name: "get_quotes", arguments: { symbols: ["bad ticker!"] } },
+    { name: "scan_market", arguments: { market: "JAPAN/../x" } },
+    { name: "scan_market", arguments: { market: "japan", filters: [{ field: "RSI", operation: "drop" }] } },
+    { name: "scan_market", arguments: { market: "japan", limit: 101 } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));
