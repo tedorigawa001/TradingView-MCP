@@ -19,6 +19,8 @@ export interface ServerDeps {
     | "loadMoreHistory"
     | "listPineScripts"
     | "getPineSource"
+    | "getStrategyReport"
+    | "runBacktest"
     | "listAlerts"
     | "getWatchlists"
     | "getChartRect"
@@ -381,6 +383,77 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
     async ({ pine_id }) => {
       try {
         return jsonResult(await tv.getPineSource(pine_id));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_strategy_report",
+    {
+      description:
+        "Read the backtest report (Strategy Tester) of the strategy currently on the " +
+        "active TradingView chart: net profit, win rate, profit factor, drawdown, Sharpe/" +
+        "Sortino, and the most recent trades with entry/exit details. Percent-style " +
+        "fields are fractions (0.33 = 33%). Fails if no strategy is on the chart — use " +
+        "run_backtest to test a saved strategy without leaving it on the chart.",
+      inputSchema: {
+        trades_limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Max most-recent trades to include. Default: 20"),
+      },
+    },
+    async ({ trades_limit }) => {
+      try {
+        return jsonResult(await tv.getStrategyReport({ tradesLimit: trades_limit ?? 20 }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "run_backtest",
+    {
+      description:
+        "Backtest one of the user's OWN saved strategies on the active chart's current " +
+        "symbol and timeframe: temporarily applies the strategy, waits for the Strategy " +
+        "Tester report, returns it (same shape as get_strategy_report) and removes the " +
+        "strategy again so the chart is left unchanged (set keep_on_chart to keep it). " +
+        "Get strategy pine_ids (kind 'strategy') from list_pine_scripts. Combine with " +
+        "set_symbol/set_timeframe to test other markets.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Strategy script id from list_pine_scripts, e.g. 'USER;71f1e4e6807c4bb48bd55edb886908a0'"),
+        trades_limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Max most-recent trades to include. Default: 20"),
+        keep_on_chart: z
+          .boolean()
+          .optional()
+          .describe("Leave the strategy on the chart after the test. Default: false (auto-remove)"),
+      },
+    },
+    async ({ pine_id, trades_limit, keep_on_chart }) => {
+      try {
+        return jsonResult(
+          await tv.runBacktest({
+            pineId: pine_id,
+            tradesLimit: trades_limit ?? 20,
+            keepOnChart: keep_on_chart ?? false,
+          }),
+        );
       } catch (err) {
         return errorResult(err);
       }

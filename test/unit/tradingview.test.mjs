@@ -319,6 +319,51 @@ test("getPineSource accepts only own USER;… ids and validates before the page"
   assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
 });
 
+test("getStrategyReport is read-only and refuses stale reports", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getStrategyReport({ tradesLimit: 0 }), /tradesLimit must be/);
+  assert.throws(() => tv.getStrategyReport({ tradesLimit: 501 }), /tradesLimit must be/);
+  assert.throws(() => tv.getStrategyReport({ tradesLimit: 2.5 }), /tradesLimit must be/);
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.getStrategyReport({ tradesLimit: 10 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("activeStrategyReportData"), "must read the strategy tester data");
+  // a removed strategy leaves its report behind: the gate must reject it
+  assert.ok(expr.includes("act === null || act === undefined"), "stale reports must be refused");
+  assert.ok(expr.includes("no strategy report available"), "missing report must fail clearly");
+  assert.ok(!expr.includes("createStudy") && !expr.includes("removeEntity"), "must not touch the chart");
+});
+
+test("runBacktest validates inputs and cleans the chart up by default", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  for (const bad of ["PUB;abcdef1234567890", "USER;short", "", 'USER;x"); hack(']) {
+    assert.throws(() => tv.runBacktest({ pineId: bad }), /pineId must look like/, bad);
+  }
+  assert.throws(
+    () => tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0", tradesLimit: 501 }),
+    /tradesLimit must be/,
+  );
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0" });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"USER;71f1e4e6807c4bb48bd55edb886908a0"'), "pineId quoted as JSON");
+  assert.ok(expr.includes("isTVScriptStrategy !== true"), "non-strategy scripts must be refused");
+  assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
+  assert.ok(expr.includes("const keep = false"), "auto-remove is the default");
+  assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
+  assert.ok(expr.includes("activeDesc === meta.description"),
+    "the report must be attributed to OUR strategy before being accepted");
+  assert.ok(expr.includes("WARNING: the strategy may still be on the chart"),
+    "failed cleanup must be reported");
+
+  await tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0", keepOnChart: true });
+  assert.ok(cdp.calls[1].includes("const keep = true"));
+});
+
 test("getChartRect validates the index and reads the chart container rect", async () => {
   const cdp = fakeCdp({ x: 0, y: 0, width: 100, height: 100, devicePixelRatio: 2 });
   const tv = new TradingView(cdp);

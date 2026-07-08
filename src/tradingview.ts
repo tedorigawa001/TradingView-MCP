@@ -237,9 +237,120 @@ export interface PineSource {
   source: string;
 }
 
+export interface StrategyTradeSide {
+  time: number | null;
+  timeIso: string | null;
+  price: number | null;
+  /** Order id/comment from the strategy, e.g. "Long", "Short Exit". */
+  label: string | null;
+}
+
+export interface StrategyTrade {
+  number: number | null;
+  direction: "long" | "short" | null;
+  entry: StrategyTradeSide | null;
+  exit: StrategyTradeSide | null;
+  profit: number | null;
+  profitPercent: number | null;
+  cumulativeProfit: number | null;
+  quantity: number | null;
+}
+
+export interface StrategyReport {
+  strategy: string | null;
+  currency: string | null;
+  initialCapital: number | null;
+  dateRange: { from: string | null; to: string | null } | null;
+  /** Percent-style fields are fractions: 0.33 means 33%. */
+  summary: Record<string, number | null>;
+  totalTrades: number | null;
+  /** Most recent trades, chronological. */
+  trades: StrategyTrade[];
+}
+
+export interface BacktestResult extends StrategyReport {
+  pineId: string;
+  /** Study id when kept on the chart, otherwise null. */
+  studyId: string | null;
+  keptOnChart: boolean;
+  removedFromChart: boolean;
+  warning?: string;
+}
+
 // Only the user's own workspace scripts ("USER;<id>"). Published/protected
 // script ids ("PUB;...") are rejected so no third-party source is ever pulled.
 const PINE_ID_PATTERN = /^USER;[\w]{8,64}$/;
+
+// In-page helper shared by getStrategyReport and runBacktest: shapes the raw
+// backtesting report into the StrategyReport structure above.
+const FORMAT_REPORT_SNIPPET = `
+  const iso = (ms) => (typeof ms === "number" && isFinite(ms) ? new Date(ms).toISOString() : null);
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+  const formatReport = (bt, tradesLimit) => {
+    // The report WatchedValue outlives a removed strategy — a report is only
+    // trustworthy while a strategy is actually active on the chart.
+    const act = bt.activeStrategy.value();
+    if (act === null || act === undefined) return null;
+    const report = bt.activeStrategyReportData.value();
+    if (!report || !report.performance) return null;
+    const p = report.performance;
+    const a = p.all || {};
+    let strategy = null;
+    try { strategy = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
+    if (!strategy) {
+      try {
+        if (typeof act.metaInfo === "function") strategy = act.metaInfo().description ?? null;
+      } catch (e) {}
+    }
+    const dr = report.settings && report.settings.dateRange && report.settings.dateRange.backtest;
+    const side = (s) => (s ? { time: num(s.time), timeIso: iso(s.time), price: num(s.price), label: typeof s.id === "string" ? s.id : null } : null);
+    const dirOf = (t) => {
+      const ty = t && t.entry ? String(t.entry.type || "") : "";
+      return ty.startsWith("s") ? "short" : ty.startsWith("l") ? "long" : null;
+    };
+    const trades = (Array.isArray(report.trades) ? report.trades : []).slice(-tradesLimit).map((t) => ({
+      number: num(t.tradeNumber),
+      direction: dirOf(t),
+      entry: side(t.entry),
+      exit: side(t.exit),
+      profit: t.profit ? num(t.profit.value) : null,
+      profitPercent: t.profit ? num(t.profit.percentValue) : null,
+      cumulativeProfit: t.cumulativeProfit ? num(t.cumulativeProfit.value) : null,
+      quantity: num(t.quantity),
+    }));
+    return {
+      strategy,
+      currency: report.currency ?? null,
+      initialCapital: num(p.initialCapital),
+      dateRange: dr ? { from: iso(dr.from), to: iso(dr.to) } : null,
+      summary: {
+        netProfit: num(a.netProfit),
+        netProfitPercent: num(a.netProfitPercent),
+        totalTrades: num(a.totalTrades),
+        winningTrades: num(a.numberOfWiningTrades),
+        losingTrades: num(a.numberOfLosingTrades),
+        percentProfitable: num(a.percentProfitable),
+        profitFactor: num(a.profitFactor),
+        grossProfit: num(a.grossProfit),
+        grossLoss: num(a.grossLoss),
+        commissionPaid: num(a.commissionPaid),
+        avgTrade: num(a.avgTrade),
+        avgWinTrade: num(a.avgWinTrade),
+        avgLosTrade: num(a.avgLosTrade),
+        ratioAvgWinAvgLoss: num(a.ratioAvgWinAvgLoss),
+        avgBarsInTrade: num(a.avgBarsInTrade),
+        maxDrawdown: num(p.maxStrategyDrawDown),
+        maxDrawdownPercent: num(p.maxStrategyDrawDownPercent),
+        sharpeRatio: num(p.sharpeRatio),
+        sortinoRatio: num(p.sortinoRatio),
+        buyHoldReturnPercent: num(p.buyHoldReturnPercent),
+        openPL: num(p.openPL),
+      },
+      totalTrades: num(a.totalTrades),
+      trades,
+    };
+  };
+`;
 
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
 
@@ -1029,6 +1140,116 @@ export class TradingView {
           sourceLength: detail.source.length,
           source: detail.source,
         };
+      })()
+    `);
+  }
+
+  /**
+   * Backtest report of the strategy currently on the active chart (the
+   * Strategy Tester data): performance summary, date range, recent trades.
+   * Read-only — fails if no strategy is on the chart.
+   */
+  getStrategyReport(options: { tradesLimit?: number } = {}): Promise<StrategyReport> {
+    const { tradesLimit = 20 } = options;
+    if (!Number.isInteger(tradesLimit) || tradesLimit < 1 || tradesLimit > 500) {
+      throw new Error(`tradesLimit must be an integer between 1 and 500, got ${tradesLimit}`);
+    }
+    return this.cdp.evaluate<StrategyReport>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        ${FORMAT_REPORT_SNIPPET}
+        const bt = await api.backtestingStrategyApi();
+        const report = formatReport(bt, ${tradesLimit});
+        if (!report) {
+          throw new Error("no strategy report available — the active chart has no strategy (or it is still calculating). Add one or use run_backtest");
+        }
+        return report;
+      })()
+    `);
+  }
+
+  /**
+   * Run a backtest of one of the user's own saved strategies on the active
+   * chart (current symbol/timeframe): apply the strategy, wait for the
+   * Strategy Tester report, and remove the strategy again by default so the
+   * chart is left as it was.
+   */
+  runBacktest(options: {
+    pineId: string;
+    tradesLimit?: number;
+    keepOnChart?: boolean;
+  }): Promise<BacktestResult> {
+    const { pineId, tradesLimit = 20, keepOnChart = false } = options;
+    if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
+      throw new Error(
+        `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
+      );
+    }
+    if (!Number.isInteger(tradesLimit) || tradesLimit < 1 || tradesLimit > 500) {
+      throw new Error(`tradesLimit must be an integer between 1 and 500, got ${tradesLimit}`);
+    }
+    return this.cdp.evaluate<BacktestResult>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        const chart = api.activeChart();
+        const pineId = ${JSON.stringify(pineId)};
+        const keep = ${keepOnChart ? "true" : "false"};
+        ${FORMAT_REPORT_SNIPPET}
+
+        const repo = api.studyMetaIntoRepository();
+        let meta = null;
+        try {
+          meta = await repo.findById({ type: "pine", pineId, version: "last" });
+        } catch (e) {}
+        if (!meta) throw new Error("script not found: " + pineId + " — check list_pine_scripts");
+        if (meta.isTVScriptStrategy !== true) {
+          throw new Error(pineId + " is not a strategy — pick a script with kind \\"strategy\\" from list_pine_scripts");
+        }
+
+        const bt = await api.backtestingStrategyApi();
+        const studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
+        let report = null;
+        const t0 = Date.now();
+        while (Date.now() - t0 < 20000) {
+          // Only accept a report attributed to OUR strategy — if another
+          // strategy on the chart stays active, waiting out the timeout and
+          // failing is better than returning its numbers as ours.
+          let activeDesc = null;
+          try { activeDesc = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
+          if (activeDesc === meta.description) {
+            report = formatReport(bt, ${tradesLimit});
+            if (report) break;
+          }
+          await new Promise((r) => setTimeout(r, 400));
+        }
+
+        // By default the strategy must not stay on the user's chart —
+        // remove it whether or not the report arrived.
+        let removed = false;
+        let warning;
+        if (!keep) {
+          try {
+            chart.removeEntity(studyId);
+            removed = true;
+          } catch (e) {
+            warning = "could not remove the strategy from the chart: " + e.message;
+          }
+        }
+        if (!report) {
+          throw new Error("backtest report did not appear within 20s (another strategy may be active on the chart)" +
+            (keep ? "" : removed
+              ? " — the strategy was removed from the chart"
+              : " — WARNING: the strategy may still be on the chart"));
+        }
+        const out = {
+          pineId,
+          studyId: keep ? studyId : null,
+          keptOnChart: keep,
+          removedFromChart: removed,
+          ...report,
+        };
+        if (warning) out.warning = warning;
+        return out;
       })()
     `);
   }

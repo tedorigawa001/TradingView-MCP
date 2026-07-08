@@ -169,6 +169,40 @@ await check("get_pine_source", async () => {
   return `${src.name} v${src.version}: ${src.sourceLength} chars of Pine`;
 });
 
+await check("run_backtest applies, reports and cleans up", async () => {
+  const strategy = smokeScripts.find((s) => s.kind === "strategy");
+  if (!strategy) return "skipped-ish: no saved strategy scripts";
+  const before = await tv.getChartContext();
+  const beforeIds = before.charts[before.activeChartIndex ?? 0].studies.map((s) => s.id).join(",");
+  const r = await tv.runBacktest({ pineId: strategy.pineId, tradesLimit: 5 });
+  if (typeof r.summary.netProfit !== "number") throw new Error("netProfit missing from summary");
+  if (typeof r.summary.percentProfitable !== "number") throw new Error("win rate missing");
+  if (r.trades.length > 5) throw new Error(`asked for 5 trades, got ${r.trades.length}`);
+  if (!r.removedFromChart) throw new Error("strategy was not removed from the chart");
+  const after = await tv.getChartContext();
+  const afterIds = after.charts[after.activeChartIndex ?? 0].studies.map((s) => s.id).join(",");
+  if (afterIds !== beforeIds) throw new Error(`chart studies changed: ${beforeIds} -> ${afterIds}`);
+  return `${r.strategy}: netProfit=${r.summary.netProfit.toFixed(0)} ${r.currency}, ` +
+    `winRate=${(r.summary.percentProfitable * 100).toFixed(1)}%, ${r.trades.length}/${r.totalTrades} trades, chart restored`;
+});
+
+await check("get_strategy_report refuses stale/absent reports", async () => {
+  // right after run_backtest removed its strategy, a stale report would be
+  // the dangerous failure mode — it must NOT be returned
+  const r = await tv.getStrategyReport().then(
+    (v) => v,
+    (e) => e,
+  );
+  if (r instanceof Error) {
+    if (!/no strategy report available/.test(r.message)) throw r;
+    return "correctly refused: no strategy on chart";
+  }
+  if (!r.strategy && typeof r.summary?.netProfit !== "number") {
+    throw new Error("returned a report without strategy attribution");
+  }
+  return `report for on-chart strategy ${r.strategy}`;
+});
+
 await check("list_alerts", async () => {
   const alerts = await tv.listAlerts();
   if (!Array.isArray(alerts)) throw new Error("expected an array");

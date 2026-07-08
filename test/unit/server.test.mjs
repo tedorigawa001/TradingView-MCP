@@ -120,6 +120,41 @@ function makeDeps(overrides = {}) {
         sourceLength: 24,
         source: "//@version=5\nplot(close)",
       }),
+      getStrategyReport: async (options) => ({
+        strategy: "Test Strategy",
+        currency: "USD",
+        initialCapital: 1000000,
+        dateRange: { from: "2020-01-01T00:00:00.000Z", to: "2026-07-08T00:00:00.000Z" },
+        summary: { netProfit: -1675, percentProfitable: 0.33, profitFactor: 0.9 },
+        totalTrades: 21,
+        options,
+        trades: [
+          {
+            number: 21,
+            direction: "short",
+            entry: { time: 1, timeIso: "x", price: 1.14, label: "Short" },
+            exit: { time: 2, timeIso: "y", price: 1.15, label: "Short Exit" },
+            profit: -1019,
+            profitPercent: -0.0102,
+            cumulativeProfit: -1675,
+            quantity: 87528,
+          },
+        ],
+      }),
+      runBacktest: async (options) => ({
+        pineId: options.pineId,
+        studyId: options.keepOnChart ? "st9" : null,
+        keptOnChart: !!options.keepOnChart,
+        removedFromChart: !options.keepOnChart,
+        strategy: "Test Strategy",
+        currency: "USD",
+        initialCapital: 1000000,
+        dateRange: null,
+        summary: { netProfit: -1675 },
+        totalTrades: 21,
+        options,
+        trades: [],
+      }),
       listAlerts: async () => [
         {
           id: 1,
@@ -216,7 +251,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the nineteen expected tools", async () => {
+test("exposes exactly the twenty-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -234,10 +269,12 @@ test("exposes exactly the nineteen expected tools", async () => {
       "get_ohlcv",
       "get_pine_source",
       "get_quotes",
+      "get_strategy_report",
       "get_watchlist",
       "list_alerts",
       "list_pine_scripts",
       "load_more_history",
+      "run_backtest",
       "scan_market",
       "set_symbol",
       "set_timeframe",
@@ -346,6 +383,28 @@ test("list_pine_scripts and get_pine_source expose own Pine sources", async () =
   const parsed = JSON.parse(res2.content[0].text);
   assert.equal(parsed.pineId, script.pineId);
   assert.match(parsed.source, /^\/\/@version=5/);
+});
+
+test("get_strategy_report and run_backtest expose the strategy tester", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_strategy_report", arguments: {} });
+  const report = JSON.parse(res.content[0].text);
+  assert.equal(report.strategy, "Test Strategy");
+  assert.deepEqual(report.options, { tradesLimit: 20 });
+  assert.equal(report.trades[0].direction, "short");
+
+  const res2 = await client.callTool({
+    name: "run_backtest",
+    arguments: { pine_id: "USER;71f1e4e6807c4bb48bd55edb886908a0", trades_limit: 5 },
+  });
+  const bt = JSON.parse(res2.content[0].text);
+  assert.equal(bt.pineId, "USER;71f1e4e6807c4bb48bd55edb886908a0");
+  assert.equal(bt.removedFromChart, true, "auto-remove is the default");
+  assert.deepEqual(bt.options, {
+    pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0",
+    tradesLimit: 5,
+    keepOnChart: false,
+  });
 });
 
 test("list_alerts returns the user's alerts", async () => {
@@ -486,6 +545,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getIndicatorTables: async () => ((handlerRan = true), []),
       listPineScripts: async () => ((handlerRan = true), []),
       getPineSource: async () => ((handlerRan = true), {}),
+      getStrategyReport: async () => ((handlerRan = true), {}),
+      runBacktest: async () => ((handlerRan = true), {}),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
     scanner: {
@@ -530,6 +591,10 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_pine_source", arguments: {} },
     { name: "get_pine_source", arguments: { pine_id: "PUB;abcdef1234567890" } },
     { name: "get_pine_source", arguments: { pine_id: 'USER;x"); hack(); ("' } },
+    { name: "run_backtest", arguments: {} },
+    { name: "run_backtest", arguments: { pine_id: "PUB;abcdef1234567890" } },
+    { name: "run_backtest", arguments: { pine_id: "USER;71f1e4e6807c4bb48bd55edb886908a0", trades_limit: 501 } },
+    { name: "get_strategy_report", arguments: { trades_limit: 0 } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

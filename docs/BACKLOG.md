@@ -12,6 +12,7 @@
 - ✅ **#6 経済カレンダー** — `get_economic_events`(economic-calendar.tradingview.com、認証不要 GET。国・重要度・期間フィルタ、comment 等の冗長フィールドは除去)
 - ✅ **#9 インジケーター内テーブルの読み取り** — `get_indicator_tables`(dwgtables/dwgtablecells からセルテキストを `grid[row][column]` で復元。tablecells はストアのネストが他と異なる点に対応)
 - ✅ **#10 Pine ソース読み取り** — `list_pine_scripts`(saved 一覧+チャート上スタディとの pineId 突合 `usedBy`)/ `get_pine_source`(`USER;` ID 限定でソース原文)。PDCA の Plan 工程
+- ✅ **#8 バックテスト連携** — `run_backtest`(自作ストラテジーを一時適用→レポート取得→自動削除でチャート復元)/ `get_strategy_report`(チャート上のストラテジーのレポート読み取り。残留レポートの誤帰属ゲート付き)。PDCA の Check 工程。調査記録は [phase6-findings.md](phase6-findings.md)。リプレイ操作(replayApi)は未実装のまま将来課題
 
 ## 優先度: 高
 
@@ -82,12 +83,11 @@
 - **案**: `create_alert` を追加する場合は (1) `confirm: true` 必須、(2) 作成前に内容をドライラン表示、(3) 作成後に alert_id を返して `list_alerts` で検証可能に、という3点セットを最低条件とする。削除・変更は当面対象外
 - **規模**: 中+セキュリティレビュー必須([security-review.md](security-review.md) の方針変更を伴う)
 
-### #8 リプレイ/バックテスト連携
+### #8 リプレイ/バックテスト連携 ✅ 完了(バックテスト部分)
 
 - **課題**: 波動カウント等の分析を過去時点で検証する手段がない
-- **案**: `replayApi` の存在は確認済み(Phase 0)。リプレイ開始・ステップ実行・その時点でのスクリーンショット/OHLCV取得、という読み取り中心の設計から着手
-- **追記(2026-07-08)**: saved に strategy が2本あることを確認。チャートに strategy を載せた際のバックテストレポート(純利益・勝率・トレード一覧等)を内部 API から読み取れれば、PDCA(#10 → AI改修 → #11 → 適用 → **#8 で結果評価**)の Check 工程になる。レポート読み取りは読み取り専用なので #11 より先行着手可能
-- **規模**: 大。探索から必要
+- **実装(2026-07-08)**: `run_backtest` + `get_strategy_report`。`createStudy({type:'pine', pineId, version:'last'})` で一時適用し、`backtestingStrategyApi` のレポートを整形して返す(削除後の残留レポートを誤って返さないゲート付き)。詳細は [phase6-findings.md](phase6-findings.md)
+- **残り(将来課題)**: リプレイ操作(`replayApi` の selectDate / doStep / スクリーンショットの組み合わせ)。replayApi には buy/sell 等のペーパートレード関数も含まれるため、公開時は書き込み系の設計が必要
 
 ### #9 インジケーター内テーブルの読み取り(`dwgtables`)✅ 完了
 
