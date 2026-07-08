@@ -316,10 +316,17 @@ const keyLevelsValues = [
     name: "SR",
     isPriceStudy: true,
     plots: [],
-    bars: [{ time: 1000, values: { R1: 102, S1: 98, Far: 200, Txt: "x", Nul: null } }],
+    bars: [
+      {
+        time: 1000,
+        // high / close / plot_5 are in-band but generically titled: the
+        // current bar's own prices must not come back as "key levels"
+        values: { R1: 102, S1: 98, Far: 200, Txt: "x", Nul: null, high: 100.4, close: 100.1, plot_5: 99.8 },
+      },
+    ],
   },
   // no flag at all: keep (only an explicit false excludes)
-  { id: "c", name: "NoFlag", plots: [], bars: [{ time: 1000, values: { P: 99 } }] },
+  { id: "c", name: "NoFlag", plots: [], bars: [{ time: 1000, values: { Pivot: 99 } }] },
 ];
 const keyLevelsGraphics = [
   {
@@ -368,12 +375,13 @@ test("getKeyLevels aggregates plots, horizontal lines, box edges and labels near
   assert.equal(r.price, 100);
   assert.equal(r.rangePercent, 3);
   // sorted by absolute distance; duplicates collapsed; oscillators, the
-  // out-of-band plot (200), non-numeric values and sloped lines excluded
+  // out-of-band plot (200), non-numeric values, sloped lines and
+  // generically-titled plots (high/close/plot_5) excluded
   assert.deepEqual(
     r.levels.map((l) => [l.price, l.kind, l.study, l.detail]),
     [
       [99.5, "label", "SMC", "OB"],
-      [99, "plot", "NoFlag", "P"],
+      [99, "plot", "NoFlag", "Pivot"],
       [101, "line", "SMC", "horizontal line (extend: right)"],
       [102, "plot", "SR", "R1"],
       [98, "plot", "SR", "S1"],
@@ -385,6 +393,20 @@ test("getKeyLevels aggregates plots, horizontal lines, box edges and labels near
   assert.equal(r.levels[0].distancePercent, -0.5);
   assert.equal(r.levels[3].distancePercent, 2);
   assert.ok(!JSON.stringify(r).includes("100.5"), "oscillator values must not leak");
+  for (const near of [100.4, 100.1, 99.8]) {
+    assert.ok(
+      !r.levels.some((l) => l.price === near),
+      `generic plot value ${near} must not become a level`,
+    );
+  }
+});
+
+test("getKeyLevels includeAllPlots keeps generically-titled plots", async () => {
+  const tv = new TradingView(fakeCdpSeq([keyLevelsOhlcv, keyLevelsValues, keyLevelsGraphics]));
+  const r = await tv.getKeyLevels({ includeAllPlots: true });
+  for (const near of [100.4, 100.1, 99.8]) {
+    assert.ok(r.levels.some((l) => l.price === near), `expected ${near} with includeAllPlots`);
+  }
 });
 
 test("getKeyLevels honors rangePercent and limit", async () => {

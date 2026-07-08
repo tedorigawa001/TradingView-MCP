@@ -476,11 +476,13 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
     {
       description:
         "Aggregate key price levels near the current price from ALL price-scale " +
-        "indicators on a TradingView chart: last plot values (S/R, bands), horizontal " +
-        "lines, box/zone edges and label prices, each tagged with its source indicator. " +
-        "Oscillator panes (RSI etc.) are excluded. Sorted by distance from the current " +
-        "price. Use this instead of manually combining get_indicator_values and " +
-        "get_indicator_graphics when you need a support/resistance table.",
+        "indicators on a TradingView chart: plot values whose titles name a level " +
+        "(S/R, pivot, VWAP, bands, BOS/CHoCH...), horizontal lines, box/zone edges and " +
+        "label prices, each tagged with its source indicator. Oscillator panes (RSI " +
+        "etc.) and generic value plots (open/high/low/close mirrors) are excluded. " +
+        "Sorted by distance from the current price. Use this instead of manually " +
+        "combining get_indicator_values and get_indicator_graphics when you need a " +
+        "support/resistance table.",
       inputSchema: {
         range_percent: z
           .number()
@@ -501,15 +503,23 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
           .min(0)
           .optional()
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
+        include_all_plots: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include every numeric plot as a level, not just level-named ones. " +
+            "Use when an indicator names its S/R plots unusually. Default: false",
+          ),
       },
     },
-    async ({ range_percent, limit, chart_index }) => {
+    async ({ range_percent, limit, chart_index, include_all_plots }) => {
       try {
         return jsonResult(
           await tv.getKeyLevels({
             rangePercent: range_percent ?? 3,
             limit: limit ?? 30,
             chartIndex: chart_index,
+            includeAllPlots: include_all_plots ?? false,
           }),
         );
       } catch (err) {

@@ -177,6 +177,9 @@ await check("get_key_levels", async () => {
   for (const l of r.levels) {
     if (l.price < lo || l.price > hi) throw new Error(`level ${l.price} outside ±10% of ${r.price}`);
     if (!l.study || !l.detail) throw new Error(`level without source: ${JSON.stringify(l)}`);
+    if (l.kind === "plot" && /^(open|high|low|close|hl2|hlc3|ohlc4|price|plot(_?\d+)?)$/i.test(l.detail)) {
+      throw new Error(`generic plot leaked into levels: ${l.detail}=${l.price} from ${l.study}`);
+    }
     const dist = Math.abs(l.distancePercent);
     if (dist + 1e-9 < prevDist) throw new Error("levels not sorted by distance");
     prevDist = dist;

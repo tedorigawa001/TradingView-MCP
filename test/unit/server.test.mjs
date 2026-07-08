@@ -221,17 +221,18 @@ test("get_key_levels forwards options with defaults applied", async () => {
   const res = await client.callTool({ name: "get_key_levels", arguments: {} });
   const parsed = JSON.parse(res.content[0].text);
   // undefined chartIndex is dropped by the JSON round-trip
-  assert.deepEqual(parsed.options, { rangePercent: 3, limit: 30 });
+  assert.deepEqual(parsed.options, { rangePercent: 3, limit: 30, includeAllPlots: false });
   assert.equal(parsed.levels[0].study, "SMC");
 
   const res2 = await client.callTool({
     name: "get_key_levels",
-    arguments: { range_percent: 1.5, limit: 10, chart_index: 1 },
+    arguments: { range_percent: 1.5, limit: 10, chart_index: 1, include_all_plots: true },
   });
   assert.deepEqual(JSON.parse(res2.content[0].text).options, {
     rangePercent: 1.5,
     limit: 10,
     chartIndex: 1,
+    includeAllPlots: true,
   });
 });
 

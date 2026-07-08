@@ -173,6 +173,13 @@ export interface KeyLevelsResult {
   levels: KeyLevel[];
 }
 
+// Plot titles that explicitly name a price level. Without this filter every
+// numeric plot of a price study becomes a "level" — including plain
+// open/high/low/close mirrors and unnamed plot_N outputs, which sit on top of
+// the current price and read like fake support/resistance.
+const LEVEL_TITLE_PATTERN =
+  /(resist|support|s\/r|pivot|vwap|band|bos|choch|breaker|order\s*block|\bob\b|fvg|imbalance|supply|demand|poc|value\s*area|equilibrium|liquidity|key\s*level|\blevel\b|zone|\b[rs][1-6]\b|レジスタンス|抵抗|サポート|支持|節目)/i;
+
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
 
 function assertStudyId(studyId: string): void {
@@ -955,12 +962,19 @@ export class TradingView {
    * Key price levels near the current price, aggregated from indicator plot
    * values, horizontal lines, box edges and labels across all price-scale
    * studies on a chart. Oscillator panes (isPriceStudy=false) are excluded so
-   * e.g. an RSI of 50 is never mistaken for a price level.
+   * e.g. an RSI of 50 is never mistaken for a price level, and plot-derived
+   * levels are limited to plots whose title names a level (S/R, pivot, VWAP,
+   * bands, BOS/CHoCH...) unless includeAllPlots is set.
    */
   async getKeyLevels(
-    options: { chartIndex?: number; rangePercent?: number; limit?: number } = {},
+    options: {
+      chartIndex?: number;
+      rangePercent?: number;
+      limit?: number;
+      includeAllPlots?: boolean;
+    } = {},
   ): Promise<KeyLevelsResult> {
-    const { chartIndex, rangePercent = 3, limit = 30 } = options;
+    const { chartIndex, rangePercent = 3, limit = 30, includeAllPlots = false } = options;
     assertChartIndex(chartIndex);
     if (!Number.isFinite(rangePercent) || rangePercent <= 0 || rangePercent > 50) {
       throw new Error(`rangePercent must be a number in (0, 50], got ${rangePercent}`);
@@ -1007,6 +1021,7 @@ export class TradingView {
       const bar = st.bars[st.bars.length - 1];
       if (!bar) continue;
       for (const [title, v] of Object.entries(bar.values)) {
+        if (!includeAllPlots && !LEVEL_TITLE_PATTERN.test(title)) continue;
         if (!inBand(v)) continue;
         push({ price: v, distancePercent: pct(v), kind: "plot", study: st.name, detail: title, time: bar.time });
       }
