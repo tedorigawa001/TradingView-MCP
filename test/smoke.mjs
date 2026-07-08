@@ -169,6 +169,45 @@ await check("get_pine_source", async () => {
   return `${src.name} v${src.version}: ${src.sourceLength} chars of Pine`;
 });
 
+await check("save_pine_script non-destructive cycle + add_pine_to_chart", async () => {
+  const NAME = "MCP Smoke Test - safe to delete";
+  const SRC1 = `//@version=5\nindicator("${NAME}")\nplot(close)`;
+  const SRC2 = `//@version=5\nindicator("${NAME}")\nplot(close * 2)`;
+  const norm = (s) => s.replace(/\r\n/g, "\n");
+  const deleteScript = (id) =>
+    cdp.evaluate(
+      `fetch("https://pine-facade.tradingview.com/pine-facade/delete/" + encodeURIComponent(${JSON.stringify(id)}), { method: "POST", credentials: "include" }).then((r) => r.status)`,
+    );
+  // leftovers from an earlier aborted run must not break the name check
+  for (const s of await tv.listPineScripts()) {
+    if (s.name === NAME) await deleteScript(s.pineId);
+  }
+
+  const dry = await tv.savePineScript({ source: SRC1, name: NAME });
+  if (dry.dryRun !== true) throw new Error("missing confirm must be a dry run");
+  const created = await tv.savePineScript({ source: SRC1, name: NAME, confirm: true });
+  try {
+    if (!created.saved || !created.verified || !created.compileOk) {
+      throw new Error(`create failed: ${JSON.stringify(created)}`);
+    }
+    const v2 = await tv.savePineScript({ source: SRC2, pineId: created.pineId, confirm: true });
+    if (!v2.saved || v2.version === created.version) throw new Error("version did not advance");
+    const v1 = await tv.getPineSource(created.pineId, "1");
+    if (norm(v1.source) !== norm(SRC1)) throw new Error("old version was not preserved");
+
+    const added = await tv.addPineToChart(created.pineId);
+    const mid = await tv.getChartContext();
+    const onChart = mid.charts[mid.activeChartIndex ?? 0].studies.some((s) => s.id === added.studyId);
+    await cdp.evaluate(
+      `window.TradingViewApi.activeChart().removeEntity(${JSON.stringify(added.studyId)})`,
+    );
+    if (!onChart) throw new Error("added study did not appear on the chart");
+    return `created ${created.pineId.slice(0, 16)}… v${created.version} -> v${v2.version}, v1 preserved, chart add/remove OK`;
+  } finally {
+    await deleteScript(created.pineId);
+  }
+});
+
 await check("run_backtest applies, reports and cleans up", async () => {
   const strategy = smokeScripts.find((s) => s.kind === "strategy");
   if (!strategy) return "skipped-ish: no saved strategy scripts";

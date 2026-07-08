@@ -111,14 +111,46 @@ function makeDeps(overrides = {}) {
           usedBy: [{ chartIndex: 0, studyId: "st1", name: "Test Study" }],
         },
       ],
-      getPineSource: async (pineId) => ({
+      getPineSource: async (pineId, version) => ({
         pineId,
+        version: version ?? "last",
         name: "Test Script",
         kind: "study",
-        version: "3.0",
         updated: null,
         sourceLength: 24,
         source: "//@version=5\nplot(close)",
+      }),
+      savePineScript: async (options) =>
+        options.confirm === true
+          ? {
+              dryRun: false,
+              action: options.pineId ? "new_version" : "create_new",
+              saved: true,
+              pineId: options.pineId ?? "USER;abcdef1234567890",
+              name: options.name ?? "Test Script",
+              version: "4.0",
+              compileOk: true,
+              compileErrors: [],
+              compileWarnings: [],
+              verified: true,
+              options,
+            }
+          : {
+              dryRun: true,
+              action: options.pineId ? "new_version" : "create_new",
+              pineId: options.pineId ?? null,
+              name: options.name ?? null,
+              currentVersion: options.pineId ? "3.0" : null,
+              currentSourceLength: options.pineId ? 100 : null,
+              newSourceLength: options.source.length,
+              note: "DRY RUN",
+              options,
+            },
+      addPineToChart: async (pineId, chartIndex) => ({
+        studyId: "stNew",
+        name: "Test Script",
+        isStrategy: false,
+        chartIndex: chartIndex ?? null,
       }),
       getStrategyReport: async (options) => ({
         strategy: "Test Strategy",
@@ -251,12 +283,13 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the twenty-one expected tools", async () => {
+test("exposes exactly the twenty-three expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     [
+      "add_pine_to_chart",
       "get_chart_context",
       "get_chart_screenshot",
       "get_economic_events",
@@ -275,6 +308,7 @@ test("exposes exactly the twenty-one expected tools", async () => {
       "list_pine_scripts",
       "load_more_history",
       "run_backtest",
+      "save_pine_script",
       "scan_market",
       "set_symbol",
       "set_timeframe",
@@ -383,6 +417,47 @@ test("list_pine_scripts and get_pine_source expose own Pine sources", async () =
   const parsed = JSON.parse(res2.content[0].text);
   assert.equal(parsed.pineId, script.pineId);
   assert.match(parsed.source, /^\/\/@version=5/);
+});
+
+test("save_pine_script defaults to a dry run; confirm must be explicit", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "save_pine_script",
+    arguments: { source: "//@version=5\nplot(close)", name: "New Script" },
+  });
+  const dry = JSON.parse(res.content[0].text);
+  assert.equal(dry.dryRun, true, "omitting confirm must not write");
+  assert.equal(dry.options.confirm, false);
+
+  const res2 = await client.callTool({
+    name: "save_pine_script",
+    arguments: {
+      source: "//@version=5\nplot(close)",
+      pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f",
+      confirm: true,
+    },
+  });
+  const saved = JSON.parse(res2.content[0].text);
+  assert.equal(saved.saved, true);
+  assert.equal(saved.action, "new_version");
+  assert.equal(saved.options.pineId, "USER;adc40b1dfee344f19412f1ae9af74f3f");
+});
+
+test("add_pine_to_chart and get_pine_source version forward correctly", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "add_pine_to_chart",
+    arguments: { pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f", chart_index: 1 },
+  });
+  const added = JSON.parse(res.content[0].text);
+  assert.equal(added.studyId, "stNew");
+  assert.equal(added.chartIndex, 1);
+
+  const res2 = await client.callTool({
+    name: "get_pine_source",
+    arguments: { pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f", version: "2" },
+  });
+  assert.equal(JSON.parse(res2.content[0].text).version, "2");
 });
 
 test("get_strategy_report and run_backtest expose the strategy tester", async () => {
@@ -547,6 +622,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getPineSource: async () => ((handlerRan = true), {}),
       getStrategyReport: async () => ((handlerRan = true), {}),
       runBacktest: async () => ((handlerRan = true), {}),
+      savePineScript: async () => ((handlerRan = true), {}),
+      addPineToChart: async () => ((handlerRan = true), {}),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
     scanner: {
@@ -595,6 +672,12 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "run_backtest", arguments: { pine_id: "PUB;abcdef1234567890" } },
     { name: "run_backtest", arguments: { pine_id: "USER;71f1e4e6807c4bb48bd55edb886908a0", trades_limit: 501 } },
     { name: "get_strategy_report", arguments: { trades_limit: 0 } },
+    { name: "save_pine_script", arguments: {} },
+    { name: "save_pine_script", arguments: { source: "x", pine_id: "PUB;abcdef1234567890" } },
+    { name: "save_pine_script", arguments: { source: "x", name: "n", confirm: "yes" } },
+    { name: "add_pine_to_chart", arguments: {} },
+    { name: "add_pine_to_chart", arguments: { pine_id: "PUB;abcdef1234567890" } },
+    { name: "get_pine_source", arguments: { pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f", version: "evil" } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

@@ -319,6 +319,89 @@ test("getPineSource accepts only own USER;… ids and validates before the page"
   assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
 });
 
+test("savePineScript validates inputs before touching the page", async () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  await assert.rejects(() => tv.savePineScript({ source: "" }), /non-empty string/);
+  await assert.rejects(() => tv.savePineScript({ source: "   " }), /non-empty string/);
+  await assert.rejects(() => tv.savePineScript({ source: "x".repeat(200_001), name: "n" }), /too large/);
+  await assert.rejects(
+    () => tv.savePineScript({ source: "plot(close)", pineId: "PUB;abcdef1234567890" }),
+    /pineId must look like/,
+  );
+  await assert.rejects(() => tv.savePineScript({ source: "plot(close)" }), /name is required/);
+  await assert.rejects(
+    () => tv.savePineScript({ source: "plot(close)", name: "x".repeat(101) }),
+    /at most 100/,
+  );
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
+test("savePineScript without confirm is a dry run that writes nothing", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const dry = await tv.savePineScript({ source: "//@version=5\nplot(close)", name: "New Script" });
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.action, "create_new");
+  assert.match(dry.note, /DRY RUN/);
+  assert.equal(cdp.calls.length, 0, "create_new dry run must not touch the page at all");
+
+  const cdp2 = fakeCdp({ pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f", name: "Old", version: "3.0", sourceLength: 100, source: "old" });
+  const tv2 = new TradingView(cdp2);
+  const dry2 = await tv2.savePineScript({
+    source: "//@version=5\nplot(close)",
+    pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f",
+  });
+  assert.equal(dry2.dryRun, true);
+  assert.equal(dry2.action, "new_version");
+  assert.equal(dry2.currentVersion, "3.0");
+  assert.equal(dry2.currentSourceLength, 100);
+  assert.equal(cdp2.calls.length, 1, "only the current source is fetched");
+  assert.ok(cdp2.calls[0].includes("pine-facade/get/"), "dry run reads, never writes");
+  assert.ok(!/save\/(new|next)|saveNew|saveNext/.test(cdp2.calls[0]), "no save call in a dry run");
+});
+
+test("savePineScript with confirm saves non-destructively and verifies", async () => {
+  const cdp = fakeCdp({ dryRun: false });
+  const tv = new TradingView(cdp);
+  await tv.savePineScript({ source: "//@version=5\nplot(close)", name: "New Script", confirm: true });
+  const create = cdp.calls[0];
+  assert.ok(
+    create.includes("lib.saveNew({ scriptSource: source, scriptName: name })"),
+    "new scripts use saveNew without the overwrite option",
+  );
+  assert.ok(create.includes("already exists"), "duplicate names must be detected up front");
+  assert.ok(create.includes('"New Script"'), "name quoted as JSON");
+  assert.ok(create.includes("/last"), "result is verified by fetching the saved version back");
+  assert.ok(create.includes("pine-facade save failed"), "string rejections must become real errors");
+
+  await tv.savePineScript({
+    source: "//@version=5\nplot(close)",
+    pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f",
+    confirm: true,
+  });
+  const next = cdp.calls[1];
+  assert.ok(next.includes("lib.saveNext"), "existing scripts get a new version");
+  assert.ok(next.includes("isLegacyScript: false"));
+  assert.ok(next.includes('"USER;adc40b1dfee344f19412f1ae9af74f3f"'), "pineId quoted as JSON");
+  assert.ok(next.includes("revertHint") && next.includes("get_pine_source"),
+    "a broken save must explain how to revert");
+});
+
+test("addPineToChart validates and only ever adds studies", async () => {
+  const cdp = fakeCdp({ studyId: "x", name: null, isStrategy: false, chartIndex: null });
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.addPineToChart("PUB;abcdef1234567890"), /pineId must look like/);
+  assert.throws(() => tv.addPineToChart("USER;adc40b1dfee344f19412f1ae9af74f3f", -1), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.addPineToChart("USER;adc40b1dfee344f19412f1ae9af74f3f", 1);
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
+  assert.ok(expr.includes("api.chart(1)"), "should target chart 1");
+  assert.ok(!expr.includes("removeEntity"), "must never remove studies");
+});
+
 test("getStrategyReport is read-only and refuses stale reports", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);

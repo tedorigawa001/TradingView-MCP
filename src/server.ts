@@ -19,6 +19,8 @@ export interface ServerDeps {
     | "loadMoreHistory"
     | "listPineScripts"
     | "getPineSource"
+    | "savePineScript"
+    | "addPineToChart"
     | "getStrategyReport"
     | "runBacktest"
     | "listAlerts"
@@ -378,11 +380,94 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
           .string()
           .regex(/^USER;[\w]{8,64}$/)
           .describe("Script id from list_pine_scripts, e.g. 'USER;adc40b1dfee344f19412f1ae9af74f3f'"),
+        version: z
+          .string()
+          .regex(/^(last|[0-9]{1,6}(\.[0-9]{1,3})?)$/)
+          .optional()
+          .describe("Version to fetch, e.g. '3'. Default: 'last'. Older versions are how you revert a bad save"),
       },
     },
-    async ({ pine_id }) => {
+    async ({ pine_id, version }) => {
       try {
-        return jsonResult(await tv.getPineSource(pine_id));
+        return jsonResult(await tv.getPineSource(pine_id, version ?? "last"));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "save_pine_script",
+    {
+      description:
+        "Save Pine source to the user's script library — the ONLY write tool, with a " +
+        "confirm flow: without confirm=true nothing is written and a dry-run preview is " +
+        "returned; show it to the user and get their approval before calling again with " +
+        "confirm=true. Non-destructive by design: creates a new script (name, no pine_id) " +
+        "or a new version of an existing one (pine_id), and every older version stays " +
+        "retrievable via get_pine_source(pine_id, version). Compile errors are returned " +
+        "with line numbers; note the version is stored even if compilation fails (see " +
+        "revertHint). Typical PDCA loop: get_pine_source -> edit -> save_pine_script -> " +
+        "run_backtest.",
+      inputSchema: {
+        source: z
+          .string()
+          .min(1)
+          .max(200_000)
+          .describe("Full Pine source, e.g. starting with //@version=5"),
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .optional()
+          .describe("Existing script to save a NEW VERSION of. Omit to create a new script"),
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Script name — required when creating a new script, optional rename otherwise"),
+        confirm: z
+          .boolean()
+          .optional()
+          .describe("Must be true to actually write. Default: false = dry run only"),
+      },
+    },
+    async ({ source, pine_id, name, confirm }) => {
+      try {
+        return jsonResult(
+          await tv.savePineScript({ source, pineId: pine_id, name, confirm: confirm ?? false }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "add_pine_to_chart",
+    {
+      description:
+        "Add one of the user's OWN saved Pine scripts (latest version) to a TradingView " +
+        "chart as a study — e.g. to show an improved indicator after save_pine_script. " +
+        "Additive only: never removes or replaces existing studies (the user can remove " +
+        "it from the chart UI). For strategies prefer run_backtest, which cleans up " +
+        "after itself.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Script id from list_pine_scripts"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ pine_id, chart_index }) => {
+      try {
+        return jsonResult(await tv.addPineToChart(pine_id, chart_index));
       } catch (err) {
         return errorResult(err);
       }

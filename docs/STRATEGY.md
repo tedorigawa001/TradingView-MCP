@@ -106,6 +106,7 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 - ✅ **バックログ中優先度 #5〜#6 完了**(2026-07-08): `get_key_levels`(価格帯±N%のキーレベルを全インジケーターから出所付きで集約。オシレーターは `is_price_study` で除外、plot はレベル名を持つタイトルのみ)/ `get_economic_events`(経済カレンダー。economic-calendar.tradingview.com、認証不要)
 - ✅ **バックログ #9 完了**(2026-07-08): `get_indicator_tables`(dwgtables/dwgtablecells から Pine テーブルをセル行列で復元。Smart Money の MTF トレンド表等が読み取り可能に)
 - ✅ **バックログ #10 完了**(2026-07-08): `list_pine_scripts` / `get_pine_source`(pine-facade REST。自作スクリプト限定・読み取り専用。Pine 改修 PDCA の Plan 工程)
-- ✅ **バックログ #8 完了**(2026-07-08): `run_backtest` / `get_strategy_report`(ストラテジーテスター連携。一時適用+自動削除、残留レポートの誤帰属ゲート。PDCA の Check 工程)。調査記録は [phase6-findings.md](phase6-findings.md)。**全21ツール**
+- ✅ **バックログ #8 完了**(2026-07-08): `run_backtest` / `get_strategy_report`(ストラテジーテスター連携。一時適用+自動削除、残留レポートの誤帰属ゲート。PDCA の Check 工程)。調査記録は [phase6-findings.md](phase6-findings.md)
+- ✅ **バックログ #11 完了**(2026-07-08): `save_pine_script`(初の書き込み系。confirm フロー+非破壊設計)/ `add_pine_to_chart` / `get_pine_source` のバージョン指定。**Pine 改修 PDCA ループ完成。全23ツール**
 - 未実装(意図的): アラート・ウォッチリストの作成/変更/削除(書き込み系は確認フロー設計が前提)
 - 📋 実分析(2026-07-08)で洗い出した改善課題は [BACKLOG.md](BACKLOG.md) に優先度付きで整理

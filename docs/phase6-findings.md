@@ -27,9 +27,17 @@
 - 削除は `chart.removeEntity(studyId)`
 - この記述子ルートは **#11(改修スクリプトのチャート反映)にもそのまま使える**
 
-## 3. 保存系 API の所在(#11 用・未実装)
+## 3. 保存系 API(#11 で実装済み)
 
-- `TradingViewApi.pineLibApi()` → `{ saveNew, saveNext, requestBuiltinScripts }` — Pine Editor が使う保存関数。#11 で非破壊保存(saveNew による別名/新規保存)を設計する際の起点
+- `TradingViewApi.pineLibApi()` → `{ saveNew, saveNext, requestBuiltinScripts }`
+  - `saveNew({scriptSource, scriptName})` → POST `pine-facade/save/new?name=...`(FormData `source`)。`allowOverwrite` は渡さない
+  - `saveNext({scriptIdPart, scriptSource, isLegacyScript: false, scriptName?})` → POST `save/next/<pineId>`。新バージョンとして追記され、**旧バージョンは `get/<pineId>/<n>` で取得可能なまま残る**
+  - 戻り値: `{ success, metaInfo, compileErrors: { errors, warnings } }`(エラーは `{start:{line,column}, message}`)
+- **罠1: コンパイル失敗でもバージョンは保存される**(success:false でも source が新バージョンとして永続化)。ツールは compileOk / revertHint で正直に報告する
+- **罠2: 改行の正規化**: 保存時に LF → CRLF に変換される。保存後の一致検証は改行正規化してから比較
+- **罠3: 同名スクリプトの saveNew はプレーン文字列 `"Request error, try again or contact support."` で reject**(Error ではない)。事前に saved 一覧と名前照合して明確なエラーを出す
+- **罠4: `studyMetaInfoRepository().findById` はキャッシュ**で、保存直後のスクリプトを知らないことがある。`createStudy` 自体は正しく解決するので、メタ取得失敗は致命傷にしない
+- 削除は POST `pine-facade/delete/<pineId>`(→ `"ok"`)。**ツールとしては公開しない**(テストの後始末でのみ使用)
 
 ## 4. replayApi(未実装・将来用)
 

@@ -277,9 +277,46 @@ export interface BacktestResult extends StrategyReport {
   warning?: string;
 }
 
+export interface PineSaveDryRun {
+  dryRun: true;
+  action: "create_new" | "new_version";
+  pineId: string | null;
+  name: string | null;
+  currentVersion: string | null;
+  currentSourceLength: number | null;
+  newSourceLength: number;
+  note: string;
+}
+
+export interface PineCompileMessage {
+  line: number | null;
+  column: number | null;
+  message: string;
+}
+
+export interface PineSaveResult {
+  dryRun: false;
+  action: "create_new" | "new_version";
+  /** Whether a version was persisted (happens even when compilation fails). */
+  saved: boolean;
+  pineId: string | null;
+  name: string | null;
+  version: string | null;
+  compileOk: boolean;
+  compileErrors: PineCompileMessage[];
+  compileWarnings: PineCompileMessage[];
+  /** True when the fetched-back latest source equals the submitted source. */
+  verified: boolean;
+  revertHint?: string;
+}
+
 // Only the user's own workspace scripts ("USER;<id>"). Published/protected
 // script ids ("PUB;...") are rejected so no third-party source is ever pulled.
 const PINE_ID_PATTERN = /^USER;[\w]{8,64}$/;
+
+const PINE_VERSION_PATTERN = /^(last|[0-9]{1,6}(\.[0-9]{1,3})?)$/;
+
+const MAX_PINE_SOURCE = 200_000;
 
 // In-page helper shared by getStrategyReport and runBacktest: shapes the raw
 // backtesting report into the StrategyReport structure above.
@@ -1106,19 +1143,23 @@ export class TradingView {
   /**
    * Full Pine source of one of the user's own saved scripts. Only "USER;..."
    * ids are accepted — published/protected third-party scripts are refused,
-   * so the existing source-leak protections stay intact.
+   * so the existing source-leak protections stay intact. Older versions can
+   * be fetched by number, which is also the revert path after a bad save.
    */
-  getPineSource(pineId: string): Promise<PineSource> {
+  getPineSource(pineId: string, version: string = "last"): Promise<PineSource> {
     if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
       throw new Error(
         `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
       );
     }
+    if (typeof version !== "string" || !PINE_VERSION_PATTERN.test(version)) {
+      throw new Error(`version must be "last" or a version number like "3" — got ${JSON.stringify(version)}`);
+    }
     return this.cdp.evaluate<PineSource>(`
       (async () => {
         const pineId = ${JSON.stringify(pineId)};
         const res = await fetch(
-          "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(pineId) + "/last",
+          "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(pineId) + "/" + ${JSON.stringify(version)},
           { credentials: "include" },
         );
         if (res.status === 403 || res.status === 404) {
@@ -1139,6 +1180,205 @@ export class TradingView {
           updated: detail.updated ?? null,
           sourceLength: detail.source.length,
           source: detail.source,
+        };
+      })()
+    `);
+  }
+
+  /**
+   * Save Pine source — the only write tool for the user's script library,
+   * guarded by a confirm flow. Without confirm=true nothing is written and a
+   * dry-run preview is returned. Writes are strictly non-destructive: a new
+   * script (saveNew, never with overwrite) or a new version of an existing
+   * script (saveNext; every older version stays retrievable via
+   * getPineSource(pineId, version)). Note that pine-facade persists the
+   * version even when compilation fails — the result reports compile errors
+   * and how to revert.
+   */
+  async savePineScript(options: {
+    source: string;
+    pineId?: string;
+    name?: string;
+    confirm?: boolean;
+  }): Promise<PineSaveDryRun | PineSaveResult> {
+    const { source, pineId, name, confirm = false } = options;
+    if (typeof source !== "string" || source.trim() === "") {
+      throw new Error("source must be a non-empty string of Pine code");
+    }
+    if (source.length > MAX_PINE_SOURCE) {
+      throw new Error(`source is too large (${source.length} chars, max ${MAX_PINE_SOURCE})`);
+    }
+    if (pineId !== undefined && !PINE_ID_PATTERN.test(pineId)) {
+      throw new Error(
+        `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
+      );
+    }
+    if (pineId === undefined && (typeof name !== "string" || name.trim() === "")) {
+      throw new Error("name is required when creating a new script (no pineId given)");
+    }
+    if (name !== undefined && (typeof name !== "string" || name.trim() === "" || name.length > 100)) {
+      throw new Error("name must be a non-empty string of at most 100 characters");
+    }
+    const action = pineId === undefined ? "create_new" : "new_version";
+
+    if (confirm !== true) {
+      const note =
+        "DRY RUN — nothing was saved. Review the change with the user, then call again with confirm: true.";
+      if (pineId === undefined) {
+        return {
+          dryRun: true,
+          action,
+          pineId: null,
+          name: name ?? null,
+          currentVersion: null,
+          currentSourceLength: null,
+          newSourceLength: source.length,
+          note,
+        };
+      }
+      // also validates that the target script exists and is the user's own
+      const current = await this.getPineSource(pineId);
+      return {
+        dryRun: true,
+        action,
+        pineId,
+        name: name ?? current.name,
+        currentVersion: current.version,
+        currentSourceLength: current.sourceLength,
+        newSourceLength: source.length,
+        note,
+      };
+    }
+
+    return this.cdp.evaluate<PineSaveResult>(`
+      (async () => {
+        const lib = window.TradingViewApi.pineLibApi();
+        const source = ${JSON.stringify(source)};
+        const pineId = ${pineId === undefined ? "null" : JSON.stringify(pineId)};
+        const name = ${name === undefined ? "null" : JSON.stringify(name)};
+        if (!pineId) {
+          // a duplicate name makes the server reject with a useless generic
+          // error (and we never overwrite) — detect it and say what to do
+          try {
+            const lr = await fetch("https://pine-facade.tradingview.com/pine-facade/list/?filter=saved", { credentials: "include" });
+            if (lr.ok) {
+              const scripts = await lr.json();
+              const dup = Array.isArray(scripts) ? scripts.find((s) => s && s.scriptName === name) : null;
+              if (dup) {
+                throw new Error('a script named "' + name + '" already exists (' + dup.scriptIdPart +
+                  ") — pass pine_id to save a new version of it, or choose a different name");
+              }
+            }
+          } catch (e) {
+            if (e instanceof Error && /already exists/.test(e.message)) throw e;
+          }
+        }
+        let res;
+        try {
+          if (pineId) {
+            const args = { scriptIdPart: pineId, scriptSource: source, isLegacyScript: false };
+            if (name) args.scriptName = name;
+            res = await lib.saveNext(args);
+          } else {
+            // never allowOverwrite — new scripts only
+            res = await lib.saveNew({ scriptSource: source, scriptName: name });
+          }
+        } catch (e) {
+          // pine-facade rejects with plain strings, not Errors
+          throw new Error("pine-facade save failed: " + (typeof e === "string" ? e : (e && e.message) || String(e)));
+        }
+        const mi = res.metaInfo || {};
+        const newPineId = mi.scriptIdPart || pineId || null;
+        let version = null;
+        let verified = false;
+        let savedName = mi.description || name || null;
+        if (newPineId) {
+          try {
+            const g = await fetch(
+              "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(newPineId) + "/last",
+              { credentials: "include" },
+            );
+            if (g.ok) {
+              const d = await g.json();
+              version = d.version ?? null;
+              // pine-facade normalizes line endings to CRLF on save
+              const norm = (s) => String(s).replace(/\\r\\n/g, "\\n");
+              verified = norm(d.source) === norm(source);
+              if (!savedName && d.scriptName) savedName = d.scriptName;
+            }
+          } catch (e) {}
+        }
+        const fmt = (e) => ({
+          line: e && e.start && Number.isFinite(e.start.line) ? e.start.line : null,
+          column: e && e.start && Number.isFinite(e.start.column) ? e.start.column : null,
+          message: String((e && e.message) || "").slice(0, 300),
+        });
+        const errors = ((res.compileErrors && res.compileErrors.errors) || []).map(fmt);
+        const warnings = ((res.compileErrors && res.compileErrors.warnings) || []).map(fmt);
+        const compileOk = res.success === true && errors.length === 0;
+        const out = {
+          dryRun: false,
+          action: ${JSON.stringify(action)},
+          saved: verified,
+          pineId: newPineId,
+          name: savedName,
+          version,
+          compileOk,
+          compileErrors: errors,
+          compileWarnings: warnings,
+          verified,
+        };
+        if (!compileOk && verified && pineId) {
+          out.revertHint = "the broken source was still stored as version " + version +
+            " — fetch an older version with get_pine_source(pine_id, version) and save it again to revert";
+        }
+        return out;
+      })()
+    `);
+  }
+
+  /**
+   * Add one of the user's own saved Pine scripts to a chart (the missing
+   * "apply" step after saving an improved version). Additive only — this
+   * never removes or replaces existing studies; the user can remove the
+   * added study from the chart UI.
+   */
+  addPineToChart(
+    pineId: string,
+    chartIndex?: number,
+  ): Promise<{ studyId: string; name: string | null; isStrategy: boolean; chartIndex: number | null }> {
+    if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
+      throw new Error(
+        `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
+      );
+    }
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
+    return this.cdp.evaluate(`
+      (async () => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const pineId = ${JSON.stringify(pineId)};
+        // findById is a cache and may not know a freshly saved script yet —
+        // use it for metadata when available, but let createStudy decide.
+        const repo = api.studyMetaIntoRepository();
+        let meta = null;
+        try {
+          meta = await repo.findById({ type: "pine", pineId, version: "last" });
+        } catch (e) {}
+        let studyId;
+        try {
+          studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
+        } catch (e) {
+          throw new Error("could not add " + pineId + " to the chart: " +
+            (typeof e === "string" ? e : (e && e.message) || e) + " — check list_pine_scripts");
+        }
+        return {
+          studyId,
+          name: meta ? meta.description ?? null : null,
+          isStrategy: meta ? meta.isTVScriptStrategy === true : false,
+          chartIndex: ${chartIndex === undefined ? "null" : chartIndex},
         };
       })()
     `);

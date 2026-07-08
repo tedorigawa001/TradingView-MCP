@@ -13,6 +13,7 @@
 - ✅ **#9 インジケーター内テーブルの読み取り** — `get_indicator_tables`(dwgtables/dwgtablecells からセルテキストを `grid[row][column]` で復元。tablecells はストアのネストが他と異なる点に対応)
 - ✅ **#10 Pine ソース読み取り** — `list_pine_scripts`(saved 一覧+チャート上スタディとの pineId 突合 `usedBy`)/ `get_pine_source`(`USER;` ID 限定でソース原文)。PDCA の Plan 工程
 - ✅ **#8 バックテスト連携** — `run_backtest`(自作ストラテジーを一時適用→レポート取得→自動削除でチャート復元)/ `get_strategy_report`(チャート上のストラテジーのレポート読み取り。残留レポートの誤帰属ゲート付き)。PDCA の Check 工程。調査記録は [phase6-findings.md](phase6-findings.md)。リプレイ操作(replayApi)は未実装のまま将来課題
+- ✅ **#11 Pine ソース保存+チャート反映** — `save_pine_script`(初の書き込み系。confirm なしはドライラン、新規 or 新バージョンのみの非破壊設計、旧バージョンは `get_pine_source(pine_id, version)` で復元可)/ `add_pine_to_chart`(追加のみ、削除はしない)。**PDCA の Act 工程 — ループ完成**
 
 ## 優先度: 高
 
@@ -69,11 +70,11 @@
 - **規模**: 小〜中。PDCA の起点であり単体でも「AI にインジケーターをレビューさせる」用途で有用
 - **セキュリティ**: 読み取り専用だが、ソース全文が AI コンテキストに載る点を security-review に明記
 
-### #11 Pine ソース保存・チャート反映(書き込み系・確認フロー前提)
+### #11 Pine ソース保存・チャート反映(書き込み系・確認フロー前提)✅ 完了
 
 - **案**: pine-facade の保存系エンドポイントを探索の上、**非破壊原則**を必須とする — 既存スクリプトの上書きではなく新バージョン/別名ドラフトとして保存し、元にいつでも戻せること。`confirm: true` + ドライラン(diff 表示)+ 保存後の検証、という #7 と同じ3点セット
-- チャートへの適用方法(pineId 指定での study 追加 API)は要探索
-- **規模**: 中〜大+セキュリティレビュー必須(書き込み系の方針変更)
+- チャートへの適用方法(pineId 指定での study 追加 API)は要探索 → Phase 6 で解決済みの記述子ルートを流用
+- **規模**: 中〜大+セキュリティレビュー必須(書き込み系の方針変更)→ [security-review.md](security-review.md) 追補に記載
 
 ## 優先度: 低(要設計)
 
