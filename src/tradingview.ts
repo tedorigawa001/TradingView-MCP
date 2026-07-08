@@ -114,6 +114,35 @@ export interface IndicatorGraphics {
   error?: string;
 }
 
+export interface IndicatorTableTooltip {
+  row: number;
+  column: number;
+  tooltip: string;
+}
+
+export interface IndicatorTable {
+  id: number | string;
+  /** Pine table position, e.g. "top_right", "bottom_right". */
+  position: string | null;
+  rows: number;
+  columns: number;
+  cellCount: number;
+  /**
+   * Cell texts as grid[row][column]; "" for cells the indicator left empty.
+   * Omitted when the table currently has no cells (e.g. hidden by an input).
+   */
+  grid?: string[][];
+  tooltips?: IndicatorTableTooltip[];
+  error?: string;
+}
+
+export interface IndicatorTables {
+  id: string;
+  name: string;
+  tables: IndicatorTable[];
+  error?: string;
+}
+
 export interface HistoryLoadResult {
   requested: number;
   barsBefore: number;
@@ -611,6 +640,132 @@ export class TradingView {
             return row;
           });
 
+          return out;
+        });
+      })()
+    `);
+  }
+
+  /**
+   * Tables drawn by Pine indicators (e.g. multi-timeframe trend dashboards),
+   * reconstructed as text grids from the dwgtables/dwgtablecells primitives.
+   * This is the only way to read table-only summaries that have no plots.
+   */
+  getIndicatorTables(
+    options: { studyId?: string; chartIndex?: number } = {},
+  ): Promise<IndicatorTables[]> {
+    const { studyId, chartIndex } = options;
+    if (studyId !== undefined) assertStudyId(studyId);
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
+    return this.cdp.evaluate<IndicatorTables[]>(`
+      (() => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const studyIdFilter = ${studyId === undefined ? "null" : JSON.stringify(studyId)};
+        const MAX_TEXT = 200;
+        const MAX_GRID_CELLS = 2000;
+
+        const model = chart.chartModel();
+        const studies = chart
+          .getAllStudies()
+          .filter((st) => studyIdFilter === null || st.id === studyIdFilter);
+        if (studies.length === 0) {
+          throw new Error(
+            studyIdFilter === null
+              ? "no indicators on this chart"
+              : "study " + studyIdFilter + " not found; get ids from get_chart_context",
+          );
+        }
+
+        // The nesting depth differs per primitive kind: for dwgtables the
+        // outer map's values are map-likes of stores, for dwgtablecells the
+        // outer map's values ARE the stores. Accept both shapes.
+        const isStore = (o) => !!o && (o._primitiveById instanceof Map || !!o._primitivesDataById);
+        const storesOf = (outerMap) => {
+          const stores = [];
+          if (!(outerMap instanceof Map)) return stores;
+          for (const inner of outerMap.values()) {
+            if (isStore(inner)) { stores.push(inner); continue; }
+            if (!inner || typeof inner.values !== "function") continue;
+            for (const store of inner.values()) if (isStore(store)) stores.push(store);
+          }
+          return stores;
+        };
+        // Prefer materialized primitives, like get_indicator_graphics does.
+        const primsOf = (outerMap) => {
+          const materialized = [];
+          const raw = [];
+          for (const store of storesOf(outerMap)) {
+            if (store._primitiveById instanceof Map) {
+              for (const p of store._primitiveById.values()) materialized.push(p);
+            }
+            const byId = store._primitivesDataById;
+            if (byId) for (const key of Object.getOwnPropertyNames(byId)) raw.push(byId[key]);
+          }
+          return materialized.length > 0 ? materialized : raw;
+        };
+        const clip = (s) => {
+          s = String(s);
+          return s.length > MAX_TEXT ? s.slice(0, MAX_TEXT) + "…(truncated)" : s;
+        };
+
+        return studies.map((st) => {
+          const out = { id: st.id, name: st.name, tables: [] };
+          const src = model.dataSources().find((s) => typeof s.id === "function" && s.id() === st.id);
+          if (!src || typeof src.graphics !== "function") {
+            out.error = "study has no graphics";
+            return out;
+          }
+          const pc = src.graphics()._primitivesCollection || {};
+
+          const byTable = new Map();
+          const tableOf = (id) => {
+            if (!byTable.has(id)) byTable.set(id, { id, position: null, rows: 0, columns: 0, cells: [] });
+            return byTable.get(id);
+          };
+          for (const m of primsOf(pc.dwgtables)) {
+            if (m.id === undefined || m.id === null) continue;
+            const t = tableOf(m.id);
+            if (typeof m.position === "string") t.position = m.position;
+            if (Number.isInteger(m.rows)) t.rows = m.rows;
+            if (Number.isInteger(m.columns)) t.columns = m.columns;
+          }
+          for (const c of primsOf(pc.dwgtablecells)) {
+            const id = c.tableId;
+            if (id === undefined || id === null) continue;
+            const row = c.row;
+            const column = c.column;
+            if (!Number.isInteger(row) || row < 0 || !Number.isInteger(column) || column < 0) continue;
+            tableOf(id).cells.push({
+              row,
+              column,
+              text: clip(typeof c.text === "string" ? c.text : ""),
+              tooltip: typeof c.tooltip === "string" && c.tooltip !== "" ? clip(c.tooltip) : null,
+            });
+          }
+
+          out.tables = [...byTable.values()]
+            .map((t) => {
+              const rows = Math.max(t.rows, ...t.cells.map((c) => c.row + 1), 0);
+              const columns = Math.max(t.columns, ...t.cells.map((c) => c.column + 1), 0);
+              const base = { id: t.id, position: t.position, rows, columns, cellCount: t.cells.length };
+              if (t.cells.length === 0) return base; // declared but currently empty
+              if (rows * columns > MAX_GRID_CELLS) {
+                return { ...base, error: "table too large to reconstruct (" + rows + "x" + columns + ")" };
+              }
+              const grid = Array.from({ length: rows }, () => Array(columns).fill(""));
+              const tooltips = [];
+              for (const c of t.cells) {
+                grid[c.row][c.column] = c.text;
+                if (c.tooltip) tooltips.push({ row: c.row, column: c.column, tooltip: c.tooltip });
+              }
+              const table = { ...base, grid };
+              if (tooltips.length > 0) table.tooltips = tooltips;
+              return table;
+            })
+            .sort((a, b) => (String(a.id) > String(b.id) ? 1 : -1));
           return out;
         });
       })()

@@ -10,6 +10,7 @@
 - ✅ **#4 set_symbol 後のデータ有無検証** — 切替後にバー0本なら reject、結果に `bars` 数を含める(set_timeframe も同様)
 - ✅ **#5 キーレベル集約** — `get_key_levels`(現在価格±N%のプロット値・水平ライン・ボックス端・ラベルを出所付きで統合。`is_price_study` でオシレーターを除外し RSI 値等の誤検出を防止)
 - ✅ **#6 経済カレンダー** — `get_economic_events`(economic-calendar.tradingview.com、認証不要 GET。国・重要度・期間フィルタ、comment 等の冗長フィールドは除去)
+- ✅ **#9 インジケーター内テーブルの読み取り** — `get_indicator_tables`(dwgtables/dwgtablecells からセルテキストを `grid[row][column]` で復元。tablecells はストアのネストが他と異なる点に対応)
 
 ## 優先度: 高
 
@@ -66,7 +67,7 @@
 - **案**: `replayApi` の存在は確認済み(Phase 0)。リプレイ開始・ステップ実行・その時点でのスクリーンショット/OHLCV取得、という読み取り中心の設計から着手
 - **規模**: 大。探索から必要
 
-### #9 インジケーター内テーブルの読み取り(`dwgtables`)
+### #9 インジケーター内テーブルの読み取り(`dwgtables`)✅ 完了
 
 - **課題**: Smart Money の右上サマリーテーブル等が読めない(Phase 5 で意図的にスコープ外)
 - **案**: `dwgtablecells` からセルテキストを行列で復元

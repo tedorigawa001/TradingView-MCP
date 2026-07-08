@@ -103,6 +103,7 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 - ✅ **Phase 4 完了**(2026-07-07): `get_watchlist`(ページ内 fetch + セッション。デスクトップビルドでは `watchlist()` API が無効のため REST 経由)/ `get_quotes` / `scan_market`(scanner.tradingview.com、Node 側から直接)。`get_technical_rating` は独立ツールにせず `get_quotes` の `Recommend.All` カラムとして提供
 - ✅ **Phase 5 完了**(2026-07-08): 残課題3件を実装 — `get_indicator_graphics`(描画専用スタディのラベル・ライン・ボックス読み取り)/ `load_more_history`(`requestMoreData` 経由の過去バー追加)/ `list_alerts`(読み取り専用)。調査結果は [phase5-findings.md](phase5-findings.md)。**全13ツール**
 - ✅ **バックログ高優先度 #1〜#4 完了**(2026-07-08): ISO時刻+未確定バーフラグ / `get_mtf_overview`(マルチタイムフレーム)/ チャート単位スクリーンショット(`chart_index`)/ `set_symbol`・`set_timeframe` のデータ有無検証+失敗時自動ロールバック(全14ツール)
-- ✅ **バックログ中優先度 #5〜#6 完了**(2026-07-08): `get_key_levels`(価格帯±N%のキーレベルを全インジケーターから出所付きで集約。オシレーターは `is_price_study` で除外)/ `get_economic_events`(経済カレンダー。economic-calendar.tradingview.com、認証不要)。**全16ツール**
-- 未実装(意図的): アラート・ウォッチリストの作成/変更/削除(書き込み系は確認フロー設計が前提)、dwgtables(インジケーターの表)読み取り
+- ✅ **バックログ中優先度 #5〜#6 完了**(2026-07-08): `get_key_levels`(価格帯±N%のキーレベルを全インジケーターから出所付きで集約。オシレーターは `is_price_study` で除外、plot はレベル名を持つタイトルのみ)/ `get_economic_events`(経済カレンダー。economic-calendar.tradingview.com、認証不要)
+- ✅ **バックログ #9 完了**(2026-07-08): `get_indicator_tables`(dwgtables/dwgtablecells から Pine テーブルをセル行列で復元。Smart Money の MTF トレンド表等が読み取り可能に)。**全17ツール**
+- 未実装(意図的): アラート・ウォッチリストの作成/変更/削除(書き込み系は確認フロー設計が前提)
 - 📋 実分析(2026-07-08)で洗い出した改善課題は [BACKLOG.md](BACKLOG.md) に優先度付きで整理

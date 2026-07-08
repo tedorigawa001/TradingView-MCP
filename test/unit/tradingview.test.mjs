@@ -221,6 +221,40 @@ test("getIndicatorGraphics reads both raw and materialized primitive stores", as
   assert.ok(expr.includes("const limit = 10"));
 });
 
+test("getIndicatorTables validates inputs before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getIndicatorTables({ studyId: '"); hack(' }), /studyId must match/);
+  assert.throws(() => tv.getIndicatorTables({ studyId: "a b" }), /studyId must match/);
+  assert.throws(() => tv.getIndicatorTables({ chartIndex: -1 }), /chartIndex must be/);
+  assert.throws(() => tv.getIndicatorTables({ chartIndex: 1.5 }), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
+test("getIndicatorTables reads both table stores and reconstructs grids safely", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorTables({ studyId: "mlahPw", chartIndex: 1 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"mlahPw"'), "studyId quoted as JSON");
+  assert.ok(expr.includes("api.chart(1)"), "should target chart 1");
+  for (const kind of ["dwgtables", "dwgtablecells"]) {
+    assert.ok(expr.includes(kind), `must read ${kind}`);
+  }
+  // dwgtablecells stores are NOT nested like the other kinds — both shapes
+  // must be handled, and both raw and materialized stores read
+  assert.ok(expr.includes("isStore(inner)"), "outer values may be stores themselves");
+  assert.ok(expr.includes("_primitivesDataById"), "raw store");
+  assert.ok(expr.includes("_primitiveById"), "materialized store");
+  assert.ok(expr.includes("truncated"), "cell text must be truncated");
+  assert.ok(expr.includes("MAX_GRID_CELLS"), "grid size must be capped");
+  assert.ok(expr.includes("grid[c.row][c.column] = c.text"), "grid keyed by row/column");
+
+  await tv.getIndicatorTables();
+  assert.ok(cdp.calls[1].includes("const studyIdFilter = null"), "default is all studies");
+  assert.ok(cdp.calls[1].includes("api.activeChart()"), "default is active chart");
+});
+
 test("loadMoreHistory validates count and builds a requestMoreData call", async () => {
   const cdp = fakeCdp({ requested: 1, barsBefore: 0, barsAfter: 0, added: 0, earliestTime: null, moreAvailable: null });
   const tv = new TradingView(cdp);

@@ -15,6 +15,7 @@ export interface ServerDeps {
     | "getIndicatorValues"
     | "getIndicatorInputs"
     | "getIndicatorGraphics"
+    | "getIndicatorTables"
     | "loadMoreHistory"
     | "listAlerts"
     | "getWatchlists"
@@ -267,6 +268,39 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
             chartIndex: chart_index,
             limitPerKind: limit_per_kind ?? 50,
           }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_indicator_tables",
+    {
+      description:
+        "Read tables drawn by Pine indicators on a TradingView chart (e.g. a " +
+        "multi-timeframe trend dashboard in the corner) as text grids: grid[row][column] " +
+        "plus the table's on-chart position. This is the only way to read table-only " +
+        "summaries that have no plots or drawings.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .optional()
+          .describe("Indicator id from get_chart_context. Default: all indicators"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ study_id, chart_index }) => {
+      try {
+        return jsonResult(
+          await tv.getIndicatorTables({ studyId: study_id, chartIndex: chart_index }),
         );
       } catch (err) {
         return errorResult(err);

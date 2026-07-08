@@ -112,6 +112,27 @@ await check("get_indicator_graphics", async () => {
   return `${withGraphics.name}: ${JSON.stringify(withGraphics.totals)}${label ? `, e.g. "${label.text.replace(/\n/g, " ")}"@${label.price}` : ""}`;
 });
 
+await check("get_indicator_tables", async () => {
+  const studies = await tv.getIndicatorTables();
+  if (!Array.isArray(studies) || studies.length === 0) {
+    return "skipped-ish: no indicators on active chart";
+  }
+  const withCells = studies
+    .flatMap((s) => (s.tables || []).map((t) => ({ study: s.name, t })))
+    .find(({ t }) => t.cellCount > 0);
+  if (!withCells) return `${studies.length} studies, none with populated tables`;
+  const { study, t } = withCells;
+  if (!Array.isArray(t.grid) || t.grid.length !== t.rows) {
+    throw new Error(`grid has ${t.grid?.length} rows, table declares ${t.rows}`);
+  }
+  for (const row of t.grid) {
+    if (row.length !== t.columns) throw new Error(`row width ${row.length} != ${t.columns} columns`);
+  }
+  const texts = t.grid.flat().filter((s) => s !== "");
+  if (texts.length === 0) throw new Error("populated table reconstructed with no text");
+  return `${study}: ${t.rows}x${t.columns}@${t.position}, e.g. [${t.grid[0].slice(0, 4).join(" | ")}]`;
+});
+
 await check("list_alerts", async () => {
   const alerts = await tv.listAlerts();
   if (!Array.isArray(alerts)) throw new Error("expected an array");

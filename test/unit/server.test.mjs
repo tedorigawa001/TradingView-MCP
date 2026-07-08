@@ -74,6 +74,26 @@ function makeDeps(overrides = {}) {
           boxes: [],
         },
       ],
+      getIndicatorTables: async (options) => [
+        {
+          id: "st1",
+          name: "Test Study",
+          options,
+          tables: [
+            {
+              id: 1,
+              position: "bottom_right",
+              rows: 2,
+              columns: 2,
+              cellCount: 4,
+              grid: [
+                ["TREND", "5M"],
+                ["Predict", "UP"],
+              ],
+            },
+          ],
+        },
+      ],
       loadMoreHistory: async (options) => ({
         requested: options.count,
         barsBefore: 300,
@@ -178,7 +198,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the sixteen expected tools", async () => {
+test("exposes exactly the seventeen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -189,6 +209,7 @@ test("exposes exactly the sixteen expected tools", async () => {
       "get_economic_events",
       "get_indicator_graphics",
       "get_indicator_inputs",
+      "get_indicator_tables",
       "get_indicator_values",
       "get_key_levels",
       "get_mtf_overview",
@@ -270,6 +291,17 @@ test("get_indicator_graphics forwards options with defaults applied", async () =
   const [study] = JSON.parse(res.content[0].text);
   assert.deepEqual(study.options, { studyId: "st1", limitPerKind: 50 });
   assert.equal(study.labels[0].text, "(3)");
+});
+
+test("get_indicator_tables forwards options and returns grids", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_indicator_tables",
+    arguments: { study_id: "st1", chart_index: 1 },
+  });
+  const [study] = JSON.parse(res.content[0].text);
+  assert.deepEqual(study.options, { studyId: "st1", chartIndex: 1 });
+  assert.deepEqual(study.tables[0].grid[1], ["Predict", "UP"]);
 });
 
 test("load_more_history forwards count with default", async () => {
@@ -415,6 +447,7 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       setSymbol: async () => ((handlerRan = true), {}),
       setResolution: async () => ((handlerRan = true), {}),
       getKeyLevels: async () => ((handlerRan = true), {}),
+      getIndicatorTables: async () => ((handlerRan = true), []),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
     scanner: {
@@ -447,6 +480,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },
     { name: "load_more_history", arguments: { count: "many" } },
+    { name: "get_indicator_tables", arguments: { study_id: "has space" } },
+    { name: "get_indicator_tables", arguments: { chart_index: -1 } },
     { name: "get_key_levels", arguments: { range_percent: 0 } },
     { name: "get_key_levels", arguments: { range_percent: 51 } },
     { name: "get_key_levels", arguments: { limit: 0 } },
