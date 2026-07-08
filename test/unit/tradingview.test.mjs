@@ -196,6 +196,38 @@ test("getIndicatorInputs validates ids and always excludes Pine-internal inputs"
   assert.ok(expr.includes("truncated"), "long string values must be truncated");
 });
 
+test("setIndicatorInput validates before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.setIndicatorInput('"); hack(', [{ id: "in_0", value: 1 }]), /studyId must match/);
+  assert.throws(() => tv.setIndicatorInput("st1", []), /non-empty array/);
+  assert.throws(() => tv.setIndicatorInput("st1", Array(21).fill({ id: "in_0", value: 1 })), /at most 20/);
+  assert.throws(() => tv.setIndicatorInput("st1", [{ id: '"); hack(', value: 1 }]), /invalid input id/);
+  assert.throws(() => tv.setIndicatorInput("st1", [{ id: "pineId", value: "x" }]), /internal.*cannot be set/);
+  assert.throws(() => tv.setIndicatorInput("st1", [{ id: "text", value: "x" }]), /internal.*cannot be set/);
+  assert.throws(
+    () => tv.setIndicatorInput("st1", [{ id: "in_0", value: { nested: true } }]),
+    /must be a number, string or boolean/,
+  );
+  assert.throws(() => tv.setIndicatorInput("st1", [{ id: "in_0", value: 1 }], { chartIndex: -1 }), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
+test("setIndicatorInput writes via the generic study API and verifies the id exists first", async () => {
+  const cdp = fakeCdp({ studyId: "st1", applied: [{ id: "in_0", name: "Length", value: 14 }] });
+  const tv = new TradingView(cdp);
+  await tv.setIndicatorInput("st1", [{ id: "in_0", value: 14 }], { chartIndex: 1 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"st1"'), "studyId quoted as JSON");
+  assert.ok(expr.includes("api.chart(1)"), "should target chart 1");
+  assert.ok(expr.includes("studyApi.setInputValues(inputs)"), "must use the generic study setter");
+  assert.ok(expr.includes("has no input with id"), "unknown ids must be rejected on the page too");
+  assert.ok(!/save|delete|method:\s*["']POST/.test(expr), "must never write to pine-facade");
+
+  await tv.setIndicatorInput("st1", [{ id: "in_0", value: 14 }]);
+  assert.ok(cdp.calls[1].includes("api.activeChart()"), "default is active chart");
+});
+
 test("getIndicatorGraphics validates inputs before touching the page", () => {
   const cdp = fakeCdp();
   const tv = new TradingView(cdp);

@@ -237,6 +237,12 @@ export interface PineSource {
   source: string;
 }
 
+export interface SetIndicatorInputResult {
+  studyId: string;
+  /** Confirmed post-write value for each input, read back after settling. */
+  applied: Array<{ id: string; name: string; value: unknown }>;
+}
+
 export interface StrategyTradeSide {
   time: number | null;
   timeIso: string | null;
@@ -390,6 +396,11 @@ const FORMAT_REPORT_SNIPPET = `
 `;
 
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
+
+const INPUT_ID_PATTERN = /^[\w$]{1,64}$/;
+
+// Pine-internal inputs (script source/id) — never writable via setIndicatorInput.
+const HIDDEN_INPUT_IDS = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
 
 function assertStudyId(studyId: string): void {
   if (typeof studyId !== "string" || !STUDY_ID_PATTERN.test(studyId)) {
@@ -655,6 +666,98 @@ export class TradingView {
           }
           return out;
         });
+      })()
+    `);
+  }
+
+  /**
+   * Change input values of an indicator or strategy already on a chart —
+   * the write counterpart to getIndicatorInputs. Nothing is persisted (the
+   * saved script and its inputs are untouched); this only changes the live
+   * calculation of the study on the chart, exactly like opening its Settings
+   * dialog. Works for both plain indicators and strategies (a strategy's
+   * backtest report recalculates and can be read via get_strategy_report).
+   */
+  setIndicatorInput(
+    studyId: string,
+    inputs: Array<{ id: string; value: unknown }>,
+    options: { chartIndex?: number } = {},
+  ): Promise<SetIndicatorInputResult> {
+    assertStudyId(studyId);
+    assertChartIndex(options.chartIndex);
+    if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > 20) {
+      throw new Error("inputs must be a non-empty array of at most 20 {id, value} entries");
+    }
+    for (const inp of inputs) {
+      if (!inp || typeof inp.id !== "string" || !INPUT_ID_PATTERN.test(inp.id)) {
+        throw new Error(`invalid input id: ${JSON.stringify(inp && inp.id)}`);
+      }
+      if (HIDDEN_INPUT_IDS.has(inp.id)) {
+        throw new Error(`input "${inp.id}" is internal (Pine source/id) and cannot be set`);
+      }
+      const t = typeof inp.value;
+      if (t !== "number" && t !== "string" && t !== "boolean") {
+        throw new Error(`input "${inp.id}" value must be a number, string or boolean`);
+      }
+    }
+    const chartExpr =
+      options.chartIndex === undefined ? "api.activeChart()" : `api.chart(${options.chartIndex})`;
+    return this.cdp.evaluate<SetIndicatorInputResult>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const studyId = ${JSON.stringify(studyId)};
+        const inputs = ${JSON.stringify(inputs)};
+        let studyApi;
+        try {
+          studyApi = chart.getStudyById(studyId);
+        } catch (e) {
+          throw new Error("study " + studyId + " not found; get ids from get_chart_context");
+        }
+        const before = studyApi.getInputValues();
+        for (const inp of inputs) {
+          if (!before.some((v) => v.id === inp.id)) {
+            throw new Error("study " + studyId + " has no input with id " + inp.id + " — check get_indicator_inputs");
+          }
+        }
+
+        // Strategies recalculate their backtest report asynchronously; watch
+        // for the report object to be replaced (same pattern as run_backtest)
+        // AND for the study's own data to settle, so this also works for
+        // plain (non-strategy) indicators that have no report at all.
+        const bt = await api.backtestingStrategyApi();
+        const staleReport = bt.activeStrategyReportData.value();
+
+        studyApi.setInputValues(inputs);
+
+        const t0 = Date.now();
+        let lastReport = staleReport;
+        let lastLoading = studyApi.isLoading();
+        let lastChangeAt = Date.now();
+        let sawChange = false;
+        while (Date.now() - t0 < 20000) {
+          const curReport = bt.activeStrategyReportData.value();
+          const curLoading = studyApi.isLoading();
+          if (curReport !== lastReport || curLoading !== lastLoading) {
+            lastReport = curReport;
+            lastLoading = curLoading;
+            lastChangeAt = Date.now();
+            sawChange = true;
+          }
+          if (sawChange && Date.now() - lastChangeAt > 1000) break;
+          if (!sawChange && Date.now() - t0 > 3000) break; // plain indicators may show no signal at all
+          await new Promise((r) => setTimeout(r, 250));
+        }
+
+        const after = studyApi.getInputValues();
+        const infoById = {};
+        try { for (const i of studyApi.getInputsInfo()) infoById[i.id] = i; } catch (e) {}
+        const applied = inputs.map((inp) => {
+          const found = after.find((v) => v.id === inp.id);
+          const meta = infoById[inp.id] || {};
+          return { id: inp.id, name: meta.localizedName || meta.name || inp.id, value: found ? found.value : null };
+        });
+        return { studyId, applied };
       })()
     `);
   }

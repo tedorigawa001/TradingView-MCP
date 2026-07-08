@@ -63,6 +63,11 @@ function makeDeps(overrides = {}) {
           ],
         },
       ],
+      setIndicatorInput: async (studyId, inputs, options) => ({
+        studyId,
+        applied: inputs.map((i) => ({ id: i.id, name: "Length", value: i.value })),
+        options,
+      }),
       getIndicatorGraphics: async (options) => [
         {
           id: "st1",
@@ -283,7 +288,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the twenty-three expected tools", async () => {
+test("exposes exactly the twenty-four expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -310,6 +315,7 @@ test("exposes exactly the twenty-three expected tools", async () => {
       "run_backtest",
       "save_pine_script",
       "scan_market",
+      "set_indicator_input",
       "set_symbol",
       "set_timeframe",
     ],
@@ -553,6 +559,18 @@ test("get_indicator_inputs returns named parameters", async () => {
   assert.equal(study.inputs[0].value, 5);
 });
 
+test("set_indicator_input forwards study_id, inputs and chart_index", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "set_indicator_input",
+    arguments: { study_id: "st1", inputs: [{ id: "in_0", value: 20 }], chart_index: 1 },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.studyId, "st1");
+  assert.equal(parsed.applied[0].value, 20);
+  assert.equal(parsed.options.chartIndex, 1);
+});
+
 test("get_chart_screenshot returns image content, defaulting to jpeg", async () => {
   let captured;
   const client = await connectedClient(
@@ -610,6 +628,7 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getOhlcv: async () => ((handlerRan = true), {}),
       getIndicatorValues: async () => ((handlerRan = true), []),
       getIndicatorInputs: async () => ((handlerRan = true), []),
+      setIndicatorInput: async () => ((handlerRan = true), {}),
       getIndicatorGraphics: async () => ((handlerRan = true), []),
       loadMoreHistory: async () => ((handlerRan = true), {}),
       listAlerts: async () => ((handlerRan = true), []),
@@ -645,6 +664,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
     { name: "get_indicator_values", arguments: { count: 501 } },
     { name: "get_indicator_inputs", arguments: { study_id: "has space" } },
+    { name: "set_indicator_input", arguments: {} },
+    { name: "set_indicator_input", arguments: { study_id: "has space", inputs: [{ id: "in_0", value: 1 }] } },
+    { name: "set_indicator_input", arguments: { study_id: "st1", inputs: [] } },
+    { name: "set_indicator_input", arguments: { study_id: "st1", inputs: [{ id: "has space", value: 1 }] } },
+    { name: "set_indicator_input", arguments: { study_id: "st1", inputs: [{ id: "in_0", value: { nested: true } }] } },
     { name: "get_quotes", arguments: { symbols: [] } },
     { name: "get_quotes", arguments: { symbols: ["bad ticker!"] } },
     { name: "scan_market", arguments: { market: "JAPAN/../x" } },

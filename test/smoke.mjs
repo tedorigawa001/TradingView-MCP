@@ -96,6 +96,34 @@ await check("get_indicator_inputs", async () => {
   return `${studies.length} studies, e.g. ${named ? `${named.name}=${named.value}` : "(no named inputs)"}`;
 });
 
+await check("set_indicator_input", async () => {
+  const studies = await tv.getIndicatorInputs();
+  if (!Array.isArray(studies) || studies.length === 0) {
+    return "skipped-ish: no indicators on active chart";
+  }
+  const withNumeric = studies
+    .map((s) => ({ study: s, input: s.inputs.find((i) => typeof i.value === "number") }))
+    .find((x) => x.input);
+  if (!withNumeric) return `${studies.length} studies, none with a numeric input`;
+  const { study, input } = withNumeric;
+  const bumped = input.value + 1;
+
+  const set1 = await tv.setIndicatorInput(study.id, [{ id: input.id, value: bumped }]);
+  if (set1.applied[0].value !== bumped) {
+    throw new Error(`expected ${bumped}, got ${JSON.stringify(set1.applied[0])}`);
+  }
+  const readBack = await tv.getIndicatorInputs({ studyId: study.id });
+  const nowValue = readBack[0].inputs.find((i) => i.id === input.id)?.value;
+  if (nowValue !== bumped) throw new Error(`get_indicator_inputs did not reflect the change: ${nowValue}`);
+
+  // restore the original value — this tool must not leave a lasting change
+  const restore = await tv.setIndicatorInput(study.id, [{ id: input.id, value: input.value }]);
+  if (restore.applied[0].value !== input.value) {
+    throw new Error(`failed to restore original value ${input.value}`);
+  }
+  return `${study.name}.${input.name}: ${input.value} -> ${bumped} -> restored`;
+});
+
 await check("get_indicator_graphics", async () => {
   const studies = await tv.getIndicatorGraphics({ limitPerKind: 5 });
   if (!Array.isArray(studies) || studies.length === 0) {

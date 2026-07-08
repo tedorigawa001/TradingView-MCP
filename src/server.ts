@@ -14,6 +14,7 @@ export interface ServerDeps {
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
+    | "setIndicatorInput"
     | "getIndicatorGraphics"
     | "getIndicatorTables"
     | "loadMoreHistory"
@@ -229,6 +230,51 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
       try {
         return jsonResult(
           await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart_index }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_indicator_input",
+    {
+      description:
+        "Change input values of an indicator or strategy already on a chart — the write " +
+        "counterpart to get_indicator_inputs. Nothing is persisted (the saved script is " +
+        "untouched); this only changes the live calculation on the chart, exactly like " +
+        "opening the study's Settings dialog. Works for both plain indicators and " +
+        "strategies (for a strategy, follow up with get_strategy_report to read the " +
+        "recalculated backtest). Use this to A/B-test parameters without re-saving the " +
+        "script each time.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .describe("Indicator/strategy id from get_chart_context or add_pine_to_chart/run_backtest(keep_on_chart:true)"),
+        inputs: z
+          .array(
+            z.object({
+              id: z.string().regex(/^[\w$]{1,64}$/).describe("Input id from get_indicator_inputs"),
+              value: z.union([z.number(), z.string(), z.boolean()]),
+            }),
+          )
+          .min(1)
+          .max(20)
+          .describe("Inputs to change, e.g. [{id:'in_0', value:14}]. Get ids/current values from get_indicator_inputs"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ study_id, inputs, chart_index }) => {
+      try {
+        return jsonResult(
+          await tv.setIndicatorInput(study_id, inputs, { chartIndex: chart_index }),
         );
       } catch (err) {
         return errorResult(err);
