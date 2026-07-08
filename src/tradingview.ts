@@ -49,6 +49,8 @@ export interface IndicatorValues {
   name: string;
   visible?: boolean;
   hasError?: boolean;
+  /** false for oscillator panes (RSI etc.) whose values are not prices. */
+  isPriceStudy?: boolean;
   plots: IndicatorPlot[];
   bars: Array<{
     time: number;
@@ -103,6 +105,8 @@ export interface GraphicBox {
 export interface IndicatorGraphics {
   id: string;
   name: string;
+  /** false for oscillator panes whose y coordinates are not prices. */
+  isPriceStudy?: boolean;
   totals: { labels: number; lines: number; boxes: number };
   labels: GraphicLabel[];
   lines: GraphicLine[];
@@ -145,6 +149,28 @@ export interface Watchlist {
   type: string | null;
   symbolCount: number;
   sections: WatchlistSection[];
+}
+
+export interface KeyLevel {
+  price: number;
+  /** Signed distance from the current price in percent (positive = above). */
+  distancePercent: number;
+  kind: "plot" | "line" | "box" | "label";
+  study: string;
+  /** Plot title, label text, or box/line description — where the level comes from. */
+  detail: string;
+  time: number | null;
+}
+
+export interface KeyLevelsResult {
+  symbol: string;
+  resolution: string;
+  /** Current price (last close, possibly of a forming bar). */
+  price: number;
+  rangePercent: number;
+  count: number;
+  /** Sorted by absolute distance from the current price. */
+  levels: KeyLevel[];
 }
 
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
@@ -311,6 +337,7 @@ export class TradingView {
           } catch (e) {}
 
           const mi = src.metaInfo();
+          if (typeof mi.is_price_study === "boolean") out.isPriceStudy = mi.is_price_study;
           const styles = mi.styles || {};
           const keep = [];
           const usedTitles = new Set();
@@ -507,6 +534,10 @@ export class TradingView {
             out.error = "study has no graphics";
             return out;
           }
+          try {
+            const mi = src.metaInfo();
+            if (typeof mi.is_price_study === "boolean") out.isPriceStudy = mi.is_price_study;
+          } catch (e) {}
           const g = src.graphics();
           const pc = g._primitivesCollection || {};
           const indexes = g._indexes;
@@ -918,5 +949,117 @@ export class TradingView {
         }
       })
     `);
+  }
+
+  /**
+   * Key price levels near the current price, aggregated from indicator plot
+   * values, horizontal lines, box edges and labels across all price-scale
+   * studies on a chart. Oscillator panes (isPriceStudy=false) are excluded so
+   * e.g. an RSI of 50 is never mistaken for a price level.
+   */
+  async getKeyLevels(
+    options: { chartIndex?: number; rangePercent?: number; limit?: number } = {},
+  ): Promise<KeyLevelsResult> {
+    const { chartIndex, rangePercent = 3, limit = 30 } = options;
+    assertChartIndex(chartIndex);
+    if (!Number.isFinite(rangePercent) || rangePercent <= 0 || rangePercent > 50) {
+      throw new Error(`rangePercent must be a number in (0, 50], got ${rangePercent}`);
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new Error(`limit must be an integer between 1 and 200, got ${limit}`);
+    }
+
+    const ohlcv = await this.getOhlcv(1, chartIndex);
+    if (ohlcv.bars.length === 0) throw new Error("no bar data loaded");
+    const price = ohlcv.bars[ohlcv.bars.length - 1].close;
+    if (typeof price !== "number" || !Number.isFinite(price) || price === 0) {
+      throw new Error(`cannot determine the current price (last close: ${price})`);
+    }
+
+    // A chart without indicators has no levels — not an error here.
+    const noIndicatorsAsEmpty = (err: unknown): never[] => {
+      if (err instanceof Error && /no indicators on this chart/.test(err.message)) return [];
+      throw err;
+    };
+    const [values, graphics] = await Promise.all([
+      this.getIndicatorValues({ count: 1, chartIndex }).catch(noIndicatorsAsEmpty),
+      this.getIndicatorGraphics({ chartIndex, limitPerKind: 100 }).catch(noIndicatorsAsEmpty),
+    ]);
+
+    const lo = price * (1 - rangePercent / 100);
+    const hi = price * (1 + rangePercent / 100);
+    const inBand = (v: unknown): v is number =>
+      typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+    const pct = (v: number) => Math.round(((v - price) / price) * 10000) / 100;
+
+    const levels: KeyLevel[] = [];
+    const seen = new Set<string>();
+    const push = (l: KeyLevel) => {
+      const key = `${l.kind}|${l.study}|${l.detail}|${l.price}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        levels.push(l);
+      }
+    };
+
+    for (const st of values) {
+      if (st.isPriceStudy === false) continue;
+      const bar = st.bars[st.bars.length - 1];
+      if (!bar) continue;
+      for (const [title, v] of Object.entries(bar.values)) {
+        if (!inBand(v)) continue;
+        push({ price: v, distancePercent: pct(v), kind: "plot", study: st.name, detail: title, time: bar.time });
+      }
+    }
+
+    for (const st of graphics) {
+      if (st.isPriceStudy === false) continue;
+      for (const ln of st.lines) {
+        // horizontal S/R rays only — a sloped trend line has no single price
+        if (ln.price1 === null || ln.price2 === null) continue;
+        if (Math.abs(ln.price1 - ln.price2) > Math.abs(price) * 1e-6) continue;
+        if (!inBand(ln.price2)) continue;
+        push({
+          price: ln.price2,
+          distancePercent: pct(ln.price2),
+          kind: "line",
+          study: st.name,
+          detail: "horizontal line" + (ln.extend ? ` (extend: ${ln.extend})` : ""),
+          time: ln.time2,
+        });
+      }
+      for (const bx of st.boxes) {
+        const edges: Array<[string, number | null]> = [
+          ["box top", bx.priceHigh],
+          ["box bottom", bx.priceLow],
+        ];
+        for (const [edge, v] of edges) {
+          if (!inBand(v)) continue;
+          push({
+            price: v,
+            distancePercent: pct(v),
+            kind: "box",
+            study: st.name,
+            detail: bx.text ? `${edge}: ${bx.text}` : edge,
+            time: bx.time2,
+          });
+        }
+      }
+      for (const lb of st.labels) {
+        if (!inBand(lb.price)) continue;
+        push({ price: lb.price, distancePercent: pct(lb.price), kind: "label", study: st.name, detail: lb.text, time: lb.time });
+      }
+    }
+
+    levels.sort((a, b) => Math.abs(a.distancePercent) - Math.abs(b.distancePercent));
+    const kept = levels.slice(0, limit);
+    return {
+      symbol: ohlcv.symbol,
+      resolution: ohlcv.resolution,
+      price,
+      rangePercent,
+      count: kept.length,
+      levels: kept,
+    };
   }
 }

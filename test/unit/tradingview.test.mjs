@@ -276,3 +276,142 @@ test("getChartContext returns the page value as-is", async () => {
   const tv = new TradingView(fakeCdp(ctx));
   assert.deepEqual(await tv.getChartContext(), ctx);
 });
+
+test("indicator values and graphics expose the is_price_study flag", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorValues();
+  await tv.getIndicatorGraphics();
+  for (const expr of cdp.calls) {
+    assert.ok(expr.includes("is_price_study"), "metaInfo flag must be read");
+  }
+});
+
+/** Fake CdpClient that returns one queued result (or Error) per evaluate call. */
+function fakeCdpSeq(results) {
+  const calls = [];
+  let i = 0;
+  return {
+    calls,
+    evaluate(expression) {
+      calls.push(expression);
+      const r = results[i++];
+      return r instanceof Error ? Promise.reject(r) : Promise.resolve(r);
+    },
+  };
+}
+
+// getKeyLevels evaluates in a fixed order: OHLCV, then values, then graphics.
+const keyLevelsOhlcv = {
+  symbol: "OANDA:EURUSD",
+  resolution: "1D",
+  count: 1,
+  bars: [{ time: 1000, timeIso: "x", open: 100, high: 100, low: 100, close: 100, volume: 1 }],
+};
+const keyLevelsValues = [
+  // oscillator pane: its "prices" must never become levels
+  { id: "a", name: "RSI", isPriceStudy: false, plots: [], bars: [{ time: 1000, values: { Signal: 100.5 } }] },
+  {
+    id: "b",
+    name: "SR",
+    isPriceStudy: true,
+    plots: [],
+    bars: [{ time: 1000, values: { R1: 102, S1: 98, Far: 200, Txt: "x", Nul: null } }],
+  },
+  // no flag at all: keep (only an explicit false excludes)
+  { id: "c", name: "NoFlag", plots: [], bars: [{ time: 1000, values: { P: 99 } }] },
+];
+const keyLevelsGraphics = [
+  {
+    id: "d",
+    name: "SMC",
+    isPriceStudy: true,
+    totals: { labels: 1, lines: 3, boxes: 1 },
+    labels: [{ time: 1500, price: 99.5, text: "OB", size: null }],
+    lines: [
+      { time1: 1, price1: 101, time2: 2000, price2: 101, extend: "right", width: 1 },
+      { time1: 1, price1: 101, time2: 2000, price2: 101, extend: "right", width: 1 }, // duplicate
+      { time1: 1, price1: 90, time2: 2000, price2: 101.5, extend: null, width: 1 }, // sloped
+    ],
+    boxes: [{ time1: 1, time2: 2000, priceHigh: 102.5, priceLow: 97.5, text: "FVG" }],
+  },
+  {
+    id: "e",
+    name: "OscDraw",
+    isPriceStudy: false,
+    totals: { labels: 1, lines: 0, boxes: 0 },
+    labels: [{ time: 1, price: 100.2, text: "osc", size: null }],
+    lines: [],
+    boxes: [],
+  },
+];
+
+test("getKeyLevels validates inputs before touching the page", async () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  for (const bad of [0, -1, 51, NaN]) {
+    await assert.rejects(() => tv.getKeyLevels({ rangePercent: bad }), /rangePercent must be/, String(bad));
+  }
+  for (const bad of [0, 201, 1.5]) {
+    await assert.rejects(() => tv.getKeyLevels({ limit: bad }), /limit must be/, String(bad));
+  }
+  await assert.rejects(() => tv.getKeyLevels({ chartIndex: -1 }), /chartIndex must be/);
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
+test("getKeyLevels aggregates plots, horizontal lines, box edges and labels near price", async () => {
+  const cdp = fakeCdpSeq([keyLevelsOhlcv, keyLevelsValues, keyLevelsGraphics]);
+  const tv = new TradingView(cdp);
+  const r = await tv.getKeyLevels();
+
+  assert.equal(r.symbol, "OANDA:EURUSD");
+  assert.equal(r.price, 100);
+  assert.equal(r.rangePercent, 3);
+  // sorted by absolute distance; duplicates collapsed; oscillators, the
+  // out-of-band plot (200), non-numeric values and sloped lines excluded
+  assert.deepEqual(
+    r.levels.map((l) => [l.price, l.kind, l.study, l.detail]),
+    [
+      [99.5, "label", "SMC", "OB"],
+      [99, "plot", "NoFlag", "P"],
+      [101, "line", "SMC", "horizontal line (extend: right)"],
+      [102, "plot", "SR", "R1"],
+      [98, "plot", "SR", "S1"],
+      [102.5, "box", "SMC", "box top: FVG"],
+      [97.5, "box", "SMC", "box bottom: FVG"],
+    ],
+  );
+  assert.equal(r.count, 7);
+  assert.equal(r.levels[0].distancePercent, -0.5);
+  assert.equal(r.levels[3].distancePercent, 2);
+  assert.ok(!JSON.stringify(r).includes("100.5"), "oscillator values must not leak");
+});
+
+test("getKeyLevels honors rangePercent and limit", async () => {
+  const narrow = new TradingView(fakeCdpSeq([keyLevelsOhlcv, keyLevelsValues, keyLevelsGraphics]));
+  const r1 = await narrow.getKeyLevels({ rangePercent: 1 });
+  assert.deepEqual(r1.levels.map((l) => l.price), [99.5, 99, 101]);
+
+  const limited = new TradingView(fakeCdpSeq([keyLevelsOhlcv, keyLevelsValues, keyLevelsGraphics]));
+  const r2 = await limited.getKeyLevels({ limit: 2 });
+  assert.deepEqual(r2.levels.map((l) => l.price), [99.5, 99]);
+  assert.equal(r2.count, 2);
+});
+
+test("getKeyLevels treats a chart without indicators as zero levels", async () => {
+  const noStudies = new Error("no indicators on this chart");
+  const tv = new TradingView(fakeCdpSeq([keyLevelsOhlcv, noStudies, noStudies]));
+  const r = await tv.getKeyLevels();
+  assert.equal(r.count, 0);
+  assert.deepEqual(r.levels, []);
+});
+
+test("getKeyLevels propagates real failures instead of hiding them", async () => {
+  const tv = new TradingView(
+    fakeCdpSeq([keyLevelsOhlcv, keyLevelsValues, new Error("TradingView desktop app is not reachable")]),
+  );
+  await assert.rejects(() => tv.getKeyLevels(), /not reachable/);
+
+  const noBars = new TradingView(fakeCdpSeq([{ ...keyLevelsOhlcv, bars: [] }]));
+  await assert.rejects(() => noBars.getKeyLevels(), /no bar data loaded/);
+});

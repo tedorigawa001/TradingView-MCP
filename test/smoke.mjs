@@ -4,10 +4,12 @@
 import { CdpClient } from "../build/cdp.js";
 import { TradingView } from "../build/tradingview.js";
 import { Scanner } from "../build/scanner.js";
+import { EconomicCalendar } from "../build/calendar.js";
 
 const cdp = new CdpClient();
 const tv = new TradingView(cdp);
 const scanner = new Scanner();
+const calendar = new EconomicCalendar();
 
 let failures = 0;
 async function check(name, fn) {
@@ -164,6 +166,36 @@ await check("scan_market (scanner)", async () => {
   });
   if (r.rows.length === 0) throw new Error("no screener results");
   return `${r.totalCount} matches, top: ${r.rows[0].symbol}`;
+});
+
+await check("get_key_levels", async () => {
+  const r = await tv.getKeyLevels({ rangePercent: 10, limit: 50 });
+  if (typeof r.price !== "number" || r.price <= 0) throw new Error(`bad current price: ${r.price}`);
+  const lo = r.price * 0.9;
+  const hi = r.price * 1.1;
+  let prevDist = 0;
+  for (const l of r.levels) {
+    if (l.price < lo || l.price > hi) throw new Error(`level ${l.price} outside ±10% of ${r.price}`);
+    if (!l.study || !l.detail) throw new Error(`level without source: ${JSON.stringify(l)}`);
+    const dist = Math.abs(l.distancePercent);
+    if (dist + 1e-9 < prevDist) throw new Error("levels not sorted by distance");
+    prevDist = dist;
+  }
+  const kinds = [...new Set(r.levels.map((l) => l.kind))].join(",");
+  return `${r.count} levels near ${r.price}${r.count ? ` (kinds: ${kinds}, nearest: ${r.levels[0].price} from ${r.levels[0].study})` : ""}`;
+});
+
+await check("get_economic_events (calendar)", async () => {
+  const r = await calendar.getEvents({ countries: ["US", "JP", "EU"], minImportance: "low", limit: 10 });
+  if (!Array.isArray(r.events)) throw new Error("expected an events array");
+  let prev = 0;
+  for (const e of r.events) {
+    if (!e.title || !e.date || !e.importance) throw new Error(`incomplete event: ${JSON.stringify(e)}`);
+    const t = Date.parse(e.date);
+    if (Number.isNaN(t) || t < prev) throw new Error("events not sorted by date");
+    prev = t;
+  }
+  return `${r.returned}/${r.totalInRange} events${r.events[0] ? `, next: ${r.events[0].date.slice(0, 16)} ${r.events[0].country} ${r.events[0].title}` : ""}`;
 });
 
 await check("get_chart_screenshot", async () => {

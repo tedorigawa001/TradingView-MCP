@@ -114,9 +114,55 @@ function makeDeps(overrides = {}) {
           sections: [{ name: "Crypto", symbols: ["BITSTAMP:BTCUSD", "OANDA:EURUSD"] }],
         },
       ],
+      getKeyLevels: async (options) => ({
+        symbol: "EURUSD",
+        resolution: "1D",
+        price: 1.1,
+        rangePercent: options.rangePercent,
+        count: 1,
+        options,
+        levels: [
+          {
+            price: 1.105,
+            distancePercent: 0.45,
+            kind: "line",
+            study: "SMC",
+            detail: "horizontal line",
+            time: 1,
+          },
+        ],
+      }),
       setSymbol: async (symbol) => ({ symbol, resolution: "1D" }),
       setResolution: async (resolution) => ({ symbol: "EURUSD", resolution }),
       ...overrides.tv,
+    },
+    calendar: {
+      getEvents: async (options) => ({
+        from: "2026-07-08T00:00:00.000Z",
+        to: "2026-07-15T00:00:00.000Z",
+        countries: options.countries ?? ["US", "EU", "JP", "GB"],
+        minImportance: options.minImportance ?? "medium",
+        totalInRange: 1,
+        returned: 1,
+        options,
+        events: [
+          {
+            id: "1",
+            date: "2026-07-08T18:00:00.000Z",
+            country: "US",
+            currency: "USD",
+            title: "FOMC Minutes",
+            indicator: null,
+            importance: "high",
+            period: null,
+            actual: null,
+            forecast: null,
+            previous: null,
+            unit: null,
+          },
+        ],
+      }),
+      ...overrides.calendar,
     },
   };
 }
@@ -132,7 +178,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the fourteen expected tools", async () => {
+test("exposes exactly the sixteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -140,9 +186,11 @@ test("exposes exactly the fourteen expected tools", async () => {
     [
       "get_chart_context",
       "get_chart_screenshot",
+      "get_economic_events",
       "get_indicator_graphics",
       "get_indicator_inputs",
       "get_indicator_values",
+      "get_key_levels",
       "get_mtf_overview",
       "get_ohlcv",
       "get_quotes",
@@ -166,6 +214,50 @@ test("get_mtf_overview forwards symbol, timeframes and fields", async () => {
   assert.equal(parsed.symbol, "OANDA:EURUSD");
   assert.deepEqual(Object.keys(parsed.timeframes), ["60", "1D"]);
   assert.deepEqual(parsed.timeframes["60"].fields, ["RSI"]);
+});
+
+test("get_key_levels forwards options with defaults applied", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_key_levels", arguments: {} });
+  const parsed = JSON.parse(res.content[0].text);
+  // undefined chartIndex is dropped by the JSON round-trip
+  assert.deepEqual(parsed.options, { rangePercent: 3, limit: 30 });
+  assert.equal(parsed.levels[0].study, "SMC");
+
+  const res2 = await client.callTool({
+    name: "get_key_levels",
+    arguments: { range_percent: 1.5, limit: 10, chart_index: 1 },
+  });
+  assert.deepEqual(JSON.parse(res2.content[0].text).options, {
+    rangePercent: 1.5,
+    limit: 10,
+    chartIndex: 1,
+  });
+});
+
+test("get_economic_events forwards filters under calendar names", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_economic_events", arguments: {} });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.events[0].title, "FOMC Minutes");
+
+  const res2 = await client.callTool({
+    name: "get_economic_events",
+    arguments: {
+      countries: ["US", "JP"],
+      from: "2026-07-08T00:00:00Z",
+      to: "2026-07-10T00:00:00Z",
+      min_importance: "high",
+      limit: 5,
+    },
+  });
+  assert.deepEqual(JSON.parse(res2.content[0].text).options, {
+    countries: ["US", "JP"],
+    from: "2026-07-08T00:00:00Z",
+    to: "2026-07-10T00:00:00Z",
+    minImportance: "high",
+    limit: 5,
+  });
 });
 
 test("get_indicator_graphics forwards options with defaults applied", async () => {
@@ -321,11 +413,15 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       getWatchlists: async () => ((handlerRan = true), []),
       setSymbol: async () => ((handlerRan = true), {}),
       setResolution: async () => ((handlerRan = true), {}),
+      getKeyLevels: async () => ((handlerRan = true), {}),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
     scanner: {
       getQuotes: async () => ((handlerRan = true), {}),
       scanMarket: async () => ((handlerRan = true), {}),
+    },
+    calendar: {
+      getEvents: async () => ((handlerRan = true), {}),
     },
   });
   const client = await connectedClient(spyingDeps);
@@ -350,6 +446,13 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },
     { name: "load_more_history", arguments: { count: "many" } },
+    { name: "get_key_levels", arguments: { range_percent: 0 } },
+    { name: "get_key_levels", arguments: { range_percent: 51 } },
+    { name: "get_key_levels", arguments: { limit: 0 } },
+    { name: "get_economic_events", arguments: { countries: ["USA"] } },
+    { name: "get_economic_events", arguments: { countries: [] } },
+    { name: "get_economic_events", arguments: { min_importance: "extreme" } },
+    { name: "get_economic_events", arguments: { limit: 201 } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

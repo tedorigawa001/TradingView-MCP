@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { CdpClient } from "./cdp.js";
 import type { TradingView } from "./tradingview.js";
 import { MTF_TIMEFRAMES, SCAN_OPERATIONS, type Scanner } from "./scanner.js";
+import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -18,10 +19,12 @@ export interface ServerDeps {
     | "listAlerts"
     | "getWatchlists"
     | "getChartRect"
+    | "getKeyLevels"
     | "setSymbol"
     | "setResolution"
   >;
   scanner: Pick<Scanner, "getQuotes" | "scanMarket" | "getMtfOverview">;
+  calendar: Pick<EconomicCalendar, "getEvents">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -46,7 +49,7 @@ function errorResult(err: unknown): ToolResult {
   };
 }
 
-export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpServer {
   const server = new McpServer({
     name: "tradingview-mcp",
     version: "0.1.0",
@@ -459,6 +462,109 @@ export function createServer({ cdp, tv, scanner }: ServerDeps): McpServer {
             columns,
             sortBy: sort_by,
             sortOrder: sort_order,
+            limit,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_key_levels",
+    {
+      description:
+        "Aggregate key price levels near the current price from ALL price-scale " +
+        "indicators on a TradingView chart: last plot values (S/R, bands), horizontal " +
+        "lines, box/zone edges and label prices, each tagged with its source indicator. " +
+        "Oscillator panes (RSI etc.) are excluded. Sorted by distance from the current " +
+        "price. Use this instead of manually combining get_indicator_values and " +
+        "get_indicator_graphics when you need a support/resistance table.",
+      inputSchema: {
+        range_percent: z
+          .number()
+          .gt(0)
+          .max(50)
+          .optional()
+          .describe("Only levels within ±this % of the current price. Default: 3"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max levels to return, nearest first. Default: 30"),
+        chart_index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Chart index in a multi-chart layout. Default: the active chart"),
+      },
+    },
+    async ({ range_percent, limit, chart_index }) => {
+      try {
+        return jsonResult(
+          await tv.getKeyLevels({
+            rangePercent: range_percent ?? 3,
+            limit: limit ?? 30,
+            chartIndex: chart_index,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_economic_events",
+    {
+      description:
+        "Get economic calendar events (CPI, NFP, central bank decisions, PMIs...) from " +
+        "TradingView's public calendar: scheduled time, country/currency, importance, " +
+        "forecast/previous/actual values. Use this to check whether upcoming news could " +
+        "invalidate a technical setup. Defaults: next 7 days, medium+ importance, " +
+        "US/EU/JP/GB.",
+      inputSchema: {
+        countries: z
+          .array(z.string().regex(/^[A-Za-z]{2}$/))
+          .min(1)
+          .max(30)
+          .optional()
+          .describe("2-letter country codes, e.g. ['US','JP','EU','GB','DE','CN','AU']. Default: US, EU, JP, GB"),
+        from: z
+          .string()
+          .max(40)
+          .optional()
+          .describe("Range start, ISO 8601 (e.g. '2026-07-08T00:00:00Z'). Default: now"),
+        to: z
+          .string()
+          .max(40)
+          .optional()
+          .describe("Range end, ISO 8601. Default: from + 7 days"),
+        min_importance: z
+          .enum(IMPORTANCE_LEVELS)
+          .optional()
+          .describe("Minimum importance to include. Default: medium"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max events to return, earliest first. Default: 50"),
+      },
+    },
+    async ({ countries, from, to, min_importance, limit }) => {
+      try {
+        return jsonResult(
+          await calendar.getEvents({
+            countries,
+            from,
+            to,
+            minImportance: min_importance,
             limit,
           }),
         );
