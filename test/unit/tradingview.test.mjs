@@ -280,6 +280,41 @@ test("listAlerts fetches the alerts API read-only with the app session", async (
   assert.ok(!/create_alert|modify|delete/.test(expr), "must stay read-only");
 });
 
+test("listPineScripts fetches saved scripts read-only and cross-references charts", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.listPineScripts();
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("https://pine-facade.tradingview.com/pine-facade/list/?filter=saved"));
+  assert.ok(expr.includes('credentials: "include"'), "must use the logged-in session");
+  assert.ok(expr.includes('v.id === "pineId"'), "must map scripts to on-chart studies");
+  assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
+});
+
+test("getPineSource accepts only own USER;… ids and validates before the page", async () => {
+  const cdp = fakeCdp({ source: "//@version=5" });
+  const tv = new TradingView(cdp);
+  for (const bad of [
+    "PUB;abcdef1234567890", // third-party published script
+    "USER;short",
+    'USER;abc12345"); hack(); ("',
+    "USER;",
+    "",
+    "adc40b1dfee344f19412f1ae9af74f3f",
+  ]) {
+    assert.throws(() => tv.getPineSource(bad), /pineId must look like/, bad);
+  }
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+
+  await tv.getPineSource("USER;adc40b1dfee344f19412f1ae9af74f3f");
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('"USER;adc40b1dfee344f19412f1ae9af74f3f"'), "pineId quoted as JSON");
+  assert.ok(expr.includes("encodeURIComponent(pineId)"), "id must be URL-encoded");
+  assert.ok(expr.includes("https://pine-facade.tradingview.com/pine-facade/get/"));
+  assert.ok(expr.includes('credentials: "include"'));
+  assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
+});
+
 test("getChartRect validates the index and reads the chart container rect", async () => {
   const cdp = fakeCdp({ x: 0, y: 0, width: 100, height: 100, devicePixelRatio: 2 });
   const tv = new TradingView(cdp);

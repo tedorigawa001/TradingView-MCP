@@ -209,6 +209,38 @@ export interface KeyLevelsResult {
 const LEVEL_TITLE_PATTERN =
   /(resist|support|s\/r|pivot|vwap|band|bos|choch|breaker|order\s*block|\bob\b|fvg|imbalance|supply|demand|poc|value\s*area|equilibrium|liquidity|key\s*level|\blevel\b|zone|\b[rs][1-6]\b|レジスタンス|抵抗|サポート|支持|節目)/i;
 
+export interface PineScriptUsage {
+  chartIndex: number;
+  studyId: string;
+  name: string;
+}
+
+export interface PineScript {
+  /** e.g. "USER;adc40b1dfee344f19412f1ae9af74f3f" — input for get_pine_source. */
+  pineId: string;
+  name: string;
+  /** "study" or "strategy". */
+  kind: string | null;
+  version: string | null;
+  /** Chart studies currently rendered from this script, if any. */
+  usedBy: PineScriptUsage[];
+}
+
+export interface PineSource {
+  pineId: string;
+  name: string;
+  kind: string | null;
+  version: string | null;
+  updated: string | number | null;
+  sourceLength: number;
+  /** Full Pine source, e.g. starting with "//@version=5". */
+  source: string;
+}
+
+// Only the user's own workspace scripts ("USER;<id>"). Published/protected
+// script ids ("PUB;...") are rejected so no third-party source is ever pulled.
+const PINE_ID_PATTERN = /^USER;[\w]{8,64}$/;
+
 const STUDY_ID_PATTERN = /^[\w$]{1,64}$/;
 
 function assertStudyId(studyId: string): void {
@@ -900,6 +932,99 @@ export class TradingView {
           width: Math.round(r.width),
           height: Math.round(r.height),
           devicePixelRatio: window.devicePixelRatio || 1,
+        };
+      })()
+    `);
+  }
+
+  /**
+   * The user's own saved Pine scripts (indicators/strategies), via the same
+   * pine-facade REST API the built-in Pine Editor uses, with the app's
+   * session. Each script is cross-referenced against the charts so the AI can
+   * tell which on-chart indicator a script belongs to. Read-only.
+   */
+  listPineScripts(): Promise<PineScript[]> {
+    return this.cdp.evaluate<PineScript[]>(`
+      (async () => {
+        const res = await fetch("https://pine-facade.tradingview.com/pine-facade/list/?filter=saved", {
+          credentials: "include",
+        });
+        if (!res.ok) {
+          throw new Error("pine-facade API returned HTTP " + res.status + " — is the app logged in?");
+        }
+        const list = await res.json();
+        if (!Array.isArray(list)) throw new Error("unexpected pine-facade response shape");
+
+        // pineId -> chart studies rendered from that script
+        const usedBy = {};
+        const api = window.TradingViewApi;
+        try {
+          const count = api.chartsCount();
+          for (let i = 0; i < count; i++) {
+            const c = api.chart(i);
+            let studies = [];
+            try { studies = c.getAllStudies(); } catch (e) {}
+            for (const st of studies) {
+              try {
+                const vals = c.getStudyById(st.id).getInputValues();
+                const pid = (vals.find((v) => v.id === "pineId") || {}).value;
+                if (typeof pid === "string") {
+                  (usedBy[pid] = usedBy[pid] || []).push({ chartIndex: i, studyId: st.id, name: st.name });
+                }
+              } catch (e) {}
+            }
+          }
+        } catch (e) {}
+
+        return list
+          .filter((s) => s && typeof s.scriptIdPart === "string")
+          .map((s) => ({
+            pineId: s.scriptIdPart,
+            name: String(s.scriptName ?? ""),
+            kind: (s.extra && s.extra.kind) ?? null,
+            version: s.version ?? null,
+            usedBy: usedBy[s.scriptIdPart] || [],
+          }));
+      })()
+    `);
+  }
+
+  /**
+   * Full Pine source of one of the user's own saved scripts. Only "USER;..."
+   * ids are accepted — published/protected third-party scripts are refused,
+   * so the existing source-leak protections stay intact.
+   */
+  getPineSource(pineId: string): Promise<PineSource> {
+    if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
+      throw new Error(
+        `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
+      );
+    }
+    return this.cdp.evaluate<PineSource>(`
+      (async () => {
+        const pineId = ${JSON.stringify(pineId)};
+        const res = await fetch(
+          "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(pineId) + "/last",
+          { credentials: "include" },
+        );
+        if (res.status === 403 || res.status === 404) {
+          throw new Error("pine-facade returned HTTP " + res.status + " for " + pineId + " — not one of your saved scripts?");
+        }
+        if (!res.ok) {
+          throw new Error("pine-facade API returned HTTP " + res.status + " — is the app logged in?");
+        }
+        const detail = await res.json();
+        if (!detail || typeof detail.source !== "string") {
+          throw new Error("unexpected pine-facade response: no source field");
+        }
+        return {
+          pineId,
+          name: String(detail.scriptName ?? ""),
+          kind: (detail.extra && detail.extra.kind) ?? null,
+          version: detail.version ?? null,
+          updated: detail.updated ?? null,
+          sourceLength: detail.source.length,
+          source: detail.source,
         };
       })()
     `);

@@ -102,6 +102,24 @@ function makeDeps(overrides = {}) {
         earliestTime: 1,
         moreAvailable: true,
       }),
+      listPineScripts: async () => [
+        {
+          pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f",
+          name: "Test Script",
+          kind: "study",
+          version: "3.0",
+          usedBy: [{ chartIndex: 0, studyId: "st1", name: "Test Study" }],
+        },
+      ],
+      getPineSource: async (pineId) => ({
+        pineId,
+        name: "Test Script",
+        kind: "study",
+        version: "3.0",
+        updated: null,
+        sourceLength: 24,
+        source: "//@version=5\nplot(close)",
+      }),
       listAlerts: async () => [
         {
           id: 1,
@@ -198,7 +216,7 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the seventeen expected tools", async () => {
+test("exposes exactly the nineteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -214,9 +232,11 @@ test("exposes exactly the seventeen expected tools", async () => {
       "get_key_levels",
       "get_mtf_overview",
       "get_ohlcv",
+      "get_pine_source",
       "get_quotes",
       "get_watchlist",
       "list_alerts",
+      "list_pine_scripts",
       "load_more_history",
       "scan_market",
       "set_symbol",
@@ -310,6 +330,22 @@ test("load_more_history forwards count with default", async () => {
   assert.equal(JSON.parse(res.content[0].text).requested, 300);
   const res2 = await client.callTool({ name: "load_more_history", arguments: { count: 42 } });
   assert.equal(JSON.parse(res2.content[0].text).added, 42);
+});
+
+test("list_pine_scripts and get_pine_source expose own Pine sources", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "list_pine_scripts", arguments: {} });
+  const [script] = JSON.parse(res.content[0].text);
+  assert.equal(script.kind, "study");
+  assert.equal(script.usedBy[0].studyId, "st1");
+
+  const res2 = await client.callTool({
+    name: "get_pine_source",
+    arguments: { pine_id: script.pineId },
+  });
+  const parsed = JSON.parse(res2.content[0].text);
+  assert.equal(parsed.pineId, script.pineId);
+  assert.match(parsed.source, /^\/\/@version=5/);
 });
 
 test("list_alerts returns the user's alerts", async () => {
@@ -448,6 +484,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       setResolution: async () => ((handlerRan = true), {}),
       getKeyLevels: async () => ((handlerRan = true), {}),
       getIndicatorTables: async () => ((handlerRan = true), []),
+      listPineScripts: async () => ((handlerRan = true), []),
+      getPineSource: async () => ((handlerRan = true), {}),
     },
     cdp: { screenshot: async () => ((handlerRan = true), "x") },
     scanner: {
@@ -489,6 +527,9 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_economic_events", arguments: { countries: [] } },
     { name: "get_economic_events", arguments: { min_importance: "extreme" } },
     { name: "get_economic_events", arguments: { limit: 201 } },
+    { name: "get_pine_source", arguments: {} },
+    { name: "get_pine_source", arguments: { pine_id: "PUB;abcdef1234567890" } },
+    { name: "get_pine_source", arguments: { pine_id: 'USER;x"); hack(); ("' } },
   ]) {
     const res = await client.callTool(args);
     assert.equal(res.isError, true, JSON.stringify(args));

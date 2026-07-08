@@ -133,6 +133,42 @@ await check("get_indicator_tables", async () => {
   return `${study}: ${t.rows}x${t.columns}@${t.position}, e.g. [${t.grid[0].slice(0, 4).join(" | ")}]`;
 });
 
+let smokeScripts = [];
+await check("list_pine_scripts", async () => {
+  smokeScripts = await tv.listPineScripts();
+  if (!Array.isArray(smokeScripts)) throw new Error("expected an array");
+  if (smokeScripts.length === 0) return "skipped-ish: no saved scripts (not logged in?)";
+  for (const s of smokeScripts) {
+    if (!/^USER;[\w]{8,64}$/.test(s.pineId)) throw new Error(`unexpected pineId: ${s.pineId}`);
+    if (!s.name) throw new Error("script without a name");
+  }
+  const used = smokeScripts.filter((s) => s.usedBy.length > 0);
+  return `${smokeScripts.length} scripts, ${used.length} on chart${used[0] ? ` (e.g. ${used[0].name} -> ${used[0].usedBy[0].studyId})` : ""}`;
+});
+
+await check("get_pine_source", async () => {
+  const target = smokeScripts.find((s) => s.usedBy.length > 0) ?? smokeScripts[0];
+  if (!target) return "skipped-ish: no saved scripts";
+  const src = await tv.getPineSource(target.pineId);
+  if (typeof src.source !== "string" || src.source.length < 50) {
+    throw new Error(`suspiciously short source: ${src.source?.length}`);
+  }
+  if (src.sourceLength !== src.source.length) throw new Error("sourceLength mismatch");
+  const head = src.source.slice(0, 4000);
+  if (!/@version|indicator|strategy|study/.test(head)) {
+    throw new Error("source does not look like Pine (compiled IL leaked instead?)");
+  }
+  // validation throws synchronously, before any network access
+  let rejected = null;
+  try {
+    await tv.getPineSource("PUB;abcdef1234567890");
+  } catch (e) {
+    rejected = e.message;
+  }
+  if (!rejected || !/USER;/.test(rejected)) throw new Error("PUB; id was not refused");
+  return `${src.name} v${src.version}: ${src.sourceLength} chars of Pine`;
+});
+
 await check("list_alerts", async () => {
   const alerts = await tv.listAlerts();
   if (!Array.isArray(alerts)) throw new Error("expected an array");

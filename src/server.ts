@@ -17,6 +17,8 @@ export interface ServerDeps {
     | "getIndicatorGraphics"
     | "getIndicatorTables"
     | "loadMoreHistory"
+    | "listPineScripts"
+    | "getPineSource"
     | "listAlerts"
     | "getWatchlists"
     | "getChartRect"
@@ -336,6 +338,49 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
         return jsonResult(
           await tv.loadMoreHistory({ count: count ?? 300, chartIndex: chart_index }),
         );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_pine_scripts",
+    {
+      description:
+        "List the user's own saved Pine scripts (indicators and strategies) with their " +
+        "pine_id, kind and version, cross-referenced with the charts: usedBy shows which " +
+        "on-chart indicators are rendered from each script. Use this to find the pine_id " +
+        "for get_pine_source. Read-only.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return jsonResult(await tv.listPineScripts());
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_pine_source",
+    {
+      description:
+        "Get the full Pine source code of one of the user's OWN saved scripts, for " +
+        "review or improvement suggestions. Only 'USER;...' ids from list_pine_scripts " +
+        "are accepted; published/protected third-party scripts are refused. Read-only — " +
+        "editing or saving scripts is not supported.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Script id from list_pine_scripts, e.g. 'USER;adc40b1dfee344f19412f1ae9af74f3f'"),
+      },
+    },
+    async ({ pine_id }) => {
+      try {
+        return jsonResult(await tv.getPineSource(pine_id));
       } catch (err) {
         return errorResult(err);
       }
