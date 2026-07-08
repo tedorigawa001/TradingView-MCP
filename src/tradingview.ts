@@ -1447,6 +1447,11 @@ export class TradingView {
         }
 
         const bt = await api.backtestingStrategyApi();
+        // The report WatchedValue can still hold the PREVIOUS run of a
+        // strategy with the SAME name (e.g. re-testing after saving a new
+        // version) — remember it so only a report object that replaced it
+        // is accepted.
+        const staleReport = bt.activeStrategyReportData.value();
         const studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
         let report = null;
         const t0 = Date.now();
@@ -1456,7 +1461,8 @@ export class TradingView {
           // failing is better than returning its numbers as ours.
           let activeDesc = null;
           try { activeDesc = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
-          if (activeDesc === meta.description) {
+          const raw = bt.activeStrategyReportData.value();
+          if (raw !== null && raw !== staleReport && activeDesc === meta.description) {
             report = formatReport(bt, ${tradesLimit});
             if (report) break;
           }

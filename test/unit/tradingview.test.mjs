@@ -440,6 +440,12 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
   assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
   assert.ok(expr.includes("activeDesc === meta.description"),
     "the report must be attributed to OUR strategy before being accepted");
+  // re-testing a saved new version keeps the same strategy name, so the
+  // previous run must be rejected by object identity, not just by name
+  assert.ok(expr.includes("const staleReport = bt.activeStrategyReportData.value()"),
+    "the pre-run report must be captured");
+  assert.ok(expr.includes("raw !== staleReport"),
+    "a leftover report of the same-named strategy must be refused");
   assert.ok(expr.includes("WARNING: the strategy may still be on the chart"),
     "failed cleanup must be reported");
 

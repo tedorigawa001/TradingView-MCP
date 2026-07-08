@@ -12,6 +12,12 @@
 - `trades[]`: `{ entry: {id, price, time(ms), type: "le"|"se"|..., barIndex}, exit: {...}, profit: {value, percentValue}, cumulativeProfit, runup, drawdown, quantity, tradeNumber }`。percent 系は**小数(0.33 = 33%)**
 - `settings.dateRange.backtest.{from,to}`(ms)
 
+### 罠: 同名ストラテジーの再テストで前回レポートが返る(実運用で発覚・修正済み)
+
+PDCA の実践(v1 計測 → v2 保存 → 再テスト)で、v2 のバックテストが v1 と**小数点以下まで完全一致**する事象が発生。原因は `activeStrategyReportData` の WatchedValue が前回実行のレポートを保持したまま、新バージョン適用直後のポーリングが「description 一致+非 null」で**ベースラインの残留レポートを受理**していたこと(保存し直しても strategy 名は同じなので description ゲートを素通りする)。対策: `createStudy` の**前に**レポートオブジェクトを覚えておき、**オブジェクト同一性**(`raw !== staleReport`)で置き換わったレポートのみ受理する。
+
+なお調査過程の注意点2つ: (1) コンパイル済み metaInfo の入力 `id` は `in_N` 形式に変換されるため、新入力の存在確認は `name` で行う(id で探すと誤って「古い」と判定する)。(2) `studyMetaInfoRepository` のキャッシュは保存時の `onModifyScript` で更新されるので手動 evict は不要 — むしろ evict すると server 側 `translate/<id>/last` エイリアスの伝播遅延を直接踏む。
+
 ### 罠: レポートはストラテジー削除後も残留する
 
 `removeEntity` でストラテジーを外しても `activeStrategyReportData.value()` は**直前のレポートを保持し続ける**(`activeStrategy` は null になる)。ゲートなしで読むと「チャートにないストラテジーの成績」を現在の状態として返してしまう。対策:
