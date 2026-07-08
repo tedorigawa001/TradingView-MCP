@@ -954,6 +954,9 @@ export class TradingView {
         }
         const list = await res.json();
         if (!Array.isArray(list)) throw new Error("unexpected pine-facade response shape");
+        // Same gate as getPineSource: anything the source tool would refuse
+        // must not be listed in the first place.
+        const PINE_ID = new RegExp(${JSON.stringify(PINE_ID_PATTERN.source)});
 
         // pineId -> chart studies rendered from that script
         const usedBy = {};
@@ -977,7 +980,7 @@ export class TradingView {
         } catch (e) {}
 
         return list
-          .filter((s) => s && typeof s.scriptIdPart === "string")
+          .filter((s) => s && typeof s.scriptIdPart === "string" && PINE_ID.test(s.scriptIdPart))
           .map((s) => ({
             pineId: s.scriptIdPart,
             name: String(s.scriptName ?? ""),

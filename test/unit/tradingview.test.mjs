@@ -289,6 +289,10 @@ test("listPineScripts fetches saved scripts read-only and cross-references chart
   assert.ok(expr.includes('credentials: "include"'), "must use the logged-in session");
   assert.ok(expr.includes('v.id === "pineId"'), "must map scripts to on-chart studies");
   assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
+  // the list must apply the exact same USER;-only gate as getPineSource, so
+  // nothing listed can ever be refused by the source tool
+  assert.ok(expr.includes('"^USER;[\\\\w]{8,64}$"'), "list must filter by the shared pine id pattern");
+  assert.ok(expr.includes("PINE_ID.test(s.scriptIdPart)"));
 });
 
 test("getPineSource accepts only own USER;… ids and validates before the page", async () => {
