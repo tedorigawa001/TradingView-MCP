@@ -108,6 +108,7 @@ Claude ⇄ (stdio) ⇄ MCP サーバー (TypeScript) ⇄ (CDP :9222) ⇄ Trading
 - ✅ **バックログ #10 完了**(2026-07-08): `list_pine_scripts` / `get_pine_source`(pine-facade REST。自作スクリプト限定・読み取り専用。Pine 改修 PDCA の Plan 工程)
 - ✅ **バックログ #8 完了**(2026-07-08): `run_backtest` / `get_strategy_report`(ストラテジーテスター連携。一時適用+自動削除、残留レポートの誤帰属ゲート。PDCA の Check 工程)。調査記録は [phase6-findings.md](phase6-findings.md)
 - ✅ **バックログ #11 完了**(2026-07-08): `save_pine_script`(初の書き込み系。confirm フロー+非破壊設計)/ `add_pine_to_chart` / `get_pine_source` のバージョン指定。**Pine 改修 PDCA ループ完成**
-- ✅ **バックログ #12 完了**(2026-07-09): `set_indicator_input`(strategy/indicator共通の入力値書き込み。永続化しないためconfirm不要)。RSI(2)平均回帰ストラテジーの実運用PDCA(多銘柄・多時間足A/Bチューニング)で判明したツールギャップに対応。**全24ツール**
+- ✅ **バックログ #12 完了**(2026-07-09): `set_indicator_input`(strategy/indicator共通の入力値書き込み。永続化しないためconfirm不要)。RSI(2)平均回帰ストラテジーの実運用PDCA(多銘柄・多時間足A/Bチューニング)で判明したツールギャップに対応
+- ✅ **バックログ #14 完了**(2026-07-09): `get_mtf_overview` の複数シンボル対応(`symbols: string[]`、上限20件)。実際の為替横断分析で判明したギャップに対応。**全24ツール**(ツール数は変わらず既存ツールの拡張)
 - 未実装(意図的): アラート・ウォッチリストの作成/変更/削除(書き込み系は確認フロー設計が前提)
 - 📋 実分析(2026-07-08)で洗い出した改善課題は [BACKLOG.md](BACKLOG.md) に優先度付きで整理

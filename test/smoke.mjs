@@ -313,11 +313,24 @@ await check("get_quotes (scanner)", async () => {
 });
 
 await check("get_mtf_overview (scanner)", async () => {
-  const o = await scanner.getMtfOverview("OANDA:EURUSD", ["60", "1D"], ["close", "RSI"]);
-  for (const tf of ["60", "1D"]) {
-    if (typeof o.timeframes[tf]?.RSI !== "number") throw new Error(`RSI missing for ${tf}`);
+  const tickers = ["OANDA:EURUSD", "OANDA:USDJPY"];
+  const [eur, jpy] = await scanner.getMtfOverview(tickers, ["60", "1D"], ["close", "RSI"]);
+  if (eur.symbol !== "OANDA:EURUSD" || jpy.symbol !== "OANDA:USDJPY") {
+    throw new Error(`results out of order: ${eur.symbol}, ${jpy.symbol}`);
   }
-  return `RSI 60=${o.timeframes["60"].RSI.toFixed(1)}, 1D=${o.timeframes["1D"].RSI.toFixed(1)}`;
+  for (const tf of ["60", "1D"]) {
+    if (typeof eur.timeframes[tf]?.RSI !== "number") throw new Error(`RSI missing for EURUSD ${tf}`);
+    if (typeof jpy.timeframes[tf]?.RSI !== "number") throw new Error(`RSI missing for USDJPY ${tf}`);
+  }
+  const badTicker = await scanner.getMtfOverview(["OANDA:EURUSD", "OANDA:NOTAREALTICKERXYZ"]).then(
+    () => null,
+    (e) => e.message,
+  );
+  if (!badTicker || !/no data for: OANDA:NOTAREALTICKERXYZ/.test(badTicker)) {
+    throw new Error(`invalid ticker in a batch did not fail clearly: ${badTicker}`);
+  }
+  return `EURUSD RSI 60=${eur.timeframes["60"].RSI.toFixed(1)} 1D=${eur.timeframes["1D"].RSI.toFixed(1)}, ` +
+    `USDJPY RSI 60=${jpy.timeframes["60"].RSI.toFixed(1)} 1D=${jpy.timeframes["1D"].RSI.toFixed(1)}`;
 });
 
 await check("scan_market (scanner)", async () => {

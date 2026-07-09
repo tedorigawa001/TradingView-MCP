@@ -21,12 +21,13 @@ function makeDeps(overrides = {}) {
         returned: 1,
         rows: [{ symbol: "TSE:9501", values: { options } }],
       }),
-      getMtfOverview: async (symbol, timeframes, fields) => ({
-        symbol,
-        timeframes: Object.fromEntries(
-          (timeframes ?? ["15", "60", "240", "1D"]).map((tf) => [tf, { fields: fields ?? null }]),
-        ),
-      }),
+      getMtfOverview: async (symbols, timeframes, fields) =>
+        symbols.map((symbol) => ({
+          symbol,
+          timeframes: Object.fromEntries(
+            (timeframes ?? ["15", "60", "240", "1D"]).map((tf) => [tf, { fields: fields ?? null }]),
+          ),
+        })),
       ...overrides.scanner,
     },
     tv: {
@@ -322,16 +323,17 @@ test("exposes exactly the twenty-four expected tools", async () => {
   );
 });
 
-test("get_mtf_overview forwards symbol, timeframes and fields", async () => {
+test("get_mtf_overview forwards symbols, timeframes and fields", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({
     name: "get_mtf_overview",
-    arguments: { symbol: "OANDA:EURUSD", timeframes: ["60", "1D"], fields: ["RSI"] },
+    arguments: { symbols: ["OANDA:EURUSD", "OANDA:USDJPY"], timeframes: ["60", "1D"], fields: ["RSI"] },
   });
-  const parsed = JSON.parse(res.content[0].text);
-  assert.equal(parsed.symbol, "OANDA:EURUSD");
-  assert.deepEqual(Object.keys(parsed.timeframes), ["60", "1D"]);
-  assert.deepEqual(parsed.timeframes["60"].fields, ["RSI"]);
+  const [eur, jpy] = JSON.parse(res.content[0].text);
+  assert.equal(eur.symbol, "OANDA:EURUSD");
+  assert.equal(jpy.symbol, "OANDA:USDJPY");
+  assert.deepEqual(Object.keys(eur.timeframes), ["60", "1D"]);
+  assert.deepEqual(eur.timeframes["60"].fields, ["RSI"]);
 });
 
 test("get_key_levels forwards options with defaults applied", async () => {
@@ -648,6 +650,7 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     scanner: {
       getQuotes: async () => ((handlerRan = true), {}),
       scanMarket: async () => ((handlerRan = true), {}),
+      getMtfOverview: async () => ((handlerRan = true), []),
     },
     calendar: {
       getEvents: async () => ((handlerRan = true), {}),
@@ -674,8 +677,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "scan_market", arguments: { market: "JAPAN/../x" } },
     { name: "scan_market", arguments: { market: "japan", filters: [{ field: "RSI", operation: "drop" }] } },
     { name: "scan_market", arguments: { market: "japan", limit: 101 } },
-    { name: "get_mtf_overview", arguments: { symbol: "OANDA:EURUSD", timeframes: ["7"] } },
+    { name: "get_mtf_overview", arguments: { symbols: ["OANDA:EURUSD"], timeframes: ["7"] } },
     { name: "get_mtf_overview", arguments: {} },
+    { name: "get_mtf_overview", arguments: { symbols: [] } },
+    { name: "get_mtf_overview", arguments: { symbols: Array(21).fill("OANDA:EURUSD") } },
+    { name: "get_mtf_overview", arguments: { symbols: ["bad ticker!"] } },
     { name: "get_indicator_graphics", arguments: { study_id: "has space" } },
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },

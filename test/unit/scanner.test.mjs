@@ -112,7 +112,7 @@ test("getMtfOverview builds suffixed columns and regroups by timeframe", async (
   t.after(() => mock.close());
   const scanner = new Scanner(mock.baseUrl);
 
-  const o = await scanner.getMtfOverview("OANDA:EURUSD", ["60", "1D"], ["close", "RSI"]);
+  const [o] = await scanner.getMtfOverview(["OANDA:EURUSD"], ["60", "1D"], ["close", "RSI"]);
   const req = mock.state.requests[0];
   assert.deepEqual(req.body.columns, ["close|60", "RSI|60", "close", "RSI"]);
   assert.deepEqual(req.body.symbols, { tickers: ["OANDA:EURUSD"] });
@@ -123,17 +123,71 @@ test("getMtfOverview builds suffixed columns and regroups by timeframe", async (
   });
 });
 
+test("getMtfOverview accepts multiple symbols in one call, sharing the column set", async (t) => {
+  const mock = await startMockScanner((req) => ({
+    totalCount: req.body.symbols.tickers.length,
+    data: req.body.symbols.tickers.map((s, row) => ({
+      s,
+      d: req.body.columns.map((_, col) => row * 100 + col),
+    })),
+  }));
+  t.after(() => mock.close());
+  const scanner = new Scanner(mock.baseUrl);
+
+  const tickers = ["OANDA:EURUSD", "OANDA:USDJPY", "OANDA:GBPAUD"];
+  const results = await scanner.getMtfOverview(tickers, ["60", "1D"], ["close", "RSI"]);
+  const req = mock.state.requests[0];
+  assert.deepEqual(req.body.symbols, { tickers }, "one shared request for all symbols");
+  assert.equal(results.length, 3);
+  assert.deepEqual(
+    results.map((r) => r.symbol),
+    tickers,
+    "results are returned in request order regardless of API row order",
+  );
+  assert.deepEqual(results[1].timeframes, { "60": { close: 100, RSI: 101 }, "1D": { close: 102, RSI: 103 } });
+});
+
+test("getMtfOverview reorders results to match the requested ticker order", async (t) => {
+  const mock = await startMockScanner((req) => ({
+    // API returns rows in a different order than requested
+    data: [...req.body.symbols.tickers].reverse().map((s) => ({ s, d: [s.length] })),
+  }));
+  t.after(() => mock.close());
+  const scanner = new Scanner(mock.baseUrl);
+
+  const tickers = ["OANDA:EURUSD", "OANDA:USDJPY"];
+  const results = await scanner.getMtfOverview(tickers, ["1D"], ["close"]);
+  assert.deepEqual(results.map((r) => r.symbol), tickers);
+});
+
+test("getMtfOverview fails loudly listing tickers the API returned no data for", async (t) => {
+  const mock = await startMockScanner((req) => ({
+    data: req.body.symbols.tickers
+      .filter((s) => s !== "OANDA:BADTICKER")
+      .map((s) => ({ s, d: req.body.columns.map(() => 1) })),
+  }));
+  t.after(() => mock.close());
+  const scanner = new Scanner(mock.baseUrl);
+
+  await assert.rejects(
+    () => scanner.getMtfOverview(["OANDA:EURUSD", "OANDA:BADTICKER"], ["1D"], ["close"]),
+    /no data for: OANDA:BADTICKER/,
+  );
+});
+
 test("getMtfOverview validates inputs before any request", async (t) => {
   const mock = await startMockScanner();
   t.after(() => mock.close());
   const scanner = new Scanner(mock.baseUrl);
 
-  await assert.rejects(() => scanner.getMtfOverview("bad ticker"), /invalid ticker/);
-  await assert.rejects(() => scanner.getMtfOverview("A:B", ["3"]), /invalid timeframe/);
-  await assert.rejects(() => scanner.getMtfOverview("A:B", ["60"], ["RSI|240"]), /invalid field/);
-  await assert.rejects(() => scanner.getMtfOverview("A:B", [], ["RSI"]), /non-empty/);
+  await assert.rejects(() => scanner.getMtfOverview(["bad ticker"]), /invalid ticker/);
+  await assert.rejects(() => scanner.getMtfOverview([]), /non-empty array of at most/);
+  await assert.rejects(() => scanner.getMtfOverview(Array(21).fill("A:B")), /at most 20 symbols/);
+  await assert.rejects(() => scanner.getMtfOverview(["A:B"], ["3"]), /invalid timeframe/);
+  await assert.rejects(() => scanner.getMtfOverview(["A:B"], ["60"], ["RSI|240"]), /invalid field/);
+  await assert.rejects(() => scanner.getMtfOverview(["A:B"], [], ["RSI"]), /non-empty/);
   await assert.rejects(
-    () => scanner.getMtfOverview("A:B", ["1", "5", "15", "30", "60", "120", "240", "1D"], Array(7).fill("RSI")),
+    () => scanner.getMtfOverview(["A:B"], ["1", "5", "15", "30", "60", "120", "240", "1D"], Array(7).fill("RSI")),
     /too many columns/,
   );
   assert.equal(mock.state.requests.length, 0);

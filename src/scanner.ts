@@ -70,6 +70,9 @@ export interface MtfOverview {
   timeframes: Record<string, Record<string, unknown>>;
 }
 
+/** Max symbols per getMtfOverview call — columns are shared across symbols, so this only bounds the row count. */
+export const MAX_MTF_SYMBOLS = 20;
+
 export const DEFAULT_QUOTE_COLUMNS = [
   "description",
   "close",
@@ -176,17 +179,24 @@ export class Scanner {
   }
 
   /**
-   * Multi-timeframe snapshot for one symbol without touching any chart:
-   * the same indicator fields across several timeframes in a single call,
-   * using the scanner's "FIELD|TIMEFRAME" column suffixes.
+   * Multi-timeframe snapshot for one or more symbols without touching any
+   * chart: the same indicator fields across several timeframes in a single
+   * call, using the scanner's "FIELD|TIMEFRAME" column suffixes. Columns are
+   * shared across all symbols (one scanner request either way), so the 50
+   * timeframe*field column cap applies per symbol, not to the batch as a whole.
    */
   async getMtfOverview(
-    ticker: string,
+    tickers: string[],
     timeframes: string[] = DEFAULT_MTF_TIMEFRAMES,
     fields: string[] = DEFAULT_MTF_FIELDS,
-  ): Promise<MtfOverview> {
-    if (typeof ticker !== "string" || !TICKER_PATTERN.test(ticker)) {
-      throw new Error(`invalid ticker: ${JSON.stringify(ticker)} — use EXCHANGE:SYMBOL form`);
+  ): Promise<MtfOverview[]> {
+    if (!Array.isArray(tickers) || tickers.length === 0 || tickers.length > MAX_MTF_SYMBOLS) {
+      throw new Error(`tickers must be a non-empty array of at most ${MAX_MTF_SYMBOLS} symbols`);
+    }
+    for (const t of tickers) {
+      if (typeof t !== "string" || !TICKER_PATTERN.test(t)) {
+        throw new Error(`invalid ticker: ${JSON.stringify(t)} — use EXCHANGE:SYMBOL form`);
+      }
     }
     if (!Array.isArray(timeframes) || timeframes.length === 0) {
       throw new Error("timeframes must be a non-empty array");
@@ -215,18 +225,24 @@ export class Scanner {
     // Daily values use the plain field name; other timeframes are suffixed.
     const columnOf = (field: string, tf: string) => (tf === "1D" ? field : `${field}|${tf}`);
     const columns = timeframes.flatMap((tf) => fields.map((f) => columnOf(f, tf)));
-    const result = await this.post("global", { symbols: { tickers: [ticker] }, columns });
-    if (result.rows.length === 0) {
-      throw new Error(`no data for ${ticker} — is the ticker valid?`);
+    const result = await this.post("global", { symbols: { tickers }, columns });
+
+    const bySymbol = new Map(result.rows.map((r) => [r.symbol, r]));
+    const missing = tickers.filter((t) => !bySymbol.has(t));
+    if (missing.length > 0) {
+      throw new Error(`no data for: ${missing.join(", ")} — are the tickers valid?`);
     }
-    const values = result.rows[0].values;
-    const out: MtfOverview = { symbol: result.rows[0].symbol, timeframes: {} };
-    for (const tf of timeframes) {
-      const perTf: Record<string, unknown> = {};
-      for (const f of fields) perTf[f] = values[columnOf(f, tf)] ?? null;
-      out.timeframes[tf] = perTf;
-    }
-    return out;
+
+    return tickers.map((t) => {
+      const row = bySymbol.get(t)!;
+      const out: MtfOverview = { symbol: row.symbol, timeframes: {} };
+      for (const tf of timeframes) {
+        const perTf: Record<string, unknown> = {};
+        for (const f of fields) perTf[f] = row.values[columnOf(f, tf)] ?? null;
+        out.timeframes[tf] = perTf;
+      }
+      return out;
+    });
   }
 
   /** Screen a market with field filters, e.g. RSI < 30 sorted by volume. */

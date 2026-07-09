@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CdpClient } from "./cdp.js";
 import type { TradingView } from "./tradingview.js";
-import { MTF_TIMEFRAMES, SCAN_OPERATIONS, type Scanner } from "./scanner.js";
+import { MAX_MTF_SYMBOLS, MTF_TIMEFRAMES, SCAN_OPERATIONS, type Scanner } from "./scanner.js";
 import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
@@ -662,16 +662,18 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
     "get_mtf_overview",
     {
       description:
-        "Multi-timeframe overview of one symbol WITHOUT touching the user's chart: the " +
-        "same indicator fields (default: close, RSI, ADX, ATR, EMA20, SMA50, SMA200 and " +
-        "Recommend.* ratings) across several timeframes in a single call. Use this for " +
+        "Multi-timeframe overview of one or more symbols WITHOUT touching the user's " +
+        "chart: the same indicator fields (default: close, RSI, ADX, ATR, EMA20, SMA50, " +
+        "SMA200 and Recommend.* ratings) across several timeframes in a single call — " +
+        "pass several symbols to compare majors side by side in one call. Use this for " +
         "top-down analysis (e.g. 1D trend, 240/60 timing) before or instead of " +
         "set_timeframe.",
       inputSchema: {
-        symbol: z
-          .string()
-          .regex(/^[\w!.:&-]{1,48}$/)
-          .describe("Symbol in EXCHANGE:SYMBOL form, e.g. 'OANDA:EURUSD'"),
+        symbols: z
+          .array(z.string().regex(/^[\w!.:&-]{1,48}$/))
+          .min(1)
+          .max(MAX_MTF_SYMBOLS)
+          .describe("Symbols in EXCHANGE:SYMBOL form, e.g. ['OANDA:EURUSD', 'OANDA:USDJPY']"),
         timeframes: z
           .array(z.enum(MTF_TIMEFRAMES))
           .min(1)
@@ -686,9 +688,9 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
           .describe("Indicator fields without timeframe suffix. Default: common trend/momentum set"),
       },
     },
-    async ({ symbol, timeframes, fields }) => {
+    async ({ symbols, timeframes, fields }) => {
       try {
-        return jsonResult(await scanner.getMtfOverview(symbol, timeframes, fields));
+        return jsonResult(await scanner.getMtfOverview(symbols, timeframes, fields));
       } catch (err) {
         return errorResult(err);
       }
