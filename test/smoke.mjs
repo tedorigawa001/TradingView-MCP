@@ -81,14 +81,12 @@ await check("get_indicator_values", async () => {
   }
   const bushidoScalp = studies.find((s) => s.name === "BushidoScalp_Tenkafubu");
   if (bushidoScalp) {
-    const titles = bushidoScalp.plots.map((p) => p.title);
-    for (const generic of ["plot_0", "plot_1", "plot_2", "plot_3"]) {
-      if (titles.includes(generic)) {
-        throw new Error(`plotcandle's ohlc_* mirror leaked into default plots: ${generic}`);
-      }
+    const ohlcMirror = bushidoScalp.plots.find((p) => /^ohlc_/.test(p.type));
+    if (ohlcMirror) {
+      throw new Error(`plotcandle ohlc_* mirror leaked into default plots: ${JSON.stringify(ohlcMirror)}`);
     }
     const withAll = await tv.getIndicatorValues({ studyId: bushidoScalp.id, count: 1, includeAllPlots: true });
-    if (!withAll[0].plots.some((p) => p.type === "ohlc_open")) {
+    if (!withAll[0].plots.some((p) => /^ohlc_/.test(p.type))) {
       throw new Error("includeAllPlots must still surface ohlc_* plots");
     }
   }
