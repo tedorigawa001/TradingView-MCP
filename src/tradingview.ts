@@ -547,8 +547,10 @@ export class TradingView {
           );
         }
 
+        // ohlc_* types come from plotcandle() — a duplicate of get_ohlcv used
+        // only to color-code candles, carrying no information of its own.
         const isNoisePlot = (type) =>
-          /colorer/i.test(type) || type === "alertcondition" || type === "textcolor";
+          /colorer/i.test(type) || type === "alertcondition" || type === "textcolor" || /^ohlc_/.test(type);
 
         return studies.map((st) => {
           const out = { id: st.id, name: st.name, plots: [], bars: [] };

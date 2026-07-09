@@ -182,6 +182,18 @@ test("getIndicatorValues embeds studyId as a JSON literal and honors options", a
   assert.ok(expr2.includes("const includeAllPlots = false"));
 });
 
+test("getIndicatorValues excludes plotcandle's ohlc_* mirror plots by default", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorValues();
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("/^ohlc_/"), "ohlc_* plot types must be treated as noise");
+  assert.ok(
+    expr.includes('type === "alertcondition"') && expr.includes('type === "textcolor"'),
+    "existing noise types must still be excluded",
+  );
+});
+
 test("getIndicatorInputs validates ids and always excludes Pine-internal inputs", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);

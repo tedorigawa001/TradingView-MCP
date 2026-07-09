@@ -79,6 +79,19 @@ await check("get_indicator_values", async () => {
   if (raw.includes("pineId") || raw.includes("ILScript")) {
     throw new Error("internal Pine data leaked into values payload");
   }
+  const bushidoScalp = studies.find((s) => s.name === "BushidoScalp_Tenkafubu");
+  if (bushidoScalp) {
+    const titles = bushidoScalp.plots.map((p) => p.title);
+    for (const generic of ["plot_0", "plot_1", "plot_2", "plot_3"]) {
+      if (titles.includes(generic)) {
+        throw new Error(`plotcandle's ohlc_* mirror leaked into default plots: ${generic}`);
+      }
+    }
+    const withAll = await tv.getIndicatorValues({ studyId: bushidoScalp.id, count: 1, includeAllPlots: true });
+    if (!withAll[0].plots.some((p) => p.type === "ohlc_open")) {
+      throw new Error("includeAllPlots must still surface ohlc_* plots");
+    }
+  }
   return `${withPlots.name}: ${Object.entries(lastBar.values).slice(0, 2).map(([k, v]) => `${k}=${v}`).join(", ")}`;
 });
 
