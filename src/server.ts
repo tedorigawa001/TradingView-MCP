@@ -242,12 +242,13 @@ export function createServer({ cdp, tv, scanner, calendar }: ServerDeps): McpSer
     {
       description:
         "Change input values of an indicator or strategy already on a chart — the write " +
-        "counterpart to get_indicator_inputs. Nothing is persisted (the saved script is " +
-        "untouched); this only changes the live calculation on the chart, exactly like " +
-        "opening the study's Settings dialog. Works for both plain indicators and " +
+        "counterpart to get_indicator_inputs. The Pine source is untouched, but the " +
+        "study's input values on the chart remain changed until set back (this is a live " +
+        "chart edit, like opening the study's Settings dialog, and may be captured by " +
+        "TradingView's own layout autosave). Works for both plain indicators and " +
         "strategies (for a strategy, follow up with get_strategy_report to read the " +
         "recalculated backtest). Use this to A/B-test parameters without re-saving the " +
-        "script each time.",
+        "script each time, and restore the original values when done.",
       inputSchema: {
         study_id: z
           .string()

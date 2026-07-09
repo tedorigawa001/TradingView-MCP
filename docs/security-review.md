@@ -141,7 +141,7 @@
 
 `set_indicator_input` 追加に伴うレビュー:
 
-- **永続化しない書き込み**: `chart.getStudyById(studyId).setInputValues()` はチャート上のスタディインスタンスの一時的な計算状態のみを変更し、pine-facade には一切触れない。スタディを削除すれば変更も消える。ユーザーが手動で Settings ダイアログを開いて値を変えるのと等価な操作であり、`save_pine_script` のような confirm フローは不要と判断(`set_symbol`/`set_timeframe` と同じ分類)
+- **Pine ソース/ライブラリへの永続化はない書き込み**: `chart.getStudyById(studyId).setInputValues()` は pine-facade には一切触れない(保存済みスクリプトは無傷)。ただし**チャート上のスタディインスタンスの入力値はライブ状態として残り**、復元するまで変更されたまま。ユーザーが手動で Settings ダイアログを開いて値を変えるのと等価な操作であり、TradingView 側のレイアウト自動保存の対象にもなり得る点は明記した上で、`save_pine_script` のような confirm フローは不要と判断(`set_symbol`/`set_timeframe` と同じ分類 — こちらもチャートのライブ状態を変更し自動保存対象になり得るが confirm 不要としている前例に倣う)
 - **入力対象の限定**: 書き込み先は `study_id` で指定した既存スタディの入力のみ。Pine内部入力(`text`/`pineId`/`pineVersion`/`pineFeatures`/`__profile`)は `get_indicator_inputs` 同様に書き込み拒否
 - **注入対策**: `study_id`・入力`id` は共に `/^[\w$]{1,64}$/` ホワイトリスト検証(zod + TradingView層の二重)後に JSON埋め込み。value は number/string/boolean のみ許可(オブジェクト・配列は拒否)
 - **未知IDの拒否**: ページ内で対象スタディの現行入力一覧と照合し、存在しないIDへの書き込みは明確なエラーで拒否してから `setInputValues` を呼ぶ

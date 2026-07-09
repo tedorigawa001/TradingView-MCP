@@ -672,11 +672,12 @@ export class TradingView {
 
   /**
    * Change input values of an indicator or strategy already on a chart —
-   * the write counterpart to getIndicatorInputs. Nothing is persisted (the
-   * saved script and its inputs are untouched); this only changes the live
-   * calculation of the study on the chart, exactly like opening its Settings
-   * dialog. Works for both plain indicators and strategies (a strategy's
-   * backtest report recalculates and can be read via get_strategy_report).
+   * the write counterpart to getIndicatorInputs. The Pine source is
+   * untouched, but the study's input values on the chart remain changed
+   * until set back — a live chart edit, exactly like opening its Settings
+   * dialog (and possibly captured by TradingView's own layout autosave).
+   * Works for both plain indicators and strategies (a strategy's backtest
+   * report recalculates and can be read via get_strategy_report).
    */
   setIndicatorInput(
     studyId: string,

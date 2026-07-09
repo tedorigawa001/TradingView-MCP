@@ -109,19 +109,23 @@ await check("set_indicator_input", async () => {
   const bumped = input.value + 1;
 
   const set1 = await tv.setIndicatorInput(study.id, [{ id: input.id, value: bumped }]);
-  if (set1.applied[0].value !== bumped) {
-    throw new Error(`expected ${bumped}, got ${JSON.stringify(set1.applied[0])}`);
+  try {
+    if (set1.applied[0].value !== bumped) {
+      throw new Error(`expected ${bumped}, got ${JSON.stringify(set1.applied[0])}`);
+    }
+    const readBack = await tv.getIndicatorInputs({ studyId: study.id });
+    const nowValue = readBack[0].inputs.find((i) => i.id === input.id)?.value;
+    if (nowValue !== bumped) throw new Error(`get_indicator_inputs did not reflect the change: ${nowValue}`);
+    return `${study.name}.${input.name}: ${input.value} -> ${bumped} -> restored`;
+  } finally {
+    // restore the original value no matter what — this tool leaves a live
+    // chart edit in place until set back, so a check failing above must
+    // not leave the user's chart on the bumped value
+    const restore = await tv.setIndicatorInput(study.id, [{ id: input.id, value: input.value }]);
+    if (restore.applied[0].value !== input.value) {
+      throw new Error(`failed to restore original value ${input.value}`);
+    }
   }
-  const readBack = await tv.getIndicatorInputs({ studyId: study.id });
-  const nowValue = readBack[0].inputs.find((i) => i.id === input.id)?.value;
-  if (nowValue !== bumped) throw new Error(`get_indicator_inputs did not reflect the change: ${nowValue}`);
-
-  // restore the original value — this tool must not leave a lasting change
-  const restore = await tv.setIndicatorInput(study.id, [{ id: input.id, value: input.value }]);
-  if (restore.applied[0].value !== input.value) {
-    throw new Error(`failed to restore original value ${input.value}`);
-  }
-  return `${study.name}.${input.name}: ${input.value} -> ${bumped} -> restored`;
 });
 
 await check("get_indicator_graphics", async () => {
