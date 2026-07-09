@@ -15,7 +15,7 @@
     "watch": "tsc --watch",
     "start": "node build/index.js",
     "pretest": "npm run build",
-    "test": "node --test test/unit/",
+    "test": "node --test test/unit/*.test.mjs",
     "test:integration": "node test/smoke.mjs"
   },
   "engines": {
