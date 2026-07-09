@@ -108,8 +108,9 @@ await check("set_indicator_input", async () => {
   const { study, input } = withNumeric;
   const bumped = input.value + 1;
 
-  const set1 = await tv.setIndicatorInput(study.id, [{ id: input.id, value: bumped }]);
+  let set1;
   try {
+    set1 = await tv.setIndicatorInput(study.id, [{ id: input.id, value: bumped }]);
     if (set1.applied[0].value !== bumped) {
       throw new Error(`expected ${bumped}, got ${JSON.stringify(set1.applied[0])}`);
     }
