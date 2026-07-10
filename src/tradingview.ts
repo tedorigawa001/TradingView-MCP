@@ -241,6 +241,10 @@ export interface SetIndicatorInputResult {
   studyId: string;
   /** Confirmed post-write value for each input, read back after settling. */
   applied: Array<{ id: string; name: string; value: unknown }>;
+  /** False when the 20s deadline hit before the recalculation went quiet. */
+  settled: boolean;
+  /** Present when settled is false: dependent reads may still be stale. */
+  warning?: string;
 }
 
 export interface StrategyTradeSide {
@@ -745,6 +749,7 @@ export class TradingView {
         let lastLoading = studyApi.isLoading();
         let lastChangeAt = Date.now();
         let sawChange = false;
+        let settled = false;
         while (Date.now() - t0 < 20000) {
           const curReport = bt.activeStrategyReportData.value();
           const curLoading = studyApi.isLoading();
@@ -755,8 +760,8 @@ export class TradingView {
             sawChange = true;
           }
           if (!curLoading) {
-            if (sawChange && Date.now() - lastChangeAt > quietMs) break;
-            if (!sawChange && Date.now() - t0 > noSignalMs) break; // plain indicators may show no signal at all
+            if (sawChange && Date.now() - lastChangeAt > quietMs) { settled = true; break; }
+            if (!sawChange && Date.now() - t0 > noSignalMs) { settled = true; break; } // plain indicators may show no signal at all
           }
           await new Promise((r) => setTimeout(r, 250));
         }
@@ -769,7 +774,13 @@ export class TradingView {
           const meta = infoById[inp.id] || {};
           return { id: inp.id, name: meta.localizedName || meta.name || inp.id, value: found ? found.value : null };
         });
-        return { studyId, applied };
+        const result = { studyId, applied, settled };
+        if (!settled) {
+          result.warning = "inputs were applied, but the study was still recalculating when the 20s " +
+            "deadline hit — dependent reads (e.g. get_strategy_report) may return a stale result; " +
+            "wait and re-read before trusting them";
+        }
+        return result;
       })()
     `);
   }

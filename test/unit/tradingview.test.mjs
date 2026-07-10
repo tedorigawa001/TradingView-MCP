@@ -246,8 +246,8 @@ test("setIndicatorInput writes via the generic study API and verifies the id exi
  * settle loop's timing can be tested without real waits. `reportAt` is a list
  * of [virtualMs, reportId] describing when activeStrategyReportData swaps its
  * identity; `loadingUntil` keeps studyApi.isLoading() true before that time.
- * Returns the virtual time at which the expression read the inputs back
- * (i.e. when the settle loop declared the recalculation finished).
+ * Returns the expression result plus the virtual time at which it read the
+ * inputs back (i.e. when the settle loop declared the recalculation finished).
  */
 async function runSettleLoop(inputs, { reportAt = [], loadingUntil = 0 } = {}) {
   let expr;
@@ -289,8 +289,8 @@ async function runSettleLoop(inputs, { reportAt = [], loadingUntil = 0 } = {}) {
       queueMicrotask(fn);
     },
   });
-  await vm.runInContext(expr, context);
-  return settledAt;
+  const result = await vm.runInContext(expr, context);
+  return { settledAt, result };
 }
 
 test("setIndicatorInput multi-input settle outlasts a lagging second recalculation", async () => {
@@ -298,23 +298,26 @@ test("setIndicatorInput multi-input settle outlasts a lagging second recalculati
   // call, the first recalc swapped the report at 500ms, the final one only at
   // 1800ms. The old 1000ms quiet window settled at ~1750ms and handed back
   // the intermediate (stale) strategy report.
-  const settledAt = await runSettleLoop(
+  const { settledAt, result } = await runSettleLoop(
     [{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }],
     { reportAt: [[500, "r1"], [1800, "r2"]] },
   );
   assert.ok(settledAt >= 1800, `must settle after the final recalc, settled at ${settledAt}ms`);
+  assert.equal(result.settled, true, "a clean settle must be reported as settled");
+  assert.equal(result.warning, undefined, "a clean settle must carry no warning");
 });
 
 test("setIndicatorInput never settles while the study still reports loading", async () => {
-  const settledAt = await runSettleLoop(
+  const { settledAt, result } = await runSettleLoop(
     [{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }],
     { reportAt: [[500, "r1"]], loadingUntil: 3000 },
   );
   assert.ok(settledAt >= 3000, `must wait for isLoading to clear, settled at ${settledAt}ms`);
+  assert.equal(result.settled, true);
 });
 
 test("setIndicatorInput single-input settle keeps the fast path", async () => {
-  const settledAt = await runSettleLoop(
+  const { settledAt } = await runSettleLoop(
     [{ id: "in_0", value: 20 }],
     { reportAt: [[500, "r1"]] },
   );
@@ -324,9 +327,23 @@ test("setIndicatorInput single-input settle keeps the fast path", async () => {
 
 test("setIndicatorInput plain-indicator no-signal timeout still terminates", async () => {
   const single = await runSettleLoop([{ id: "in_0", value: 20 }]);
-  assert.ok(single > 3000 && single <= 4000, `single input no-signal exit, settled at ${single}ms`);
+  assert.ok(single.settledAt > 3000 && single.settledAt <= 4000,
+    `single input no-signal exit, settled at ${single.settledAt}ms`);
+  assert.equal(single.result.settled, true, "a quiet no-signal exit counts as settled");
   const multi = await runSettleLoop([{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }]);
-  assert.ok(multi > 5000 && multi <= 6000, `multi input no-signal exit, settled at ${multi}ms`);
+  assert.ok(multi.settledAt > 5000 && multi.settledAt <= 6000,
+    `multi input no-signal exit, settled at ${multi.settledAt}ms`);
+});
+
+test("setIndicatorInput reports settled:false when still loading at the 20s deadline", async () => {
+  const { settledAt, result } = await runSettleLoop(
+    [{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }],
+    { reportAt: [[500, "r1"]], loadingUntil: 30000 },
+  );
+  assert.ok(settledAt >= 20000, `must hold until the deadline, settled at ${settledAt}ms`);
+  assert.equal(result.settled, false, "a deadline exit must not be reported as settled");
+  assert.match(result.warning, /still recalculating/, "must warn that dependent reads may be stale");
+  assert.equal(result.applied.length, 2, "applied values are still returned");
 });
 
 test("getIndicatorGraphics validates inputs before touching the page", () => {
