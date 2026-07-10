@@ -66,7 +66,7 @@ export class CdpClient {
       // TV_CDP_URL) — keep it out of the client-facing error, log it here.
       console.error(
         `[tradingview-mcp] CDP endpoint unreachable: ${redactSecrets(this.baseUrl)}` +
-          ` (${err instanceof Error ? err.message : String(err)})`,
+          ` (${redactSecrets(err instanceof Error ? err.message : String(err))})`,
       );
       throw new TradingViewNotAvailableError(
         "cannot reach the CDP endpoint configured via TV_CDP_URL",

@@ -104,7 +104,13 @@ test("fails clearly when CDP endpoint is unreachable", async (t) => {
 
 test("unreachable-endpoint errors never echo the CDP URL", async (t) => {
   // TV_CDP_URL may carry credentials or internal host names; the error the
-  // MCP client sees must not contain any part of it.
+  // MCP client sees must not contain any part of it, and the local stderr
+  // log must mask credentials too (fetch errors can echo the full URL).
+  const logged = [];
+  const origError = console.error;
+  console.error = (...args) => logged.push(args.join(" "));
+  t.after(() => (console.error = origError));
+
   const cdp = new CdpClient({ baseUrl: "http://user:hunter2@10.11.12.13:1" });
   t.after(() => cdp.close());
   await assert.rejects(
@@ -117,6 +123,11 @@ test("unreachable-endpoint errors never echo the CDP URL", async (t) => {
       return true;
     },
   );
+
+  const log = logged.join("\n");
+  assert.match(log, /CDP endpoint unreachable/, "the failure must be logged locally");
+  assert.ok(!log.includes("hunter2"), "the local log must mask credentials too");
+  assert.ok(log.includes("***@10.11.12.13"), "the log keeps the masked endpoint for diagnostics");
 });
 
 test("page exceptions are stripped of stack frames and URL secrets", async (t) => {
