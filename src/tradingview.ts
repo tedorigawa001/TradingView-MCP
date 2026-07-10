@@ -734,6 +734,13 @@ export class TradingView {
         studyApi.setInputValues(inputs);
 
         const t0 = Date.now();
+        // Changing several inputs at once can trigger a recalculation per
+        // input, with gaps between them longer than a single quiet window —
+        // settling after the first one hands back a stale strategy report.
+        // Scale the quiet window with the number of inputs and never settle
+        // while the study still reports loading.
+        const quietMs = Math.min(1000 + (inputs.length - 1) * 750, 3500);
+        const noSignalMs = inputs.length > 1 ? 5000 : 3000;
         let lastReport = staleReport;
         let lastLoading = studyApi.isLoading();
         let lastChangeAt = Date.now();
@@ -747,8 +754,10 @@ export class TradingView {
             lastChangeAt = Date.now();
             sawChange = true;
           }
-          if (sawChange && Date.now() - lastChangeAt > 1000) break;
-          if (!sawChange && Date.now() - t0 > 3000) break; // plain indicators may show no signal at all
+          if (!curLoading) {
+            if (sawChange && Date.now() - lastChangeAt > quietMs) break;
+            if (!sawChange && Date.now() - t0 > noSignalMs) break; // plain indicators may show no signal at all
+          }
           await new Promise((r) => setTimeout(r, 250));
         }
 

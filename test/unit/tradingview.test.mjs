@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 import { TradingView } from "../../build/tradingview.js";
 
 /** Fake CdpClient that records expressions instead of talking to a page. */
@@ -238,6 +239,94 @@ test("setIndicatorInput writes via the generic study API and verifies the id exi
 
   await tv.setIndicatorInput("st1", [{ id: "in_0", value: 14 }]);
   assert.ok(cdp.calls[1].includes("api.activeChart()"), "default is active chart");
+});
+
+/**
+ * Execute the setIndicatorInput page expression under a virtual clock so the
+ * settle loop's timing can be tested without real waits. `reportAt` is a list
+ * of [virtualMs, reportId] describing when activeStrategyReportData swaps its
+ * identity; `loadingUntil` keeps studyApi.isLoading() true before that time.
+ * Returns the virtual time at which the expression read the inputs back
+ * (i.e. when the settle loop declared the recalculation finished).
+ */
+async function runSettleLoop(inputs, { reportAt = [], loadingUntil = 0 } = {}) {
+  let expr;
+  const cdp = { evaluate: (e) => ((expr = e), Promise.resolve({})) };
+  await new TradingView(cdp).setIndicatorInput("st1", inputs);
+
+  let now = 0;
+  let settledAt = null;
+  let inputReads = 0;
+  const studyApi = {
+    getInputValues() {
+      inputReads += 1;
+      if (inputReads > 1) settledAt = now; // second read happens after the settle loop
+      return inputs.map((inp) => ({ id: inp.id, value: inp.value }));
+    },
+    setInputValues() {},
+    getInputsInfo: () => [],
+    isLoading: () => now < loadingUntil,
+  };
+  const bt = {
+    activeStrategyReportData: {
+      value() {
+        let report = "r0";
+        for (const [t, id] of reportAt) if (now >= t) report = id;
+        return report;
+      },
+    },
+  };
+  const context = vm.createContext({
+    window: {
+      TradingViewApi: {
+        activeChart: () => ({ getStudyById: () => studyApi }),
+        backtestingStrategyApi: async () => bt,
+      },
+    },
+    Date: { now: () => now },
+    setTimeout: (fn, ms) => {
+      now += ms;
+      queueMicrotask(fn);
+    },
+  });
+  await vm.runInContext(expr, context);
+  return settledAt;
+}
+
+test("setIndicatorInput multi-input settle outlasts a lagging second recalculation", async () => {
+  // Regression for the race observed 2026-07-10: two inputs changed in one
+  // call, the first recalc swapped the report at 500ms, the final one only at
+  // 1800ms. The old 1000ms quiet window settled at ~1750ms and handed back
+  // the intermediate (stale) strategy report.
+  const settledAt = await runSettleLoop(
+    [{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }],
+    { reportAt: [[500, "r1"], [1800, "r2"]] },
+  );
+  assert.ok(settledAt >= 1800, `must settle after the final recalc, settled at ${settledAt}ms`);
+});
+
+test("setIndicatorInput never settles while the study still reports loading", async () => {
+  const settledAt = await runSettleLoop(
+    [{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }],
+    { reportAt: [[500, "r1"]], loadingUntil: 3000 },
+  );
+  assert.ok(settledAt >= 3000, `must wait for isLoading to clear, settled at ${settledAt}ms`);
+});
+
+test("setIndicatorInput single-input settle keeps the fast path", async () => {
+  const settledAt = await runSettleLoop(
+    [{ id: "in_0", value: 20 }],
+    { reportAt: [[500, "r1"]] },
+  );
+  assert.ok(settledAt >= 1500, `must wait a quiet window after the recalc, settled at ${settledAt}ms`);
+  assert.ok(settledAt <= 3000, `single input must not pay the multi-input wait, settled at ${settledAt}ms`);
+});
+
+test("setIndicatorInput plain-indicator no-signal timeout still terminates", async () => {
+  const single = await runSettleLoop([{ id: "in_0", value: 20 }]);
+  assert.ok(single > 3000 && single <= 4000, `single input no-signal exit, settled at ${single}ms`);
+  const multi = await runSettleLoop([{ id: "in_0", value: 20 }, { id: "in_1", value: 20 }]);
+  assert.ok(multi > 5000 && multi <= 6000, `multi input no-signal exit, settled at ${multi}ms`);
 });
 
 test("getIndicatorGraphics validates inputs before touching the page", () => {
