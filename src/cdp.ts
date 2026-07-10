@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { redactSecrets } from "./redact.js";
 
 export interface CdpClientOptions {
   /** CDP HTTP endpoint, e.g. http://localhost:9222 */
@@ -60,8 +61,16 @@ export class CdpClient {
     try {
       const res = await fetch(`${this.baseUrl}/json`);
       targets = (await res.json()) as CdpTarget[];
-    } catch {
-      throw new TradingViewNotAvailableError(`cannot reach ${this.baseUrl}`);
+    } catch (err) {
+      // The endpoint URL may carry credentials or internal host names (via
+      // TV_CDP_URL) — keep it out of the client-facing error, log it here.
+      console.error(
+        `[tradingview-mcp] CDP endpoint unreachable: ${redactSecrets(this.baseUrl)}` +
+          ` (${err instanceof Error ? err.message : String(err)})`,
+      );
+      throw new TradingViewNotAvailableError(
+        "cannot reach the CDP endpoint configured via TV_CDP_URL",
+      );
     }
     const chart = targets.find((t) => {
       if (t.type !== "page") return false;
@@ -189,7 +198,13 @@ export class CdpClient {
         result.exceptionDetails.exception?.description ??
         result.exceptionDetails.text ??
         "unknown page error";
-      throw new Error(`Page evaluation failed: ${detail}`);
+      // Keep the thrown message but drop the page stack frames — their
+      // script URLs can carry session tokens — and redact what remains.
+      const message = redactSecrets(detail.split(/\n\s+at /)[0]);
+      if (message !== detail) {
+        console.error(`[tradingview-mcp] page exception: ${redactSecrets(detail)}`);
+      }
+      throw new Error(`Page evaluation failed: ${message}`);
     }
     return result.result?.value as T;
   }

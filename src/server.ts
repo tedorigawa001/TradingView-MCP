@@ -4,6 +4,7 @@ import type { CdpClient } from "./cdp.js";
 import type { TradingView } from "./tradingview.js";
 import { MAX_MTF_SYMBOLS, MTF_TIMEFRAMES, SCAN_OPERATIONS, type Scanner } from "./scanner.js";
 import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
+import { redactSecrets } from "./redact.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -50,7 +51,15 @@ function jsonResult(value: unknown): ToolResult {
 }
 
 function errorResult(err: unknown): ToolResult {
-  const message = err instanceof Error ? err.message : String(err);
+  const raw = err instanceof Error ? err.message : String(err);
+  // Last line of defense: whatever the layers below let through, no
+  // credential/query/token material may reach the MCP client. Details go
+  // to the local log (stderr) instead, also redacted.
+  const message = redactSecrets(raw);
+  if (message !== raw) {
+    const detail = err instanceof Error ? err.stack ?? raw : raw;
+    console.error(`[tradingview-mcp] tool error (redacted for client): ${redactSecrets(detail)}`);
+  }
   return {
     content: [{ type: "text", text: `Error: ${message}` }],
     isError: true,

@@ -102,6 +102,53 @@ test("fails clearly when CDP endpoint is unreachable", async (t) => {
   );
 });
 
+test("unreachable-endpoint errors never echo the CDP URL", async (t) => {
+  // TV_CDP_URL may carry credentials or internal host names; the error the
+  // MCP client sees must not contain any part of it.
+  const cdp = new CdpClient({ baseUrl: "http://user:hunter2@10.11.12.13:1" });
+  t.after(() => cdp.close());
+  await assert.rejects(
+    () => cdp.evaluate("1"),
+    (err) => {
+      assert.ok(err instanceof TradingViewNotAvailableError);
+      assert.ok(!err.message.includes("hunter2"), "must not leak credentials");
+      assert.ok(!err.message.includes("10.11.12.13"), "must not leak the host");
+      assert.match(err.message, /TV_CDP_URL/, "must still point at the knob to fix");
+      return true;
+    },
+  );
+});
+
+test("page exceptions are stripped of stack frames and URL secrets", async (t) => {
+  const mock = await startMockCdp({
+    onCommand: () => ({
+      result: {
+        exceptionDetails: {
+          exception: {
+            description:
+              "Error: study st1 not found\n" +
+              "    at run (https://user:pw@internal.corp/bundle.js?session=tok123:1:2)",
+          },
+        },
+      },
+    }),
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  t.after(() => cdp.close());
+
+  await assert.rejects(
+    () => cdp.evaluate("x()"),
+    (err) => {
+      assert.match(err.message, /study st1 not found/, "the thrown message must survive");
+      assert.ok(!err.message.includes("tok123"), "must not leak query tokens");
+      assert.ok(!err.message.includes("internal.corp"), "must not leak stack-frame URLs");
+      assert.ok(!err.message.includes("pw@"), "must not leak credentials");
+      return true;
+    },
+  );
+});
+
 test("fails clearly when no chart page target exists", async (t) => {
   const mock = await startMockCdp({
     targets: [

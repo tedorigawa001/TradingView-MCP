@@ -323,6 +323,27 @@ test("exposes exactly the twenty-four expected tools", async () => {
   );
 });
 
+test("tool errors are redacted before reaching the MCP client", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getOhlcv: async () => {
+          throw new Error(
+            "fetch failed for http://admin:hunter2@10.0.0.5:9222/json?token=abc123 while connecting",
+          );
+        },
+      },
+    }),
+  );
+  const res = await client.callTool({ name: "get_ohlcv", arguments: {} });
+  assert.equal(res.isError, true);
+  const text = res.content[0].text;
+  assert.ok(!text.includes("hunter2"), "must not leak URL credentials");
+  assert.ok(!text.includes("token=abc123"), "must not leak query tokens");
+  assert.ok(text.includes("fetch failed"), "the error must stay recognizable");
+  assert.ok(text.includes("while connecting"), "text after the URL must survive");
+});
+
 test("get_mtf_overview forwards symbols, timeframes and fields", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({
