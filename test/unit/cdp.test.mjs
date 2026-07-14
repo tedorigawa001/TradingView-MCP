@@ -209,7 +209,11 @@ test("a closing socket only rejects its own in-flight requests", async (t) => {
   t.after(() => cdp.close());
 
   const hanging = cdp.evaluate("hang");
-  await new Promise((r) => setTimeout(r, 50));
+  const receivedDeadline = Date.now() + 2_000;
+  while (!mock.state.received.some((msg) => msg.params?.expression === "hang")) {
+    if (Date.now() >= receivedDeadline) assert.fail("hanging command was not received before the deadline");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   cdp.close(); // drops socket 1 — must reject only the hanging call
 
   const [hangResult, fresh] = await Promise.all([

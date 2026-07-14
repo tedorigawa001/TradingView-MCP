@@ -275,6 +275,81 @@ function makeDeps(overrides = {}) {
       }),
       ...overrides.calendar,
     },
+    cot: {
+      getLatest: async (symbol) => ({
+        symbol,
+        report_date: "2026-07-07T00:00:00.000Z",
+        positions: [],
+        positioning_features: { point_in_time_status: "blocked", groups: [] },
+      }),
+      getHistory: async (symbol, weeks) => ({
+        symbol,
+        requested_weeks: weeks,
+        observations: Array.from({ length: weeks }, (_, index) => ({
+          symbol,
+          report_date: `2026-07-${String(7 - index).padStart(2, "0")}T00:00:00.000Z`,
+          positions: [],
+        })),
+        positioning_features: { point_in_time_status: "blocked", groups: [] },
+        cache_status: "miss",
+      }),
+      ...overrides.cot,
+    },
+    realYield: {
+      getLatest: async () => ({
+        schema_version: "1.1",
+        status: "partial",
+        series: "US_TREASURY_PAR_REAL_CMT_10Y",
+        observation_date: "2026-07-13",
+        value: 2.01,
+        value_status: "valid",
+        unit: "percent_per_annum_bond_equivalent",
+        source: "us_treasury",
+        source_url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/",
+        observed_at: "2026-07-14T01:00:00.000Z",
+        source_at: null,
+        available_at: null,
+        available_at_basis: "unavailable",
+        first_seen_at: null,
+        source_updated_at_raw: "2026-07-14T00:30:00Z",
+        latency_class: "end_of_day",
+        revision_status: "unknown",
+        freshness_weekdays: 1,
+        freshness_status: "fresh",
+        point_in_time_status: "blocked",
+        as_of: null,
+        quality_issues: ["publication_time_unavailable"],
+        cache_status: "miss",
+        source_error: null,
+      }),
+      getAsOf: async (asOf) => ({
+        schema_version: "1.1",
+        status: "partial",
+        series: "US_TREASURY_PAR_REAL_CMT_10Y",
+        observation_date: "2026-07-10",
+        value: 1.98,
+        value_status: "valid",
+        unit: "percent_per_annum_bond_equivalent",
+        source: "us_treasury",
+        source_url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/",
+        observed_at: "2026-07-11T01:00:00.000Z",
+        source_at: null,
+        available_at: "2026-07-11T01:00:00.000Z",
+        available_at_basis: "local_first_seen",
+        first_seen_at: "2026-07-11T01:00:00.000Z",
+        source_updated_at_raw: "2026-07-11T00:30:00Z",
+        latency_class: "end_of_day",
+        revision_status: "first_seen_tracked",
+        freshness_weekdays: 1,
+        freshness_status: "fresh",
+        point_in_time_status: "observed_first_seen",
+        as_of: asOf.toISOString(),
+        quality_issues: ["publication_time_unavailable"],
+        cache_status: "not_applicable",
+        source_error: null,
+      }),
+      ...overrides.realYield,
+    },
   };
 }
 
@@ -289,13 +364,18 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the twenty-four expected tools", async () => {
+test("exposes exactly the thirty-two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     [
       "add_pine_to_chart",
+      "audit_pine_indicator",
+      "compare_indicator_observations",
+      "compute_market_features",
+      "compute_round_trip_cost",
+      "get_aligned_history",
       "get_chart_context",
       "get_chart_screenshot",
       "get_economic_events",
@@ -304,10 +384,13 @@ test("exposes exactly the twenty-four expected tools", async () => {
       "get_indicator_tables",
       "get_indicator_values",
       "get_key_levels",
+      "get_market_snapshot",
       "get_mtf_overview",
       "get_ohlcv",
       "get_pine_source",
+      "get_positioning_context",
       "get_quotes",
+      "get_real_yield_context",
       "get_strategy_report",
       "get_watchlist",
       "list_alerts",
@@ -355,6 +438,108 @@ test("get_mtf_overview forwards symbols, timeframes and fields", async () => {
   assert.equal(jpy.symbol, "OANDA:USDJPY");
   assert.deepEqual(Object.keys(eur.timeframes), ["60", "1D"]);
   assert.deepEqual(eur.timeframes["60"].fields, ["RSI"]);
+});
+
+test("get_aligned_history aligns closed bars without forward filling", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "test",
+          activeChartIndex: 0,
+          chartsCount: 2,
+          charts: [
+            { index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] },
+            { index: 1, symbol: "TVC:DXY", resolution: "60", studies: [] },
+          ],
+        }),
+        getOhlcv: async (_count, chartIndex) => ({
+          symbol: chartIndex === 0 ? "OANDA:EURUSD" : "TVC:DXY",
+          resolution: "60",
+          count: 3,
+          bars: [
+            { time: 100, timeIso: "1970-01-01T00:01:40.000Z", open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 },
+            { time: 200, timeIso: "1970-01-01T00:03:20.000Z", open: 2, high: 3, low: 1.5, close: 2.5, volume: 200 },
+            { time: 300, timeIso: "1970-01-01T00:05:00.000Z", open: 3, high: 4, low: 2.5, close: 3.5, volume: 300, ...(chartIndex === 0 ? { forming: true } : {}) },
+          ],
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({ name: "get_aligned_history", arguments: { count: 10 } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "blocked", "the DXY bar at 300 cannot be forward-filled onto EURUSD");
+  assert.equal(parsed.alignment_policy, "exact_utc_timestamp_no_forward_fill");
+  assert.equal(parsed.observations.length, 2);
+  assert.equal(parsed.observations[0].bars.length, 2);
+  assert.equal(parsed.forming_bars_excluded["0"], 1);
+});
+
+test("audit_pine_indicator identifies repaint-prone source constructs", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getPineSource: async () => ({
+          pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f",
+          version: "5",
+          name: "Risky",
+          kind: "study",
+          updated: null,
+          sourceLength: 150,
+          source: "//@version=5\nvarip float x = na\nh = request.security(syminfo.tickerid, 'D', high)\np = ta.pivothigh(high, 2, 2)\nplot(timenow)",
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({
+    name: "audit_pine_indicator",
+    arguments: { pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f" },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "restricted");
+  assert.equal(parsed.uses_request_security, true);
+  assert.equal(parsed.uses_pivots, true);
+  assert.equal(parsed.uses_varip, true);
+  assert.equal(parsed.uses_timenow, true);
+  assert.equal(parsed.restart_diff_checked, false);
+});
+
+test("compare_indicator_observations exposes restart differences without persistence", async () => {
+  const client = await connectedClient(makeDeps());
+  const before = { study_id: "st1", symbol: "OANDA:EURUSD", resolution: "60", bars: [{ time: 1, values: { Signal: 1 } }] };
+  const res = await client.callTool({ name: "compare_indicator_observations", arguments: { before, after: { ...before, bars: [{ time: 1, values: { Signal: 2 } }] } } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "changed");
+  assert.equal(parsed.changed_values[0].plot, "Signal");
+});
+
+test("compute_market_features returns deterministic return, volatility, ATR, and correlations", async () => {
+  const client = await connectedClient(makeDeps());
+  const observations = [100, 101, 102, 103].map((close, index) => ({
+    time: index,
+    bars: [
+      { symbol: "OANDA:EURUSD", open: close - 0.5, high: close + 1, low: close - 1, close },
+      { symbol: "TVC:DXY", open: 200 + index * index, high: 201 + index * index, low: 199 + index * index, close: 200 + index * index },
+    ],
+  }));
+  const res = await client.callTool({
+    name: "compute_market_features",
+    arguments: { primary_symbol: "OANDA:EURUSD", window: 3, observations },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "ok");
+  assert.equal(parsed.observations_used, 4);
+  assert.ok(parsed.return_log > 0);
+  assert.ok(parsed.atr > 0);
+  assert.ok(parsed.correlations["TVC:DXY"] < 0);
+});
+
+test("compute_round_trip_cost exposes explicit execution assumptions", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "compute_round_trip_cost", arguments: { symbol: "OANDA:EURUSD", bid: 1.1, ask: 1.1002, quantity: 100000, slippage_pips_per_side: 0.5 } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.ok(Math.abs(parsed.spread_pips - 2) < 1e-12);
+  assert.equal(parsed.slippage_pips_round_trip, 1);
 });
 
 test("get_key_levels forwards options with defaults applied", async () => {
@@ -538,6 +723,284 @@ test("get_quotes forwards symbols and columns", async () => {
   assert.deepEqual(parsed.rows[0].values.columns, ["close", "RSI"]);
 });
 
+test("get_market_snapshot joins sources and exposes timestamp/data-quality limits", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_market_snapshot",
+    arguments: {
+      symbols: ["OANDA:EURUSD"],
+      auxiliary_symbols: ["TVC:DXY"],
+      timeframes: ["60", "1D"],
+      fields: ["RSI"],
+      required_quote_fields: ["close"],
+      include_events: true,
+      countries: ["US"],
+      min_importance: "high",
+    },
+  });
+  assert.equal(res.isError, undefined);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.schema_version, "1.0");
+  assert.match(parsed.snapshot_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(parsed.status, "partial", "receipt time is not a common market-data timestamp");
+  assert.equal(parsed.data_use.automated_trading_decision, "not_permitted");
+  assert.deepEqual(parsed.requested_symbols, ["OANDA:EURUSD", "TVC:DXY"]);
+  assert.deepEqual(parsed.required_symbols, ["OANDA:EURUSD"]);
+  assert.equal(parsed.quotes.length, 2);
+  assert.equal(parsed.normalized_quotes[0].spread_status, "unavailable");
+  assert.deepEqual(Object.keys(parsed.mtf_overview[0].timeframes), ["60", "1D"]);
+  assert.equal(parsed.economic_events.events[0].title, "FOMC Minutes");
+  assert.equal(parsed.quality_issues[0].code, "source_timestamp_unavailable");
+  assert.equal(parsed.max_source_skew_ms, null, "source timestamps are unavailable");
+  assert.equal(typeof parsed.max_receipt_skew_ms, "number");
+});
+
+test("get_positioning_context exposes delayed COT data with limitations", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_positioning_context", arguments: { symbol: "OANDA:EURUSD" } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.schema_version, "1.1");
+  assert.equal(parsed.status, "partial");
+  assert.equal(parsed.schema_version, "1.1");
+  assert.equal(parsed.cot.symbol, "OANDA:EURUSD");
+  assert.equal(parsed.cot.positioning_features.point_in_time_status, "blocked");
+  assert.match(parsed.limitations[0], /weekly/);
+});
+
+test("get_real_yield_context exposes official daily macro context", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_real_yield_context", arguments: {} });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.status, "partial");
+  assert.equal(parsed.series, "US_TREASURY_PAR_REAL_CMT_10Y");
+  assert.equal(parsed.value, 2.01);
+  assert.equal(parsed.available_at, null);
+  assert.equal(parsed.point_in_time_status, "blocked");
+  assert.deepEqual(res.structuredContent, parsed);
+});
+
+test("get_real_yield_context forwards an as_of cutoff to persisted history", async () => {
+  let receivedAsOf = null;
+  const client = await connectedClient(makeDeps({
+    realYield: {
+      getAsOf: async (asOf) => {
+        receivedAsOf = asOf;
+        return {
+          schema_version: "1.1",
+          status: "partial",
+          series: "US_TREASURY_PAR_REAL_CMT_10Y",
+          observation_date: "2026-07-10",
+          value: 1.98,
+          value_status: "valid",
+          unit: "percent_per_annum_bond_equivalent",
+          source: "us_treasury",
+          source_url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/",
+          observed_at: "2026-07-11T01:00:00.000Z",
+          source_at: null,
+          available_at: "2026-07-11T01:00:00.000Z",
+          available_at_basis: "local_first_seen",
+          first_seen_at: "2026-07-11T01:00:00.000Z",
+          source_updated_at_raw: "2026-07-11T00:30:00Z",
+          latency_class: "end_of_day",
+          revision_status: "first_seen_tracked",
+          freshness_weekdays: 1,
+          freshness_status: "fresh",
+          point_in_time_status: "observed_first_seen",
+          as_of: asOf.toISOString(),
+          quality_issues: ["publication_time_unavailable"],
+          cache_status: "not_applicable",
+          source_error: null,
+        };
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "get_real_yield_context",
+    arguments: { as_of: "2026-07-12T00:00:00.000Z" },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(receivedAsOf.toISOString(), "2026-07-12T00:00:00.000Z");
+  assert.equal(parsed.observation_date, "2026-07-10");
+  assert.equal(parsed.available_at_basis, "local_first_seen");
+  assert.equal(parsed.point_in_time_status, "observed_first_seen");
+  assert.deepEqual(res.structuredContent, parsed);
+});
+
+test("get_real_yield_context fails closed when Treasury is unavailable", async () => {
+  const client = await connectedClient(makeDeps({
+    realYield: { getLatest: async () => { throw new Error("Treasury unavailable"); } },
+  }));
+  const res = await client.callTool({ name: "get_real_yield_context", arguments: {} });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.status, "unavailable");
+  assert.equal(parsed.observation_date, null);
+  assert.equal(parsed.value, null);
+  assert.equal(parsed.value_status, "unavailable");
+  assert.equal(parsed.unit, "percent_per_annum_bond_equivalent");
+  assert.equal(parsed.source_at, null);
+  assert.equal(parsed.first_seen_at, null);
+  assert.equal(parsed.freshness_weekdays, null);
+  assert.equal(parsed.freshness_status, "unavailable");
+  assert.equal(parsed.quality_issues[0], "source_request_failed");
+});
+
+test("get_positioning_context exposes requested COT history", async () => {
+  let requestedWeeks = null;
+  const client = await connectedClient(makeDeps({
+    cot: {
+      getHistory: async (symbol, weeks) => {
+        requestedWeeks = weeks;
+        return {
+          symbol,
+          requested_weeks: weeks,
+          observations: [
+            { symbol, report_date: "2026-07-07T00:00:00.000Z", positions: [] },
+            { symbol, report_date: "2026-06-30T00:00:00.000Z", positions: [] },
+          ],
+          cache_status: "miss",
+        };
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "get_positioning_context",
+    arguments: { symbol: "OANDA:EURUSD", weeks: 2 },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(requestedWeeks, 2);
+  assert.equal(parsed.as_of, "2026-07-07T00:00:00.000Z");
+  assert.equal(parsed.cot.observations.length, 2);
+});
+
+test("get_positioning_context treats an explicit one week request as history", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "get_positioning_context",
+    arguments: { symbol: "OANDA:EURUSD", weeks: 1 },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.cot.requested_weeks, 1);
+  assert.equal(parsed.cot.observations.length, 1);
+});
+
+test("get_market_snapshot blocks required quote gaps but preserves the evidence", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      scanner: {
+        getQuotes: async () => ({
+          totalCount: 1,
+          returned: 1,
+          rows: [{ symbol: "OANDA:EURUSD", values: { close: null } }],
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({
+    name: "get_market_snapshot",
+    arguments: { symbols: ["OANDA:EURUSD"], required_quote_fields: ["close"] },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "required_quote_field_invalid"));
+  assert.equal(parsed.quotes[0].values.close, null);
+});
+
+test("get_market_snapshot blocks a crossed bid/ask quote and reports source timing", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      scanner: {
+        getQuotes: async () => ({
+          totalCount: 1,
+          returned: 1,
+          rows: [{ symbol: "OANDA:EURUSD", values: { bid: 1.2, ask: 1.1 } }],
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({
+    name: "get_market_snapshot",
+    arguments: { symbols: ["OANDA:EURUSD"], required_quote_fields: ["bid", "ask"] },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "bid_ask_inverted"));
+  assert.equal(parsed.sources[0].status, "ok");
+  assert.equal(typeof parsed.sources[0].latency_ms, "number");
+  assert.equal(parsed.normalized_quotes[0].spread_status, "bid_ask_incomplete");
+});
+
+test("get_market_snapshot derives mid and spread from a valid bid/ask pair", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      scanner: {
+        getQuotes: async () => ({
+          totalCount: 1,
+          returned: 1,
+          rows: [{ symbol: "OANDA:EURUSD", values: { bid: 1.1, ask: 1.1002 } }],
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({
+    name: "get_market_snapshot",
+    arguments: { symbols: ["OANDA:EURUSD"], required_quote_fields: ["bid", "ask"] },
+  });
+  const quote = JSON.parse(res.content[0].text).normalized_quotes[0];
+  assert.equal(quote.spread_status, "derived_from_bid_ask");
+  assert.equal(quote.mid, 1.1001);
+  assert.ok(Math.abs(quote.spread_price - 0.0002) < 1e-12);
+  assert.equal(quote.pip_size, 0.0001);
+  assert.equal(quote.tick_size, 0.00001);
+  assert.ok(Math.abs(quote.spread_pips - 2) < 1e-12);
+});
+
+test("get_market_snapshot rejects an MTF column combination before it reaches the scanner", async () => {
+  let scannerCalled = false;
+  const client = await connectedClient(
+    makeDeps({
+      scanner: {
+        getQuotes: async () => ((scannerCalled = true), {}),
+        getMtfOverview: async () => ((scannerCalled = true), []),
+      },
+    }),
+  );
+  const res = await client.callTool({
+    name: "get_market_snapshot",
+    arguments: { symbols: ["OANDA:EURUSD"], timeframes: ["1", "5", "15", "30", "60", "240"] },
+  });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /too many MTF columns/);
+  assert.equal(scannerCalled, false);
+});
+
+test("get_market_snapshot blocks duplicate required quotes and drops unexpected rows", async () => {
+  const client = await connectedClient(
+    makeDeps({
+      scanner: {
+        getQuotes: async () => ({
+          totalCount: 3,
+          returned: 3,
+          rows: [
+            { symbol: "OANDA:EURUSD", values: { close: 1.1 } },
+            { symbol: "OANDA:EURUSD", values: { close: 1.2 } },
+            { symbol: "OANDA:USDJPY", values: { close: 150 } },
+          ],
+        }),
+      },
+    }),
+  );
+  const res = await client.callTool({ name: "get_market_snapshot", arguments: { symbols: ["OANDA:EURUSD"] } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.deepEqual(parsed.returned_symbols, ["OANDA:EURUSD"]);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "duplicate_required_quote"));
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "unexpected_quote_symbol"));
+});
+
 test("scan_market forwards options under scanner names", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({
@@ -695,6 +1158,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "set_indicator_input", arguments: { study_id: "st1", inputs: [{ id: "in_0", value: { nested: true } }] } },
     { name: "get_quotes", arguments: { symbols: [] } },
     { name: "get_quotes", arguments: { symbols: ["bad ticker!"] } },
+    { name: "get_market_snapshot", arguments: {} },
+    { name: "get_market_snapshot", arguments: { symbols: [] } },
+    { name: "get_market_snapshot", arguments: { symbols: ["bad ticker!"] } },
+    { name: "get_market_snapshot", arguments: { symbols: ["OANDA:EURUSD"], timeframes: ["7"] } },
+    { name: "get_market_snapshot", arguments: { symbols: ["OANDA:EURUSD"], fields: Array(9).fill("RSI") } },
     { name: "scan_market", arguments: { market: "JAPAN/../x" } },
     { name: "scan_market", arguments: { market: "japan", filters: [{ field: "RSI", operation: "drop" }] } },
     { name: "scan_market", arguments: { market: "japan", limit: 101 } },

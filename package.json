@@ -14,6 +14,8 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node build/index.js",
+    "evaluate": "node build/evaluate.js",
+    "walk-forward": "node build/walkForwardCli.js",
     "pretest": "npm run build",
     "test": "node --test test/unit/*.test.mjs",
     "test:integration": "node test/smoke.mjs"
@@ -24,6 +26,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-xml-parser": "^5.10.0",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },

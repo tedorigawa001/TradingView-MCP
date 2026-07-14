@@ -4,14 +4,21 @@ import { CdpClient } from "./cdp.js";
 import { TradingView } from "./tradingview.js";
 import { Scanner } from "./scanner.js";
 import { EconomicCalendar } from "./calendar.js";
+import { CotClient } from "./cot.js";
+import { TreasuryRealYieldClient } from "./realYield.js";
+import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
 import { createServer } from "./server.js";
 
 const cdp = new CdpClient();
+const realYieldHistoryPath = resolveRealYieldHistoryPath();
+const realYieldHistory = new RealYieldFirstSeenStore(realYieldHistoryPath);
 const server = createServer({
   cdp,
   tv: new TradingView(cdp),
   scanner: new Scanner(),
   calendar: new EconomicCalendar(),
+  cot: new CotClient(),
+  realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldHistory),
 });
 
 const transport = new StdioServerTransport();
