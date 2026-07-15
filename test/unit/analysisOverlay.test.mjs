@@ -77,6 +77,22 @@ test("validateAnalysisPayload enforces directional levels and marks expiry", () 
   assert.throws(
     () =>
       validateAnalysisPayload(
+        { ...bullish, targets: [162.85, 162.6] },
+        new Date("2026-07-15T11:00:00.000Z"),
+      ),
+    /bullish targets must be strictly increasing/,
+  );
+  assert.throws(
+    () =>
+      validateAnalysisPayload(
+        { ...bullish, stop: 162.2 },
+        new Date("2026-07-15T11:00:00.000Z"),
+      ),
+    /bullish stop must be below invalidation/,
+  );
+  assert.throws(
+    () =>
+      validateAnalysisPayload(
         {
           ...bullish,
           bias: "bearish",
@@ -90,6 +106,23 @@ test("validateAnalysisPayload enforces directional levels and marks expiry", () 
         new Date("2026-07-15T11:00:00.000Z"),
       ),
     /bearish confirmation must be below entry_low/,
+  );
+  assert.throws(
+    () =>
+      validateAnalysisPayload(
+        {
+          ...bullish,
+          bias: "bearish",
+          entryLow: 1.141,
+          entryHigh: 1.142,
+          confirmation: 1.14,
+          invalidation: 1.143,
+          stop: 1.144,
+          targets: [1.137, 1.139],
+        },
+        new Date("2026-07-15T11:00:00.000Z"),
+      ),
+    /bearish targets must be strictly decreasing/,
   );
   assert.doesNotThrow(() =>
     validateAnalysisPayload(

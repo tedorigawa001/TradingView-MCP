@@ -193,6 +193,12 @@ export function validateAnalysisPayload(payload: AnalysisOverlayPayload, now = n
     if (payload.targets.some((target) => target <= payload.entryHigh)) {
       throw new Error("bullish targets must be above entry_high");
     }
+    if (payload.targets.some((target, index) => index > 0 && target <= payload.targets[index - 1])) {
+      throw new Error("bullish targets must be strictly increasing");
+    }
+    if (payload.stop >= payload.invalidation) {
+      throw new Error("bullish stop must be below invalidation");
+    }
     if (payload.confirmation !== undefined && payload.confirmation <= payload.entryHigh) {
       throw new Error("bullish confirmation must be above entry_high");
     }
@@ -203,6 +209,12 @@ export function validateAnalysisPayload(payload: AnalysisOverlayPayload, now = n
     }
     if (payload.targets.some((target) => target >= payload.entryLow)) {
       throw new Error("bearish targets must be below entry_low");
+    }
+    if (payload.targets.some((target, index) => index > 0 && target >= payload.targets[index - 1])) {
+      throw new Error("bearish targets must be strictly decreasing");
+    }
+    if (payload.stop <= payload.invalidation) {
+      throw new Error("bearish stop must be above invalidation");
     }
     if (payload.confirmation !== undefined && payload.confirmation >= payload.entryLow) {
       throw new Error("bearish confirmation must be below entry_low");

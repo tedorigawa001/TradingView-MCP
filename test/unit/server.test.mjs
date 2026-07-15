@@ -394,7 +394,7 @@ function overlayStudy(id, values = {}) {
   };
 }
 
-test("exposes exactly the thirty-seven expected tools", async () => {
+test("exposes exactly the thirty-eight expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -407,6 +407,7 @@ test("exposes exactly the thirty-seven expected tools", async () => {
       "compute_market_features",
       "compute_round_trip_cost",
       "ensure_analysis_overlay",
+      "evaluate_analysis_overlay_outcome",
       "get_aligned_history",
       "get_analysis_overlay_status",
       "get_analysis_overlay_template",
@@ -1369,6 +1370,106 @@ test("get_analysis_overlay_status blocks inputs that violate the analysis contra
   assert.equal(parsed.status, "blocked");
   assert.equal(parsed.trusted, false);
   assert.equal(parsed.reason, "inputs_violate_contract");
+});
+
+test("evaluate_analysis_overlay_outcome returns first-hit evidence from closed bars", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const analyzedAtMs = Date.now() - 60 * 60_000;
+  const expiresAtMs = Date.now() - 5 * 60_000;
+  const values = {
+    in_0: "USDJPY-outcome",
+    in_1: analyzedAtMs,
+    in_2: "bullish",
+    in_3: 162.1,
+    in_4: 162.2,
+    in_5: 0,
+    in_6: 161.95,
+    in_7: 161.9,
+    in_8: 162.6,
+    in_9: 162.8,
+    in_10: 0,
+    in_11: 0.6,
+    in_12: expiresAtMs,
+    in_13: "",
+  };
+  const makeBar = (timeMs, open, high, low, close, forming = false) => ({
+    time: timeMs / 1000,
+    timeIso: new Date(timeMs).toISOString(),
+    open,
+    high,
+    low,
+    close,
+    volume: null,
+    ...(forming ? { forming: true } : {}),
+  });
+  let requestedCount = null;
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "FX",
+          activeChartIndex: 0,
+          chartsCount: 1,
+          charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "15", studies: [] }],
+        }),
+        listPineScripts: async () => [
+          {
+            pineId,
+            name: ANALYSIS_OVERLAY_NAME,
+            kind: "study",
+            version: "2.0",
+            usedBy: [
+              {
+                chartIndex: 0,
+                studyId: "overlay2",
+                name: ANALYSIS_OVERLAY_NAME,
+                version: "2.0",
+              },
+            ],
+          },
+        ],
+        getPineSource: async () => ({
+          pineId,
+          name: ANALYSIS_OVERLAY_NAME,
+          kind: "study",
+          version: "2.0",
+          updated: null,
+          sourceLength: ANALYSIS_OVERLAY_SOURCE.length,
+          source: ANALYSIS_OVERLAY_SOURCE,
+        }),
+        getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+        getOhlcv: async (count) => {
+          requestedCount = count;
+          return {
+            symbol: "OANDA:USDJPY",
+            resolution: "15",
+            count: 4,
+            bars: [
+              makeBar(analyzedAtMs - 5 * 60_000, 162.3, 162.7, 161.8, 162.3),
+              makeBar(analyzedAtMs + 10 * 60_000, 162.3, 162.35, 162.15, 162.25),
+              makeBar(analyzedAtMs + 25 * 60_000, 162.25, 162.65, 162.22, 162.55),
+              makeBar(analyzedAtMs + 40 * 60_000, 162.55, 162.9, 162.5, 162.8, true),
+            ],
+          };
+        },
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: pineId,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "15",
+      count: 500,
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(requestedCount, 500);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.outcome, "target_before_stop");
+  assert.equal(parsed.terminal.targetIndex, 1);
+  assert.equal(parsed.source.formingBarsExcluded, 1);
 });
 
 test("get_analysis_overlay_status reports missing and blocks unaudited placed source", async () => {

@@ -32,6 +32,7 @@ import {
   resolveAnalysisChart,
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
+import { evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -1262,6 +1263,177 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
             observed: graphics,
           },
           qualityIssues,
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "evaluate_analysis_overlay_outcome",
+    {
+      description:
+        "Evaluate the first confirmed Target-versus-Stop outcome of an audited Bushido " +
+        "Analysis Overlay using only loaded, closed OHLCV bars after the analysis time. " +
+        "The analysis-containing bar and forming bars are excluded. Entry must precede an " +
+        "optional confirmation; invalidation reached before confirmation cancels the setup. " +
+        "Same-bar ordering, gaps and incomplete history are reported as ambiguous or incomplete " +
+        "rather than guessed. Calendar-month charts are not evaluable because their duration " +
+        "varies. Read-only; call load_more_history first when history coverage is incomplete.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Saved Bushido Analysis Overlay id from list_pine_scripts"),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .optional()
+          .describe("Most recent loaded bars to inspect. Default: 1000"),
+      },
+    },
+    async ({ pine_id, chart_index, expected_symbol, expected_timeframe, count }) => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(
+          context,
+          chart_index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script) throw new Error(`${pine_id} is not one of the user's saved Pine scripts`);
+        if (script.name !== ANALYSIS_OVERLAY_NAME || script.kind !== "study") {
+          throw new Error(`${pine_id} is not the ${ANALYSIS_OVERLAY_NAME} study`);
+        }
+        const usages = script.usedBy.filter((usage) => usage.chartIndex === chart.index);
+        if (usages.length === 0) {
+          return jsonResult({
+            status: "not_installed",
+            outcome: "not_evaluable",
+            trusted: false,
+            pineId: pine_id,
+            chartIndex: chart.index,
+            remediation: "call ensure_analysis_overlay",
+          });
+        }
+        if (usages.length > 1) {
+          return jsonResult({
+            status: "ambiguous",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "multiple_overlay_instances",
+            pineId: pine_id,
+            chartIndex: chart.index,
+            usages,
+            remediation: "call ensure_analysis_overlay or remove_owned_study",
+          });
+        }
+        const usage = usages[0];
+        if (!usage.version) {
+          return jsonResult({
+            status: "blocked",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "on_chart_pine_version_unavailable",
+            pineId: pine_id,
+            studyId: usage.studyId,
+          });
+        }
+        const placedSource = await tv.getPineSource(pine_id, usage.version);
+        const normalizeSource = (source: string) => source.replace(/\r\n/g, "\n");
+        if (normalizeSource(placedSource.source) !== normalizeSource(ANALYSIS_OVERLAY_SOURCE)) {
+          return jsonResult({
+            status: "blocked",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "on_chart_source_does_not_match_audited_template",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            remediation: "save the template and call ensure_analysis_overlay",
+          });
+        }
+        const inputResult = await tv.getIndicatorInputs({
+          studyId: usage.studyId,
+          chartIndex: chart.index,
+        });
+        let analysis: ReturnType<typeof parseAnalysisOverlayState>;
+        try {
+          const study = assertAnalysisOverlayStudy(inputResult, usage.studyId);
+          analysis = parseAnalysisOverlayState(study);
+        } catch (err) {
+          return jsonResult({
+            status: "blocked",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "inputs_violate_contract",
+            detail: err instanceof Error ? err.message : "overlay inputs are invalid",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+          });
+        }
+        if (
+          analysis.analysisId.trim().toLowerCase() === ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID ||
+          analysis.analyzedAt === ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT
+        ) {
+          return jsonResult({
+            status: "unconfigured",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "default_analysis_inputs",
+            pineId: pine_id,
+            studyId: usage.studyId,
+            remediation: "call apply_analysis_overlay with a real analysis",
+          });
+        }
+
+        const history = await tv.getOhlcv(count ?? 1000, chart.index);
+        resolveAnalysisChart(
+          await tv.getChartContext(),
+          chart.index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const result = evaluateAnalysisOverlayOutcome(
+          analysis,
+          history.bars,
+          history.resolution,
+        );
+        return jsonResult({
+          ...result,
+          trusted: true,
+          pineId: pine_id,
+          pineVersion: usage.version,
+          studyId: usage.studyId,
+          chartIndex: chart.index,
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+          source: {
+            kind: "active_chart_loaded_closed_ohlcv",
+            requestedBars: count ?? 1000,
+            returnedBars: history.bars.length,
+            formingBarsExcluded: history.bars.filter((bar) => bar.forming === true).length,
+          },
+          ...(result.status === "incomplete"
+            ? {
+                remediation:
+                  result.outcome === "no_closed_bars_in_evaluation_window"
+                    ? "use a shorter chart timeframe that has closed bars inside the analysis window"
+                    : "call load_more_history, then evaluate again",
+              }
+            : {}),
+          ...(result.outcome === "calendar_month_resolution_unsupported"
+            ? { remediation: "use an intraday, daily, or weekly chart timeframe" }
+            : {}),
         });
       } catch (err) {
         return errorResult(err);
