@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../build/server.js";
+import { ANALYSIS_OVERLAY_INPUTS, ANALYSIS_OVERLAY_NAME } from "../../build/analysisOverlay.js";
 
 function makeDeps(overrides = {}) {
   return {
@@ -364,18 +365,20 @@ async function connectedClient(deps) {
   return client;
 }
 
-test("exposes exactly the thirty-two expected tools", async () => {
+test("exposes exactly the thirty-four expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     [
       "add_pine_to_chart",
+      "apply_analysis_overlay",
       "audit_pine_indicator",
       "compare_indicator_observations",
       "compute_market_features",
       "compute_round_trip_cost",
       "get_aligned_history",
+      "get_analysis_overlay_template",
       "get_chart_context",
       "get_chart_screenshot",
       "get_economic_events",
@@ -672,6 +675,162 @@ test("add_pine_to_chart and get_pine_source version forward correctly", async ()
     arguments: { pine_id: "USER;adc40b1dfee344f19412f1ae9af74f3f", version: "2" },
   });
   assert.equal(JSON.parse(res2.content[0].text).version, "2");
+});
+
+test("get_analysis_overlay_template returns the fixed Pine source", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_analysis_overlay_template", arguments: {} });
+  const template = JSON.parse(res.content[0].text);
+  assert.equal(template.name, ANALYSIS_OVERLAY_NAME);
+  assert.match(template.source, /entryBox := box\.new/);
+  assert.equal(template.inputContract.length, 14);
+});
+
+test("apply_analysis_overlay is a dry run by default and verifies after confirmation", async () => {
+  let values = Object.fromEntries(ANALYSIS_OVERLAY_INPUTS.map((input) => [input.id, 0]));
+  let writes = 0;
+  const overlayInputs = () => [
+    {
+      id: "overlay1",
+      name: ANALYSIS_OVERLAY_NAME,
+      title: ANALYSIS_OVERLAY_NAME,
+      inputs: ANALYSIS_OVERLAY_INPUTS.map((input) => ({
+        id: input.id,
+        name: input.name,
+        type: typeof values[input.id],
+        value: values[input.id],
+        defval: 0,
+        tooltip: null,
+      })),
+    },
+  ];
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "FX",
+          activeChartIndex: 0,
+          chartsCount: 1,
+          charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+        }),
+        getIndicatorInputs: async () => overlayInputs(),
+        setIndicatorInput: async (studyId, inputs, options) => {
+          writes += 1;
+          values = { ...values, ...Object.fromEntries(inputs.map((input) => [input.id, input.value])) };
+          return { studyId, applied: inputs, options, settled: true };
+        },
+        getIndicatorGraphics: async () => [
+          {
+            id: "overlay1",
+            name: ANALYSIS_OVERLAY_NAME,
+            totals: { labels: 1, lines: 5, boxes: 1 },
+            labels: [],
+            lines: [],
+            boxes: [],
+          },
+        ],
+      },
+    }),
+  );
+  const args = {
+    study_id: "overlay1",
+    expected_symbol: "OANDA:USDJPY",
+    expected_timeframe: "4H",
+    analysis_id: "USDJPY-20260715-1930",
+    analyzed_at: new Date(Date.now() - 60_000).toISOString(),
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+    bias: "bullish",
+    entry_low: 162.28,
+    entry_high: 162.35,
+    confirmation: 162.43,
+    invalidation: 162.18,
+    stop: 162.15,
+    targets: [162.6, 162.85],
+    confidence: 0.72,
+    note: "PPI risk",
+  };
+  const dry = await client.callTool({ name: "apply_analysis_overlay", arguments: args });
+  assert.equal(JSON.parse(dry.content[0].text).dryRun, true);
+  assert.equal(writes, 0);
+
+  const live = await client.callTool({
+    name: "apply_analysis_overlay",
+    arguments: { ...args, confirm: true },
+  });
+  const applied = JSON.parse(live.content[0].text);
+  assert.equal(writes, 1);
+  assert.equal(applied.verified, true);
+  assert.deepEqual(applied.graphicsVerification, { labels: 1, lines: 5, boxes: 1 });
+});
+
+test("apply_analysis_overlay does not report verified when recalculation misses its deadline", async () => {
+  let values = Object.fromEntries(ANALYSIS_OVERLAY_INPUTS.map((input) => [input.id, 0]));
+  const overlayInputs = () => [
+    {
+      id: "overlay1",
+      name: ANALYSIS_OVERLAY_NAME,
+      title: ANALYSIS_OVERLAY_NAME,
+      inputs: ANALYSIS_OVERLAY_INPUTS.map((input) => ({
+        id: input.id,
+        name: input.name,
+        type: typeof values[input.id],
+        value: values[input.id],
+        defval: 0,
+        tooltip: null,
+      })),
+    },
+  ];
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "FX",
+          activeChartIndex: 0,
+          chartsCount: 1,
+          charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+        }),
+        getIndicatorInputs: async () => overlayInputs(),
+        setIndicatorInput: async (studyId, inputs) => {
+          values = { ...values, ...Object.fromEntries(inputs.map((input) => [input.id, input.value])) };
+          return { studyId, applied: inputs, settled: false, warning: "deadline hit" };
+        },
+        getIndicatorGraphics: async () => [
+          {
+            id: "overlay1",
+            name: ANALYSIS_OVERLAY_NAME,
+            totals: { labels: 1, lines: 5, boxes: 1 },
+            labels: [],
+            lines: [],
+            boxes: [],
+          },
+        ],
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "apply_analysis_overlay",
+    arguments: {
+      study_id: "overlay1",
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      analysis_id: "USDJPY-timeout",
+      analyzed_at: new Date(Date.now() - 60_000).toISOString(),
+      bias: "bullish",
+      entry_low: 162.24,
+      entry_high: 162.32,
+      confirmation: 162.44,
+      invalidation: 162.075,
+      stop: 162.04,
+      targets: [162.6],
+      confidence: 0.64,
+      confirm: true,
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.verified, false);
+  assert.equal(parsed.inputsVerified, true);
+  assert.equal(parsed.recalculationSettled, false);
+  assert.match(parsed.warnings.join(" "), /recalculation did not settle/);
 });
 
 test("get_strategy_report and run_backtest expose the strategy tester", async () => {

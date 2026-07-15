@@ -14,6 +14,7 @@
 - ✅ **#10 Pine ソース読み取り** — `list_pine_scripts`(saved 一覧+チャート上スタディとの pineId 突合 `usedBy`)/ `get_pine_source`(`USER;` ID 限定でソース原文)。PDCA の Plan 工程
 - ✅ **#8 バックテスト連携** — `run_backtest`(自作ストラテジーを一時適用→レポート取得→自動削除でチャート復元)/ `get_strategy_report`(チャート上のストラテジーのレポート読み取り。残留レポートの誤帰属ゲート付き)。PDCA の Check 工程。調査記録は [phase6-findings.md](phase6-findings.md)。リプレイ操作(replayApi)は未実装のまま将来課題
 - ✅ **#11 Pine ソース保存+チャート反映** — `save_pine_script`(初の書き込み系。confirm なしはドライラン、新規 or 新バージョンのみの非破壊設計、旧バージョンは `get_pine_source(pine_id, version)` で復元可)/ `add_pine_to_chart`(追加のみ、削除はしない)。**PDCA の Act 工程 — ループ完成**
+- ✅ **#15 分析結果のチャート反映** — `get_analysis_overlay_template`(固定・監査可能な汎用Pine)/`apply_analysis_overlay`(銘柄・時間足・専用入力契約を照合、confirm付き反映、入力+描画の読み戻し検証)。分析時刻・期限を固定し、期限切れは`EXPIRED`表示。注文・アラートとは非接続
 
 ## 優先度: 高
 

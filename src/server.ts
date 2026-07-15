@@ -18,6 +18,16 @@ import { compareIndicatorObservations } from "./indicatorAudit.js";
 import { getInstrumentMetadata } from "./instrumentMetadata.js";
 import { computeRoundTripCost } from "./costModel.js";
 import { redactSecrets } from "./redact.js";
+import {
+  ANALYSIS_OVERLAY_INPUTS,
+  ANALYSIS_OVERLAY_NAME,
+  ANALYSIS_OVERLAY_SOURCE,
+  ANALYSIS_OVERLAY_VERSION,
+  assertAnalysisOverlayStudy,
+  buildAnalysisOverlayInputs,
+  resolveAnalysisChart,
+  validateAnalysisPayload,
+} from "./analysisOverlay.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -685,6 +695,30 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
   );
 
   server.registerTool(
+    "get_analysis_overlay_template",
+    {
+      description:
+        "Get the audited generic Pine overlay used to render a structured market analysis " +
+        "(entry zone, confirmation, invalidation, stop, targets, confidence and expiry). " +
+        "Read-only: pass the returned source to save_pine_script, then add_pine_to_chart once; " +
+        "subsequent analyses should update that study with apply_analysis_overlay.",
+      inputSchema: {},
+    },
+    async () =>
+      jsonResult({
+        name: ANALYSIS_OVERLAY_NAME,
+        version: ANALYSIS_OVERLAY_VERSION,
+        source: ANALYSIS_OVERLAY_SOURCE,
+        inputContract: ANALYSIS_OVERLAY_INPUTS,
+        setup: [
+          "Save this source with save_pine_script (dry-run, then confirm).",
+          "Add the resulting pine_id once with add_pine_to_chart.",
+          "Use the returned study_id with apply_analysis_overlay.",
+        ],
+      }),
+  );
+
+  server.registerTool(
     "save_pine_script",
     {
       description:
@@ -756,6 +790,179 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
     async ({ pine_id, chart_index }) => {
       try {
         return jsonResult(await tv.addPineToChart(pine_id, chart_index));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "apply_analysis_overlay",
+    {
+      description:
+        "Preview or apply a structured market analysis to an existing Bushido Analysis " +
+        "Overlay study. The tool fails closed when the chart symbol, timeframe or overlay " +
+        "input contract does not match. Without confirm=true it is read-only and returns a " +
+        "preview. With confirm=true it changes only that overlay's inputs, then reads them " +
+        "and its drawing totals back for verification. It never places orders or alerts.",
+      inputSchema: {
+        study_id: z
+          .string()
+          .regex(/^[\w$]{1,64}$/)
+          .describe("Overlay study id returned by add_pine_to_chart or get_chart_context"),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA.describe(
+          "Exact symbol expected on the target chart, e.g. OANDA:USDJPY",
+        ),
+        expected_timeframe: z
+          .string()
+          .regex(/^[A-Za-z0-9]{1,8}$/)
+          .describe("Expected chart resolution, e.g. 15, 240, 4H or 1D"),
+        analysis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        analyzed_at: z.string().datetime({ offset: true }),
+        expires_at: z.string().datetime({ offset: true }).optional(),
+        bias: z.enum(["bullish", "bearish", "neutral"]),
+        entry_low: z.number().positive(),
+        entry_high: z.number().positive(),
+        confirmation: z.number().positive().optional(),
+        invalidation: z.number().positive(),
+        stop: z.number().positive(),
+        targets: z.array(z.number().positive()).min(1).max(3),
+        confidence: z.number().min(0).max(1),
+        note: z.string().max(160).optional(),
+        confirm: z
+          .boolean()
+          .optional()
+          .describe("Must be true to edit the live chart. Default: false = dry run"),
+      },
+    },
+    async ({
+      study_id,
+      chart_index,
+      expected_symbol,
+      expected_timeframe,
+      analysis_id,
+      analyzed_at,
+      expires_at,
+      bias,
+      entry_low,
+      entry_high,
+      confirmation,
+      invalidation,
+      stop,
+      targets,
+      confidence,
+      note,
+      confirm,
+    }) => {
+      try {
+        const analysis = {
+          analysisId: analysis_id,
+          analyzedAt: analyzed_at,
+          expiresAt: expires_at,
+          bias,
+          entryLow: entry_low,
+          entryHigh: entry_high,
+          confirmation,
+          invalidation,
+          stop,
+          targets,
+          confidence,
+          note,
+        };
+        const quality = validateAnalysisPayload(analysis);
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(
+          context,
+          chart_index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const resolvedChartIndex = chart.index;
+        const before = await tv.getIndicatorInputs({
+          studyId: study_id,
+          chartIndex: resolvedChartIndex,
+        });
+        assertAnalysisOverlayStudy(before, study_id);
+        const inputs = buildAnalysisOverlayInputs(analysis);
+        const preview = {
+          analysisId: analysis_id,
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+          studyId: study_id,
+          analyzedAt: analyzed_at,
+          expiresAt: expires_at ?? null,
+          stale: quality.stale,
+          bias,
+          entryZone: [entry_low, entry_high],
+          confirmation: confirmation ?? null,
+          invalidation,
+          stop,
+          targets,
+          confidence,
+          note: note ?? "",
+          warnings: quality.warnings,
+        };
+        if (confirm !== true) {
+          return jsonResult({
+            dryRun: true,
+            action: "apply_analysis_overlay",
+            preview,
+            confirmRequired: true,
+          });
+        }
+
+        const applied = await tv.setIndicatorInput(study_id, inputs, {
+          chartIndex: resolvedChartIndex,
+        });
+        const after = await tv.getIndicatorInputs({
+          studyId: study_id,
+          chartIndex: resolvedChartIndex,
+        });
+        const verifiedStudy = assertAnalysisOverlayStudy(after, study_id);
+        const observed = new Map(verifiedStudy.inputs.map((input) => [input.id, input.value]));
+        const inputVerification = inputs.map((input) => ({
+          id: input.id,
+          expected: input.value,
+          observed: observed.get(input.id) ?? null,
+          matches: observed.get(input.id) === input.value,
+        }));
+        const inputsVerified = inputVerification.every((item) => item.matches);
+        const recalculationSettled = applied.settled !== false;
+        if (!recalculationSettled) {
+          quality.warnings.push(
+            "overlay inputs were applied, but recalculation did not settle within the 20s " +
+              "deadline; drawing verification was skipped and dependent reads may be stale",
+          );
+        }
+
+        let graphicsVerification: unknown = null;
+        if (recalculationSettled) {
+          try {
+            const graphics = await tv.getIndicatorGraphics({
+              studyId: study_id,
+              chartIndex: resolvedChartIndex,
+              limitPerKind: 20,
+            });
+            graphicsVerification = graphics[0]?.totals ?? null;
+          } catch {
+            quality.warnings.push("overlay inputs were applied, but drawing verification was unavailable");
+          }
+        }
+
+        return jsonResult({
+          dryRun: false,
+          action: "apply_analysis_overlay",
+          applied: true,
+          verified: inputsVerified && recalculationSettled,
+          inputsVerified,
+          recalculationSettled,
+          preview,
+          inputVerification,
+          graphicsVerification,
+          operation: applied,
+          warnings: quality.warnings,
+        });
       } catch (err) {
         return errorResult(err);
       }
