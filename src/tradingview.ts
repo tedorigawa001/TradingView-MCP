@@ -213,6 +213,7 @@ export interface PineScriptUsage {
   chartIndex: number;
   studyId: string;
   name: string;
+  version: string | null;
 }
 
 export interface PineScript {
@@ -1245,8 +1246,14 @@ export class TradingView {
               try {
                 const vals = c.getStudyById(st.id).getInputValues();
                 const pid = (vals.find((v) => v.id === "pineId") || {}).value;
+                const version = (vals.find((v) => v.id === "pineVersion") || {}).value;
                 if (typeof pid === "string") {
-                  (usedBy[pid] = usedBy[pid] || []).push({ chartIndex: i, studyId: st.id, name: st.name });
+                  (usedBy[pid] = usedBy[pid] || []).push({
+                    chartIndex: i,
+                    studyId: st.id,
+                    name: st.name,
+                    version: typeof version === "string" ? version : null,
+                  });
                 }
               } catch (e) {}
             }
@@ -1472,7 +1479,13 @@ export class TradingView {
   addPineToChart(
     pineId: string,
     chartIndex?: number,
-  ): Promise<{ studyId: string; name: string | null; isStrategy: boolean; chartIndex: number | null }> {
+  ): Promise<{
+    studyId: string;
+    name: string | null;
+    isStrategy: boolean;
+    version: string | null;
+    chartIndex: number | null;
+  }> {
     if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
       throw new Error(
         `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
@@ -1504,6 +1517,68 @@ export class TradingView {
           studyId,
           name: meta ? meta.description ?? null : null,
           isStrategy: meta ? meta.isTVScriptStrategy === true : false,
+          version: meta && meta.pine ? meta.pine.version ?? null : null,
+          chartIndex: ${chartIndex === undefined ? "null" : chartIndex},
+        };
+      })()
+    `);
+  }
+
+  /** Remove one on-chart instance only after its hidden Pine id matches. */
+  removePineFromChart(
+    pineId: string,
+    studyId: string,
+    chartIndex?: number,
+  ): Promise<{
+    removed: true;
+    pineId: string;
+    pineVersion: string | null;
+    studyId: string;
+    name: string;
+    chartIndex: number | null;
+  }> {
+    if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
+      throw new Error(
+        `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
+      );
+    }
+    assertStudyId(studyId);
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
+    return this.cdp.evaluate(`
+      (async () => {
+        const api = window.TradingViewApi;
+        const chart = ${chartExpr};
+        const pineId = ${JSON.stringify(pineId)};
+        const studyId = ${JSON.stringify(studyId)};
+        const ref = chart.getAllStudies().find((study) => study.id === studyId);
+        if (!ref) throw new Error("study " + studyId + " not found; nothing was removed");
+        let values;
+        try {
+          values = chart.getStudyById(studyId).getInputValues();
+        } catch (e) {
+          throw new Error("cannot inspect study " + studyId + "; nothing was removed");
+        }
+        const actualPineId = (values.find((value) => value.id === "pineId") || {}).value;
+        const pineVersion = (values.find((value) => value.id === "pineVersion") || {}).value;
+        if (actualPineId !== pineId) {
+          throw new Error("study " + studyId + " does not belong to " + pineId + "; nothing was removed");
+        }
+        chart.removeEntity(studyId);
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && chart.getAllStudies().some((study) => study.id === studyId)) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (chart.getAllStudies().some((study) => study.id === studyId)) {
+          throw new Error("study removal did not settle within 5s");
+        }
+        return {
+          removed: true,
+          pineId,
+          pineVersion: typeof pineVersion === "string" ? pineVersion : null,
+          studyId,
+          name: ref.name,
           chartIndex: ${chartIndex === undefined ? "null" : chartIndex},
         };
       })()

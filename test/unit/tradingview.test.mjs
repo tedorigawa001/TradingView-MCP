@@ -438,6 +438,7 @@ test("listPineScripts fetches saved scripts read-only and cross-references chart
   assert.ok(expr.includes("https://pine-facade.tradingview.com/pine-facade/list/?filter=saved"));
   assert.ok(expr.includes('credentials: "include"'), "must use the logged-in session");
   assert.ok(expr.includes('v.id === "pineId"'), "must map scripts to on-chart studies");
+  assert.ok(expr.includes('v.id === "pineVersion"'), "must expose each on-chart instance version");
   assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
   // the list must apply the exact same USER;-only gate as getPineSource, so
   // nothing listed can ever be refused by the source tool
@@ -550,6 +551,28 @@ test("addPineToChart validates and only ever adds studies", async () => {
   assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
   assert.ok(expr.includes("api.chart(1)"), "should target chart 1");
   assert.ok(!expr.includes("removeEntity"), "must never remove studies");
+});
+
+test("removePineFromChart validates ownership before removing one exact study", async () => {
+  const cdp = fakeCdp({ removed: true });
+  const tv = new TradingView(cdp);
+  assert.throws(
+    () => tv.removePineFromChart("PUB;abcdef1234567890", "st1"),
+    /pineId must look like/,
+  );
+  assert.throws(
+    () => tv.removePineFromChart("USER;adc40b1dfee344f19412f1ae9af74f3f", "has space"),
+    /studyId must match/,
+  );
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.removePineFromChart("USER;adc40b1dfee344f19412f1ae9af74f3f", "st1", 1);
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes('value.id === "pineId"'));
+  assert.ok(expr.includes('actualPineId !== pineId'));
+  assert.ok(expr.includes('chart.removeEntity(studyId)'));
+  assert.ok(expr.indexOf('actualPineId !== pineId') < expr.indexOf('chart.removeEntity(studyId)'));
+  assert.ok(expr.includes('api.chart(1)'));
 });
 
 test("getStrategyReport is read-only and refuses stale reports", async () => {

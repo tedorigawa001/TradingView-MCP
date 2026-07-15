@@ -6,6 +6,8 @@ import {
   ANALYSIS_OVERLAY_SOURCE,
   assertAnalysisOverlayStudy,
   buildAnalysisOverlayInputs,
+  computeAnalysisOverlayPriceStatus,
+  parseAnalysisOverlayState,
   resolveAnalysisChart,
   validateAnalysisPayload,
 } from "../../build/analysisOverlay.js";
@@ -153,4 +155,46 @@ test("assertAnalysisOverlayStudy refuses unrelated studies", () => {
       ),
     /refusing to modify an unrelated indicator/,
   );
+});
+
+test("parseAnalysisOverlayState and price status preserve current-price semantics", () => {
+  const mapped = buildAnalysisOverlayInputs(bullish);
+  const study = {
+    id: "overlay1",
+    name: ANALYSIS_OVERLAY_NAME,
+    title: ANALYSIS_OVERLAY_NAME,
+    inputs: ANALYSIS_OVERLAY_INPUTS.map((expected) => {
+      const input = mapped.find((candidate) => candidate.id === expected.id);
+      return {
+        id: expected.id,
+        name: expected.name,
+        type: typeof input.value,
+        value: input.value,
+        defval: 0,
+        tooltip: null,
+      };
+    }),
+  };
+  const state = parseAnalysisOverlayState(study);
+  assert.equal(state.analyzedAt, bullish.analyzedAt);
+  assert.deepEqual(state.targets, [162.6, 162.85]);
+
+  const status = computeAnalysisOverlayPriceStatus(
+    state,
+    162.45,
+    new Date("2026-07-15T11:30:00.000Z"),
+  );
+  assert.equal(status.lifecycle, "active");
+  assert.equal(status.entryRelation, "above_entry");
+  assert.equal(status.confirmation, "current_price_at_or_beyond");
+  assert.equal(status.targets[0].currentPriceStatus, "current_price_not_at_or_beyond");
+  assert.match(status.interpretation, /do not prove historical touch order/);
+
+  const expired = computeAnalysisOverlayPriceStatus(
+    state,
+    162.3,
+    new Date("2026-07-15T15:00:00.000Z"),
+  );
+  assert.equal(expired.lifecycle, "expired");
+  assert.equal(expired.entryRelation, "inside_entry");
 });

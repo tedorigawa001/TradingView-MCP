@@ -1,7 +1,10 @@
 import type { ChartContext, IndicatorInputs } from "./tradingview.js";
 
 export const ANALYSIS_OVERLAY_NAME = "Bushido Analysis Overlay";
+// Logical template version; independent of TradingView's per-save Pine version.
 export const ANALYSIS_OVERLAY_VERSION = "1.0";
+export const ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID = "unassigned";
+export const ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT = "2020-01-01T00:00:00.000Z";
 
 export const ANALYSIS_OVERLAY_INPUTS = [
   { id: "in_0", name: "Analysis ID", key: "analysisId" },
@@ -35,6 +38,21 @@ export interface AnalysisOverlayPayload {
   targets: number[];
   confidence: number;
   note?: string;
+}
+
+export interface AnalysisOverlayState {
+  analysisId: string;
+  analyzedAt: string;
+  expiresAt: string | null;
+  bias: AnalysisBias;
+  entryLow: number;
+  entryHigh: number;
+  confirmation: number | null;
+  invalidation: number;
+  stop: number;
+  targets: number[];
+  confidence: number;
+  note: string;
 }
 
 export const ANALYSIS_OVERLAY_SOURCE = `//@version=6
@@ -225,4 +243,123 @@ export function buildAnalysisOverlayInputs(payload: AnalysisOverlayPayload) {
     note: payload.note ?? "",
   };
   return ANALYSIS_OVERLAY_INPUTS.map((input) => ({ id: input.id, value: values[input.key] }));
+}
+
+export function parseAnalysisOverlayState(study: IndicatorInputs): AnalysisOverlayState {
+  assertAnalysisOverlayStudy([study], study.id);
+  const values = new Map(study.inputs.map((input) => [input.id, input.value]));
+  const text = (id: string, name: string) => {
+    const value = values.get(id);
+    if (typeof value !== "string") throw new Error(`${name} must be a string`);
+    return value;
+  };
+  const number = (id: string, name: string) => {
+    const value = values.get(id);
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error(`${name} must be a finite number`);
+    }
+    return value;
+  };
+  const analyzedAtMs = number("in_1", "Analyzed At");
+  const expiresAtMs = number("in_12", "Expires At");
+  const bias = text("in_2", "Bias");
+  if (bias !== "bullish" && bias !== "bearish" && bias !== "neutral") {
+    throw new Error(`Bias has unsupported value ${JSON.stringify(bias)}`);
+  }
+  const confirmation = number("in_5", "Confirmation");
+  const targetValues = [
+    number("in_8", "Target 1"),
+    number("in_9", "Target 2"),
+    number("in_10", "Target 3"),
+  ];
+  const state: AnalysisOverlayState = {
+    analysisId: text("in_0", "Analysis ID"),
+    analyzedAt: new Date(analyzedAtMs).toISOString(),
+    expiresAt: expiresAtMs > 0 ? new Date(expiresAtMs).toISOString() : null,
+    bias,
+    entryLow: number("in_3", "Entry Low"),
+    entryHigh: number("in_4", "Entry High"),
+    confirmation: confirmation > 0 ? confirmation : null,
+    invalidation: number("in_6", "Invalidation"),
+    stop: number("in_7", "Stop"),
+    targets: targetValues.filter((target) => target > 0),
+    confidence: number("in_11", "Confidence"),
+    note: text("in_13", "Note"),
+  };
+  validateAnalysisPayload({
+    analysisId: state.analysisId,
+    analyzedAt: state.analyzedAt,
+    expiresAt: state.expiresAt ?? undefined,
+    bias: state.bias,
+    entryLow: state.entryLow,
+    entryHigh: state.entryHigh,
+    confirmation: state.confirmation ?? undefined,
+    invalidation: state.invalidation,
+    stop: state.stop,
+    targets: state.targets,
+    confidence: state.confidence,
+    note: state.note,
+  });
+  if (state.confidence < 0 || state.confidence > 1) {
+    throw new Error("Confidence must be between zero and one");
+  }
+  return state;
+}
+
+export function computeAnalysisOverlayPriceStatus(
+  state: AnalysisOverlayState,
+  currentPrice: number,
+  now = new Date(),
+) {
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+    throw new Error("current price must be finite and greater than zero");
+  }
+  const analyzedAtMs = Date.parse(state.analyzedAt);
+  const expiresAtMs = state.expiresAt ? Date.parse(state.expiresAt) : null;
+  const lifecycle =
+    analyzedAtMs > now.getTime()
+      ? "future"
+      : expiresAtMs !== null && expiresAtMs <= now.getTime()
+        ? "expired"
+        : "active";
+  const entryRelation =
+    currentPrice < state.entryLow
+      ? "below_entry"
+      : currentPrice > state.entryHigh
+        ? "above_entry"
+        : "inside_entry";
+  const directional = (level: number | null, trigger: "favorable" | "adverse") => {
+    if (level === null) return "not_configured";
+    if (state.bias === "neutral") return "not_applicable";
+    const atOrBeyond =
+      trigger === "favorable"
+        ? state.bias === "bullish"
+          ? currentPrice >= level
+          : currentPrice <= level
+        : state.bias === "bullish"
+          ? currentPrice <= level
+          : currentPrice >= level;
+    return atOrBeyond ? "current_price_at_or_beyond" : "current_price_not_at_or_beyond";
+  };
+  const entryReference = (state.entryLow + state.entryHigh) / 2;
+  const risk = Math.abs(entryReference - state.stop);
+  return {
+    observedAt: now.toISOString(),
+    currentPrice,
+    lifecycle,
+    ageMs: now.getTime() - analyzedAtMs,
+    expiresInMs: expiresAtMs === null ? null : expiresAtMs - now.getTime(),
+    entryRelation,
+    confirmation: directional(state.confirmation, "favorable"),
+    invalidation: directional(state.invalidation, "adverse"),
+    stop: directional(state.stop, "adverse"),
+    targets: state.targets.map((target, index) => ({
+      index: index + 1,
+      price: target,
+      currentPriceStatus: directional(target, "favorable"),
+      riskRewardFromEntryMid: risk > 0 ? Math.abs(target - entryReference) / risk : null,
+    })),
+    interpretation:
+      "Level states compare only the current price with each threshold; they do not prove historical touch order.",
+  };
 }

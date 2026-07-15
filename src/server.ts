@@ -20,11 +20,15 @@ import { computeRoundTripCost } from "./costModel.js";
 import { redactSecrets } from "./redact.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
+  ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID,
+  ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT,
   ANALYSIS_OVERLAY_NAME,
   ANALYSIS_OVERLAY_SOURCE,
   ANALYSIS_OVERLAY_VERSION,
   assertAnalysisOverlayStudy,
   buildAnalysisOverlayInputs,
+  computeAnalysisOverlayPriceStatus,
+  parseAnalysisOverlayState,
   resolveAnalysisChart,
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
@@ -46,6 +50,7 @@ export interface ServerDeps {
     | "getPineSource"
     | "savePineScript"
     | "addPineToChart"
+    | "removePineFromChart"
     | "getStrategyReport"
     | "runBacktest"
     | "listAlerts"
@@ -790,6 +795,474 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
     async ({ pine_id, chart_index }) => {
       try {
         return jsonResult(await tv.addPineToChart(pine_id, chart_index));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "remove_owned_study",
+    {
+      description:
+        "Preview or remove one on-chart instance of the user's OWN saved Pine script. " +
+        "The tool verifies the USER pine_id against both list_pine_scripts and the " +
+        "study's hidden Pine id before removal. It also fails closed if the chart symbol " +
+        "or timeframe changed. Without confirm=true nothing is removed.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        study_id: z.string().regex(/^[\w$]{1,64}$/),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ pine_id, study_id, chart_index, expected_symbol, expected_timeframe, confirm }) => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(
+          context,
+          chart_index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script) throw new Error(`${pine_id} is not one of the user's saved Pine scripts`);
+        const usage = script.usedBy.find(
+          (candidate) => candidate.chartIndex === chart.index && candidate.studyId === study_id,
+        );
+        if (!usage) {
+          throw new Error(
+            `study ${study_id} is not mapped to ${pine_id} on chart ${chart.index}; nothing was removed`,
+          );
+        }
+        const preview = {
+          pineId: pine_id,
+          pineVersion: usage.version,
+          studyId: study_id,
+          name: usage.name,
+          chartIndex: chart.index,
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+        };
+        if (confirm !== true) {
+          return jsonResult({
+            dryRun: true,
+            action: "remove_owned_study",
+            preview,
+            confirmRequired: true,
+          });
+        }
+        const removed = await tv.removePineFromChart(pine_id, study_id, chart.index);
+        return jsonResult({
+          dryRun: false,
+          action: "remove_owned_study",
+          removed: true,
+          preview,
+          operation: removed,
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ensure_analysis_overlay",
+    {
+      description:
+        "Idempotently ensure that the audited Bushido Analysis Overlay is present once " +
+        "on a target chart at the latest saved Pine version. It reuses a current instance, " +
+        "adds a missing one, or transactionally adds the latest version, migrates all 14 " +
+        "analysis inputs, verifies them, then removes the old instance. Source, symbol, " +
+        "timeframe, pine_id, version and input contract are checked fail-closed. Without " +
+        "confirm=true, any chart-changing action is preview-only.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Saved Bushido Analysis Overlay id from list_pine_scripts"),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ pine_id, chart_index, expected_symbol, expected_timeframe, confirm }) => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(
+          context,
+          chart_index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script) throw new Error(`${pine_id} is not one of the user's saved Pine scripts`);
+        if (script.name !== ANALYSIS_OVERLAY_NAME || script.kind !== "study") {
+          throw new Error(`${pine_id} is not the ${ANALYSIS_OVERLAY_NAME} study`);
+        }
+        if (!script.version) throw new Error(`${pine_id} has no readable latest version`);
+        const latestSource = await tv.getPineSource(pine_id, "last");
+        const normalizeSource = (source: string) => source.replace(/\r\n/g, "\n");
+        if (normalizeSource(latestSource.source) !== normalizeSource(ANALYSIS_OVERLAY_SOURCE)) {
+          throw new Error(
+            `${pine_id} latest source does not match the audited analysis overlay template; save the template first`,
+          );
+        }
+
+        const usages = script.usedBy.filter((usage) => usage.chartIndex === chart.index);
+        if (usages.length > 2) {
+          throw new Error(
+            `chart ${chart.index} has ${usages.length} instances of ${pine_id}; refusing ambiguous automatic cleanup`,
+          );
+        }
+        const inspected = [];
+        for (const usage of usages) {
+          const studies = await tv.getIndicatorInputs({
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+          });
+          inspected.push({ usage, study: assertAnalysisOverlayStudy(studies, usage.studyId) });
+        }
+        const latest = inspected.filter(({ usage }) => usage.version === script.version);
+        const outdated = inspected.filter(({ usage }) => usage.version !== script.version);
+        if (latest.length > 1) {
+          throw new Error(
+            `chart ${chart.index} has multiple latest overlay instances; refusing to choose one automatically`,
+          );
+        }
+
+        if (latest.length === 1) {
+          const active = latest[0].usage;
+          if (outdated.length === 0) {
+            return jsonResult({
+              action: "reuse_analysis_overlay",
+              changed: false,
+              status: "ready",
+              pineId: pine_id,
+              pineVersion: active.version,
+              studyId: active.studyId,
+              chartIndex: chart.index,
+              symbol: chart.symbol,
+              timeframe: chart.resolution,
+            });
+          }
+          const stale = outdated[0].usage;
+          if (confirm !== true) {
+            return jsonResult({
+              dryRun: true,
+              action: "cleanup_outdated_analysis_overlay",
+              keepStudyId: active.studyId,
+              removeStudyId: stale.studyId,
+              warnings: [
+                "The outdated overlay will be removed without migrating its inputs because " +
+                  "the latest overlay instance is retained.",
+              ],
+              confirmRequired: true,
+            });
+          }
+          const removed = await tv.removePineFromChart(pine_id, stale.studyId, chart.index);
+          return jsonResult({
+            dryRun: false,
+            action: "cleanup_outdated_analysis_overlay",
+            changed: true,
+            status: "ready",
+            pineId: pine_id,
+            pineVersion: active.version,
+            studyId: active.studyId,
+            removed,
+          });
+        }
+
+        if (outdated.length > 1) {
+          throw new Error(
+            `chart ${chart.index} has multiple outdated overlay instances; refusing ambiguous migration`,
+          );
+        }
+        const old = outdated[0] ?? null;
+        const plannedAction = old ? "upgrade_analysis_overlay" : "add_analysis_overlay";
+        if (confirm !== true) {
+          return jsonResult({
+            dryRun: true,
+            action: plannedAction,
+            pineId: pine_id,
+            fromVersion: old?.usage.version ?? null,
+            toVersion: script.version,
+            migrateStudyId: old?.usage.studyId ?? null,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            confirmRequired: true,
+          });
+        }
+
+        let newStudyId: string | null = null;
+        try {
+          const added = await tv.addPineToChart(pine_id, chart.index);
+          newStudyId = added.studyId;
+          const newInputs = await tv.getIndicatorInputs({
+            studyId: newStudyId,
+            chartIndex: chart.index,
+          });
+          const newStudy = assertAnalysisOverlayStudy(newInputs, newStudyId);
+
+          let migrated = false;
+          if (old) {
+            const migrationInputs = ANALYSIS_OVERLAY_INPUTS.map((expected) => {
+              const input = old.study.inputs.find((candidate) => candidate.id === expected.id);
+              if (!input) throw new Error(`old overlay is missing input ${expected.id}`);
+              return { id: expected.id, value: input.value };
+            });
+            const operation = await tv.setIndicatorInput(newStudyId, migrationInputs, {
+              chartIndex: chart.index,
+            });
+            if (operation.settled === false) {
+              throw new Error("new overlay input migration did not settle; retaining the old overlay");
+            }
+            const after = assertAnalysisOverlayStudy(
+              await tv.getIndicatorInputs({ studyId: newStudyId, chartIndex: chart.index }),
+              newStudyId,
+            );
+            const observed = new Map(after.inputs.map((input) => [input.id, input.value]));
+            if (migrationInputs.some((input) => observed.get(input.id) !== input.value)) {
+              throw new Error("new overlay input migration could not be verified; retaining the old overlay");
+            }
+            migrated = true;
+          } else {
+            assertAnalysisOverlayStudy([newStudy], newStudyId);
+          }
+
+          const refreshed = await tv.listPineScripts();
+          const refreshedScript = refreshed.find((candidate) => candidate.pineId === pine_id);
+          const refreshedUsage = refreshedScript?.usedBy.find(
+            (usage) => usage.chartIndex === chart.index && usage.studyId === newStudyId,
+          );
+          if (!refreshedUsage || refreshedUsage.version !== script.version) {
+            throw new Error("new overlay did not load the latest Pine version");
+          }
+
+          let removed = null;
+          if (old) {
+            removed = await tv.removePineFromChart(pine_id, old.usage.studyId, chart.index);
+          }
+          return jsonResult({
+            dryRun: false,
+            action: plannedAction,
+            changed: true,
+            status: "ready",
+            pineId: pine_id,
+            pineVersion: refreshedUsage.version,
+            studyId: newStudyId,
+            migrated,
+            removed,
+          });
+        } catch (err) {
+          if (newStudyId) {
+            try {
+              await tv.removePineFromChart(pine_id, newStudyId, chart.index);
+            } catch (rollbackErr) {
+              const originalMessage = err instanceof Error ? err.message : String(err);
+              const rollbackMessage =
+                rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+              throw new Error(
+                `analysis overlay ensure failed (${originalMessage}) and rollback also failed ` +
+                  `for new study ${newStudyId} (${rollbackMessage})`,
+              );
+            }
+          }
+          throw err;
+        }
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_analysis_overlay_status",
+    {
+      description:
+        "Read the current Bushido Analysis Overlay state without changing the chart. " +
+        "It resolves the study by USER pine_id, verifies the exact on-chart Pine version " +
+        "source and 14-input contract, then returns analysis metadata, expiry, current-price " +
+        "relations, risk/reward references and drawing integrity. Level states describe only " +
+        "the current price, not historical touch order; use a future outcome tool for that.",
+      inputSchema: {
+        pine_id: z
+          .string()
+          .regex(/^USER;[\w]{8,64}$/)
+          .describe("Saved Bushido Analysis Overlay id from list_pine_scripts"),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+      },
+    },
+    async ({ pine_id, chart_index, expected_symbol, expected_timeframe }) => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(
+          context,
+          chart_index,
+          expected_symbol,
+          expected_timeframe,
+        );
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script) throw new Error(`${pine_id} is not one of the user's saved Pine scripts`);
+        if (script.name !== ANALYSIS_OVERLAY_NAME || script.kind !== "study") {
+          throw new Error(`${pine_id} is not the ${ANALYSIS_OVERLAY_NAME} study`);
+        }
+        const usages = script.usedBy.filter((usage) => usage.chartIndex === chart.index);
+        if (usages.length === 0) {
+          return jsonResult({
+            status: "not_installed",
+            trusted: false,
+            pineId: pine_id,
+            latestPineVersion: script.version,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            remediation: "call ensure_analysis_overlay",
+          });
+        }
+        if (usages.length > 1) {
+          return jsonResult({
+            status: "ambiguous",
+            trusted: false,
+            pineId: pine_id,
+            latestPineVersion: script.version,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            usages,
+            remediation: "call ensure_analysis_overlay or remove_owned_study",
+          });
+        }
+        const usage = usages[0];
+        if (!usage.version) {
+          return jsonResult({
+            status: "blocked",
+            trusted: false,
+            reason: "on_chart_pine_version_unavailable",
+            pineId: pine_id,
+            studyId: usage.studyId,
+          });
+        }
+        const placedSource = await tv.getPineSource(pine_id, usage.version);
+        const normalizeSource = (source: string) => source.replace(/\r\n/g, "\n");
+        if (normalizeSource(placedSource.source) !== normalizeSource(ANALYSIS_OVERLAY_SOURCE)) {
+          return jsonResult({
+            status: "blocked",
+            trusted: false,
+            reason: "on_chart_source_does_not_match_audited_template",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            remediation: "save the template and call ensure_analysis_overlay",
+          });
+        }
+        const inputResult = await tv.getIndicatorInputs({
+          studyId: usage.studyId,
+          chartIndex: chart.index,
+        });
+        let analysis: ReturnType<typeof parseAnalysisOverlayState>;
+        try {
+          const study = assertAnalysisOverlayStudy(inputResult, usage.studyId);
+          analysis = parseAnalysisOverlayState(study);
+        } catch (err) {
+          return jsonResult({
+            status: "blocked",
+            trusted: false,
+            reason: "inputs_violate_contract",
+            detail: err instanceof Error ? err.message : "overlay inputs are invalid",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            remediation: "call apply_analysis_overlay with a valid analysis",
+          });
+        }
+        if (
+          analysis.analysisId.trim().toLowerCase() === ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID ||
+          analysis.analyzedAt === ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT
+        ) {
+          return jsonResult({
+            status: "unconfigured",
+            trusted: false,
+            reason: "default_analysis_inputs",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            analysis,
+            remediation: "call apply_analysis_overlay with a real analysis",
+          });
+        }
+        const ohlcv = await tv.getOhlcv(1, chart.index);
+        const latestBar = ohlcv.bars.at(-1);
+        if (!latestBar || !Number.isFinite(latestBar.close) || latestBar.close <= 0) {
+          throw new Error("current chart price is unavailable");
+        }
+        const priceStatus = computeAnalysisOverlayPriceStatus(analysis, latestBar.close);
+
+        const expectedGraphics = {
+          labels: 1,
+          lines: 2 + analysis.targets.length + (analysis.confirmation === null ? 0 : 1),
+          boxes: 1,
+        };
+        let graphics: unknown = null;
+        let renderVerified = false;
+        const qualityIssues: string[] = [];
+        try {
+          const graphicsResult = await tv.getIndicatorGraphics({
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            limitPerKind: 20,
+          });
+          graphics = graphicsResult[0]?.totals ?? null;
+          const totals = graphicsResult[0]?.totals;
+          renderVerified =
+            totals?.labels === expectedGraphics.labels &&
+            totals.lines === expectedGraphics.lines &&
+            totals.boxes === expectedGraphics.boxes;
+          if (!renderVerified) qualityIssues.push("drawing_totals_do_not_match_analysis_inputs");
+        } catch {
+          qualityIssues.push("drawing_verification_unavailable");
+        }
+
+        return jsonResult({
+          status: "ready",
+          trusted: true,
+          pineId: pine_id,
+          pineVersion: usage.version,
+          latestPineVersion: script.version,
+          versionStatus: usage.version === script.version ? "current" : "outdated",
+          studyId: usage.studyId,
+          chartIndex: chart.index,
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+          analysis,
+          marketObservation: {
+            source: "active_chart_last_loaded_bar",
+            barTime: latestBar.timeIso,
+            forming: latestBar.forming ?? null,
+            ...priceStatus,
+          },
+          render: {
+            verified: renderVerified,
+            expected: expectedGraphics,
+            observed: graphics,
+          },
+          qualityIssues,
+        });
       } catch (err) {
         return errorResult(err);
       }
