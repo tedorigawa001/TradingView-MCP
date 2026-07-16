@@ -29,10 +29,17 @@ import {
   buildAnalysisOverlayInputs,
   computeAnalysisOverlayPriceStatus,
   parseAnalysisOverlayState,
+  normalizeResolution,
   resolveAnalysisChart,
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
 import { evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
+import {
+  AnalysisDefinitionConflictError,
+  analysisDefinitionHash,
+  type AnalysisJournalDefinition,
+  type AnalysisJournalStore,
+} from "./analysisJournal.js";
 
 /** Injectable dependencies so the server can be tested without a live app. */
 export interface ServerDeps {
@@ -65,6 +72,7 @@ export interface ServerDeps {
   calendar: Pick<EconomicCalendar, "getEvents">;
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
+  journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "list" | "calibration">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -97,6 +105,38 @@ const REAL_YIELD_OUTPUT_SCHEMA = {
 };
 
 type SnapshotStatus = "ok" | "partial" | "blocked";
+
+class SerialOperationQueue {
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(operation);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
+
+function journalDefinition(
+  analysis: ReturnType<typeof parseAnalysisOverlayState>,
+  placement: {
+    symbol: string;
+    timeframe: string;
+    chartIndex: number;
+    studyId: string;
+    pineId?: string | null;
+    pineVersion?: string | null;
+  },
+): AnalysisJournalDefinition {
+  return {
+    ...analysis,
+    symbol: placement.symbol.toUpperCase(),
+    timeframe: normalizeResolution(placement.timeframe),
+    chartIndex: placement.chartIndex,
+    studyId: placement.studyId,
+    pineId: placement.pineId ?? null,
+    pineVersion: placement.pineVersion ?? null,
+  };
+}
 type SnapshotQualityIssue = {
   code: string;
   severity: "warning" | "error";
@@ -314,7 +354,8 @@ async function captureSnapshotSource<T>(
   }
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal }: ServerDeps): McpServer {
+  const chartOperations = new SerialOperationQueue();
   const server = new McpServer({
     name: "tradingview-mcp",
     version: "0.1.0",
@@ -340,8 +381,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Capture only this chart (index from get_chart_context). Default: whole window"),
       },
     },
-    async ({ format, chart_index }) => {
-      try {
+    async ({ format, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
         const fmt = format ?? "jpeg";
         let clip;
         if (chart_index !== undefined) {
@@ -358,10 +400,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         return {
           content: [{ type: "image" as const, data, mimeType: `image/${fmt}` }],
         };
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -374,13 +416,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         "looking at.",
       inputSchema: {},
     },
-    async () => {
-      try {
-        return jsonResult(await tv.getChartContext());
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async () =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.getChartContext());
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -405,13 +448,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ count, chart_index }) => {
-      try {
-        return jsonResult(await tv.getOhlcv(count ?? 100, chart_index));
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ count, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.getOhlcv(count ?? 100, chart_index));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -447,8 +491,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Include cosmetic plots (colorers, alert conditions). Default: false"),
       },
     },
-    async ({ study_id, count, chart_index, include_all_plots }) => {
-      try {
+    async ({ study_id, count, chart_index, include_all_plots }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.getIndicatorValues({
             studyId: study_id,
@@ -457,10 +502,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
             includeAllPlots: include_all_plots ?? false,
           }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -483,15 +528,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ study_id, chart_index }) => {
-      try {
+    async ({ study_id, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart_index }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -529,15 +575,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ study_id, inputs, chart_index }) => {
-      try {
-        return jsonResult(
-          await tv.setIndicatorInput(study_id, inputs, { chartIndex: chart_index }),
-        );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ study_id, inputs, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(
+            await tv.setIndicatorInput(study_id, inputs, { chartIndex: chart_index }),
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -570,8 +617,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Max labels/lines/boxes each, most recent first. Default: 50"),
       },
     },
-    async ({ study_id, chart_index, limit_per_kind }) => {
-      try {
+    async ({ study_id, chart_index, limit_per_kind }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.getIndicatorGraphics({
             studyId: study_id,
@@ -579,10 +627,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
             limitPerKind: limit_per_kind ?? 50,
           }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -607,15 +655,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ study_id, chart_index }) => {
-      try {
+    async ({ study_id, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.getIndicatorTables({ studyId: study_id, chartIndex: chart_index }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -641,15 +690,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ count, chart_index }) => {
-      try {
+    async ({ count, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.loadMoreHistory({ count: count ?? 300, chartIndex: chart_index }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -662,13 +712,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         "for get_pine_source. Read-only.",
       inputSchema: {},
     },
-    async () => {
-      try {
-        return jsonResult(await tv.listPineScripts());
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async () =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.listPineScripts());
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -793,13 +844,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
       },
     },
-    async ({ pine_id, chart_index }) => {
-      try {
-        return jsonResult(await tv.addPineToChart(pine_id, chart_index));
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ pine_id, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.addPineToChart(pine_id, chart_index));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -819,8 +871,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         confirm: z.boolean().optional(),
       },
     },
-    async ({ pine_id, study_id, chart_index, expected_symbol, expected_timeframe, confirm }) => {
-      try {
+    async ({ pine_id, study_id, chart_index, expected_symbol, expected_timeframe, confirm }) =>
+      chartOperations.run(async () => {
+        try {
         const context = await tv.getChartContext();
         const chart = resolveAnalysisChart(
           context,
@@ -864,10 +917,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           preview,
           operation: removed,
         });
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -891,8 +944,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         confirm: z.boolean().optional(),
       },
     },
-    async ({ pine_id, chart_index, expected_symbol, expected_timeframe, confirm }) => {
-      try {
+    async ({ pine_id, chart_index, expected_symbol, expected_timeframe, confirm }) =>
+      chartOperations.run(async () => {
+        try {
         const context = await tv.getChartContext();
         const chart = resolveAnalysisChart(
           context,
@@ -1077,10 +1131,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           }
           throw err;
         }
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -1102,8 +1156,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
       },
     },
-    async ({ pine_id, chart_index, expected_symbol, expected_timeframe }) => {
-      try {
+    async ({ pine_id, chart_index, expected_symbol, expected_timeframe }) =>
+      chartOperations.run(async () => {
+        try {
         const context = await tv.getChartContext();
         const chart = resolveAnalysisChart(
           context,
@@ -1264,10 +1319,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           },
           qualityIssues,
         });
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -1280,7 +1335,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         "optional confirmation; invalidation reached before confirmation cancels the setup. " +
         "Same-bar ordering, gaps and incomplete history are reported as ambiguous or incomplete " +
         "rather than guessed. Calendar-month charts are not evaluable because their duration " +
-        "varies. Read-only; call load_more_history first when history coverage is incomplete.",
+        "varies. By default it is read-only. When evaluation_timeframe is specified, it " +
+        "temporarily changes only the selected chart's timeframe, captures evidence, and " +
+        "restores the original timeframe; restoration failures are returned explicitly.",
       inputSchema: {
         pine_id: z
           .string()
@@ -1289,6 +1346,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         chart_index: z.number().int().min(0).optional(),
         expected_symbol: SYMBOL_SCHEMA,
         expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        evaluation_timeframe: z
+          .string()
+          .max(8)
+          .regex(/^(?:[1-9]\d*|[1-9]\d*[SHDWM]|[SDWM])$/i)
+          .optional()
+          .describe(
+            "Optional evidence timeframe, e.g. 15 or 1H. The overlay remains verified " +
+              "against expected_timeframe and the chart is restored afterward",
+          ),
         count: z
           .number()
           .int()
@@ -1296,10 +1362,23 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .max(5000)
           .optional()
           .describe("Most recent loaded bars to inspect. Default: 1000"),
+        record: z
+          .boolean()
+          .optional()
+          .describe("Explicitly append this evaluation to the local analysis journal. Default: false"),
       },
     },
-    async ({ pine_id, chart_index, expected_symbol, expected_timeframe, count }) => {
-      try {
+    async ({
+      pine_id,
+      chart_index,
+      expected_symbol,
+      expected_timeframe,
+      evaluation_timeframe,
+      count,
+      record,
+    }) =>
+      chartOperations.run(async () => {
+        try {
         const context = await tv.getChartContext();
         const chart = resolveAnalysisChart(
           context,
@@ -1396,19 +1475,123 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           });
         }
 
-        const history = await tv.getOhlcv(count ?? 1000, chart.index);
-        resolveAnalysisChart(
-          await tv.getChartContext(),
-          chart.index,
-          expected_symbol,
-          expected_timeframe,
+        const requestedBars = count ?? 1000;
+        const originalTimeframe = chart.resolution;
+        const evidenceTimeframe = normalizeResolution(
+          evaluation_timeframe ?? originalTimeframe,
         );
+        const timeframeChangeRequired =
+          normalizeResolution(originalTimeframe) !== evidenceTimeframe;
+
+        const collectEvidence = async () => {
+          let history: Awaited<ReturnType<typeof tv.getOhlcv>> | null = null;
+          let operationError: string | null = null;
+          let restoreError: string | null = null;
+          let restored = true;
+          let currentTimeframe = originalTimeframe;
+          let switchResult: Awaited<ReturnType<typeof tv.setResolution>> | null = null;
+          let restoreResult: Awaited<ReturnType<typeof tv.setResolution>> | null = null;
+
+          resolveAnalysisChart(
+            await tv.getChartContext(),
+            chart.index,
+            expected_symbol,
+            expected_timeframe,
+          );
+
+          try {
+            if (timeframeChangeRequired) {
+              switchResult = await tv.setResolution(evidenceTimeframe, chart.index);
+              resolveAnalysisChart(
+                await tv.getChartContext(),
+                chart.index,
+                expected_symbol,
+                evidenceTimeframe,
+              );
+            }
+            history = await tv.getOhlcv(requestedBars, chart.index);
+            if (history.symbol !== chart.symbol) {
+              throw new Error(
+                `OHLCV symbol ${history.symbol} does not match expected ${chart.symbol}`,
+              );
+            }
+            if (normalizeResolution(history.resolution) !== evidenceTimeframe) {
+              throw new Error(
+                `OHLCV resolution ${history.resolution} does not match evaluation timeframe ${evidenceTimeframe}`,
+              );
+            }
+            if (history.bars.length === 0) {
+              throw new Error(`no OHLCV bars loaded for evaluation timeframe ${evidenceTimeframe}`);
+            }
+          } catch (err) {
+            operationError = redactSecrets(err instanceof Error ? err.message : String(err));
+          } finally {
+            if (timeframeChangeRequired) {
+              try {
+                restoreResult = await tv.setResolution(originalTimeframe, chart.index);
+                const restoredChart = resolveAnalysisChart(
+                  await tv.getChartContext(),
+                  chart.index,
+                  expected_symbol,
+                  expected_timeframe,
+                );
+                currentTimeframe = restoredChart.resolution;
+              } catch (err) {
+                restored = false;
+                restoreError = redactSecrets(err instanceof Error ? err.message : String(err));
+                try {
+                  const current = (await tv.getChartContext()).charts.find(
+                    (candidate) => candidate.index === chart.index,
+                  );
+                  currentTimeframe = current?.resolution ?? "unknown";
+                } catch {
+                  currentTimeframe = "unknown";
+                }
+              }
+            }
+          }
+
+          return {
+            history,
+            operationError,
+            chartState: {
+              changed: timeframeChangeRequired,
+              originalTimeframe,
+              evaluationTimeframe: evidenceTimeframe,
+              restored,
+              currentTimeframe,
+              switchResult,
+              restoreResult,
+              restoreError,
+            },
+          };
+        };
+
+        const evidence = await collectEvidence();
+        if (evidence.operationError || evidence.history === null) {
+          return jsonResult({
+            status: "blocked",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "evaluation_evidence_unavailable",
+            detail: evidence.operationError ?? "OHLCV evidence was not returned",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: originalTimeframe,
+            evaluationTimeframe: evidenceTimeframe,
+            chartState: evidence.chartState,
+          });
+        }
+        const history = evidence.history;
         const result = evaluateAnalysisOverlayOutcome(
           analysis,
           history.bars,
           history.resolution,
         );
-        return jsonResult({
+        const response = {
           ...result,
           trusted: true,
           pineId: pine_id,
@@ -1416,10 +1599,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           studyId: usage.studyId,
           chartIndex: chart.index,
           symbol: chart.symbol,
-          timeframe: chart.resolution,
+          timeframe: originalTimeframe,
+          evaluationTimeframe: evidenceTimeframe,
+          chartState: evidence.chartState,
+          qualityIssues: [
+            ...result.qualityIssues,
+            ...(evidence.chartState.restored ? [] : ["chart_timeframe_restore_failed"]),
+          ],
           source: {
-            kind: "active_chart_loaded_closed_ohlcv",
-            requestedBars: count ?? 1000,
+            kind: timeframeChangeRequired
+              ? "temporary_evaluation_timeframe_closed_ohlcv"
+              : "active_chart_loaded_closed_ohlcv",
+            requestedBars,
             returnedBars: history.bars.length,
             formingBarsExcluded: history.bars.filter((bar) => bar.forming === true).length,
           },
@@ -1427,18 +1618,66 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
             ? {
                 remediation:
                   result.outcome === "no_closed_bars_in_evaluation_window"
-                    ? "use a shorter chart timeframe that has closed bars inside the analysis window"
+                    ? "set evaluation_timeframe to a shorter interval with closed bars inside the analysis window"
                     : "call load_more_history, then evaluate again",
               }
             : {}),
           ...(result.outcome === "calendar_month_resolution_unsupported"
             ? { remediation: "use an intraday, daily, or weekly chart timeframe" }
             : {}),
-        });
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        };
+        if (record !== true) return jsonResult({ ...response, journal: { requested: false } });
+
+        try {
+          const definition = journalDefinition(analysis, {
+            symbol: chart.symbol,
+            timeframe: originalTimeframe,
+            chartIndex: chart.index,
+            studyId: usage.studyId,
+            pineId: pine_id,
+            pineVersion: usage.version,
+          });
+          const journalResult = await journal.recordOutcome(
+            analysis.analysisId,
+            analysisDefinitionHash(definition),
+            {
+              status: result.status,
+              outcome: result.outcome,
+              evaluatedAt: new Date().toISOString(),
+              evidenceTimeframe,
+              evidenceThrough: result.evidence.evidenceThrough,
+              result: response as Record<string, unknown>,
+            },
+          );
+          return jsonResult({
+            ...response,
+            journal: {
+              requested: true,
+              recorded: journalResult.recorded,
+              idempotent: journalResult.idempotent,
+              eventId: journalResult.entry.event_id,
+            },
+          });
+        } catch (err) {
+          const definitionConflict = err instanceof AnalysisDefinitionConflictError;
+          return jsonResult({
+            ...response,
+            qualityIssues: [...response.qualityIssues, "analysis_journal_write_failed"],
+            journal: {
+              requested: true,
+              recorded: false,
+              reason: definitionConflict ? err.code : "journal_write_failed",
+              error: redactSecrets(err instanceof Error ? err.message : String(err)),
+              remediation: definitionConflict
+                ? "assign a new analysis_id, re-apply the overlay with confirm=true, then evaluate it again with record=true"
+                : "verify the journal path and re-run with record=true",
+            },
+          });
+        }
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -1499,8 +1738,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
       confidence,
       note,
       confirm,
-    }) => {
-      try {
+    }) =>
+      chartOperations.run(async () => {
+        try {
         const analysis = {
           analysisId: analysis_id,
           analyzedAt: analyzed_at,
@@ -1573,6 +1813,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           matches: observed.get(input.id) === input.value,
         }));
         const inputsVerified = inputVerification.every((item) => item.matches);
+        const observedAnalysis = parseAnalysisOverlayState(verifiedStudy);
         const recalculationSettled = applied.settled !== false;
         if (!recalculationSettled) {
           quality.warnings.push(
@@ -1595,6 +1836,51 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           }
         }
 
+        let journalStatus: Record<string, unknown>;
+        if (!inputsVerified) {
+          journalStatus = {
+            recorded: false,
+            reason: "overlay_inputs_not_verified",
+            remediation: "fix the chart input mismatch, then apply again with confirm=true",
+          };
+        } else {
+          try {
+            const scripts = await tv.listPineScripts();
+            const owner = scripts.find((script) =>
+              script.name === ANALYSIS_OVERLAY_NAME &&
+              script.usedBy.some((usage) =>
+                usage.chartIndex === resolvedChartIndex && usage.studyId === study_id));
+            const usage = owner?.usedBy.find((candidate) =>
+              candidate.chartIndex === resolvedChartIndex && candidate.studyId === study_id);
+            const journalResult = await journal.recordAnalysis(journalDefinition(observedAnalysis, {
+              symbol: chart.symbol,
+              timeframe: chart.resolution,
+              chartIndex: resolvedChartIndex,
+              studyId: study_id,
+              pineId: owner?.pineId ?? null,
+              pineVersion: usage?.version ?? null,
+            }));
+            journalStatus = {
+              recorded: journalResult.recorded,
+              idempotent: journalResult.idempotent,
+              eventId: journalResult.entry.event_id,
+            };
+          } catch (err) {
+            const definitionConflict = err instanceof AnalysisDefinitionConflictError;
+            quality.warnings.push(
+              "overlay inputs were applied and verified, but the local analysis journal write failed",
+            );
+            journalStatus = {
+              recorded: false,
+              reason: definitionConflict ? err.code : "journal_write_failed",
+              error: redactSecrets(err instanceof Error ? err.message : String(err)),
+              remediation: definitionConflict
+                ? "assign a new analysis_id and re-apply this chart definition with confirm=true"
+                : "verify the journal path, then apply the same analysis again to retry idempotently",
+            };
+          }
+        }
+
         return jsonResult({
           dryRun: false,
           action: "apply_analysis_overlay",
@@ -1606,8 +1892,57 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           inputVerification,
           graphicsVerification,
           operation: applied,
+          journal: journalStatus,
           warnings: quality.warnings,
         });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "get_analysis_journal",
+    {
+      description:
+        "Read locally journaled analysis definitions and their monotonic latest evaluations. " +
+        "A completed evaluation is never displaced by a later stale ongoing read. This tool " +
+        "does not access or change the TradingView chart.",
+      inputSchema: {
+        analysis_id: z.string().regex(/^[\w.:-]{1,80}$/).optional(),
+        symbol: SYMBOL_SCHEMA.optional(),
+        limit: z.number().int().min(1).max(500).optional(),
+      },
+    },
+    async ({ analysis_id, symbol, limit }) => {
+      try {
+        return jsonResult(await journal.list({
+          analysisId: analysis_id,
+          symbol,
+          limit: limit ?? 50,
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_analysis_calibration",
+    {
+      description:
+        "Calculate confidence calibration from the local analysis journal. Only " +
+        "target_before_stop is labelled positive and stop_before_target negative; ambiguous, " +
+        "incomplete, cancelled, neutral, and unevaluated analyses are reported as exclusions.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA.optional(),
+        bias: z.enum(["bullish", "bearish", "neutral"]).optional(),
+        bins: z.number().int().min(2).max(50).optional(),
+      },
+    },
+    async ({ symbol, bias, bins }) => {
+      try {
+        return jsonResult(await journal.calibration({ symbol, bias, bins: bins ?? 10 }));
       } catch (err) {
         return errorResult(err);
       }
@@ -1633,13 +1968,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Max most-recent trades to include. Default: 20"),
       },
     },
-    async ({ trades_limit }) => {
-      try {
-        return jsonResult(await tv.getStrategyReport({ tradesLimit: trades_limit ?? 20 }));
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ trades_limit }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.getStrategyReport({ tradesLimit: trades_limit ?? 20 }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -1670,19 +2006,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Leave the strategy on the chart after the test. Default: false (auto-remove)"),
       },
     },
-    async ({ pine_id, trades_limit, keep_on_chart }) => {
-      try {
-        return jsonResult(
-          await tv.runBacktest({
-            pineId: pine_id,
-            tradesLimit: trades_limit ?? 20,
-            keepOnChart: keep_on_chart ?? false,
-          }),
-        );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ pine_id, trades_limit, keep_on_chart }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(
+            await tv.runBacktest({
+              pineId: pine_id,
+              tradesLimit: trades_limit ?? 20,
+              keepOnChart: keep_on_chart ?? false,
+            }),
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -2076,8 +2413,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Block when the worst chart's timestamp-missing ratio exceeds this value. Default: 0.05"),
       },
     },
-    async ({ chart_indexes, count, max_missing_ratio }) => {
-      try {
+    async ({ chart_indexes, count, max_missing_ratio }) =>
+      chartOperations.run(async () => {
+        try {
         const context = await tv.getChartContext();
         const indexes = chart_indexes ?? context.charts.map((chart) => chart.index);
         if (indexes.length < 2) {
@@ -2187,10 +2525,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           basis_adjustment: null,
           quality_issues: issues,
         });
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -2512,8 +2850,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           ),
       },
     },
-    async ({ range_percent, limit, chart_index, include_all_plots }) => {
-      try {
+    async ({ range_percent, limit, chart_index, include_all_plots }) =>
+      chartOperations.run(async () => {
+        try {
         return jsonResult(
           await tv.getKeyLevels({
             rangePercent: range_percent ?? 3,
@@ -2522,10 +2861,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
             includeAllPlots: include_all_plots ?? false,
           }),
         );
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -2597,13 +2936,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
           .describe("Symbol to display, optionally exchange-prefixed"),
       },
     },
-    async ({ symbol }) => {
-      try {
-        return jsonResult(await tv.setSymbol(symbol));
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ symbol }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.setSymbol(symbol));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
@@ -2616,13 +2956,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield }: Ser
         resolution: z.string().min(1).describe("Timeframe/resolution string"),
       },
     },
-    async ({ resolution }) => {
-      try {
-        return jsonResult(await tv.setResolution(resolution));
-      } catch (err) {
-        return errorResult(err);
-      }
-    },
+    async ({ resolution }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.setResolution(resolution));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   return server;

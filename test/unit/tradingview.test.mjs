@@ -45,6 +45,15 @@ test("setResolution accepts typical TradingView resolutions", async () => {
   assert.equal(cdp.calls.length, 10);
 });
 
+test("setResolution targets an explicit chart index", async () => {
+  const cdp = fakeCdp({ symbol: "X", resolution: "15" });
+  const tv = new TradingView(cdp);
+  await tv.setResolution("15", 1);
+  assert.match(cdp.calls[0], /window\.TradingViewApi\.chart\(1\)/);
+  assert.throws(() => tv.setResolution("15", -1), /chartIndex must be/);
+  assert.throws(() => tv.setResolution("15", 1.5), /chartIndex must be/);
+});
+
 test("setSymbol rejects empty input", () => {
   const tv = new TradingView(fakeCdp());
   assert.throws(() => tv.setSymbol(""), /non-empty/);

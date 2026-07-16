@@ -8,6 +8,7 @@ import {
   ANALYSIS_OVERLAY_NAME,
   ANALYSIS_OVERLAY_SOURCE,
 } from "../../build/analysisOverlay.js";
+import { AnalysisDefinitionConflictError } from "../../build/analysisJournal.js";
 
 function makeDeps(overrides = {}) {
   return {
@@ -261,6 +262,34 @@ function makeDeps(overrides = {}) {
       setResolution: async (resolution) => ({ symbol: "EURUSD", resolution }),
       ...overrides.tv,
     },
+    journal: {
+      recordAnalysis: async (definition) => ({
+        recorded: true,
+        idempotent: false,
+        entry: {
+          event_id: "11111111-1111-4111-8111-111111111111",
+          payload: definition,
+        },
+      }),
+      recordOutcome: async (_analysisId, _definitionHash, outcome) => ({
+        recorded: true,
+        idempotent: false,
+        entry: {
+          event_id: "22222222-2222-4222-8222-222222222222",
+          payload: outcome,
+        },
+      }),
+      list: async (options) => ({ total: 0, returned: 0, analyses: [], options }),
+      calibration: async (options) => ({
+        population: 0,
+        included: 0,
+        excluded: {},
+        labelDefinition: { positive: "target_before_stop", negative: "stop_before_target" },
+        calibration: null,
+        options,
+      }),
+      ...overrides.journal,
+    },
     calendar: {
       getEvents: async (options) => ({
         from: "2026-07-08T00:00:00.000Z",
@@ -394,7 +423,104 @@ function overlayStudy(id, values = {}) {
   };
 }
 
-test("exposes exactly the thirty-eight expected tools", async () => {
+const OUTCOME_PINE_ID = "USER;8f868f366873411aa46bd30872711544";
+const OUTCOME_ANALYZED_AT = Date.parse("2026-07-15T12:35:00.000Z");
+
+function outcomeOverlayValues() {
+  return {
+    in_0: "USDJPY-timeframe-evaluation",
+    in_1: OUTCOME_ANALYZED_AT,
+    in_2: "bullish",
+    in_3: 162.1,
+    in_4: 162.24,
+    in_5: 0,
+    in_6: 161.95,
+    in_7: 161.9,
+    in_8: 162.6,
+    in_9: 162.8,
+    in_10: 0,
+    in_11: 0.6,
+    in_12: Date.parse("2026-07-15T14:00:00.000Z"),
+    in_13: "",
+  };
+}
+
+function outcomeBar(iso, open, high, low, close) {
+  return {
+    time: Date.parse(iso) / 1000,
+    timeIso: iso,
+    open,
+    high,
+    low,
+    close,
+    volume: null,
+  };
+}
+
+function outcomeEvidenceBars() {
+  return [
+    outcomeBar("2026-07-15T12:30:00.000Z", 162.2, 162.3, 162, 162.2),
+    outcomeBar("2026-07-15T12:45:00.000Z", 162.2, 162.23, 162.15, 162.2),
+    outcomeBar("2026-07-15T13:00:00.000Z", 162.2, 162.65, 162.18, 162.55),
+  ];
+}
+
+function outcomeTimeframeDeps(state, overrides = {}) {
+  return makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 1,
+        chartsCount: 2,
+        charts: [
+          { index: 0, symbol: "OANDA:USDJPY", resolution: state.resolution, studies: [] },
+          { index: 1, symbol: "OANDA:XAUUSD", resolution: "240", studies: [] },
+        ],
+      }),
+      listPineScripts: async () => [
+        {
+          pineId: OUTCOME_PINE_ID,
+          name: ANALYSIS_OVERLAY_NAME,
+          kind: "study",
+          version: "2.0",
+          usedBy: [
+            {
+              chartIndex: 0,
+              studyId: "overlay2",
+              name: ANALYSIS_OVERLAY_NAME,
+              version: "2.0",
+            },
+          ],
+        },
+      ],
+      getPineSource: async () => ({
+        pineId: OUTCOME_PINE_ID,
+        name: ANALYSIS_OVERLAY_NAME,
+        kind: "study",
+        version: "2.0",
+        updated: null,
+        sourceLength: ANALYSIS_OVERLAY_SOURCE.length,
+        source: ANALYSIS_OVERLAY_SOURCE,
+      }),
+      getIndicatorInputs: async () => [overlayStudy("overlay2", outcomeOverlayValues())],
+      getOhlcv: async () => ({
+        symbol: "OANDA:USDJPY",
+        resolution: state.resolution,
+        count: 3,
+        bars: outcomeEvidenceBars(),
+      }),
+      setResolution: async (resolution, chartIndex) => {
+        assert.equal(chartIndex, 0);
+        state.calls.push(resolution);
+        state.resolution = resolution;
+        return { symbol: "OANDA:USDJPY", resolution, changed: true, bars: 3 };
+      },
+      ...overrides,
+    },
+  });
+}
+
+test("exposes exactly the forty expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -409,6 +535,8 @@ test("exposes exactly the thirty-eight expected tools", async () => {
       "ensure_analysis_overlay",
       "evaluate_analysis_overlay_outcome",
       "get_aligned_history",
+      "get_analysis_calibration",
+      "get_analysis_journal",
       "get_analysis_overlay_status",
       "get_analysis_overlay_template",
       "get_chart_context",
@@ -1472,6 +1600,180 @@ test("evaluate_analysis_overlay_outcome returns first-hit evidence from closed b
   assert.equal(parsed.source.formingBarsExcluded, 1);
 });
 
+test("evaluate_analysis_overlay_outcome evaluates on a temporary timeframe and restores the selected chart", async () => {
+  const state = { resolution: "240", calls: [] };
+  const client = await connectedClient(outcomeTimeframeDeps(state));
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: OUTCOME_PINE_ID,
+      chart_index: 0,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      evaluation_timeframe: "15",
+    },
+  });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.outcome, "target_before_stop");
+  assert.equal(parsed.timeframe, "240");
+  assert.equal(parsed.evaluationTimeframe, "15");
+  assert.equal(parsed.source.kind, "temporary_evaluation_timeframe_closed_ohlcv");
+  assert.equal(parsed.chartState.restored, true);
+  assert.equal(parsed.chartState.currentTimeframe, "240");
+  assert.deepEqual(state.calls, ["15", "240"]);
+});
+
+test("evaluate_analysis_overlay_outcome records only when explicitly requested", async () => {
+  const state = { resolution: "240", calls: [] };
+  const deps = outcomeTimeframeDeps(state);
+  const recorded = [];
+  deps.journal.recordOutcome = async (...args) => {
+    recorded.push(args);
+    return {
+      recorded: true,
+      idempotent: false,
+      entry: { event_id: "44444444-4444-4444-8444-444444444444" },
+    };
+  };
+  const client = await connectedClient(deps);
+  const argumentsBase = {
+    pine_id: OUTCOME_PINE_ID,
+    chart_index: 0,
+    expected_symbol: "OANDA:USDJPY",
+    expected_timeframe: "240",
+    evaluation_timeframe: "15",
+  };
+
+  const readOnly = JSON.parse((await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: argumentsBase,
+  })).content[0].text);
+  assert.equal(readOnly.journal.requested, false);
+  assert.equal(recorded.length, 0);
+
+  const persisted = JSON.parse((await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: { ...argumentsBase, record: true },
+  })).content[0].text);
+  assert.equal(persisted.journal.recorded, true);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0][0], "USDJPY-timeframe-evaluation");
+  assert.match(recorded[0][1], /^[0-9a-f]{64}$/);
+  assert.equal(recorded[0][2].outcome, "target_before_stop");
+  assert.equal(recorded[0][2].evidenceThrough, "2026-07-15T13:00:00.000Z");
+});
+
+test("evaluate_analysis_overlay_outcome blocks stale-resolution evidence and still restores the chart", async () => {
+  const state = { resolution: "240", calls: [] };
+  const client = await connectedClient(
+    outcomeTimeframeDeps(state, {
+      getOhlcv: async () => ({
+        symbol: "OANDA:USDJPY",
+        resolution: "240",
+        count: 3,
+        bars: outcomeEvidenceBars(),
+      }),
+    }),
+  );
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: OUTCOME_PINE_ID,
+      chart_index: 0,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      evaluation_timeframe: "15",
+    },
+  });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.reason, "evaluation_evidence_unavailable");
+  assert.match(parsed.detail, /does not match evaluation timeframe/);
+  assert.equal(parsed.chartState.restored, true);
+  assert.deepEqual(state.calls, ["15", "240"]);
+});
+
+test("evaluate_analysis_overlay_outcome preserves the result and reports a restore failure", async () => {
+  const state = { resolution: "240", calls: [] };
+  const client = await connectedClient(
+    outcomeTimeframeDeps(state, {
+      setResolution: async (resolution, chartIndex) => {
+        assert.equal(chartIndex, 0);
+        state.calls.push(resolution);
+        if (resolution === "240") throw new Error("restore refused");
+        state.resolution = resolution;
+        return { symbol: "OANDA:USDJPY", resolution, changed: true, bars: 3 };
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: OUTCOME_PINE_ID,
+      chart_index: 0,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      evaluation_timeframe: "15",
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.outcome, "target_before_stop");
+  assert.equal(parsed.chartState.restored, false);
+  assert.equal(parsed.chartState.currentTimeframe, "15");
+  assert.match(parsed.chartState.restoreError, /restore refused/);
+  assert.ok(parsed.qualityIssues.includes("chart_timeframe_restore_failed"));
+});
+
+test("temporary outcome evaluation serializes a concurrent set_timeframe operation", async () => {
+  const state = { resolution: "240", calls: [] };
+  let signalSwitchStarted;
+  let releaseSwitch;
+  const switchStarted = new Promise((resolve) => { signalSwitchStarted = resolve; });
+  const switchGate = new Promise((resolve) => { releaseSwitch = resolve; });
+  const client = await connectedClient(
+    outcomeTimeframeDeps(state, {
+      setResolution: async (resolution, chartIndex) => {
+        state.calls.push(resolution);
+        if (resolution === "15") {
+          assert.equal(chartIndex, 0);
+          signalSwitchStarted();
+          await switchGate;
+        }
+        state.resolution = resolution;
+        return { symbol: "OANDA:USDJPY", resolution, changed: true, bars: 3 };
+      },
+    }),
+  );
+  const evaluation = client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: OUTCOME_PINE_ID,
+      chart_index: 0,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      evaluation_timeframe: "15",
+    },
+  });
+  await switchStarted;
+  const contextRead = client.callTool({
+    name: "get_chart_context",
+    arguments: {},
+  });
+  const timeframeChange = client.callTool({
+    name: "set_timeframe",
+    arguments: { resolution: "60" },
+  });
+  releaseSwitch();
+  const [, contextResult] = await Promise.all([evaluation, contextRead, timeframeChange]);
+  const context = JSON.parse(contextResult.content[0].text);
+  assert.equal(context.charts[0].resolution, "240");
+  assert.deepEqual(state.calls, ["15", "240", "60"]);
+});
+
 test("get_analysis_overlay_status reports missing and blocks unaudited placed source", async () => {
   const pineId = "USER;8f868f366873411aa46bd30872711544";
   const baseScript = {
@@ -1577,6 +1879,8 @@ test("remove_owned_study requires confirmation and forwards an ownership-verifie
 test("apply_analysis_overlay is a dry run by default and verifies after confirmation", async () => {
   let values = Object.fromEntries(ANALYSIS_OVERLAY_INPUTS.map((input) => [input.id, 0]));
   let writes = 0;
+  let journalFailure = null;
+  const journaled = [];
   const overlayInputs = () => [
     {
       id: "overlay1",
@@ -1618,6 +1922,17 @@ test("apply_analysis_overlay is a dry run by default and verifies after confirma
           },
         ],
       },
+      journal: {
+        recordAnalysis: async (definition) => {
+          if (journalFailure) throw journalFailure;
+          journaled.push(definition);
+          return {
+            recorded: true,
+            idempotent: false,
+            entry: { event_id: "33333333-3333-4333-8333-333333333333" },
+          };
+        },
+      },
     }),
   );
   const args = {
@@ -1649,6 +1964,31 @@ test("apply_analysis_overlay is a dry run by default and verifies after confirma
   assert.equal(writes, 1);
   assert.equal(applied.verified, true);
   assert.deepEqual(applied.graphicsVerification, { labels: 1, lines: 5, boxes: 1 });
+  assert.equal(applied.journal.recorded, true);
+  assert.equal(journaled[0].analysisId, args.analysis_id);
+  assert.equal(journaled[0].symbol, "OANDA:USDJPY");
+
+  journalFailure = new Error("journal disk unavailable");
+  const appliedWithoutJournal = JSON.parse((await client.callTool({
+    name: "apply_analysis_overlay",
+    arguments: { ...args, analysis_id: `${args.analysis_id}-retry`, confirm: true },
+  })).content[0].text);
+  assert.equal(appliedWithoutJournal.applied, true);
+  assert.equal(appliedWithoutJournal.verified, true);
+  assert.equal(appliedWithoutJournal.journal.recorded, false);
+  assert.match(appliedWithoutJournal.journal.error, /journal disk unavailable/);
+  assert.equal(appliedWithoutJournal.journal.reason, "journal_write_failed");
+  assert.ok(appliedWithoutJournal.warnings.some((warning) => warning.includes("journal write failed")));
+
+  journalFailure = new AnalysisDefinitionConflictError(args.analysis_id);
+  const appliedWithConflict = JSON.parse((await client.callTool({
+    name: "apply_analysis_overlay",
+    arguments: { ...args, confidence: 0.71, confirm: true },
+  })).content[0].text);
+  assert.equal(appliedWithConflict.applied, true);
+  assert.equal(appliedWithConflict.journal.reason, "analysis_id_definition_conflict");
+  assert.match(appliedWithConflict.journal.remediation, /new analysis_id/);
+  assert.doesNotMatch(appliedWithConflict.journal.remediation, /retry idempotently/);
 });
 
 test("apply_analysis_overlay does not report verified when recalculation misses its deadline", async () => {

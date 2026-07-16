@@ -7,11 +7,13 @@ import { EconomicCalendar } from "./calendar.js";
 import { CotClient } from "./cot.js";
 import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
+import { AnalysisJournalStore, resolveAnalysisJournalPath } from "./analysisJournal.js";
 import { createServer } from "./server.js";
 
 const cdp = new CdpClient();
 const realYieldHistoryPath = resolveRealYieldHistoryPath();
 const realYieldHistory = new RealYieldFirstSeenStore(realYieldHistoryPath);
+const analysisJournal = new AnalysisJournalStore(resolveAnalysisJournalPath());
 const server = createServer({
   cdp,
   tv: new TradingView(cdp),
@@ -19,6 +21,7 @@ const server = createServer({
   calendar: new EconomicCalendar(),
   cot: new CotClient(),
   realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldHistory),
+  journal: analysisJournal,
 });
 
 const transport = new StdioServerTransport();

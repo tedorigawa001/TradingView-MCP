@@ -111,7 +111,7 @@ if barstate.islast
     analysisLabel := label.new(bar_index + 1, entryHigh, labelText, color = color.new(biasColor, 15), textcolor = color.black, style = label.style_label_left, size = size.small)
 `;
 
-function normalizeResolution(value: string): string {
+export function normalizeResolution(value: string): string {
   const upper = value.trim().toUpperCase();
   const hours = upper.match(/^(\d+)H$/);
   if (hours) return String(Number(hours[1]) * 60);

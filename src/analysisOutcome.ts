@@ -55,7 +55,14 @@ export function evaluateAnalysisOverlayOutcome(
       activation: { entryAt: null, confirmationAt: null },
       terminal: null,
       qualityIssues: ["neutral_analysis_has_no_directional_outcome"],
-      evidence: { suppliedBars: bars.length, closedBars: 0, evaluatedBars: 0, skippedAnalysisBar: false },
+      evidence: {
+        suppliedBars: bars.length,
+        closedBars: 0,
+        evaluatedBars: 0,
+        skippedAnalysisBar: false,
+        closedThrough: null,
+        evidenceThrough: null,
+      },
     };
   }
   const barMs = resolutionMilliseconds(resolution);
@@ -72,6 +79,8 @@ export function evaluateAnalysisOverlayOutcome(
         closedBars: bars.filter((bar) => bar.forming !== true).length,
         evaluatedBars: 0,
         skippedAnalysisBar: false,
+        closedThrough: bars.filter((bar) => bar.forming !== true).at(-1)?.timeIso ?? null,
+        evidenceThrough: null,
       },
     };
   }
@@ -98,6 +107,8 @@ export function evaluateAnalysisOverlayOutcome(
     suppliedBars: bars.length,
     closedBars: closed.length,
     evaluatedBars: 0,
+    closedThrough: closed.at(-1)?.timeIso ?? null,
+    evidenceThrough: null as string | null,
     skippedAnalysisBar: closed.some((bar) => {
       const start = bar.time * 1000;
       return start < analyzedAtMs && start + barMs > analyzedAtMs;
@@ -119,7 +130,11 @@ export function evaluateAnalysisOverlayOutcome(
     const end = start + barMs;
     return start >= analyzedAtMs && (expiresAtMs === null || end <= expiresAtMs);
   });
-  const evidence = { ...evidenceBase, evaluatedBars: eligible.length };
+  const evidence = {
+    ...evidenceBase,
+    evaluatedBars: eligible.length,
+    evidenceThrough: eligible.at(-1)?.timeIso ?? null,
+  };
   const windowClosed = expiresAtMs !== null && now.getTime() >= expiresAtMs;
   if (eligible.length === 0) {
     return {

@@ -1832,7 +1832,7 @@ export class TradingView {
    * Rejects if the change does not take effect rather than silently returning
    * the old state.
    */
-  setResolution(resolution: string): Promise<{
+  setResolution(resolution: string, chartIndex?: number): Promise<{
     symbol: string;
     resolution: string;
     changed: boolean;
@@ -1842,10 +1842,13 @@ export class TradingView {
     if (typeof resolution !== "string" || !/^[0-9]*[SDWM]?$/i.test(resolution) || resolution === "") {
       throw new Error(`resolution must look like "15", "240", "1D", "1W" — got ${JSON.stringify(resolution)}`);
     }
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "window.TradingViewApi.activeChart()" : `window.TradingViewApi.chart(${chartIndex})`;
     return this.cdp.evaluate(`
       new Promise((resolve, reject) => {
         const requested = ${JSON.stringify(resolution)};
-        const chart = window.TradingViewApi.activeChart();
+        const chart = ${chartExpr};
         const before = chart.resolution();
         const state = () => ({ symbol: chart.symbol(), resolution: chart.resolution() });
         // Normalize "D"/"1D", "W"/"1W", "M"/"1M", "S"/"1S" before comparing
