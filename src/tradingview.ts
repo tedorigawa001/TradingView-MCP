@@ -733,8 +733,14 @@ export class TradingView {
         // for the report object to be replaced (same pattern as run_backtest)
         // AND for the study's own data to settle, so this also works for
         // plain (non-strategy) indicators that have no report at all.
-        const bt = await api.backtestingStrategyApi();
-        const staleReport = bt.activeStrategyReportData.value();
+        // The Strategy Tester API is absent until the app initializes it
+        // (e.g. right after an app restart with no strategy loaded) — fall
+        // back to isLoading-only settling instead of failing the write.
+        let bt = null;
+        try {
+          if (typeof api.backtestingStrategyApi === "function") bt = await api.backtestingStrategyApi();
+        } catch (e) {}
+        const staleReport = bt ? bt.activeStrategyReportData.value() : null;
 
         studyApi.setInputValues(inputs);
 
@@ -752,7 +758,7 @@ export class TradingView {
         let sawChange = false;
         let settled = false;
         while (Date.now() - t0 < 20000) {
-          const curReport = bt.activeStrategyReportData.value();
+          const curReport = bt ? bt.activeStrategyReportData.value() : null;
           const curLoading = studyApi.isLoading();
           if (curReport !== lastReport || curLoading !== lastLoading) {
             lastReport = curReport;
@@ -1599,6 +1605,9 @@ export class TradingView {
       (async () => {
         const api = window.TradingViewApi;
         ${FORMAT_REPORT_SNIPPET}
+        if (typeof api.backtestingStrategyApi !== "function") {
+          throw new Error("Strategy Tester API is unavailable in this app session — open a chart with a strategy once, then retry");
+        }
         const bt = await api.backtestingStrategyApi();
         const report = formatReport(bt, ${tradesLimit});
         if (!report) {
@@ -1647,6 +1656,9 @@ export class TradingView {
           throw new Error(pineId + " is not a strategy — pick a script with kind \\"strategy\\" from list_pine_scripts");
         }
 
+        if (typeof api.backtestingStrategyApi !== "function") {
+          throw new Error("Strategy Tester API is unavailable in this app session — open a chart with a strategy once, then retry");
+        }
         const bt = await api.backtestingStrategyApi();
         // The report WatchedValue can still hold the PREVIOUS run of a
         // strategy with the SAME name (e.g. re-testing after saving a new

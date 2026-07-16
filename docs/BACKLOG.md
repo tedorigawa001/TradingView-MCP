@@ -168,6 +168,7 @@ USDJPY 4H の実分析(analyzedAt 12:35Z・期限 14:00Z)を `evaluate_analysis_
 - **実装(2026-07-09)**: `isNoisePlot` の対象に `/^ohlc_/` type を追加。`include_all_plots: true` で従来どおり全プロットを見られる点は維持(実機でBushidoScalpの `plot_0`〜`plot_3` がデフォルトで消え、`includeAllPlots:true` で復活することを確認)
 - **規模**: 小。テスト: ユニット96件・統合28件
 
-## 運用メモ(コード変更なし)
+## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
+- **ストラテジーテスターAPIは遅延初期化**(2026-07-16実機で発見): TradingViewアプリ再起動直後は `TradingViewApi.backtestingStrategyApi` が存在せず、settle検知でこれを無条件に呼んでいた `set_indicator_input` 系の全書き込みが失敗していた(書き込み前に失敗するためチャートは無傷)。ガードを追加し、API不在時はプレーンインジケーターと同じ `isLoading` のみのsettle判定へフォールバック。`get_strategy_report` / `run_backtest` はAPI不在時に明確なエラーを返す
