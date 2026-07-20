@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,10 @@ const definition = (analysisId, confidence = 0.8) => ({
   targets: [162.6],
   confidence,
   note: "journal test",
+  analysisSymbol: "OANDA:USDJPY",
+  analysisTimeframe: "240",
+  snapshotId: "67fa3a10-fdf7-47ac-a4f7-9a3047545930",
+  strategyVersion: "Bushido-2026.07",
 });
 
 const outcome = (label, status, evidenceThrough, evaluatedAt = "2026-07-16T06:00:00.000Z") => ({
@@ -59,6 +64,41 @@ test("AnalysisJournalStore persists definitions idempotently with owner-only per
     assert.equal(err.code, "analysis_id_definition_conflict");
     return true;
   });
+  await assert.rejects(
+    store.recordAnalysis({
+      ...value,
+      snapshotId: "1318dd8e-299b-4e9b-bf5b-c8b1f8b807ad",
+    }),
+    AnalysisDefinitionConflictError,
+  );
+});
+
+test("analysis definition hashing remains compatible with legacy context-free records", () => {
+  const {
+    analysisSymbol: _analysisSymbol,
+    analysisTimeframe: _analysisTimeframe,
+    snapshotId: _snapshotId,
+    strategyVersion: _strategyVersion,
+    ...legacy
+  } = definition("USDJPY-legacy");
+  const oldCanonical = {
+    analysisId: legacy.analysisId,
+    symbol: legacy.symbol,
+    timeframe: legacy.timeframe,
+    analyzedAt: legacy.analyzedAt,
+    expiresAt: legacy.expiresAt,
+    bias: legacy.bias,
+    entryLow: legacy.entryLow,
+    entryHigh: legacy.entryHigh,
+    confirmation: legacy.confirmation,
+    invalidation: legacy.invalidation,
+    stop: legacy.stop,
+    targets: legacy.targets,
+    confidence: legacy.confidence,
+    note: legacy.note,
+  };
+  const legacyHash = createHash("sha256").update(JSON.stringify(oldCanonical)).digest("hex");
+  assert.equal(analysisDefinitionHash(legacy), legacyHash);
 });
 
 test("AnalysisJournalStore keeps completed outcomes monotonic and calibrates only target versus stop", async () => {

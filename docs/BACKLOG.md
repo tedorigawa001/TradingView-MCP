@@ -20,6 +20,7 @@
 - ✅ **#18 分析オーバーレイの事後評価** — `evaluate_analysis_overlay_outcome`(分析時刻後のロード済み確定OHLCだけを時系列評価。Entry→任意Confirmation後のTarget/Stop初回到達を判定し、同一足・ギャップ・履歴不足は`ambiguous`/`incomplete`)
 - ✅ **#19 事後評価の評価用時間足分離** — `evaluation_timeframe`指定時に対象チャートだけを一時切替し、OHLC証拠のsymbol・resolution・バー有無を検証して元時間足へ復元。復元失敗は`chartState`へ明示し、競合するチャート操作を直列化
 - ✅ **#20 分析ジャーナル** — apply確定時の分析定義と明示指定された事後評価を安全なローカルJSONLへ記録。ID/定義衝突と状態逆行を防ぎ、履歴参照・銘柄/bias別の確信度較正を提供
+- ✅ **#21 分析オーバーレイの銘柄・時間足バインド** — 18入力版へ更新し、保存されたsymbol/timeframeと現在チャートの不一致をstatus・事後評価でfail-closedに検出
 
 ## 優先度: 高
 
@@ -158,12 +159,13 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 
 安全境界として、以下は分析・監視・評価・計算に限定する。注文API、口座識別子、認証情報を取得・保存せず、発注・変更・決済を行わない。ライブ観測、過去のバックテスト、事後評価は出所と時点を分離し、過去成績を現在相場の証拠として扱わない。
 
-### #21 分析オーバーレイの銘柄・時間足バインド(優先度: P0・規模: 中)
+### #21 分析オーバーレイの銘柄・時間足バインド ✅ 完了(2026-07-20)
 
 - **課題**: オーバーレイ入力に分析対象symbol/timeframeがないため、EURUSD分析をUSDJPYチャートへ残した状態でも、固定Pineソースと既存入力が妥当なら`ready`/`trusted:true`になり得る。価格水準の桁や範囲による推測は銘柄横断で安全ではない
-- **案**: Pine入力契約へ`analysisSymbol`、`analysisTimeframe`、`snapshotId`、`strategyVersion`を追加する。`apply_analysis_overlay`で実チャート、期待値、入力へ保存する文脈を三者照合し、`get_analysis_overlay_status`と`evaluate_analysis_overlay_outcome`でも再照合する。不一致は`status: "stale_context"`、`trusted:false`として、価格関係判定・事後評価・ジャーナル記録へ進めない
-- **移行**: テンプレート版を上げ、旧14入力版は`ensure_analysis_overlay`で入力を移行する。ただし旧版にはsymbol/timeframeの信頼できる保存値がないため、呼び出し時の期待値を無条件に焼き付けず、プレビューで`context_binding_required`を示して明示確認後に移行する
-- **受入条件**: EURUSD分析を保持したスタディをUSDJPYチャートへ移した実機ケースがfail-closedになる。同一銘柄・同一時間足は従来どおり冪等に再利用でき、時間足変更後も元の分析時間足との不一致を検出できる
+- **実装**: Pine入力契約の末尾へ`analysisSymbol`、`analysisTimeframe`、`snapshotId`、`strategyVersion`を追加して論理テンプレート版を`2.0`へ更新。`apply_analysis_overlay`で実チャートのsymbol/timeframeを保存し、任意のsnapshot ID・strategy versionとともに全18入力を読み戻す。`get_analysis_overlay_status`と`evaluate_analysis_overlay_outcome`は保存文脈を現在チャートと再照合し、不一致を`status: "stale_context"`、`trusted:false`として市場読取り・時間足切替・評価・記録へ進めない
+- **移行**: 旧`in_0`〜`in_13`のIDを維持したまま4入力を末尾追加。旧14入力版の`ensure_analysis_overlay`プレビューは`contextBindingRequired:true`と警告を返し、`confirm:true`後だけ旧分析を現在の検証済みsymbol/timeframeへ拘束する。追加・18入力移行・settle・読み戻し・配置版確認が成功してから旧Studyを削除し、失敗時は従来どおり新規側をロールバックする
+- **検証**: EURUSDに拘束された分析をUSDJPYチャートでstatus確認・事後評価する公開MCPテストを追加し、いずれも市場データを読まずfail-closedになることを固定。`4H`と`240`は同一時間足として受理し、snapshot ID・strategy versionはジャーナルの定義hashへ含める
+- **実機検証(2026-07-20)**: 監査済みテンプレートをTradingView Pine保存版`3.0`としてコンパイル警告なしで非破壊保存し、USDJPY 4Hへ新版Studyを追加。18入力の読み戻し、再計算settle、描画数、ジャーナル記録を確認してから旧`2.0` Studyだけを削除した。USDJPYでは`ready`/`trusted:true`、一時的にEURUSDへ切り替えるとstatusは`stale_context`/`trusted:false`、事後評価は`not_evaluable`となり、OHLC取得・評価時間足切替へ進まないことを確認後、USDJPY 4Hへ復元した
 
 ### #22 分析案の事前検証(`validate_trade_plan`)(優先度: P0・規模: 小〜中)
 

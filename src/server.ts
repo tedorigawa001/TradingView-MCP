@@ -20,13 +20,16 @@ import { computeRoundTripCost } from "./costModel.js";
 import { redactSecrets } from "./redact.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
+  ANALYSIS_OVERLAY_LEGACY_INPUTS,
   ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID,
   ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT,
   ANALYSIS_OVERLAY_NAME,
   ANALYSIS_OVERLAY_SOURCE,
   ANALYSIS_OVERLAY_VERSION,
   assertAnalysisOverlayStudy,
+  assertLegacyAnalysisOverlayStudy,
   buildAnalysisOverlayInputs,
+  compareAnalysisOverlayBinding,
   computeAnalysisOverlayPriceStatus,
   parseAnalysisOverlayState,
   normalizeResolution,
@@ -929,7 +932,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Idempotently ensure that the audited Bushido Analysis Overlay is present once " +
         "on a target chart at the latest saved Pine version. It reuses a current instance, " +
-        "adds a missing one, or transactionally adds the latest version, migrates all 14 " +
+        "adds a missing one, or transactionally adds the latest version, migrates the " +
         "analysis inputs, verifies them, then removes the old instance. Source, symbol, " +
         "timeframe, pine_id, version and input contract are checked fail-closed. Without " +
         "confirm=true, any chart-changing action is preview-only.",
@@ -981,7 +984,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             studyId: usage.studyId,
             chartIndex: chart.index,
           });
-          inspected.push({ usage, study: assertAnalysisOverlayStudy(studies, usage.studyId) });
+          let study;
+          if (usage.version === script.version) {
+            study = assertAnalysisOverlayStudy(studies, usage.studyId);
+          } else {
+            try {
+              study = assertAnalysisOverlayStudy(studies, usage.studyId);
+            } catch {
+              study = assertLegacyAnalysisOverlayStudy(studies, usage.studyId);
+            }
+          }
+          inspected.push({ usage, study });
         }
         const latest = inspected.filter(({ usage }) => usage.version === script.version);
         const outdated = inspected.filter(({ usage }) => usage.version !== script.version);
@@ -1040,6 +1053,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }
         const old = outdated[0] ?? null;
         const plannedAction = old ? "upgrade_analysis_overlay" : "add_analysis_overlay";
+        const contextBindingRequired = old !== null && ANALYSIS_OVERLAY_INPUTS.some(
+          (expected) => !old.study.inputs.some((candidate) => candidate.id === expected.id),
+        );
         if (confirm !== true) {
           return jsonResult({
             dryRun: true,
@@ -1051,6 +1067,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             chartIndex: chart.index,
             symbol: chart.symbol,
             timeframe: chart.resolution,
+            contextBindingRequired,
+            warnings: contextBindingRequired
+              ? [
+                  "The legacy overlay does not contain a trusted symbol/timeframe binding. " +
+                    "Confirming this upgrade will bind its migrated analysis to the currently verified chart context.",
+                ]
+              : [],
             confirmRequired: true,
           });
         }
@@ -1069,8 +1092,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           if (old) {
             const migrationInputs = ANALYSIS_OVERLAY_INPUTS.map((expected) => {
               const input = old.study.inputs.find((candidate) => candidate.id === expected.id);
-              if (!input) throw new Error(`old overlay is missing input ${expected.id}`);
-              return { id: expected.id, value: input.value };
+              if (input) return { id: expected.id, value: input.value };
+              if (!ANALYSIS_OVERLAY_LEGACY_INPUTS.every((legacy) =>
+                old.study.inputs.some((candidate) => candidate.id === legacy.id))) {
+                throw new Error(`old overlay is missing input ${expected.id}`);
+              }
+              if (expected.id === "in_14") return { id: expected.id, value: chart.symbol };
+              if (expected.id === "in_15") {
+                return { id: expected.id, value: normalizeResolution(chart.resolution) };
+              }
+              if (expected.id === "in_16" || expected.id === "in_17") {
+                return { id: expected.id, value: "" };
+              }
+              throw new Error(`old overlay is missing input ${expected.id}`);
             });
             const operation = await tv.setIndicatorInput(newStudyId, migrationInputs, {
               chartIndex: chart.index,
@@ -1143,7 +1177,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Read the current Bushido Analysis Overlay state without changing the chart. " +
         "It resolves the study by USER pine_id, verifies the exact on-chart Pine version " +
-        "source and 14-input contract, then returns analysis metadata, expiry, current-price " +
+        "source and context-bound input contract, then returns analysis metadata, expiry, current-price " +
         "relations, risk/reward references and drawing integrity. Level states describe only " +
         "the current price, not historical touch order; use a future outcome tool for that.",
       inputSchema: {
@@ -1260,6 +1294,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             timeframe: chart.resolution,
             analysis,
             remediation: "call apply_analysis_overlay with a real analysis",
+          });
+        }
+        const binding = compareAnalysisOverlayBinding(
+          analysis,
+          chart.symbol,
+          chart.resolution,
+        );
+        if (!binding.matches) {
+          return jsonResult({
+            status: "stale_context",
+            trusted: false,
+            reason: "analysis_context_mismatch",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            analysis,
+            mismatches: binding.mismatches,
+            remediation: "apply a new analysis for the current symbol and timeframe",
           });
         }
         const ohlcv = await tv.getOhlcv(1, chart.index);
@@ -1472,6 +1527,28 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             pineId: pine_id,
             studyId: usage.studyId,
             remediation: "call apply_analysis_overlay with a real analysis",
+          });
+        }
+        const binding = compareAnalysisOverlayBinding(
+          analysis,
+          chart.symbol,
+          chart.resolution,
+        );
+        if (!binding.matches) {
+          return jsonResult({
+            status: "stale_context",
+            outcome: "not_evaluable",
+            trusted: false,
+            reason: "analysis_context_mismatch",
+            pineId: pine_id,
+            pineVersion: usage.version,
+            studyId: usage.studyId,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            analysis,
+            mismatches: binding.mismatches,
+            remediation: "apply a new analysis for the current symbol and timeframe",
           });
         }
 
@@ -1714,6 +1791,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         targets: z.array(z.number().positive()).min(1).max(3),
         confidence: z.number().min(0).max(1),
         note: z.string().max(160).optional(),
+        snapshot_id: z.string().uuid().optional().describe(
+          "Optional get_market_snapshot snapshot_id binding this analysis to its evidence",
+        ),
+        strategy_version: z.string().min(1).max(80).optional().describe(
+          "Optional strategy or decision-policy version used for this analysis",
+        ),
         confirm: z
           .boolean()
           .optional()
@@ -1737,6 +1820,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       targets,
       confidence,
       note,
+      snapshot_id,
+      strategy_version,
       confirm,
     }) =>
       chartOperations.run(async () => {
@@ -1769,7 +1854,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           chartIndex: resolvedChartIndex,
         });
         assertAnalysisOverlayStudy(before, study_id);
-        const inputs = buildAnalysisOverlayInputs(analysis);
+        const inputs = buildAnalysisOverlayInputs(analysis, {
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+          snapshotId: snapshot_id,
+          strategyVersion: strategy_version,
+        });
         const preview = {
           analysisId: analysis_id,
           symbol: chart.symbol,
@@ -1786,6 +1876,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           targets,
           confidence,
           note: note ?? "",
+          snapshotId: snapshot_id ?? null,
+          strategyVersion: strategy_version ?? null,
           warnings: quality.warnings,
         };
         if (confirm !== true) {

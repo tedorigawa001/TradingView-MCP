@@ -122,6 +122,26 @@ const validateDefinition = (value: unknown): AnalysisJournalDefinition => {
   if (typeof definition.note !== "string" || definition.note.length > 160) {
     throw new Error("invalid journal note");
   }
+  if (definition.analysisSymbol !== undefined &&
+      (typeof definition.analysisSymbol !== "string" ||
+       definition.analysisSymbol.toUpperCase() !== definition.symbol.toUpperCase())) {
+    throw new Error("journal analysisSymbol does not match symbol");
+  }
+  if (definition.analysisTimeframe !== undefined &&
+      (typeof definition.analysisTimeframe !== "string" ||
+       definition.analysisTimeframe !== definition.timeframe)) {
+    throw new Error("journal analysisTimeframe does not match timeframe");
+  }
+  if (definition.snapshotId !== undefined && definition.snapshotId !== null &&
+      (typeof definition.snapshotId !== "string" ||
+       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(definition.snapshotId))) {
+    throw new Error("invalid journal snapshotId");
+  }
+  if (definition.strategyVersion !== undefined && definition.strategyVersion !== null &&
+      (typeof definition.strategyVersion !== "string" || definition.strategyVersion.length < 1 ||
+       definition.strategyVersion.length > 80)) {
+    throw new Error("invalid journal strategyVersion");
+  }
   return definition as AnalysisJournalDefinition;
 };
 
@@ -165,6 +185,10 @@ const canonicalDefinition = (definition: AnalysisJournalDefinition) => ({
   targets: definition.targets,
   confidence: definition.confidence,
   note: definition.note,
+  analysisSymbol: definition.analysisSymbol,
+  analysisTimeframe: definition.analysisTimeframe,
+  snapshotId: definition.snapshotId,
+  strategyVersion: definition.strategyVersion,
 });
 
 export function analysisDefinitionHash(definition: AnalysisJournalDefinition): string {

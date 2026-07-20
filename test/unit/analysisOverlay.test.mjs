@@ -5,7 +5,9 @@ import {
   ANALYSIS_OVERLAY_NAME,
   ANALYSIS_OVERLAY_SOURCE,
   assertAnalysisOverlayStudy,
+  assertLegacyAnalysisOverlayStudy,
   buildAnalysisOverlayInputs,
+  compareAnalysisOverlayBinding,
   computeAnalysisOverlayPriceStatus,
   parseAnalysisOverlayState,
   resolveAnalysisChart,
@@ -32,8 +34,10 @@ test("analysis overlay template exposes the stable input contract", () => {
   assert.match(ANALYSIS_OVERLAY_SOURCE, /\\n" \+ analysisNote/);
   assert.match(ANALYSIS_OVERLAY_SOURCE, /label\.style_label_left, size = size\.small/);
   assert.doesNotMatch(ANALYSIS_OVERLAY_SOURCE, /" \| " \+ analysisId/);
-  assert.equal(ANALYSIS_OVERLAY_INPUTS.length, 14);
+  assert.equal(ANALYSIS_OVERLAY_INPUTS.length, 18);
   assert.equal(ANALYSIS_OVERLAY_INPUTS[13].name, "Note");
+  assert.equal(ANALYSIS_OVERLAY_INPUTS[14].name, "Analysis Symbol");
+  assert.equal(ANALYSIS_OVERLAY_INPUTS[17].name, "Strategy Version");
 });
 
 test("resolveAnalysisChart validates symbol and equivalent timeframe aliases", () => {
@@ -140,14 +144,17 @@ test("validateAnalysisPayload enforces directional levels and marks expiry", () 
 });
 
 test("buildAnalysisOverlayInputs maps optional values to inert defaults", () => {
-  const inputs = buildAnalysisOverlayInputs({
-    ...bullish,
-    confirmation: undefined,
-    expiresAt: undefined,
-    targets: [162.6],
-    note: undefined,
-  });
-  assert.equal(inputs.length, 14);
+  const inputs = buildAnalysisOverlayInputs(
+    {
+      ...bullish,
+      confirmation: undefined,
+      expiresAt: undefined,
+      targets: [162.6],
+      note: undefined,
+    },
+    { symbol: "OANDA:USDJPY", timeframe: "4H" },
+  );
+  assert.equal(inputs.length, 18);
   assert.deepEqual(inputs.find((input) => input.id === "in_1"), {
     id: "in_1",
     value: Date.parse(bullish.analyzedAt),
@@ -155,6 +162,11 @@ test("buildAnalysisOverlayInputs maps optional values to inert defaults", () => 
   assert.deepEqual(inputs.find((input) => input.id === "in_5"), { id: "in_5", value: 0 });
   assert.deepEqual(inputs.find((input) => input.id === "in_9"), { id: "in_9", value: 0 });
   assert.deepEqual(inputs.find((input) => input.id === "in_12"), { id: "in_12", value: 0 });
+  assert.deepEqual(inputs.find((input) => input.id === "in_14"), {
+    id: "in_14",
+    value: "OANDA:USDJPY",
+  });
+  assert.deepEqual(inputs.find((input) => input.id === "in_15"), { id: "in_15", value: "240" });
 });
 
 test("assertAnalysisOverlayStudy refuses unrelated studies", () => {
@@ -180,6 +192,19 @@ test("assertAnalysisOverlayStudy refuses unrelated studies", () => {
     })),
   };
   assert.equal(assertAnalysisOverlayStudy([study], "overlay1"), study);
+  const legacyStudy = {
+    ...study,
+    inputs: study.inputs.slice(0, 14),
+  };
+  assert.equal(assertLegacyAnalysisOverlayStudy([legacyStudy], "overlay1"), legacyStudy);
+  assert.throws(
+    () =>
+      assertLegacyAnalysisOverlayStudy(
+        [{ ...legacyStudy, inputs: [...legacyStudy.inputs, study.inputs[14]] }],
+        "overlay1",
+      ),
+    /partial or malformed context-binding contract/,
+  );
   assert.throws(
     () =>
       assertAnalysisOverlayStudy(
@@ -191,7 +216,12 @@ test("assertAnalysisOverlayStudy refuses unrelated studies", () => {
 });
 
 test("parseAnalysisOverlayState and price status preserve current-price semantics", () => {
-  const mapped = buildAnalysisOverlayInputs(bullish);
+  const mapped = buildAnalysisOverlayInputs(bullish, {
+    symbol: "OANDA:USDJPY",
+    timeframe: "240",
+    snapshotId: "67fa3a10-fdf7-47ac-a4f7-9a3047545930",
+    strategyVersion: "Bushido-2026.07",
+  });
   const study = {
     id: "overlay1",
     name: ANALYSIS_OVERLAY_NAME,
@@ -211,6 +241,25 @@ test("parseAnalysisOverlayState and price status preserve current-price semantic
   const state = parseAnalysisOverlayState(study);
   assert.equal(state.analyzedAt, bullish.analyzedAt);
   assert.deepEqual(state.targets, [162.6, 162.85]);
+  assert.equal(state.analysisSymbol, "OANDA:USDJPY");
+  assert.equal(state.analysisTimeframe, "240");
+  assert.equal(state.snapshotId, "67fa3a10-fdf7-47ac-a4f7-9a3047545930");
+  assert.equal(state.strategyVersion, "Bushido-2026.07");
+  assert.deepEqual(compareAnalysisOverlayBinding(state, "oanda:usdjpy", "4H"), {
+    matches: true,
+    mismatches: [],
+  });
+  const mismatched = compareAnalysisOverlayBinding(state, "OANDA:USDJPY", "15");
+  assert.equal(mismatched.matches, false);
+  assert.deepEqual(mismatched.mismatches, [
+    { field: "timeframe", expected: "15", observed: "240" },
+  ]);
+  const invalidSnapshot = {
+    ...study,
+    inputs: study.inputs.map((input) =>
+      input.id === "in_16" ? { ...input, value: "not-a-snapshot-id" } : input),
+  };
+  assert.throws(() => parseAnalysisOverlayState(invalidSnapshot), /Snapshot ID must be a UUID/);
 
   const status = computeAnalysisOverlayPriceStatus(
     state,

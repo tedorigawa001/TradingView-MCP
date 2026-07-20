@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../build/server.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
+  ANALYSIS_OVERLAY_LEGACY_INPUTS,
   ANALYSIS_OVERLAY_NAME,
   ANALYSIS_OVERLAY_SOURCE,
 } from "../../build/analysisOverlay.js";
@@ -408,6 +409,12 @@ async function connectedClient(deps) {
 }
 
 function overlayStudy(id, values = {}) {
+  const contextDefaults = {
+    in_14: "OANDA:USDJPY",
+    in_15: "240",
+    in_16: "",
+    in_17: "",
+  };
   return {
     id,
     name: ANALYSIS_OVERLAY_NAME,
@@ -415,12 +422,18 @@ function overlayStudy(id, values = {}) {
     inputs: ANALYSIS_OVERLAY_INPUTS.map((input) => ({
       id: input.id,
       name: input.name,
-      type: typeof (values[input.id] ?? 0),
-      value: values[input.id] ?? 0,
+      type: typeof (values[input.id] ?? contextDefaults[input.id] ?? 0),
+      value: values[input.id] ?? contextDefaults[input.id] ?? 0,
       defval: 0,
       tooltip: null,
     })),
   };
+}
+
+function legacyOverlayStudy(id, values = {}) {
+  const study = overlayStudy(id, values);
+  const legacyIds = new Set(ANALYSIS_OVERLAY_LEGACY_INPUTS.map((input) => input.id));
+  return { ...study, inputs: study.inputs.filter((input) => legacyIds.has(input.id)) };
 }
 
 const OUTCOME_PINE_ID = "USER;8f868f366873411aa46bd30872711544";
@@ -843,9 +856,9 @@ test("get_analysis_overlay_template returns the fixed Pine source", async () => 
   const res = await client.callTool({ name: "get_analysis_overlay_template", arguments: {} });
   const template = JSON.parse(res.content[0].text);
   assert.equal(template.name, ANALYSIS_OVERLAY_NAME);
-  assert.equal(template.version, "1.0");
+  assert.equal(template.version, "2.0");
   assert.match(template.source, /entryBox := box\.new/);
-  assert.equal(template.inputContract.length, 14);
+  assert.equal(template.inputContract.length, 18);
 });
 
 test("ensure_analysis_overlay reuses one current instance without writing", async () => {
@@ -1048,7 +1061,7 @@ test("ensure_analysis_overlay migrates inputs before removing one old instance",
     { chartIndex: 0, studyId: "overlay1", name: ANALYSIS_OVERLAY_NAME, version: "1.0" },
   ];
   const oldValues = Object.fromEntries(
-    ANALYSIS_OVERLAY_INPUTS.map((input, index) => [input.id, index + 10]),
+    ANALYSIS_OVERLAY_LEGACY_INPUTS.map((input, index) => [input.id, index + 10]),
   );
   oldValues.in_0 = "analysis-old";
   oldValues.in_2 = "bullish";
@@ -1083,7 +1096,9 @@ test("ensure_analysis_overlay migrates inputs before removing one old instance",
           source: ANALYSIS_OVERLAY_SOURCE,
         }),
         getIndicatorInputs: async ({ studyId }) => [
-          overlayStudy(studyId, valuesByStudy.get(studyId)),
+          studyId === "overlay1"
+            ? legacyOverlayStudy(studyId, valuesByStudy.get(studyId))
+            : overlayStudy(studyId, valuesByStudy.get(studyId)),
         ],
         addPineToChart: async () => {
           usages = [...usages, { chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }];
@@ -1108,6 +1123,18 @@ test("ensure_analysis_overlay migrates inputs before removing one old instance",
       },
     }),
   );
+  const previewResult = await client.callTool({
+    name: "ensure_analysis_overlay",
+    arguments: {
+      pine_id: pineId,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+    },
+  });
+  const preview = JSON.parse(previewResult.content[0].text);
+  assert.equal(preview.contextBindingRequired, true);
+  assert.match(preview.warnings[0], /currently verified chart context/);
+
   const result = await client.callTool({
     name: "ensure_analysis_overlay",
     arguments: {
@@ -1122,7 +1149,13 @@ test("ensure_analysis_overlay migrates inputs before removing one old instance",
   assert.equal(parsed.studyId, "overlay2");
   assert.equal(parsed.migrated, true);
   assert.deepEqual(removed, ["overlay1"]);
-  assert.deepEqual(valuesByStudy.get("overlay2"), oldValues);
+  assert.deepEqual(valuesByStudy.get("overlay2"), {
+    ...oldValues,
+    in_14: "OANDA:USDJPY",
+    in_15: "240",
+    in_16: "",
+    in_17: "",
+  });
 });
 
 test("ensure_analysis_overlay rolls the new instance back when migration does not settle", async () => {
@@ -1351,6 +1384,81 @@ test("get_analysis_overlay_status returns trusted current-price and render state
   assert.deepEqual(parsed.qualityIssues, []);
 });
 
+test("get_analysis_overlay_status blocks an analysis bound to another symbol", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  let marketReads = 0;
+  const analyzedAt = new Date(Date.now() - 30 * 60_000).toISOString();
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "FX",
+          activeChartIndex: 0,
+          chartsCount: 1,
+          charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+        }),
+        listPineScripts: async () => [
+          {
+            pineId,
+            name: ANALYSIS_OVERLAY_NAME,
+            kind: "study",
+            version: "2.0",
+            usedBy: [{ chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }],
+          },
+        ],
+        getPineSource: async () => ({
+          pineId,
+          name: ANALYSIS_OVERLAY_NAME,
+          kind: "study",
+          version: "2.0",
+          updated: null,
+          sourceLength: ANALYSIS_OVERLAY_SOURCE.length,
+          source: ANALYSIS_OVERLAY_SOURCE,
+        }),
+        getIndicatorInputs: async () => [
+          overlayStudy("overlay2", {
+            in_0: "EURUSD-on-USDJPY",
+            in_1: Date.parse(analyzedAt),
+            in_2: "bullish",
+            in_3: 1.16,
+            in_4: 1.161,
+            in_5: 1.162,
+            in_6: 1.158,
+            in_7: 1.157,
+            in_8: 1.165,
+            in_9: 0,
+            in_10: 0,
+            in_11: 0.6,
+            in_12: 0,
+            in_13: "",
+            in_14: "OANDA:EURUSD",
+            in_15: "240",
+            in_16: "",
+            in_17: "",
+          }),
+        ],
+        getOhlcv: async () => {
+          marketReads += 1;
+          return { bars: [] };
+        },
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "get_analysis_overlay_status",
+    arguments: {
+      pine_id: pineId,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "stale_context");
+  assert.equal(parsed.trusted, false);
+  assert.equal(parsed.reason, "analysis_context_mismatch");
+  assert.equal(marketReads, 0);
+});
+
 test("get_analysis_overlay_status does not trust an unconfigured overlay", async () => {
   const pineId = "USER;8f868f366873411aa46bd30872711544";
   let marketReads = 0;
@@ -1519,6 +1627,10 @@ test("evaluate_analysis_overlay_outcome returns first-hit evidence from closed b
     in_11: 0.6,
     in_12: expiresAtMs,
     in_13: "",
+    in_14: "OANDA:USDJPY",
+    in_15: "15",
+    in_16: "",
+    in_17: "",
   };
   const makeBar = (timeMs, open, high, low, close, forming = false) => ({
     time: timeMs / 1000,
@@ -1623,6 +1735,39 @@ test("evaluate_analysis_overlay_outcome evaluates on a temporary timeframe and r
   assert.equal(parsed.chartState.restored, true);
   assert.equal(parsed.chartState.currentTimeframe, "240");
   assert.deepEqual(state.calls, ["15", "240"]);
+});
+
+test("evaluate_analysis_overlay_outcome refuses evidence for an overlay bound to another symbol", async () => {
+  const state = { resolution: "240", calls: [] };
+  let marketReads = 0;
+  const client = await connectedClient(
+    outcomeTimeframeDeps(state, {
+      getIndicatorInputs: async () => [
+        overlayStudy("overlay2", { ...outcomeOverlayValues(), in_14: "OANDA:EURUSD" }),
+      ],
+      getOhlcv: async () => {
+        marketReads += 1;
+        return { symbol: "OANDA:USDJPY", resolution: "240", count: 0, bars: [] };
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: OUTCOME_PINE_ID,
+      chart_index: 0,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240",
+      evaluation_timeframe: "15",
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "stale_context");
+  assert.equal(parsed.outcome, "not_evaluable");
+  assert.equal(parsed.trusted, false);
+  assert.equal(parsed.reason, "analysis_context_mismatch");
+  assert.equal(marketReads, 0);
+  assert.deepEqual(state.calls, []);
 });
 
 test("evaluate_analysis_overlay_outcome records only when explicitly requested", async () => {
@@ -1951,6 +2096,8 @@ test("apply_analysis_overlay is a dry run by default and verifies after confirma
     targets: [162.6, 162.85],
     confidence: 0.72,
     note: "PPI risk",
+    snapshot_id: "67fa3a10-fdf7-47ac-a4f7-9a3047545930",
+    strategy_version: "Bushido-2026.07",
   };
   const dry = await client.callTool({ name: "apply_analysis_overlay", arguments: args });
   assert.equal(JSON.parse(dry.content[0].text).dryRun, true);
@@ -1967,6 +2114,12 @@ test("apply_analysis_overlay is a dry run by default and verifies after confirma
   assert.equal(applied.journal.recorded, true);
   assert.equal(journaled[0].analysisId, args.analysis_id);
   assert.equal(journaled[0].symbol, "OANDA:USDJPY");
+  assert.equal(journaled[0].analysisSymbol, "OANDA:USDJPY");
+  assert.equal(journaled[0].analysisTimeframe, "240");
+  assert.equal(journaled[0].snapshotId, args.snapshot_id);
+  assert.equal(journaled[0].strategyVersion, args.strategy_version);
+  assert.equal(values.in_14, "OANDA:USDJPY");
+  assert.equal(values.in_15, "240");
 
   journalFailure = new Error("journal disk unavailable");
   const appliedWithoutJournal = JSON.parse((await client.callTool({

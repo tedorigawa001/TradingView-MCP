@@ -2,11 +2,11 @@ import type { ChartContext, IndicatorInputs } from "./tradingview.js";
 
 export const ANALYSIS_OVERLAY_NAME = "Bushido Analysis Overlay";
 // Logical template version; independent of TradingView's per-save Pine version.
-export const ANALYSIS_OVERLAY_VERSION = "1.0";
+export const ANALYSIS_OVERLAY_VERSION = "2.0";
 export const ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID = "unassigned";
 export const ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT = "2020-01-01T00:00:00.000Z";
 
-export const ANALYSIS_OVERLAY_INPUTS = [
+export const ANALYSIS_OVERLAY_LEGACY_INPUTS = [
   { id: "in_0", name: "Analysis ID", key: "analysisId" },
   { id: "in_1", name: "Analyzed At", key: "analyzedAt" },
   { id: "in_2", name: "Bias", key: "bias" },
@@ -21,6 +21,14 @@ export const ANALYSIS_OVERLAY_INPUTS = [
   { id: "in_11", name: "Confidence", key: "confidence" },
   { id: "in_12", name: "Expires At", key: "expiresAt" },
   { id: "in_13", name: "Note", key: "note" },
+] as const;
+
+export const ANALYSIS_OVERLAY_INPUTS = [
+  ...ANALYSIS_OVERLAY_LEGACY_INPUTS,
+  { id: "in_14", name: "Analysis Symbol", key: "analysisSymbol" },
+  { id: "in_15", name: "Analysis Timeframe", key: "analysisTimeframe" },
+  { id: "in_16", name: "Snapshot ID", key: "snapshotId" },
+  { id: "in_17", name: "Strategy Version", key: "strategyVersion" },
 ] as const;
 
 export type AnalysisBias = "bullish" | "bearish" | "neutral";
@@ -40,6 +48,13 @@ export interface AnalysisOverlayPayload {
   note?: string;
 }
 
+export interface AnalysisOverlayBinding {
+  symbol: string;
+  timeframe: string;
+  snapshotId?: string;
+  strategyVersion?: string;
+}
+
 export interface AnalysisOverlayState {
   analysisId: string;
   analyzedAt: string;
@@ -53,6 +68,10 @@ export interface AnalysisOverlayState {
   targets: number[];
   confidence: number;
   note: string;
+  analysisSymbol: string;
+  analysisTimeframe: string;
+  snapshotId: string | null;
+  strategyVersion: string | null;
 }
 
 export const ANALYSIS_OVERLAY_SOURCE = `//@version=6
@@ -72,6 +91,10 @@ target3     = input.float(0.0, "Target 3")
 confidence  = input.float(0.5, "Confidence", minval = 0.0, maxval = 1.0, step = 0.01)
 expiresAt   = input.time(0, "Expires At")
 analysisNote = input.string("", "Note")
+analysisSymbol = input.string("unassigned", "Analysis Symbol")
+analysisTimeframe = input.string("unassigned", "Analysis Timeframe")
+snapshotId = input.string("", "Snapshot ID")
+strategyVersion = input.string("", "Strategy Version")
 
 expired = expiresAt > 0 and timenow > expiresAt
 biasColor = expired ? color.gray : bias == "bullish" ? color.lime : bias == "bearish" ? color.red : color.yellow
@@ -146,7 +169,11 @@ export function resolveAnalysisChart(
   return chart;
 }
 
-export function assertAnalysisOverlayStudy(studies: IndicatorInputs[], studyId: string): IndicatorInputs {
+function assertAnalysisOverlayInputContract(
+  studies: IndicatorInputs[],
+  studyId: string,
+  contract: ReadonlyArray<{ id: string; name: string }>,
+): IndicatorInputs {
   const study = studies.find((candidate) => candidate.id === studyId);
   if (!study) throw new Error(`study ${studyId} was not returned by get_indicator_inputs`);
   if (study.name !== ANALYSIS_OVERLAY_NAME) {
@@ -154,13 +181,35 @@ export function assertAnalysisOverlayStudy(studies: IndicatorInputs[], studyId: 
       `study ${studyId} is not ${ANALYSIS_OVERLAY_NAME}; refusing to modify an unrelated indicator`,
     );
   }
-  for (const expected of ANALYSIS_OVERLAY_INPUTS) {
+  for (const expected of contract) {
     const actual = study.inputs.find((input) => input.id === expected.id);
     if (!actual || actual.name !== expected.name) {
       throw new Error(
         `study ${studyId} does not match overlay input contract at ${expected.id} (${expected.name})`,
       );
     }
+  }
+  return study;
+}
+
+export function assertAnalysisOverlayStudy(studies: IndicatorInputs[], studyId: string): IndicatorInputs {
+  return assertAnalysisOverlayInputContract(studies, studyId, ANALYSIS_OVERLAY_INPUTS);
+}
+
+export function assertLegacyAnalysisOverlayStudy(
+  studies: IndicatorInputs[],
+  studyId: string,
+): IndicatorInputs {
+  const study = assertAnalysisOverlayInputContract(
+    studies,
+    studyId,
+    ANALYSIS_OVERLAY_LEGACY_INPUTS,
+  );
+  const contextInputIds = new Set<string>(
+    ANALYSIS_OVERLAY_INPUTS.slice(ANALYSIS_OVERLAY_LEGACY_INPUTS.length).map((input) => input.id),
+  );
+  if (study.inputs.some((input) => contextInputIds.has(input.id))) {
+    throw new Error(`study ${studyId} has a partial or malformed context-binding contract`);
   }
   return study;
 }
@@ -235,7 +284,10 @@ export function validateAnalysisPayload(payload: AnalysisOverlayPayload, now = n
   return { stale, warnings };
 }
 
-export function buildAnalysisOverlayInputs(payload: AnalysisOverlayPayload) {
+export function buildAnalysisOverlayInputs(
+  payload: AnalysisOverlayPayload,
+  binding: AnalysisOverlayBinding,
+) {
   const targets = [...payload.targets, 0, 0, 0];
   const values: Record<(typeof ANALYSIS_OVERLAY_INPUTS)[number]["key"], string | number> = {
     analysisId: payload.analysisId,
@@ -253,6 +305,10 @@ export function buildAnalysisOverlayInputs(payload: AnalysisOverlayPayload) {
     confidence: payload.confidence,
     expiresAt: payload.expiresAt ? new Date(payload.expiresAt).getTime() : 0,
     note: payload.note ?? "",
+    analysisSymbol: binding.symbol,
+    analysisTimeframe: normalizeResolution(binding.timeframe),
+    snapshotId: binding.snapshotId ?? "",
+    strategyVersion: binding.strategyVersion ?? "",
   };
   return ANALYSIS_OVERLAY_INPUTS.map((input) => ({ id: input.id, value: values[input.key] }));
 }
@@ -297,7 +353,24 @@ export function parseAnalysisOverlayState(study: IndicatorInputs): AnalysisOverl
     targets: targetValues.filter((target) => target > 0),
     confidence: number("in_11", "Confidence"),
     note: text("in_13", "Note"),
+    analysisSymbol: text("in_14", "Analysis Symbol"),
+    analysisTimeframe: text("in_15", "Analysis Timeframe"),
+    snapshotId: text("in_16", "Snapshot ID") || null,
+    strategyVersion: text("in_17", "Strategy Version") || null,
   };
+  if (!/^[\w!.:&-]{1,48}$/.test(state.analysisSymbol)) {
+    throw new Error("Analysis Symbol has an invalid value");
+  }
+  if (state.analysisTimeframe !== "unassigned" && !/^[A-Za-z0-9]{1,8}$/.test(state.analysisTimeframe)) {
+    throw new Error("Analysis Timeframe has an invalid value");
+  }
+  if (state.snapshotId !== null &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(state.snapshotId)) {
+    throw new Error("Snapshot ID must be a UUID");
+  }
+  if (state.strategyVersion !== null && state.strategyVersion.length > 80) {
+    throw new Error("Strategy Version must not exceed 80 characters");
+  }
   validateAnalysisPayload({
     analysisId: state.analysisId,
     analyzedAt: state.analyzedAt,
@@ -316,6 +389,25 @@ export function parseAnalysisOverlayState(study: IndicatorInputs): AnalysisOverl
     throw new Error("Confidence must be between zero and one");
   }
   return state;
+}
+
+export function compareAnalysisOverlayBinding(
+  state: AnalysisOverlayState,
+  expectedSymbol: string,
+  expectedTimeframe: string,
+) {
+  const mismatches: Array<{ field: "symbol" | "timeframe"; expected: string; observed: string }> = [];
+  if (state.analysisSymbol.toUpperCase() !== expectedSymbol.toUpperCase()) {
+    mismatches.push({ field: "symbol", expected: expectedSymbol, observed: state.analysisSymbol });
+  }
+  if (normalizeResolution(state.analysisTimeframe) !== normalizeResolution(expectedTimeframe)) {
+    mismatches.push({
+      field: "timeframe",
+      expected: normalizeResolution(expectedTimeframe),
+      observed: state.analysisTimeframe,
+    });
+  }
+  return { matches: mismatches.length === 0, mismatches };
 }
 
 export function computeAnalysisOverlayPriceStatus(
