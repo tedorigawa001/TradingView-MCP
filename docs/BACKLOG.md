@@ -261,13 +261,116 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **Node選定**: Node公式の2026-07-20時点の一覧で22/24がLTS、20がEOL、26がCurrentのため、最低サポートと最新LTSを22/24で固定した。Current 26は必須ゲートにせず、LTS化後に追加を再評価する
 - **検証**: Node 24.18.0で`npm ci --ignore-scripts`と全284テストが成功し、`npm audit --audit-level=high`は0 vulnerabilities、workflow YAMLの構文検証も成功した。Node 22を含むGitHub Actions実runはworkflowのcommit/push後に確認する
 
-### 推奨実装順
+## 構想: AIによる新手法研究基盤(2026-07-20)
 
-1. **#21** 文脈取り違えをfail-closedにする
-2. **#22** 分析案の品質ゲートを反映前に独立させる
-3. **#23** 分析証拠を同一取得ウィンドウへ統合する
-4. **#24・#25** 執行条件とリスク数量を明示する
-5. **#29** マルチチャート操作の共通基盤を整える(完了)
+現行MCPは、ライブ環境認識、仮説のチャート反映、監視、事後評価、単発バックテストまでを一連のPDCAとして実行できる。一方、新しい売買手法を発見するには、集計成績だけで候補を選ぶのではなく、全取引から効いた理由を診断し、同一条件で比較し、未使用期間・他銘柄・コスト悪化・パラメータ近傍で反証する研究基盤が必要になる。
+
+### 設計原則
+
+- **役割分離**: AIは仮説、特徴量候補、ルール案、結果の解釈を担当する。MCPはデータ取得、実験条件固定、決定論的計算、TradingView操作、証拠保存を担当し、ブラックボックスな「最適戦略」を返さない
+- **事前固定**: 評価期間、主要評価指標、最低取引数、コスト、候補数、棄却条件を実験開始前に固定する。OOSを確認後に変更したルールは同じ実験の続きではなく、新しい仮説・実験として扱う
+- **Point-in-time**: 確定足だけを使い、形成中足、リペイント、未来参照、後日改訂マクロ値を混入させない。symbol、timeframe、期間、タイムゾーン、データ源、取得時刻、Pine ID/版、入力、コスト、methodology versionを記録する
+- **再現性**: 実験定義と結果をcanonical JSON化してhashを付ける。乱数を使う頑健性検証はseedを必須にし、同一入力は同一結果になるようにする
+- **母集団分離**: Strategy Tester、Bar Replay、ライブ分析ジャーナルを別の証拠母集団として保持し、成績を暗黙に合算しない。既存`get_analysis_performance`はライブ分析専用のままとする
+- **安全境界**: 注文、口座、認証情報へ接続しない。チャート変更を伴うバッチ処理はdry-run、明示確認、ジョブ上限、直列実行、各ジョブ後の復元検証を必須とし、復元失敗時は残件を停止する
+- **採用基準**: in-sample最良値だけで採用しない。OOS/walk-forward、現実的な往復コスト、最低取引数、パラメータ近傍、複数銘柄または複数期間での安定性を確認する
+
+### #31 Strategy Tester全取引台帳(`get_strategy_trade_ledger`) ✅ 実装・実機検証完了
+
+- **課題**: 現在の`get_strategy_report`/`run_backtest`は直近最大500取引と集計値を返すため、古い取引を含む損失原因、時間帯依存、Exit理由、裾野リスクを完全には診断できない
+- **案**: Strategy Testerから利用可能な全取引をページングまたはbounded chunkで取得し、Entry/Exit時刻・価格、方向、数量、gross/net損益、手数料、保有時間、Exit ID/理由、利用可能ならrun-up/drawdownを正規化する。取得不能な項目を推測やゼロで補完しない
+- **契約**: report ID、symbol/timeframe、テスト期間、Pine ID/版、入力、通貨・数量単位、取得件数と総件数、truncated理由を返す。MAE/MFEがTradingView原値として存在しない場合は、別ツールでOHLCと約定時刻を拘束して算出する
+- **完了条件**: 集計値と台帳再集計の照合、500件超の扱い、open trade、同時刻複数約定、部分決済、欠落値、stale report拒否を実機とテストで固定する
+- **実装**: アクティブStrategy Testerの`report.trades`全件を正規化し、`offset`/`limit`で最大500件ずつ返す。全正規化取引、symbol/timeframe、Pine ID/版、公開入力、期間、通貨、初期資本からSHA-256 `ledgerId`を作り、2ページ目以降の`expected_ledger_id`不一致をfail closedにする。Entry/Exit、方向、数量、損益、累積損益、保有時間に加え、TradingView原値が存在する場合だけcommission/run-up/drawdownを返し、全件欠落は`unavailableFields`へ明示する
+- **品質境界**: Strategy Testerの配列順を保持し、サマリー件数不一致と時刻逆行を`qualityIssues`へ載せる。アクティブストラテジーをチャート上の単一studyへ帰属できない場合はPine/入力を推測せず品質問題にする。ソース本文等のhidden入力は返さない。チャート、Pine、注文、口座、ジャーナルを変更しない
+- **互換性対応**: 2026-07-20時点のTradingViewでは従来の`TradingViewApi.backtestingStrategyApi()`が削除され、active chart modelの`activeStrategySource().value().reportData()`へ移行していた。旧APIを優先しつつ、現行chart modelを同じWatchedValue契約へ適応するfallbackを追加した。現行`trades[]`の短縮field(`e`/`x`/`q`/`tp`/`cp`/`rn`/`dd`/`cm`)と従来のverbose fieldを両方正規化する。存在しないtrade numberは配列位置と混同せず`number:null`、順序識別用にzero-based `reportIndex`を返す
+- **検証状況**: 模擬レポートで旧・現行API、verbose・短縮取引形式、ページ境界、SHA-256、再計算ID拒否、方向、保有時間、Pine版・入力、欠落項目、stale active strategy拒否を固定した。実機の`Bushido Smart Money Strategy`(`OANDA:USDJPY` 4H、Pine v2.0)で72/72取引、summary件数一致、欠落field・品質問題なしを確認。20件ずつの後続ページと70件目からの最終2件を同じ`expected_ledger_id`で取得し、index 0〜71の連続性と`nextOffset:null`を確認した。TypeScriptビルドと全286テストが成功。500件超、open trade、部分決済は該当する実レポート入手時の継続確認事項とする
+
+### #32 ベースライン対候補実験(`run_strategy_experiment`) ✅ 実装・実機検証完了
+
+- **目的**: ベースラインと候補を同一symbol/timeframe/期間/コスト条件で連続実行し、成績差を再現可能な1実験として返す
+- **案**: 実行前に両Pine版、入力、対象チャート、評価指標、最低取引数を固定し、各runのreport IDと取引台帳hashを保存する。純利益だけでなくPF、DD、Sortino、取引数、期待値、保有時間、MAE/MFEの差を返す
+- **安全性**: dry-runで実験計画とチャート変更を提示し、`confirm:true`後だけ実行する。候補失敗時もベースライン結果を保持し、元チャートのsymbol/timeframe/studiesを復元・照合する
+- **判定**: 単一の総合スコアへ早期集約せず、主要指標、guardrail、母集団不足、悪化項目を分ける。優劣の最終解釈はAIへ残す
+- **実装(2026-07-20)**: baseline/candidateに自作strategy `pine_id`と最大20件の入力overrideを指定し、実行前の`list_pine_scripts`から`last`を具体的な保存版へ解決する。active chartの期待symbol/timeframeを拘束し、既定dry-runでexperiment SHA-256、具体的Pine版、入力、最低取引数、予定操作を返す。`confirm:true`後だけ各variantを直列に一時追加し、入力settle後のreportと全取引ledgerを500件ずつ同一`ledgerId`で収集してから所有確認付きで削除する
+- **比較契約**: net profit/率、PF、最大DD/率、Sharpe、Sortino、取引数、1取引期待値、平均保有時間、平均run-up/drawdown、worst trade drawdownをbaseline/candidate/deltaで返す。TradingView原値や取引証拠がない指標はnullのままとし、総合スコアや採用判定を生成しない。commission、slippage、capital、currency、quantity、margin、fill設定、期間を条件証拠として比較し、差があれば`conditions_differ`、最低取引数不足なら`insufficient_sample`にする
+- **失敗・復元**: baseline失敗時はcandidateを実行せず、candidate失敗時はbaselineのledger IDと集計を保持する。成功指定の`keepOnChart`でもレポート取得失敗時は一時Studyを削除するよう既存`run_backtest`を強化した。各variant後と実験終了後に元symbol/timeframe/study集合を照合し、cleanupまたは復元失敗を構造化して比較対象外にする
+- **検証状況**: dry-run非書き込み、具体的Pine版照合、入力settle、全台帳集約、指標差、コスト条件差、最低取引数、候補失敗時のbaseline保持、両variant cleanup、最終chart復元、揮発するstudy IDをledger hashから除外する回帰を固定した
+- **実機検証(2026-07-20)**: `Bushido Smart Money Strategy` v2.0、`OANDA:USDJPY` 4Hで、baseline=`Require Next-Bar Confirmation:false`、candidate=`true`、最低30取引のA/Bを実行。experiment IDは`sha256:54cc5480...e712c2`、両variantは期間・commission・slippage・資本・数量・fill条件が一致し、品質問題なし、比較適格となった。baselineは72取引、純利益8,286.61 JPY、PF 1.459、期待値115.09、最大DD 5,844.26。candidateは88取引、純損失5,137.97 JPY、PF 0.811、期待値-58.39、最大DD 6,098.77となり、この単独変更は棄却相当の明確な悪化を示した。両一時Study削除後、元3 Study、symbol/timeframe、既存Strategy Testerのbaseline ledger ID(`sha256:ef338863...b5b17`)と`in_20:false`まで復元確認した。全290テストとTypeScriptビルドが成功
+
+### #33 制限付き一括バックテスト(`run_backtest_matrix`、優先度: 高・規模: 大)
+
+- **目的**: 複数symbol、timeframe、Pine版、明示パラメータ集合を同じ実験契約で比較し、銘柄固有の偶然と再現する構造を分ける
+- **制限**: 任意の無制限グリッドは受けず、ジョブ数、パラメータ数、履歴期間、総実行時間に上限を置く。dry-runで展開後ジョブ数と推定チャート変更を返し、明示確認後に直列実行する
+- **結果**: 成功だけでなく、計算不能、取引不足、timeout、履歴不足、復元失敗を行単位で残す。上位結果だけを返さず全候補の結果と除外理由を保存する
+- **過剰適合対策**: matrix順位は探索結果であって採用判定ではない。未使用期間を同じmatrixの選定に使わず、#34へ渡す候補数を事前固定する
+
+### #34 Pine Strategy walk-forward(`run_strategy_walk_forward`、優先度: 高・規模: 大)
+
+- **課題**: 既存walk-forward CLIは評価ログの予測ラベルをfold別集計するもので、Pine Strategy Testerを期間分割して再実行する機能ではない
+- **案**: 時系列順のtrain/test fold、anchored/rolling方式、embargo、最低取引数を事前指定し、選定はtrainだけ、最終指標はtestだけから算出する。fold別結果を保持し、全期間を再最適化した見かけの成績をOOSとして扱わない
+- **境界**: TradingViewが任意日付範囲をStrategy Testerへ確実に適用できるかを先に実機調査する。Pine側の期間入力を使う場合は、監査済み入力契約と読み戻し検証を必須にする
+- **完了条件**: 将来隣接データのembargo、期間境界、fold失敗、候補tie、選定不能、全fold OOS集計、再実行再現性を固定する
+
+### #35 研究プロトコル検証・頑健性試験(`validate_research_protocol` / `stress_test_strategy`、優先度: 高・規模: 中〜大)
+
+- **事前検証**: IS/OOS重複、未来時刻、形成中足、監査未済みPine、リペイント要因、少なすぎる取引数、未指定コスト、多すぎる候補、OOS閲覧後の同一実験変更をblockedまたはwarningへ分類する
+- **ストレス**: spread/slippage/commission増加、Entryの1本遅延、Stop/Targetの微小変動、主要パラメータ近傍、期間開始点の移動、取引順序のseed付きbootstrap/Monte Carloを個別シナリオとして実行する
+- **判定**: 最良値ではなく、シナリオ分布、worst case、中央値、破綻率、元候補からの劣化率を返す。パラメータ近傍の一点だけが突出する場合は`unstable`とする
+- **注意**: OHLCだけでは足内約定順序や真の滑りを再現できない。モデル化したストレスと実約定証拠を区別する
+
+### #36 条件付きイベントスタディ(`run_market_event_study`、優先度: 中〜高・規模: 中)
+
+- **目的**: いきなり売買ストラテジーを作らず、「条件発生後に優位性があるか」を将来リターン、MFE、MAE、到達時間で調べる
+- **入力**: point-in-timeで計算可能な条件、観測時刻、複数horizon、方向、セッション、コスト仮定、重複イベントの扱いを明示する。条件式は許可された特徴量DSLまたは構造化JSONとし、任意コードを実行しない
+- **出力**: 発生数、欠落数、平均/中央値/分位点、勝率、信頼区間、時系列fold別結果を返す。複数条件探索時は試行数を記録し、多重比較を無視したp値だけで採用しない
+
+### #37 市場レジーム分類(`compute_market_regimes`、優先度: 中〜高・規模: 中)
+
+- **目的**: trend/range、低/高volatility、相関状態、session、重要イベント近接を決定論的に分類し、手法の適用環境と停止環境を発見する
+- **契約**: 閾値、lookback、使用特徴量、版を明示し、各バーに当時利用可能だった証拠だけでlabelを付ける。未来全期間の分位点を過去labelへ遡及適用しない
+- **評価**: Strategy Tester台帳と厳密時刻で結合し、regime別の取引数、期待値、PF、DD、MAE/MFEを返す。少数regimeを全体成績へ隠さない
+
+### #38 特徴量と将来結果の関係(`compute_feature_outcome_relationships`、優先度: 中・規模: 中〜大)
+
+- **目的**: RSI/MAだけでなく、ATR収縮率、実体・ヒゲ比率、連続性、ギャップ、相関変化、セッション位置などから次に検証すべき仮説候補を見つける
+- **境界**: 売買判断や「最適閾値」を直接返さず、欠落率、分布、将来horizon別効果、fold安定性、多重試行数を返す。特徴量算出は確定足かつpoint-in-timeで決定論的に行う
+- **リーク防止**: 正規化、閾値、特徴量選択を全期間でfitしない。trainで決めた変換をtestへ固定適用する
+
+### #39 大口フロー代理証拠(`get_futures_flow_context`、優先度: 中・規模: 大・要データ源調査)
+
+- **目的**: 既存の週次COTに、利用可能ならCME通貨・金先物の出来高、建玉、建玉変化、価格変化を加え、`price up + OI up`とshort covering等の候補を区別する
+- **限界**: FX現物に集中取引所の完全な出来高や板は存在しない。CME先物、TradingView tick volume、COTはいずれも大口動向の代理証拠であり、リアルタイム注文フローや主体別売買と断定しない
+- **データ品質**: symbol mapping、取引所タイムゾーン、限月・ロール、公開遅延、改訂、first-seen時刻を保存し、将来公表されたOI/COTを過去判断へ混入させない
+
+### #40 セッションプロファイル(`compute_session_profile`、優先度: 中・規模: 中)
+
+- **目的**: 東京・ロンドン・NY別の高安、値幅、VWAP、出来高、前日高安からの反応を統一計算し、時間帯固有のEntry/Exit仮説を作る
+- **契約**: DSTを含むIANA timezone、休日、session境界、volume種別を明示する。FXのtick volumeを取引所実出来高として表示しない
+- **評価**: セッション開始からの経過時間、opening range、前sessionとの重なり、拡張率を#36/#37へ渡せる決定論的特徴量として返す
+
+### #41 クロスアセット先行・遅行分析(`compute_cross_asset_lead_lag`、優先度: 中・規模: 中〜大)
+
+- **目的**: FX、DXY、国債金利、実質金利、金、株価指数を厳密なUTC時刻で整列し、同時相関だけでなくlead/lag候補を検証する
+- **安全性**: forward fillせず、休場・更新頻度・公表遅延が異なる系列を区別する。複数lag探索は試行数として記録し、全期間で最良lagを選んだ結果をOOS成績と呼ばない
+- **出力**: overlap、欠落、lag別効果、fold安定性、符号反転、データ鮮度を返し、方向予測はAIが他証拠と統合する
+
+### #42 仮説・実験ジャーナル(`register_strategy_hypothesis` / `record_strategy_experiment` / `compare_strategy_experiments`、優先度: 高・規模: 中)
+
+- **目的**: 仮説、変更理由、ベースライン、事前評価契約、実験結果、採否、次の変更をappend-onlyで結び、同じデータを繰り返し見た研究者自由度を可視化する
+- **識別**: hypothesis ID、experiment ID、親実験ID、definition hash、Pine版、dataset/evidence hash、methodology versionを保存する。同じIDへの異なる定義上書きやOOS結果の削除を拒否する
+- **比較**: 同一契約の実験だけを自動比較し、IS、OOS、walk-forward、stress、liveを列として分離する。異なるコスト、期間、symbol/timeframe、methodologyを無言でランキングしない
+- **保存境界**: 既存のライブ分析ジャーナルとは別のローカルJSONLを使い、OHLC原本、認証情報、口座情報を保存しない。ロック、stale lock回収、所有権、原子的追記は既存ジャーナル実装を流用する
+
+### 新手法研究基盤の推奨実装順
+
+1. **#31 全取引台帳**で集計値の内訳と失敗原因を観測可能にする
+2. **#32 ベースライン対候補実験**で1回の改善を再現可能にする
+3. **#42 仮説・実験ジャーナル**を早期に入れ、以後の探索回数と証拠を失わない
+4. **#33 一括バックテスト**で複数市場・時間足へ反証範囲を広げる
+5. **#34 walk-forward**と**#35 研究プロトコル・頑健性**を採用ゲートにする
+6. **#36 イベントスタディ**、**#37 レジーム**、**#38 特徴量関係**で新しい仮説の探索力を増やす
+7. **#39 大口フロー**、**#40 セッション**、**#41 クロスアセット**はデータ源とpoint-in-time品質を確認できたものから追加する
 
 ## 構想: 為替全体の環境認識(2026-07-09、実際の為替分析で判明)
 
@@ -288,4 +391,4 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
-- **ストラテジーテスターAPIは遅延初期化**(2026-07-16実機で発見): TradingViewアプリ再起動直後は `TradingViewApi.backtestingStrategyApi` が存在せず、settle検知でこれを無条件に呼んでいた `set_indicator_input` 系の全書き込みが失敗していた(書き込み前に失敗するためチャートは無傷)。ガードを追加し、API不在時はプレーンインジケーターと同じ `isLoading` のみのsettle判定へフォールバック。`get_strategy_report` / `run_backtest` はAPI不在時に明確なエラーを返す
+- **ストラテジーテスターAPI移行**(2026-07-20訂正): 当初はアプリ再起動直後の`TradingViewApi.backtestingStrategyApi`不在を遅延初期化と判断していたが、Strategy Tester表示後も復活せず、現行版ではactive chart modelのstrategy sourceへ移行したことを実機確認した。旧APIがあれば優先し、現行APIをWatchedValue相当へ適応する互換層を追加。`set_indicator_input`のsettle、`get_strategy_report`、`get_strategy_trade_ledger`、`run_backtest`を両経路へ統一した

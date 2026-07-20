@@ -4,6 +4,15 @@
 
 ## 1. backtestingStrategyApi(ストラテジーテスター)
 
+### 2026-07-20 現行TradingViewへの移行
+
+- 現行アプリでは`TradingViewApi.backtestingStrategyApi`自体が存在しない。Strategy Testerを表示しても遅延初期化されるのではなく、active chart modelの`activeStrategySource().value()`がstrategy sourceを返し、その`reportData()`からレポートを取得する構造へ変わっていた
+- MCPは旧`backtestingStrategyApi()`が存在すれば従来経路を優先し、存在しなければ現行chart modelを`activeStrategy` / `activeStrategyMetaInfo` / `activeStrategyReportData`のWatchedValue相当へ適応する。active sourceは呼び出しごとに解決し、`run_backtest`でstudyを追加した後のsource切替も追跡する
+- 現行`trades[]`は短縮形式を返す。主な対応は`e`=entry、`x`=exit、`q`=quantity、`tp`=trade profit、`cp`=cumulative profit、`rn`=run-up、`dd`=drawdown、`cm`=commissionで、entry/exit内部は`c`=label、`p`=price、`tm`=time、`b`=bar index、`tp`=type。従来のverbose形式も後方互換として維持する
+- 実機のUSDJPY 4Hで72取引を取得し、Strategy Tester summaryとの件数一致、ページ間ledger ID拘束、最終ページまでのindex連続性を確認した。現行形式にはtrade numberがないため推測せずnullとし、配列位置は別の`reportIndex`として返す
+
+以下は旧APIで確認した契約であり、互換アダプターが同じ読み取り形状を提供する。
+
 - `await TradingViewApi.backtestingStrategyApi()` — **Promise を返す**(replayApi も同様)
 - 主要プロパティは **WatchedValue**(`.value()` で読む。関数呼び出しではない):
   - `activeStrategyReportData` → レポート本体 `{ currency, settings, performance, trades, filledOrders, ... }`

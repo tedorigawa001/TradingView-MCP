@@ -206,6 +206,12 @@ function makeDeps(overrides = {}) {
       }),
       getStrategyReport: async (options) => ({
         strategy: "Test Strategy",
+        symbol: "OANDA:EURUSD",
+        timeframe: "60",
+        studyId: "strategy-1",
+        pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0",
+        pineVersion: "2.0",
+        inputs: [],
         currency: "USD",
         initialCapital: 1000000,
         dateRange: { from: "2020-01-01T00:00:00.000Z", to: "2026-07-08T00:00:00.000Z" },
@@ -224,6 +230,28 @@ function makeDeps(overrides = {}) {
             quantity: 87528,
           },
         ],
+      }),
+      getStrategyTradeLedger: async (options) => ({
+        schemaVersion: "1.0",
+        ledgerId: `sha256:${"a".repeat(64)}`,
+        strategy: "Test Strategy",
+        currency: "USD",
+        initialCapital: 1000000,
+        dateRange: { from: "2020-01-01T00:00:00.000Z", to: "2026-07-08T00:00:00.000Z" },
+        summary: { netProfit: -1675, totalTrades: 21 },
+        totalTrades: 21,
+        availableTrades: 21,
+        countMatchesSummary: true,
+        ordering: "strategy_report",
+        offset: options.offset,
+        limit: options.limit,
+        returned: 1,
+        nextOffset: null,
+        complete: true,
+        unavailableFields: ["trade_run_up"],
+        qualityIssues: [],
+        options,
+        trades: [{ number: 21, direction: "short", status: "closed" }],
       }),
       runBacktest: async (options) => ({
         pineId: options.pineId,
@@ -643,7 +671,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the fifty-one expected tools", async () => {
+test("exposes exactly the fifty-three expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -684,6 +712,7 @@ test("exposes exactly the fifty-one expected tools", async () => {
       "get_real_yield_context",
       "get_replay_status",
       "get_strategy_report",
+      "get_strategy_trade_ledger",
       "get_trade_decision_context",
       "get_watchlist",
       "list_alerts",
@@ -691,6 +720,7 @@ test("exposes exactly the fifty-one expected tools", async () => {
       "load_more_history",
       "remove_owned_study",
       "run_backtest",
+      "run_strategy_experiment",
       "save_pine_script",
       "scan_market",
       "set_indicator_input",
@@ -2817,6 +2847,222 @@ test("get_strategy_report and run_backtest expose the strategy tester", async ()
     tradesLimit: 5,
     keepOnChart: false,
   });
+});
+
+test("get_strategy_trade_ledger exposes stable bounded pages", async () => {
+  const client = await connectedClient(makeDeps());
+  const ledgerId = `sha256:${"a".repeat(64)}`;
+  const res = await client.callTool({
+    name: "get_strategy_trade_ledger",
+    arguments: { offset: 20, limit: 100, expected_ledger_id: ledgerId },
+  });
+  const ledger = JSON.parse(res.content[0].text);
+  assert.equal(ledger.ledgerId, ledgerId);
+  assert.equal(ledger.trades[0].status, "closed");
+  assert.deepEqual(ledger.options, {
+    offset: 20,
+    limit: 100,
+    expectedLedgerId: ledgerId,
+  });
+});
+
+test("run_strategy_experiment previews, compares full ledgers, and cleans both variants", async () => {
+  const baselineId = "USER;baseline123";
+  const candidateId = "USER;candidate123";
+  let activePine = null;
+  let runCount = 0;
+  const removed = [];
+  const requestedInputs = new Map();
+  const profits = {
+    [baselineId]: [10, -5],
+    [candidateId]: [20, 30],
+  };
+  const ledger = (pineId) => {
+    const trades = profits[pineId].map((profit, reportIndex) => ({
+      reportIndex,
+      number: null,
+      direction: "long",
+      status: "closed",
+      entry: null,
+      exit: null,
+      durationMilliseconds: 1000,
+      profit,
+      profitPercent: null,
+      cumulativeProfit: null,
+      quantity: 1,
+      commission: 1,
+      commissionPercent: null,
+      runUp: profit + 10,
+      runUpPercent: null,
+      drawDown: 2,
+      drawDownPercent: null,
+    }));
+    return {
+      schemaVersion: "1.0",
+      ledgerId: `sha256:${(pineId === baselineId ? "a" : "b").repeat(64)}`,
+      strategy: pineId,
+      symbol: "OANDA:USDJPY",
+      timeframe: "240",
+      studyId: "temporary",
+      pineId,
+      pineVersion: "1.0",
+      inputs: [
+        { id: "in_cost", name: "Commission Value", value: 0.01 },
+        ...(requestedInputs.get(pineId) ?? []),
+      ],
+      currency: "JPY",
+      initialCapital: 1000000,
+      dateRange: { from: "2025-01-01T00:00:00.000Z", to: "2026-01-01T00:00:00.000Z" },
+      summary: { totalTrades: 2 },
+      totalTrades: 2,
+      availableTrades: 2,
+      countMatchesSummary: true,
+      ordering: "strategy_report",
+      offset: 0,
+      limit: 500,
+      returned: 2,
+      nextOffset: null,
+      complete: true,
+      unavailableFields: [],
+      qualityIssues: [],
+      trades,
+    };
+  };
+  const deps = makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [{ id: "original", name: "RSI" }] }],
+      }),
+      listPineScripts: async () => [
+        { pineId: baselineId, name: "Baseline", kind: "strategy", version: "1.0", usedBy: [] },
+        { pineId: candidateId, name: "Candidate", kind: "strategy", version: "1.0", usedBy: [] },
+      ],
+      runBacktest: async ({ pineId, keepOnChart }) => {
+        runCount += 1;
+        activePine = pineId;
+        return {
+          pineId,
+          studyId: keepOnChart ? `temporary-${runCount}` : null,
+          keptOnChart: keepOnChart,
+          removedFromChart: false,
+          strategy: pineId,
+          currency: "JPY",
+          initialCapital: 1000000,
+          dateRange: null,
+          summary: {},
+          totalTrades: 2,
+          trades: [],
+        };
+      },
+      setIndicatorInput: async (studyId, inputs) => {
+        requestedInputs.set(activePine, inputs.map((input) => ({ ...input, name: input.id })));
+        return { studyId, applied: inputs, settled: true };
+      },
+      getStrategyReport: async () => ({
+        strategy: activePine,
+        currency: "JPY",
+        initialCapital: 1000000,
+        dateRange: null,
+        summary: {
+          netProfit: profits[activePine].reduce((sum, value) => sum + value, 0),
+          profitFactor: activePine === baselineId ? 1.1 : 1.8,
+        },
+        totalTrades: 2,
+        trades: [],
+      }),
+      getStrategyTradeLedger: async () => ledger(activePine),
+      removePineFromChart: async (pineId, studyId) => {
+        removed.push({ pineId, studyId });
+        activePine = null;
+        return { removed: true, pineId, pineVersion: "1.0", studyId, name: pineId, chartIndex: null };
+      },
+    },
+  });
+  const client = await connectedClient(deps);
+  const args = {
+    expected_symbol: "OANDA:USDJPY",
+    expected_timeframe: "240",
+    baseline: { pine_id: baselineId },
+    candidate: { pine_id: candidateId, inputs: [{ id: "in_0", value: 7 }] },
+    minimum_trades: 2,
+  };
+  const dry = JSON.parse((await client.callTool({ name: "run_strategy_experiment", arguments: args })).content[0].text);
+  assert.equal(dry.dryRun, true);
+  assert.equal(runCount, 0, "dry-run must not add a strategy");
+
+  const result = JSON.parse((await client.callTool({
+    name: "run_strategy_experiment",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(result.status, "complete");
+  assert.equal(result.comparisonStatus, "eligible");
+  assert.equal(result.comparison.expectancy.delta, 22.5);
+  assert.equal(result.chartState.restored, true);
+  assert.equal(removed.length, 2);
+  assert.match(result.baseline.ledgerId, /^sha256:[a-f0-9]{64}$/);
+  assert.match(result.candidate.ledgerId, /^sha256:[a-f0-9]{64}$/);
+});
+
+test("run_strategy_experiment preserves baseline evidence when the candidate fails", async () => {
+  const baselineId = "USER;baseline999";
+  const candidateId = "USER;candidate999";
+  let activePine = null;
+  const removed = [];
+  const deps = makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+      }),
+      listPineScripts: async () => [
+        { pineId: baselineId, name: "Baseline", kind: "strategy", version: "1.0", usedBy: [] },
+        { pineId: candidateId, name: "Candidate", kind: "strategy", version: "1.0", usedBy: [] },
+      ],
+      runBacktest: async ({ pineId }) => {
+        activePine = pineId;
+        return { pineId, studyId: `temp-${pineId}`, keptOnChart: true, removedFromChart: false, strategy: pineId, currency: "JPY", initialCapital: null, dateRange: null, summary: {}, totalTrades: 1, trades: [] };
+      },
+      getStrategyReport: async () => {
+        if (activePine === candidateId) throw new Error("candidate calculation failed");
+        return { strategy: activePine, currency: "JPY", initialCapital: null, dateRange: null, summary: { netProfit: 1 }, totalTrades: 1, trades: [] };
+      },
+      getStrategyTradeLedger: async () => ({
+        schemaVersion: "1.0", ledgerId: `sha256:${"c".repeat(64)}`, strategy: activePine,
+        symbol: "OANDA:USDJPY", timeframe: "240", studyId: "temp", pineId: activePine,
+        pineVersion: "1.0", inputs: [], currency: "JPY", initialCapital: null, dateRange: null,
+        summary: { totalTrades: 1 }, totalTrades: 1, availableTrades: 1, countMatchesSummary: true,
+        ordering: "strategy_report", offset: 0, limit: 500, returned: 1, nextOffset: null,
+        complete: true, unavailableFields: [], qualityIssues: [],
+        trades: [{ reportIndex: 0, number: null, direction: "long", status: "closed", entry: null,
+          exit: null, durationMilliseconds: 1, profit: 1, profitPercent: null, cumulativeProfit: 1,
+          quantity: 1, commission: null, commissionPercent: null, runUp: null, runUpPercent: null,
+          drawDown: null, drawDownPercent: null }],
+      }),
+      removePineFromChart: async (pineId, studyId) => {
+        removed.push(pineId);
+        activePine = null;
+        return { removed: true, pineId, pineVersion: "1.0", studyId, name: pineId, chartIndex: null };
+      },
+    },
+  });
+  const client = await connectedClient(deps);
+  const result = JSON.parse((await client.callTool({
+    name: "run_strategy_experiment",
+    arguments: {
+      expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", minimum_trades: 1, confirm: true,
+      baseline: { pine_id: baselineId }, candidate: { pine_id: candidateId },
+    },
+  })).content[0].text);
+  assert.equal(result.status, "partial");
+  assert.equal(result.baseline.summary.metrics.netProfit, 1);
+  assert.match(result.candidate.error, /candidate calculation failed/);
+  assert.deepEqual(removed, [baselineId, candidateId]);
+  assert.equal(result.chartState.restored, true);
 });
 
 test("list_alerts returns the user's alerts", async () => {

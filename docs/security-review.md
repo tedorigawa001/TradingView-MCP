@@ -297,6 +297,30 @@
 - **リアルタイムとの混在防止**: TradingView公式は、リプレイ中もserver-side alerts、orders、trading panelとquote listをリアルタイム側としている。`get_trade_decision_context`はreplay状態を必須証拠にし、toolbarまたはsession稼働中はOHLC/キーレベルを読まず`decision_status: blocked`にする。チャート証拠取得後にも状態を再確認し、途中でreplayが開始された場合や再確認不能時は取得済み証拠を破棄する。執行quoteを過去時点へ巻き戻したと解釈しない
 - **競合と残余リスク**: 4ツールは既存のプロセス内`SerialOperationQueue`で他の主要チャート操作と直列化する。UIや別プロセスの同時操作は排他できず、開始前・開始後・各step・終了後のreadbackで検出する。TradingView内部の非公開API変更は明示エラーとなり、自動でUIクリックへフォールバックしない
 
+## 追補: バックログ #31(2026-07-20)
+
+`get_strategy_trade_ledger`追加に伴うレビュー:
+
+- **読み取り境界**: アクティブチャートのStrategy Testerが既に保持するレポートだけを読み、ストラテジー追加、入力変更、Pine保存、チャート変更、注文、口座、外部HTTP、ジャーナル書き込みを行わない。`activeStrategy`がない残留レポートは拒否する
+- **ページ整合性**: 取引全件とstrategy、symbol/timeframe、Pine ID/版、公開入力、期間、通貨、初期資本をcanonical JSON化し、ページ内Web CryptoでSHA-256 `ledgerId`を算出する。後続ページの`expected_ledger_id`が違えば、再計算前後の取引を混在させず停止する
+- **情報最小化**: 入力値はPine内部の`text`、`pineFeatures`、`__profile`を除外し、`pineId`/`pineVersion`は専用メタデータとして返す。サポート外の複合入力値は文字列化せずnullと品質問題にする。認証情報、Pineソース本文、ブラウザセッション情報は返さない
+- **応答上限**: 1ページは最大500取引、offsetは0〜10,000,000へ制限する。全件はhash計算のためページ内メモリで正規化するが、CDP/MCPへ返すのは要求ページだけとし、巨大レポートの応答増幅を抑える
+- **データ意味論**: Strategy Testerの損益とcommission/run-up/drawdownはTradingViewが返した値だけを採用し、欠落をゼロやOHLC推定で補わない。配列件数とsummary件数の不一致、時刻逆行、active study帰属不能を品質問題として返す。Strategy Testerのシミュレーションは実約定、足内順序、滑り、流動性、口座損益の証明ではない
+- **内部API互換層**: 2026-07-20時点で旧`backtestingStrategyApi()`が削除されたため、現行active chart modelのstrategy sourceを読み取り専用で適応するfallbackを追加した。fallbackは`reportData()`、`metaInfo()`、`id()`相当だけを公開形状へ写し、chart modelの書き込みmethodや注文系APIを露出しない。短縮取引fieldは許可した既知キーだけを正規化し、未確認fieldから意味を推測しない
+- **残余リスク**: TradingView内部APIは非公開で、field名・chart modelへの到達経路・active strategy表現・レポート保持方式が変更され得る。旧・現行両経路のfixtureで回帰を固定するが、将来の変更は明示エラーまたは品質問題として扱い、UI操作や曖昧なfield推測へ自動fallbackしない。SHA-256はページ間同一性を保証するが、TradingViewが生成した元データの正しさや完全性までは保証しない
+
+## 追補: バックログ #32(2026-07-20)
+
+`run_strategy_experiment`追加に伴うレビュー:
+
+- **書き込み確認**: 既定はdry-runで、具体的Pine版、入力、最低取引数、active chart拘束、実行操作だけを返す。`confirm:true`、期待symbol/timeframe完全一致、自作`USER;` strategy、保存版取得成功を満たす場合だけ一時Studyを追加する。Pine保存、symbol/timeframe変更、アラート、注文、口座、外部HTTP、ジャーナル書き込みは行わない
+- **入力境界**: variantは2件固定、各入力overrideは既知形式のIDとprimitive値だけで最大20件。任意コード、Pine source、式、無制限gridを受け取らない。実行前の`last`を具体的保存版へ解決し、取得台帳のPine ID/版が違えば結果を拒否する
+- **証拠拘束**: 各variantの全取引を最大500件のページで収集し、後続ページは先頭`ledgerId`へ拘束する。ledger hashはPine ID/版、公開入力、symbol/timeframe、期間、通貨、資本、全正規化取引を含む一方、再追加ごとに変わる一時`studyId`は除外する。比較methodology versionと実験定義にもSHA-256を付ける
+- **比較境界**: 総合スコアや自動採用を返さない。取得できない指標はnullとし、最低取引数、欠落path metric、Strategy Tester品質問題を明示する。commission、slippage、capital/currency、quantity/margin、fill設定、期間が違う場合は`conditions_differ`として比較適格にしない
+- **cleanup・部分失敗**: 各variantは成功・失敗を問わず、取得した一時study IDを所有Pine IDと照合して削除する。`run_backtest`もレポート失敗時は`keepOnChart:true`に関係なく削除する。baseline失敗またはcleanup失敗時はcandidateを開始せず、candidate失敗時はbaseline証拠を保持する。各段階と終了時に元symbol/timeframe/study集合を照合し、復元失敗を隠さない
+- **残余リスク**: TradingView UIや別プロセスの同時操作はプロセス内queueで排他できない。期待context、Pine帰属、ledger ID、終了時chart fingerprintで検出するが、Strategy Tester内部のactive tab状態やUI選択状態までは復元証明に含まれない。バックテスト値はシミュレーションであり、実約定・流動性・足内順序の証明ではない
+- **実機復元確認**: USDJPY 4Hの同一Pine v2.0で1入力だけを変えるA/Bを実行し、両variantのcondition一致、全取引証拠、cleanup成功を確認した。終了後は元Study集合とcontextに加え、既存Strategy Testerがbaselineと同じledger IDおよび元入力へ戻ったことを別のread-only呼び出しで確認した
+
 ## 将来フェーズへの申し送り
 
 - 注文系(`trading`)APIとReplay Tradingは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない

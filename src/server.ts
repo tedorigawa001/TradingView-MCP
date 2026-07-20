@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
-import type { TradingView } from "./tradingview.js";
+import type { StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -21,6 +22,11 @@ import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
 import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
 import { buildAnalysisPerformance } from "./analysisPerformance.js";
+import {
+  compareStrategyConditions,
+  compareStrategyMetrics,
+  summarizeStrategyEvidence,
+} from "./strategyExperiment.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -73,6 +79,7 @@ export interface ServerDeps {
     | "addPineToChart"
     | "removePineFromChart"
     | "getStrategyReport"
+    | "getStrategyTradeLedger"
     | "runBacktest"
     | "listAlerts"
     | "createPriceAlert"
@@ -260,6 +267,95 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     name: "tradingview-mcp",
     version: "0.1.0",
   });
+
+  type ExperimentVariant = {
+    pineId: string;
+    inputs: Array<{ id: string; value: string | number | boolean }>;
+  };
+
+  const chartFingerprint = (context: Awaited<ReturnType<typeof tv.getChartContext>>) => {
+    const chart = context.charts.find((item) => item.index === context.activeChartIndex);
+    if (!chart) throw new Error("active chart is missing from chart context");
+    return {
+      index: chart.index,
+      symbol: chart.symbol,
+      timeframe: chart.resolution,
+      studies: [...chart.studies]
+        .map((study) => ({ id: study.id, name: study.name }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    };
+  };
+
+  const collectExperimentVariant = async (
+    variant: ExperimentVariant,
+    expectedVersion: string,
+  ): Promise<{
+    evidence: { report: StrategyReport; ledger: StrategyTradeLedger } | null;
+    error: string | null;
+    cleanupError: string | null;
+  }> => {
+    let studyId: string | null = null;
+    let evidence: { report: StrategyReport; ledger: StrategyTradeLedger } | null = null;
+    let error: string | null = null;
+    let cleanupError: string | null = null;
+    try {
+      const started = await tv.runBacktest({
+        pineId: variant.pineId,
+        tradesLimit: 1,
+        keepOnChart: true,
+      });
+      studyId = started.studyId;
+      if (!studyId) throw new Error("temporary strategy did not return its study id");
+      if (variant.inputs.length > 0) {
+        const applied = await tv.setIndicatorInput(studyId, variant.inputs);
+        if (applied.settled === false) {
+          throw new Error(applied.warning ?? "strategy input recalculation did not settle");
+        }
+      }
+      const report = await tv.getStrategyReport({ tradesLimit: 1 });
+      const first = await tv.getStrategyTradeLedger({ offset: 0, limit: 500 });
+      const trades = [...first.trades];
+      let nextOffset = first.nextOffset;
+      while (nextOffset !== null) {
+        const page = await tv.getStrategyTradeLedger({
+          offset: nextOffset,
+          limit: 500,
+          expectedLedgerId: first.ledgerId,
+        });
+        trades.push(...page.trades);
+        nextOffset = page.nextOffset;
+      }
+      const ledger: StrategyTradeLedger = {
+        ...first,
+        offset: 0,
+        limit: trades.length,
+        returned: trades.length,
+        nextOffset: null,
+        complete: true,
+        trades,
+      };
+      if (ledger.pineId !== variant.pineId) {
+        throw new Error(`active strategy attribution changed: expected ${variant.pineId}, found ${ledger.pineId}`);
+      }
+      if (ledger.pineVersion !== expectedVersion) {
+        throw new Error(
+          `strategy version changed during experiment: expected ${expectedVersion}, found ${ledger.pineVersion}`,
+        );
+      }
+      evidence = { report, ledger };
+    } catch (err) {
+      error = redactSecrets(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (studyId) {
+        try {
+          await tv.removePineFromChart(variant.pineId, studyId);
+        } catch (err) {
+          cleanupError = redactSecrets(err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+    return { evidence, error, cleanupError };
+  };
 
   server.registerTool(
     "get_chart_screenshot",
@@ -2415,6 +2511,233 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       chartOperations.run(async () => {
         try {
           return jsonResult(await tv.getStrategyReport({ tradesLimit: trades_limit ?? 20 }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "get_strategy_trade_ledger",
+    {
+      description:
+        "Read a stable, paginated ledger of every trade available in the active Strategy " +
+        "Tester report. Returns entry/exit, direction, profit, quantity, duration, and " +
+        "run-up/drawdown/commission when TradingView exposes them. Start with offset 0; " +
+        "pass the returned ledgerId as expected_ledger_id on later pages to fail closed if " +
+        "the strategy recalculates. Read-only and requires an active strategy.",
+      inputSchema: {
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .max(10_000_000)
+          .optional()
+          .describe("Zero-based trade offset. Default: 0"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Trades to return in this page. Default: 200, maximum: 500"),
+        expected_ledger_id: z
+          .string()
+          .regex(/^sha256:[a-f0-9]{64}$/)
+          .optional()
+          .describe("ledgerId from page 1; rejects mixed pages after recalculation"),
+      },
+    },
+    async ({ offset, limit, expected_ledger_id }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await tv.getStrategyTradeLedger({
+            offset: offset ?? 0,
+            limit: limit ?? 200,
+            expectedLedgerId: expected_ledger_id,
+          }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "run_strategy_experiment",
+    {
+      description:
+        "Run one bounded baseline-versus-candidate Strategy Tester experiment on the " +
+        "active chart. Both variants are resolved to exact saved Pine versions, applied " +
+        "serially with optional input overrides, bound to full-ledger SHA-256 ids, and " +
+        "removed after collection. Returns metric deltas without a synthetic score. " +
+        "Without confirm=true it only previews the experiment. It never places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA.describe("Exact active-chart symbol, e.g. OANDA:USDJPY"),
+        expected_timeframe: z.string().min(1).max(16).describe("Exact active-chart timeframe, e.g. 240 or 1D"),
+        baseline: z.object({
+          pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          inputs: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string(), z.boolean()]),
+          })).max(20).optional(),
+        }),
+        candidate: z.object({
+          pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          inputs: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string(), z.boolean()]),
+          })).max(20).optional(),
+        }),
+        minimum_trades: z.number().int().min(1).max(100_000).optional()
+          .describe("Closed trades required per variant. Default: 30"),
+        confirm: z.boolean().optional()
+          .describe("Must be true to temporarily add strategies and run the experiment. Default: false"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, baseline, candidate, minimum_trades, confirm }) =>
+      chartOperations.run(async () => {
+        try {
+          const minimumTrades = minimum_trades ?? 30;
+          const initialContext = await tv.getChartContext();
+          const initialChart = chartFingerprint(initialContext);
+          if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+            throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+          }
+          if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+            throw new Error(
+              `active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`,
+            );
+          }
+          const scripts = await tv.listPineScripts();
+          const resolveVariant = (variant: typeof baseline) => {
+            const script = scripts.find((item) => item.pineId === variant.pine_id);
+            if (!script) throw new Error(`strategy not found: ${variant.pine_id}`);
+            if (script.kind !== "strategy") throw new Error(`${variant.pine_id} is not a saved strategy`);
+            if (typeof script.version !== "string" || script.version.length === 0) {
+              throw new Error(`saved strategy version is unavailable: ${variant.pine_id}`);
+            }
+            return {
+              pineId: variant.pine_id,
+              pineVersion: script.version,
+              name: script.name,
+              inputs: [...(variant.inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id)),
+            };
+          };
+          const resolvedBaseline = resolveVariant(baseline);
+          const resolvedCandidate = resolveVariant(candidate);
+          const definition = {
+            methodologyVersion: "1.0",
+            symbol: initialChart.symbol,
+            timeframe: initialChart.timeframe,
+            minimumTrades,
+            baseline: resolvedBaseline,
+            candidate: resolvedCandidate,
+          };
+          const experimentId = "sha256:" + createHash("sha256")
+            .update(JSON.stringify(definition), "utf8")
+            .digest("hex");
+          const preview = {
+            schemaVersion: "1.0",
+            experimentId,
+            definition,
+            operations: [
+              "temporarily_add_baseline",
+              "apply_baseline_inputs",
+              "collect_baseline_report_and_full_ledger",
+              "remove_baseline",
+              "temporarily_add_candidate",
+              "apply_candidate_inputs",
+              "collect_candidate_report_and_full_ledger",
+              "remove_candidate",
+              "verify_original_chart_state",
+            ],
+            chartState: initialChart,
+          };
+          if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+          const baselineRun = await collectExperimentVariant(resolvedBaseline, resolvedBaseline.pineVersion);
+          let candidateRun: Awaited<ReturnType<typeof collectExperimentVariant>> | null = null;
+          if (baselineRun.evidence && !baselineRun.cleanupError) {
+            const afterBaseline = chartFingerprint(await tv.getChartContext());
+            if (JSON.stringify(afterBaseline) === JSON.stringify(initialChart)) {
+              candidateRun = await collectExperimentVariant(resolvedCandidate, resolvedCandidate.pineVersion);
+            } else {
+              candidateRun = {
+                evidence: null,
+                error: "chart state did not restore after baseline; candidate was not run",
+                cleanupError: null,
+              };
+            }
+          } else {
+            candidateRun = {
+              evidence: null,
+              error: baselineRun.cleanupError
+                ? "baseline cleanup failed; candidate was not run"
+                : "baseline evidence was unavailable; candidate was not run",
+              cleanupError: null,
+            };
+          }
+
+          const finalChart = chartFingerprint(await tv.getChartContext());
+          const chartRestored = JSON.stringify(finalChart) === JSON.stringify(initialChart);
+          const baselineSummary = baselineRun.evidence
+            ? summarizeStrategyEvidence(baselineRun.evidence, minimumTrades)
+            : null;
+          const candidateSummary = candidateRun?.evidence
+            ? summarizeStrategyEvidence(candidateRun.evidence, minimumTrades)
+            : null;
+          const conditions = baselineRun.evidence && candidateRun?.evidence
+            ? compareStrategyConditions(baselineRun.evidence.ledger, candidateRun.evidence.ledger)
+            : null;
+          const comparison = baselineSummary && candidateSummary
+            ? compareStrategyMetrics(baselineSummary.metrics, candidateSummary.metrics)
+            : null;
+          const qualityIssues = [...new Set([
+            ...(baselineSummary?.qualityIssues ?? []),
+            ...(candidateSummary?.qualityIssues ?? []),
+            ...(conditions?.qualityIssues ?? []),
+            ...(baselineRun.cleanupError ? ["baseline_cleanup_failed"] : []),
+            ...(candidateRun?.cleanupError ? ["candidate_cleanup_failed"] : []),
+            ...(chartRestored ? [] : ["chart_state_restore_failed"]),
+          ])];
+          const complete = Boolean(baselineRun.evidence && candidateRun?.evidence && chartRestored &&
+            !baselineRun.cleanupError && !candidateRun?.cleanupError);
+          const comparisonEligible = Boolean(
+            complete && conditions?.matched && baselineSummary?.minimumTradesMet && candidateSummary?.minimumTradesMet,
+          );
+          const variantResult = (
+            resolved: typeof resolvedBaseline,
+            run: Awaited<ReturnType<typeof collectExperimentVariant>> | null,
+            summary: typeof baselineSummary,
+          ) => ({
+            pineId: resolved.pineId,
+            pineVersion: resolved.pineVersion,
+            name: resolved.name,
+            requestedInputs: resolved.inputs,
+            ledgerId: run?.evidence?.ledger.ledgerId ?? null,
+            reportDateRange: run?.evidence?.ledger.dateRange ?? null,
+            summary,
+            error: run?.error ?? null,
+            cleanupError: run?.cleanupError ?? null,
+          });
+          return jsonResult({
+            dryRun: false,
+            status: complete ? "complete" : "partial",
+            comparisonStatus: comparisonEligible
+              ? "eligible"
+              : !complete
+                ? "incomplete"
+                : !conditions?.matched
+                  ? "conditions_differ"
+                  : "insufficient_sample",
+            ...preview,
+            baseline: variantResult(resolvedBaseline, baselineRun, baselineSummary),
+            candidate: variantResult(resolvedCandidate, candidateRun, candidateSummary),
+            conditions,
+            comparison,
+            qualityIssues,
+            chartState: { before: initialChart, after: finalChart, restored: chartRestored },
+          });
         } catch (err) {
           return errorResult(err);
         }

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import vm from "node:vm";
 import { TradingView } from "../../build/tradingview.js";
 
@@ -780,6 +781,143 @@ test("getStrategyReport is read-only and refuses stale reports", async () => {
   assert.ok(!expr.includes("createStudy") && !expr.includes("removeEntity"), "must not touch the chart");
 });
 
+test("getStrategyTradeLedger paginates all normalized trades behind a stable ledger id", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getStrategyTradeLedger({ offset: -1 }), /offset must be/);
+  assert.throws(() => tv.getStrategyTradeLedger({ limit: 0 }), /limit must be/);
+  assert.throws(() => tv.getStrategyTradeLedger({ limit: 501 }), /limit must be/);
+  assert.throws(
+    () => tv.getStrategyTradeLedger({ expectedLedgerId: "sha256:not-a-hash" }),
+    /expectedLedgerId must be/,
+  );
+  assert.equal(cdp.calls.length, 0);
+
+  await tv.getStrategyTradeLedger({ offset: 0, limit: 1 });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("rawTrades.map(normalizeTrade)"), "ledger identity must cover all trades");
+  assert.ok(expr.includes("allTrades.slice(offset, offset + limit)"), "only the requested page is returned");
+  assert.ok(expr.includes('subtle.digest("SHA-256"'), "pages must be bound by a cryptographic id");
+  const identityStart = expr.indexOf("const identity = JSON.stringify({");
+  const identityEnd = expr.indexOf("});", identityStart);
+  assert.ok(identityStart >= 0 && identityEnd > identityStart);
+  assert.ok(!expr.slice(identityStart, identityEnd).includes("studyId"),
+    "ephemeral study ids must not make identical reruns hash differently");
+  assert.ok(expr.includes("activeStrategy.value()"), "removed-strategy reports must be refused");
+  assert.ok(!expr.includes("createStudy") && !expr.includes("removeEntity"), "ledger reads must not touch the chart");
+
+  const report = {
+    currency: "USD",
+    settings: { dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } } },
+    performance: {
+      initialCapital: 100_000,
+      all: {
+        totalTrades: 2,
+        netProfit: 125,
+        netProfitPercent: 0.00125,
+        numberOfWiningTrades: 1,
+        numberOfLosingTrades: 1,
+        percentProfitable: 0.5,
+        profitFactor: 1.2,
+        grossProfit: 250,
+        grossLoss: -125,
+        commissionPaid: 5,
+      },
+    },
+    trades: [
+      {
+        e: { tm: 1_700_000_000_000, p: 100, c: "Long", tp: "le" },
+        x: { tm: 1_700_000_060_000, p: 102, c: "Long Exit", tp: "lx" },
+        tp: { v: 250, p: 0.0025 },
+        cp: { v: 250, p: 0.0025 },
+        q: 10,
+        cm: 2.5,
+        rn: { v: 300, p: 0.003 },
+        dd: { v: 50, p: 0.0005 },
+      },
+      {
+        tradeNumber: 2,
+        entry: { time: 1_700_000_120_000, price: 102, id: "Short", type: "short" },
+        exit: { time: 1_700_000_240_000, price: 103, id: "Short Exit" },
+        profit: { value: -125, percentValue: -0.00125 },
+        cumulativeProfit: { value: 125 },
+        quantity: 5,
+      },
+    ],
+  };
+  const activeChart = {
+    symbol: () => "OANDA:EURUSD",
+    resolution: () => "60",
+    getAllStudies: () => [{ id: "strategy-1", name: "Ledger Strategy" }],
+    getStudyById: () => ({
+      getInputsInfo: () => [{ id: "in_0", localizedName: "Length" }],
+      getInputValues: () => [
+        { id: "pineId", value: "USER;12345678abcdef12" },
+        { id: "pineVersion", value: "4.0" },
+        { id: "text", value: "secret source is excluded" },
+        { id: "in_0", value: 14 },
+      ],
+    }),
+  };
+  const strategySource = {
+    id: () => "strategy-1",
+    metaInfo: () => ({ description: "Ledger Strategy" }),
+    reportData: () => report,
+  };
+  activeChart._chartWidget = {
+    _lineToolsSynchronizer: {
+      _chartModel: {
+        activeStrategySource: () => ({ value: () => strategySource }),
+      },
+    },
+  };
+  const context = vm.createContext({
+    crypto: webcrypto,
+    TextEncoder,
+    window: {
+      TradingViewApi: {
+        activeChart: () => activeChart,
+      },
+    },
+  });
+  const page = await vm.runInContext(expr, context);
+  assert.match(page.ledgerId, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(page.availableTrades, 2);
+  assert.equal(page.symbol, "OANDA:EURUSD");
+  assert.equal(page.timeframe, "60");
+  assert.equal(page.pineId, "USER;12345678abcdef12");
+  assert.equal(page.pineVersion, "4.0");
+  assert.deepEqual(JSON.parse(JSON.stringify(page.inputs)), [{ id: "in_0", name: "Length", value: 14 }]);
+  assert.equal(page.countMatchesSummary, true);
+  assert.equal(page.offset, 0);
+  assert.equal(page.returned, 1);
+  assert.equal(page.nextOffset, 1);
+  assert.equal(page.complete, false);
+  assert.equal(page.trades[0].reportIndex, 0);
+  assert.equal(page.trades[0].number, null);
+  assert.equal(page.trades[0].direction, "long");
+  assert.equal(page.trades[0].durationMilliseconds, 60_000);
+  assert.equal(page.trades[0].commission, 2.5);
+  assert.equal(page.trades[0].runUp, 300);
+  assert.equal(page.trades[0].drawDown, 50);
+  assert.deepEqual([...page.unavailableFields], [], "a field is available if any trade exposes it");
+  assert.deepEqual([...page.qualityIssues], []);
+
+  await tv.getStrategyTradeLedger({
+    offset: 0,
+    limit: 1,
+    expectedLedgerId: `sha256:${"0".repeat(64)}`,
+  });
+  await assert.rejects(
+    () => vm.runInContext(cdp.calls[1], vm.createContext({
+      crypto: webcrypto,
+      TextEncoder,
+      window: context.window,
+    })),
+    /strategy report changed between ledger pages/,
+  );
+});
+
 test("runBacktest validates inputs and cleans the chart up by default", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
@@ -799,6 +937,8 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
   assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
   assert.ok(expr.includes("const keep = false"), "auto-remove is the default");
   assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
+  assert.ok(expr.includes("if (!keep || !report)"),
+    "a failed kept run must still remove its temporary strategy");
   assert.ok(expr.includes("activeDesc === meta.description"),
     "the report must be attributed to OUR strategy before being accepted");
   // re-testing a saved new version keeps the same strategy name, so the

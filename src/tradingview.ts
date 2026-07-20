@@ -302,6 +302,47 @@ export interface StrategyTrade {
   quantity: number | null;
 }
 
+export interface StrategyLedgerTrade extends StrategyTrade {
+  /** Zero-based position in TradingView's report.trades array. */
+  reportIndex: number;
+  status: "closed" | "open";
+  durationMilliseconds: number | null;
+  commission: number | null;
+  commissionPercent: number | null;
+  runUp: number | null;
+  runUpPercent: number | null;
+  drawDown: number | null;
+  drawDownPercent: number | null;
+}
+
+export interface StrategyTradeLedger {
+  schemaVersion: "1.0";
+  ledgerId: string;
+  strategy: string | null;
+  symbol: string | null;
+  timeframe: string | null;
+  studyId: string | null;
+  pineId: string | null;
+  pineVersion: string | null;
+  inputs: Array<{ id: string; name: string; value: string | number | boolean | null }>;
+  currency: string | null;
+  initialCapital: number | null;
+  dateRange: { from: string | null; to: string | null } | null;
+  summary: Record<string, number | null>;
+  totalTrades: number | null;
+  availableTrades: number;
+  countMatchesSummary: boolean | null;
+  ordering: "strategy_report";
+  offset: number;
+  limit: number;
+  returned: number;
+  nextOffset: number | null;
+  complete: boolean;
+  unavailableFields: string[];
+  qualityIssues: string[];
+  trades: StrategyLedgerTrade[];
+}
+
 export interface StrategyReport {
   strategy: string | null;
   currency: string | null;
@@ -389,6 +430,54 @@ const PINE_ID_PATTERN = /^USER;[\w]{8,64}$/;
 const PINE_VERSION_PATTERN = /^(last|[0-9]{1,6}(\.[0-9]{1,3})?)$/;
 
 const MAX_PINE_SOURCE = 200_000;
+
+// TradingView removed TradingViewApi.backtestingStrategyApi in a 2026 app
+// update. Current builds keep the same report on the active chart model's
+// strategy source. Normalize both layouts behind the WatchedValue-shaped
+// surface consumed by report formatting and recalculation settling.
+const BACKTESTING_API_SNIPPET = `
+  const resolveBacktestingApi = async (api, chart) => {
+    if (typeof api.backtestingStrategyApi === "function") {
+      return await api.backtestingStrategyApi();
+    }
+    const model = chart && chart._chartWidget &&
+      chart._chartWidget._lineToolsSynchronizer &&
+      chart._chartWidget._lineToolsSynchronizer._chartModel;
+    if (!model) return null;
+    const activeSource = () => {
+      let holder = null;
+      try {
+        holder = typeof model.activeStrategySource === "function"
+          ? model.activeStrategySource()
+          : model._activeStrategySource;
+      } catch (e) {}
+      try {
+        return holder && typeof holder.value === "function" ? holder.value() : holder;
+      } catch (e) {
+        return null;
+      }
+    };
+    const reportFor = (source) => {
+      if (!source) return null;
+      try {
+        if (typeof source.reportData === "function") return source.reportData();
+      } catch (e) {}
+      return source._reportData || null;
+    };
+    const metaFor = (source) => {
+      if (!source) return null;
+      try {
+        if (typeof source.metaInfo === "function") return source.metaInfo();
+      } catch (e) {}
+      return source._metaInfo || null;
+    };
+    return {
+      activeStrategy: { value: () => activeSource() },
+      activeStrategyMetaInfo: { value: () => metaFor(activeSource()) },
+      activeStrategyReportData: { value: () => reportFor(activeSource()) },
+    };
+  };
+`;
 
 // In-page helper shared by getStrategyReport and runBacktest: shapes the raw
 // backtesting report into the StrategyReport structure above.
@@ -1013,6 +1102,7 @@ export class TradingView {
       (async () => {
         const api = window.TradingViewApi;
         const chart = ${chartExpr};
+        ${BACKTESTING_API_SNIPPET}
         const studyId = ${JSON.stringify(studyId)};
         const inputs = ${JSON.stringify(inputs)};
         let studyApi;
@@ -1037,7 +1127,7 @@ export class TradingView {
         // back to isLoading-only settling instead of failing the write.
         let bt = null;
         try {
-          if (typeof api.backtestingStrategyApi === "function") bt = await api.backtestingStrategyApi();
+          bt = await resolveBacktestingApi(api, chart);
         } catch (e) {}
         const staleReport = bt ? bt.activeStrategyReportData.value() : null;
 
@@ -2037,16 +2127,244 @@ export class TradingView {
     return this.cdp.evaluate<StrategyReport>(`
       (async () => {
         const api = window.TradingViewApi;
+        const chart = api.activeChart();
+        ${BACKTESTING_API_SNIPPET}
         ${FORMAT_REPORT_SNIPPET}
-        if (typeof api.backtestingStrategyApi !== "function") {
-          throw new Error("Strategy Tester API is unavailable in this app session — open a chart with a strategy once, then retry");
-        }
-        const bt = await api.backtestingStrategyApi();
+        const bt = await resolveBacktestingApi(api, chart);
+        if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
         const report = formatReport(bt, ${tradesLimit});
         if (!report) {
           throw new Error("no strategy report available — the active chart has no strategy (or it is still calculating). Add one or use run_backtest");
         }
         return report;
+      })()
+    `);
+  }
+
+  /**
+   * Paginated, read-only trade ledger for the strategy currently active in
+   * Strategy Tester. The ledger id covers every normalized trade, allowing a
+   * caller to reject pages from a report that recalculated between requests.
+   */
+  getStrategyTradeLedger(options: {
+    offset?: number;
+    limit?: number;
+    expectedLedgerId?: string;
+  } = {}): Promise<StrategyTradeLedger> {
+    const { offset = 0, limit = 200, expectedLedgerId } = options;
+    if (!Number.isInteger(offset) || offset < 0 || offset > 10_000_000) {
+      throw new Error(`offset must be an integer between 0 and 10000000, got ${offset}`);
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error(`limit must be an integer between 1 and 500, got ${limit}`);
+    }
+    if (expectedLedgerId !== undefined && !/^sha256:[a-f0-9]{64}$/.test(expectedLedgerId)) {
+      throw new Error(`expectedLedgerId must be a sha256 ledger id, got ${JSON.stringify(expectedLedgerId)}`);
+    }
+    return this.cdp.evaluate<StrategyTradeLedger>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        const offset = ${offset};
+        const limit = ${limit};
+        const expectedLedgerId = ${expectedLedgerId === undefined ? "null" : JSON.stringify(expectedLedgerId)};
+        const chart = api.activeChart();
+        ${BACKTESTING_API_SNIPPET}
+        const bt = await resolveBacktestingApi(api, chart);
+        if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
+        const act = bt.activeStrategy.value();
+        if (act === null || act === undefined) {
+          throw new Error("no active strategy — add a strategy to the chart before requesting its trade ledger");
+        }
+        const report = bt.activeStrategyReportData.value();
+        if (!report || !report.performance) {
+          throw new Error("no strategy report available — the active strategy may still be calculating");
+        }
+        const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+        const iso = (ms) => (typeof ms === "number" && isFinite(ms) ? new Date(ms).toISOString() : null);
+        const metric = (v) => {
+          if (typeof v === "number") return num(v);
+          return v && typeof v === "object" ? num(v.value ?? v.v) : null;
+        };
+        const percent = (v) => v && typeof v === "object" ? num(v.percentValue ?? v.p) : null;
+        const side = (s) => (s ? {
+          time: num(s.time ?? s.tm),
+          timeIso: iso(s.time ?? s.tm),
+          price: num(s.price ?? s.p),
+          label: typeof (s.id ?? s.c) === "string" ? (s.id ?? s.c) : null,
+        } : null);
+        const dirOf = (trade) => {
+          const entry = trade ? (trade.entry ?? trade.e) : null;
+          const type = entry ? String(entry.type ?? entry.tp ?? "") : "";
+          return type.startsWith("s") ? "short" : type.startsWith("l") ? "long" : null;
+        };
+        const normalizeTrade = (trade, reportIndex) => {
+          const entry = side(trade.entry ?? trade.e);
+          const exit = side(trade.exit ?? trade.x);
+          const runUp = trade.runUp ?? trade.runup ?? trade.maxRunUp ?? trade.rn ?? null;
+          const drawDown = trade.drawDown ?? trade.drawdown ?? trade.maxDrawDown ?? trade.dd ?? null;
+          const commission = trade.commission ?? trade.cm ?? null;
+          const profit = trade.profit ?? trade.tp ?? null;
+          const cumulativeProfit = trade.cumulativeProfit ?? trade.cp ?? null;
+          return {
+            reportIndex,
+            number: num(trade.tradeNumber ?? trade.number),
+            direction: dirOf(trade),
+            status: exit ? "closed" : "open",
+            entry,
+            exit,
+            durationMilliseconds: entry && exit && entry.time !== null && exit.time !== null
+              ? Math.max(0, exit.time - entry.time)
+              : null,
+            profit: metric(profit),
+            profitPercent: percent(profit),
+            cumulativeProfit: metric(cumulativeProfit),
+            quantity: num(trade.quantity ?? trade.q),
+            commission: metric(commission),
+            commissionPercent: percent(commission),
+            runUp: metric(runUp),
+            runUpPercent: percent(runUp),
+            drawDown: metric(drawDown),
+            drawDownPercent: percent(drawDown),
+          };
+        };
+        const rawTrades = Array.isArray(report.trades) ? report.trades : [];
+        const allTrades = rawTrades.map(normalizeTrade);
+        if (offset > allTrades.length) {
+          throw new Error("offset " + offset + " exceeds available trade count " + allTrades.length);
+        }
+        let strategy = null;
+        try { strategy = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
+        if (!strategy) {
+          try {
+            if (typeof act.metaInfo === "function") strategy = act.metaInfo().description ?? null;
+          } catch (e) {}
+        }
+        const symbol = typeof chart.symbol === "function" ? chart.symbol() : null;
+        const timeframe = typeof chart.resolution === "function" ? chart.resolution() : null;
+        let activeId = null;
+        if (typeof act === "string") activeId = act;
+        else if (act && typeof act.id === "string") activeId = act.id;
+        else if (act && typeof act.id === "function") {
+          try { activeId = act.id(); } catch (e) {}
+        }
+        const studyCandidates = chart.getAllStudies().filter((study) =>
+          activeId !== null ? study.id === activeId : strategy !== null && study.name === strategy);
+        const activeStudy = studyCandidates.length === 1 ? studyCandidates[0] : null;
+        let pineId = null;
+        let pineVersion = null;
+        let inputs = [];
+        let unsupportedInputValue = false;
+        if (activeStudy) {
+          try {
+            const studyApi = chart.getStudyById(activeStudy.id);
+            const infoById = {};
+            try {
+              for (const info of studyApi.getInputsInfo()) infoById[info.id] = info;
+            } catch (e) {}
+            const values = studyApi.getInputValues();
+            pineId = typeof values.find((value) => value.id === "pineId")?.value === "string"
+              ? values.find((value) => value.id === "pineId").value
+              : null;
+            pineVersion = typeof values.find((value) => value.id === "pineVersion")?.value === "string"
+              ? values.find((value) => value.id === "pineVersion").value
+              : null;
+            const hidden = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
+            inputs = values.filter((value) => !hidden.has(value.id)).map((input) => {
+              const info = infoById[input.id] || {};
+              const primitive = typeof input.value === "string" || typeof input.value === "number" || typeof input.value === "boolean";
+              if (!primitive && input.value !== null) unsupportedInputValue = true;
+              return {
+                id: input.id,
+                name: info.localizedName || info.name || input.id,
+                value: primitive ? input.value : null,
+              };
+            });
+          } catch (e) {}
+        }
+        const performance = report.performance;
+        const all = performance.all || {};
+        const dateRange = report.settings && report.settings.dateRange && report.settings.dateRange.backtest;
+        const normalizedDateRange = dateRange ? { from: iso(dateRange.from), to: iso(dateRange.to) } : null;
+        const totalTrades = num(all.totalTrades);
+        const identity = JSON.stringify({
+          strategy,
+          symbol,
+          timeframe,
+          pineId,
+          pineVersion,
+          inputs,
+          currency: report.currency ?? null,
+          initialCapital: num(performance.initialCapital),
+          dateRange: normalizedDateRange,
+          totalTrades,
+          trades: allTrades,
+        });
+        if (!globalThis.crypto || !globalThis.crypto.subtle || typeof TextEncoder !== "function") {
+          throw new Error("Web Crypto is unavailable — cannot bind paginated ledger pages safely");
+        }
+        const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+        const ledgerId = "sha256:" + Array.from(new Uint8Array(digest))
+          .map((value) => value.toString(16).padStart(2, "0"))
+          .join("");
+        if (expectedLedgerId !== null && expectedLedgerId !== ledgerId) {
+          throw new Error("strategy report changed between ledger pages: expected " + expectedLedgerId + " but found " + ledgerId);
+        }
+        const trades = allTrades.slice(offset, offset + limit);
+        const nextOffset = offset + trades.length < allTrades.length ? offset + trades.length : null;
+        const unavailableFields = [];
+        if (!allTrades.some((trade) => trade.commission !== null)) unavailableFields.push("trade_commission");
+        if (!allTrades.some((trade) => trade.runUp !== null)) unavailableFields.push("trade_run_up");
+        if (!allTrades.some((trade) => trade.drawDown !== null)) unavailableFields.push("trade_draw_down");
+        const qualityIssues = [];
+        if (totalTrades !== null && totalTrades !== allTrades.length) qualityIssues.push("report_trade_count_mismatch");
+        if (!activeStudy) qualityIssues.push(studyCandidates.length > 1 ? "ambiguous_active_strategy_study" : "active_strategy_study_not_found");
+        if (unsupportedInputValue) qualityIssues.push("unsupported_strategy_input_value");
+        for (let index = 1; index < allTrades.length; index += 1) {
+          const previous = allTrades[index - 1].entry?.time;
+          const current = allTrades[index].entry?.time;
+          if (previous !== null && previous !== undefined && current !== null && current !== undefined && current < previous) {
+            qualityIssues.push("non_monotonic_trade_order");
+            break;
+          }
+        }
+        return {
+          schemaVersion: "1.0",
+          ledgerId,
+          strategy,
+          symbol,
+          timeframe,
+          studyId: activeStudy?.id ?? null,
+          pineId,
+          pineVersion,
+          inputs,
+          currency: report.currency ?? null,
+          initialCapital: num(performance.initialCapital),
+          dateRange: normalizedDateRange,
+          summary: {
+            netProfit: num(all.netProfit),
+            netProfitPercent: num(all.netProfitPercent),
+            totalTrades,
+            winningTrades: num(all.numberOfWiningTrades),
+            losingTrades: num(all.numberOfLosingTrades),
+            percentProfitable: num(all.percentProfitable),
+            profitFactor: num(all.profitFactor),
+            grossProfit: num(all.grossProfit),
+            grossLoss: num(all.grossLoss),
+            commissionPaid: num(all.commissionPaid),
+          },
+          totalTrades,
+          availableTrades: allTrades.length,
+          countMatchesSummary: totalTrades === null ? null : totalTrades === allTrades.length,
+          ordering: "strategy_report",
+          offset,
+          limit,
+          returned: trades.length,
+          nextOffset,
+          complete: nextOffset === null,
+          unavailableFields,
+          qualityIssues,
+          trades,
+        };
       })()
     `);
   }
@@ -2077,6 +2395,7 @@ export class TradingView {
         const chart = api.activeChart();
         const pineId = ${JSON.stringify(pineId)};
         const keep = ${keepOnChart ? "true" : "false"};
+        ${BACKTESTING_API_SNIPPET}
         ${FORMAT_REPORT_SNIPPET}
 
         const repo = api.studyMetaIntoRepository();
@@ -2089,10 +2408,8 @@ export class TradingView {
           throw new Error(pineId + " is not a strategy — pick a script with kind \\"strategy\\" from list_pine_scripts");
         }
 
-        if (typeof api.backtestingStrategyApi !== "function") {
-          throw new Error("Strategy Tester API is unavailable in this app session — open a chart with a strategy once, then retry");
-        }
-        const bt = await api.backtestingStrategyApi();
+        const bt = await resolveBacktestingApi(api, chart);
+        if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
         // The report WatchedValue can still hold the PREVIOUS run of a
         // strategy with the SAME name (e.g. re-testing after saving a new
         // version) — remember it so only a report object that replaced it
@@ -2119,7 +2436,9 @@ export class TradingView {
         // remove it whether or not the report arrived.
         let removed = false;
         let warning;
-        if (!keep) {
+        // keepOnChart applies only to a successful run. A timed-out or
+        // unattributed report must never strand the temporary strategy.
+        if (!keep || !report) {
           try {
             chart.removeEntity(studyId);
             removed = true;
@@ -2129,7 +2448,7 @@ export class TradingView {
         }
         if (!report) {
           throw new Error("backtest report did not appear within 20s (another strategy may be active on the chart)" +
-            (keep ? "" : removed
+            (removed
               ? " — the strategy was removed from the chart"
               : " — WARNING: the strategy may still be on the chart"));
         }
