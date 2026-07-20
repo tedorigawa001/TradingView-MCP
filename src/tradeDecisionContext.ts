@@ -1,0 +1,396 @@
+import type { Scanner, MtfTimeframe } from "./scanner.js";
+import type { EconomicCalendar, ImportanceLevel } from "./calendar.js";
+import type { CotClient } from "./cot.js";
+import { cotFreshness } from "./cot.js";
+import type { TreasuryRealYieldClient } from "./realYield.js";
+import type { TradingView } from "./tradingview.js";
+import { normalizeResolution } from "./analysisOverlay.js";
+import { buildMarketSnapshot } from "./marketSnapshot.js";
+
+export type TradeDecisionContextOptions = {
+  symbol: string;
+  chartIndex?: number;
+  expectedTimeframe: string;
+  auxiliarySymbols?: string[];
+  timeframes?: MtfTimeframe[];
+  fields?: string[];
+  countries?: string[];
+  minImportance?: ImportanceLevel;
+  ohlcvCount: number;
+  keyLevelRangePercent: number;
+  keyLevelLimit: number;
+  includePositioning: boolean;
+  requirePositioning: boolean;
+  includeRealYield: boolean;
+  requireRealYield: boolean;
+  eventBlackoutBeforeMinutes: number;
+  eventBlackoutAfterMinutes: number;
+  minimumEventImportance: "medium" | "high";
+};
+
+type ContextIssue = {
+  code: string;
+  severity: "warning" | "error";
+  component: string;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+type EvidenceStatus = "available" | "partial" | "unavailable" | "blocked";
+
+function evidence(
+  required: boolean,
+  status: EvidenceStatus,
+  source: string,
+  observedAt: string,
+  sourceAt: string | null,
+  freshness: unknown,
+  data: unknown,
+) {
+  return {
+    required,
+    status,
+    source,
+    observed_at: observedAt,
+    source_at: sourceAt,
+    freshness,
+    data,
+  };
+}
+
+function matchesSymbol(actual: string, expected: string): boolean {
+  return actual.toUpperCase() === expected.toUpperCase();
+}
+
+function topLevelStatus(issues: ContextIssue[]): "complete" | "partial" | "blocked" {
+  if (issues.some((issue) => issue.severity === "error")) return "blocked";
+  if (issues.length > 0) return "partial";
+  return "complete";
+}
+
+export async function buildTradeDecisionContext(
+  dependencies: {
+    tv: Pick<TradingView, "getChartContext" | "getOhlcv" | "getKeyLevels">;
+    scanner: Pick<Scanner, "getQuotes" | "getMtfOverview">;
+    calendar: Pick<EconomicCalendar, "getEvents">;
+    cot: Pick<CotClient, "getLatest">;
+    realYield: Pick<TreasuryRealYieldClient, "getLatest">;
+  },
+  options: TradeDecisionContextOptions,
+  now = new Date(),
+) {
+  const requestedAt = now.toISOString();
+  const issues: ContextIssue[] = [];
+  let context: Awaited<ReturnType<typeof dependencies.tv.getChartContext>> | null = null;
+  try {
+    context = await dependencies.tv.getChartContext();
+  } catch {
+    issues.push({
+      code: "chart_context_unavailable",
+      severity: "error",
+      component: "chart",
+      message: "TradingView chart context retrieval failed.",
+    });
+  }
+  const chartIndex = options.chartIndex ?? context?.activeChartIndex ?? null;
+  const chart = chartIndex === null || context === null
+    ? undefined
+    : context.charts.find((candidate) => candidate.index === chartIndex);
+  const chartMatches = chart !== undefined
+    && matchesSymbol(chart.symbol, options.symbol)
+    && normalizeResolution(chart.resolution) === normalizeResolution(options.expectedTimeframe);
+
+  if (context === null) {
+    // The structured chart_context_unavailable issue was added above.
+  } else if (!chart) {
+    issues.push({
+      code: "chart_unavailable",
+      severity: "error",
+      component: "chart",
+      message: "The requested TradingView chart is not present in the current layout.",
+      details: { chartIndex },
+    });
+  } else if (!matchesSymbol(chart.symbol, options.symbol)) {
+    issues.push({
+      code: "chart_symbol_mismatch",
+      severity: "error",
+      component: "chart",
+      message: "The selected chart symbol does not match the requested analysis symbol.",
+      details: { expected: options.symbol, observed: chart.symbol },
+    });
+  } else if (normalizeResolution(chart.resolution) !== normalizeResolution(options.expectedTimeframe)) {
+    issues.push({
+      code: "chart_timeframe_mismatch",
+      severity: "error",
+      component: "chart",
+      message: "The selected chart timeframe does not match expected_timeframe.",
+      details: { expected: normalizeResolution(options.expectedTimeframe), observed: normalizeResolution(chart.resolution) },
+    });
+  }
+
+  const marketPromise = buildMarketSnapshot(
+    { scanner: dependencies.scanner, calendar: dependencies.calendar },
+    {
+      symbols: [options.symbol],
+      auxiliarySymbols: options.auxiliarySymbols,
+      timeframes: options.timeframes,
+      fields: options.fields,
+      quoteFields: ["bid", "ask"],
+      requiredQuoteFields: ["close"],
+      includeEvents: true,
+      countries: options.countries,
+      minImportance: options.minImportance,
+    },
+  );
+  const chartEvidencePromise = chartMatches
+    ? Promise.allSettled([
+        dependencies.tv.getOhlcv(options.ohlcvCount, chartIndex!),
+        dependencies.tv.getKeyLevels({
+          chartIndex: chartIndex!,
+          rangePercent: options.keyLevelRangePercent,
+          limit: options.keyLevelLimit,
+          includeAllPlots: false,
+        }),
+      ])
+    : Promise.resolve(null);
+  const positioningPromise = options.includePositioning
+    ? dependencies.cot.getLatest(options.symbol).then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        () => ({ status: "rejected" as const }),
+      )
+    : Promise.resolve(null);
+  const realYieldPromise = options.includeRealYield
+    ? dependencies.realYield.getLatest().then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        () => ({ status: "rejected" as const }),
+      )
+    : Promise.resolve(null);
+
+  const [market, chartResults, positioningResult, realYieldResult] = await Promise.all([
+    marketPromise,
+    chartEvidencePromise,
+    positioningPromise,
+    realYieldPromise,
+  ]);
+  const completedAt = new Date().toISOString();
+
+  for (const issue of market.quality_issues) {
+    issues.push({
+      code: `market_${issue.code}`,
+      severity: issue.severity,
+      component: "market_snapshot",
+      message: issue.message,
+      ...(issue.symbols ? { details: { symbols: issue.symbols } } : {}),
+    });
+  }
+
+  let chartData: unknown = null;
+  let keyLevelsData: unknown = null;
+  let chartSourceAt: string | null = null;
+  let chartEvidenceValid = false;
+  if (chartResults) {
+    const [ohlcvResult, keyLevelsResult] = chartResults;
+    if (ohlcvResult.status === "fulfilled") {
+      const ohlcv = ohlcvResult.value;
+      const bindingMatches = matchesSymbol(ohlcv.symbol, options.symbol)
+        && normalizeResolution(ohlcv.resolution) === normalizeResolution(options.expectedTimeframe);
+      if (!bindingMatches || ohlcv.bars.length === 0) {
+        issues.push({
+          code: "chart_ohlcv_invalid",
+          severity: "error",
+          component: "chart",
+          message: "OHLCV evidence is empty or does not match the requested symbol and timeframe.",
+        });
+      } else {
+        const closedBars = ohlcv.bars.filter((bar) => !bar.forming);
+        const formingBar = [...ohlcv.bars].reverse().find((bar) => bar.forming) ?? null;
+        chartSourceAt = ohlcv.bars.at(-1)?.timeIso ?? null;
+        chartData = {
+          chart_index: chartIndex,
+          symbol: ohlcv.symbol,
+          timeframe: normalizeResolution(ohlcv.resolution),
+          closed_bars: closedBars,
+          forming_bar: formingBar,
+        };
+        if (closedBars.length === 0) {
+          issues.push({
+            code: "closed_bars_unavailable",
+            severity: "error",
+            component: "chart",
+            message: "The selected chart has no closed OHLCV bars in the requested window.",
+          });
+        } else {
+          chartEvidenceValid = true;
+        }
+      }
+    } else {
+      issues.push({
+        code: "chart_ohlcv_unavailable",
+        severity: "error",
+        component: "chart",
+        message: "Required chart OHLCV retrieval failed.",
+      });
+    }
+
+    if (keyLevelsResult.status === "fulfilled") {
+      const keyLevels = keyLevelsResult.value;
+      if (
+        matchesSymbol(keyLevels.symbol, options.symbol)
+        && normalizeResolution(keyLevels.resolution) === normalizeResolution(options.expectedTimeframe)
+      ) {
+        keyLevelsData = keyLevels;
+      } else {
+        issues.push({
+          code: "key_levels_context_mismatch",
+          severity: "warning",
+          component: "key_levels",
+          message: "Key-level evidence does not match the requested symbol and timeframe and was discarded.",
+        });
+      }
+    } else {
+      issues.push({
+        code: "key_levels_unavailable",
+        severity: "warning",
+        component: "key_levels",
+        message: "Key-level retrieval failed; no levels were inferred or substituted.",
+      });
+    }
+  }
+
+  let positioningData: unknown = null;
+  let positioningFreshness: unknown = { status: "not_requested" };
+  if (positioningResult?.status === "fulfilled") {
+    positioningData = {
+      schema_version: "1.1",
+      status: "partial",
+      as_of: positioningResult.value.report_date,
+      cot: positioningResult.value,
+      freshness: cotFreshness(positioningResult.value.report_date),
+      limitations: [
+        "COT is weekly delayed futures positioning, not realtime institutional order flow.",
+        "Publication availability time is unavailable and is not inferred from report_date.",
+      ],
+    };
+    positioningFreshness = cotFreshness(positioningResult.value.report_date);
+  } else if (positioningResult?.status === "rejected") {
+    issues.push({
+      code: "positioning_unavailable",
+      severity: options.requirePositioning ? "error" : "warning",
+      component: "positioning",
+      message: "COT positioning is unavailable for this request.",
+    });
+  }
+
+  let realYieldData: unknown = null;
+  let realYieldFreshness: unknown = { status: "not_requested" };
+  if (realYieldResult?.status === "fulfilled") {
+    realYieldData = realYieldResult.value;
+    realYieldFreshness = {
+      status: realYieldResult.value.freshness_status,
+      weekdays: realYieldResult.value.freshness_weekdays,
+      latency_class: realYieldResult.value.latency_class,
+    };
+    if (realYieldResult.value.status === "unavailable") {
+      issues.push({
+        code: "real_yield_unavailable",
+        severity: options.requireRealYield ? "error" : "warning",
+        component: "real_yield",
+        message: "U.S. real-yield context is unavailable.",
+      });
+    }
+  } else if (realYieldResult?.status === "rejected") {
+    issues.push({
+      code: "real_yield_unavailable",
+      severity: options.requireRealYield ? "error" : "warning",
+      component: "real_yield",
+      message: "U.S. real-yield context retrieval failed.",
+    });
+  }
+
+  const normalizedQuote = market.normalized_quotes.find((quote) => matchesSymbol(quote.symbol, options.symbol));
+  const executionAvailable = normalizedQuote?.spread_status === "derived_from_bid_ask";
+  if (!executionAvailable) {
+    issues.push({
+      code: "execution_quote_unavailable",
+      severity: "warning",
+      component: "execution",
+      message: "A validated bid/ask pair is unavailable; chart close is not substituted for execution evidence.",
+    });
+  } else {
+    issues.push({
+      code: "execution_source_timestamp_unavailable",
+      severity: "warning",
+      component: "execution",
+      message: "Bid/ask is available, but its market-source timestamp is unavailable; execution readiness remains unverified.",
+    });
+  }
+
+  const importanceRank = { low: 0, medium: 1, high: 2 } as const;
+  const eventThreshold = importanceRank[options.minimumEventImportance];
+  const activeEvents = (market.economic_events?.events ?? []).filter((event) => {
+    if (importanceRank[event.importance] < eventThreshold) return false;
+    const minutesUntil = (Date.parse(event.date) - now.getTime()) / 60_000;
+    return minutesUntil >= -options.eventBlackoutAfterMinutes
+      && minutesUntil <= options.eventBlackoutBeforeMinutes;
+  });
+  if (activeEvents.length > 0) {
+    issues.push({
+      code: "event_blackout_active",
+      severity: "warning",
+      component: "economic_events",
+      message: "The request is inside a configured important-event blackout window.",
+      details: { events: activeEvents.map((event) => ({ title: event.title, date: event.date, importance: event.importance })) },
+    });
+  }
+
+  const hasErrors = issues.some((issue) => issue.severity === "error");
+  const decisionStatus = hasErrors
+    ? "blocked"
+    : activeEvents.length > 0 || !executionAvailable || market.max_source_skew_ms === null
+      ? "wait"
+      : "trade_ready";
+  const marketSourceAt = market.sources
+    .map((source) => source.received_at)
+    .sort()
+    .at(-1) ?? market.received_at;
+
+  return {
+    schema_version: "1.0",
+    snapshot_id: market.snapshot_id,
+    status: topLevelStatus(issues),
+    decision_status: decisionStatus,
+    directional_recommendation: null,
+    data_use: {
+      mode: "decision_support_only",
+      automated_trading_decision: "not_permitted",
+      order_execution: "not_supported",
+    },
+    symbol: options.symbol.toUpperCase(),
+    timeframe: normalizeResolution(options.expectedTimeframe),
+    chart_index: chartIndex,
+    requested_at: requestedAt,
+    completed_at: completedAt,
+    quality_issues: issues,
+    evidence: {
+      market_snapshot: evidence(true, market.status === "blocked" ? "blocked" : "partial", "tradingview_scanner_and_calendar", market.received_at, null, { status: "source_timestamp_unavailable" }, market),
+      chart: evidence(true, chartEvidenceValid ? "available" : "blocked", "tradingview_chart_ohlcv", completedAt, chartSourceAt, { status: "not_assessed", basis: "bar_timestamp" }, chartData),
+      key_levels: evidence(false, keyLevelsData === null ? "unavailable" : "available", "tradingview_chart_indicators", completedAt, chartSourceAt, { status: "not_assessed" }, keyLevelsData),
+      positioning: evidence(options.requirePositioning, positioningData === null ? "unavailable" : "partial", "cftc_cot", completedAt, positioningResult?.status === "fulfilled" ? positioningResult.value.report_date : null, positioningFreshness, positioningData),
+      real_yield: evidence(options.requireRealYield, realYieldData === null ? "unavailable" : "partial", "us_treasury", realYieldResult?.status === "fulfilled" ? realYieldResult.value.observed_at ?? completedAt : completedAt, realYieldResult?.status === "fulfilled" ? realYieldResult.value.observation_date : null, realYieldFreshness, realYieldData),
+      execution: evidence(true, executionAvailable ? "partial" : "unavailable", "tradingview_scanner_bid_ask", marketSourceAt, null, { status: "source_timestamp_unavailable" }, executionAvailable ? { ...normalizedQuote, price_basis: "bid_ask" } : null),
+    },
+    event_gate: {
+      status: activeEvents.length > 0 ? "blackout" : "clear",
+      before_minutes: options.eventBlackoutBeforeMinutes,
+      after_minutes: options.eventBlackoutAfterMinutes,
+      minimum_importance: options.minimumEventImportance,
+      active_events: activeEvents,
+    },
+    limitations: [
+      "trade_ready describes evidence completeness and configured gates, not a directional recommendation.",
+      "Scanner receipt times are not exchange timestamps and do not prove quote freshness.",
+      "COT and real yield are slow macro context and must not be treated as intraday triggers.",
+      "No order, alert, Pine script, chart setting, or journal entry is created or changed.",
+    ],
+  };
+}

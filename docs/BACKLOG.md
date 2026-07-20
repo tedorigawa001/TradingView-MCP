@@ -167,19 +167,23 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **検証**: EURUSDに拘束された分析をUSDJPYチャートでstatus確認・事後評価する公開MCPテストを追加し、いずれも市場データを読まずfail-closedになることを固定。`4H`と`240`は同一時間足として受理し、snapshot ID・strategy versionはジャーナルの定義hashへ含める
 - **実機検証(2026-07-20)**: 監査済みテンプレートをTradingView Pine保存版`3.0`としてコンパイル警告なしで非破壊保存し、USDJPY 4Hへ新版Studyを追加。18入力の読み戻し、再計算settle、描画数、ジャーナル記録を確認してから旧`2.0` Studyだけを削除した。USDJPYでは`ready`/`trusted:true`、一時的にEURUSDへ切り替えるとstatusは`stale_context`/`trusted:false`、事後評価は`not_evaluable`となり、OHLC取得・評価時間足切替へ進まないことを確認後、USDJPY 4Hへ復元した
 
-### #22 分析案の事前検証(`validate_trade_plan`)(優先度: P0・規模: 小〜中)
+### #22 分析案の事前検証(`validate_trade_plan`) ✅ 完了(2026-07-20)
 
 - **課題**: `apply_analysis_overlay`にも入力契約検証はあるが、重要イベント、データ鮮度、現在価格による水準通過、コスト控除後RRなど、反映可否に必要な判断が複数ツールとAI推論へ分散している
-- **案**: チャートを書き換えない純粋な検証ツールを追加し、biasとConfirmation/Invalidation/Stop/Targetsの方向整合、Target単調性、分析時刻・期限、Entry通過状態、最低RR、spread/slippage/commission控除後RR、イベント停止時間、証拠鮮度を構造化検証する
-- **出力**: `status: "valid" | "warning" | "blocked"`、正規化済み分析案、`qualityIssues`、計算前提、修正候補を返す。データ欠落をゼロや最新値で補完せず、必須証拠の欠落は`blocked`にする
-- **受入条件**: bearishでStopがEntry下、非単調Target、期限切れ、重要指標停止時間内、コスト控除後RR不足を個別コードで検出する。検証処理はPine・チャート・ジャーナルへ書き込まない
+- **実装**: チャートを書き換えない純粋な検証ツールを追加。既存オーバーレイ契約を再利用してbiasとConfirmation/Invalidation/Stop/Targetsの方向整合、Target単調性、分析時刻・期限を検証し、契約違反もMCPエラーではなく構造化された`blocked`へ変換する
+- **鮮度と水準**: 必須の`current_price`と`market_observed_at`を受け取り、既定60秒を超えた証拠、未来時刻、観測時点ですでにConfirmation/Invalidation/Stopへ到達済みの案を拒否する。Entry通過後かつConfirmation前は履歴上の通過を推測せず`warning`に留める
+- **コストとイベント**: `estimated_round_trip_cost_price`を銘柄価格単位の往復コストとして、Target 1の純報酬から控除しStopリスクへ加算したnet RRを算出する。重要度閾値と前後の停止分数を指定できるイベント配列を検査し、該当時間内は`event_blackout_active`で拒否する
+- **出力と安全境界**: `status: "valid" | "warning" | "blocked"`、個別コード・修正候補付き`issues`、gross/net RR、使用証拠と計算前提を返す。渡された証拠を現在値で補完せず、TradingView、Pine、アラート、注文、ジャーナルへアクセスも書き込みもしない
+- **検証**: 公開MCP経路で正常案、bearishのStop方向違反、非単調Target、期限切れ、stale証拠、重要指標停止時間、Confirmation通過、コスト控除後RR不足、Entry通過warningを固定。ツール総数を41として完全一致テストへ追加した
 
-### #23 トレード判断コンテキスト統合(`get_trade_decision_context`)(優先度: P1・規模: 中)
+### #23 トレード判断コンテキスト統合(`get_trade_decision_context`) ✅ 完了(2026-07-20)
 
 - **課題**: 1回の分析に`get_market_snapshot`、`get_key_levels`、`get_positioning_context`、`get_real_yield_context`、執行コスト関連を個別呼び出しし、取得時刻と欠落状態をAI側で突合する必要がある
-- **案**: 対象チャートの確定足/形成中足、MTF、キーレベル、補助市場、経済イベント、COT、実質金利、執行条件を同一取得ウィンドウで束ねる読み取り専用ツールを追加する。既存`get_market_snapshot`を基盤とし、元レスポンスを失わず各証拠へ`observed_at`、`source`、`freshness`、`status`を付ける
-- **判定境界**: MCPは決定論的な品質ゲートと事実の統合までを担当し、方向予測の最終判断はAI側に残す。出力は`trade_ready | wait | blocked`をデータ完全性・イベント・執行条件についてだけ表し、売買推奨そのものを意味しない
-- **受入条件**: 一部データ源失敗時に全体を無言で成功扱いせず、必須度に応じて`partial`/`blocked`を返す。`snapshot_id`を分析オーバーレイとジャーナルへ引き継げる
+- **実装**: 既存`get_market_snapshot`の生成処理を再利用可能な`marketSnapshot.ts`へ抽出し、従来レスポンスを維持したまま統合ツールの基盤にした。対象チャートのsymbol/timeframeを拘束し、確定足と形成中足、キーレベル、元市場スナップショット、COT、米実質金利、bid/askを同じUUID `snapshot_id`へ束ねる
+- **証拠契約**: 各証拠へ`required`、`status`、`source`、`observed_at`、`source_at`、`freshness`、元`data`を付与する。COTと実質金利は既定で取得するが任意証拠とし、`require_positioning`/`require_real_yield`指定時だけ取得失敗を`blocked`に昇格する。キーレベル失敗は推測で補わず`partial`とする
+- **品質ゲート**: 全体完全性は`complete | partial | blocked`、判断ゲートは`trade_ready | wait | blocked`へ分離する。チャート不在・symbol/timeframe不一致・OHLC欠落・必須ソース失敗は`blocked`、設定した重要イベント停止時間と執行証拠不足は`wait`にする。`directional_recommendation`は常に`null`で、方向予測はAI側に残す
+- **執行境界**: scannerのbid/askが揃っても市場側timestampがないため`execution.status: partial`かつ`decision_status: wait`とする。チャート終値で代用せず、#24の鮮度検証済み執行スナップショットを接続するまで`trade_ready`へ昇格しない
+- **検証**: 公開MCP経路で全証拠の統合と`snapshot_id`共有、チャート取り違え時のOHLC非取得、重要イベント停止、必須COT失敗、chart context失敗時の他証拠保持を固定。ツール総数を42として完全一致テストへ追加した
 
 ### #24 ライブ執行条件スナップショット(`get_execution_snapshot`)(優先度: P1・規模: 中、データ源要調査)
 

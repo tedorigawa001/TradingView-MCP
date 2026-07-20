@@ -1,11 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { CdpClient } from "./cdp.js";
 import type { TradingView } from "./tradingview.js";
 import {
-  DEFAULT_MTF_FIELDS,
-  DEFAULT_MTF_TIMEFRAMES,
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
   SCAN_OPERATIONS,
@@ -15,8 +12,10 @@ import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
 import { cotFreshness, type CotClient } from "./cot.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
-import { getInstrumentMetadata } from "./instrumentMetadata.js";
 import { computeRoundTripCost } from "./costModel.js";
+import { validateTradePlan } from "./tradePlan.js";
+import { buildMarketSnapshot } from "./marketSnapshot.js";
+import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { redactSecrets } from "./redact.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -140,35 +139,6 @@ function journalDefinition(
     pineVersion: placement.pineVersion ?? null,
   };
 }
-type SnapshotQualityIssue = {
-  code: string;
-  severity: "warning" | "error";
-  message: string;
-  symbols?: string[];
-};
-
-type SnapshotSource<T> = {
-  name: string;
-  status: "ok" | "error";
-  requested_at: string;
-  received_at: string;
-  latency_ms: number;
-  timestamp_basis: "mcp_receipt_time" | "scheduled_event_time";
-  value: T | null;
-};
-
-type NormalizedQuote = {
-  symbol: string;
-  bid: number | null;
-  ask: number | null;
-  mid: number | null;
-  spread_price: number | null;
-  spread_pips: number | null;
-  pip_size: number | null;
-  tick_size: number | null;
-  spread_status: "derived_from_bid_ask" | "bid_ask_incomplete" | "unavailable";
-};
-
 type AlignedHistoryIssue = {
   code: string;
   severity: "warning" | "error";
@@ -209,54 +179,6 @@ function errorResult(err: unknown): ToolResult {
   return {
     content: [{ type: "text", text: `Error: ${message}` }],
     isError: true,
-  };
-}
-
-function addIssue(
-  issues: SnapshotQualityIssue[],
-  code: string,
-  severity: SnapshotQualityIssue["severity"],
-  message: string,
-  symbols?: string[],
-): void {
-  issues.push({ code, severity, message, ...(symbols && symbols.length > 0 ? { symbols } : {}) });
-}
-
-function isPresent(value: unknown): boolean {
-  return value !== null && value !== undefined && value !== "";
-}
-
-function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function normalizeQuote(row: { symbol: string; values: Record<string, unknown> }): NormalizedQuote {
-  const metadata = getInstrumentMetadata(row.symbol);
-  const bid = finiteNumber(row.values.bid);
-  const ask = finiteNumber(row.values.ask);
-  if (bid !== null && ask !== null && bid > 0 && ask > 0 && ask >= bid) {
-    return {
-      symbol: row.symbol,
-      bid,
-      ask,
-      mid: (bid + ask) / 2,
-      spread_price: ask - bid,
-      spread_pips: metadata.pip_size === null ? null : (ask - bid) / metadata.pip_size,
-      pip_size: metadata.pip_size,
-      tick_size: metadata.tick_size,
-      spread_status: "derived_from_bid_ask",
-    };
-  }
-  return {
-    symbol: row.symbol,
-    bid,
-    ask,
-    mid: null,
-    spread_price: null,
-    spread_pips: null,
-    pip_size: metadata.pip_size,
-    tick_size: metadata.tick_size,
-    spread_status: bid !== null || ask !== null ? "bid_ask_incomplete" : "unavailable",
   };
 }
 
@@ -318,43 +240,6 @@ function correlation(left: number[], right: number[]): number | null {
   }
   const denominator = Math.sqrt(leftSum * rightSum);
   return denominator === 0 ? null : numerator / denominator;
-}
-
-function snapshotStatus(issues: SnapshotQualityIssue[]): SnapshotStatus {
-  if (issues.some((issue) => issue.severity === "error")) return "blocked";
-  if (issues.length > 0) return "partial";
-  return "ok";
-}
-
-async function captureSnapshotSource<T>(
-  name: string,
-  timestampBasis: SnapshotSource<T>["timestamp_basis"],
-  load: () => Promise<T>,
-): Promise<SnapshotSource<T>> {
-  const requestedAt = new Date().toISOString();
-  const startedAt = Date.now();
-  try {
-    const value = await load();
-    return {
-      name,
-      status: "ok",
-      requested_at: requestedAt,
-      received_at: new Date().toISOString(),
-      latency_ms: Date.now() - startedAt,
-      timestamp_basis: timestampBasis,
-      value,
-    };
-  } catch {
-    return {
-      name,
-      status: "error",
-      requested_at: requestedAt,
-      received_at: new Date().toISOString(),
-      latency_ms: Date.now() - startedAt,
-      timestamp_basis: timestampBasis,
-      value: null,
-    };
-  }
 }
 
 export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal }: ServerDeps): McpServer {
@@ -2236,162 +2121,111 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ symbols, auxiliary_symbols, timeframes, fields, required_quote_fields, include_events, countries, min_importance }) => {
-      const requestedAt = new Date().toISOString();
-      const requiredQuoteFields = required_quote_fields ?? ["close"];
-      if (new Set(symbols).size !== symbols.length || new Set(auxiliary_symbols ?? []).size !== (auxiliary_symbols ?? []).length) {
-        return errorResult(new Error("symbols and auxiliary_symbols must not contain duplicates"));
+      try {
+        return jsonResult(await buildMarketSnapshot(
+          { scanner, calendar },
+          {
+            symbols,
+            auxiliarySymbols: auxiliary_symbols,
+            timeframes,
+            fields,
+            requiredQuoteFields: required_quote_fields,
+            includeEvents: include_events,
+            countries,
+            minImportance: min_importance,
+          },
+        ));
+      } catch (err) {
+        return errorResult(err);
       }
-      if ((auxiliary_symbols ?? []).some((symbol) => symbols.includes(symbol))) {
-        return errorResult(new Error("a symbol cannot be both required and auxiliary"));
-      }
-      if (new Set(timeframes ?? []).size !== (timeframes ?? []).length || new Set(fields ?? []).size !== (fields ?? []).length) {
-        return errorResult(new Error("timeframes and fields must not contain duplicates"));
-      }
-      if (new Set(requiredQuoteFields).size !== requiredQuoteFields.length) {
-        return errorResult(new Error("required_quote_fields must not contain duplicates"));
-      }
-      const effectiveTimeframes = timeframes ?? DEFAULT_MTF_TIMEFRAMES;
-      const effectiveFields = fields ?? DEFAULT_MTF_FIELDS;
-      if (effectiveTimeframes.length * effectiveFields.length > 50) {
-        return errorResult(
-          new Error(
-            `too many MTF columns: ${effectiveTimeframes.length} timeframes x ${effectiveFields.length} fields > 50`,
-          ),
-        );
-      }
-      const requestedSymbols = [...new Set([...symbols, ...(auxiliary_symbols ?? [])])];
-      if (requestedSymbols.length > MAX_MTF_SYMBOLS) {
-        return errorResult(new Error(`symbols plus auxiliary_symbols must contain at most ${MAX_MTF_SYMBOLS} unique symbols`));
-      }
-
-      const quoteColumns = [...new Set(["description", ...requiredQuoteFields])];
-      const sources = await Promise.all([
-        captureSnapshotSource("tradingview_scanner_quotes", "mcp_receipt_time", () =>
-          scanner.getQuotes(requestedSymbols, quoteColumns),
-        ),
-        captureSnapshotSource("tradingview_scanner_mtf", "mcp_receipt_time", () =>
-          scanner.getMtfOverview(requestedSymbols, effectiveTimeframes, effectiveFields),
-        ),
-        ...(include_events
-          ? [
-              captureSnapshotSource("tradingview_economic_calendar", "scheduled_event_time", () =>
-                calendar.getEvents({ countries, minImportance: min_importance }),
-              ),
-            ]
-          : []),
-      ]);
-      const [quotes, overview, events] = sources;
-      const receivedAt = new Date().toISOString();
-      const sourceReceiptTimes = sources.map((source) => Date.parse(source.received_at));
-      const maxReceiptSkewMs =
-        sourceReceiptTimes.length < 2 ? 0 : Math.max(...sourceReceiptTimes) - Math.min(...sourceReceiptTimes);
-      const qualityIssues: SnapshotQualityIssue[] = [];
-
-      // The scanner response has no source/candle timestamp. Keep that limitation
-      // visible rather than presenting separately fetched values as atomic market state.
-      addIssue(
-        qualityIssues,
-        "source_timestamp_unavailable",
-        "warning",
-        "TradingView scanner responses do not include a common source timestamp; received_at is the MCP receipt time, not market-data time.",
-      );
-
-      let quoteRows: Array<{ symbol: string; values: Record<string, unknown> }> = [];
-      if (quotes.status === "ok" && quotes.value !== null) {
-        const rawQuoteRows = quotes.value.rows;
-        const rowCounts = new Map<string, number>();
-        for (const row of rawQuoteRows) rowCounts.set(row.symbol, (rowCounts.get(row.symbol) ?? 0) + 1);
-        const duplicateRequired = symbols.filter((symbol) => (rowCounts.get(symbol) ?? 0) > 1);
-        if (duplicateRequired.length > 0) {
-          addIssue(qualityIssues, "duplicate_required_quote", "error", "The quote source returned duplicate rows for a required symbol.", duplicateRequired);
-        }
-        const duplicateAuxiliary = (auxiliary_symbols ?? []).filter((symbol) => (rowCounts.get(symbol) ?? 0) > 1);
-        if (duplicateAuxiliary.length > 0) {
-          addIssue(qualityIssues, "duplicate_auxiliary_quote", "warning", "The quote source returned duplicate rows for an auxiliary symbol.", duplicateAuxiliary);
-        }
-        const unexpectedSymbols = rawQuoteRows
-          .map((row) => row.symbol)
-          .filter((symbol, index, all) => !requestedSymbols.includes(symbol) && all.indexOf(symbol) === index);
-        if (unexpectedSymbols.length > 0) {
-          addIssue(qualityIssues, "unexpected_quote_symbol", "warning", "The quote source returned symbols that were not requested.", unexpectedSymbols);
-        }
-        const quotedBySymbol = new Map(rawQuoteRows.map((row) => [row.symbol, row]));
-        quoteRows = requestedSymbols.flatMap((symbol) => {
-          const row = quotedBySymbol.get(symbol);
-          return row ? [row] : [];
-        });
-        const missingTargets = symbols.filter((symbol) => !quotedBySymbol.has(symbol));
-        if (missingTargets.length > 0) {
-          addIssue(qualityIssues, "required_symbol_missing", "error", "No quote data was returned for a required symbol.", missingTargets);
-        }
-        const missingAuxiliary = (auxiliary_symbols ?? []).filter((symbol) => !quotedBySymbol.has(symbol));
-        if (missingAuxiliary.length > 0) {
-          addIssue(qualityIssues, "auxiliary_symbol_missing", "warning", "No quote data was returned for an auxiliary symbol.", missingAuxiliary);
-        }
-        const invalidFields = symbols.filter((symbol) => {
-          const row = quotedBySymbol.get(symbol);
-          return row !== undefined && requiredQuoteFields.some((field) => {
-            const value = row.values[field];
-            return !isPresent(value) || !Number.isFinite(value) || ((field === "bid" || field === "ask") && (value as number) <= 0);
-          });
-        });
-        if (invalidFields.length > 0) {
-          addIssue(
-            qualityIssues,
-            "required_quote_field_invalid",
-            "error",
-            `A required symbol is missing or has a non-numeric required quote field: ${requiredQuoteFields.join(", ")}.`,
-            invalidFields,
-          );
-        }
-        const invertedQuotes = symbols.filter((symbol) => {
-          const values = quotedBySymbol.get(symbol)?.values;
-          return values !== undefined && Number.isFinite(values.bid) && Number.isFinite(values.ask) && (values.ask as number) < (values.bid as number);
-        });
-        if (invertedQuotes.length > 0) {
-          addIssue(qualityIssues, "bid_ask_inverted", "error", "A required symbol has ask below bid.", invertedQuotes);
-        }
-      } else {
-        addIssue(qualityIssues, "quotes_unavailable", "error", "Quote retrieval failed; the snapshot cannot support analysis.");
-      }
-
-      const mtf = overview?.status === "ok" ? overview.value : null;
-      if (overview?.status === "error") {
-        addIssue(qualityIssues, "mtf_overview_unavailable", "warning", "Multi-timeframe overview retrieval failed.");
-      }
-      const economicEvents = events?.status === "ok" ? events.value : null;
-      if (events?.status === "error") {
-        addIssue(qualityIssues, "economic_events_unavailable", "warning", "Economic calendar retrieval failed.");
-      }
-
-      return jsonResult({
-        schema_version: "1.0",
-        snapshot_id: randomUUID(),
-        status: snapshotStatus(qualityIssues),
-        data_use: {
-          mode: "display_only_analysis_assist",
-          automated_trading_decision: "not_permitted",
-        },
-        requested_at: requestedAt,
-        received_at: receivedAt,
-        request_started_at: requestedAt,
-        request_completed_at: receivedAt,
-        latency_ms: Date.parse(receivedAt) - Date.parse(requestedAt),
-        max_source_skew_ms: null,
-        max_receipt_skew_ms: maxReceiptSkewMs,
-        sources: sources.map(({ value: _value, ...source }) => source),
-        requested_symbols: requestedSymbols,
-        required_symbols: symbols,
-        auxiliary_symbols: auxiliary_symbols ?? [],
-        returned_symbols: quoteRows.map((row) => row.symbol),
-        required_quote_fields: requiredQuoteFields,
-        quotes: quoteRows,
-        normalized_quotes: quoteRows.map(normalizeQuote),
-        mtf_overview: mtf,
-        economic_events: economicEvents,
-        quality_issues: qualityIssues,
-      });
     },
+  );
+
+  server.registerTool(
+    "get_trade_decision_context",
+    {
+      description:
+        "Build one read-only evidence bundle for trade analysis from a symbol-bound TradingView " +
+        "chart, OHLCV, key levels, scanner MTF/quotes, events, COT, U.S. real yield, and bid/ask " +
+        "execution evidence. decision_status reports only data and gate readiness; it never " +
+        "produces a directional recommendation or changes charts, Pine, alerts, orders, or journals.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        chart_index: z.number().int().min(0).optional(),
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        auxiliary_symbols: z.array(SYMBOL_SCHEMA).max(MAX_MTF_SYMBOLS - 1).optional(),
+        timeframes: z.array(z.enum(MTF_TIMEFRAMES)).min(1).max(6).optional(),
+        fields: z.array(z.string().regex(/^[\w.]{1,64}$/)).min(1).max(8).optional(),
+        countries: z.array(z.string().regex(/^[A-Za-z]{2}$/)).min(1).max(30).optional(),
+        min_importance: z.enum(IMPORTANCE_LEVELS).optional(),
+        ohlcv_count: z.number().int().min(10).max(500).optional(),
+        key_level_range_percent: z.number().positive().max(50).optional(),
+        key_level_limit: z.number().int().min(1).max(200).optional(),
+        include_positioning: z.boolean().optional(),
+        require_positioning: z.boolean().optional(),
+        include_real_yield: z.boolean().optional(),
+        require_real_yield: z.boolean().optional(),
+        event_blackout_before_minutes: z.number().int().nonnegative().max(1440).optional(),
+        event_blackout_after_minutes: z.number().int().nonnegative().max(1440).optional(),
+        minimum_event_importance: z.enum(["medium", "high"]).optional(),
+      },
+    },
+    async ({
+      symbol,
+      chart_index,
+      expected_timeframe,
+      auxiliary_symbols,
+      timeframes,
+      fields,
+      countries,
+      min_importance,
+      ohlcv_count,
+      key_level_range_percent,
+      key_level_limit,
+      include_positioning,
+      require_positioning,
+      include_real_yield,
+      require_real_yield,
+      event_blackout_before_minutes,
+      event_blackout_after_minutes,
+      minimum_event_importance,
+    }) => chartOperations.run(async () => {
+      try {
+        const positioningIncluded = include_positioning ?? true;
+        const realYieldIncluded = include_real_yield ?? true;
+        if ((require_positioning ?? false) && !positioningIncluded) {
+          return errorResult(new Error("require_positioning cannot be true when include_positioning is false"));
+        }
+        if ((require_real_yield ?? false) && !realYieldIncluded) {
+          return errorResult(new Error("require_real_yield cannot be true when include_real_yield is false"));
+        }
+        return jsonResult(await buildTradeDecisionContext(
+          { tv, scanner, calendar, cot, realYield },
+          {
+            symbol,
+            chartIndex: chart_index,
+            expectedTimeframe: expected_timeframe,
+            auxiliarySymbols: auxiliary_symbols,
+            timeframes,
+            fields,
+            countries,
+            minImportance: min_importance,
+            ohlcvCount: ohlcv_count ?? 100,
+            keyLevelRangePercent: key_level_range_percent ?? 3,
+            keyLevelLimit: key_level_limit ?? 30,
+            includePositioning: positioningIncluded,
+            requirePositioning: require_positioning ?? false,
+            includeRealYield: realYieldIncluded,
+            requireRealYield: require_real_yield ?? false,
+            eventBlackoutBeforeMinutes: event_blackout_before_minutes ?? 30,
+            eventBlackoutAfterMinutes: event_blackout_after_minutes ?? 15,
+            minimumEventImportance: minimum_event_importance ?? "high",
+          },
+        ));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(
@@ -2796,6 +2630,105 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }) => {
       try {
         return jsonResult(computeRoundTripCost({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "validate_trade_plan",
+    {
+      description:
+        "Validate a proposed trade plan without changing TradingView, Pine, alerts, orders, " +
+        "or journals. Returns structured quality issues and cost-adjusted Target 1 risk/reward.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        analysis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        analyzed_at: z.string().datetime({ offset: true }),
+        expires_at: z.string().datetime({ offset: true }).optional(),
+        bias: z.enum(["bullish", "bearish", "neutral"]),
+        entry_low: z.number().positive(),
+        entry_high: z.number().positive(),
+        confirmation: z.number().positive().optional(),
+        invalidation: z.number().positive(),
+        stop: z.number().positive(),
+        targets: z.array(z.number().positive()).min(1).max(3),
+        confidence: z.number().min(0).max(1),
+        note: z.string().max(160).optional(),
+        current_price: z.number().positive(),
+        market_observed_at: z.string().datetime({ offset: true }),
+        estimated_round_trip_cost_price: z.number().nonnegative().optional(),
+        minimum_risk_reward: z.number().positive().max(10).optional(),
+        max_market_age_seconds: z.number().int().positive().max(86_400).optional(),
+        events: z.array(z.object({
+          name: z.string().min(1).max(160),
+          event_at: z.string().datetime({ offset: true }),
+          importance: z.enum(["low", "medium", "high"]),
+          country: z.string().regex(/^[A-Za-z]{2}$/).optional(),
+        })).max(100).optional(),
+        event_blackout_before_minutes: z.number().int().nonnegative().max(1440).optional(),
+        event_blackout_after_minutes: z.number().int().nonnegative().max(1440).optional(),
+        minimum_event_importance: z.enum(["medium", "high"]).optional(),
+      },
+    },
+    async ({
+      symbol,
+      timeframe,
+      analysis_id,
+      analyzed_at,
+      expires_at,
+      bias,
+      entry_low,
+      entry_high,
+      confirmation,
+      invalidation,
+      stop,
+      targets,
+      confidence,
+      note,
+      current_price,
+      market_observed_at,
+      estimated_round_trip_cost_price,
+      minimum_risk_reward,
+      max_market_age_seconds,
+      events,
+      event_blackout_before_minutes,
+      event_blackout_after_minutes,
+      minimum_event_importance,
+    }) => {
+      try {
+        return jsonResult(validateTradePlan({
+          symbol,
+          timeframe,
+          analysisId: analysis_id,
+          analyzedAt: analyzed_at,
+          expiresAt: expires_at,
+          bias,
+          entryLow: entry_low,
+          entryHigh: entry_high,
+          confirmation,
+          invalidation,
+          stop,
+          targets,
+          confidence,
+          note,
+          currentPrice: current_price,
+          marketObservedAt: market_observed_at,
+          estimatedRoundTripCostPrice: estimated_round_trip_cost_price ?? 0,
+          minimumRiskReward: minimum_risk_reward ?? 1.5,
+          maxMarketAgeSeconds: max_market_age_seconds ?? 60,
+          events: (events ?? []).map((event) => ({
+            name: event.name,
+            eventAt: event.event_at,
+            importance: event.importance,
+            country: event.country,
+          })),
+          eventBlackoutBeforeMinutes: event_blackout_before_minutes ?? 30,
+          eventBlackoutAfterMinutes: event_blackout_after_minutes ?? 15,
+          minimumEventImportance: minimum_event_importance ?? "high",
+        }));
       } catch (err) {
         return errorResult(err);
       }

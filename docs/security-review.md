@@ -216,6 +216,25 @@
 - **較正の母集団**: 確信度をシナリオ成功確率として扱い、`target_before_stop=1`、`stop_before_target=0`だけでBrier scoreと確信度帯別実現率を算出する。同一足順序不明、ギャップ、履歴不足、未発動、無効化、neutral等を勝敗へ丸めず、理由別除外数を返す。少数標本では値を表示しても統計的信頼性を保証しない
 - **残余リスク**: JSONLは暗号化しないため、OSアカウントや端末自体が侵害された場合の秘匿性は提供しない。`note`には取引分析以外の機微情報を入れない。ログは追記専用で自動ローテーションを行わず、64MiB上限到達時は明示エラーになる
 
+## 追補: バックログ #22(2026-07-20)
+
+`validate_trade_plan`追加に伴うレビュー:
+
+- **純粋な事前検証**: 入力された分析定義、現在価格、観測時刻、往復コスト、イベントだけをNode内で決定論的に評価する。CDP、TradingView、Pine、アラート、注文、分析ジャーナル、外部HTTPへアクセスせず、副作用を持たない
+- **fail closed**: 方向矛盾、期限切れ、未来または期限超過の市場証拠、観測時点でConfirmation/Invalidation/Stopへ到達済み、重要イベント停止時間、コスト控除後RR不足を個別のerrorコードで`blocked`にする。分析契約違反を生のMCPエラーへせず、修正候補付きの構造化結果として返す
+- **推測の禁止**: `current_price`は呼び出し側が明示した観測値だけを使用し、過去の水準接触、約定、執行可能性を推定しない。Entryを過ぎConfirmation前の状態は`warning`であり、到達履歴の証明ではない。イベント配列も渡された範囲だけを評価し、カレンダー完全性を保証しない
+- **単位境界**: `estimated_round_trip_cost_price`は銘柄価格単位であり、`compute_round_trip_cost.total_price_per_unit`と接続できる。口座通貨の総額やpipsを暗黙変換せず、Target 1のnet RRは往復コストを報酬から控除しリスクへ加算して算出する
+
+## 追補: バックログ #23(2026-07-20)
+
+`get_trade_decision_context`追加に伴うレビュー:
+
+- **読み取り専用統合**: 既存のTradingView chart context/OHLC/キーレベル、公開scanner・経済カレンダー、CFTC COT、米財務省実質金利の読み取りだけを束ねる。symbol、時間足、インジケーター入力、Pine、アラート、注文、ジャーナルを変更せず、口座情報や認証情報も受け取らない
+- **文脈拘束**: `chart_index`のsymbolと`expected_timeframe`を取得前に照合し、不一致時はOHLCとキーレベルを読まない。取得後もOHLCとキーレベルのsymbol/timeframeを再照合し、staleまたは別チャート由来の証拠を破棄する
+- **部分失敗の保持**: 各ソースを`required/status/source/observed_at/source_at/freshness/data`で包み、失敗をゼロ値や別ソースで補完しない。chart contextや必須ソースの失敗は他の取得済み証拠とUUID `snapshot_id`を保持した構造化`blocked`として返し、任意COT・実質金利・キーレベルの失敗は`partial`に留める
+- **判断境界**: `decision_status`はデータ完全性・イベント停止・執行証拠だけのゲートで、`directional_recommendation`は常に`null`。`trade_ready`を売買推奨として扱わない。重要イベント時間帯は`wait`、必須証拠破損は`blocked`とする
+- **執行鮮度**: scannerのbid/askを取得しても市場側timestampがないため`execution.status: partial`とし、`decision_status`を`wait`に固定する。チャート終値をbid/askや約定可能価格へ代用しない。将来#24でsource timestamp・市場状態・鮮度を検証できるまでは`trade_ready`へ昇格しない
+
 ## 将来フェーズへの申し送り
 
 - アラート作成・注文系(`trading`)API には**触れない**か、明示的な確認フローを挟む(現状ツール未公開 = 安全)

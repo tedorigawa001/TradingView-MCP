@@ -533,7 +533,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the forty expected tools", async () => {
+test("exposes exactly the forty-two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -568,6 +568,7 @@ test("exposes exactly the forty expected tools", async () => {
       "get_quotes",
       "get_real_yield_context",
       "get_strategy_report",
+      "get_trade_decision_context",
       "get_watchlist",
       "list_alerts",
       "list_pine_scripts",
@@ -579,6 +580,7 @@ test("exposes exactly the forty expected tools", async () => {
       "set_indicator_input",
       "set_symbol",
       "set_timeframe",
+      "validate_trade_plan",
     ],
   );
 });
@@ -717,6 +719,162 @@ test("compute_round_trip_cost exposes explicit execution assumptions", async () 
   const parsed = JSON.parse(res.content[0].text);
   assert.ok(Math.abs(parsed.spread_pips - 2) < 1e-12);
   assert.equal(parsed.slippage_pips_round_trip, 1);
+});
+
+test("validate_trade_plan accepts a fresh cost-adjusted bullish plan", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps());
+  const result = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: {
+      symbol: "OANDA:USDJPY",
+      timeframe: "240",
+      analysis_id: "USDJPY-valid-plan",
+      analyzed_at: new Date(now - 60_000).toISOString(),
+      expires_at: new Date(now + 2 * 60 * 60_000).toISOString(),
+      bias: "bullish",
+      entry_low: 162.42,
+      entry_high: 162.46,
+      confirmation: 162.5,
+      invalidation: 162.3,
+      stop: 162.24,
+      targets: [162.8],
+      confidence: 0.6,
+      current_price: 162.35,
+      market_observed_at: new Date(now - 5_000).toISOString(),
+      estimated_round_trip_cost_price: 0.01,
+      minimum_risk_reward: 1.5,
+      events: [],
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "valid");
+  assert.deepEqual(parsed.issues, []);
+  assert.ok(parsed.metrics.netRiskRewardToTarget1 >= 1.5);
+});
+
+function validTradePlanArguments(now = Date.now()) {
+  return {
+    symbol: "OANDA:USDJPY",
+    timeframe: "240",
+    analysis_id: "USDJPY-plan-validation",
+    analyzed_at: new Date(now - 60_000).toISOString(),
+    expires_at: new Date(now + 2 * 60 * 60_000).toISOString(),
+    bias: "bullish",
+    entry_low: 162.42,
+    entry_high: 162.46,
+    confirmation: 162.5,
+    invalidation: 162.3,
+    stop: 162.24,
+    targets: [162.8],
+    confidence: 0.6,
+    current_price: 162.35,
+    market_observed_at: new Date(now - 5_000).toISOString(),
+    estimated_round_trip_cost_price: 0.01,
+    minimum_risk_reward: 1.5,
+    events: [],
+  };
+}
+
+test("validate_trade_plan returns structured blocks for invalid levels and expiry", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps());
+  const invalidLevels = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: { ...validTradePlanArguments(now), stop: 162.45 },
+  });
+  assert.notEqual(invalidLevels.isError, true);
+  const invalidParsed = JSON.parse(invalidLevels.content[0].text);
+  assert.equal(invalidParsed.status, "blocked");
+  assert.ok(invalidParsed.issues.some((issue) => issue.code === "stop_or_invalidation_direction_invalid"));
+
+  const expired = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: {
+      ...validTradePlanArguments(now),
+      analyzed_at: new Date(now - 3 * 60 * 60_000).toISOString(),
+      expires_at: new Date(now - 60 * 60_000).toISOString(),
+    },
+  });
+  const expiredParsed = JSON.parse(expired.content[0].text);
+  assert.equal(expiredParsed.status, "blocked");
+  assert.ok(expiredParsed.issues.some((issue) => issue.code === "analysis_expired"));
+
+  const bearishInvalid = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: {
+      ...validTradePlanArguments(now),
+      bias: "bearish",
+      confirmation: 162.3,
+      invalidation: 162.55,
+      stop: 162.4,
+      targets: [162.1],
+      current_price: 162.5,
+    },
+  });
+  const bearishParsed = JSON.parse(bearishInvalid.content[0].text);
+  assert.equal(bearishParsed.status, "blocked");
+  assert.ok(bearishParsed.issues.some((issue) => issue.code === "stop_or_invalidation_direction_invalid"));
+
+  const nonMonotonic = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: { ...validTradePlanArguments(now), targets: [162.8, 162.7] },
+  });
+  const nonMonotonicParsed = JSON.parse(nonMonotonic.content[0].text);
+  assert.equal(nonMonotonicParsed.status, "blocked");
+  assert.ok(nonMonotonicParsed.issues.some((issue) => issue.code === "targets_not_monotonic"));
+});
+
+test("validate_trade_plan blocks stale evidence and active event blackouts", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps());
+  const result = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: {
+      ...validTradePlanArguments(now),
+      market_observed_at: new Date(now - 5 * 60_000).toISOString(),
+      max_market_age_seconds: 60,
+      events: [{
+        name: "FOMC decision",
+        event_at: new Date(now + 10 * 60_000).toISOString(),
+        importance: "high",
+        country: "US",
+      }],
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.ok(parsed.issues.some((issue) => issue.code === "market_data_stale"));
+  assert.ok(parsed.issues.some((issue) => issue.code === "event_blackout_active"));
+});
+
+test("validate_trade_plan blocks passed levels and insufficient net risk reward", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps());
+  const result = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: {
+      ...validTradePlanArguments(now),
+      current_price: 162.51,
+      targets: [162.6],
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.ok(parsed.issues.some((issue) => issue.code === "confirmation_already_at_or_beyond"));
+  assert.ok(parsed.issues.some((issue) => issue.code === "cost_adjusted_rr_below_minimum"));
+});
+
+test("validate_trade_plan warns when price left entry but has not reached confirmation", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps());
+  const result = await client.callTool({
+    name: "validate_trade_plan",
+    arguments: { ...validTradePlanArguments(now), current_price: 162.48 },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "warning");
+  assert.deepEqual(parsed.issues.map((issue) => issue.code), ["entry_zone_currently_passed"]);
 });
 
 test("get_key_levels forwards options with defaults applied", async () => {
@@ -2293,6 +2451,179 @@ test("get_market_snapshot joins sources and exposes timestamp/data-quality limit
   assert.equal(parsed.quality_issues[0].code, "source_timestamp_unavailable");
   assert.equal(parsed.max_source_skew_ms, null, "source timestamps are unavailable");
   assert.equal(typeof parsed.max_receipt_skew_ms, "number");
+});
+
+test("get_trade_decision_context binds chart, market, macro, positioning, and execution evidence", async () => {
+  const now = Date.now();
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async () => ({
+        symbol: "OANDA:EURUSD",
+        resolution: "60",
+        count: 2,
+        bars: [
+          { time: now / 1000 - 3600, timeIso: new Date(now - 3600_000).toISOString(), open: 1.1, high: 1.101, low: 1.099, close: 1.1005, volume: 100 },
+          { time: now / 1000, timeIso: new Date(now).toISOString(), open: 1.1005, high: 1.102, low: 1.1, close: 1.1015, volume: 50, forming: true },
+        ],
+      }),
+      getKeyLevels: async () => ({
+        symbol: "OANDA:EURUSD",
+        resolution: "60",
+        price: 1.1015,
+        rangePercent: 3,
+        count: 1,
+        levels: [{ price: 1.105, distancePercent: 0.32, kind: "line", study: "SMC", detail: "resistance", time: now / 1000 }],
+      }),
+    },
+    scanner: {
+      getQuotes: async (symbols) => ({
+        totalCount: symbols.length,
+        returned: symbols.length,
+        rows: symbols.map((symbol) => ({ symbol, values: { close: 1.1015, bid: 1.1014, ask: 1.1016 } })),
+      }),
+    },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: {
+      symbol: "OANDA:EURUSD",
+      chart_index: 0,
+      expected_timeframe: "60",
+      auxiliary_symbols: ["TVC:DXY"],
+      timeframes: ["15", "60", "240", "1D"],
+      countries: ["US", "EU"],
+    },
+  });
+  assert.notEqual(result.isError, true);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.schema_version, "1.0");
+  assert.match(parsed.snapshot_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(parsed.status, "partial", "scanner timestamps and delayed macro evidence remain explicit");
+  assert.equal(parsed.decision_status, "wait", "bid/ask without a source timestamp is not execution-ready");
+  assert.equal(parsed.directional_recommendation, null);
+  assert.equal(parsed.evidence.market_snapshot.data.snapshot_id, parsed.snapshot_id);
+  assert.equal(parsed.evidence.chart.data.closed_bars.length, 1);
+  assert.equal(parsed.evidence.chart.data.forming_bar.forming, true);
+  assert.equal(parsed.evidence.key_levels.data.levels[0].price, 1.105);
+  assert.equal(parsed.evidence.positioning.data.cot.symbol, "OANDA:EURUSD");
+  assert.equal(parsed.evidence.real_yield.data.value, 2.01);
+  assert.equal(parsed.evidence.execution.status, "partial");
+  assert.equal(parsed.evidence.execution.data.price_basis, "bid_ask");
+});
+
+test("get_trade_decision_context blocks a chart binding mismatch without reading chart evidence", async () => {
+  let chartEvidenceRead = false;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async () => ((chartEvidenceRead = true), { symbol: "OANDA:USDJPY", resolution: "60", count: 0, bars: [] }),
+      getKeyLevels: async () => ((chartEvidenceRead = true), { symbol: "OANDA:USDJPY", resolution: "60", price: 1, rangePercent: 3, count: 0, levels: [] }),
+    },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "OANDA:EURUSD", chart_index: 0, expected_timeframe: "60" },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.decision_status, "blocked");
+  assert.equal(chartEvidenceRead, false);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "chart_symbol_mismatch"));
+});
+
+test("get_trade_decision_context waits during an important-event blackout", async () => {
+  const eventAt = new Date(Date.now() + 10 * 60_000).toISOString();
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async () => ({
+        symbol: "OANDA:EURUSD",
+        resolution: "60",
+        count: 1,
+        bars: [{ time: Date.now() / 1000 - 3600, timeIso: new Date(Date.now() - 3600_000).toISOString(), open: 1.1, high: 1.2, low: 1, close: 1.1, volume: 1 }],
+      }),
+      getKeyLevels: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", price: 1.1, rangePercent: 3, count: 0, levels: [] }),
+    },
+    scanner: {
+      getQuotes: async (symbols) => ({ totalCount: symbols.length, returned: symbols.length, rows: symbols.map((symbol) => ({ symbol, values: { close: 1.1, bid: 1.0999, ask: 1.1001 } })) }),
+    },
+    calendar: {
+      getEvents: async () => ({
+        from: new Date().toISOString(),
+        to: new Date(Date.now() + 86_400_000).toISOString(),
+        countries: ["US"],
+        minImportance: "medium",
+        totalInRange: 1,
+        returned: 1,
+        events: [{ id: "fomc", date: eventAt, country: "US", currency: "USD", title: "FOMC", indicator: null, importance: "high", period: null, actual: null, forecast: null, previous: null, unit: null }],
+      }),
+    },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "OANDA:EURUSD", expected_timeframe: "60", countries: ["US"] },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.decision_status, "wait");
+  assert.equal(parsed.event_gate.status, "blackout");
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "event_blackout_active"));
+});
+
+test("get_trade_decision_context blocks a failed required positioning source", async () => {
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "1D", studies: [] }],
+      }),
+    },
+    cot: { getLatest: async () => { throw new Error("COT unavailable"); } },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "OANDA:EURUSD", expected_timeframe: "1D", require_positioning: true },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.decision_status, "blocked");
+  assert.equal(parsed.evidence.positioning.required, true);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "positioning_unavailable" && issue.severity === "error"));
+});
+
+test("get_trade_decision_context preserves other evidence when chart context retrieval fails", async () => {
+  const client = await connectedClient(makeDeps({
+    tv: { getChartContext: async () => { throw new Error("chart unavailable"); } },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "OANDA:EURUSD", expected_timeframe: "60" },
+  });
+  assert.notEqual(result.isError, true);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.decision_status, "blocked");
+  assert.match(parsed.snapshot_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(parsed.evidence.chart.status, "blocked");
+  assert.ok(parsed.evidence.market_snapshot.data);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "chart_context_unavailable"));
 });
 
 test("get_positioning_context exposes delayed COT data with limitations", async () => {
