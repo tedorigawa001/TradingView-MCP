@@ -297,6 +297,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **失敗・復元**: baseline失敗時はcandidateを実行せず、candidate失敗時はbaselineのledger IDと集計を保持する。成功指定の`keepOnChart`でもレポート取得失敗時は一時Studyを削除するよう既存`run_backtest`を強化した。各variant後と実験終了後に元symbol/timeframe/study集合を照合し、cleanupまたは復元失敗を構造化して比較対象外にする
 - **検証状況**: dry-run非書き込み、具体的Pine版照合、入力settle、全台帳集約、指標差、コスト条件差、最低取引数、候補失敗時のbaseline保持、両variant cleanup、最終chart復元、揮発するstudy IDをledger hashから除外する回帰を固定した
 - **実機検証(2026-07-20)**: `Bushido Smart Money Strategy` v2.0、`OANDA:USDJPY` 4Hで、baseline=`Require Next-Bar Confirmation:false`、candidate=`true`、最低30取引のA/Bを実行。experiment IDは`sha256:54cc5480...e712c2`、両variantは期間・commission・slippage・資本・数量・fill条件が一致し、品質問題なし、比較適格となった。baselineは72取引、純利益8,286.61 JPY、PF 1.459、期待値115.09、最大DD 5,844.26。candidateは88取引、純損失5,137.97 JPY、PF 0.811、期待値-58.39、最大DD 6,098.77となり、この単独変更は棄却相当の明確な悪化を示した。両一時Study削除後、元3 Study、symbol/timeframe、既存Strategy Testerのbaseline ledger ID(`sha256:ef338863...b5b17`)と`in_20:false`まで復元確認した。全290テストとTypeScriptビルドが成功
+- **ロジック追跡と再検証(2026-07-20)**: v2の「Next-Bar Confirmation」は`pre_buy[1]`/`pre_sell[1]`による1本遅延だけで、次足の方向確認をしていなかった。遅延によりTP/SL基準、反転、signal distanceの状態系列が変わり、フィルターONで取引数が増える別戦略になっていた。次足終値がsignal足high/lowを方向別に突破する明示確認へ修正したPine v3.0を非破壊保存し、コンパイル成功・読み戻し一致を確認。v3 A/BではOFFが72取引/PF1.459/期待値115.09/最大DD5,844.26、ONが37取引/PF1.021/期待値6.41/最大DD3,234.76となった。取引抑制とDD改善は意図どおりだが優位性をほぼ失うためON案は棄却し、既存チャートはv2/OFFへ完全復元した。v3は棄却仮説の再現証拠として保存版に残す
 
 ### #33 制限付き一括バックテスト(`run_backtest_matrix`、優先度: 高・規模: 大)
 
@@ -355,12 +356,19 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **安全性**: forward fillせず、休場・更新頻度・公表遅延が異なる系列を区別する。複数lag探索は試行数として記録し、全期間で最良lagを選んだ結果をOOS成績と呼ばない
 - **出力**: overlap、欠落、lag別効果、fold安定性、符号反転、データ鮮度を返し、方向予測はAIが他証拠と統合する
 
-### #42 仮説・実験ジャーナル(`register_strategy_hypothesis` / `record_strategy_experiment` / `compare_strategy_experiments`、優先度: 高・規模: 中)
+### #42 仮説・実験ジャーナル(`register_strategy_hypothesis` / `record_strategy_experiment` / `compare_strategy_experiments`) ✅ 実装・実機検証完了
 
 - **目的**: 仮説、変更理由、ベースライン、事前評価契約、実験結果、採否、次の変更をappend-onlyで結び、同じデータを繰り返し見た研究者自由度を可視化する
 - **識別**: hypothesis ID、experiment ID、親実験ID、definition hash、Pine版、dataset/evidence hash、methodology versionを保存する。同じIDへの異なる定義上書きやOOS結果の削除を拒否する
 - **比較**: 同一契約の実験だけを自動比較し、IS、OOS、walk-forward、stress、liveを列として分離する。異なるコスト、期間、symbol/timeframe、methodologyを無言でランキングしない
 - **保存境界**: 既存のライブ分析ジャーナルとは別のローカルJSONLを使い、OHLC原本、認証情報、口座情報を保存しない。ロック、stale lock回収、所有権、原子的追記は既存ジャーナル実装を流用する
+- **実装(2026-07-20)**: `TRADINGVIEW_MCP_STRATEGY_RESEARCH_JOURNAL_PATH`または`~/.tradingview-mcp/strategy-research-journal.jsonl`へ、仮説登録と実験記録をsequence付きappend-only eventとして保存する。仮説は事前population、primary metric、最低取引数、対象symbol/timeframe、任意PF/DD guardrailを固定する。同一hypothesis IDの異定義上書きを拒否する
+- **実験識別**: #32のdefinition hashである`experiment_id`と、両ledger ID、既知metrics、population、methodology、context、guardrailから計算する`evidence_hash`の組で一意化する。同じ定義を期間延長後に再実行した証拠は別eventとして残し、同じ証拠の異内容上書きを拒否する。親実験・親仮説は既に記録済みの場合だけ参照できる
+- **比較**: 2〜20件の正確な`experiment_id + evidence_hash`参照だけを読み、同一hypothesis、population、symbol/timeframe、methodology、条件一致を比較契約とする。不一致をランキングせず`incompatibilities`へ返す。単一スコアを生成せず、保存したbaseline/candidate指標と採否をそのまま返す
+- **保存安全性**: ディレクトリ0700、ファイル/lock 0600、owner・regular file・symlink拒否、64MiB/1行64KiB上限、fsync、プロセス内直列化、O_EXCL lock、60秒超かつowner PID不在時だけのstale回収を実装した。再読込時にevent ID、連番、親子順序、definition/evidence hashを再計算する。OHLC、Pine source、認証・口座情報、任意metric名は保存しない
+- **検証状況**: 仮説の冪等登録と定義衝突、孤立実験拒否、同一実験の複数証拠、同一証拠の冪等性、未知metric拒否、symlink拒否、0600、比較互換性、3 MCPツールのチャート非アクセスを固定した
+- **実機検証(2026-07-20)**: `next-bar-confirmation`仮説をsequence 1、方向確認になっていなかったSmart Money v2実験をsequence 2、シグナル足高安の外側で終値確定するよう直したv3実験を親子関係付きsequence 3として記録した。v2 evidenceは`sha256:82fcbd87e89914904150d2d7fc4adf51858608a294868ba1562446ed1823e943`、v3 evidenceは`sha256:4b78d80ae673ea122f3c20f1f6a8a310d1355081bbed233c069ed1ea36775b74`。正確な2参照による比較は`comparable: true`、不一致なしを返した
+- **実機判断**: v3の確認ONは取引数を72から37へ減らし最大DDを約5844から約3235へ抑えたが、期待値は約115.09から約6.41、PFは約1.459から約1.021へ低下した。最低37取引は満たす一方、事前PF下限1.2を割ったため候補を`rejected`として保存した。APIのmetric名は保存契約どおり`totalTrades`、`averageDurationMilliseconds`、`averageRunUp`等のcamelCaseを使う
 
 ### 新手法研究基盤の推奨実装順
 

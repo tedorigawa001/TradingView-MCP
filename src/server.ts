@@ -27,6 +27,7 @@ import {
   compareStrategyMetrics,
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
+import type { StrategyResearchJournalStore } from "./strategyResearchJournal.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -94,10 +95,13 @@ export interface ServerDeps {
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
+  researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
 const SYMBOL_SCHEMA = z.string().regex(/^[\w!.:&-]{1,48}$/);
+const RESEARCH_POPULATION_SCHEMA = z.enum(["in_sample", "out_of_sample", "walk_forward", "stress", "live"]);
+const RESEARCH_METRICS_SCHEMA = z.record(z.string().min(1).max(64), z.number().nullable());
 const REAL_YIELD_OUTPUT_SCHEMA = {
   schema_version: z.literal("1.1"),
   status: z.enum(["partial", "unavailable"]),
@@ -261,7 +265,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue();
   const server = new McpServer({
     name: "tradingview-mcp",
@@ -2742,6 +2746,142 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "register_strategy_hypothesis",
+    {
+      description:
+        "Register one immutable strategy-research hypothesis and its evaluation contract " +
+        "in a local append-only journal. This does not access TradingView or run a test. " +
+        "Reusing a hypothesis_id with a different definition is rejected.",
+      inputSchema: {
+        hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        title: z.string().min(1).max(120),
+        thesis: z.string().min(1).max(2000),
+        parent_experiment_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+        evaluation_contract: z.object({
+          population: RESEARCH_POPULATION_SCHEMA,
+          primary_metric: z.string().min(1).max(64),
+          minimum_trades: z.number().int().min(1).max(100_000),
+          symbols: z.array(SYMBOL_SCHEMA).min(1).max(20),
+          timeframes: z.array(z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i)).min(1).max(20),
+          minimum_profit_factor: z.number().min(0).nullable().optional(),
+          maximum_drawdown_percent: z.number().min(0).nullable().optional(),
+        }),
+      },
+    },
+    async ({ hypothesis_id, title, thesis, parent_experiment_id, evaluation_contract }) => {
+      try {
+        return jsonResult(await researchJournal.registerHypothesis({
+          hypothesisId: hypothesis_id,
+          title,
+          thesis,
+          parentExperimentId: parent_experiment_id ?? null,
+          evaluationContract: {
+            population: evaluation_contract.population,
+            primaryMetric: evaluation_contract.primary_metric,
+            minimumTrades: evaluation_contract.minimum_trades,
+            symbols: evaluation_contract.symbols,
+            timeframes: evaluation_contract.timeframes,
+            minimumProfitFactor: evaluation_contract.minimum_profit_factor ?? null,
+            maximumDrawdownPercent: evaluation_contract.maximum_drawdown_percent ?? null,
+          },
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  const researchVariantSchema = z.object({
+    pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+    pine_version: z.string().min(1).max(32),
+    ledger_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    metrics: RESEARCH_METRICS_SCHEMA,
+  });
+
+  server.registerTool(
+    "record_strategy_experiment",
+    {
+      description:
+        "Append one exact strategy experiment result to the research journal. The record " +
+        "binds the hypothesis, population, Pine versions, full-ledger ids, known metrics, " +
+        "guardrails, and decision. It stores no OHLC or source code and never touches a chart.",
+      inputSchema: {
+        experiment_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        parent_experiment_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+        population: RESEARCH_POPULATION_SCHEMA,
+        methodology_version: z.string().min(1).max(40),
+        symbol: SYMBOL_SCHEMA,
+        timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+        baseline: researchVariantSchema,
+        candidate: researchVariantSchema,
+        conditions_matched: z.boolean(),
+        minimum_trades_met: z.boolean(),
+        decision: z.enum(["adopted", "rejected", "inconclusive"]),
+        note: z.string().max(500).optional(),
+      },
+    },
+    async ({ experiment_id, hypothesis_id, parent_experiment_id, population, methodology_version,
+      symbol, timeframe, baseline, candidate, conditions_matched, minimum_trades_met, decision, note }) => {
+      try {
+        return jsonResult(await researchJournal.recordExperiment({
+          experimentId: experiment_id,
+          hypothesisId: hypothesis_id,
+          parentExperimentId: parent_experiment_id ?? null,
+          population,
+          methodologyVersion: methodology_version,
+          symbol,
+          timeframe,
+          baseline: {
+            pineId: baseline.pine_id,
+            pineVersion: baseline.pine_version,
+            ledgerId: baseline.ledger_id,
+            metrics: baseline.metrics,
+          },
+          candidate: {
+            pineId: candidate.pine_id,
+            pineVersion: candidate.pine_version,
+            ledgerId: candidate.ledger_id,
+            metrics: candidate.metrics,
+          },
+          conditionsMatched: conditions_matched,
+          minimumTradesMet: minimum_trades_met,
+          decision,
+          note: note ?? "",
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "compare_strategy_experiments",
+    {
+      description:
+        "Compare two to twenty exact saved experiment-evidence records without ranking or " +
+        "combining incompatible populations. References must include both experiment_id " +
+        "and evidence_hash. Read-only and does not access TradingView.",
+      inputSchema: {
+        references: z.array(z.object({
+          experiment_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+          evidence_hash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        })).min(2).max(20),
+      },
+    },
+    async ({ references }) => {
+      try {
+        return jsonResult(await researchJournal.compare(references.map((reference) => ({
+          experimentId: reference.experiment_id,
+          evidenceHash: reference.evidence_hash,
+        }))));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
   );
 
   server.registerTool(

@@ -321,6 +321,14 @@
 - **残余リスク**: TradingView UIや別プロセスの同時操作はプロセス内queueで排他できない。期待context、Pine帰属、ledger ID、終了時chart fingerprintで検出するが、Strategy Tester内部のactive tab状態やUI選択状態までは復元証明に含まれない。バックテスト値はシミュレーションであり、実約定・流動性・足内順序の証明ではない
 - **実機復元確認**: USDJPY 4Hの同一Pine v2.0で1入力だけを変えるA/Bを実行し、両variantのcondition一致、全取引証拠、cleanup成功を確認した。終了後は元Study集合とcontextに加え、既存Strategy Testerがbaselineと同じledger IDおよび元入力へ戻ったことを別のread-only呼び出しで確認した
 
+## 追補: バックログ #42(2026-07-20)
+
+- **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない
+- **入力最小化**: 仮説は短いtitle/thesisと構造化評価契約だけ、実験はPine ID/版、ledger ID、許可済みmetrics、guardrail、採否だけを受ける。OHLC、Pine source、任意コード、任意metric、認証・口座情報は拒否する。各文字列・配列・レコードサイズに上限を置く
+- **改ざん検知**: definition hashとevidence hashを保存時に生成し、再読込時にもpayloadから再計算する。event ID、sequence、entity ID、親子順序、仮説存在、重複証拠を検証し、破損や手動改変を部分的に無視して続行しない
+- **ファイル安全性**: ディレクトリ0700、journal/lock 0600、current-user ownership、regular file、NOFOLLOW、64MiB/64KiB上限、完全write、fsyncを要求する。lockはtoken/inodeを照合し、60秒超かつ記録PID不在を確認できる場合だけ回収する
+- **比較境界**: 比較は正確なexperiment/evidence hashを2〜20件指定するread-only操作。同一仮説、population、symbol/timeframe、methodology、condition一致以外は`comparable:false`とし、異種母集団のランキングや総合スコアを作らない
+
 ## 将来フェーズへの申し送り
 
 - 注文系(`trading`)APIとReplay Tradingは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない

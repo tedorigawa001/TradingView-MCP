@@ -369,6 +369,12 @@ function makeDeps(overrides = {}) {
       }),
       ...overrides.journal,
     },
+    researchJournal: {
+      registerHypothesis: async (payload) => ({ recorded: true, idempotent: false, entry: { payload } }),
+      recordExperiment: async (payload) => ({ recorded: true, idempotent: false, entry: { payload, evidence_hash: `sha256:${"e".repeat(64)}` } }),
+      compare: async (references) => ({ comparable: true, incompatibilities: [], experiments: references }),
+      ...overrides.researchJournal,
+    },
     calendar: {
       getEvents: async (options) => ({
         from: "2026-07-08T00:00:00.000Z",
@@ -671,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the fifty-three expected tools", async () => {
+test("exposes exactly the fifty-six expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -681,6 +687,7 @@ test("exposes exactly the fifty-three expected tools", async () => {
       "apply_analysis_overlay",
       "audit_pine_indicator",
       "compare_indicator_observations",
+      "compare_strategy_experiments",
       "compute_market_features",
       "compute_position_size",
       "compute_round_trip_cost",
@@ -718,6 +725,8 @@ test("exposes exactly the fifty-three expected tools", async () => {
       "list_alerts",
       "list_pine_scripts",
       "load_more_history",
+      "record_strategy_experiment",
+      "register_strategy_hypothesis",
       "remove_owned_study",
       "run_backtest",
       "run_strategy_experiment",
@@ -3063,6 +3072,60 @@ test("run_strategy_experiment preserves baseline evidence when the candidate fai
   assert.match(result.candidate.error, /candidate calculation failed/);
   assert.deepEqual(removed, [baselineId, candidateId]);
   assert.equal(result.chartState.restored, true);
+});
+
+test("strategy research journal tools map immutable records without chart access", async () => {
+  const calls = [];
+  const hash = (letter) => `sha256:${letter.repeat(64)}`;
+  const deps = makeDeps({
+    tv: { getChartContext: async () => { throw new Error("chart must not be accessed"); } },
+    researchJournal: {
+      registerHypothesis: async (payload) => (calls.push(["hypothesis", payload]), { recorded: true, entry: { payload } }),
+      recordExperiment: async (payload) => (calls.push(["experiment", payload]), { recorded: true, entry: { payload, evidence_hash: hash("e") } }),
+      compare: async (references) => (calls.push(["compare", references]), { comparable: true, experiments: references }),
+    },
+  });
+  const client = await connectedClient(deps);
+  const registered = await client.callTool({
+    name: "register_strategy_hypothesis",
+    arguments: {
+      hypothesis_id: "next-bar-confirmation",
+      title: "Next-bar confirmation",
+      thesis: "Continuation should reduce false entries.",
+      evaluation_contract: {
+        population: "in_sample", primary_metric: "expectancy", minimum_trades: 30,
+        symbols: ["OANDA:USDJPY"], timeframes: ["240"], minimum_profit_factor: 1.2,
+      },
+    },
+  });
+  assert.equal(JSON.parse(registered.content[0].text).recorded, true);
+  assert.equal(calls[0][1].evaluationContract.primaryMetric, "expectancy");
+
+  const variant = {
+    pine_id: "USER;aaaaaaaa", pine_version: "3.0", ledger_id: hash("b"),
+    metrics: { totalTrades: 37, expectancy: 6.41 },
+  };
+  const recorded = await client.callTool({
+    name: "record_strategy_experiment",
+    arguments: {
+      experiment_id: hash("a"), hypothesis_id: "next-bar-confirmation", population: "in_sample",
+      methodology_version: "1.0", symbol: "OANDA:USDJPY", timeframe: "240",
+      baseline: { ...variant, ledger_id: hash("c") }, candidate: variant,
+      conditions_matched: true, minimum_trades_met: true, decision: "rejected",
+    },
+  });
+  assert.equal(JSON.parse(recorded.content[0].text).recorded, true);
+  assert.equal(calls[1][1].candidate.ledgerId, hash("b"));
+
+  const compared = await client.callTool({
+    name: "compare_strategy_experiments",
+    arguments: { references: [
+      { experiment_id: hash("a"), evidence_hash: hash("e") },
+      { experiment_id: hash("d"), evidence_hash: hash("f") },
+    ] },
+  });
+  assert.equal(JSON.parse(compared.content[0].text).comparable, true);
+  assert.equal(calls[2][1][0].experimentId, hash("a"));
 });
 
 test("list_alerts returns the user's alerts", async () => {
