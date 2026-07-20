@@ -344,6 +344,15 @@
 - **非リペイント境界**: 時刻分割は未来取引の選定混入を防ぐが、Pine自身のlookahead/repaintを無害化しない。採用候補は既存source auditとrestart差分検証を通し、#35でコスト・遅延・近傍・期間移動のストレスを追加する
 - **残余リスク**: 全期間を一度計算したstrategy内部stateはfold開始以前の履歴をwarm-upとして利用する。これは当時利用可能な過去情報だが、独立初期化したDeep Backtesting foldとは一致しない可能性がある。結果は`ledger_partition_v1`として識別し、別methodologyと無言で比較しない
 
+## 追補: バックログ #35(2026-07-21)
+
+- **事前契約**: `validate_research_protocol`はread-onlyで、具体的な自作Pine ID/版だけを取得して静的監査する。候補IDはSHA-256、窓とlifecycleはcanonical ISO timestamp、件数・配列・文字列は上限付き構造化入力とし、任意コードやPine sourceをクライアントから受け取らない。チャート、Strategy Tester、外部HTTP、注文には接続しない
+- **先読み防止**: IS/OOSとOOS同士の半開区間重複、未来窓、形成中足、凍結後変更、OOS初回閲覧後変更をblockedにする。静的監査は非リペイントの証明ではないため、request.security、pivot、varip、timenow、intrabar/realtime分岐とrestart差分未確認をwarningとして保持し、警告ゼロの場合だけ`adoptionEligible:true`にする
+- **ストレス実行境界**: `stress_test_strategy`は既定dry-runでprotocol ID、chart binding、Pine版、入力、評価窓、全シナリオ、seed/反復回数を固定する。confirm後はprocess内queueで一時Strategy追加、input settle、完全ledger取得、所有確認付き削除、元chart fingerprint照合を一度だけ行う。cleanup/復元を証明できない場合は評価を返さない
+- **計算境界**: 追加コストはreport通貨/取引としてのみ受け、pipsから口座通貨への不確かな換算をしない。commission倍率はtrade commissionが全件ある場合だけ計算する。期間ずらしはentry/exitともに半開区間内のclosed tradeだけを含め、境界跨ぎを除外する。bootstrapはseed固定・100〜10,000回・同数復元抽出に限定し、市場経路や自己相関を再現したMonte Carloとは表現しない
+- **出力・増幅制限**: シナリオ1〜20、入力20、開始ずらし1〜100bar、bootstrap最大10,000回。反復ごとのsampleやtrade/index列を返さず、baseline、シナリオ集計、相対劣化、分位点、worst、破綻率だけを返す。ランキング、単一score、自動採用、注文を実装しない
+- **残余リスク**: trade順序bootstrapは独立同分布を仮定し、連敗のregime依存を過小評価し得る。Entry遅延、Stop/Target変動、主要parameter近傍はledgerから再構成できず、現段階では`unsupportedModeledEffects`として返す。これらは監査済み入力を変えたStrategy再実行と、同じcleanup/復元契約で追加する
+
 ## 追補: バックログ #42(2026-07-20)
 
 - **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない

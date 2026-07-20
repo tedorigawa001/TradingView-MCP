@@ -18,7 +18,9 @@
     "walk-forward": "node build/walkForwardCli.js",
     "pretest": "npm run build",
     "test": "node --test test/unit/*.test.mjs",
-    "test:integration": "node test/smoke.mjs"
+    "test:integration": "node test/smoke.mjs",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.mjs"
   },
   "engines": {
     "node": ">=22"

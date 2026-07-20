@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the fifty-eight expected tools", async () => {
+test("exposes exactly the sixty expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -740,6 +740,8 @@ test("exposes exactly the fifty-eight expected tools", async () => {
       "start_chart_replay",
       "step_chart_replay",
       "stop_chart_replay",
+      "stress_test_strategy",
+      "validate_research_protocol",
       "validate_trade_plan",
     ],
   );
@@ -934,6 +936,46 @@ test("audit_pine_indicator identifies repaint-prone source constructs", async ()
   assert.equal(parsed.uses_varip, true);
   assert.equal(parsed.uses_timenow, true);
   assert.equal(parsed.restart_diff_checked, false);
+});
+
+test("validate_research_protocol resolves and audits an exact strategy without chart access", async () => {
+  const pineId = "USER;adc40b1dfee344f19412f1ae9af74f3f";
+  const hash = (letter) => `sha256:${letter.repeat(64)}`;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => { throw new Error("chart must not be accessed"); },
+      getPineSource: async (requestedId, version) => {
+        assert.equal(requestedId, pineId);
+        assert.equal(version, "3.0");
+        const source = "//@version=6\nstrategy('Protocol')\nplot(close)";
+        return { pineId, version: "3.0", name: "Protocol", kind: "strategy", updated: null,
+          sourceLength: source.length, source };
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "validate_research_protocol",
+    arguments: {
+      pine_id: pineId,
+      pine_version: "3.0",
+      candidate_ids: [hash("a"), hash("b")],
+      windows: [
+        { window_id: "is", population: "in_sample", from: "2025-01-01T00:00:00.000Z", to: "2025-07-01T00:00:00.000Z" },
+        { window_id: "oos", population: "out_of_sample", from: "2025-07-02T00:00:00.000Z", to: "2026-01-01T00:00:00.000Z" },
+      ],
+      minimum_trades: 30,
+      observed_trades: 45,
+      costs: { spread_pips: 1, slippage_pips_per_side: 0.2, commission_per_round_trip: 10 },
+      closed_bars_only: true,
+      restart_diff_checked: true,
+      definition_frozen_at: "2025-01-01T00:00:00.000Z",
+      definition_last_changed_at: "2025-01-01T00:00:00.000Z",
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "ready");
+  assert.equal(parsed.definition.pineVersion, "3.0");
+  assert.equal(parsed.adoptionEligible, true);
 });
 
 test("compare_indicator_observations exposes restart differences without persistence", async () => {
@@ -3390,6 +3432,64 @@ test("run_strategy_walk_forward selects on train, exposes selected OOS only, and
   assert.equal(result.chartState.restored, true);
   assert.equal(runCount, 2);
   assert.equal(removed.length, 2);
+});
+
+test("stress_test_strategy previews, evaluates a complete ledger, and restores", async () => {
+  const pineId = "USER;stresstest12345";
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240",
+      studies: [{ id: "original", name: "RSI" }] }] });
+  const trades = [100, -50, 80, -20].map((profit, index) => {
+    const entryTime = Date.UTC(2025, 0, 2 + index);
+    return { reportIndex: index, number: index + 1, direction: "long", status: "closed",
+      entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+      exit: { time: entryTime + 3_600_000, timeIso: new Date(entryTime + 3_600_000).toISOString(), price: 1, label: null },
+      durationMilliseconds: 3_600_000, profit, profitPercent: null, cumulativeProfit: null,
+      quantity: 1, commission: 5, commissionPercent: null, runUp: null, runUpPercent: null,
+      drawDown: null, drawDownPercent: null };
+  });
+  let runs = 0;
+  let removes = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    listPineScripts: async () => [{ pineId, name: "Stress", kind: "strategy", version: "3.0", usedBy: [] }],
+    runBacktest: async () => (runs++, { pineId, studyId: "temporary", keptOnChart: true,
+      removedFromChart: false, strategy: "Stress", currency: "JPY", initialCapital: 1_000_000,
+      dateRange: null, summary: {}, totalTrades: trades.length, trades: [] }),
+    getStrategyReport: async () => ({ strategy: "Stress", currency: "JPY", initialCapital: 1_000_000,
+      dateRange: null, summary: { netProfit: 110 }, totalTrades: trades.length, trades: [] }),
+    getStrategyTradeLedger: async () => ({ schemaVersion: "1.0", ledgerId: `sha256:${"d".repeat(64)}`,
+      strategy: "Stress", symbol: "OANDA:USDJPY", timeframe: "240", studyId: "temporary", pineId,
+      pineVersion: "3.0", inputs: [], currency: "JPY", initialCapital: 1_000_000,
+      dateRange: { from: "2025-01-01T00:00:00.000Z", to: "2025-02-01T00:00:00.000Z" },
+      summary: {}, totalTrades: trades.length, availableTrades: trades.length, countMatchesSummary: true,
+      ordering: "strategy_report", offset: 0, limit: 500, returned: trades.length, nextOffset: null,
+      complete: true, unavailableFields: [], qualityIssues: [], trades }),
+    removePineFromChart: async () => (removes++, { removed: true, pineId, pineVersion: "3.0",
+      studyId: "temporary", name: "Stress", chartIndex: 0 }),
+  } }));
+  const args = {
+    protocol_id: `sha256:${"a".repeat(64)}`,
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", pine_id: pineId, pine_version: "3.0",
+    evaluation_from: "2025-01-01T00:00:00.000Z", evaluation_to: "2025-02-01T00:00:00.000Z",
+    minimum_trades: 2,
+    scenarios: [
+      { scenario_id: "cost-10", kind: "additional_cost_per_trade", value: 10 },
+      { scenario_id: "commission-2x", kind: "commission_multiplier", value: 2 },
+    ],
+    bootstrap: { seed: "fixed", iterations: 100, failure_net_profit: 0 },
+  };
+  const dry = JSON.parse((await client.callTool({ name: "stress_test_strategy", arguments: args })).content[0].text);
+  assert.equal(dry.status, "preview");
+  assert.equal(runs, 0);
+  const result = JSON.parse((await client.callTool({ name: "stress_test_strategy",
+    arguments: { ...args, confirm: true } })).content[0].text);
+  assert.equal(result.status, "complete");
+  assert.equal(result.evaluation.baseline.metrics.netProfit, 110);
+  assert.equal(result.evaluation.scenarios[0].metrics.netProfit, 70);
+  assert.equal(result.chartState.restored, true);
+  assert.equal(runs, 1);
+  assert.equal(removes, 1);
 });
 
 test("strategy research journal tools map immutable records without chart access", async () => {

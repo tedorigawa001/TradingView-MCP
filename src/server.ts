@@ -15,6 +15,8 @@ import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
 import { computeRoundTripCost } from "./costModel.js";
 import { computePositionSize } from "./positionSize.js";
+import { auditPineSource } from "./pineAudit.js";
+import { validateResearchProtocol } from "./researchProtocol.js";
 import { buildAnalysisAlertPlans, matchExistingAnalysisAlerts } from "./analysisAlerts.js";
 import { validateTradePlan } from "./tradePlan.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
@@ -33,6 +35,7 @@ import {
   validateStrategyWalkForwardFolds,
   type StrategyWalkForwardFold,
 } from "./strategyWalkForward.js";
+import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -214,32 +217,6 @@ function alignedHistoryStatus(issues: AlignedHistoryIssue[]): SnapshotStatus {
   if (issues.some((issue) => issue.severity === "error")) return "blocked";
   if (issues.length > 0) return "partial";
   return "ok";
-}
-
-function pineCodeOnly(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "")
-    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '""');
-}
-
-function auditPineSource(source: string) {
-  const code = pineCodeOnly(source);
-  const usesRequestSecurity = /\brequest\.security(?:_lower_tf)?\s*\(/.test(code);
-  const usesPivots = /\bta\.pivot(?:high|low)\s*\(/.test(code);
-  const usesVarip = /\bvarip\b/.test(code);
-  const usesTimenow = /\btimenow\b/.test(code);
-  const calcOnEveryTick = /\bcalc_on_every_tick\s*=\s*true\b/.test(code);
-  const usesRealtimeState = /\bbarstate\.isrealtime\b/.test(code);
-  const findings = [
-    ...(usesRequestSecurity ? [{ code: "request_security", severity: "warning", message: "request.security can introduce higher-timeframe lookahead/recalculation risk." }] : []),
-    ...(usesPivots ? [{ code: "pivots", severity: "warning", message: "Pivot values are only confirmed after future bars have elapsed." }] : []),
-    ...(usesVarip ? [{ code: "varip", severity: "warning", message: "varip can preserve intrabar state that differs after restart." }] : []),
-    ...(usesTimenow ? [{ code: "timenow", severity: "warning", message: "timenow makes values depend on wall-clock execution time." }] : []),
-    ...(calcOnEveryTick ? [{ code: "calc_on_every_tick", severity: "warning", message: "Intrabar strategy recalculation can differ from closed-bar history." }] : []),
-    ...(usesRealtimeState ? [{ code: "barstate_isrealtime", severity: "warning", message: "Realtime-only branches can differ from historical execution." }] : []),
-  ];
-  return { usesRequestSecurity, usesPivots, usesVarip, usesTimenow, calcOnEveryTick, usesRealtimeState, findings };
 }
 
 function mean(values: number[]): number {
@@ -3264,6 +3241,152 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "stress_test_strategy",
+    {
+      description:
+        "Run bounded, ledger-based robustness tests for one exact saved Pine strategy. After " +
+        "a dry-run preview, confirm=true temporarily collects one complete Strategy Tester ledger, " +
+        "restores the chart, and evaluates explicit extra-cost, commission-multiplier, period-start " +
+        "shift, and seeded trade-order bootstrap scenarios. Results include distributions, worst " +
+        "cases, failure rates, and degradation without ranking or adoption. It does not fabricate " +
+        "entry-delay or Stop/Target effects from OHLC or place orders.",
+      inputSchema: {
+        protocol_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SHDW]|[SHDW])$/i),
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        pine_version: z.string().regex(/^\d+(?:\.\d+)*$/),
+        inputs: z.array(z.object({
+          id: z.string().regex(/^[\w$]{1,64}$/),
+          value: z.union([z.number(), z.string().max(256), z.boolean()]),
+        })).max(20).optional(),
+        evaluation_from: z.string().datetime({ offset: true }),
+        evaluation_to: z.string().datetime({ offset: true }),
+        minimum_trades: z.number().int().min(1).max(100_000),
+        scenarios: z.array(z.discriminatedUnion("kind", [
+          z.object({ scenario_id: z.string().regex(/^[\w.:-]{1,80}$/), kind: z.literal("additional_cost_per_trade"), value: z.number().finite().min(0) }),
+          z.object({ scenario_id: z.string().regex(/^[\w.:-]{1,80}$/), kind: z.literal("commission_multiplier"), value: z.number().finite().min(1).max(100) }),
+          z.object({ scenario_id: z.string().regex(/^[\w.:-]{1,80}$/), kind: z.literal("start_shift_bars"), value: z.number().int().min(1).max(100) }),
+        ])).min(1).max(20),
+        bootstrap: z.object({
+          seed: z.string().min(1).max(128),
+          iterations: z.number().int().min(100).max(10_000),
+          failure_net_profit: z.number().finite().optional(),
+        }).nullable().optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ protocol_id, expected_symbol, expected_timeframe, pine_id, pine_version, inputs,
+      evaluation_from, evaluation_to, minimum_trades, scenarios, bootstrap, confirm }) =>
+      chartOperations.run(async () => {
+        try {
+          const initialChart = chartFingerprint(await tv.getChartContext());
+          if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+            throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+          }
+          if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+            throw new Error(`active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`);
+          }
+          const script = (await tv.listPineScripts()).find((item) => item.pineId === pine_id);
+          if (!script) throw new Error(`strategy not found: ${pine_id}`);
+          if (script.kind !== "strategy") throw new Error(`${pine_id} is not a saved strategy`);
+          if (script.version !== pine_version) {
+            throw new Error(`saved strategy version changed: expected ${pine_version}, found ${script.version ?? "unavailable"}`);
+          }
+          const resolvedInputs = [...(inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+          if (new Set(resolvedInputs.map((input) => input.id)).size !== resolvedInputs.length) {
+            throw new Error("stress test contains duplicate input ids");
+          }
+          const resolvedScenarios: StrategyStressScenario[] = scenarios.map((scenario) => ({
+            scenarioId: scenario.scenario_id,
+            kind: scenario.kind,
+            value: scenario.value,
+          }));
+          if (new Set(resolvedScenarios.map((scenario) => scenario.scenarioId)).size !== resolvedScenarios.length) {
+            throw new Error("stress test scenario ids must be unique");
+          }
+          const definition = {
+            methodologyVersion: "ledger_stress_v1",
+            protocolId: protocol_id,
+            symbol: initialChart.symbol,
+            timeframe: initialChart.timeframe,
+            pineId: pine_id,
+            pineVersion: pine_version,
+            inputs: resolvedInputs,
+            evaluationFrom: evaluation_from,
+            evaluationTo: evaluation_to,
+            minimumTrades: minimum_trades,
+            scenarios: resolvedScenarios,
+            bootstrap: bootstrap === null || bootstrap === undefined ? null : {
+              seed: bootstrap.seed,
+              iterations: bootstrap.iterations,
+              failureNetProfit: bootstrap.failure_net_profit ?? 0,
+            },
+          };
+          const stressTestId = "sha256:" + createHash("sha256")
+            .update(JSON.stringify(definition), "utf8").digest("hex");
+          const preview = {
+            schemaVersion: "1.0",
+            stressTestId,
+            definition,
+            execution: {
+              mode: "single_ledger_collection_then_modeled_stress",
+              chartWrites: "temporary_strategy_add_input_apply_remove",
+              automaticRanking: false,
+              automaticAdoption: false,
+              unsupportedModeledEffects: ["entry_delay", "stop_target_perturbation", "parameter_neighbors"],
+            },
+            chartState: initialChart,
+          };
+          if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+          const run = await collectExperimentVariant(
+            { pineId: pine_id, inputs: resolvedInputs },
+            pine_version,
+            { symbol: initialChart.symbol, timeframe: initialChart.timeframe },
+          );
+          let finalChart: ReturnType<typeof chartFingerprint> | null = null;
+          try { finalChart = chartFingerprint(await tv.getChartContext()); } catch { /* represented below */ }
+          const chartRestored = finalChart !== null && JSON.stringify(finalChart) === JSON.stringify(initialChart);
+          const collectionComplete = run.evidence !== null && run.error === null && run.cleanupError === null && chartRestored;
+          const evaluation = collectionComplete ? evaluateStrategyStress({
+            ledger: run.evidence!.ledger,
+            evaluationFrom: evaluation_from,
+            evaluationTo: evaluation_to,
+            timeframe: initialChart.timeframe,
+            minimumTrades: minimum_trades,
+            scenarios: resolvedScenarios,
+            bootstrap: definition.bootstrap,
+          }) : null;
+          return jsonResult({
+            dryRun: false,
+            status: evaluation?.status ?? "partial",
+            ...preview,
+            collection: {
+              status: collectionComplete ? "complete" : "failed",
+              ledgerId: run.evidence?.ledger.ledgerId ?? null,
+              reportDateRange: run.evidence?.ledger.dateRange ?? null,
+              ledgerQualityIssues: run.evidence?.ledger.qualityIssues ?? [],
+              countMatchesSummary: run.evidence?.ledger.countMatchesSummary ?? null,
+              error: run.error,
+              cleanupError: run.cleanupError,
+            },
+            evaluation,
+            qualityIssues: [
+              ...(!collectionComplete ? ["ledger_collection_incomplete"] : []),
+              ...(!chartRestored ? ["chart_state_restore_failed"] : []),
+              ...(evaluation?.status === "not_evaluable" ? ["stress_not_evaluable"] : []),
+              ...(evaluation?.status === "partial" ? ["one_or_more_scenarios_not_evaluable"] : []),
+            ],
+            chartState: { before: initialChart, after: finalChart, restored: chartRestored },
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
     "register_strategy_hypothesis",
     {
       description:
@@ -4245,6 +4368,77 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "validate_research_protocol",
+    {
+      description:
+        "Validate a frozen strategy-research protocol before adoption decisions. Resolves and " +
+        "statically audits one exact saved Pine strategy version, then checks IS/OOS overlap, " +
+        "future windows, forming-bar use, candidate multiplicity, minimum trades, explicit costs, " +
+        "restart-difference evidence, and definition changes after OOS access. This is read-only " +
+        "and does not run a backtest, inspect the chart, or prove non-repainting.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[a-zA-Z0-9]{16,64}$/),
+        pine_version: z.string().regex(/^\d+(?:\.\d+)*$/),
+        candidate_ids: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(1).max(24),
+        windows: z.array(z.object({
+          window_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          population: z.enum(["in_sample", "out_of_sample"]),
+          from: z.string().datetime({ offset: true }),
+          to: z.string().datetime({ offset: true }),
+        })).min(2).max(24),
+        minimum_trades: z.number().int().min(1).max(100_000),
+        observed_trades: z.number().int().min(0).max(1_000_000).nullable().optional(),
+        costs: z.object({
+          spread_pips: z.number().finite().min(0).nullable(),
+          slippage_pips_per_side: z.number().finite().min(0).nullable(),
+          commission_per_round_trip: z.number().finite().min(0).nullable(),
+        }),
+        closed_bars_only: z.boolean(),
+        restart_diff_checked: z.boolean(),
+        definition_frozen_at: z.string().datetime({ offset: true }),
+        definition_last_changed_at: z.string().datetime({ offset: true }),
+        oos_first_viewed_at: z.string().datetime({ offset: true }).nullable().optional(),
+      },
+    },
+    async ({ pine_id, pine_version, candidate_ids, windows, minimum_trades, observed_trades,
+      costs, closed_bars_only, restart_diff_checked, definition_frozen_at,
+      definition_last_changed_at, oos_first_viewed_at }) => {
+      try {
+        const pine = await tv.getPineSource(pine_id, pine_version);
+        if (pine.pineId !== pine_id || pine.version !== pine_version) {
+          throw new Error(`resolved Pine identity changed: expected ${pine_id} v${pine_version}`);
+        }
+        return jsonResult(validateResearchProtocol({
+          pineId: pine_id,
+          pineVersion: pine_version,
+          pineKind: pine.kind,
+          candidateIds: candidate_ids,
+          windows: windows.map((window) => ({
+            windowId: window.window_id,
+            population: window.population,
+            from: window.from,
+            to: window.to,
+          })),
+          minimumTrades: minimum_trades,
+          observedTrades: observed_trades ?? null,
+          costs: {
+            spreadPips: costs.spread_pips,
+            slippagePipsPerSide: costs.slippage_pips_per_side,
+            commissionPerRoundTrip: costs.commission_per_round_trip,
+          },
+          closedBarsOnly: closed_bars_only,
+          restartDiffChecked: restart_diff_checked,
+          definitionFrozenAt: definition_frozen_at,
+          definitionLastChangedAt: definition_last_changed_at,
+          oosFirstViewedAt: oos_first_viewed_at ?? null,
+        }, auditPineSource(pine.source)));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
   );
 
   server.registerTool(

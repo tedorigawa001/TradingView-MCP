@@ -328,12 +328,16 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機結果**: 両foldともOFF候補をtrainだけで選択した。OOSは2025-Q4が14取引/期待値270.13/PF2.722、2026-Q1が12取引/期待値207.96/PF2.220、非重複2fold集計が26取引/期待値241.44/PF2.480/勝率61.54%/closed-trade DD989.52だった。これは最低件数をtrain 5/test 3へ下げた機能検証であり、採用判定には#35と、より多いfold・取引数が必要
 - **実機後修正**: foldごとの全`reportIndex`配列は大規模ledgerで応答を増幅するため、集計内部だけに保持し公開レスポンスから除外した。選定不能foldがある`partial`結果は最上位にも`one_or_more_folds_not_evaluable`を返す
 
-### #35 研究プロトコル検証・頑健性試験(`validate_research_protocol` / `stress_test_strategy`、優先度: 高・規模: 中〜大)
+### #35 研究プロトコル検証・頑健性試験(`validate_research_protocol` / `stress_test_strategy`) 🟡 基盤実装完了・再実行ストレスは継続
 
 - **事前検証**: IS/OOS重複、未来時刻、形成中足、監査未済みPine、リペイント要因、少なすぎる取引数、未指定コスト、多すぎる候補、OOS閲覧後の同一実験変更をblockedまたはwarningへ分類する
 - **ストレス**: spread/slippage/commission増加、Entryの1本遅延、Stop/Targetの微小変動、主要パラメータ近傍、期間開始点の移動、取引順序のseed付きbootstrap/Monte Carloを個別シナリオとして実行する
 - **判定**: 最良値ではなく、シナリオ分布、worst case、中央値、破綻率、元候補からの劣化率を返す。パラメータ近傍の一点だけが突出する場合は`unstable`とする
 - **注意**: OHLCだけでは足内約定順序や真の滑りを再現できない。モデル化したストレスと実約定証拠を区別する
+- **事前ゲート実装(2026-07-21)**: `validate_research_protocol`は具体的な保存済みPine ID/版を読み取り、静的ソース監査を同時実行する。1〜24個のSHA-256候補ID、IS/OOS窓、最低/観測取引数、spread/slippage/commission仮定、確定足限定、restart差分確認、定義凍結・最終変更・OOS初回閲覧時刻を一つのprotocol定義へ固定し、決定論的protocol IDを返す。IS/OOS重複、OOS同士の重複、未来窓、形成中足、8候補超、コスト欠落、最低件数未達、凍結後またはOOS閲覧後の変更をblockedとし、30件未満、4候補超、全コスト0、restart未確認、Pineのrepaint候補構文をwarningとする
+- **台帳ストレス実装(2026-07-21)**: `stress_test_strategy`はprotocol ID、具体的Pine版、入力、評価窓を既定dry-runで固定し、confirm後にStrategyを一度だけ一時適用して完全ledgerを取得・削除・chart復元する。`additional_cost_per_trade`(report通貨)、既存trade commissionの倍率、開始点1〜100barずらし、100〜10,000回のseed固定bootstrapを台帳へ適用し、baseline、全シナリオ、相対劣化、中央値/min/max、純損益0以下の破綻率、bootstrap p05/median/p95/worstを返す。ledger不完全、件数不一致、品質問題、期間非coverage、最低件数未達はfail-closedとする
+- **モデル境界**: spread/slippageをpipsからreport通貨へ一般変換せず、追加コストは明示的な`report currency / trade`として扱う。commission欠落時は該当シナリオだけ`not_evaluable`にする。bootstrapは取引結果の再標本化であり、市場経路、自己相関、約定順序を再現しない。Entry 1本遅延、Stop/Target変動、パラメータ近傍は台帳やOHLCから捏造せず、次段のStrategy再実行シナリオとして未実装のまま明示する
+- **検証状況**: protocolのready/blocked/warning、ID決定性、未来・重複・OOS閲覧後変更、コスト/件数、Pine監査、台帳stressの決定性、コスト劣化、commission欠落、品質・coverage拒否、seed再現性、MCP dry-run/一時適用/cleanup/chart fingerprint復元をユニットテストで固定した
 
 ### #36 条件付きイベントスタディ(`run_market_event_study`、優先度: 中〜高・規模: 中)
 
