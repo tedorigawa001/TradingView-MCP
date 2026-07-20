@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateAnalysisOverlayOutcome } from "../../build/analysisOutcome.js";
+import {
+  computeAnalysisPathMetrics,
+  evaluateAnalysisOverlayOutcome,
+} from "../../build/analysisOutcome.js";
 
 const state = {
   analysisId: "USDJPY-outcome",
@@ -237,4 +240,28 @@ test("analysis outcome reports calendar-month resolution as not evaluable", () =
   const result = evaluateAnalysisOverlayOutcome(state, [], "M");
   assert.equal(result.status, "not_evaluable");
   assert.equal(result.outcome, "calendar_month_resolution_unsupported");
+});
+
+test("path metrics use entry geometry and exclude activation and terminal bar OHLC", () => {
+  const bars = [
+    bar("2026-07-15T10:00:00.000Z", { open: 162.3, high: 162.4, low: 162.2, close: 162.3 }),
+    bar("2026-07-15T10:15:00.000Z", { open: 162.3, high: 162.3, low: 162.1, close: 162.2 }),
+    bar("2026-07-15T10:30:00.000Z", { open: 162.2, high: 162.5, low: 162, close: 162.4 }),
+    bar("2026-07-15T10:45:00.000Z", { open: 162.4, high: 162.7, low: 162.3, close: 162.6 }),
+  ];
+  const result = evaluateAnalysisOverlayOutcome(
+    state,
+    bars,
+    "15",
+    new Date("2026-07-15T11:05:00.000Z"),
+  );
+  const metrics = computeAnalysisPathMetrics(state, bars, result);
+  assert.equal(result.outcome, "target_before_stop");
+  assert.ok(Math.abs(metrics.referenceEntry - 162.15) < 1e-9);
+  assert.ok(Math.abs(metrics.structuralRiskPrice - 0.25) < 1e-9);
+  assert.ok(Math.abs(metrics.excursion.mfeR - 1.8) < 1e-9);
+  assert.ok(Math.abs(metrics.excursion.maeR - 0.6) < 1e-9);
+  assert.ok(Math.abs(metrics.grossRealizedR - 1.8) < 1e-9);
+  assert.equal(metrics.excursion.interiorBars, 1);
+  assert.equal(metrics.timing.activationToTerminalMs, 30 * 60_000);
 });

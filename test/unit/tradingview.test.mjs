@@ -60,6 +60,13 @@ test("setSymbol rejects empty input", () => {
   assert.throws(() => tv.setSymbol("   "), /non-empty/);
 });
 
+test("setSymbol targets an explicit chart index", async () => {
+  const cdp = fakeCdp({ symbol: "OANDA:EURUSD", resolution: "60", changed: true, bars: 10 });
+  const tv = new TradingView(cdp);
+  await tv.setSymbol("OANDA:EURUSD", 2);
+  assert.ok(cdp.calls[0].includes("window.TradingViewApi.chart(2)"));
+});
+
 test("setSymbol/setResolution never report a non-matching state as success", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
@@ -439,6 +446,64 @@ test("listAlerts fetches the alerts API read-only with the app session", async (
   assert.ok(!/create_alert|modify|delete/.test(expr), "must stay read-only");
 });
 
+test("createPriceAlert posts a bounded non-webhook alert and verifies readback", async () => {
+  const cdp = fakeCdp({
+    requestId: 9,
+    alertId: 10,
+    name: "BUSHIDO-MCP:0123456789abcdef:confirmation",
+    symbol: "OANDA:USDJPY",
+    resolution: "240",
+    operator: "cross_up",
+    level: 162.3,
+    expiration: "2099-01-01T00:00:00.000Z",
+    verified: true,
+  });
+  const tv = new TradingView(cdp);
+  const result = await tv.createPriceAlert({
+    symbol: "OANDA:USDJPY",
+    resolution: "240",
+    operator: "cross_up",
+    level: 162.3,
+    expiration: "2099-01-01T00:00:00.000Z",
+    name: "BUSHIDO-MCP:0123456789abcdef:confirmation",
+    message: "Bushido confirmation",
+    mobilePush: true,
+    popup: true,
+    playSound: false,
+  });
+  assert.equal(result.verified, true);
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("https://pricealerts.tradingview.com/create_alert"));
+  assert.ok(expr.includes('method: "POST"'));
+  assert.ok(expr.includes("JSON.stringify({ payload })"));
+  assert.ok(expr.includes("cross_interval: true"));
+  assert.ok(expr.includes('created.s !== "ok"'));
+  assert.ok(expr.includes("https://pricealerts.tradingview.com/list_alerts"));
+  assert.ok(expr.includes("web_hook: null"));
+  assert.ok(expr.includes("email: false"));
+  assert.ok(expr.includes("sms_over_email: false"));
+  assert.ok(!expr.includes("modify_restart_alert"));
+  assert.ok(!expr.includes("delete_alerts"));
+});
+
+test("createPriceAlert validates ownership and values before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.createPriceAlert({
+    symbol: "OANDA:USDJPY",
+    resolution: "240",
+    operator: "cross_up",
+    level: 162.3,
+    expiration: "2099-01-01T00:00:00.000Z",
+    name: "not-owned",
+    message: "x",
+    mobilePush: false,
+    popup: false,
+    playSound: false,
+  }), /ownership label/);
+  assert.equal(cdp.calls.length, 0);
+});
+
 test("listPineScripts fetches saved scripts read-only and cross-references charts", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);
@@ -664,6 +729,18 @@ test("getChartContext returns the page value as-is", async () => {
   const ctx = { layoutName: "L", activeChartIndex: 0, chartsCount: 1, charts: [] };
   const tv = new TradingView(fakeCdp(ctx));
   assert.deepEqual(await tv.getChartContext(), ctx);
+});
+
+test("getExecutionQuotes reads bounded live quote and session fields from every chart", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getExecutionQuotes();
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes("series.quotes"));
+  assert.ok(expr.includes("quote.lp_time"));
+  assert.ok(expr.includes("quote.current_session"));
+  assert.ok(expr.includes("quote.hub_rt_loaded"));
+  assert.ok(expr.includes("info.session"));
 });
 
 test("indicator values and graphics expose the is_price_study flag", async () => {

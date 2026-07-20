@@ -11,6 +11,7 @@ const REGISTRY: Record<string, InstrumentMetadata> = {
   "OANDA:USDJPY": { pip_size: 0.01, tick_size: 0.001, quote_currency: "JPY", source: "configured_registry" },
   "OANDA:GBPJPY": { pip_size: 0.01, tick_size: 0.001, quote_currency: "JPY", source: "configured_registry" },
   "OANDA:GBPAUD": { pip_size: 0.0001, tick_size: 0.00001, quote_currency: "AUD", source: "configured_registry" },
+  "OANDA:XAUUSD": { pip_size: null, tick_size: 0.001, quote_currency: "USD", source: "configured_registry" },
 };
 
 export function getInstrumentMetadata(symbol: string): InstrumentMetadata {

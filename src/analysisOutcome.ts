@@ -287,3 +287,97 @@ export function evaluateAnalysisOverlayOutcome(
     evidence,
   };
 }
+
+export function computeAnalysisPathMetrics(
+  state: AnalysisOverlayState,
+  bars: OhlcvBar[],
+  result: ReturnType<typeof evaluateAnalysisOverlayOutcome>,
+) {
+  const referenceEntry = (state.entryLow + state.entryHigh) / 2;
+  const structuralRiskPrice = Math.abs(referenceEntry - state.stop);
+  const entryAt = result.activation.entryAt;
+  const confirmationAt = result.activation.confirmationAt;
+  const activationAt = confirmationAt ?? entryAt;
+  const terminalAt = result.terminal?.barTime ?? null;
+  const elapsed = (from: string | null, to: string | null) => {
+    if (from === null || to === null) return null;
+    const value = Date.parse(to) - Date.parse(from);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  const timing = {
+    analyzedToEntryMs: elapsed(state.analyzedAt, entryAt),
+    entryToConfirmationMs: elapsed(entryAt, confirmationAt),
+    activationToTerminalMs: elapsed(activationAt, terminalAt),
+  };
+  if (activationAt === null || !Number.isFinite(structuralRiskPrice) || structuralRiskPrice <= 0) {
+    return {
+      methodologyVersion: "1.0" as const,
+      referenceEntry,
+      structuralRiskPrice,
+      timing,
+      excursion: null,
+      grossRealizedR: null,
+      measurement: "entry_midpoint_reference; no activated path available",
+    };
+  }
+
+  const evidenceThroughMs = result.evidence.evidenceThrough === null
+    ? Number.POSITIVE_INFINITY
+    : Date.parse(result.evidence.evidenceThrough);
+  const activationMs = Date.parse(activationAt);
+  const terminalMs = terminalAt === null ? Number.POSITIVE_INFINITY : Date.parse(terminalAt);
+  const interiorBars = bars.filter((bar) => {
+    if (bar.forming === true) return false;
+    const time = Date.parse(bar.timeIso);
+    return time > activationMs && time < terminalMs && time <= evidenceThroughMs;
+  });
+  let favorableExtreme = referenceEntry;
+  let adverseExtreme = referenceEntry;
+  for (const bar of interiorBars) {
+    if (state.bias === "bullish") {
+      favorableExtreme = Math.max(favorableExtreme, bar.high);
+      adverseExtreme = Math.min(adverseExtreme, bar.low);
+    } else {
+      favorableExtreme = Math.min(favorableExtreme, bar.low);
+      adverseExtreme = Math.max(adverseExtreme, bar.high);
+    }
+  }
+  if (result.terminal !== null) {
+    if (state.bias === "bullish") {
+      favorableExtreme = Math.max(favorableExtreme, result.terminal.price);
+      adverseExtreme = Math.min(adverseExtreme, result.terminal.price);
+    } else {
+      favorableExtreme = Math.min(favorableExtreme, result.terminal.price);
+      adverseExtreme = Math.max(adverseExtreme, result.terminal.price);
+    }
+  }
+  const mfePrice = state.bias === "bullish"
+    ? favorableExtreme - referenceEntry
+    : referenceEntry - favorableExtreme;
+  const maePrice = state.bias === "bullish"
+    ? referenceEntry - adverseExtreme
+    : adverseExtreme - referenceEntry;
+  const grossRealizedR = result.terminal?.kind === "target"
+    ? Math.abs(result.terminal.price - referenceEntry) / structuralRiskPrice
+    : result.terminal?.kind === "stop"
+      ? -Math.abs(result.terminal.price - referenceEntry) / structuralRiskPrice
+      : null;
+  return {
+    methodologyVersion: "1.0" as const,
+    referenceEntry,
+    structuralRiskPrice,
+    timing,
+    excursion: {
+      mfePrice,
+      maePrice,
+      mfeR: mfePrice / structuralRiskPrice,
+      maeR: maePrice / structuralRiskPrice,
+      favorableExtreme,
+      adverseExtreme,
+      interiorBars: interiorBars.length,
+    },
+    grossRealizedR,
+    measurement:
+      "entry midpoint is a geometry reference, not a fill; activation and terminal bars are excluded from OHLC excursion, with terminal level added as a point",
+  };
+}

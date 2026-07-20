@@ -79,7 +79,7 @@
 - **外部 HTTP(scanner.tradingview.com)**: ベース URL は固定(https)。市場名は `/^[a-z]{2,24}$/`、フィールド名は `/^[\w.|]{1,64}$/`、ティッカーは `/^[\w!.:&-]{1,48}$/`、演算子はホワイトリストで検証してからリクエストを構築(パストラバーサル・任意ボディ注入不可)。応答は zod スキーマで検証(申し送り対応済み)。タイムアウトは AbortController で強制
 - **ウォッチリスト取得**: ページ内 fetch(`credentials: "include"`)で TradingView 自身のオリジンにのみアクセス。取得は読み取り専用 GET。式に外部入力の埋め込みなし(引数ゼロ)
 - **第三者コンテンツ**: スキャナー応答の銘柄説明等が AI に渡る(公開マーケットデータであり、間接プロンプトインジェクションのリスクは従来評価どおり Low)
-- 変更系(ウォッチリストへの追加・削除、アラート作成)は引き続き非公開
+- 当時は変更系(ウォッチリストへの追加・削除、アラート作成)を非公開とした。アラート作成は2026-07-20に#26の限定confirm経路だけを追加した
 
 ## 追補: Phase 5(2026-07-08)
 
@@ -135,7 +135,7 @@
 - **正直な結果報告**: pine-facade はコンパイル失敗でもバージョンを保存する。結果に `compileOk` / 行番号付き `compileErrors` / `revertHint` を含め、保存後にソースを取得し直して一致検証(`verified`)。改行は CRLF 正規化差を吸収
 - **対象は自作スクリプトのみ**: `USER;` ゲート(zod + TradingView 層の二重)。他者スクリプトへの書き込み経路はない
 - **`add_pine_to_chart` 自体は追加のみ**: 削除を暗黙に行わない。削除は#16の所有確認・confirm付き専用ツールへ分離し、追加されたスタディはユーザーがUIからも外せる
-- 引き続き非公開: 注文系、アラート作成/変更/削除、ウォッチリスト変更、スクリプト削除、リプレイの buy/sell
+- 引き続き非公開: 注文系、既存アラートの変更・再開・削除、Webhook、ウォッチリスト変更、Pineライブラリのスクリプト削除、リプレイの buy/sell。新規アラート作成は2026-07-20に#26の限定confirm経路だけを追加した
 
 ## 追補: バックログ #12(2026-07-09)
 
@@ -233,10 +233,63 @@
 - **文脈拘束**: `chart_index`のsymbolと`expected_timeframe`を取得前に照合し、不一致時はOHLCとキーレベルを読まない。取得後もOHLCとキーレベルのsymbol/timeframeを再照合し、staleまたは別チャート由来の証拠を破棄する
 - **部分失敗の保持**: 各ソースを`required/status/source/observed_at/source_at/freshness/data`で包み、失敗をゼロ値や別ソースで補完しない。chart contextや必須ソースの失敗は他の取得済み証拠とUUID `snapshot_id`を保持した構造化`blocked`として返し、任意COT・実質金利・キーレベルの失敗は`partial`に留める
 - **判断境界**: `decision_status`はデータ完全性・イベント停止・執行証拠だけのゲートで、`directional_recommendation`は常に`null`。`trade_ready`を売買推奨として扱わない。重要イベント時間帯は`wait`、必須証拠破損は`blocked`とする
-- **執行鮮度**: scannerのbid/askを取得しても市場側timestampがないため`execution.status: partial`とし、`decision_status`を`wait`に固定する。チャート終値をbid/askや約定可能価格へ代用しない。将来#24でsource timestamp・市場状態・鮮度を検証できるまでは`trade_ready`へ昇格しない
+- **執行鮮度**: 開いているチャートのquoteは`lp_time`、`current_session`、`hub_rt_loaded`、`trade_loaded`、bid/askを同時に読み、source時刻SLA・streaming・active session・realtime loadedをすべて満たす場合だけreadyとする。`lp_time`はlast-price時刻でありbid/ask個別のexchange timestampではないため、単独では鮮度証明に使わない。チャート未配置時のscanner fallbackには市場側timestampとsession calendarがないため受信時刻をsource timeへ置換せず、リクエスト後のbid/ask変化を観測した場合だけローカルなlivenessを検証済みとする。静止、遅延、stale、欠落、crossed quoteはreadyにしない。`get_trade_decision_context`はこの条件と他の必須ゲートを満たした場合だけ`trade_ready`へ進む。チャート終値をbid/askや約定可能価格へ代用せず、readyも約定・流動性・exchange sequencingの保証とはしない
+
+## 追補: バックログ #25(2026-07-20)
+
+`compute_position_size`追加に伴うレビュー:
+
+- **純粋計算・権限境界**: 呼び出し側が明示した口座通貨、評価額、リスク、価格、コスト、数量制約、換算証拠だけをNode内で計算する。ブローカー口座、認証情報、TradingView、CDP、外部HTTP、注文、チャート、ジャーナルへ接続せず、入力と結果を永続化しない
+- **リスク上限**: EntryからStopまでの値幅と往復コストをquantity当たり損失へ含め、最大数量適用後も`quantity_step`単位で下方向へ丸める。浮動小数点誤差で推定損失が予算を超えた場合はさらに1 step減らし、12桁を超えるstepや安全整数範囲外の正確な丸めは推定せず拒否する
+- **通貨換算のfail closed**: instrument registryのquote通貨と口座通貨が異なる場合、`quote_to_account_rate`を「quote通貨1単位あたりの口座通貨」と固定し、conversion symbol、ISO観測時刻、最大鮮度をすべて要求する。欠落、stale、未来時刻、非正値、未知quote通貨では数量をnullにする。同一通貨の場合だけ換算率1を内部設定する
+- **ブローカー仕様を推測しない**: 戻り値はinstrument unitでありlotではない。最小/最大数量、数量刻み、contract multiplierはブローカー、商品、口座種別、地域で異なるため自動推定せず入力必須または明示optionalとする。MCPのXAUUSD metadataはquote通貨とtickを識別するだけで、取引可能数量や契約仕様を保証しない
+- **非執行性**: 結果はStop価格での単純な損失見積りであり、ギャップ、滑り、流動性、追証、証拠金、価格改善、税、swap、約定可能性を保証しない。往復コストとcontract multiplierの正確性は呼び出し側の証拠品質に依存する
+
+## 追補: バックログ #26(2026-07-20)
+
+`create_analysis_alerts`追加に伴うレビュー:
+
+- **限定された書き込み**: `confirm:true`がない呼び出しはpreviewのみ。確認後も固定テンプレートと完全一致する所有Pine、対象チャート上の単一配置、18入力、`analysisId`、symbol/timeframe、未来の分析期限をすべて照合した場合だけ、Confirmation、Invalidation、Target 1の不足アラートを作成する
+- **非破壊・冪等**: 所有名は`BUSHIDO-MCP:<analysisIdのSHA-256先頭16桁>:<kind>`に固定する。同名アラートが完全一致すれば再利用し、定義違い、停止済み、重複なら上書き・再開・削除せず停止する。Confirmationだけが欠け、InvalidationまたはTarget 1が既存の場合も、到達済み省略と手動削除を区別できないため後付け作成しない。他のユーザーアラートは名前照合以外の管理対象にしない
+- **通信境界**: ログイン済みTradingViewページ内から固定HTTPS originの`create_alert`へPOSTし、`list_alerts`で読み戻す。symbol、resolution、operator、正値level、未来expiration、所有名、300文字以内messageをNode側で検証してからJSON化する。公開APIではなくアプリ内部契約への依存なので、HTTP・応答shape・読み戻しの不一致は成功にせず停止する
+- **通知・執行境界**: mobile pushとpopupだけを既定有効とし、soundは任意。email、SMS、Webhookは常に無効で、注文・ブローカー・Pine strategyには接続しない。既存アラートのmodify/restart/delete endpointは実装しない
+- **時間と履歴の限界**: expirationは分析期限へ拘束する。作成時点の最新終値がInvalidationまたはTarget 1のTerminal側なら拒否し、Confirmation側ならそのアラートを省略するが、作成前の接触やOHLC内の到達順序を証明しない
+- **部分失敗と監査**: 1件ずつ作成し、最初の未検証エラーで停止後、全対象を再取得して`complete/partial`を返す。タイムアウトしたPOSTが実際には到達している可能性があるため自動削除・即時再試行を行わない。完全一致集合だけを既存分析定義hashへ拘束してジャーナルへ追記し、記録失敗でもTradingView上の有効アラートは巻き戻さない
+
+## 追補: バックログ #27(2026-07-20)
+
+`evaluate_due_analyses`追加に伴うレビュー:
+
+- **確認境界**: `confirm:true`なしではチャートを変更せず、候補と推定変更だけを返す。確認後は指定した一つの`chart_index`だけを使い、symbol/timeframe変更、任意の履歴追加、OHLCV取得、評価記録を既存のプロセス内直列キューで実行する
+- **対象の信頼境界**: 破損・改ざん検証済みのローカルジャーナル定義を評価ソースとし、配置中Pineや現在のオーバーレイ入力へ依存しない。neutralと既存終端評価を除き、期限到来未評価、非終端再評価、明示指定された有効未評価だけを選ぶ。最大500定義の走査上限と切り詰めを返し、未走査対象がないと推定しない
+- **チャート分離**: `setSymbol`と`setResolution`の内部APIを`chart_index`対応にし、対象ペイン以外を変更しない。各切替後にchart context、取得後にOHLCVのsymbol/timeframe/バー有無を再照合し、別symbolやstale resolutionの証拠を評価しない
+- **復元規則**: 各分析の成功・失敗にかかわらず元symbol/timeframeへの復元と読み戻しを行う。個別の切替・履歴・評価・journal失敗は次の分析へ進むが、復元不能ではチャート前提が失われるため残件を即時中止する。TradingView UIや別プロセスの同時操作は排他できないため、段階ごとの再照合を省略しない
+- **履歴の副作用**: `load_more_bars`既定値は0。明示値がある時だけTradingViewの履歴を追加ロードする。追加済み履歴はアンロードできず元のメモリ状態へ戻せないため、dry-runでpersistent history loadとして表示する。履歴不足、形成中足、同一足順序、ギャップ、暦月は既存評価と同じfail-closed契約を維持する
+- **ジャーナル整合性**: 評価は保存済み`definition_hash`へ直接拘束し、別定義への記録を拒否する。同じstatus/outcome/evidence timeframe/evidenceThroughは冪等で、再試行時に重複イベントを増やさない。評価結果が得られた後のjournal失敗はチャート評価を消さず、項目単位のエラーとして保持する
+
+## 追補: バックログ #28(2026-07-20)
+
+`get_analysis_performance`と評価経路指標追加に伴うレビュー:
+
+- **読み取り境界**: 集計ツールは検証済みローカル分析ジャーナルだけを読み、TradingView、CDP、外部HTTP、Pine、アラート、注文、ブローカー口座へ接続しない。ライブ分析だけを対象とし、Strategy Tester・walk-forward・その他バックテストを同じ母集団へ混在させない
+- **経路指標の保存**: 評価時にOHLC原本ではなく、Entry帯midpoint、midpoint-to-Stopのstructural risk、MFE/MAE、gross R、経過時間だけをoutcome resultへ保存する。既存64KiBイベント上限、追記専用、definition hash拘束、0600権限を維持する。同一意味・同一証拠の旧イベントにmetricsがない場合だけ一度の拡充追記を許し、metrics付きイベントが存在すれば再度の追記は冪等に抑止する
+- **足内不確実性**: activation足とterminal足のHigh/Lowはイベント前後を区別できないためMFE/MAEから除き、terminal水準だけを一点追加する。activation後・terminal前の確定足だけを使うため保守的だが、真の足内excursionを完全には測定しない。曖昧足やギャップを推定でterminalへ変換しない
+- **非約定R**: Entry midpointは分析形状の基準であって約定価格ではない。gross Rは価格距離比、net Rは明示された銘柄別往復価格コストをstructural riskで割って控除した参考値であり、金額、lot、口座収益率、実現損益ではない。コスト欠落はゼロ扱いせずnet母集団から除く
+- **データ品質**: 最新評価、二値勝敗、実現R、excursion、各時間指標を別母集団として件数を返す。旧レコード、未評価、非二値、未activation、コスト欠落を個別に数え、ゼロ埋めしない。経路指標は`methodologyVersion: "1.0"`だけを採用し、将来の算出法変更を同じ平均へ混在させない。重複symbolのコスト前提は順序依存にせず拒否する
+- **集計上限**: 1回に検証済み最新500定義を読み、全件数・走査件数・切り詰めを返す。上限外の履歴を含む完全統計だと主張しない。OSアカウント侵害時のジャーナル改ざん・秘匿性は#20と同じ残余リスクを持つ
+
+## 追補: バックログ #29(2026-07-20)
+
+`set_symbol`/`set_timeframe`のチャート指定一般化に伴うレビュー:
+
+- **明示的な対象ペイン**: 両ツールは任意の`chart_index`を受け取り、省略時だけ現在のactive chartを使う。非負整数かつchart contextに存在するindexを要求し、対象不明のままactive chartへ推測適用しない
+- **不変スナップショットと段階検証**: 操作前のsymbol/timeframe/studiesをコピーして保持し、APIが参照オブジェクトを更新しても復元先を失わない。symbol変更後と最終状態で対象ペインを読み戻し、要求値と一致しなければ成功にしない。低レベルAPIの入力検証、JSON文字列化、バー0本拒否も維持する
+- **ロールバック**: symbol変更後のtimeframe失敗など部分適用でも、対象ペインだけを元のsymbol/timeframeへ戻して再検証する。復元も失敗した場合は最初の操作エラーを上書きせず、操作原因と復元原因の両方を返す
+- **共通トランザクション**: #27の分析ごとの一時切替も同じ変更・復元処理を使う。バッチ開始時の元状態を各候補の直前に再確認し、途中の外部変更を暗黙の新基準として受け入れない。復元不能時は残件を停止する
+- **競合と残余リスク**: 公開操作と主要なチャート依存処理は既存のプロセス内`SerialOperationQueue`で直列化する。TradingView UIの手動操作や別MCPプロセスまでは排他できないため、段階ごとの読み戻しで不一致を検出してfail closedする。外部操作が読み戻し後に発生する競合窓そのものは残る
 
 ## 将来フェーズへの申し送り
 
-- アラート作成・注文系(`trading`)API には**触れない**か、明示的な確認フローを挟む(現状ツール未公開 = 安全)
+- 注文系(`trading`)APIは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない
 - ~~スキャナー API(Phase 4)追加時は外部 HTTP 応答のスキーマ検証を入れる~~ → Phase 4 で対応済み(zod 検証)
 - CI 導入時: `npm audit` + ユニットテストをゲートに

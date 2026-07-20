@@ -42,15 +42,27 @@ export type AnalysisJournalOutcome = {
   result: Record<string, unknown>;
 };
 
+export type AnalysisJournalAlertLink = {
+  linkedAt: string;
+  alerts: Array<{
+    kind: "confirmation" | "invalidation" | "target_1";
+    alertId: number | string;
+    ownershipName: string;
+    operator: "cross_up" | "cross_down";
+    level: number;
+    expiration: string;
+  }>;
+};
+
 export type AnalysisJournalEntry = {
   schema_version: "1.0";
   event_id: string;
   sequence: number;
   recorded_at: string;
-  kind: "analysis_applied" | "outcome_evaluated";
+  kind: "analysis_applied" | "outcome_evaluated" | "alerts_created";
   analysis_id: string;
   definition_hash: string;
-  payload: AnalysisJournalDefinition | AnalysisJournalOutcome;
+  payload: AnalysisJournalDefinition | AnalysisJournalOutcome | AnalysisJournalAlertLink;
 };
 
 export type AnalysisJournalRecordResult = {
@@ -74,10 +86,12 @@ const validateDefinition = (value: unknown): AnalysisJournalDefinition => {
   }
   const definition = value as Partial<AnalysisJournalDefinition>;
   if (!validateAnalysisId(definition.analysisId)) throw new Error("invalid journal analysisId");
-  if (typeof definition.symbol !== "string" || definition.symbol.length < 1 || definition.symbol.length > 48) {
+  if (typeof definition.symbol !== "string" || !/^[\w!.:&-]{1,48}$/.test(definition.symbol)) {
     throw new Error("invalid journal symbol");
   }
-  if (typeof definition.timeframe !== "string" || definition.timeframe.length < 1 || definition.timeframe.length > 8) {
+  if (typeof definition.timeframe !== "string" ||
+      !/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i.test(definition.timeframe) ||
+      definition.timeframe.length > 8) {
     throw new Error("invalid journal timeframe");
   }
   if (!Number.isInteger(definition.chartIndex) || (definition.chartIndex ?? -1) < 0) {
@@ -170,6 +184,45 @@ const validateOutcome = (value: unknown): AnalysisJournalOutcome => {
   return outcome as AnalysisJournalOutcome;
 };
 
+const validateAlertLink = (value: unknown): AnalysisJournalAlertLink => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("analysis journal alert link must be an object");
+  }
+  const link = value as Partial<AnalysisJournalAlertLink>;
+  if (!isCanonicalTimestamp(link.linkedAt)) throw new Error("invalid journal alert linkedAt");
+  if (!Array.isArray(link.alerts) || link.alerts.length < 1 || link.alerts.length > 3) {
+    throw new Error("journal alert link must contain one to three alerts");
+  }
+  const kinds = new Set<string>();
+  for (const alert of link.alerts) {
+    if (!alert || typeof alert !== "object" || Array.isArray(alert)) throw new Error("invalid journal alert");
+    if (!(["confirmation", "invalidation", "target_1"] as unknown[]).includes(alert.kind)) {
+      throw new Error("invalid journal alert kind");
+    }
+    if (kinds.has(alert.kind)) throw new Error("duplicate journal alert kind");
+    kinds.add(alert.kind);
+    const validNumericId = typeof alert.alertId === "number" &&
+      Number.isSafeInteger(alert.alertId) && alert.alertId >= 0;
+    const validStringId = typeof alert.alertId === "string" &&
+      /^[A-Za-z0-9._:-]{1,80}$/.test(alert.alertId);
+    if (!validNumericId && !validStringId) {
+      throw new Error("invalid journal alert id");
+    }
+    if (typeof alert.ownershipName !== "string" ||
+        !new RegExp(`^BUSHIDO-MCP:[0-9a-f]{16}:${alert.kind}$`).test(alert.ownershipName)) {
+      throw new Error("invalid journal alert ownership name");
+    }
+    if (alert.operator !== "cross_up" && alert.operator !== "cross_down") {
+      throw new Error("invalid journal alert operator");
+    }
+    if (typeof alert.level !== "number" || !Number.isFinite(alert.level) || alert.level <= 0) {
+      throw new Error("invalid journal alert level");
+    }
+    if (!isCanonicalTimestamp(alert.expiration)) throw new Error("invalid journal alert expiration");
+  }
+  return link as AnalysisJournalAlertLink;
+};
+
 const canonicalDefinition = (definition: AnalysisJournalDefinition) => ({
   analysisId: definition.analysisId,
   symbol: definition.symbol,
@@ -213,12 +266,14 @@ const validateEntry = (value: unknown, line?: number): AnalysisJournalEntry => {
   if (typeof entry.definition_hash !== "string" || !/^[0-9a-f]{64}$/.test(entry.definition_hash)) {
     throw new Error(`invalid analysis journal definition_hash${suffix}`);
   }
-  if (entry.kind !== "analysis_applied" && entry.kind !== "outcome_evaluated") {
+  if (entry.kind !== "analysis_applied" && entry.kind !== "outcome_evaluated" && entry.kind !== "alerts_created") {
     throw new Error(`invalid analysis journal kind${suffix}`);
   }
   const payload = entry.kind === "analysis_applied"
     ? validateDefinition(entry.payload)
-    : validateOutcome(entry.payload);
+    : entry.kind === "outcome_evaluated"
+      ? validateOutcome(entry.payload)
+      : validateAlertLink(entry.payload);
   if (entry.kind === "analysis_applied") {
     const definition = payload as AnalysisJournalDefinition;
     if (definition.analysisId !== entry.analysis_id || analysisDefinitionHash(definition) !== entry.definition_hash) {
@@ -398,7 +453,8 @@ export class AnalysisJournalStore {
           }
           definitionHashes.set(entry.analysis_id, entry.definition_hash);
         } else if (definitionHashes.get(entry.analysis_id) !== entry.definition_hash) {
-          throw new Error(`orphaned or mismatched analysis outcome at line ${index + 1}`);
+          const eventType = entry.kind === "outcome_evaluated" ? "analysis outcome" : "analysis alert link";
+          throw new Error(`orphaned or mismatched ${eventType} at line ${index + 1}`);
         }
       });
       return entries;
@@ -493,13 +549,20 @@ export class AnalysisJournalStore {
         return prior.status === "complete" && outcome.status === "complete" && prior.outcome !== outcome.outcome;
       });
       if (conflicting) throw new Error(`analysis_id ${analysisId} has conflicting terminal outcomes`);
-      const duplicate = outcomes.find((entry) => {
+      const semanticDuplicates = outcomes.filter((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
         return prior.status === outcome.status &&
           prior.outcome === outcome.outcome &&
           prior.evidenceTimeframe === outcome.evidenceTimeframe &&
           prior.evidenceThrough === outcome.evidenceThrough;
       });
+      const hasPathMetrics = (value: AnalysisJournalOutcome) => {
+        const performance = value.result.performance;
+        return performance !== null && typeof performance === "object" && !Array.isArray(performance);
+      };
+      const enriched = hasPathMetrics(outcome);
+      const duplicate = semanticDuplicates.find((entry) =>
+        !enriched || hasPathMetrics(entry.payload as AnalysisJournalOutcome));
       if (duplicate) return { recorded: false, idempotent: true, entry: duplicate };
       const entry = validateEntry({
         schema_version: "1.0",
@@ -510,6 +573,45 @@ export class AnalysisJournalStore {
         analysis_id: analysisId,
         definition_hash: definitionHash,
         payload: outcome,
+      });
+      await this.appendUnlocked(entry);
+      return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async recordAlertSet(
+    analysisId: string,
+    definitionHash: string,
+    alertsValue: AnalysisJournalAlertLink["alerts"],
+  ): Promise<AnalysisJournalRecordResult> {
+    if (!validateAnalysisId(analysisId)) throw new Error("invalid analysis_id");
+    const alerts = validateAlertLink({ linkedAt: new Date().toISOString(), alerts: alertsValue }).alerts;
+    const canonical = (values: AnalysisJournalAlertLink["alerts"]) =>
+      JSON.stringify([...values].sort((left, right) => left.kind.localeCompare(right.kind)));
+    return this.serialize(async () => {
+      const entries = await this.readAllUnlocked();
+      const definition = entries.find((entry) => entry.kind === "analysis_applied" && entry.analysis_id === analysisId);
+      if (!definition) throw new Error(`analysis_id ${analysisId} has no journaled applied definition`);
+      if (definition.definition_hash !== definitionHash) {
+        throw new AnalysisDefinitionConflictError(
+          analysisId,
+          `analysis_id ${analysisId} does not match its journaled definition`,
+        );
+      }
+      const priorLinks = entries.filter((entry) => entry.kind === "alerts_created" && entry.analysis_id === analysisId);
+      const duplicate = priorLinks.find((entry) =>
+        canonical((entry.payload as AnalysisJournalAlertLink).alerts) === canonical(alerts));
+      if (duplicate) return { recorded: false, idempotent: true, entry: duplicate };
+      if (priorLinks.length > 0) throw new Error(`analysis_id ${analysisId} has conflicting alert linkage`);
+      const entry = validateEntry({
+        schema_version: "1.0",
+        event_id: randomUUID(),
+        sequence: entries.length + 1,
+        recorded_at: new Date().toISOString(),
+        kind: "alerts_created",
+        analysis_id: analysisId,
+        definition_hash: definitionHash,
+        payload: { linkedAt: new Date().toISOString(), alerts },
       });
       await this.appendUnlocked(entry);
       return { recorded: true, idempotent: false, entry };
@@ -529,8 +631,15 @@ export class AnalysisJournalStore {
       });
       const analyses = definitions.map((definition) => {
         const outcomes = entries.filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id);
+        const alertLinks = entries.filter((entry) => entry.kind === "alerts_created" && entry.analysis_id === definition.analysis_id);
         const latest = outcomes.sort(compareRank).at(-1) ?? null;
-        return { definition, latestOutcome: latest, outcomeCount: outcomes.length };
+        return {
+          definition,
+          latestOutcome: latest,
+          outcomeCount: outcomes.length,
+          latestAlertLink: alertLinks.at(-1) ?? null,
+          alertLinkCount: alertLinks.length,
+        };
       }).sort((a, b) => b.definition.sequence - a.definition.sequence).slice(0, limit);
       return { total: definitions.length, returned: analyses.length, analyses };
     });

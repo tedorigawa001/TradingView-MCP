@@ -101,6 +101,68 @@ test("analysis definition hashing remains compatible with legacy context-free re
   assert.equal(analysisDefinitionHash(legacy), legacyHash);
 });
 
+test("AnalysisJournalStore permits one idempotent path-metrics enrichment", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("USDJPY-enrichment");
+  await store.recordAnalysis(value);
+  const base = outcome("target_before_stop", "complete", "2026-07-16T03:00:00.000Z");
+  await store.recordOutcome(value.analysisId, analysisDefinitionHash(value), base);
+  const enriched = {
+    ...base,
+    evaluatedAt: "2026-07-16T09:00:00.000Z",
+    result: {
+      ...base.result,
+      performance: { methodologyVersion: "1.0", structuralRiskPrice: 0.25, grossRealizedR: 1.8 },
+    },
+  };
+  const enrichment = await store.recordOutcome(value.analysisId, analysisDefinitionHash(value), enriched);
+  const repeated = await store.recordOutcome(value.analysisId, analysisDefinitionHash(value), enriched);
+  assert.equal(enrichment.recorded, true);
+  assert.equal(repeated.recorded, false);
+  assert.equal(repeated.idempotent, true);
+  const listed = await store.list({ analysisId: value.analysisId });
+  assert.equal(listed.analyses[0].outcomeCount, 2);
+  assert.equal(listed.analyses[0].latestOutcome.payload.result.performance.grossRealizedR, 1.8);
+});
+
+test("AnalysisJournalStore links a verified alert set idempotently and rejects replacements", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("USDJPY-alerts");
+  await store.recordAnalysis(value);
+  const alerts = [
+    {
+      kind: "confirmation",
+      alertId: 101,
+      ownershipName: "BUSHIDO-MCP:0123456789abcdef:confirmation",
+      operator: "cross_up",
+      level: 162.3,
+      expiration: "2026-07-16T05:00:00.000Z",
+    },
+    {
+      kind: "invalidation",
+      alertId: 102,
+      ownershipName: "BUSHIDO-MCP:0123456789abcdef:invalidation",
+      operator: "cross_down",
+      level: 161.95,
+      expiration: "2026-07-16T05:00:00.000Z",
+    },
+  ];
+  const first = await store.recordAlertSet(value.analysisId, analysisDefinitionHash(value), alerts);
+  const repeated = await store.recordAlertSet(value.analysisId, analysisDefinitionHash(value), [...alerts].reverse());
+  assert.equal(first.recorded, true);
+  assert.equal(repeated.recorded, false);
+  assert.equal(repeated.idempotent, true);
+  const listed = await store.list({ analysisId: value.analysisId });
+  assert.equal(listed.analyses[0].alertLinkCount, 1);
+  assert.equal(listed.analyses[0].latestAlertLink.kind, "alerts_created");
+  await assert.rejects(
+    store.recordAlertSet(value.analysisId, analysisDefinitionHash(value), [{ ...alerts[0], alertId: 999 }]),
+    /conflicting alert linkage/,
+  );
+});
+
 test("AnalysisJournalStore keeps completed outcomes monotonic and calibrates only target versus stop", async () => {
   const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
   const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));

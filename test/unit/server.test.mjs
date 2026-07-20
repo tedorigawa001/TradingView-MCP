@@ -44,6 +44,7 @@ function makeDeps(overrides = {}) {
         chartsCount: 1,
         charts: [{ index: 0, symbol: "EURUSD", resolution: "1D", studies: [] }],
       }),
+      getExecutionQuotes: async () => [],
       getOhlcv: async (count, chartIndex) => ({
         symbol: "EURUSD",
         resolution: "1D",
@@ -225,6 +226,17 @@ function makeDeps(overrides = {}) {
           lastError: null,
         },
       ],
+      createPriceAlert: async (options) => ({
+        requestId: 1,
+        alertId: 2,
+        name: options.name,
+        symbol: options.symbol,
+        resolution: options.resolution,
+        operator: options.operator,
+        level: options.level,
+        expiration: options.expiration,
+        verified: true,
+      }),
       getChartRect: async (chartIndex) => ({
         x: 50 + chartIndex * 500,
         y: 40,
@@ -260,6 +272,7 @@ function makeDeps(overrides = {}) {
         ],
       }),
       setSymbol: async (symbol) => ({ symbol, resolution: "1D" }),
+      setSymbol: async (symbol) => ({ symbol, resolution: "1D", changed: true, bars: 1 }),
       setResolution: async (resolution) => ({ symbol: "EURUSD", resolution }),
       ...overrides.tv,
     },
@@ -278,6 +291,14 @@ function makeDeps(overrides = {}) {
         entry: {
           event_id: "22222222-2222-4222-8222-222222222222",
           payload: outcome,
+        },
+      }),
+      recordAlertSet: async (_analysisId, _definitionHash, alerts) => ({
+        recorded: true,
+        idempotent: false,
+        entry: {
+          event_id: "44444444-4444-4444-8444-444444444444",
+          payload: { alerts },
         },
       }),
       list: async (options) => ({ total: 0, returned: 0, analyses: [], options }),
@@ -436,6 +457,66 @@ function legacyOverlayStudy(id, values = {}) {
   return { ...study, inputs: study.inputs.filter((input) => legacyIds.has(input.id)) };
 }
 
+function dueAnalysisRecord(analysisId, symbol, timeframe, expiresAt, latestOutcome = null) {
+  const payload = {
+    analysisId,
+    analyzedAt: "2026-07-01T00:00:00.000Z",
+    expiresAt,
+    bias: "bullish",
+    entryLow: 1.1,
+    entryHigh: 1.2,
+    confirmation: null,
+    invalidation: 0.95,
+    stop: 0.9,
+    targets: [1.4],
+    confidence: 0.6,
+    note: "batch test",
+    symbol,
+    timeframe,
+    chartIndex: 0,
+    pineId: null,
+    pineVersion: null,
+    studyId: "journalStudy",
+  };
+  return {
+    definition: {
+      schema_version: "1.0",
+      event_id: `definition-${analysisId}`,
+      sequence: 1,
+      recorded_at: "2026-07-01T00:00:00.000Z",
+      kind: "analysis_applied",
+      analysis_id: analysisId,
+      definition_hash: `hash-${analysisId}`,
+      payload,
+    },
+    latestOutcome,
+    outcomeCount: latestOutcome === null ? 0 : 1,
+    latestAlertLink: null,
+    alertLinkCount: 0,
+  };
+}
+
+function dueBars({ incomplete = false } = {}) {
+  const base = Date.parse("2026-07-01T00:00:00.000Z") / 1000;
+  if (incomplete) {
+    return [{
+      time: base + 900,
+      timeIso: "2026-07-01T00:15:00.000Z",
+      open: 1.1,
+      high: 1.2,
+      low: 1.05,
+      close: 1.15,
+      volume: 1,
+      forming: false,
+    }];
+  }
+  return [
+    { time: base - 900, timeIso: "2026-06-30T23:45:00.000Z", open: 1, high: 1, low: 1, close: 1, volume: 1, forming: false },
+    { time: base, timeIso: "2026-07-01T00:00:00.000Z", open: 1.05, high: 1.2, low: 1.05, close: 1.15, volume: 1, forming: false },
+    { time: base + 900, timeIso: "2026-07-01T00:15:00.000Z", open: 1.2, high: 1.45, low: 1.15, close: 1.4, volume: 1, forming: false },
+  ];
+}
+
 const OUTCOME_PINE_ID = "USER;8f868f366873411aa46bd30872711544";
 const OUTCOME_ANALYZED_AT = Date.parse("2026-07-15T12:35:00.000Z");
 
@@ -533,7 +614,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the forty-two expected tools", async () => {
+test("exposes exactly the forty-seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -544,17 +625,22 @@ test("exposes exactly the forty-two expected tools", async () => {
       "audit_pine_indicator",
       "compare_indicator_observations",
       "compute_market_features",
+      "compute_position_size",
       "compute_round_trip_cost",
+      "create_analysis_alerts",
       "ensure_analysis_overlay",
       "evaluate_analysis_overlay_outcome",
+      "evaluate_due_analyses",
       "get_aligned_history",
       "get_analysis_calibration",
       "get_analysis_journal",
       "get_analysis_overlay_status",
       "get_analysis_overlay_template",
+      "get_analysis_performance",
       "get_chart_context",
       "get_chart_screenshot",
       "get_economic_events",
+      "get_execution_snapshot",
       "get_indicator_graphics",
       "get_indicator_inputs",
       "get_indicator_tables",
@@ -719,6 +805,28 @@ test("compute_round_trip_cost exposes explicit execution assumptions", async () 
   const parsed = JSON.parse(res.content[0].text);
   assert.ok(Math.abs(parsed.spread_pips - 2) < 1e-12);
   assert.equal(parsed.slippage_pips_round_trip, 1);
+});
+
+test("compute_position_size exposes a risk-capped quantity through MCP", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "compute_position_size",
+    arguments: {
+      symbol: "OANDA:USDJPY",
+      account_currency: "JPY",
+      account_equity: 1_000_000,
+      risk_percent: 1,
+      entry_price: 162.4,
+      stop_price: 162.2,
+      round_trip_cost_price_per_unit: 0.014,
+      quantity_step: 1,
+      minimum_quantity: 1,
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "ready");
+  assert.equal(parsed.quantity, 46_728);
+  assert.ok(parsed.estimated_loss_at_stop <= parsed.risk_budget);
 });
 
 test("validate_trade_plan accepts a fresh cost-adjusted bullish plan", async () => {
@@ -2077,6 +2185,197 @@ test("temporary outcome evaluation serializes a concurrent set_timeframe operati
   assert.deepEqual(state.calls, ["15", "240", "60"]);
 });
 
+test("evaluate_due_analyses previews, restores multiple symbols, records non-guessed outcomes, and retries idempotently", async () => {
+  const records = [
+    dueAnalysisRecord("EURUSD-due", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),
+    dueAnalysisRecord("XAUUSD-month", "OANDA:XAUUSD", "M", "2026-07-01T02:00:00.000Z"),
+  ];
+  const state = { symbol: "OANDA:USDJPY", resolution: "240", changes: [], recorded: new Set() };
+  const context = async () => ({
+    layoutName: "batch",
+    activeChartIndex: 0,
+    chartsCount: 1,
+    charts: [{ index: 0, symbol: state.symbol, resolution: state.resolution, studies: [] }],
+  });
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: context,
+      setSymbol: async (symbol, chartIndex) => {
+        assert.equal(chartIndex, 0);
+        state.changes.push(["symbol", symbol]);
+        state.symbol = symbol;
+        return { symbol, resolution: state.resolution, changed: true, bars: 10 };
+      },
+      setResolution: async (resolution, chartIndex) => {
+        assert.equal(chartIndex, 0);
+        state.changes.push(["timeframe", resolution]);
+        state.resolution = resolution;
+        return { symbol: state.symbol, resolution, changed: true, bars: 10 };
+      },
+      getOhlcv: async () => ({
+        symbol: state.symbol,
+        resolution: state.resolution,
+        count: 3,
+        bars: state.symbol === "OANDA:EURUSD" ? dueBars({ incomplete: true }) : dueBars(),
+      }),
+    },
+    journal: {
+      list: async () => ({ total: records.length, returned: records.length, analyses: records }),
+      recordOutcome: async (analysisId, _hash, value) => {
+        const key = `${analysisId}:${value.status}:${value.outcome}:${value.evidenceTimeframe}:${value.evidenceThrough}`;
+        const idempotent = state.recorded.has(key);
+        state.recorded.add(key);
+        return {
+          recorded: !idempotent,
+          idempotent,
+          entry: { event_id: `outcome-${analysisId}`, payload: value },
+        };
+      },
+    },
+  }));
+  const args = { chart_index: 0 };
+  const dry = JSON.parse((await client.callTool({ name: "evaluate_due_analyses", arguments: args })).content[0].text);
+  assert.equal(dry.status, "preview");
+  assert.equal(dry.preview.selected, 2);
+  assert.deepEqual(state.changes, []);
+
+  const first = JSON.parse((await client.callTool({
+    name: "evaluate_due_analyses",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(first.status, "complete");
+  assert.equal(first.processed, 2);
+  assert.equal(first.results[0].result.status, "incomplete");
+  assert.equal(first.results[1].result.outcome, "calendar_month_resolution_unsupported");
+  assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+
+  const repeated = JSON.parse((await client.callTool({
+    name: "evaluate_due_analyses",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(repeated.status, "complete");
+  assert.equal(repeated.results[0].journal.idempotent, true);
+  assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+});
+
+test("evaluate_due_analyses continues after one evaluation failure", async () => {
+  const records = [
+    dueAnalysisRecord("EURUSD-fails", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),
+    dueAnalysisRecord("XAUUSD-continues", "OANDA:XAUUSD", "15", "2026-07-01T02:00:00.000Z"),
+  ];
+  const state = { symbol: "OANDA:USDJPY", resolution: "240" };
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "batch", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: state.symbol, resolution: state.resolution, studies: [] }],
+      }),
+      setSymbol: async (symbol) => ((state.symbol = symbol), { symbol, resolution: state.resolution, changed: true, bars: 10 }),
+      setResolution: async (resolution) => ((state.resolution = resolution), { symbol: state.symbol, resolution, changed: true, bars: 10 }),
+      getOhlcv: async () => {
+        if (state.symbol === "OANDA:EURUSD") throw new Error("EURUSD feed unavailable");
+        return { symbol: state.symbol, resolution: state.resolution, count: 3, bars: dueBars() };
+      },
+    },
+    journal: {
+      list: async () => ({ total: 2, returned: 2, analyses: records }),
+    },
+  }));
+  const result = JSON.parse((await client.callTool({
+    name: "evaluate_due_analyses",
+    arguments: { chart_index: 0, confirm: true },
+  })).content[0].text);
+  assert.equal(result.status, "partial");
+  assert.equal(result.processed, 2);
+  assert.equal(result.results[0].status, "failed");
+  assert.equal(result.results[1].status, "evaluated");
+  assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+});
+
+test("evaluate_due_analyses aborts remaining work when chart restoration fails", async () => {
+  const records = [
+    dueAnalysisRecord("EURUSD-restore", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),
+    dueAnalysisRecord("XAUUSD-unprocessed", "OANDA:XAUUSD", "15", "2026-07-01T02:00:00.000Z"),
+  ];
+  const state = { symbol: "OANDA:USDJPY", resolution: "240" };
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "batch", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: state.symbol, resolution: state.resolution, studies: [] }],
+      }),
+      setSymbol: async (symbol) => {
+        if (symbol === "OANDA:USDJPY") throw new Error("restore refused");
+        state.symbol = symbol;
+        return { symbol, resolution: state.resolution, changed: true, bars: 10 };
+      },
+      setResolution: async (resolution) => ((state.resolution = resolution), { symbol: state.symbol, resolution, changed: true, bars: 10 }),
+      getOhlcv: async () => ({ symbol: state.symbol, resolution: state.resolution, count: 3, bars: dueBars() }),
+    },
+    journal: {
+      list: async () => ({ total: 2, returned: 2, analyses: records }),
+    },
+  }));
+  const result = JSON.parse((await client.callTool({
+    name: "evaluate_due_analyses",
+    arguments: { chart_index: 0, confirm: true },
+  })).content[0].text);
+  assert.equal(result.status, "aborted");
+  assert.equal(result.processed, 1);
+  assert.equal(result.remaining, 1);
+  assert.equal(result.results[0].result.chartState.restored, false);
+});
+
+test("get_analysis_performance aggregates journal path metrics without chart access", async () => {
+  let chartRead = false;
+  const record = dueAnalysisRecord(
+    "EURUSD-performance",
+    "OANDA:EURUSD",
+    "60",
+    "2026-07-01T01:00:00.000Z",
+  );
+  record.latestOutcome = {
+    schema_version: "1.0",
+    event_id: "performance-outcome",
+    sequence: 2,
+    recorded_at: "2026-07-01T02:00:00.000Z",
+    kind: "outcome_evaluated",
+    analysis_id: record.definition.analysis_id,
+    definition_hash: record.definition.definition_hash,
+    payload: {
+      status: "complete",
+      outcome: "target_before_stop",
+      evaluatedAt: "2026-07-01T02:00:00.000Z",
+      evidenceTimeframe: "15",
+      evidenceThrough: "2026-07-01T00:45:00.000Z",
+      result: {
+        performance: {
+          methodologyVersion: "1.0",
+          structuralRiskPrice: 0.01,
+          grossRealizedR: 2,
+          excursion: { mfeR: 2.5, maeR: 0.4 },
+          timing: { analyzedToEntryMs: 60_000, entryToConfirmationMs: null, activationToTerminalMs: 120_000 },
+        },
+      },
+    },
+  };
+  const client = await connectedClient(makeDeps({
+    tv: { getChartContext: async () => ((chartRead = true), { charts: [] }) },
+    journal: { list: async () => ({ total: 1, returned: 1, analyses: [record] }) },
+  }));
+  const result = JSON.parse((await client.callTool({
+    name: "get_analysis_performance",
+    arguments: {
+      group_by: "symbol",
+      cost_assumptions: [{ symbol: "OANDA:EURUSD", total_price_per_unit: 0.001 }],
+    },
+  })).content[0].text);
+  assert.equal(result.groups[0].key, "OANDA:EURUSD");
+  assert.equal(result.groups[0].binary.winRate, 1);
+  assert.ok(Math.abs(result.groups[0].rMultiples.meanNetRealizedR - 1.9) < 1e-9);
+  assert.equal(chartRead, false);
+});
+
 test("get_analysis_overlay_status reports missing and blocks unaudited placed source", async () => {
   const pineId = "USER;8f868f366873411aa46bd30872711544";
   const baseScript = {
@@ -2402,6 +2701,135 @@ test("list_alerts returns the user's alerts", async () => {
   assert.equal(alert.active, false);
 });
 
+test("create_analysis_alerts previews, creates, verifies, and reuses owned alerts", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const now = Date.now();
+  const analysisId = "USDJPY-alert-monitor";
+  const values = {
+    in_0: analysisId,
+    in_1: now - 60_000,
+    in_2: "bullish",
+    in_3: 162.1,
+    in_4: 162.2,
+    in_5: 162.3,
+    in_6: 161.9,
+    in_7: 161.8,
+    in_8: 162.6,
+    in_9: 0,
+    in_10: 0,
+    in_11: 0.65,
+    in_12: now + 60 * 60_000,
+    in_13: "",
+  };
+  const alerts = [];
+  let creates = 0;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+      }),
+      listPineScripts: async () => [{
+        pineId,
+        name: ANALYSIS_OVERLAY_NAME,
+        kind: "study",
+        version: "2.0",
+        usedBy: [{ chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }],
+      }],
+      getPineSource: async () => ({
+        pineId,
+        name: ANALYSIS_OVERLAY_NAME,
+        kind: "study",
+        version: "2.0",
+        updated: null,
+        sourceLength: ANALYSIS_OVERLAY_SOURCE.length,
+        source: ANALYSIS_OVERLAY_SOURCE,
+      }),
+      getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+      getOhlcv: async () => ({
+        symbol: "OANDA:USDJPY",
+        resolution: "240",
+        count: 1,
+        bars: [{ time: now / 1000, timeIso: new Date(now).toISOString(), open: 162.2, high: 162.25, low: 162.15, close: 162.2, volume: null }],
+      }),
+      listAlerts: async () => alerts,
+      createPriceAlert: async (options) => {
+        creates += 1;
+        const alert = {
+          id: 100 + creates,
+          name: options.name,
+          symbol: options.symbol,
+          resolution: options.resolution,
+          condition: {
+            type: options.operator,
+            frequency: "on_first_fire",
+            series: [{ type: "barset" }, { type: "value", value: options.level }],
+          },
+          message: options.message,
+          active: true,
+          type: "price",
+          createTime: new Date().toISOString(),
+          lastFireTime: null,
+          expiration: options.expiration,
+          lastError: null,
+        };
+        alerts.push(alert);
+        return {
+          requestId: creates,
+          alertId: alert.id,
+          name: options.name,
+          symbol: options.symbol,
+          resolution: options.resolution,
+          operator: options.operator,
+          level: options.level,
+          expiration: options.expiration,
+          verified: true,
+        };
+      },
+    },
+  }));
+  const args = {
+    pine_id: pineId,
+    expected_symbol: "OANDA:USDJPY",
+    expected_timeframe: "4H",
+    analysis_id: analysisId,
+  };
+  const dry = JSON.parse((await client.callTool({ name: "create_analysis_alerts", arguments: args })).content[0].text);
+  assert.equal(dry.status, "preview");
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.preview.create.length, 3);
+  assert.equal(creates, 0);
+
+  const confirmed = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(confirmed.status, "complete");
+  assert.equal(confirmed.created.length, 3);
+  assert.equal(confirmed.verified.length, 3);
+  assert.equal(creates, 3);
+
+  const repeated = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(repeated.status, "complete");
+  assert.equal(repeated.changed, false);
+  assert.equal(creates, 3);
+
+  const confirmationIndex = alerts.findIndex((alert) => alert.name.endsWith(":confirmation"));
+  alerts.splice(confirmationIndex, 1);
+  const ambiguous = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(ambiguous.status, "blocked");
+  assert.equal(ambiguous.reason, "ambiguous_missing_confirmation_alert");
+  assert.equal(creates, 3);
+});
+
 test("get_watchlist returns the user's lists", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "get_watchlist", arguments: {} });
@@ -2453,8 +2881,49 @@ test("get_market_snapshot joins sources and exposes timestamp/data-quality limit
   assert.equal(typeof parsed.max_receipt_skew_ms, "number");
 });
 
+test("get_execution_snapshot exposes verified liveness without account or chart access", async () => {
+  let calls = 0;
+  const client = await connectedClient(makeDeps({
+    scanner: {
+      getQuotes: async (symbols) => {
+        calls += 1;
+        const offset = calls > 1 ? 0.0001 : 0;
+        return {
+          totalCount: symbols.length,
+          returned: symbols.length,
+          rows: symbols.map((symbol) => ({
+            symbol,
+            values: {
+              bid: 1.1 + offset,
+              ask: 1.1002 + offset,
+              update_mode: "streaming",
+              pricescale: 100000,
+              minmov: 1,
+              type: "forex",
+            },
+          })),
+        };
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "get_execution_snapshot",
+    arguments: {
+      symbols: ["OANDA:EURUSD"],
+      wait_for_update_ms: 100,
+      sample_interval_ms: 100,
+      max_quote_age_ms: 500,
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "ready");
+  assert.equal(parsed.quotes[0].market_state, "active");
+  assert.equal(parsed.quotes[0].freshness.status, "verified_live_update");
+});
+
 test("get_trade_decision_context binds chart, market, macro, positioning, and execution evidence", async () => {
   const now = Date.now();
+  let quoteCalls = 0;
   const client = await connectedClient(makeDeps({
     tv: {
       getChartContext: async () => ({
@@ -2482,11 +2951,22 @@ test("get_trade_decision_context binds chart, market, macro, positioning, and ex
       }),
     },
     scanner: {
-      getQuotes: async (symbols) => ({
-        totalCount: symbols.length,
-        returned: symbols.length,
-        rows: symbols.map((symbol) => ({ symbol, values: { close: 1.1015, bid: 1.1014, ask: 1.1016 } })),
-      }),
+      getQuotes: async (symbols) => {
+        quoteCalls += 1;
+        const offset = quoteCalls >= 3 ? 0.0001 : 0;
+        return {
+          totalCount: symbols.length,
+          returned: symbols.length,
+          rows: symbols.map((symbol) => ({ symbol, values: {
+            close: 1.1015,
+            bid: 1.1014 + offset,
+            ask: 1.1016 + offset,
+            update_mode: "streaming",
+            pricescale: 100000,
+            minmov: 1,
+          } })),
+        };
+      },
     },
   }));
   const result = await client.callTool({
@@ -2498,6 +2978,8 @@ test("get_trade_decision_context binds chart, market, macro, positioning, and ex
       auxiliary_symbols: ["TVC:DXY"],
       timeframes: ["15", "60", "240", "1D"],
       countries: ["US", "EU"],
+      execution_wait_for_update_ms: 100,
+      execution_sample_interval_ms: 100,
     },
   });
   assert.notEqual(result.isError, true);
@@ -2505,7 +2987,7 @@ test("get_trade_decision_context binds chart, market, macro, positioning, and ex
   assert.equal(parsed.schema_version, "1.0");
   assert.match(parsed.snapshot_id, /^[0-9a-f-]{36}$/i);
   assert.equal(parsed.status, "partial", "scanner timestamps and delayed macro evidence remain explicit");
-  assert.equal(parsed.decision_status, "wait", "bid/ask without a source timestamp is not execution-ready");
+  assert.equal(parsed.decision_status, "trade_ready", "a post-request streaming update clears the execution gate");
   assert.equal(parsed.directional_recommendation, null);
   assert.equal(parsed.evidence.market_snapshot.data.snapshot_id, parsed.snapshot_id);
   assert.equal(parsed.evidence.chart.data.closed_bars.length, 1);
@@ -2513,8 +2995,10 @@ test("get_trade_decision_context binds chart, market, macro, positioning, and ex
   assert.equal(parsed.evidence.key_levels.data.levels[0].price, 1.105);
   assert.equal(parsed.evidence.positioning.data.cot.symbol, "OANDA:EURUSD");
   assert.equal(parsed.evidence.real_yield.data.value, 2.01);
-  assert.equal(parsed.evidence.execution.status, "partial");
-  assert.equal(parsed.evidence.execution.data.price_basis, "bid_ask");
+  assert.equal(parsed.evidence.execution.status, "available");
+  assert.equal(parsed.evidence.execution.source, "tradingview_scanner");
+  assert.equal(parsed.evidence.execution.data.snapshot_id, parsed.snapshot_id);
+  assert.equal(parsed.evidence.execution.data.quotes[0].freshness.status, "verified_live_update");
 });
 
 test("get_trade_decision_context blocks a chart binding mismatch without reading chart evidence", async () => {
@@ -3017,7 +3501,9 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_ohlcv", arguments: { count: 99999 } },
     { name: "get_ohlcv", arguments: { count: "50; rm -rf" } },
     { name: "set_symbol", arguments: {} },
+    { name: "set_symbol", arguments: { symbol: "OANDA:EURUSD", chart_index: -1 } },
     { name: "set_timeframe", arguments: { resolution: 42 } },
+    { name: "set_timeframe", arguments: { resolution: "15", chart_index: -1 } },
     { name: "get_chart_screenshot", arguments: { format: "gif" } },
     { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
     { name: "get_indicator_values", arguments: { count: 501 } },
@@ -3076,19 +3562,51 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
   assert.equal(handlerRan, false, "invalid input must never reach a tool handler");
 });
 
-test("set_symbol and set_timeframe report the resulting state", async () => {
-  const client = await connectedClient(makeDeps());
+test("set_symbol and set_timeframe target one explicit pane and report the resulting state", async () => {
+  const charts = [
+    { index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] },
+    { index: 1, symbol: "OANDA:XAUUSD", resolution: "60", studies: [] },
+  ];
+  const calls = [];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "two",
+        activeChartIndex: 0,
+        chartsCount: charts.length,
+        charts,
+      }),
+      setSymbol: async (symbol, chartIndex) => {
+        calls.push(["symbol", symbol, chartIndex]);
+        charts[chartIndex].symbol = symbol;
+        return { symbol, resolution: charts[chartIndex].resolution, changed: true, bars: 100 };
+      },
+      setResolution: async (resolution, chartIndex) => {
+        calls.push(["timeframe", resolution, chartIndex]);
+        charts[chartIndex].resolution = resolution;
+        return { symbol: charts[chartIndex].symbol, resolution, changed: true, bars: 100 };
+      },
+    },
+  }));
   const res = await client.callTool({
     name: "set_symbol",
-    arguments: { symbol: "NASDAQ:AAPL" },
+    arguments: { symbol: "NASDAQ:AAPL", chart_index: 1 },
   });
-  assert.equal(JSON.parse(res.content[0].text).symbol, "NASDAQ:AAPL");
+  const symbolResult = JSON.parse(res.content[0].text);
+  assert.equal(symbolResult.symbol, "NASDAQ:AAPL");
+  assert.equal(symbolResult.transaction.original.symbol, "OANDA:XAUUSD");
 
   const res2 = await client.callTool({
     name: "set_timeframe",
-    arguments: { resolution: "240" },
+    arguments: { resolution: "15", chart_index: 1 },
   });
-  assert.equal(JSON.parse(res2.content[0].text).resolution, "240");
+  assert.equal(JSON.parse(res2.content[0].text).resolution, "15");
+  assert.deepEqual(calls, [
+    ["symbol", "NASDAQ:AAPL", 1],
+    ["timeframe", "15", 1],
+  ]);
+  assert.deepEqual([charts[0].symbol, charts[0].resolution], ["OANDA:USDJPY", "240"]);
+  assert.deepEqual([charts[1].symbol, charts[1].resolution], ["NASDAQ:AAPL", "15"]);
 });
 
 test("dependency failures come back as isError results, not crashes", async () => {

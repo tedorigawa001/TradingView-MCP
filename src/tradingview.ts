@@ -19,6 +19,28 @@ export interface ChartContext {
   charts: ChartInfo[];
 }
 
+export interface ExecutionQuote {
+  chartIndex: number;
+  symbol: string;
+  bid: number | null;
+  ask: number | null;
+  lastPrice: number | null;
+  lpTime: number | null;
+  updateMode: string | null;
+  currentSession: string | null;
+  hubRealtimeLoaded: boolean | null;
+  tradeLoaded: boolean | null;
+  pricescale: number | null;
+  minmov: number | null;
+  minmove2: number | null;
+  fractional: boolean | null;
+  type: string | null;
+  currency: string | null;
+  exchange: string | null;
+  timezone: string | null;
+  session: string | null;
+}
+
 export interface OhlcvBar {
   time: number;
   timeIso: string;
@@ -165,6 +187,19 @@ export interface Alert {
   lastFireTime: string | number | null;
   expiration: string | number | null;
   lastError: string | null;
+}
+
+export interface CreatePriceAlertOptions {
+  symbol: string;
+  resolution: string;
+  operator: "cross_up" | "cross_down";
+  level: number;
+  expiration: string;
+  name: string;
+  message: string;
+  mobilePush: boolean;
+  popup: boolean;
+  playSound: boolean;
 }
 
 export interface WatchlistSection {
@@ -447,6 +482,47 @@ export class TradingView {
         let activeChartIndex = null;
         try { activeChartIndex = api.activeChartIndex(); } catch (e) {}
         return { layoutName, activeChartIndex, chartsCount: count, charts };
+      })()
+    `);
+  }
+
+  /** Live quote state already attached to each open chart's main series. */
+  getExecutionQuotes(): Promise<ExecutionQuote[]> {
+    return this.cdp.evaluate<ExecutionQuote[]>(`
+      (() => {
+        const api = window.TradingViewApi;
+        if (!api) throw new Error("TradingViewApi not found on page");
+        const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+        const text = (value) => typeof value === "string" && value.length > 0 ? value : null;
+        const result = [];
+        for (let i = 0; i < api.chartsCount(); i++) {
+          const chart = api.chart(i);
+          const series = chart.chartModel().mainSeries();
+          const quote = series.quotes?.() || {};
+          const info = series.symbolInfo?.() || {};
+          result.push({
+            chartIndex: i,
+            symbol: chart.symbol(),
+            bid: number(quote.bid),
+            ask: number(quote.ask),
+            lastPrice: number(quote.last_price),
+            lpTime: number(quote.lp_time),
+            updateMode: text(quote.update_mode),
+            currentSession: text(quote.current_session),
+            hubRealtimeLoaded: typeof quote.hub_rt_loaded === "boolean" ? quote.hub_rt_loaded : null,
+            tradeLoaded: typeof quote.trade_loaded === "boolean" ? quote.trade_loaded : null,
+            pricescale: number(quote.pricescale ?? info.pricescale),
+            minmov: number(quote.minmov ?? info.minmov),
+            minmove2: number(quote.minmove2 ?? info.minmove2),
+            fractional: typeof (quote.fractional ?? info.fractional) === "boolean" ? (quote.fractional ?? info.fractional) : null,
+            type: text(quote.type ?? info.type),
+            currency: text(quote.currency_code ?? info.currency_code),
+            exchange: text(quote.exchange ?? info.exchange),
+            timezone: text(quote.timezone ?? info.timezone),
+            session: text(info.session),
+          });
+        }
+        return result;
       })()
     `);
   }
@@ -1146,7 +1222,7 @@ export class TradingView {
 
   /**
    * The user's price alerts, read-only, via the alerts REST API with the
-   * app's session. Creating or modifying alerts is intentionally unsupported.
+   * app's session. This method never changes an alert.
    */
   listAlerts(): Promise<Alert[]> {
     return this.cdp.evaluate<Alert[]>(`
@@ -1181,6 +1257,140 @@ export class TradingView {
           expiration: a.expiration ?? null,
           lastError: a.last_error ?? null,
         }));
+      })()
+    `);
+  }
+
+  /** Create one bounded price alert and verify it through list_alerts. */
+  createPriceAlert(options: CreatePriceAlertOptions): Promise<{
+    requestId: number | string | null;
+    alertId: number | string;
+    name: string;
+    symbol: string;
+    resolution: string;
+    operator: string;
+    level: number;
+    expiration: string;
+    verified: true;
+  }> {
+    if (!/^[\w!.:&-]{1,48}$/.test(options.symbol)) throw new Error("symbol has an invalid format");
+    if (!/^[A-Za-z0-9]{1,8}$/.test(options.resolution)) throw new Error("resolution has an invalid format");
+    if (options.operator !== "cross_up" && options.operator !== "cross_down") throw new Error("operator is unsupported");
+    if (!Number.isFinite(options.level) || options.level <= 0) throw new Error("level must be a positive finite number");
+    const expirationMs = Date.parse(options.expiration);
+    if (!Number.isFinite(expirationMs) || expirationMs <= Date.now()) throw new Error("expiration must be a future ISO timestamp");
+    if (!/^BUSHIDO-MCP:[0-9a-f]{16}:(?:confirmation|invalidation|target_1)$/.test(options.name)) {
+      throw new Error("name must be a Bushido MCP ownership label");
+    }
+    if (options.message.length < 1 || options.message.length > 300) throw new Error("message must contain 1 to 300 characters");
+
+    const serialized = JSON.stringify({
+      symbol: options.symbol,
+      resolution: options.resolution,
+      operator: options.operator,
+      level: options.level,
+      expiration: new Date(expirationMs).toISOString(),
+      name: options.name,
+      message: options.message,
+      mobilePush: options.mobilePush,
+      popup: options.popup,
+      playSound: options.playSound,
+    });
+    return this.cdp.evaluate(`
+      (async () => {
+        const requested = ${serialized};
+        const user = globalThis.user;
+        if (!user || typeof user.username !== "string" || user.username.length === 0) {
+          throw new Error("TradingView alert creation requires a logged-in user");
+        }
+        if ((typeof globalThis.BUILD_TIME !== "string" && typeof globalThis.BUILD_TIME !== "number")
+            || String(globalThis.BUILD_TIME).length === 0) {
+          throw new Error("TradingView BUILD_TIME is unavailable");
+        }
+        const endpoint = new URL("https://pricealerts.tradingview.com/create_alert");
+        endpoint.searchParams.set("log_username", user.username);
+        endpoint.searchParams.set("build_time", String(globalThis.BUILD_TIME));
+        const condition = {
+          type: requested.operator,
+          frequency: "on_first_fire",
+          series: [{ type: "barset" }, { type: "value", value: requested.level }],
+          resolution: requested.resolution,
+          cross_interval: true,
+        };
+        const payload = {
+          conditions: [condition],
+          symbol: requested.symbol,
+          resolution: requested.resolution,
+          message: requested.message,
+          sound_file: requested.playSound ? "alert/calling" : "",
+          sound_duration: requested.playSound ? 5 : 0,
+          popup: requested.popup,
+          auto_deactivate: false,
+          email: false,
+          sms_over_email: false,
+          mobile_push: requested.mobilePush,
+          web_hook: null,
+          name: requested.name,
+          expiration: requested.expiration,
+        };
+        const response = await fetch(endpoint.toString(), {
+          method: "POST",
+          credentials: "include",
+          body: JSON.stringify({ payload }),
+        });
+        if (!response.ok) throw new Error("alert creation API returned HTTP " + response.status);
+        const created = await response.json();
+        if (!created || typeof created !== "object" || !("id" in created) || !("s" in created)) {
+          throw new Error("alert creation API returned an invalid response");
+        }
+        if (created.err) {
+          const code = created.err && typeof created.err.code === "string" ? created.err.code : "unknown";
+          throw new Error("alert creation API rejected the request: " + code);
+        }
+        if (created.s !== "ok") throw new Error("alert creation API returned a non-ok status");
+        const parseSymbol = (value) => {
+          if (typeof value !== "string") return "";
+          if (value.startsWith("={")) {
+            try { return JSON.parse(value.slice(1)).symbol ?? value; } catch (_) { return value; }
+          }
+          return value;
+        };
+        const deadline = Date.now() + 5000;
+        do {
+          const listResponse = await fetch("https://pricealerts.tradingview.com/list_alerts", {
+            credentials: "include",
+          });
+          if (!listResponse.ok) throw new Error("alert readback API returned HTTP " + listResponse.status);
+          const listed = await listResponse.json();
+          const match = (Array.isArray(listed.r) ? listed.r : []).find((alert) => {
+            const c = alert && typeof alert.condition === "object" ? alert.condition : null;
+            const value = Array.isArray(c && c.series)
+              ? c.series.find((series) => series && series.type === "value")
+              : null;
+            return alert.name === requested.name
+              && alert.active === true
+              && parseSymbol(alert.symbol).toUpperCase() === requested.symbol.toUpperCase()
+              && String(alert.resolution) === requested.resolution
+              && c && c.type === requested.operator
+              && value && value.value === requested.level
+              && Math.abs(Date.parse(alert.expiration) - Date.parse(requested.expiration)) <= 1000;
+          });
+          if (match) {
+            return {
+              requestId: created.id ?? null,
+              alertId: match.alert_id,
+              name: match.name,
+              symbol: parseSymbol(match.symbol),
+              resolution: String(match.resolution),
+              operator: match.condition.type,
+              level: requested.level,
+              expiration: match.expiration,
+              verified: true,
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        } while (Date.now() < deadline);
+        throw new Error("alert creation succeeded but readback verification timed out");
       })()
     `);
   }
@@ -1754,11 +1964,11 @@ export class TradingView {
   }
 
   /**
-   * Change the active chart's symbol (e.g. "OANDA:EURUSD", "BTCUSD").
+   * Change one chart's symbol (e.g. "OANDA:EURUSD", "BTCUSD").
    * Rejects if the change does not take effect (e.g. invalid symbol) rather
    * than silently returning the old state.
    */
-  setSymbol(symbol: string): Promise<{
+  setSymbol(symbol: string, chartIndex?: number): Promise<{
     symbol: string;
     resolution: string;
     changed: boolean;
@@ -1768,10 +1978,13 @@ export class TradingView {
     if (typeof symbol !== "string" || symbol.trim() === "") {
       throw new Error("symbol must be a non-empty string");
     }
+    assertChartIndex(chartIndex);
+    const chartExpr =
+      chartIndex === undefined ? "window.TradingViewApi.activeChart()" : `window.TradingViewApi.chart(${chartIndex})`;
     return this.cdp.evaluate(`
       new Promise((resolve, reject) => {
         const requested = ${JSON.stringify(symbol)};
-        const chart = window.TradingViewApi.activeChart();
+        const chart = ${chartExpr};
         const before = chart.symbol();
         const state = () => ({ symbol: chart.symbol(), resolution: chart.resolution() });
         // "EURUSD" resolves to e.g. "OANDA:EURUSD", so match with or without prefix

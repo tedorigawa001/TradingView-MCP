@@ -6,6 +6,7 @@ import type { TreasuryRealYieldClient } from "./realYield.js";
 import type { TradingView } from "./tradingview.js";
 import { normalizeResolution } from "./analysisOverlay.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
+import { buildExecutionSnapshot } from "./executionSnapshot.js";
 
 export type TradeDecisionContextOptions = {
   symbol: string;
@@ -26,6 +27,9 @@ export type TradeDecisionContextOptions = {
   eventBlackoutBeforeMinutes: number;
   eventBlackoutAfterMinutes: number;
   minimumEventImportance: "medium" | "high";
+  executionWaitForUpdateMs: number;
+  executionSampleIntervalMs: number;
+  executionMaxQuoteAgeMs: number;
 };
 
 type ContextIssue = {
@@ -70,7 +74,7 @@ function topLevelStatus(issues: ContextIssue[]): "complete" | "partial" | "block
 
 export async function buildTradeDecisionContext(
   dependencies: {
-    tv: Pick<TradingView, "getChartContext" | "getOhlcv" | "getKeyLevels">;
+    tv: Pick<TradingView, "getChartContext" | "getExecutionQuotes" | "getOhlcv" | "getKeyLevels">;
     scanner: Pick<Scanner, "getQuotes" | "getMtfOverview">;
     calendar: Pick<EconomicCalendar, "getEvents">;
     cot: Pick<CotClient, "getLatest">;
@@ -172,6 +176,26 @@ export async function buildTradeDecisionContext(
     positioningPromise,
     realYieldPromise,
   ]);
+  let executionSnapshot: Awaited<ReturnType<typeof buildExecutionSnapshot>> | null = null;
+  try {
+    executionSnapshot = await buildExecutionSnapshot(
+      { scanner: dependencies.scanner, tv: dependencies.tv },
+      {
+        symbols: [options.symbol],
+        waitForUpdateMs: options.executionWaitForUpdateMs,
+        sampleIntervalMs: options.executionSampleIntervalMs,
+        maxQuoteAgeMs: options.executionMaxQuoteAgeMs,
+        snapshotId: market.snapshot_id,
+      },
+    );
+  } catch {
+    issues.push({
+      code: "execution_snapshot_unavailable",
+      severity: "warning",
+      component: "execution",
+      message: "Execution snapshot retrieval failed.",
+    });
+  }
   const completedAt = new Date().toISOString();
 
   for (const issue of market.quality_issues) {
@@ -307,21 +331,21 @@ export async function buildTradeDecisionContext(
     });
   }
 
-  const normalizedQuote = market.normalized_quotes.find((quote) => matchesSymbol(quote.symbol, options.symbol));
-  const executionAvailable = normalizedQuote?.spread_status === "derived_from_bid_ask";
-  if (!executionAvailable) {
+  const executionQuote = executionSnapshot?.quotes.find((quote) => matchesSymbol(quote.symbol, options.symbol));
+  const executionReady = executionSnapshot?.status === "ready" && executionQuote?.status === "ready";
+  if (executionSnapshot?.status === "blocked") {
     issues.push({
-      code: "execution_quote_unavailable",
-      severity: "warning",
+      code: "execution_quote_invalid",
+      severity: "error",
       component: "execution",
-      message: "A validated bid/ask pair is unavailable; chart close is not substituted for execution evidence.",
+      message: "Execution evidence failed an integrity check.",
     });
-  } else {
+  } else if (!executionReady) {
     issues.push({
-      code: "execution_source_timestamp_unavailable",
+      code: "execution_not_ready",
       severity: "warning",
       component: "execution",
-      message: "Bid/ask is available, but its market-source timestamp is unavailable; execution readiness remains unverified.",
+      message: "A streaming post-request bid/ask update was not verified; chart close is not substituted for execution evidence.",
     });
   }
 
@@ -346,14 +370,9 @@ export async function buildTradeDecisionContext(
   const hasErrors = issues.some((issue) => issue.severity === "error");
   const decisionStatus = hasErrors
     ? "blocked"
-    : activeEvents.length > 0 || !executionAvailable || market.max_source_skew_ms === null
+    : activeEvents.length > 0 || !executionReady
       ? "wait"
       : "trade_ready";
-  const marketSourceAt = market.sources
-    .map((source) => source.received_at)
-    .sort()
-    .at(-1) ?? market.received_at;
-
   return {
     schema_version: "1.0",
     snapshot_id: market.snapshot_id,
@@ -377,7 +396,15 @@ export async function buildTradeDecisionContext(
       key_levels: evidence(false, keyLevelsData === null ? "unavailable" : "available", "tradingview_chart_indicators", completedAt, chartSourceAt, { status: "not_assessed" }, keyLevelsData),
       positioning: evidence(options.requirePositioning, positioningData === null ? "unavailable" : "partial", "cftc_cot", completedAt, positioningResult?.status === "fulfilled" ? positioningResult.value.report_date : null, positioningFreshness, positioningData),
       real_yield: evidence(options.requireRealYield, realYieldData === null ? "unavailable" : "partial", "us_treasury", realYieldResult?.status === "fulfilled" ? realYieldResult.value.observed_at ?? completedAt : completedAt, realYieldResult?.status === "fulfilled" ? realYieldResult.value.observation_date : null, realYieldFreshness, realYieldData),
-      execution: evidence(true, executionAvailable ? "partial" : "unavailable", "tradingview_scanner_bid_ask", marketSourceAt, null, { status: "source_timestamp_unavailable" }, executionAvailable ? { ...normalizedQuote, price_basis: "bid_ask" } : null),
+      execution: evidence(
+        true,
+        executionReady ? "available" : executionSnapshot?.status === "blocked" ? "blocked" : "partial",
+        executionQuote?.source ?? "execution_snapshot",
+        executionQuote?.observed_at ?? executionSnapshot?.completed_at ?? completedAt,
+        executionQuote?.source_at ?? null,
+        executionQuote?.freshness ?? { status: "unavailable" },
+        executionSnapshot,
+      ),
     },
     event_gate: {
       status: activeEvents.length > 0 ? "blackout" : "clear",
@@ -388,7 +415,7 @@ export async function buildTradeDecisionContext(
     },
     limitations: [
       "trade_ready describes evidence completeness and configured gates, not a directional recommendation.",
-      "Scanner receipt times are not exchange timestamps and do not prove quote freshness.",
+      "Open-chart execution evidence uses quote lp_time; scanner fallback receipt times are not exchange timestamps and require a post-request bid/ask change.",
       "COT and real yield are slow macro context and must not be treated as intraday triggers.",
       "No order, alert, Pine script, chart setting, or journal entry is created or changed.",
     ],

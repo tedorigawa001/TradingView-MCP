@@ -13,9 +13,15 @@ import { cotFreshness, type CotClient } from "./cot.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
 import { computeRoundTripCost } from "./costModel.js";
+import { computePositionSize } from "./positionSize.js";
+import { buildAnalysisAlertPlans, matchExistingAnalysisAlerts } from "./analysisAlerts.js";
 import { validateTradePlan } from "./tradePlan.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
+import { buildExecutionSnapshot } from "./executionSnapshot.js";
+import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
+import { buildAnalysisPerformance } from "./analysisPerformance.js";
+import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -35,7 +41,7 @@ import {
   resolveAnalysisChart,
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
-import { evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
+import { computeAnalysisPathMetrics, evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
 import {
   AnalysisDefinitionConflictError,
   analysisDefinitionHash,
@@ -49,6 +55,7 @@ export interface ServerDeps {
   tv: Pick<
     TradingView,
     | "getChartContext"
+    | "getExecutionQuotes"
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
@@ -64,6 +71,7 @@ export interface ServerDeps {
     | "getStrategyReport"
     | "runBacktest"
     | "listAlerts"
+    | "createPriceAlert"
     | "getWatchlists"
     | "getChartRect"
     | "getKeyLevels"
@@ -74,7 +82,7 @@ export interface ServerDeps {
   calendar: Pick<EconomicCalendar, "getEvents">;
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
-  journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "list" | "calibration">;
+  journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -1553,8 +1561,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           history.bars,
           history.resolution,
         );
+        const performance = computeAnalysisPathMetrics(analysis, history.bars, result);
         const response = {
           ...result,
+          performance,
           trusted: true,
           pineId: pine_id,
           pineVersion: usage.version,
@@ -1640,6 +1650,278 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "evaluate_due_analyses",
+    {
+      description:
+        "Preview or evaluate due analyses directly from the local analysis journal. " +
+        "Without confirm=true it only lists candidates and estimated chart changes. With " +
+        "confirmation it temporarily changes one selected chart's symbol and evidence " +
+        "timeframe for each analysis, evaluates closed OHLCV, records the result, and " +
+        "restores the original chart after every item. Individual failures do not stop the " +
+        "batch; a chart restoration failure stops all remaining work.",
+      inputSchema: {
+        chart_index: z.number().int().min(0).optional(),
+        evaluation_timeframe: z
+          .string()
+          .max(8)
+          .regex(/^(?:[1-9]\d*|[1-9]\d*[SHDWM]|[SDWM])$/i)
+          .optional()
+          .describe("Optional evidence timeframe for every candidate; defaults to each analysis timeframe"),
+        count: z.number().int().min(1).max(5000).optional()
+          .describe("Loaded OHLCV bars inspected per analysis. Default: 1000"),
+        load_more_bars: z.number().int().min(0).max(5000).optional()
+          .describe("Explicit history load before evaluation. Default: 0 (no persistent history load)"),
+        limit: z.number().int().min(1).max(50).optional()
+          .describe("Maximum analyses to evaluate. Default: 20"),
+        include_active: z.boolean().optional()
+          .describe("Include active analyses with no prior evaluation. Default: false"),
+        confirm: z.boolean().optional()
+          .describe("Must be true to change the chart and append outcomes. Default: false"),
+      },
+    },
+    async ({
+      chart_index,
+      evaluation_timeframe,
+      count,
+      load_more_bars,
+      limit,
+      include_active,
+      confirm,
+    }) => chartOperations.run(async () => {
+      try {
+        const initialContext = await tv.getChartContext();
+        const selectedIndex = chart_index ?? initialContext.activeChartIndex;
+        if (selectedIndex === null) {
+          return jsonResult({
+            status: "blocked",
+            reason: "evaluation_chart_not_selected",
+            trusted: false,
+            remediation: "provide chart_index explicitly",
+          });
+        }
+        const originalChart = initialContext.charts.find((chart) => chart.index === selectedIndex);
+        if (!originalChart) {
+          return jsonResult({
+            status: "blocked",
+            reason: "evaluation_chart_not_found",
+            trusted: false,
+            chartIndex: selectedIndex,
+          });
+        }
+        const journalView = await journal.list({ limit: 500 });
+        const selection = selectDueAnalyses(
+          journalView.analyses as JournalAnalysisRecord[],
+          { includeActive: include_active ?? false, limit: limit ?? 20 },
+        );
+        const requestedBars = count ?? 1000;
+        const historyLoad = load_more_bars ?? 0;
+        const previewItems = selection.candidates.map((candidate) => {
+          const evidenceTimeframe = normalizeResolution(
+            evaluation_timeframe ?? candidate.definition.timeframe,
+          );
+          return {
+            analysisId: candidate.analysisId,
+            reason: candidate.reason,
+            symbol: candidate.definition.symbol,
+            analysisTimeframe: candidate.definition.timeframe,
+            evaluationTimeframe: evidenceTimeframe,
+            expiresAt: candidate.definition.expiresAt,
+            latestOutcome: candidate.latestOutcome === null ? null : {
+              status: candidate.latestOutcome.status,
+              outcome: candidate.latestOutcome.outcome,
+              evidenceThrough: candidate.latestOutcome.evidenceThrough,
+            },
+            estimatedChanges: {
+              symbol: originalChart.symbol.toUpperCase() !== candidate.definition.symbol.toUpperCase(),
+              timeframe: normalizeResolution(originalChart.resolution) !== evidenceTimeframe,
+              persistentHistoryLoad: historyLoad > 0,
+            },
+          };
+        });
+        const preview = {
+          chartIndex: selectedIndex,
+          originalChart: { symbol: originalChart.symbol, timeframe: originalChart.resolution },
+          requestedBars,
+          loadMoreBars: historyLoad,
+          includeActive: include_active ?? false,
+          journalPopulation: journalView.total,
+          journalScanned: journalView.returned,
+          journalScanTruncated: journalView.total > journalView.returned,
+          eligible: selection.eligible,
+          selected: previewItems.length,
+          truncated: selection.truncated,
+          candidates: previewItems,
+          skipped: selection.skipped,
+        };
+        if (confirm !== true) {
+          return jsonResult({
+            status: "preview",
+            dryRun: true,
+            changed: false,
+            confirmRequired: previewItems.length > 0,
+            preview,
+          });
+        }
+
+        const results: Array<Record<string, unknown>> = [];
+        let aborted = false;
+
+        for (const candidate of selection.candidates) {
+          const evidenceTimeframe = normalizeResolution(
+            evaluation_timeframe ?? candidate.definition.timeframe,
+          );
+          await assertChartState(tv, selectedIndex, {
+            symbol: originalChart.symbol,
+            resolution: originalChart.resolution,
+          });
+          const transaction = await withTemporaryChartState(
+            tv,
+            selectedIndex,
+            { symbol: candidate.definition.symbol, resolution: evidenceTimeframe },
+            async () => {
+              const operationChanges: Array<Record<string, unknown>> = [];
+              let historyLoadResult: unknown = null;
+            if (historyLoad > 0) {
+                historyLoadResult = await tv.loadMoreHistory({ count: historyLoad, chartIndex: selectedIndex });
+                operationChanges.push({ kind: "history_load", result: historyLoadResult });
+            }
+              const history = await tv.getOhlcv(requestedBars, selectedIndex);
+            if (history.symbol.toUpperCase() !== candidate.definition.symbol.toUpperCase()) {
+              throw new Error(`OHLCV symbol ${history.symbol} does not match ${candidate.definition.symbol}`);
+            }
+            if (normalizeResolution(history.resolution) !== evidenceTimeframe) {
+              throw new Error(`OHLCV timeframe ${history.resolution} does not match ${evidenceTimeframe}`);
+            }
+            if (history.bars.length === 0) throw new Error("no OHLCV bars were returned");
+              const evaluation = evaluateAnalysisOverlayOutcome(
+              candidate.definition,
+              history.bars,
+              history.resolution,
+            );
+              return { history, evaluation, operationChanges };
+            },
+          );
+          const operationError = transaction.operationError === null
+            ? null
+            : redactSecrets(transaction.operationError instanceof Error
+              ? transaction.operationError.message
+              : String(transaction.operationError));
+          const restoreError = transaction.restoreError === null
+            ? null
+            : redactSecrets(transaction.restoreError instanceof Error
+              ? transaction.restoreError.message
+              : String(transaction.restoreError));
+          const history = transaction.value?.history ?? null;
+          const evaluation = transaction.value?.evaluation ?? null;
+          const changes: Array<Record<string, unknown>> = [
+            ...(transaction.change?.operations ?? []),
+            ...(transaction.value?.operationChanges ?? []),
+          ];
+
+          if (operationError !== null || evaluation === null || history === null) {
+            results.push({
+              analysisId: candidate.analysisId,
+              status: "failed",
+              reason: "evaluation_failed",
+              error: operationError ?? "evaluation did not produce a result",
+              changes,
+              chartRestored: restoreError === null,
+              restoreError,
+            });
+          } else {
+            const performance = computeAnalysisPathMetrics(
+              candidate.definition,
+              history.bars,
+              evaluation,
+            );
+            const response = {
+              ...evaluation,
+              performance,
+              trusted: true,
+              symbol: candidate.definition.symbol,
+              analysisTimeframe: candidate.definition.timeframe,
+              evaluationTimeframe: evidenceTimeframe,
+              source: {
+                kind: "temporary_batch_evaluation_closed_ohlcv",
+                requestedBars,
+                returnedBars: history.bars.length,
+                loadMoreBars: historyLoad,
+              },
+              chartState: {
+                chartIndex: selectedIndex,
+                restored: restoreError === null,
+                restoreError,
+                changes,
+              },
+              qualityIssues: [
+                ...evaluation.qualityIssues,
+                ...(restoreError === null ? [] : ["chart_state_restore_failed"]),
+              ],
+            };
+            try {
+              const journalResult = await journal.recordOutcome(
+                candidate.analysisId,
+                candidate.definitionHash,
+                {
+                  status: evaluation.status,
+                  outcome: evaluation.outcome,
+                  evaluatedAt: new Date().toISOString(),
+                  evidenceTimeframe,
+                  evidenceThrough: evaluation.evidence.evidenceThrough,
+                  result: response,
+                },
+              );
+              results.push({
+                analysisId: candidate.analysisId,
+                status: "evaluated",
+                result: response,
+                journal: {
+                  recorded: journalResult.recorded,
+                  idempotent: journalResult.idempotent,
+                  eventId: journalResult.entry.event_id,
+                },
+              });
+            } catch (err) {
+              results.push({
+                analysisId: candidate.analysisId,
+                status: "evaluated",
+                result: response,
+                journal: {
+                  recorded: false,
+                  error: redactSecrets(err instanceof Error ? err.message : String(err)),
+                },
+              });
+            }
+          }
+          if (restoreError !== null) {
+            aborted = true;
+            break;
+          }
+        }
+
+        return jsonResult({
+          status: aborted
+            ? "aborted"
+            : results.some((result) => result.status === "failed" ||
+                (result.journal as { error?: string } | undefined)?.error !== undefined)
+              ? "partial"
+              : "complete",
+          dryRun: false,
+          changed: results.length > 0,
+          chartIndex: selectedIndex,
+          processed: results.length,
+          remaining: selection.candidates.length - results.length,
+          aborted,
+          preview,
+          results,
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(
@@ -1905,6 +2187,58 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_analysis_performance",
+    {
+      description:
+        "Aggregate live analysis-journal outcomes into explicit populations for binary " +
+        "win rate, gross/net R, MFE/MAE and timing. Missing historical path metrics, " +
+        "non-binary outcomes and absent cost assumptions are excluded with counts rather " +
+        "than filled with zero. This read-only tool never mixes Strategy Tester backtests " +
+        "into the live-analysis population.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA.optional(),
+        bias: z.enum(["bullish", "bearish", "neutral"]).optional(),
+        timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/).optional(),
+        strategy_version: z.string().min(1).max(80).optional(),
+        group_by: z.enum(["overall", "symbol", "bias", "timeframe", "strategy_version"]).optional(),
+        cost_assumptions: z.array(z.object({
+          symbol: SYMBOL_SCHEMA,
+          total_price_per_unit: z.number().finite().nonnegative(),
+        })).max(20).optional().describe(
+          "Optional symbol-specific round-trip costs in instrument price units per unit",
+        ),
+      },
+    },
+    async ({ symbol, bias, timeframe, strategy_version, group_by, cost_assumptions }) => {
+      try {
+        const journalView = await journal.list({ limit: 500 });
+        const report = buildAnalysisPerformance(
+          journalView.analyses as JournalAnalysisRecord[],
+          {
+            symbol,
+            bias,
+            timeframe,
+            strategyVersion: strategy_version,
+            groupBy: group_by,
+            costs: cost_assumptions?.map((cost) => ({
+              symbol: cost.symbol,
+              totalPricePerUnit: cost.total_price_per_unit,
+            })),
+          },
+        );
+        return jsonResult({
+          ...report,
+          journalPopulation: journalView.total,
+          journalScanned: journalView.returned,
+          journalScanTruncated: journalView.total > journalView.returned,
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_analysis_calibration",
     {
       description:
@@ -2004,7 +2338,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "List the user's TradingView price alerts (read-only): symbol, condition, active " +
-        "state, last fire time. Creating or modifying alerts is not supported.",
+        "state, last fire time. This tool does not create, modify, restart, or delete alerts.",
       inputSchema: {},
     },
     async () => {
@@ -2014,6 +2348,308 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     },
+  );
+
+  server.registerTool(
+    "create_analysis_alerts",
+    {
+      description:
+        "Preview or create bounded, one-shot TradingView price alerts for Confirmation, " +
+        "Invalidation, and Target 1 from one audited Bushido Analysis Overlay. It verifies " +
+        "the exact Pine source, chart binding, analysis_id, current price, existing owned " +
+        "alerts, and post-create readback. Without confirm=true it is read-only. It never " +
+        "uses webhooks, email, SMS, broker APIs, or orders.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        chart_index: z.number().int().min(0).optional(),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        analysis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        mobile_push: z.boolean().optional().describe("Notify in the TradingView app. Default: true"),
+        popup: z.boolean().optional().describe("Show a TradingView popup. Default: true"),
+        play_sound: z.boolean().optional().describe("Play TradingView's calling sound. Default: false"),
+        confirm: z.boolean().optional().describe("Must be true to create alerts. Default: false"),
+      },
+    },
+    async ({
+      pine_id,
+      chart_index,
+      expected_symbol,
+      expected_timeframe,
+      analysis_id,
+      mobile_push,
+      popup,
+      play_sound,
+      confirm,
+    }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script || script.name !== ANALYSIS_OVERLAY_NAME || script.kind !== "study") {
+          return jsonResult({ status: "blocked", reason: "analysis_overlay_not_owned", trusted: false });
+        }
+        const usages = script.usedBy.filter((usage) => usage.chartIndex === chart.index);
+        if (usages.length !== 1) {
+          return jsonResult({
+            status: "blocked",
+            reason: usages.length === 0 ? "analysis_overlay_not_installed" : "multiple_overlay_instances",
+            trusted: false,
+            usages,
+          });
+        }
+        const usage = usages[0];
+        if (!usage.version) {
+          return jsonResult({ status: "blocked", reason: "on_chart_pine_version_unavailable", trusted: false });
+        }
+        const placedSource = await tv.getPineSource(pine_id, usage.version);
+        if (placedSource.source.replace(/\r\n/g, "\n") !== ANALYSIS_OVERLAY_SOURCE.replace(/\r\n/g, "\n")) {
+          return jsonResult({
+            status: "blocked",
+            reason: "on_chart_source_does_not_match_audited_template",
+            trusted: false,
+          });
+        }
+        const inputResult = await tv.getIndicatorInputs({ studyId: usage.studyId, chartIndex: chart.index });
+        let analysis: ReturnType<typeof parseAnalysisOverlayState>;
+        try {
+          analysis = parseAnalysisOverlayState(assertAnalysisOverlayStudy(inputResult, usage.studyId));
+        } catch (err) {
+          return jsonResult({
+            status: "blocked",
+            reason: "inputs_violate_contract",
+            trusted: false,
+            detail: err instanceof Error ? err.message : "overlay inputs are invalid",
+          });
+        }
+        if (
+          analysis.analysisId.trim().toLowerCase() === ANALYSIS_OVERLAY_DEFAULT_ANALYSIS_ID
+          || analysis.analyzedAt === ANALYSIS_OVERLAY_DEFAULT_ANALYZED_AT
+        ) {
+          return jsonResult({ status: "blocked", reason: "default_analysis_inputs", trusted: false });
+        }
+        if (analysis.analysisId !== analysis_id) {
+          return jsonResult({
+            status: "blocked",
+            reason: "analysis_id_mismatch",
+            trusted: false,
+            expectedAnalysisId: analysis_id,
+            observedAnalysisId: analysis.analysisId,
+          });
+        }
+        const binding = compareAnalysisOverlayBinding(analysis, chart.symbol, chart.resolution);
+        if (!binding.matches) {
+          return jsonResult({
+            status: "blocked",
+            reason: "analysis_context_mismatch",
+            trusted: false,
+            mismatches: binding.mismatches,
+          });
+        }
+
+        let plans;
+        try {
+          plans = buildAnalysisAlertPlans(analysis, chart.symbol, chart.resolution);
+        } catch (err) {
+          return jsonResult({
+            status: "blocked",
+            reason: "analysis_not_alertable",
+            trusted: true,
+            detail: err instanceof Error ? err.message : "analysis cannot be monitored with price alerts",
+          });
+        }
+        const ohlcv = await tv.getOhlcv(1, chart.index);
+        const latestBar = ohlcv.bars.at(-1);
+        if (!latestBar || ohlcv.symbol.toUpperCase() !== chart.symbol.toUpperCase()
+            || normalizeResolution(ohlcv.resolution) !== normalizeResolution(chart.resolution)
+            || !Number.isFinite(latestBar.close) || latestBar.close <= 0) {
+          return jsonResult({ status: "blocked", reason: "current_price_unavailable", trusted: false });
+        }
+        const currentPrice = latestBar.close;
+        const bullish = analysis.bias === "bullish";
+        const terminalReached = bullish
+          ? currentPrice <= analysis.invalidation || currentPrice >= analysis.targets[0]
+          : currentPrice >= analysis.invalidation || currentPrice <= analysis.targets[0];
+        if (terminalReached) {
+          return jsonResult({
+            status: "blocked",
+            reason: "terminal_level_currently_reached",
+            trusted: true,
+            currentPrice,
+            invalidation: analysis.invalidation,
+            target1: analysis.targets[0],
+            limitation: "Current price does not prove historical touch order.",
+          });
+        }
+        const confirmationCurrentlyReached = analysis.confirmation !== null && (bullish
+          ? currentPrice >= analysis.confirmation
+          : currentPrice <= analysis.confirmation);
+        const omitted = confirmationCurrentlyReached
+          ? [{ kind: "confirmation", reason: "confirmation_currently_reached" }]
+          : [];
+        if (confirmationCurrentlyReached) plans = plans.filter((plan) => plan.kind !== "confirmation");
+
+        const beforeAlerts = await tv.listAlerts();
+        const beforeMatches = matchExistingAnalysisAlerts(plans, beforeAlerts);
+        const conflicts = beforeMatches.filter((match) => match.status === "conflict");
+        if (conflicts.length > 0) {
+          return jsonResult({
+            status: "blocked",
+            reason: "owned_alert_definition_conflict",
+            trusted: true,
+            conflicts: conflicts.map((match) => ({
+              kind: match.plan.kind,
+              ownershipName: match.plan.ownershipName,
+              alertId: match.alert?.id ?? null,
+              mismatches: match.mismatches,
+            })),
+            remediation: "Resolve the conflicting owned alerts in TradingView before retrying; MCP never overwrites them.",
+          });
+        }
+        const existing = beforeMatches.filter((match) => match.status === "exact");
+        const missing = beforeMatches.filter((match) => match.status === "missing");
+        const missingConfirmation = missing.some((match) => match.plan.kind === "confirmation");
+        const existingTerminalMonitor = existing.some((match) =>
+          match.plan.kind === "invalidation" || match.plan.kind === "target_1");
+        if (!confirmationCurrentlyReached && missingConfirmation && existingTerminalMonitor) {
+          return jsonResult({
+            status: "blocked",
+            reason: "ambiguous_missing_confirmation_alert",
+            trusted: true,
+            existing: existing.map((match) => ({ kind: match.plan.kind, alertId: match.alert?.id ?? null })),
+            remediation:
+              "Do not add Confirmation retroactively. Inspect the analysis journal and TradingView alert history; use a new analysis_id for a new monitoring lifecycle.",
+          });
+        }
+        const notification = {
+          mobilePush: mobile_push ?? true,
+          popup: popup ?? true,
+          playSound: play_sound ?? false,
+          email: false,
+          smsOverEmail: false,
+          webhook: false,
+        };
+        const preview = {
+          analysisId: analysis.analysisId,
+          symbol: chart.symbol,
+          timeframe: chart.resolution,
+          currentPrice,
+          expiresAt: analysis.expiresAt,
+          notification,
+          existing: existing.map((match) => ({ kind: match.plan.kind, alertId: match.alert?.id ?? null })),
+          create: missing.map((match) => match.plan),
+          omitted,
+          limitation: "Alerts monitor crossings from creation time; they do not prove earlier level touches.",
+        };
+        if (confirm !== true) {
+          return jsonResult({
+            status: "preview",
+            dryRun: true,
+            changed: false,
+            trusted: true,
+            confirmRequired: missing.length > 0,
+            preview,
+          });
+        }
+
+        const created: unknown[] = [];
+        const failures: Array<{ kind: string; error: string; state: "not_verified" }> = [];
+        for (const match of missing) {
+          try {
+            created.push(await tv.createPriceAlert({
+              symbol: match.plan.symbol,
+              resolution: match.plan.resolution,
+              operator: match.plan.operator,
+              level: match.plan.level,
+              expiration: match.plan.expiration,
+              name: match.plan.ownershipName,
+              message: match.plan.message,
+              mobilePush: notification.mobilePush,
+              popup: notification.popup,
+              playSound: notification.playSound,
+            }));
+          } catch (err) {
+            failures.push({
+              kind: match.plan.kind,
+              error: redactSecrets(err instanceof Error ? err.message : String(err)),
+              state: "not_verified",
+            });
+            break;
+          }
+        }
+        const finalAlerts = await tv.listAlerts();
+        const finalMatches = matchExistingAnalysisAlerts(plans, finalAlerts);
+        const verified = finalMatches.filter((match) => match.status === "exact");
+        const unresolved = finalMatches.filter((match) => match.status !== "exact");
+        const complete = failures.length === 0 && unresolved.length === 0;
+        let journalStatus: Record<string, unknown> = { requested: complete, recorded: false };
+        if (complete) {
+          try {
+            const definition = journalDefinition(analysis, {
+              symbol: chart.symbol,
+              timeframe: chart.resolution,
+              chartIndex: chart.index,
+              studyId: usage.studyId,
+              pineId: pine_id,
+              pineVersion: usage.version,
+            });
+            const journalResult = await journal.recordAlertSet(
+              analysis.analysisId,
+              analysisDefinitionHash(definition),
+              verified.map((match) => ({
+                kind: match.plan.kind,
+                alertId: match.alert!.id,
+                ownershipName: match.plan.ownershipName,
+                operator: match.plan.operator,
+                level: match.plan.level,
+                expiration: match.plan.expiration,
+              })),
+            );
+            journalStatus = {
+              requested: true,
+              recorded: journalResult.recorded,
+              idempotent: journalResult.idempotent,
+              eventId: journalResult.entry.event_id,
+            };
+          } catch (err) {
+            journalStatus = {
+              requested: true,
+              recorded: false,
+              reason: err instanceof AnalysisDefinitionConflictError
+                ? err.code
+                : "journal_write_failed",
+              error: redactSecrets(err instanceof Error ? err.message : String(err)),
+              remediation: err instanceof AnalysisDefinitionConflictError
+                ? "Do not recreate alerts; assign a new analysis_id and apply a new analysis before monitoring it."
+                : "The TradingView alerts remain active; repair the journal path, then call this tool again to link the verified existing alerts.",
+            };
+          }
+        }
+        return jsonResult({
+          status: complete ? "complete" : "partial",
+          dryRun: false,
+          changed: created.length > 0,
+          trusted: complete,
+          analysisId: analysis.analysisId,
+          created,
+          verified: verified.map((match) => ({ kind: match.plan.kind, alertId: match.alert?.id ?? null })),
+          omitted,
+          failures,
+          unresolved: unresolved.map((match) => ({
+            kind: match.plan.kind,
+            status: match.status,
+            mismatches: match.mismatches,
+          })),
+          journal: journalStatus,
+          remediation: complete
+            ? null
+            : "Call list_alerts and inspect owned alert names before retrying; a timed-out create may still have reached TradingView.",
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(
@@ -2142,6 +2778,41 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_execution_snapshot",
+    {
+      description:
+        "Observe read-only TradingView scanner bid/ask conditions for one or more symbols. " +
+        "It normalizes spread and tick/pip units, rejects crossed quotes and delayed data, and " +
+        "reports ready only when a streaming bid/ask change is observed after the request. " +
+        "It does not access accounts or create, modify, or execute orders.",
+      inputSchema: {
+        symbols: z.array(SYMBOL_SCHEMA).min(1).max(MAX_MTF_SYMBOLS),
+        wait_for_update_ms: z.number().int().min(0).max(5_000).optional()
+          .describe("How long to poll for a post-request bid/ask change. Default: 1200"),
+        sample_interval_ms: z.number().int().min(100).max(1_000).optional()
+          .describe("Polling interval while waiting for an update. Default: 300"),
+        max_quote_age_ms: z.number().int().min(100).max(10_000).optional()
+          .describe("Maximum age of chart lp_time or a locally observed scanner update. Default: 5000"),
+      },
+    },
+    async ({ symbols, wait_for_update_ms, sample_interval_ms, max_quote_age_ms }) => {
+      try {
+        return jsonResult(await buildExecutionSnapshot(
+          { scanner, tv },
+          {
+            symbols,
+            waitForUpdateMs: wait_for_update_ms ?? 1_200,
+            sampleIntervalMs: sample_interval_ms ?? 300,
+            maxQuoteAgeMs: max_quote_age_ms ?? 5_000,
+          },
+        ));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_trade_decision_context",
     {
       description:
@@ -2168,6 +2839,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         event_blackout_before_minutes: z.number().int().nonnegative().max(1440).optional(),
         event_blackout_after_minutes: z.number().int().nonnegative().max(1440).optional(),
         minimum_event_importance: z.enum(["medium", "high"]).optional(),
+        execution_wait_for_update_ms: z.number().int().min(0).max(5_000).optional(),
+        execution_sample_interval_ms: z.number().int().min(100).max(1_000).optional(),
+        execution_max_quote_age_ms: z.number().int().min(100).max(10_000).optional(),
       },
     },
     async ({
@@ -2189,6 +2863,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       event_blackout_before_minutes,
       event_blackout_after_minutes,
       minimum_event_importance,
+      execution_wait_for_update_ms,
+      execution_sample_interval_ms,
+      execution_max_quote_age_ms,
     }) => chartOperations.run(async () => {
       try {
         const positioningIncluded = include_positioning ?? true;
@@ -2220,6 +2897,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             eventBlackoutBeforeMinutes: event_blackout_before_minutes ?? 30,
             eventBlackoutAfterMinutes: event_blackout_after_minutes ?? 15,
             minimumEventImportance: minimum_event_importance ?? "high",
+            executionWaitForUpdateMs: execution_wait_for_update_ms ?? 1_200,
+            executionSampleIntervalMs: execution_sample_interval_ms ?? 300,
+            executionMaxQuoteAgeMs: execution_max_quote_age_ms ?? 5_000,
           },
         ));
       } catch (err) {
@@ -2637,6 +3317,43 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "compute_position_size",
+    {
+      description:
+        "Compute a risk-budgeted instrument quantity from entry, stop, explicit execution cost, " +
+        "quantity constraints, and fresh quote-to-account currency evidence. The quantity is always " +
+        "rounded down and the tool fails closed when conversion evidence or minimum-size capacity is " +
+        "missing. It does not access an account or place an order.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        account_currency: z.string().regex(/^[A-Za-z]{3}$/),
+        account_equity: z.number().finite().positive(),
+        risk_percent: z.number().finite().positive().max(100).optional(),
+        risk_amount: z.number().finite().positive().optional(),
+        entry_price: z.number().finite().positive(),
+        stop_price: z.number().finite().positive(),
+        round_trip_cost_price_per_unit: z.number().finite().nonnegative().optional(),
+        contract_multiplier: z.number().finite().positive().optional(),
+        quantity_step: z.number().finite().positive(),
+        minimum_quantity: z.number().finite().positive(),
+        maximum_quantity: z.number().finite().positive().optional(),
+        quote_to_account_rate: z.number().finite().positive().optional()
+          .describe("Account-currency units per one quote-currency unit"),
+        conversion_symbol: SYMBOL_SCHEMA.optional(),
+        conversion_observed_at: z.string().datetime({ offset: true }).optional(),
+        max_conversion_age_seconds: z.number().finite().positive().max(86_400).optional(),
+      },
+    },
+    async (input) => {
+      try {
+        return jsonResult(computePositionSize(input));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "validate_trade_plan",
     {
       description:
@@ -2952,19 +3669,26 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "set_symbol",
     {
       description:
-        "Change the active TradingView chart to a different symbol, e.g. 'BTCUSD', " +
-        "'OANDA:EURUSD', 'NASDAQ:AAPL'. Returns the resulting symbol and timeframe.",
+        "Change one TradingView chart to a different symbol, e.g. 'BTCUSD', " +
+        "'OANDA:EURUSD', 'NASDAQ:AAPL'. chart_index selects a pane in multi-chart layouts; " +
+        "the active chart is used by default. The target pane is read back and failures are rolled back.",
       inputSchema: {
         symbol: z
           .string()
           .min(1)
           .describe("Symbol to display, optionally exchange-prefixed"),
+        chart_index: z.number().int().min(0).optional()
+          .describe("Chart index in a multi-chart layout. Default: active chart"),
       },
     },
-    async ({ symbol }) =>
+    async ({ symbol, chart_index }) =>
       chartOperations.run(async () => {
         try {
-          return jsonResult(await tv.setSymbol(symbol));
+          const context = await tv.getChartContext();
+          const selectedIndex = chart_index ?? context.activeChartIndex;
+          if (selectedIndex === null) throw new Error("no active chart; provide chart_index explicitly");
+          const result = await changeChartState(tv, selectedIndex, { symbol });
+          return jsonResult({ ...result.current, changed: result.changed, bars: result.bars, transaction: result });
         } catch (err) {
           return errorResult(err);
         }
@@ -2975,16 +3699,23 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "set_timeframe",
     {
       description:
-        "Change the active TradingView chart's timeframe. Examples: '1', '5', '15', '60', " +
-        "'240' (minutes), '1D', '1W', '1M'. Returns the resulting symbol and timeframe.",
+        "Change one TradingView chart's timeframe. Examples: '1', '5', '15', '60', " +
+        "'240' (minutes), '1D', '1W', '1M'. chart_index selects a pane in multi-chart " +
+        "layouts; the target pane is read back and failures are rolled back.",
       inputSchema: {
         resolution: z.string().min(1).describe("Timeframe/resolution string"),
+        chart_index: z.number().int().min(0).optional()
+          .describe("Chart index in a multi-chart layout. Default: active chart"),
       },
     },
-    async ({ resolution }) =>
+    async ({ resolution, chart_index }) =>
       chartOperations.run(async () => {
         try {
-          return jsonResult(await tv.setResolution(resolution));
+          const context = await tv.getChartContext();
+          const selectedIndex = chart_index ?? context.activeChartIndex;
+          if (selectedIndex === null) throw new Error("no active chart; provide chart_index explicitly");
+          const result = await changeChartState(tv, selectedIndex, { resolution });
+          return jsonResult({ ...result.current, changed: result.changed, bars: result.bars, transaction: result });
         } catch (err) {
           return errorResult(err);
         }
