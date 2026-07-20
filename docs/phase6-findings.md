@@ -45,10 +45,12 @@ PDCA の実践(v1 計測 → v2 保存 → 再テスト)で、v2 のバックテ
 - **罠4: `studyMetaInfoRepository().findById` はキャッシュ**で、保存直後のスクリプトを知らないことがある。`createStudy` 自体は正しく解決するので、メタ取得失敗は致命傷にしない
 - 削除は POST `pine-facade/delete/<pineId>`(→ `"ok"`)。**ツールとしては公開しない**(テストの後始末でのみ使用)
 
-## 4. replayApi(未実装・将来用)
+## 4. replayApi(2026-07-20に限定公開)
 
 - `await TradingViewApi.replayApi()` で取得。メソッド: `selectDate` / `doStep` / `toggleAutoplay` / `stopReplay` / `goToRealtime` / `getReplayDepth` / `currentDate` / `leaveReplay` など
-- `buy` / `sell` / `closePosition` / `realizedPL` もあり(リプレイ内ペーパートレード)— **公開する場合は書き込み系扱いで要設計**。今回のスコープ外
+- 公開: 状態取得、期待symbol/timeframe+confirm付き`selectDate`、停止中の有限`doStep`、confirm付き`stopReplay`
+- 非公開: `buy` / `sell` / `closePosition` / `realizedPL`(Replay Trading)、autoplay、random/first date、replay resolution変更
+- TradingView公式仕様上、リプレイ中もserver-side alerts、orders、trading panel/quote listはリアルタイム側に残るため、`get_trade_decision_context`はリプレイ中をblockedにする
 
 ## 制約・注意
 

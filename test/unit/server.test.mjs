@@ -44,6 +44,35 @@ function makeDeps(overrides = {}) {
         chartsCount: 1,
         charts: [{ index: 0, symbol: "EURUSD", resolution: "1D", studies: [] }],
       }),
+      getReplayStatus: async () => ({
+        available: true,
+        toolbarVisible: false,
+        started: false,
+        ready: false,
+        autoplay: false,
+        jumpToBarMode: false,
+        currentTime: null,
+        currentTimeIso: null,
+        selectedTime: null,
+        selectedTimeIso: null,
+        currentResolution: null,
+        replayResolutions: [],
+        autoResolution: "1D",
+        autoplayDelayMs: 1000,
+        activeChart: { symbol: "EURUSD", resolution: "1D", index: 0 },
+      }),
+      startReplay: async (options) => ({
+        requestedStartAt: options.startAt,
+        status: { started: true, currentTimeIso: options.startAt },
+      }),
+      stepReplay: async (steps) => ({
+        requestedSteps: steps,
+        completedSteps: steps,
+        reachedEnd: false,
+        before: { currentTime: 1 },
+        after: { currentTime: 2 },
+      }),
+      stopReplay: async () => ({ changed: true, before: { started: true }, after: { started: false } }),
       getExecutionQuotes: async () => [],
       getOhlcv: async (count, chartIndex) => ({
         symbol: "EURUSD",
@@ -614,7 +643,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the forty-seven expected tools", async () => {
+test("exposes exactly the fifty-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -653,6 +682,7 @@ test("exposes exactly the forty-seven expected tools", async () => {
       "get_positioning_context",
       "get_quotes",
       "get_real_yield_context",
+      "get_replay_status",
       "get_strategy_report",
       "get_trade_decision_context",
       "get_watchlist",
@@ -666,9 +696,105 @@ test("exposes exactly the forty-seven expected tools", async () => {
       "set_indicator_input",
       "set_symbol",
       "set_timeframe",
+      "start_chart_replay",
+      "step_chart_replay",
+      "stop_chart_replay",
       "validate_trade_plan",
     ],
   );
+});
+
+test("Bar Replay tools preview writes, context-bind start, step, and stop", async () => {
+  const calls = [];
+  const inactive = {
+    available: true,
+    toolbarVisible: false,
+    started: false,
+    ready: false,
+    autoplay: false,
+    jumpToBarMode: false,
+    currentTime: null,
+    currentTimeIso: null,
+    selectedTime: null,
+    selectedTimeIso: null,
+    currentResolution: null,
+    replayResolutions: [],
+    autoResolution: "1D",
+    autoplayDelayMs: 1000,
+    activeChart: { symbol: "EURUSD", resolution: "1D", index: 0 },
+  };
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getReplayStatus: async () => inactive,
+      startReplay: async (options) => {
+        calls.push(["start", options]);
+        return { requestedStartAt: options.startAt, status: { ...inactive, started: true } };
+      },
+      stepReplay: async (steps) => {
+        calls.push(["step", steps]);
+        return { requestedSteps: steps, completedSteps: steps, reachedEnd: false };
+      },
+      stopReplay: async () => {
+        calls.push(["stop"]);
+        return { changed: true, before: { ...inactive, started: true }, after: inactive };
+      },
+    },
+  }));
+
+  const args = {
+    start_at: "2025-01-01T00:00:00.000Z",
+    expected_symbol: "EURUSD",
+    expected_timeframe: "1D",
+  };
+  const dryStart = JSON.parse((await client.callTool({ name: "start_chart_replay", arguments: args })).content[0].text);
+  assert.equal(dryStart.dryRun, true);
+  assert.deepEqual(calls, []);
+
+  const started = JSON.parse((await client.callTool({
+    name: "start_chart_replay",
+    arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(started.dryRun, false);
+  assert.equal(calls[0][0], "start");
+  assert.equal(calls[0][1].expectedSymbol, "EURUSD");
+
+  const stepped = JSON.parse((await client.callTool({
+    name: "step_chart_replay",
+    arguments: { steps: 3 },
+  })).content[0].text);
+  assert.equal(stepped.completedSteps, 3);
+  assert.deepEqual(calls[1], ["step", 3]);
+
+  const dryStop = JSON.parse((await client.callTool({ name: "stop_chart_replay", arguments: {} })).content[0].text);
+  assert.equal(dryStop.dryRun, true);
+  assert.equal(calls.length, 2);
+  const stopped = JSON.parse((await client.callTool({
+    name: "stop_chart_replay",
+    arguments: { confirm: true },
+  })).content[0].text);
+  assert.equal(stopped.dryRun, false);
+  assert.deepEqual(calls[2], ["stop"]);
+});
+
+test("start_chart_replay rejects active-chart binding mismatches without writing", async () => {
+  let wrote = false;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      startReplay: async () => { wrote = true; },
+    },
+  }));
+  const result = await client.callTool({
+    name: "start_chart_replay",
+    arguments: {
+      start_at: "2025-01-01T00:00:00.000Z",
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "1D",
+      confirm: true,
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /does not match expected_symbol/);
+  assert.equal(wrote, false);
 });
 
 test("tool errors are redacted before reaching the MCP client", async () => {
@@ -3026,6 +3152,82 @@ test("get_trade_decision_context blocks a chart binding mismatch without reading
   assert.ok(parsed.quality_issues.some((issue) => issue.code === "chart_symbol_mismatch"));
 });
 
+test("get_trade_decision_context blocks Bar Replay without reading historical chart evidence", async () => {
+  let chartEvidenceRead = false;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getReplayStatus: async () => ({
+        available: true,
+        toolbarVisible: true,
+        started: true,
+        ready: true,
+        autoplay: false,
+        jumpToBarMode: false,
+        currentTime: 1735689600,
+        currentTimeIso: "2025-01-01T00:00:00.000Z",
+        selectedTime: 1735689600,
+        selectedTimeIso: "2025-01-01T00:00:00.000Z",
+        currentResolution: "60",
+        replayResolutions: ["60"],
+        autoResolution: "60",
+        autoplayDelayMs: 1000,
+        activeChart: { symbol: "EURUSD", resolution: "1D", index: 0 },
+      }),
+      getOhlcv: async () => ((chartEvidenceRead = true), { symbol: "EURUSD", resolution: "1D", count: 0, bars: [] }),
+      getKeyLevels: async () => ((chartEvidenceRead = true), { symbol: "EURUSD", resolution: "1D", price: 1, rangePercent: 3, count: 0, levels: [] }),
+    },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "EURUSD", chart_index: 0, expected_timeframe: "1D" },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.decision_status, "blocked");
+  assert.equal(parsed.evidence.replay.status, "blocked");
+  assert.equal(parsed.evidence.chart.data, null);
+  assert.equal(chartEvidenceRead, false);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "chart_replay_active"));
+});
+
+test("get_trade_decision_context discards chart evidence when replay starts during collection", async () => {
+  let replayReads = 0;
+  const base = {
+    available: true,
+    toolbarVisible: false,
+    started: false,
+    ready: false,
+    autoplay: false,
+    jumpToBarMode: false,
+    currentTime: null,
+    currentTimeIso: null,
+    selectedTime: null,
+    selectedTimeIso: null,
+    currentResolution: null,
+    replayResolutions: [],
+    autoResolution: "1D",
+    autoplayDelayMs: 1000,
+    activeChart: { symbol: "EURUSD", resolution: "1D", index: 0 },
+  };
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getReplayStatus: async () => {
+        replayReads += 1;
+        return replayReads === 1
+          ? base
+          : { ...base, toolbarVisible: true, started: true, currentTimeIso: "2025-01-01T00:00:00.000Z" };
+      },
+    },
+  }));
+  const result = await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "EURUSD", chart_index: 0, expected_timeframe: "1D" },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.decision_status, "blocked");
+  assert.equal(parsed.evidence.chart.data, null);
+  assert.ok(parsed.quality_issues.some((issue) => issue.code === "chart_replay_started_during_snapshot"));
+});
+
 test("get_trade_decision_context waits during an important-event blackout", async () => {
   const eventAt = new Date(Date.now() + 10 * 60_000).toISOString();
   const client = await connectedClient(makeDeps({
@@ -3504,6 +3706,10 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "set_symbol", arguments: { symbol: "OANDA:EURUSD", chart_index: -1 } },
     { name: "set_timeframe", arguments: { resolution: 42 } },
     { name: "set_timeframe", arguments: { resolution: "15", chart_index: -1 } },
+    { name: "start_chart_replay", arguments: {} },
+    { name: "start_chart_replay", arguments: { start_at: "not-a-date", expected_symbol: "EURUSD", expected_timeframe: "1D" } },
+    { name: "step_chart_replay", arguments: { steps: 101 } },
+    { name: "stop_chart_replay", arguments: { confirm: "yes" } },
     { name: "get_chart_screenshot", arguments: { format: "gif" } },
     { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
     { name: "get_indicator_values", arguments: { count: 501 } },

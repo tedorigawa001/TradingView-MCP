@@ -55,6 +55,10 @@ export interface ServerDeps {
   tv: Pick<
     TradingView,
     | "getChartContext"
+    | "getReplayStatus"
+    | "startReplay"
+    | "stepReplay"
+    | "stopReplay"
     | "getExecutionQuotes"
     | "getOhlcv"
     | "getIndicatorValues"
@@ -320,6 +324,134 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "get_replay_status",
+    {
+      description:
+        "Read the current TradingView Bar Replay state, active chart binding, historical " +
+        "cursor time, and replay resolution. This is read-only and never starts, advances, " +
+        "or stops replay trading.",
+      inputSchema: {},
+    },
+    async () => chartOperations.run(async () => {
+      try {
+        return jsonResult(await tv.getReplayStatus());
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "start_chart_replay",
+    {
+      description:
+        "Preview or start TradingView Bar Replay on the active chart at one historical " +
+        "instant. expected_symbol and expected_timeframe are checked immediately before " +
+        "the write. confirm=true is required. Replay Trading orders and autoplay are never used.",
+      inputSchema: {
+        start_at: z.string().datetime({ offset: true }),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        confirm: z.boolean().optional().describe("Must be true to enter Bar Replay. Default: false"),
+      },
+    },
+    async ({ start_at, expected_symbol, expected_timeframe, confirm }) =>
+      chartOperations.run(async () => {
+        try {
+          const startMs = Date.parse(start_at);
+          if (startMs >= Date.now()) throw new Error("start_at must be in the past");
+          const [status, context] = await Promise.all([tv.getReplayStatus(), tv.getChartContext()]);
+          const activeIndex = context.activeChartIndex;
+          const activeChart = activeIndex === null
+            ? undefined
+            : context.charts.find((chart) => chart.index === activeIndex);
+          if (!activeChart) throw new Error("no active chart is available for Bar Replay");
+          if (activeChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+            throw new Error(`active chart symbol ${activeChart.symbol} does not match expected_symbol ${expected_symbol}`);
+          }
+          if (normalizeResolution(activeChart.resolution) !== normalizeResolution(expected_timeframe)) {
+            throw new Error(
+              `active chart timeframe ${activeChart.resolution} does not match expected_timeframe ${expected_timeframe}`,
+            );
+          }
+          if (!status.available) throw new Error("Bar Replay is unavailable for the active chart");
+          if (status.started || status.toolbarVisible) {
+            throw new Error("Bar Replay is already active; stop it before starting another session");
+          }
+          const preview = {
+            action: "start_chart_replay",
+            startAt: new Date(startMs).toISOString(),
+            activeChart: { index: activeIndex, symbol: activeChart.symbol, resolution: activeChart.resolution },
+            effects: [
+              "The chart display moves to historical data and remains there until replay is stopped.",
+              "Server-side alerts, trading orders, and quote lists remain tied to real-time data.",
+            ],
+            excludedCapabilities: ["autoplay", "buy", "sell", "close_position", "replay_trading"],
+          };
+          if (confirm !== true) return jsonResult({ dryRun: true, preview });
+          return jsonResult({
+            dryRun: false,
+            preview,
+            result: await tv.startReplay({
+              startAt: start_at,
+              expectedSymbol: expected_symbol,
+              expectedResolution: expected_timeframe,
+            }),
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "step_chart_replay",
+    {
+      description:
+        "Advance an already started, paused TradingView Bar Replay by 1-100 bars. Each " +
+        "step is read back and must advance the replay cursor. Autoplay and Replay Trading " +
+        "orders are not supported.",
+      inputSchema: {
+        steps: z.number().int().min(1).max(100).optional().describe("Bars to advance. Default: 1"),
+      },
+    },
+    async ({ steps }) => chartOperations.run(async () => {
+      try {
+        return jsonResult(await tv.stepReplay(steps ?? 1));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "stop_chart_replay",
+    {
+      description:
+        "Preview or stop TradingView Bar Replay and return the chart to real-time mode. " +
+        "confirm=true is required when replay or its toolbar is active.",
+      inputSchema: {
+        confirm: z.boolean().optional().describe("Must be true to leave Bar Replay. Default: false"),
+      },
+    },
+    async ({ confirm }) => chartOperations.run(async () => {
+      try {
+        const status = await tv.getReplayStatus();
+        const preview = {
+          action: "stop_chart_replay",
+          active: status.started || status.toolbarVisible,
+          currentTime: status.currentTimeIso,
+          activeChart: status.activeChart,
+        };
+        if (confirm !== true) return jsonResult({ dryRun: true, preview });
+        return jsonResult({ dryRun: false, preview, result: await tv.stopReplay() });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(

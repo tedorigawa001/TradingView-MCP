@@ -323,6 +323,32 @@ export interface BacktestResult extends StrategyReport {
   warning?: string;
 }
 
+export interface ReplayStatus {
+  available: boolean;
+  toolbarVisible: boolean;
+  started: boolean;
+  ready: boolean;
+  autoplay: boolean;
+  jumpToBarMode: boolean;
+  currentTime: number | null;
+  currentTimeIso: string | null;
+  selectedTime: number | null;
+  selectedTimeIso: string | null;
+  currentResolution: string | null;
+  replayResolutions: string[];
+  autoResolution: string | null;
+  autoplayDelayMs: number | null;
+  activeChart: { symbol: string; resolution: string; index: number | null };
+}
+
+export interface ReplayStepResult {
+  requestedSteps: number;
+  completedSteps: number;
+  reachedEnd: boolean;
+  before: ReplayStatus;
+  after: ReplayStatus;
+}
+
 export interface PineSaveDryRun {
   dryRun: true;
   action: "create_new" | "new_version";
@@ -456,6 +482,45 @@ function assertChartIndex(chartIndex: number | undefined): void {
   }
 }
 
+const REPLAY_STATUS_SNIPPET = `
+  const replayStatus = () => {
+    const unwrap = (value) => value && typeof value.value === "function" ? value.value() : value;
+    const finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+    const iso = (value) => {
+      const number = finite(value);
+      if (number === null) return null;
+      const date = new Date(Math.abs(number) >= 1e12 ? number : number * 1000);
+      return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    };
+    const chart = api.activeChart();
+    let index = null;
+    try { index = api.activeChartIndex(); } catch (e) {}
+    const currentTime = finite(unwrap(replay.currentDate()));
+    const selectedTime = finite(unwrap(replay.getReplaySelectedDate()));
+    const resolutions = unwrap(replay.replayResolutions());
+    const currentResolution = unwrap(replay.currentReplayResolution());
+    const autoResolution = unwrap(replay.autoReplayResolution());
+    return {
+      available: unwrap(replay.isReplayAvailable()) === true,
+      toolbarVisible: unwrap(replay.isReplayToolbarVisible()) === true,
+      started: unwrap(replay.isReplayStarted()) === true,
+      ready: unwrap(replay.isReadyToPlay()) === true,
+      autoplay: unwrap(replay.isAutoplayStarted()) === true,
+      jumpToBarMode: unwrap(replay.isJumpToBarModeEnabled()) === true,
+      currentTime,
+      currentTimeIso: iso(currentTime),
+      selectedTime,
+      selectedTimeIso: iso(selectedTime),
+      currentResolution: typeof currentResolution === "string" ? currentResolution : null,
+      replayResolutions: Array.isArray(resolutions)
+        ? resolutions.filter((value) => typeof value === "string").slice(0, 100) : [],
+      autoResolution: typeof autoResolution === "string" ? autoResolution : null,
+      autoplayDelayMs: finite(replay.autoplayDelay()),
+      activeChart: { symbol: chart.symbol(), resolution: chart.resolution(), index },
+    };
+  };
+`;
+
 /**
  * High-level TradingView operations built on the in-page charting API
  * (window.TradingViewApi) exposed by the desktop app.
@@ -482,6 +547,164 @@ export class TradingView {
         let activeChartIndex = null;
         try { activeChartIndex = api.activeChartIndex(); } catch (e) {}
         return { layoutName, activeChartIndex, chartsCount: count, charts };
+      })()
+    `);
+  }
+
+  /** Read-only state of TradingView Bar Replay. */
+  getReplayStatus(): Promise<ReplayStatus> {
+    return this.cdp.evaluate<ReplayStatus>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        if (!api || typeof api.replayApi !== "function") {
+          throw new Error("Bar Replay API is unavailable in this app session");
+        }
+        const replay = await api.replayApi();
+        ${REPLAY_STATUS_SNIPPET}
+        return replayStatus();
+      })()
+    `);
+  }
+
+  /** Start Bar Replay at a caller-bound historical instant on the active chart. */
+  startReplay(options: {
+    startAt: string;
+    expectedSymbol: string;
+    expectedResolution: string;
+  }): Promise<{ requestedStartAt: string; status: ReplayStatus }> {
+    const startMs = Date.parse(options.startAt);
+    if (!Number.isFinite(startMs)) throw new Error("startAt must be a valid ISO-8601 timestamp");
+    if (startMs >= Date.now()) throw new Error("startAt must be in the past");
+    if (typeof options.expectedSymbol !== "string" || options.expectedSymbol.trim() === "") {
+      throw new Error("expectedSymbol must be a non-empty string");
+    }
+    if (!/^[0-9]*[SDWM]?$/i.test(options.expectedResolution) || options.expectedResolution === "") {
+      throw new Error("expectedResolution must be a TradingView resolution");
+    }
+    return this.cdp.evaluate(`
+      (async () => {
+        const api = window.TradingViewApi;
+        if (!api || typeof api.replayApi !== "function") throw new Error("Bar Replay API is unavailable");
+        const replay = await api.replayApi();
+        const chart = api.activeChart();
+        const expectedSymbol = ${JSON.stringify(options.expectedSymbol)};
+        const expectedResolution = ${JSON.stringify(options.expectedResolution)};
+        const normalize = (value) => {
+          const upper = String(value).trim().toUpperCase();
+          return /^[SDWM]$/.test(upper) ? "1" + upper : upper;
+        };
+        if (chart.symbol().toUpperCase() !== expectedSymbol.toUpperCase()) {
+          throw new Error("active chart symbol does not match expectedSymbol");
+        }
+        if (normalize(chart.resolution()) !== normalize(expectedResolution)) {
+          throw new Error("active chart timeframe does not match expectedResolution");
+        }
+        ${REPLAY_STATUS_SNIPPET}
+        const before = replayStatus();
+        if (!before.available) throw new Error("Bar Replay is unavailable for this chart");
+        if (before.started || before.toolbarVisible) {
+          throw new Error("Bar Replay is already active; stop it before starting another session");
+        }
+        try {
+          await replay.selectDate(${startMs});
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline) {
+            const current = replayStatus();
+            if (current.started && current.currentTime !== null) break;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          if (!replayStatus().started) {
+            throw new Error("Bar Replay did not start within 20 seconds");
+          }
+          return {
+            requestedStartAt: ${JSON.stringify(new Date(startMs).toISOString())},
+            status: replayStatus(),
+          };
+        } catch (error) {
+          let rollbackError = null;
+          try {
+            const partial = replayStatus();
+            if (partial.started || partial.toolbarVisible) {
+              await replay.stopReplay();
+              const rollbackDeadline = Date.now() + 10000;
+              while (Date.now() < rollbackDeadline) {
+                const restored = replayStatus();
+                if (!restored.started && !restored.toolbarVisible) break;
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+              const restored = replayStatus();
+              if (restored.started || restored.toolbarVisible) {
+                throw new Error("Bar Replay cleanup did not finish within 10 seconds");
+              }
+            }
+          } catch (cleanupError) {
+            rollbackError = cleanupError;
+          }
+          if (rollbackError !== null) {
+            throw new Error(
+              "Bar Replay start failed (" + String(error?.message || error) +
+              ") and cleanup also failed (" + String(rollbackError?.message || rollbackError) + ")",
+            );
+          }
+          throw error;
+        }
+      })()
+    `);
+  }
+
+  /** Advance a paused replay by a bounded number of bars. */
+  stepReplay(steps = 1): Promise<ReplayStepResult> {
+    if (!Number.isInteger(steps) || steps < 1 || steps > 100) {
+      throw new Error(`steps must be an integer between 1 and 100, got ${steps}`);
+    }
+    return this.cdp.evaluate<ReplayStepResult>(`
+      (async () => {
+        const api = window.TradingViewApi;
+        if (!api || typeof api.replayApi !== "function") throw new Error("Bar Replay API is unavailable");
+        const replay = await api.replayApi();
+        ${REPLAY_STATUS_SNIPPET}
+        const before = replayStatus();
+        if (!before.started || !before.ready) throw new Error("Bar Replay is not ready for stepping");
+        if (before.autoplay) throw new Error("pause Bar Replay autoplay before stepping");
+        let completedSteps = 0;
+        let reachedEnd = false;
+        for (let i = 0; i < ${steps}; i += 1) {
+          const prior = replayStatus().currentTime;
+          await replay.doStep();
+          const deadline = Date.now() + 5000;
+          let advanced = false;
+          while (Date.now() < deadline) {
+            const current = replayStatus();
+            if (!current.started) { reachedEnd = true; break; }
+            if (current.currentTime !== null && current.currentTime !== prior) { advanced = true; break; }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          if (!advanced) { reachedEnd = true; break; }
+          completedSteps += 1;
+        }
+        return { requestedSteps: ${steps}, completedSteps, reachedEnd, before, after: replayStatus() };
+      })()
+    `);
+  }
+
+  /** Close Bar Replay and verify that the chart returned to real-time mode. */
+  stopReplay(): Promise<{ changed: boolean; before: ReplayStatus; after: ReplayStatus }> {
+    return this.cdp.evaluate(`
+      (async () => {
+        const api = window.TradingViewApi;
+        if (!api || typeof api.replayApi !== "function") throw new Error("Bar Replay API is unavailable");
+        const replay = await api.replayApi();
+        ${REPLAY_STATUS_SNIPPET}
+        const before = replayStatus();
+        if (!before.started && !before.toolbarVisible) return { changed: false, before, after: before };
+        await replay.stopReplay();
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          const current = replayStatus();
+          if (!current.started && !current.toolbarVisible) return { changed: true, before, after: current };
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error("Bar Replay did not stop within 10 seconds");
       })()
     `);
   }

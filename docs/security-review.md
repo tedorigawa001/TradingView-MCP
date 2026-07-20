@@ -52,7 +52,7 @@
 ### 4. 依存関係 — クリーン
 
 - ランタイム依存は 3 つのみ: `@modelcontextprotocol/sdk` / `ws` / `zod`(いずれも活発にメンテされている)
-- `npm audit`: **0 vulnerabilities**(2026-07-07 時点)
+- `npm audit --audit-level=high`: **0 vulnerabilities**(2026-07-20、Node 24.18.0)
 - `package-lock.json` をコミットしてバージョンを固定すること
 - 定期的な `npm audit` を推奨(CI 導入時に組み込む)
 
@@ -288,8 +288,17 @@
 - **共通トランザクション**: #27の分析ごとの一時切替も同じ変更・復元処理を使う。バッチ開始時の元状態を各候補の直前に再確認し、途中の外部変更を暗黙の新基準として受け入れない。復元不能時は残件を停止する
 - **競合と残余リスク**: 公開操作と主要なチャート依存処理は既存のプロセス内`SerialOperationQueue`で直列化する。TradingView UIの手動操作や別MCPプロセスまでは排他できないため、段階ごとの読み戻しで不一致を検出してfail closedする。外部操作が読み戻し後に発生する競合窓そのものは残る
 
+## 追補: バックログ #8 Bar Replay(2026-07-20)
+
+- **限定公開**: 公開する内部APIは状態取得、`selectDate`、`doStep`、`stopReplay`だけ。実機で存在を確認した`buy`、`sell`、`closePosition`、Replay Tradingの損益/position、autoplay、random/first date、replay resolution変更は公開しない
+- **開始境界**: `start_chart_replay`はdry-runを既定とし、`confirm:true`、過去のISO日時、active chartの期待symbol/timeframe完全一致、Replay利用可能、既存sessionなしをページ内で再検証してから開始する。日時とsymbolはNode側検証後にJSON文字列化し、開始後20秒以内のstarted/current time読み戻しを要求する。`selectDate`失敗またはタイムアウト時は部分的に開いたsession/toolbarを`stopReplay`で閉じ、cleanupも失敗した場合は元原因とcleanup原因を併記する
+- **ステップ境界**: `step_chart_replay`は開始済み・ready・autoplay停止中だけ1〜100本を進める。各`doStep`後にcurrent timeが変わったことを確認し、進まない場合はreached endとして停止する。無期限autoplayやバックグラウンド継続を作らない
+- **終了境界**: `stop_chart_replay`もdry-run/confirmを使い、`stopReplay`後にstartedとtoolbarの両方がfalseになるまで読み戻す。終了はチャートをリアルタイム表示へ戻すが、TradingViewが保存する過去のreplay session履歴自体の削除は保証しない
+- **リアルタイムとの混在防止**: TradingView公式は、リプレイ中もserver-side alerts、orders、trading panelとquote listをリアルタイム側としている。`get_trade_decision_context`はreplay状態を必須証拠にし、toolbarまたはsession稼働中はOHLC/キーレベルを読まず`decision_status: blocked`にする。チャート証拠取得後にも状態を再確認し、途中でreplayが開始された場合や再確認不能時は取得済み証拠を破棄する。執行quoteを過去時点へ巻き戻したと解釈しない
+- **競合と残余リスク**: 4ツールは既存のプロセス内`SerialOperationQueue`で他の主要チャート操作と直列化する。UIや別プロセスの同時操作は排他できず、開始前・開始後・各step・終了後のreadbackで検出する。TradingView内部の非公開API変更は明示エラーとなり、自動でUIクリックへフォールバックしない
+
 ## 将来フェーズへの申し送り
 
-- 注文系(`trading`)APIは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない
+- 注文系(`trading`)APIとReplay Tradingは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない
 - ~~スキャナー API(Phase 4)追加時は外部 HTTP 応答のスキーマ検証を入れる~~ → Phase 4 で対応済み(zod 検証)
-- CI 導入時: `npm audit` + ユニットテストをゲートに
+- CIは#30で導入済み。NodeのLTS/EOL移行時にmatrixと`engines`を更新し、固定済みActions SHAも依存更新として定期レビューする

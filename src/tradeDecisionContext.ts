@@ -74,7 +74,7 @@ function topLevelStatus(issues: ContextIssue[]): "complete" | "partial" | "block
 
 export async function buildTradeDecisionContext(
   dependencies: {
-    tv: Pick<TradingView, "getChartContext" | "getExecutionQuotes" | "getOhlcv" | "getKeyLevels">;
+    tv: Pick<TradingView, "getChartContext" | "getReplayStatus" | "getExecutionQuotes" | "getOhlcv" | "getKeyLevels">;
     scanner: Pick<Scanner, "getQuotes" | "getMtfOverview">;
     calendar: Pick<EconomicCalendar, "getEvents">;
     cot: Pick<CotClient, "getLatest">;
@@ -85,6 +85,30 @@ export async function buildTradeDecisionContext(
 ) {
   const requestedAt = now.toISOString();
   const issues: ContextIssue[] = [];
+  let replayStatus: Awaited<ReturnType<typeof dependencies.tv.getReplayStatus>> | null = null;
+  try {
+    replayStatus = await dependencies.tv.getReplayStatus();
+    if (replayStatus.started || replayStatus.toolbarVisible) {
+      issues.push({
+        code: "chart_replay_active",
+        severity: "error",
+        component: "chart",
+        message: "TradingView Bar Replay is active; historical chart evidence cannot be mixed with real-time execution evidence.",
+        details: {
+          started: replayStatus.started,
+          toolbarVisible: replayStatus.toolbarVisible,
+          currentTime: replayStatus.currentTimeIso,
+        },
+      });
+    }
+  } catch {
+    issues.push({
+      code: "replay_status_unavailable",
+      severity: "error",
+      component: "chart",
+      message: "Bar Replay state could not be verified, so live chart evidence is blocked.",
+    });
+  }
   let context: Awaited<ReturnType<typeof dependencies.tv.getChartContext>> | null = null;
   try {
     context = await dependencies.tv.getChartContext();
@@ -100,7 +124,8 @@ export async function buildTradeDecisionContext(
   const chart = chartIndex === null || context === null
     ? undefined
     : context.charts.find((candidate) => candidate.index === chartIndex);
-  const chartMatches = chart !== undefined
+  let replaySafe = replayStatus !== null && !replayStatus.started && !replayStatus.toolbarVisible;
+  const chartMatches = replaySafe && chart !== undefined
     && matchesSymbol(chart.symbol, options.symbol)
     && normalizeResolution(chart.resolution) === normalizeResolution(options.expectedTimeframe);
 
@@ -170,12 +195,40 @@ export async function buildTradeDecisionContext(
       )
     : Promise.resolve(null);
 
-  const [market, chartResults, positioningResult, realYieldResult] = await Promise.all([
+  const [market, initialChartResults, positioningResult, realYieldResult] = await Promise.all([
     marketPromise,
     chartEvidencePromise,
     positioningPromise,
     realYieldPromise,
   ]);
+  let chartResults = initialChartResults;
+  try {
+    replayStatus = await dependencies.tv.getReplayStatus();
+    replaySafe = !replayStatus.started && !replayStatus.toolbarVisible;
+    if (!replaySafe) {
+      chartResults = null;
+      if (!issues.some((issue) => issue.code === "chart_replay_active")) {
+        issues.push({
+          code: "chart_replay_started_during_snapshot",
+          severity: "error",
+          component: "chart",
+          message: "Bar Replay became active while chart evidence was being collected; the chart evidence was discarded.",
+          details: { currentTime: replayStatus.currentTimeIso },
+        });
+      }
+    }
+  } catch {
+    replaySafe = false;
+    chartResults = null;
+    if (!issues.some((issue) => issue.code === "replay_status_unavailable")) {
+      issues.push({
+        code: "replay_status_unavailable_after_chart_read",
+        severity: "error",
+        component: "chart",
+        message: "Bar Replay state could not be re-verified after chart evidence collection; the chart evidence was discarded.",
+      });
+    }
+  }
   let executionSnapshot: Awaited<ReturnType<typeof buildExecutionSnapshot>> | null = null;
   try {
     executionSnapshot = await buildExecutionSnapshot(
@@ -391,6 +444,15 @@ export async function buildTradeDecisionContext(
     completed_at: completedAt,
     quality_issues: issues,
     evidence: {
+      replay: evidence(
+        true,
+        replaySafe ? "available" : "blocked",
+        "tradingview_replay_state",
+        completedAt,
+        replayStatus?.currentTimeIso ?? null,
+        { status: "not_applicable" },
+        replayStatus,
+      ),
       market_snapshot: evidence(true, market.status === "blocked" ? "blocked" : "partial", "tradingview_scanner_and_calendar", market.received_at, null, { status: "source_timestamp_unavailable" }, market),
       chart: evidence(true, chartEvidenceValid ? "available" : "blocked", "tradingview_chart_ohlcv", completedAt, chartSourceAt, { status: "not_assessed", basis: "bar_timestamp" }, chartData),
       key_levels: evidence(false, keyLevelsData === null ? "unavailable" : "available", "tradingview_chart_indicators", completedAt, chartSourceAt, { status: "not_assessed" }, keyLevelsData),
@@ -416,6 +478,7 @@ export async function buildTradeDecisionContext(
     limitations: [
       "trade_ready describes evidence completeness and configured gates, not a directional recommendation.",
       "Open-chart execution evidence uses quote lp_time; scanner fallback receipt times are not exchange timestamps and require a post-request bid/ask change.",
+      "Bar Replay chart evidence is historical while alerts, orders, quotes lists, and trading-panel quotes remain real-time; replay blocks trade_ready.",
       "COT and real yield are slow macro context and must not be treated as intraday triggers.",
       "No order, alert, Pine script, chart setting, or journal entry is created or changed.",
     ],

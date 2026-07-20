@@ -12,7 +12,7 @@
 - ✅ **#6 経済カレンダー** — `get_economic_events`(economic-calendar.tradingview.com、認証不要 GET。国・重要度・期間フィルタ、comment 等の冗長フィールドは除去)
 - ✅ **#9 インジケーター内テーブルの読み取り** — `get_indicator_tables`(dwgtables/dwgtablecells からセルテキストを `grid[row][column]` で復元。tablecells はストアのネストが他と異なる点に対応)
 - ✅ **#10 Pine ソース読み取り** — `list_pine_scripts`(saved 一覧+チャート上スタディとの pineId 突合 `usedBy`)/ `get_pine_source`(`USER;` ID 限定でソース原文)。PDCA の Plan 工程
-- ✅ **#8 バックテスト連携** — `run_backtest`(自作ストラテジーを一時適用→レポート取得→自動削除でチャート復元)/ `get_strategy_report`(チャート上のストラテジーのレポート読み取り。残留レポートの誤帰属ゲート付き)。PDCA の Check 工程。調査記録は [phase6-findings.md](phase6-findings.md)。リプレイ操作(replayApi)は未実装のまま将来課題
+- ✅ **#8 リプレイ/バックテスト連携** — `run_backtest`/`get_strategy_report`に加え、状態確認、confirm付き開始、有限ステップ、confirm付き終了を実装。Replay Tradingとautoplayは非公開。リプレイ中の`get_trade_decision_context`は過去チャートとリアルタイム執行証拠の混在を防いでfail closed
 - ✅ **#11 Pine ソース保存+チャート反映** — `save_pine_script`(初の書き込み系。confirm なしはドライラン、新規 or 新バージョンのみの非破壊設計、旧バージョンは `get_pine_source(pine_id, version)` で復元可)/ `add_pine_to_chart`(追加のみ、削除はしない)。**PDCA の Act 工程 — ループ完成**
 - ✅ **#15 分析結果のチャート反映** — `get_analysis_overlay_template`(固定・監査可能な汎用Pine)/`apply_analysis_overlay`(銘柄・時間足・専用入力契約を照合、confirm付き反映、入力+描画の読み戻し検証)。分析時刻・期限を固定し、期限切れは`EXPIRED`表示。注文・アラートとは非接続
 - ✅ **#16 分析オーバーレイのライフサイクル管理** — `ensure_analysis_overlay`(現行版再利用/未配置追加/旧版の14入力移行→検証→旧版削除、失敗時ロールバック)/`remove_owned_study`(`USER;` Pine ID+hidden pineId+chart照合、confirm必須)。`list_pine_scripts.usedBy`へ配置版`version`を追加
@@ -29,6 +29,7 @@
 - ✅ **#27 ジャーナル分析の一括事後評価** — `evaluate_due_analyses`で期限到来・非終端分析を選定し、指定チャートを分析ごとに切替・評価・記録・復元。個別失敗は継続し、復元失敗時だけ中止
 - ✅ **#28 事後評価指標の拡張** — 評価時にentry midpoint基準の経路指標を保存し、`get_analysis_performance`で勝敗、gross/net R、MFE/MAE、到達時間を母集団・除外数付きで集計
 - ✅ **#29 チャート指定操作の一般化** — `set_symbol`/`set_timeframe`へ`chart_index`を追加し、変更・読み戻し・ロールバックを共通トランザクションへ集約。#27の一時切替も同じ実装へ統一
+- ✅ **#30 CI品質・依存脆弱性ゲート** — GitHub Actionsでサポート中のNode 22/24をテストし、high以上の`npm audit`検出を拒否。ActionsはコミットSHA固定、権限はcontents read限定
 
 ## 優先度: 高
 
@@ -93,17 +94,20 @@
 
 ## 優先度: 低(要設計)
 
-### #7 アラート作成(書き込み系・確認フロー前提)
+### #7 アラート作成(書き込み系・確認フロー前提) ✅ #26で限定実装
 
 - **課題**: 分析の自然な帰結が「このレベルにアラートを張る」だが、書き込み系は方針として非公開
-- **案**: `create_alert` を追加する場合は (1) `confirm: true` 必須、(2) 作成前に内容をドライラン表示、(3) 作成後に alert_id を返して `list_alerts` で検証可能に、という3点セットを最低条件とする。削除・変更は当面対象外
-- **規模**: 中+セキュリティレビュー必須([security-review.md](security-review.md) の方針変更を伴う)
+- **実装**: #26 `create_analysis_alerts`として、監査済み分析オーバーレイ由来のConfirmation/Invalidation/Target 1だけを対象に、`confirm:true`、dry-run、作成後readback、所有名、冪等性を実装した。汎用アラート作成、変更、再開、削除、Webhookは引き続き非公開
 
-### #8 リプレイ/バックテスト連携 ✅ 完了(バックテスト部分)
+### #8 リプレイ/バックテスト連携 ✅ 完了
 
 - **課題**: 波動カウント等の分析を過去時点で検証する手段がない
 - **実装(2026-07-08)**: `run_backtest` + `get_strategy_report`。`createStudy({type:'pine', pineId, version:'last'})` で一時適用し、`backtestingStrategyApi` のレポートを整形して返す(削除後の残留レポートを誤って返さないゲート付き)。詳細は [phase6-findings.md](phase6-findings.md)
-- **残り(将来課題)**: リプレイ操作(`replayApi` の selectDate / doStep / スクリーンショットの組み合わせ)。replayApi には buy/sell 等のペーパートレード関数も含まれるため、公開時は書き込み系の設計が必要
+- **リプレイ実装(2026-07-20)**: `get_replay_status`、`start_chart_replay`、`step_chart_replay`、`stop_chart_replay`を追加。開始は過去ISO日時、active chartの期待symbol/timeframe、利用可能状態、`confirm:true`を要求する。ステップはautoplay停止中だけ1〜100本を許可し、各ステップ後の時刻前進を検証する。終了もdry-run/confirmと停止後readbackを行う
+- **失敗と競合**: 開始途中の`selectDate`失敗またはタイムアウトでは`stopReplay`を試み、元エラーとcleanupエラーを両方保持する。意思決定スナップショットはチャート証拠の取得前後でreplay状態を二重確認し、途中でreplayが始まった場合は取得済みOHLC/キーレベルを破棄する
+- **公式仕様との整合**: [TradingView Bar Replay](https://www.tradingview.com/support/solutions/43000712747-bar-replay-how-and-why-to-test-a-strategy-in-the-past/)は過去バーの手動Forwardとリアルタイム復帰を提供する一方、server-side alerts、orders、trading panel/quote listはリプレイ中もリアルタイムと説明している。このため`get_trade_decision_context`はリプレイtoolbarまたはsession稼働中にチャートOHLC/キーレベルを取得せず、`chart_replay_active`でblockedにする
+- **非公開境界**: 実機`replayApi`で`buy`/`sell`/`closePosition`、autoplay、random/first date、replay resolution変更も確認したが公開しない。Replay Tradingは[通常のPaper Tradingとは別の過去データ取引モード](https://www.tradingview.com/support/solutions/43000691889-learn-to-trade-on-historical-data/)であり、本MCPの分析支援・非注文境界から外す
+- **検証**: 状態WatchedValue正規化、日時・文脈・ステップ境界、入力文字列のJSON化、注文系API非生成、dry-run、confirm、開始失敗cleanup、途中replay開始時の証拠破棄を固定した。全284テストとTypeScriptビルドが成功。実機read-only statusと開始/終了dry-runでは`OANDA:USDJPY/240`、replay非稼働、チャート無変更を確認した
 
 ### #9 インジケーター内テーブルの読み取り(`dwgtables`)✅ 完了
 
@@ -248,6 +252,14 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実装**: 両ツールへ任意の`chart_index`を追加し、省略時だけアクティブチャートを選ぶ。共通`chartTransaction`が対象ペインのsymbol/timeframeを不変スナップショットとして保持し、symbol、timeframeの順で変更、各段階のchart context読み戻し、最終一致確認、失敗時ロールバックを行う。元エラーとロールバックエラーが重なった場合も両方を保持する
 - **共通化**: #27 `evaluate_due_analyses`の分析ごとのsymbol/timeframe切替・復元を同じヘルパーへ移行した。各候補の開始前にバッチ開始時の状態を再照合するため、TradingView UIや別プロセスによる途中変更を新しい正常状態として採用しない
 - **検証**: 非アクティブなペイン1だけの変更、ペイン0不変、部分変更失敗からの復元、一時処理失敗後の復元、復元失敗の構造化、負の`chart_index`拒否、公開MCPツールからのindex転送を固定した。全275テストとTypeScriptビルドが成功。実機ではペイン1の現在値`OANDA:XAUUSD/240`を両ツールへ明示指定し、`changed:false`、操作列空、ペイン0の`OANDA:USDJPY/240`を含む全状態不変を確認した
+
+### #30 CI品質・依存脆弱性ゲート ✅ 完了
+
+- **課題**: テストと`npm audit`がローカル手順だけで、Pull Requestやpush時に実行を強制できない。加えて`engines: >=20`は2026-03-24にEOLとなったNode 20を許容していた
+- **実装**: `.github/workflows/ci.yml`を追加し、push/PRでNode 22・24の`npm ci --ignore-scripts`と`npm test`を実行する。依存監査はNode 24の独立ジョブで`npm audit --audit-level=high`を実行し、high/criticalをゲートする。Node要件を`>=22`へ更新し、ローカル`nodenv`用`.node-version`を検証済み24.18.0へ固定した
+- **サプライチェーン境界**: workflow権限を`contents: read`だけにし、`actions/checkout`と`actions/setup-node`はv6タグの取得時コミットSHAへ固定する。依存インストールscriptはCIテストで無効化し、lockfileとnpm cache keyを利用する。auditはlockfileをregistry advisoryへ照合するためネットワーク障害時も成功扱いにしない
+- **Node選定**: Node公式の2026-07-20時点の一覧で22/24がLTS、20がEOL、26がCurrentのため、最低サポートと最新LTSを22/24で固定した。Current 26は必須ゲートにせず、LTS化後に追加を再評価する
+- **検証**: Node 24.18.0で`npm ci --ignore-scripts`と全284テストが成功し、`npm audit --audit-level=high`は0 vulnerabilities、workflow YAMLの構文検証も成功した。Node 22を含むGitHub Actions実runはworkflowのcommit/push後に確認する
 
 ### 推奨実装順
 
