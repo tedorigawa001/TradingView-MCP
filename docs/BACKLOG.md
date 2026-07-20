@@ -299,12 +299,18 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機検証(2026-07-20)**: `Bushido Smart Money Strategy` v2.0、`OANDA:USDJPY` 4Hで、baseline=`Require Next-Bar Confirmation:false`、candidate=`true`、最低30取引のA/Bを実行。experiment IDは`sha256:54cc5480...e712c2`、両variantは期間・commission・slippage・資本・数量・fill条件が一致し、品質問題なし、比較適格となった。baselineは72取引、純利益8,286.61 JPY、PF 1.459、期待値115.09、最大DD 5,844.26。candidateは88取引、純損失5,137.97 JPY、PF 0.811、期待値-58.39、最大DD 6,098.77となり、この単独変更は棄却相当の明確な悪化を示した。両一時Study削除後、元3 Study、symbol/timeframe、既存Strategy Testerのbaseline ledger ID(`sha256:ef338863...b5b17`)と`in_20:false`まで復元確認した。全290テストとTypeScriptビルドが成功
 - **ロジック追跡と再検証(2026-07-20)**: v2の「Next-Bar Confirmation」は`pre_buy[1]`/`pre_sell[1]`による1本遅延だけで、次足の方向確認をしていなかった。遅延によりTP/SL基準、反転、signal distanceの状態系列が変わり、フィルターONで取引数が増える別戦略になっていた。次足終値がsignal足high/lowを方向別に突破する明示確認へ修正したPine v3.0を非破壊保存し、コンパイル成功・読み戻し一致を確認。v3 A/BではOFFが72取引/PF1.459/期待値115.09/最大DD5,844.26、ONが37取引/PF1.021/期待値6.41/最大DD3,234.76となった。取引抑制とDD改善は意図どおりだが優位性をほぼ失うためON案は棄却し、既存チャートはv2/OFFへ完全復元した。v3は棄却仮説の再現証拠として保存版に残す
 
-### #33 制限付き一括バックテスト(`run_backtest_matrix`、優先度: 高・規模: 大)
+### #33 制限付き一括バックテスト(`run_backtest_matrix`) ✅ 実装・実機検証完了
 
 - **目的**: 複数symbol、timeframe、Pine版、明示パラメータ集合を同じ実験契約で比較し、銘柄固有の偶然と再現する構造を分ける
 - **制限**: 任意の無制限グリッドは受けず、ジョブ数、パラメータ数、履歴期間、総実行時間に上限を置く。dry-runで展開後ジョブ数と推定チャート変更を返し、明示確認後に直列実行する
 - **結果**: 成功だけでなく、計算不能、取引不足、timeout、履歴不足、復元失敗を行単位で残す。上位結果だけを返さず全候補の結果と除外理由を保存する
 - **過剰適合対策**: matrix順位は探索結果であって採用判定ではない。未使用期間を同じmatrixの選定に使わず、#34へ渡す候補数を事前固定する
+- **実装(2026-07-20)**: 1〜24件の明示jobとしてsymbol、timeframe、自作strategy `pine_id`、最大20入力を受ける。実行前に保存済みstrategyと具体的Pine版へ解決し、正規化したjob定義とmatrix全体へSHA-256 IDを付ける。完全重複jobと同一job内の重複input IDを拒否し、文字列入力は256文字に制限する
+- **実行境界**: 既定dry-runで全job、版、入力、件数、直列実行、soft deadlineを提示し、`confirm:true`後だけ対象chartを一時的にsymbol/timeframe切替する。各jobで一時Study追加、入力settle、reportと全ledger取得、所有確認付き削除、元chart復元を完結させる。最大実行予算は30〜1800秒で、進行中jobを危険に中断せず、期限後は新しいjobを開始しない
+- **結果契約**: `complete`、`insufficient_sample`、`failed`、`cleanup_failed`、`restore_failed`、`skipped`を全job分、入力順のまま返す。成功行だけのランキングや総合スコアを作らず、ledger ID、期間、指標、品質問題、失敗理由を保持する。通常の計算失敗は次jobへ隔離し、chart復元失敗時だけ残件を中止する
+- **検証状況**: dry-run非書き込み、3市場・時間足の直列実行、入力override、全ledger集約、途中計算失敗後の継続、毎回復元、復元失敗後の残件skip、24job上限、runtime上限、公開ツール完全一致をユニットテストで固定した
+- **実機検証(2026-07-20)**: Smart Money Strategy v3.0をUSDJPY/EURUSD/XAUUSDの4Hへ3jobで実行し、7.4秒で全件完走した。各jobは30取引以上、ledger ID取得、cleanup成功、job後復元成功となり、終了時のUSDJPY 4Hと元3 StudyのID・名前は開始時と完全一致した。USDJPYは72取引/PF1.459/期待値115.09、EURUSDはreport 64件に対しledger 65件で`report_trade_count_mismatch`、PF0.823/期待値-50.59、XAUUSDは56取引/PF1.348/期待値285.12だった
+- **実機後修正**: EURUSDの行内品質警告を検出できた一方、matrix最上位の`qualityIssues`が空だったため、`jobsWithQualityIssues`件数と`one_or_more_jobs_have_quality_issues`を集約して返すよう修正した。実行完了と証拠品質を別概念として維持し、64対65の原因はTradingView report/ledger不一致として継続観測する
 
 ### #34 Pine Strategy walk-forward(`run_strategy_walk_forward`、優先度: 高・規模: 大)
 

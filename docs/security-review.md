@@ -321,6 +321,17 @@
 - **残余リスク**: TradingView UIや別プロセスの同時操作はプロセス内queueで排他できない。期待context、Pine帰属、ledger ID、終了時chart fingerprintで検出するが、Strategy Tester内部のactive tab状態やUI選択状態までは復元証明に含まれない。バックテスト値はシミュレーションであり、実約定・流動性・足内順序の証明ではない
 - **実機復元確認**: USDJPY 4Hの同一Pine v2.0で1入力だけを変えるA/Bを実行し、両variantのcondition一致、全取引証拠、cleanup成功を確認した。終了後は元Study集合とcontextに加え、既存Strategy Testerがbaselineと同じledger IDおよび元入力へ戻ったことを別のread-only呼び出しで確認した
 
+## 追補: バックログ #33(2026-07-20)
+
+`run_backtest_matrix`追加に伴うレビュー:
+
+- **書き込み確認と上限**: 既定dry-runで、`confirm:true`後だけチャートを一時変更する。jobは1〜24件、各入力は最大20件、primitiveのみ、文字列256文字、soft runtimeは30〜1800秒に制限する。任意コード、Pine source、式、無制限parameter grid、並列実行、注文を受け付けない
+- **帰属と証拠**: 各jobを実行前の保存済み自作strategyと具体的Pine版へ固定し、job/matrix定義をSHA-256化する。取得ledgerのPine ID/版に加えてsymbol/timeframeも要求jobと一致しなければ証拠を拒否し、全ページを先頭ledger IDへ拘束する
+- **逐次変更と復元**: process内chart queueで全matrixを直列化し、jobごとに対象symbol/timeframeへ変更、入力settle、全証拠取得、一時Study削除、元symbol/timeframe/study fingerprint照合まで行う。通常の計算失敗は行へ隔離して続行するが、cleanupまたは復元により元fingerprintを証明できない場合は残jobを開始しない
+- **期限の意味**: soft deadlineは期限到達後に新しいjobを開始しないための境界であり、進行中のCDP処理を強制cancelしない。強制中断でcleanupを失う危険を避ける代わりに、最終経過時間が指定秒数を超える可能性をレスポンスとREADMEで明示する
+- **研究境界**: 全行を入力順に返し、成功行だけの抽出、ランキング、総合スコア、自動採用を行わない。matrixは探索証拠であり、同じデータから選んだ最良値をOOS成績と扱わず、候補数を固定して#34 walk-forwardへ渡す
+- **残余リスク**: TradingView UIや別プロセスの同時操作、非公開Strategy Tester API変更、履歴プラン差、銘柄ごとの足内約定モデルは排除できない。chart/ledger帰属と復元で検出可能な差をfail closedにするが、バックテスト値自体は実約定の証明ではない
+
 ## 追補: バックログ #42(2026-07-20)
 
 - **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない

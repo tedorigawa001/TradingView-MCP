@@ -293,6 +293,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   const collectExperimentVariant = async (
     variant: ExperimentVariant,
     expectedVersion: string,
+    expectedChart?: { symbol: string; timeframe: string },
   ): Promise<{
     evidence: { report: StrategyReport; ledger: StrategyTradeLedger } | null;
     error: string | null;
@@ -344,6 +345,23 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       if (ledger.pineVersion !== expectedVersion) {
         throw new Error(
           `strategy version changed during experiment: expected ${expectedVersion}, found ${ledger.pineVersion}`,
+        );
+      }
+      if (expectedChart && !ledger.symbol) {
+        throw new Error(`strategy ledger symbol is unavailable; expected ${expectedChart.symbol}`);
+      }
+      if (expectedChart && ledger.symbol!.toUpperCase() !== expectedChart.symbol.toUpperCase()) {
+        throw new Error(
+          `strategy ledger symbol changed: expected ${expectedChart.symbol}, found ${ledger.symbol}`,
+        );
+      }
+      if (expectedChart && !ledger.timeframe) {
+        throw new Error(`strategy ledger timeframe is unavailable; expected ${expectedChart.timeframe}`);
+      }
+      if (expectedChart &&
+        normalizeResolution(ledger.timeframe!) !== normalizeResolution(expectedChart.timeframe)) {
+        throw new Error(
+          `strategy ledger timeframe changed: expected ${expectedChart.timeframe}, found ${ledger.timeframe}`,
         );
       }
       evidence = { report, ledger };
@@ -2582,14 +2600,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
           inputs: z.array(z.object({
             id: z.string().regex(/^[\w$]{1,64}$/),
-            value: z.union([z.number(), z.string(), z.boolean()]),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
           })).max(20).optional(),
         }),
         candidate: z.object({
           pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
           inputs: z.array(z.object({
             id: z.string().regex(/^[\w$]{1,64}$/),
-            value: z.union([z.number(), z.string(), z.boolean()]),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
           })).max(20).optional(),
         }),
         minimum_trades: z.number().int().min(1).max(100_000).optional()
@@ -2659,12 +2677,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           };
           if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
 
-          const baselineRun = await collectExperimentVariant(resolvedBaseline, resolvedBaseline.pineVersion);
+          const expectedChart = { symbol: initialChart.symbol, timeframe: initialChart.timeframe };
+          const baselineRun = await collectExperimentVariant(
+            resolvedBaseline,
+            resolvedBaseline.pineVersion,
+            expectedChart,
+          );
           let candidateRun: Awaited<ReturnType<typeof collectExperimentVariant>> | null = null;
           if (baselineRun.evidence && !baselineRun.cleanupError) {
             const afterBaseline = chartFingerprint(await tv.getChartContext());
             if (JSON.stringify(afterBaseline) === JSON.stringify(initialChart)) {
-              candidateRun = await collectExperimentVariant(resolvedCandidate, resolvedCandidate.pineVersion);
+              candidateRun = await collectExperimentVariant(
+                resolvedCandidate,
+                resolvedCandidate.pineVersion,
+                expectedChart,
+              );
             } else {
               candidateRun = {
                 evidence: null,
@@ -2740,6 +2767,235 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             conditions,
             comparison,
             qualityIssues,
+            chartState: { before: initialChart, after: finalChart, restored: chartRestored },
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "run_backtest_matrix",
+    {
+      description:
+        "Run a bounded, serial matrix of saved Pine strategies across explicit symbol, " +
+        "timeframe, and input combinations. The matrix is limited to 24 jobs and a soft " +
+        "runtime budget. Each strategy is temporarily added, bound to a full-ledger SHA-256 " +
+        "id, removed, and the original chart state is restored after every job. Failures and " +
+        "insufficient samples remain as rows; results are never ranked. Without confirm=true " +
+        "this only returns the resolved execution plan. It never places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA.describe("Exact active-chart symbol before and after the matrix"),
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i)
+          .describe("Exact active-chart timeframe before and after the matrix"),
+        jobs: z.array(z.object({
+          symbol: SYMBOL_SCHEMA,
+          timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+          pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          inputs: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
+          })).max(20).optional(),
+        })).min(1).max(24),
+        minimum_trades: z.number().int().min(1).max(100_000).optional()
+          .describe("Closed trades required per job. Default: 30"),
+        max_runtime_seconds: z.number().int().min(30).max(1800).optional()
+          .describe("Do not start another job after this soft deadline. Default: 600, maximum: 1800"),
+        confirm: z.boolean().optional()
+          .describe("Must be true to change the chart and run the matrix. Default: false"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, jobs, minimum_trades, max_runtime_seconds, confirm }) =>
+      chartOperations.run(async () => {
+        try {
+          const minimumTrades = minimum_trades ?? 30;
+          const maxRuntimeSeconds = max_runtime_seconds ?? 600;
+          const initialChart = chartFingerprint(await tv.getChartContext());
+          if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+            throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+          }
+          if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+            throw new Error(
+              `active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`,
+            );
+          }
+
+          const scripts = await tv.listPineScripts();
+          const resolvedJobs = jobs.map((job) => {
+            const script = scripts.find((item) => item.pineId === job.pine_id);
+            if (!script) throw new Error(`strategy not found: ${job.pine_id}`);
+            if (script.kind !== "strategy") throw new Error(`${job.pine_id} is not a saved strategy`);
+            if (typeof script.version !== "string" || script.version.length === 0) {
+              throw new Error(`saved strategy version is unavailable: ${job.pine_id}`);
+            }
+            const inputs = [...(job.inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+            if (new Set(inputs.map((input) => input.id)).size !== inputs.length) {
+              throw new Error(`duplicate input id in matrix job for ${job.pine_id}`);
+            }
+            const definition = {
+              symbol: job.symbol.toUpperCase(),
+              timeframe: normalizeResolution(job.timeframe),
+              pineId: job.pine_id,
+              pineVersion: script.version,
+              name: script.name,
+              inputs,
+            };
+            const jobId = "sha256:" + createHash("sha256")
+              .update(JSON.stringify(definition), "utf8")
+              .digest("hex");
+            return { jobId, ...definition };
+          });
+          if (new Set(resolvedJobs.map((job) => job.jobId)).size !== resolvedJobs.length) {
+            throw new Error("matrix contains duplicate resolved jobs");
+          }
+          const definition = {
+            methodologyVersion: "1.0",
+            minimumTrades,
+            maxRuntimeSeconds,
+            jobs: resolvedJobs,
+          };
+          const matrixId = "sha256:" + createHash("sha256")
+            .update(JSON.stringify(definition), "utf8")
+            .digest("hex");
+          const preview = {
+            schemaVersion: "1.0",
+            matrixId,
+            definition,
+            jobCount: resolvedJobs.length,
+            execution: {
+              mode: "serial",
+              maxJobs: 24,
+              softRuntimeDeadlineSeconds: maxRuntimeSeconds,
+              stopRemainingJobsOnRestoreFailure: true,
+              ranking: false,
+            },
+            chartState: initialChart,
+          };
+          if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+          const startedAt = Date.now();
+          const deadline = startedAt + maxRuntimeSeconds * 1000;
+          let abortReason: string | null = null;
+          const results: Array<Record<string, unknown>> = [];
+          for (const job of resolvedJobs) {
+            if (abortReason || Date.now() >= deadline) {
+              const reason = abortReason ?? "matrix soft runtime deadline reached before this job started";
+              results.push({
+                jobId: job.jobId,
+                symbol: job.symbol,
+                timeframe: job.timeframe,
+                pineId: job.pineId,
+                pineVersion: job.pineVersion,
+                requestedInputs: job.inputs,
+                status: "skipped",
+                ledgerId: null,
+                reportDateRange: null,
+                summary: null,
+                error: reason,
+                cleanupError: null,
+                chartRestored: abortReason === null,
+              });
+              continue;
+            }
+
+            const transaction = await withTemporaryChartState(
+              tv,
+              initialChart.index,
+              { symbol: job.symbol, resolution: job.timeframe },
+              () => collectExperimentVariant(
+                { pineId: job.pineId, inputs: job.inputs },
+                job.pineVersion,
+                { symbol: job.symbol, timeframe: job.timeframe },
+              ),
+            );
+            const run = transaction.value;
+            let afterJob: ReturnType<typeof chartFingerprint> | null = null;
+            let fingerprintError: string | null = null;
+            try {
+              afterJob = chartFingerprint(await tv.getChartContext());
+            } catch (err) {
+              fingerprintError = redactSecrets(err instanceof Error ? err.message : String(err));
+            }
+            const chartRestored = transaction.restored && afterJob !== null &&
+              JSON.stringify(afterJob) === JSON.stringify(initialChart);
+            if (!chartRestored) {
+              const restoreMessage = transaction.restoreError instanceof Error
+                ? transaction.restoreError.message
+                : transaction.restoreError
+                  ? String(transaction.restoreError)
+                  : fingerprintError ?? "chart fingerprint differs from its pre-matrix state";
+              abortReason = `chart restore failed after ${job.jobId}: ${redactSecrets(restoreMessage)}`;
+            }
+            const operationError = transaction.operationError
+              ? redactSecrets(transaction.operationError instanceof Error
+                ? transaction.operationError.message
+                : String(transaction.operationError))
+              : null;
+            const summary = run?.evidence ? summarizeStrategyEvidence(run.evidence, minimumTrades) : null;
+            const status = !chartRestored
+              ? "restore_failed"
+              : operationError || !run?.evidence
+                ? "failed"
+                : run.cleanupError
+                  ? "cleanup_failed"
+                  : summary?.minimumTradesMet
+                    ? "complete"
+                    : "insufficient_sample";
+            results.push({
+              jobId: job.jobId,
+              symbol: job.symbol,
+              timeframe: job.timeframe,
+              pineId: job.pineId,
+              pineVersion: job.pineVersion,
+              name: job.name,
+              requestedInputs: job.inputs,
+              status,
+              ledgerId: run?.evidence?.ledger.ledgerId ?? null,
+              reportDateRange: run?.evidence?.ledger.dateRange ?? null,
+              summary,
+              error: operationError ?? run?.error ?? (chartRestored ? null : abortReason),
+              cleanupError: run?.cleanupError ?? null,
+              chartRestored,
+            });
+          }
+
+          let finalChart: ReturnType<typeof chartFingerprint> | null = null;
+          try {
+            finalChart = chartFingerprint(await tv.getChartContext());
+          } catch {
+            // A per-job restore failure already carries the actionable error.
+          }
+          const chartRestored = finalChart !== null && JSON.stringify(finalChart) === JSON.stringify(initialChart);
+          const counts = results.reduce<Record<string, number>>((acc, result) => {
+            const key = String(result.status);
+            acc[key] = (acc[key] ?? 0) + 1;
+            return acc;
+          }, {});
+          const jobsWithQualityIssues = results.filter((result) => {
+            const summary = result.summary;
+            return summary !== null && typeof summary === "object" &&
+              Array.isArray((summary as { qualityIssues?: unknown }).qualityIssues) &&
+              ((summary as { qualityIssues: unknown[] }).qualityIssues.length > 0);
+          }).length;
+          const completedAllJobs = results.every((result) =>
+            result.status === "complete" || result.status === "insufficient_sample");
+          return jsonResult({
+            dryRun: false,
+            status: completedAllJobs && chartRestored ? "complete" : "partial",
+            ...preview,
+            results,
+            counts,
+            jobsWithQualityIssues,
+            qualityIssues: [
+              ...(jobsWithQualityIssues > 0 ? ["one_or_more_jobs_have_quality_issues"] : []),
+              ...(counts.insufficient_sample ? ["one_or_more_jobs_have_insufficient_samples"] : []),
+              ...(counts.failed ? ["one_or_more_jobs_failed"] : []),
+              ...(counts.cleanup_failed ? ["one_or_more_job_cleanups_failed"] : []),
+              ...(counts.restore_failed ? ["chart_state_restore_failed"] : []),
+              ...(counts.skipped ? ["one_or_more_jobs_were_skipped"] : []),
+            ],
+            elapsedMilliseconds: Date.now() - startedAt,
             chartState: { before: initialChart, after: finalChart, restored: chartRestored },
           });
         } catch (err) {
