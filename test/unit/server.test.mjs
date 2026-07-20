@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the fifty-seven expected tools", async () => {
+test("exposes exactly the fifty-eight expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -731,6 +731,7 @@ test("exposes exactly the fifty-seven expected tools", async () => {
       "run_backtest",
       "run_backtest_matrix",
       "run_strategy_experiment",
+      "run_strategy_walk_forward",
       "save_pine_script",
       "scan_market",
       "set_indicator_input",
@@ -3284,6 +3285,111 @@ test("run_backtest_matrix stops remaining jobs after a chart restore failure", a
   assert.match(result.results[1].error, /chart restore failed/);
   assert.equal(runCount, 1);
   assert.equal(result.chartState.restored, false);
+});
+
+test("run_strategy_walk_forward selects on train, exposes selected OOS only, and restores", async () => {
+  const pineId = "USER;walkforward123";
+  let activeLength = null;
+  let runCount = 0;
+  const removed = [];
+  const context = () => ({
+    layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240",
+      studies: [{ id: "original", name: "RSI" }] }],
+  });
+  const profits = {
+    5: { 2020: [2, -1], 2021: [3, -1], 2022: [4, -1], 2023: [5, -1] },
+    10: { 2020: [1, -2], 2021: [1, -2], 2022: [100, -1], 2023: [100, -1] },
+  };
+  const ledgerFor = (length) => {
+    const trades = Object.entries(profits[length]).flatMap(([year, values]) => values.map((profit, index) => {
+      const entryTime = Date.UTC(Number(year), 1, 1 + index);
+      return {
+        reportIndex: Number(year) * 100 + index, number: null, direction: "long", status: "closed",
+        entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+        exit: { time: entryTime + 3_600_000, timeIso: new Date(entryTime + 3_600_000).toISOString(),
+          price: 1, label: null },
+        durationMilliseconds: 3_600_000, profit, profitPercent: null, cumulativeProfit: null,
+        quantity: 1, commission: 0.01, commissionPercent: null, runUp: Math.max(profit, 0) + 1,
+        runUpPercent: null, drawDown: Math.max(-profit, 0) + 1, drawDownPercent: null,
+      };
+    }));
+    return {
+      schemaVersion: "1.0", ledgerId: `sha256:${(length === 5 ? "a" : "b").repeat(64)}`,
+      strategy: "Walk Forward", symbol: "OANDA:USDJPY", timeframe: "240", studyId: "temporary",
+      pineId, pineVersion: "1.0",
+      inputs: [{ id: "commission", name: "Commission Value", value: 0.01 },
+        { id: "length", name: "Length", value: length }],
+      currency: "JPY", initialCapital: 1000000,
+      dateRange: { from: "2020-01-01T00:00:00.000Z", to: "2025-01-01T00:00:00.000Z" },
+      summary: { totalTrades: trades.length }, totalTrades: trades.length, availableTrades: trades.length,
+      countMatchesSummary: true, ordering: "strategy_report", offset: 0, limit: 500,
+      returned: trades.length, nextOffset: null, complete: true, unavailableFields: [], qualityIssues: [], trades,
+    };
+  };
+  const deps = makeDeps({
+    tv: {
+      getChartContext: async () => context(),
+      listPineScripts: async () => [
+        { pineId, name: "Walk Forward", kind: "strategy", version: "1.0", usedBy: [] },
+      ],
+      runBacktest: async ({ pineId: requested }) => {
+        runCount += 1;
+        activeLength = null;
+        return { pineId: requested, studyId: `walk-${runCount}`, keptOnChart: true,
+          removedFromChart: false, strategy: "Walk Forward", currency: "JPY", initialCapital: 1000000,
+          dateRange: null, summary: {}, totalTrades: 8, trades: [] };
+      },
+      setIndicatorInput: async (studyId, inputs) => {
+        activeLength = inputs.find((input) => input.id === "length").value;
+        return { studyId, applied: inputs, settled: true };
+      },
+      getStrategyReport: async () => ({
+        strategy: "Walk Forward", currency: "JPY", initialCapital: 1000000,
+        dateRange: null, summary: { netProfit: 1 }, totalTrades: 8, trades: [],
+      }),
+      getStrategyTradeLedger: async () => ledgerFor(activeLength),
+      removePineFromChart: async (requested, studyId) => {
+        removed.push({ requested, studyId });
+        return { removed: true, pineId: requested, pineVersion: "1.0", studyId,
+          name: "Walk Forward", chartIndex: 0 };
+      },
+    },
+  });
+  const client = await connectedClient(deps);
+  const args = {
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", mode: "anchored",
+    minimum_train_trades: 2, minimum_test_trades: 2, selection_metric: "expectancy",
+    candidates: [
+      { pine_id: pineId, inputs: [{ id: "length", value: 5 }] },
+      { pine_id: pineId, inputs: [{ id: "length", value: 10 }] },
+    ],
+    folds: [
+      { fold_id: "f1", train_from: "2020-01-01T00:00:00.000Z",
+        train_to: "2021-12-31T00:00:00.000Z", test_from: "2022-01-01T00:00:00.000Z",
+        test_to: "2022-12-31T00:00:00.000Z" },
+      { fold_id: "f2", train_from: "2020-01-01T00:00:00.000Z",
+        train_to: "2022-12-31T00:00:00.000Z", test_from: "2023-01-01T00:00:00.000Z",
+        test_to: "2023-12-31T00:00:00.000Z" },
+    ],
+  };
+  const dry = JSON.parse((await client.callTool({ name: "run_strategy_walk_forward", arguments: args })).content[0].text);
+  assert.equal(dry.dryRun, true);
+  assert.equal(runCount, 0);
+  assert.equal(dry.execution.nonSelectedOosMetricsExposed, false);
+
+  const result = JSON.parse((await client.callTool({ name: "run_strategy_walk_forward",
+    arguments: { ...args, confirm: true } })).content[0].text);
+  assert.equal(result.status, "complete");
+  assert.equal(result.candidates.length, 2);
+  assert.equal(result.evaluation.folds[0].selection.status, "selected");
+  assert.equal(result.evaluation.folds[0].test.evidence.metrics.totalTrades, 2);
+  assert.equal(result.evaluation.folds[0].test.candidateId,
+    result.evaluation.folds[0].selection.candidateId);
+  assert.equal(result.evaluation.oosAggregate.evaluableFolds, 2);
+  assert.equal(result.chartState.restored, true);
+  assert.equal(runCount, 2);
+  assert.equal(removed.length, 2);
 });
 
 test("strategy research journal tools map immutable records without chart access", async () => {

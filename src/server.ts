@@ -28,6 +28,11 @@ import {
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
 import type { StrategyResearchJournalStore } from "./strategyResearchJournal.js";
+import {
+  evaluateStrategyWalkForward,
+  validateStrategyWalkForwardFolds,
+  type StrategyWalkForwardFold,
+} from "./strategyWalkForward.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -2994,6 +2999,260 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               ...(counts.cleanup_failed ? ["one_or_more_job_cleanups_failed"] : []),
               ...(counts.restore_failed ? ["chart_state_restore_failed"] : []),
               ...(counts.skipped ? ["one_or_more_jobs_were_skipped"] : []),
+            ],
+            elapsedMilliseconds: Date.now() - startedAt,
+            chartState: { before: initialChart, after: finalChart, restored: chartRestored },
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "run_strategy_walk_forward",
+    {
+      description:
+        "Run a bounded Pine Strategy walk-forward evaluation from full, immutable trade " +
+        "ledgers. Two to eight exact saved strategy/input candidates are collected serially " +
+        "on the bound chart, then partitioned into two to twelve explicit train, embargo, " +
+        "and test windows by closed-trade entry/exit time. Selection uses train metrics only; " +
+        "only the selected candidate's test metrics are exposed. Candidate failure, ledger " +
+        "quality issues, cost-condition differences, ties, and insufficient samples are not " +
+        "silently ignored. Without confirm=true this only previews the plan. Never places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SHDW]|[SHDW])$/i),
+        candidates: z.array(z.object({
+          pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          inputs: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
+          })).max(20).optional(),
+        })).min(2).max(8),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          train_from: z.string().datetime({ offset: true }),
+          train_to: z.string().datetime({ offset: true }),
+          test_from: z.string().datetime({ offset: true }),
+          test_to: z.string().datetime({ offset: true }),
+        })).min(2).max(12),
+        mode: z.enum(["anchored", "rolling"]),
+        embargo_bars: z.number().int().min(1).max(100).optional()
+          .describe("Closed bars between train and test. Default: 1"),
+        minimum_train_trades: z.number().int().min(1).max(100_000).optional()
+          .describe("Trades required to select a candidate in each train fold. Default: 30"),
+        minimum_test_trades: z.number().int().min(1).max(100_000).optional()
+          .describe("Trades required for each selected OOS fold. Default: 10"),
+        selection_metric: z.enum(["expectancy", "netProfit", "profitFactor"]).optional()
+          .describe("Train-only metric to maximize. Default: expectancy"),
+        max_runtime_seconds: z.number().int().min(30).max(1800).optional()
+          .describe("Do not start another candidate after this soft deadline. Default: 600"),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, candidates, folds, mode, embargo_bars,
+      minimum_train_trades, minimum_test_trades, selection_metric, max_runtime_seconds, confirm }) =>
+      chartOperations.run(async () => {
+        try {
+          const embargoBars = embargo_bars ?? 1;
+          const minimumTrainTrades = minimum_train_trades ?? 30;
+          const minimumTestTrades = minimum_test_trades ?? 10;
+          const selectionMetric = selection_metric ?? "expectancy";
+          const maxRuntimeSeconds = max_runtime_seconds ?? 600;
+          const initialChart = chartFingerprint(await tv.getChartContext());
+          if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+            throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+          }
+          if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+            throw new Error(
+              `active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`,
+            );
+          }
+          const scripts = await tv.listPineScripts();
+          const resolvedCandidates = candidates.map((candidate) => {
+            const script = scripts.find((item) => item.pineId === candidate.pine_id);
+            if (!script) throw new Error(`strategy not found: ${candidate.pine_id}`);
+            if (script.kind !== "strategy") throw new Error(`${candidate.pine_id} is not a saved strategy`);
+            if (typeof script.version !== "string" || script.version.length === 0) {
+              throw new Error(`saved strategy version is unavailable: ${candidate.pine_id}`);
+            }
+            const inputs = [...(candidate.inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+            if (new Set(inputs.map((input) => input.id)).size !== inputs.length) {
+              throw new Error(`duplicate input id in walk-forward candidate ${candidate.pine_id}`);
+            }
+            const candidateDefinition = {
+              pineId: candidate.pine_id,
+              pineVersion: script.version,
+              name: script.name,
+              inputs,
+            };
+            const candidateId = "sha256:" + createHash("sha256")
+              .update(JSON.stringify(candidateDefinition), "utf8")
+              .digest("hex");
+            return { candidateId, ...candidateDefinition };
+          });
+          if (new Set(resolvedCandidates.map((candidate) => candidate.candidateId)).size !==
+            resolvedCandidates.length) {
+            throw new Error("walk-forward contains duplicate resolved candidates");
+          }
+          const resolvedFolds: StrategyWalkForwardFold[] = folds.map((fold) => ({
+            foldId: fold.fold_id,
+            trainFrom: fold.train_from,
+            trainTo: fold.train_to,
+            testFrom: fold.test_from,
+            testTo: fold.test_to,
+          }));
+          validateStrategyWalkForwardFolds(
+            resolvedFolds,
+            mode,
+            initialChart.timeframe,
+            embargoBars,
+          );
+          const definition = {
+            methodologyVersion: "ledger_partition_v1",
+            symbol: initialChart.symbol,
+            timeframe: initialChart.timeframe,
+            mode,
+            embargoBars,
+            minimumTrainTrades,
+            minimumTestTrades,
+            selectionMetric,
+            maxRuntimeSeconds,
+            candidates: resolvedCandidates,
+            folds: resolvedFolds,
+          };
+          const walkForwardId = "sha256:" + createHash("sha256")
+            .update(JSON.stringify(definition), "utf8")
+            .digest("hex");
+          const preview = {
+            schemaVersion: "1.0",
+            walkForwardId,
+            definition,
+            execution: {
+              mode: "serial_candidate_collection_then_ledger_partition",
+              candidateCount: resolvedCandidates.length,
+              foldCount: resolvedFolds.length,
+              maxCandidates: 8,
+              maxFolds: 12,
+              nonSelectedOosMetricsExposed: false,
+              stopOnRestoreFailure: true,
+              ranking: false,
+            },
+            chartState: initialChart,
+          };
+          if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+          const startedAt = Date.now();
+          const deadline = startedAt + maxRuntimeSeconds * 1000;
+          let abortReason: string | null = null;
+          const runs: Array<{
+            candidate: typeof resolvedCandidates[number];
+            evidence: { report: StrategyReport; ledger: StrategyTradeLedger } | null;
+            error: string | null;
+            cleanupError: string | null;
+            chartRestored: boolean;
+          }> = [];
+          for (const candidate of resolvedCandidates) {
+            if (abortReason || Date.now() >= deadline) {
+              runs.push({
+                candidate,
+                evidence: null,
+                error: abortReason ?? "walk-forward soft runtime deadline reached before candidate started",
+                cleanupError: null,
+                chartRestored: abortReason === null,
+              });
+              continue;
+            }
+            const run = await collectExperimentVariant(
+              { pineId: candidate.pineId, inputs: candidate.inputs },
+              candidate.pineVersion,
+              { symbol: initialChart.symbol, timeframe: initialChart.timeframe },
+            );
+            let afterCandidate: ReturnType<typeof chartFingerprint> | null = null;
+            try {
+              afterCandidate = chartFingerprint(await tv.getChartContext());
+            } catch {
+              // The failed fingerprint is represented as a restore failure below.
+            }
+            const chartRestored = afterCandidate !== null &&
+              JSON.stringify(afterCandidate) === JSON.stringify(initialChart);
+            if (!chartRestored) {
+              abortReason = `chart restore failed after candidate ${candidate.candidateId}`;
+            }
+            runs.push({ candidate, ...run, chartRestored });
+          }
+
+          const allEvidenceAvailable = runs.every((run) =>
+            run.evidence !== null && run.error === null && run.cleanupError === null && run.chartRestored);
+          let conditionChecks: Array<ReturnType<typeof compareStrategyConditions>> = [];
+          if (allEvidenceAvailable) {
+            const reference = runs[0].evidence!.ledger;
+            conditionChecks = runs.slice(1).map((run) =>
+              compareStrategyConditions(reference, run.evidence!.ledger));
+          }
+          const conditionsMatched = allEvidenceAvailable && conditionChecks.every((check) => check.matched);
+          const evaluation = !allEvidenceAvailable
+            ? null
+            : !conditionsMatched
+              ? {
+                status: "not_evaluable" as const,
+                methodologyVersion: "ledger_partition_v1",
+                blockers: ["candidate_conditions_differ"],
+                folds: [],
+                oosAggregate: null,
+              }
+              : evaluateStrategyWalkForward({
+                candidates: runs.map((run) => ({
+                  candidateId: run.candidate.candidateId,
+                  ledger: run.evidence!.ledger,
+                })),
+                folds: resolvedFolds,
+                mode,
+                timeframe: initialChart.timeframe,
+                embargoBars,
+                minimumTrainTrades,
+                minimumTestTrades,
+                selectionMetric,
+              });
+          let finalChart: ReturnType<typeof chartFingerprint> | null = null;
+          try {
+            finalChart = chartFingerprint(await tv.getChartContext());
+          } catch {
+            // Candidate results retain the restore failure.
+          }
+          const chartRestored = finalChart !== null && JSON.stringify(finalChart) === JSON.stringify(initialChart);
+          const candidateResults = runs.map((run) => ({
+            candidateId: run.candidate.candidateId,
+            pineId: run.candidate.pineId,
+            pineVersion: run.candidate.pineVersion,
+            name: run.candidate.name,
+            requestedInputs: run.candidate.inputs,
+            status: run.evidence && !run.error && !run.cleanupError && run.chartRestored ? "collected" : "failed",
+            ledgerId: run.evidence?.ledger.ledgerId ?? null,
+            reportDateRange: run.evidence?.ledger.dateRange ?? null,
+            ledgerQualityIssues: run.evidence?.ledger.qualityIssues ?? [],
+            countMatchesSummary: run.evidence?.ledger.countMatchesSummary ?? null,
+            error: run.error,
+            cleanupError: run.cleanupError,
+            chartRestored: run.chartRestored,
+          }));
+          return jsonResult({
+            dryRun: false,
+            status: evaluation?.status ?? "partial",
+            ...preview,
+            candidates: candidateResults,
+            conditions: {
+              matched: conditionsMatched,
+              comparisons: conditionChecks,
+            },
+            evaluation,
+            qualityIssues: [
+              ...(!allEvidenceAvailable ? ["candidate_collection_incomplete"] : []),
+              ...(allEvidenceAvailable && !conditionsMatched ? ["candidate_conditions_differ"] : []),
+              ...(!chartRestored ? ["chart_state_restore_failed"] : []),
+              ...((evaluation?.blockers.length ?? 0) > 0 ? ["walk_forward_not_evaluable"] : []),
+              ...(evaluation?.status === "partial" ? ["one_or_more_folds_not_evaluable"] : []),
             ],
             elapsedMilliseconds: Date.now() - startedAt,
             chartState: { before: initialChart, after: finalChart, restored: chartRestored },

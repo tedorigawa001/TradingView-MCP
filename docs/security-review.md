@@ -332,6 +332,18 @@
 - **研究境界**: 全行を入力順に返し、成功行だけの抽出、ランキング、総合スコア、自動採用を行わない。matrixは探索証拠であり、同じデータから選んだ最良値をOOS成績と扱わず、候補数を固定して#34 walk-forwardへ渡す
 - **残余リスク**: TradingView UIや別プロセスの同時操作、非公開Strategy Tester API変更、履歴プラン差、銘柄ごとの足内約定モデルは排除できない。chart/ledger帰属と復元で検出可能な差をfail closedにするが、バックテスト値自体は実約定の証明ではない
 
+## 追補: バックログ #34(2026-07-20)
+
+`run_strategy_walk_forward`追加に伴うレビュー:
+
+- **期間境界**: Premium依存かつ通常reportと結果が異なるDeep Backtestingの非公開書き込みAPIを使用しない。Pine sourceも改変せず、完全ledgerのclosed tradeをentry/exitともに`[from,to)`内の場合だけ含める。境界跨ぎ、open、時刻欠落を別集計し、ledger date rangeが全foldを覆わない場合はデータなしと推測しない
+- **探索・応答上限**: 候補2〜8、fold 2〜12、入力20件、文字列256文字、embargo 1〜100bar、soft runtime 30〜1800秒へ制限する。foldは明示ISO timestamp、test非重複、時系列前進、anchored/rolling契約をdry-run前に検証し、任意コードや自動parameter gridを受け取らない。included tradeの全indexは集計内部だけで使い、fold応答には件数・指標・除外理由だけを返す
+- **OOS秘匿**: 選定は各foldのtrain ledgerだけで行い、非選択候補のtest指標を計算結果へ含めない。同点や最低train件数不足で恣意的な候補を選ばず、選択不能としてtestを返さない。OOS集計には最低test件数と品質を満たした選択候補foldだけを含め、evaluable fold数を併記する
+- **候補集合の固定**: 一候補でも収集、input settle、Pine帰属、ledger完全性、品質、期間coverage、cleanup、chart fingerprint復元に失敗した場合、残った候補だけで選定しない。commission、slippage、capital/currency、quantity/margin、fill設定、report期間が候補間で違う場合も評価不能にする
+- **指標意味論**: fold指標はledger tradeから再計算し、欠落profitをゼロ補完しない。期間別のbar-level equityを持たないためTradingView最大DD、Sharpe、Sortinoを按分せず、closed trade累積損益からの`maxClosedTradeEquityDrawdown`として明示する。PFは損失tradeがない場合に無限大を返さずnullとする
+- **非リペイント境界**: 時刻分割は未来取引の選定混入を防ぐが、Pine自身のlookahead/repaintを無害化しない。採用候補は既存source auditとrestart差分検証を通し、#35でコスト・遅延・近傍・期間移動のストレスを追加する
+- **残余リスク**: 全期間を一度計算したstrategy内部stateはfold開始以前の履歴をwarm-upとして利用する。これは当時利用可能な過去情報だが、独立初期化したDeep Backtesting foldとは一致しない可能性がある。結果は`ledger_partition_v1`として識別し、別methodologyと無言で比較しない
+
 ## 追補: バックログ #42(2026-07-20)
 
 - **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない

@@ -312,12 +312,21 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機検証(2026-07-20)**: Smart Money Strategy v3.0をUSDJPY/EURUSD/XAUUSDの4Hへ3jobで実行し、7.4秒で全件完走した。各jobは30取引以上、ledger ID取得、cleanup成功、job後復元成功となり、終了時のUSDJPY 4Hと元3 StudyのID・名前は開始時と完全一致した。USDJPYは72取引/PF1.459/期待値115.09、EURUSDはreport 64件に対しledger 65件で`report_trade_count_mismatch`、PF0.823/期待値-50.59、XAUUSDは56取引/PF1.348/期待値285.12だった
 - **実機後修正**: EURUSDの行内品質警告を検出できた一方、matrix最上位の`qualityIssues`が空だったため、`jobsWithQualityIssues`件数と`one_or_more_jobs_have_quality_issues`を集約して返すよう修正した。実行完了と証拠品質を別概念として維持し、64対65の原因はTradingView report/ledger不一致として継続観測する
 
-### #34 Pine Strategy walk-forward(`run_strategy_walk_forward`、優先度: 高・規模: 大)
+### #34 Pine Strategy walk-forward(`run_strategy_walk_forward`) ✅ 実装・実機検証完了
 
 - **課題**: 既存walk-forward CLIは評価ログの予測ラベルをfold別集計するもので、Pine Strategy Testerを期間分割して再実行する機能ではない
 - **案**: 時系列順のtrain/test fold、anchored/rolling方式、embargo、最低取引数を事前指定し、選定はtrainだけ、最終指標はtestだけから算出する。fold別結果を保持し、全期間を再最適化した見かけの成績をOOSとして扱わない
 - **境界**: TradingViewが任意日付範囲をStrategy Testerへ確実に適用できるかを先に実機調査する。Pine側の期間入力を使う場合は、監査済み入力契約と読み戻し検証を必須にする
 - **完了条件**: 将来隣接データのembargo、期間境界、fold失敗、候補tie、選定不能、全fold OOS集計、再実行再現性を固定する
+- **期間指定調査(2026-07-20)**: TradingView公式では、任意日付範囲を直接指定できるのは[Deep Backtesting](https://www.tradingview.com/support/solutions/43000666199-what-is-deep-backtesting/)で、通常Strategy Reportと結果が異なる。さらに[Premium以上](https://www.tradingview.com/support/solutions/43000666265-how-deep-backtesting-works/)で、選択期間でもintraday履歴や最大200万barの制約がある。Pine側の期間filterも[公式FAQ](https://www.tradingview.com/pine-script-docs/faq/strategies)で案内されるが、既存strategyすべてへ専用input追加を要求し、期間境界でのposition処理がstrategy実装依存になる
+- **採用方式**: #31の完全ledgerを一候補につき一度だけ同一chart条件で取得し、closed tradeのentry/exit時刻がともに明示窓内の取引だけをtrain/testへ分割する`ledger_partition_v1`を採用した。期間をTradingViewやPineへ書き込まず、開始・終了境界を跨ぐtrade、open trade、時刻欠落tradeを除外件数として保持する。ledgerのdate rangeが全foldを覆わない場合は「取引なし」と推測せず評価不能にする
+- **実装(2026-07-20)**: 2〜8候補、2〜12fold、anchored/rolling、1〜100bar embargo、train/test最低取引数、train選定metric(`expectancy`/`netProfit`/`profitFactor`)を事前固定する。候補は具体的Pine版・正規化入力・SHA-256 IDへ解決し、既定dry-run後の`confirm:true`でだけ直列収集する。候補収集失敗、cleanup/復元失敗、ledger品質問題、期間未coverage、コスト・資本・数量・fill・期間条件差が一つでもあれば候補集合を縮めず停止する
+- **リーク防止**: 各foldはtrainだけで最大metric候補を選び、完全同点は`selection_tie`として選ばない。レスポンスは全候補のtrain証拠を返すが、testは選択候補1件だけを計算・公開し、非選択候補のOOS指標を返さない。test窓は非重複かつ時系列順を要求し、anchoredはtrain開始固定、rollingはtrain開始前進を検証する
+- **OOS指標**: ledger原値から取引数、期待値、純損益、PF、勝率、平均保有時間、平均run-up/drawdown、closed-trade累積損益の最大DDを再計算する。TradingViewのbar内equity DD、Sharpe、Sortinoを期間按分して捏造せず、`maxClosedTradeEquityDrawdown`を別名で返す。最低test取引数と品質を満たしたfoldだけを全fold OOSへ集約する
+- **検証状況**: train-only選定、非選択OOS非公開、anchored/rolling境界、embargo不足、test重複、候補tie、最低取引数、ledger品質・期間coverage、公開MCPのdry-run、候補直列収集、条件比較、cleanup、chart fingerprint復元をユニットテストで固定した
+- **実機検証(2026-07-21)**: USDJPY 4HのSmart Money v3.0で`Next-Bar Confirmation` OFF/ONを2候補、anchored 2fold、1bar embargo、train期待値選定として実行した。Strategy Testerのreport期間は2020年開始でも実tradeは2025-03-19以降だったため、当初の2023/2024 testは正しく0件・選定不能となった。実trade範囲内の2025-Q4/2026-Q1 testへ事前契約を組み直した再実行では、両ledger完全・条件一致・品質問題なし・cleanup/復元成功となった
+- **実機結果**: 両foldともOFF候補をtrainだけで選択した。OOSは2025-Q4が14取引/期待値270.13/PF2.722、2026-Q1が12取引/期待値207.96/PF2.220、非重複2fold集計が26取引/期待値241.44/PF2.480/勝率61.54%/closed-trade DD989.52だった。これは最低件数をtrain 5/test 3へ下げた機能検証であり、採用判定には#35と、より多いfold・取引数が必要
+- **実機後修正**: foldごとの全`reportIndex`配列は大規模ledgerで応答を増幅するため、集計内部だけに保持し公開レスポンスから除外した。選定不能foldがある`partial`結果は最上位にも`one_or_more_folds_not_evaluable`を返す
 
 ### #35 研究プロトコル検証・頑健性試験(`validate_research_protocol` / `stress_test_strategy`、優先度: 高・規模: 中〜大)
 
