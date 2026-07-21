@@ -4551,6 +4551,7 @@ test("run_market_event_study binds the chart and returns session auction evidenc
     condition: { type: "session_auction", timezone: "UTC", range_start: "00:00",
       range_end: "08:00", auction_end: "10:00", minimum_range_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
+    confidence_level: 0.99, configuration_trials: 7,
     folds: [{ fold_id: "all", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" }],
   } });
   const parsed = JSON.parse(res.content[0].text);
@@ -4559,6 +4560,10 @@ test("run_market_event_study binds the chart and returns session auction evidenc
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.events[0].direction, "long");
   assert.equal(parsed.folds[0].events, 1);
+  assert.equal(parsed.inferenceContract.confidenceLevel, 0.99);
+  assert.equal(parsed.inferenceContract.configurationTrials, 7);
+  assert.equal(parsed.byBranch.accepted_up.horizons["1"].positiveRateConfidenceInterval.method,
+    "wilson_score");
 });
 
 test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {

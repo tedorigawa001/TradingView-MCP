@@ -360,7 +360,10 @@
 - **時間契約**: clientからUTC offsetを計算させず、64文字以下のIANA timezoneを`Intl.DateTimeFormat`へ渡す。同一local dayで`range_start < range_end < auction_end`だけを許可し、DSTに伴うUTC offset変化を日別に解決する。日跨ぎ、休日calendar、session早期終了は推測せず初版の対象外とする
 - **先読み・曖昧性**: 形成中足を除外し、range終了後の最初のboundary touchだけを分類する。上下両側sweep、OHLC矛盾、重複timestamp、境界後の反対側touchは拒否またはambiguousへ数え、足内順序を推測しない。signal bar closeはevent referenceであり約定と表現しない
 - **応答上限**: horizon 1〜8件・最大96本、fold最大12、event明細最大200、target最大1,000bps。反復ごとのbar列や全OHLCを返さず、集計とbounded event evidenceだけを返す。各horizonはtimestamp連続性を要求し、週末等をforward fillしない
-- **統計境界**: 初版は記述統計とfold分離であり、因果、有意性、収益性を証明しない。confidence interval、多重比較補正、重複event policyは未実装であるため、複数parameterを回して最良行だけを採用しない
+- **統計境界**: 記述統計、fold分離、v2の限定的なconfidence intervalは、因果、有意性、収益性を証明しない。多重比較補正と重複event policyは未実装であるため、複数parameterを回して最良行だけを採用しない
+- **推論区間(v2)**: 全体branch×horizonの方向調整return平均には標本分散を使う90/95/99%正規近似、positive率・target到達率にはWilson score区間だけを追加した。平均は2観測未満、比率は0観測で利用不能とし、ゼロ幅や0%として補完しない。これはevent独立性を仮定する漸近区間で、session連続性・volatility regime等の系列依存を調整しない。p値、有意/非有意ラベル、因果、採用判定は返さない
+- **試行数・応答境界(v2)**: `configuration_trials`はcallerが今回までに閲覧した関連設定数を申告する監査メタデータであり、MCPが正しさを推測しない。未申告は`not_declared`、多重比較補正は常に`none`として明示する。区間は全体の主要3指標だけに限定し、foldは件数、return平均/中央値、positive率、target率だけへ圧縮する。最大fold×horizonで区間やMFE/MAE詳細を複製せず、branch×horizon×3の設定済みinterval数とfoldの省略契約を返す
+- **実機応答確認(v2)**: EURUSD 15分5,000本、43 event、4 horizon、2 foldで全体推論値を維持しながら応答を約89KBから52KBへ削減した。`event_limit:0`でもaggregate/foldは返る設計のため応答はゼロにならないが、生OHLC・event明細・fold区間・fold MFE/MAEは含めない。range coverage不足1日はpartialとして保持した
 - **horizon連続性**: session auctionは短期session反応を対象とするため、signalから各horizonまでのtimestamp差が名目時間足の1.5倍以内で連続する場合だけ結果を有効にする。週末、休場、未ロード区間を跨ぐhorizonはnullとし、観測市場足基準の#38/#41とは契約フラグで区別する
 
 ## 追補: バックログ #37 市場レジーム初版(2026-07-21)

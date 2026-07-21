@@ -617,7 +617,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "The initial condition type, session_auction, uses an IANA timezone to classify the first " +
         "break of a prior local-session range as accepted outside closes or a failed return inside. " +
         "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
-        "optional non-overlapping time folds. Signal-bar close is an event reference, not an assumed fill. " +
+        "optional non-overlapping time folds with bounded mean and rate confidence intervals. The caller " +
+        "can declare the number of configurations inspected; serial dependence and multiple testing are " +
+        "not silently adjusted. Signal-bar close is an event reference, not an assumed fill. " +
         "It never ranks parameters, changes the chart, or places orders.",
       inputSchema: {
         expected_symbol: SYMBOL_SCHEMA,
@@ -637,6 +639,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
         target_return_bps: z.number().finite().gt(0).max(1000),
         minimum_events: z.number().int().min(1).max(5000),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional()
+          .describe("Confidence level for normal-approximation mean and Wilson rate intervals. Default: 0.95"),
+        configuration_trials: z.number().int().min(1).max(100_000).optional()
+          .describe("Total related parameter/configuration trials inspected so far, including this one"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
@@ -647,7 +653,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ expected_symbol, expected_timeframe, count, condition, horizons, target_return_bps,
-      minimum_events, folds, event_limit }) => chartOperations.run(async () => {
+      minimum_events, confidence_level, configuration_trials, folds, event_limit }) => chartOperations.run(async () => {
       try {
         const context = await tv.getChartContext();
         const activeIndex = context.activeChartIndex ?? 0;
@@ -680,6 +686,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           horizons,
           targetReturnBps: target_return_bps,
           minimumEvents: minimum_events,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials ?? null,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           eventLimit: event_limit ?? 50,
         });
@@ -697,6 +705,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "This is an event study, not a fill, execution, or profitability simulation.",
             "Loaded chart history can be shorter than the requested count and differs by TradingView plan.",
             "MFE and MAE use bar extremes; intrabar ordering is unknown.",
+            "Confidence intervals use asymptotic formulas and do not adjust for serial dependence or multiple testing.",
           ],
         });
       } catch (err) {

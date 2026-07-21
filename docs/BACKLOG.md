@@ -348,8 +348,10 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **出力**: 発生数、欠落数、平均/中央値/分位点、勝率、信頼区間、時系列fold別結果を返す。複数条件探索時は試行数を記録し、多重比較を無視したp値だけで採用しない
 - **初版実装(2026-07-21)**: `run_market_event_study`はアクティブchartのexact symbol/timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCだけを読む。`session_auction`条件はIANA timezone、同一local day内のrange start/endとauction end、range coverage、1〜4本のacceptance closes、0〜4本のfailure windowを構造化入力とする。各平日は最初の上下境界touchだけを対象に、両側sweepはambiguousとして除外し、外側終値の連続をaccepted、内側復帰をfailedへ排他的に分類する
 - **結果契約**: signal確定足closeを約定価格ではなくevent referenceとし、1〜8個・最大96本のhorizonごとに方向調整return、positive rate、MFE、MAE、事前bps targetの到達率/本数を集計する。週末・休場等で連続barを欠くhorizonは利用不能にし、半開区間の非重複foldを最大12件集計する。イベント明細は最大200件、集計は全件を使用し、形成中足、range不足、無touch、両側sweep、未分類を別件数で返す
+- **推論区間と試行追跡(2026-07-21)**: methodology v2で、全体branch×horizonの方向調整return平均へ90/95/99%正規近似区間、positive率・target到達率へ同水準のWilson score区間を追加した。2観測未満の平均区間は捏造せず`insufficient_sample`、比率は0観測だけ利用不能とする。`configuration_trials`で今回までに閲覧した関連設定数を任意申告でき、未申告を`not_declared`として返す。設定済み主要interval出力数、系列依存補正なし、多重比較補正なしを明示し、p値・有意判定・自動採用は生成しない。foldは件数、方向調整returnの平均/中央値、positive率、target到達率だけに圧縮し、区間・MFE/MAE・到達本数を重複展開せず最大fold×horizonでの応答増幅を抑える
+- **v2実機検証(2026-07-21)**: EURUSD 15分足の確定5,000本(2026-05-08〜07-21)、UTC 00:00〜08:00 range、12:00 auction end、1/4/8/16本horizon、2fold、申告12 trialsで43イベントを取得した。形成中1本を除外し、52 eligible日のうちrange coverage不足1日を補完せず`partial`へ残した。全体branch×horizonの48主要区間を生成し、accepted-up 4本returnは8件、平均-0.0030%、95%区間-0.0440%〜+0.0381%でゼロを跨いだ。fold圧縮前後でイベント・全体推論値は不変のまま応答を約89KBから52KBへ41%削減した。検証後はUSDJPY 4H、元2 Study、active paneを復元した
 - **検証状況**: accepted-upとfailed-upの排他分類・方向反転、形成中足除外、両側sweep拒否、fold集計、London DST開始後もlocal 08:00をUTC 07:00として扱うこと、MCP chart binding/read-only履歴取得をユニットテストで固定した
-- **残タスク**: EURUSD 15分で十分な履歴をloadした実機event study、confidence interval、条件DSL、重複event policy、試行数/multiple-testing記録、経済event条件、#37のlabelとのevent結果結合は未実装。初版のsession clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
+- **残タスク**: 条件DSL、重複event policy、多重比較補正を採用する場合の事前方式、経済event条件、#37のlabelとのevent結果結合は未実装。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
 ### #37 市場レジーム分類(`compute_market_regimes`) 🟡 価格・volatility初版実装、台帳結合は継続
 

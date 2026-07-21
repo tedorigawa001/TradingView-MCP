@@ -22,6 +22,8 @@ export interface SessionAuctionStudyInput {
   minimumEvents: number;
   folds: SessionAuctionFold[];
   eventLimit: number;
+  confidenceLevel: 0.9 | 0.95 | 0.99;
+  configurationTrials: number | null;
 }
 
 type LocalBar = OhlcvBar & { localDate: string; localMinute: number; weekday: string; globalIndex: number };
@@ -58,7 +60,40 @@ function percentile(values: number[], probability: number): number | null {
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
 }
 
-function stats(values: number[]) {
+const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+
+function meanConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (values.length < 2) {
+    return { status: "insufficient_sample" as const, method: "normal_approximation" as const,
+      confidenceLevel, observations: values.length, lower: null, upper: null };
+  }
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const margin = NORMAL_Z[confidenceLevel] * Math.sqrt(variance / values.length);
+  return { status: "available" as const, method: "normal_approximation" as const,
+    confidenceLevel, observations: values.length, lower: mean - margin, upper: mean + margin };
+}
+
+function wilsonConfidenceInterval(successes: number, observations: number, confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (observations === 0) {
+    return { status: "insufficient_sample" as const, method: "wilson_score" as const,
+      confidenceLevel, observations, successes, lower: null, upper: null };
+  }
+  const z = NORMAL_Z[confidenceLevel];
+  const rate = successes / observations;
+  const denominator = 1 + z ** 2 / observations;
+  const center = (rate + z ** 2 / (2 * observations)) / denominator;
+  const margin = z * Math.sqrt(rate * (1 - rate) / observations + z ** 2 / (4 * observations ** 2)) /
+    denominator;
+  return { status: "available" as const, method: "wilson_score" as const,
+    confidenceLevel, observations, successes, lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+function stats(
+  values: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
+  includeMeanConfidenceInterval = false,
+) {
   return {
     count: values.length,
     mean: values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length,
@@ -67,6 +102,9 @@ function stats(values: number[]) {
     p75: percentile(values, 0.75),
     minimum: values.length === 0 ? null : Math.min(...values),
     maximum: values.length === 0 ? null : Math.max(...values),
+    ...(includeMeanConfidenceInterval
+      ? { meanConfidenceInterval: meanConfidenceInterval(values, confidenceLevel) }
+      : {}),
   };
 }
 
@@ -102,20 +140,45 @@ function localize(bars: OhlcvBar[], timezone: string): LocalBar[] {
   });
 }
 
-function summarizeOutcomes(events: Array<ReturnType<typeof outcomeForEvent>>, horizons: number[]) {
+function summarizeOutcomes(
+  events: Array<ReturnType<typeof outcomeForEvent>>,
+  horizons: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
+  includeInference: boolean,
+) {
   return Object.fromEntries(horizons.map((horizon) => {
     const outcomes = events.map((event) => event.outcomes[String(horizon)]).filter((value) => value !== null);
     const returns = outcomes.map((outcome) => outcome!.directionalReturn);
     const targetHits = outcomes.filter((outcome) => outcome!.targetHitBars !== null);
+    if (!includeInference) {
+      return [String(horizon), {
+        availableEvents: outcomes.length,
+        unavailableEvents: events.length - outcomes.length,
+        directionalReturn: {
+          count: returns.length,
+          mean: returns.length === 0 ? null : returns.reduce((sum, value) => sum + value, 0) / returns.length,
+          median: percentile(returns, 0.5),
+        },
+        positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
+        targetHitRate: outcomes.length === 0 ? null : targetHits.length / outcomes.length,
+      }];
+    }
     return [String(horizon), {
       availableEvents: outcomes.length,
       unavailableEvents: events.length - outcomes.length,
-      directionalReturn: stats(returns),
+      directionalReturn: stats(returns, confidenceLevel, includeInference),
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
-      mfe: stats(outcomes.map((outcome) => outcome!.mfe)),
-      mae: stats(outcomes.map((outcome) => outcome!.mae)),
+      ...(includeInference ? { positiveRateConfidenceInterval: wilsonConfidenceInterval(
+        returns.filter((value) => value > 0).length, returns.length, confidenceLevel),
+      } : {}),
+      mfe: stats(outcomes.map((outcome) => outcome!.mfe), confidenceLevel),
+      mae: stats(outcomes.map((outcome) => outcome!.mae), confidenceLevel),
       targetHitRate: outcomes.length === 0 ? null : targetHits.length / outcomes.length,
-      targetHitBars: stats(targetHits.map((outcome) => outcome!.targetHitBars!)),
+      ...(includeInference ? {
+        targetHitRateConfidenceInterval: wilsonConfidenceInterval(
+          targetHits.length, outcomes.length, confidenceLevel),
+      } : {}),
+      targetHitBars: stats(targetHits.map((outcome) => outcome!.targetHitBars!), confidenceLevel),
     }];
   }));
 }
@@ -178,6 +241,11 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
       input.failureWithinBars < 0 || input.failureWithinBars > 4) throw new Error("invalid auction classification window");
   if (!(input.minimumRangeCoverage > 0 && input.minimumRangeCoverage <= 1)) throw new Error("invalid minimum range coverage");
   if (input.bars.length < 3) throw new Error("at least three OHLC bars are required");
+  if (![0.9, 0.95, 0.99].includes(input.confidenceLevel)) throw new Error("unsupported confidence level");
+  if (input.configurationTrials !== null &&
+      (!Number.isInteger(input.configurationTrials) || input.configurationTrials < 1 || input.configurationTrials > 100_000)) {
+    throw new Error("configuration trials must be an integer from 1 to 100000");
+  }
   const bars = [...input.bars].sort((left, right) => left.time - right.time);
   if (bars.some((bar, index) => index > 0 && bar.time === bars[index - 1].time)) throw new Error("duplicate OHLC timestamps");
   if (bars.some((bar) => !Number.isFinite(bar.open) || !Number.isFinite(bar.high) || !Number.isFinite(bar.low) ||
@@ -280,7 +348,8 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   const branches = ["accepted_up", "accepted_down", "failed_up", "failed_down"] as const;
   const byBranch = Object.fromEntries(branches.map((branch) => {
     const selected = events.filter((event) => event.branch === branch);
-    return [branch, { events: selected.length, horizons: summarizeOutcomes(selected, input.horizons) }];
+    return [branch, { events: selected.length,
+      horizons: summarizeOutcomes(selected, input.horizons, input.confidenceLevel, true) }];
   }));
   const foldResults = folds.map((fold) => {
     const selected = events.filter((event) => {
@@ -294,7 +363,8 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
       events: selected.length,
       byBranch: Object.fromEntries(branches.map((branch) => {
         const branchEvents = selected.filter((event) => event.branch === branch);
-        return [branch, { events: branchEvents.length, horizons: summarizeOutcomes(branchEvents, input.horizons) }];
+        return [branch, { events: branchEvents.length,
+          horizons: summarizeOutcomes(branchEvents, input.horizons, input.confidenceLevel, false) }];
       })),
     };
   });
@@ -305,7 +375,7 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   ];
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "session_auction_event_study_v1" as const,
+    methodologyVersion: "session_auction_event_study_v2" as const,
     status: issues.length === 0 ? "complete" as const : "partial" as const,
     symbol: input.symbol,
     timeframe: input.timeframe,
@@ -322,6 +392,28 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
       horizons: input.horizons,
       targetReturnBps: input.targetReturnBps,
       contiguousBarsRequired: true,
+    },
+    inferenceContract: {
+      confidenceLevel: input.confidenceLevel,
+      meanIntervalMethod: "normal_approximation",
+      rateIntervalMethod: "wilson_score",
+      serialDependenceAdjustment: "none",
+      multipleTestingAdjustment: "none",
+      configurationTrials: input.configurationTrials,
+      trialTrackingStatus: input.configurationTrials === null ? "not_declared" : "declared",
+      inferenceScope: "global_branch_horizon_primary_outcomes_only",
+      configuredMetricIntervals: branches.length * input.horizons.length * 3,
+    },
+    inferenceWarnings: [
+      ...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []),
+      "confidence_intervals_do_not_adjust_for_serial_dependence",
+      "no_multiple_testing_adjustment_applied",
+    ],
+    foldContract: {
+      detail: "compact_directional_outcomes",
+      fields: ["availableEvents", "unavailableEvents", "directionalReturn.count",
+        "directionalReturn.mean", "directionalReturn.median", "positiveRate", "targetHitRate"],
+      omitted: ["confidenceIntervals", "mfe", "mae", "targetHitBars"],
     },
     sample: { barsReceived: input.bars.length, closedBars: closed.length, events: events.length, minimumEvents: input.minimumEvents },
     quality,

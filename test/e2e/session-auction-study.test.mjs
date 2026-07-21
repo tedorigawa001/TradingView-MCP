@@ -46,6 +46,9 @@ test("session auction event study over MCP stdio and live TradingView", {
     assert.equal(result.timeframe, config.expected_timeframe);
     assert.ok(result.sample.events >= 1);
     assert.equal(result.eventsTruncated, result.sample.events > (config.event_limit ?? 50));
+    assert.equal(result.inferenceContract.confidenceLevel, config.confidence_level ?? 0.95);
+    assert.equal(result.inferenceContract.configurationTrials, config.configuration_trials ?? null);
+    assert.equal(result.inferenceContract.multipleTestingAdjustment, "none");
     assert.equal(containsKey(result, "bars"), false, "raw OHLC arrays must not amplify the response");
     t.diagnostic(`source=${result.source.from}..${result.source.to} events=${result.sample.events} ` +
       `accepted_up=${result.byBranch.accepted_up.events} accepted_down=${result.byBranch.accepted_down.events} ` +
