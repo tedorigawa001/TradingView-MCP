@@ -3,6 +3,11 @@ import {
   marketRegimeResolutionMilliseconds,
   type ClassifiedMarketRegimeObservation,
 } from "./marketRegimes.js";
+import {
+  createSessionClockClassifier,
+  OUTSIDE_DEFINED_SESSIONS_ID,
+  type SessionClockDefinition,
+} from "./sessionProfile.js";
 
 export interface StrategyRegimeEvaluationInput {
   ledger: StrategyTradeLedger;
@@ -11,12 +16,14 @@ export interface StrategyRegimeEvaluationInput {
   minimumGroupTrades: number;
   minimumCoverageRatio: number;
   maxRegimeAgeBars: number;
+  sessions?: SessionClockDefinition[];
 }
 
 type JoinedTrade = {
   trade: StrategyLedgerTrade;
   observation: ClassifiedMarketRegimeObservation;
   regimeAgeMilliseconds: number;
+  sessionIds: string[];
 };
 
 function average(values: number[]): number | null {
@@ -80,6 +87,23 @@ function groupEvidence(joined: JoinedTrade[], keyOf: (item: JoinedTrade) => stri
     }]));
 }
 
+function sessionEvidence(
+  joined: JoinedTrade[],
+  sessions: SessionClockDefinition[],
+  minimumGroupTrades: number,
+) {
+  const groups = new Map(sessions.map((session) => [session.sessionId, [] as JoinedTrade[]]));
+  groups.set(OUTSIDE_DEFINED_SESSIONS_ID, []);
+  for (const item of joined) {
+    const keys = item.sessionIds.length === 0 ? [OUTSIDE_DEFINED_SESSIONS_ID] : item.sessionIds;
+    for (const key of keys) groups.get(key)!.push(item);
+  }
+  return Object.fromEntries([...groups].map(([key, evidence]) => [key, {
+    ...metrics(evidence),
+    minimumTradesMet: evidence.length >= minimumGroupTrades,
+  }]));
+}
+
 function latestClosedObservation(
   observations: ClassifiedMarketRegimeObservation[],
   entryTime: number,
@@ -111,6 +135,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   if (!Number.isInteger(input.maxRegimeAgeBars) || input.maxRegimeAgeBars < 0 || input.maxRegimeAgeBars > 100) {
     throw new Error("maximum regime age bars must be an integer between 0 and 100");
   }
+  const classifySession = input.sessions === undefined ? null : createSessionClockClassifier(input.sessions);
   const resolutionMs = marketRegimeResolutionMilliseconds(input.timeframe);
   if (resolutionMs === null || resolutionMs <= 0) throw new Error(`unsupported timeframe: ${input.timeframe}`);
   const observations = [...input.observations].sort((left, right) => left.time - right.time);
@@ -147,7 +172,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       excluded.staleRegimeEvidence += 1;
       continue;
     }
-    joined.push({ trade, observation, regimeAgeMilliseconds });
+    const sessionIds = classifySession === null
+      ? []
+      : classifySession(trade.entry.time).map((match) => match.sessionId);
+    joined.push({ trade, observation, regimeAgeMilliseconds, sessionIds });
   }
 
   const eligibleClosedTrades = closedTrades.length - excluded.missingEntryTime - excluded.missingProfit;
@@ -185,6 +213,9 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       maximumAgeMilliseconds: maximumAgeMs,
       minimumCoverageRatio: input.minimumCoverageRatio,
       minimumGroupTrades: input.minimumGroupTrades,
+      sessionMatchPolicy: input.sessions === undefined ? null : "all_matches_non_exclusive",
+      unmatchedSessionLabel: input.sessions === undefined ? null : OUTSIDE_DEFINED_SESSIONS_ID,
+      sessions: input.sessions ?? [],
     },
     coverage: {
       ledgerTrades: input.ledger.trades.length,
@@ -202,5 +233,8 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       input.minimumGroupTrades),
     byCombinedRegime: groupEvidence(joined, (item) =>
       `${item.observation.directionalRegime}:${item.observation.volatilityRegime}`, input.minimumGroupTrades),
+    bySession: input.sessions === undefined
+      ? null
+      : sessionEvidence(joined, input.sessions, input.minimumGroupTrades),
   };
 }

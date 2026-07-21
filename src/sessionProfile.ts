@@ -1,11 +1,22 @@
 import type { OhlcvBar } from "./tradingview.js";
 
+export const OUTSIDE_DEFINED_SESSIONS_ID = "outside_defined_sessions";
+
 export interface SessionProfileDefinition {
   sessionId: string;
   timezone: string;
   start: string;
   end: string;
   minimumCoverage: number;
+}
+
+export type SessionClockDefinition = Omit<SessionProfileDefinition, "minimumCoverage">;
+
+export interface SessionClockMatch {
+  sessionId: string;
+  timezone: string;
+  sessionDate: string;
+  minutesFromStart: number;
 }
 
 export interface SessionProfileInput {
@@ -90,6 +101,63 @@ function shiftDate(date: string, days: number): string {
 function isWeekday(date: string): boolean {
   const day = new Date(`${date}T00:00:00.000Z`).getUTCDay();
   return day >= 1 && day <= 5;
+}
+
+export function validateSessionClockDefinitions(sessions: SessionClockDefinition[]): void {
+  if (sessions.length < 1 || sessions.length > 8 ||
+      new Set(sessions.map((session) => session.sessionId)).size !== sessions.length) {
+    throw new Error("sessions must contain one to eight unique session ids");
+  }
+  for (const session of sessions) {
+    if (!/^[\w.:-]{1,80}$/.test(session.sessionId)) throw new Error("invalid session id");
+    if (session.sessionId === OUTSIDE_DEFINED_SESSIONS_ID) throw new Error("reserved session id");
+    const startMinute = clockMinute(session.start, `${session.sessionId}.start`);
+    const endMinute = clockMinute(session.end, `${session.sessionId}.end`);
+    if (startMinute === endMinute) throw new Error("session start and end must differ");
+    formatter(session.timezone);
+  }
+}
+
+export function classifyTimestampSessions(
+  timestampMs: number,
+  sessions: SessionClockDefinition[],
+): SessionClockMatch[] {
+  return createSessionClockClassifier(sessions)(timestampMs);
+}
+
+export function createSessionClockClassifier(sessions: SessionClockDefinition[]) {
+  validateSessionClockDefinitions(sessions);
+  const prepared = sessions.map((session) => ({
+    ...session,
+    startMinute: clockMinute(session.start, `${session.sessionId}.start`),
+    endMinute: clockMinute(session.end, `${session.sessionId}.end`),
+    dateFormatter: formatter(session.timezone),
+  }));
+  return (timestampMs: number): SessionClockMatch[] => {
+    if (!Number.isFinite(timestampMs)) throw new Error("session timestamp must be finite");
+    return prepared.flatMap((session) => {
+      const { startMinute, endMinute } = session;
+      const parts = Object.fromEntries(session.dateFormatter.formatToParts(new Date(timestampMs))
+        .filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+      const localMinute = Number(parts.hour) * 60 + Number(parts.minute);
+      const crossMidnight = startMinute >= endMinute;
+      const included = crossMidnight
+        ? localMinute >= startMinute || localMinute < endMinute
+        : localMinute >= startMinute && localMinute < endMinute;
+      if (!included) return [];
+      const localDate = `${parts.year}-${parts.month}-${parts.day}`;
+      const sessionDate = crossMidnight && localMinute < endMinute ? shiftDate(localDate, -1) : localDate;
+      if (!isWeekday(sessionDate)) return [];
+      return [{
+        sessionId: session.sessionId,
+        timezone: session.timezone,
+        sessionDate,
+        minutesFromStart: localMinute >= startMinute
+          ? localMinute - startMinute
+          : 1_440 - startMinute + localMinute,
+      }];
+    });
+  };
 }
 
 function percentile(values: number[], probability: number): number | null {
@@ -184,22 +252,16 @@ export function computeSessionProfile(input: SessionProfileInput) {
   if (!Number.isInteger(input.observationLimit) || input.observationLimit < 0 || input.observationLimit > 500) {
     throw new Error("invalid observation limit");
   }
-  if (input.sessions.length < 1 || input.sessions.length > 8 ||
-      new Set(input.sessions.map((session) => session.sessionId)).size !== input.sessions.length) {
-    throw new Error("sessions must contain one to eight unique session ids");
-  }
+  validateSessionClockDefinitions(input.sessions);
   const barsAll = validateBars(input.bars);
   const formingBarsExcluded = barsAll.filter((bar) => bar.forming === true).length;
   const bars = barsAll.filter((bar) => bar.forming !== true);
   const rows: SessionObservation[] = [];
 
   for (const session of input.sessions) {
-    if (!/^[\w.:-]{1,80}$/.test(session.sessionId)) throw new Error("invalid session id");
     if (!(session.minimumCoverage > 0 && session.minimumCoverage <= 1)) throw new Error("invalid minimum session coverage");
     const startMinute = clockMinute(session.start, `${session.sessionId}.start`);
     const endMinute = clockMinute(session.end, `${session.sessionId}.end`);
-    if (startMinute === endMinute) throw new Error("session start and end must differ");
-    formatter(session.timezone);
     const durationMinutes = startMinute < endMinute ? endMinute - startMinute : 1_440 - startMinute + endMinute;
     const expectedBars = Math.ceil(durationMinutes / timeframe);
     const grouped = new Map<string, LocalBar[]>();

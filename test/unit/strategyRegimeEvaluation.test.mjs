@@ -73,3 +73,23 @@ test("strategy regime evaluation reports stale evidence and incomplete ledgers",
   assert.ok(partial.qualityIssues.includes("strategy_ledger_incomplete"));
   assert.ok(partial.qualityIssues.includes("no_trades_joined_to_regimes"));
 });
+
+test("strategy regime evaluation groups entry times into non-exclusive DST-aware sessions", () => {
+  const observations = Array.from({ length: 24 }, (_, index) => observation(index, "range", "normal"));
+  const londonOpen = trade(8, 4);
+  const londonNewYorkOverlap = trade(13, -2);
+  const outside = trade(22, 3);
+  const result = evaluate([londonOpen, londonNewYorkOverlap, outside], observations, {
+    minimumGroupTrades: 1,
+    minimumCoverageRatio: 1,
+    sessions: [
+      { sessionId: "london", timezone: "Europe/London", start: "08:00", end: "16:00" },
+      { sessionId: "new_york", timezone: "America/New_York", start: "08:00", end: "17:00" },
+    ],
+  });
+  assert.equal(result.joinContract.sessionMatchPolicy, "all_matches_non_exclusive");
+  assert.equal(result.bySession.london.trades, 2);
+  assert.equal(result.bySession.new_york.trades, 1);
+  assert.equal(result.bySession.outside_defined_sessions.trades, 1);
+  assert.equal(result.bySession.london.netProfit, 2);
+});

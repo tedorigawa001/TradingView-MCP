@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeSessionProfile } from "../../build/sessionProfile.js";
+import { classifyTimestampSessions, computeSessionProfile } from "../../build/sessionProfile.js";
 
 function bar(time, open, close, volume = 1) {
   return { time: time / 1000, timeIso: new Date(time).toISOString(), open,
@@ -22,6 +22,24 @@ test("session profile honors London daylight saving time", () => {
   assert.equal(result.bySession.london.completeSessionDays, 2);
   assert.equal(result.observations[0].startTime, "2026-03-27T08:00:00.000Z");
   assert.equal(result.observations[1].startTime, "2026-03-30T07:00:00.000Z");
+});
+
+test("session clock classification honors DST and prior-day ownership across midnight", () => {
+  const london = [{ sessionId: "london", timezone: "Europe/London", start: "08:00", end: "10:00" }];
+  assert.equal(classifyTimestampSessions(Date.UTC(2026, 2, 27, 8, 30), london)[0].minutesFromStart, 30);
+  assert.equal(classifyTimestampSessions(Date.UTC(2026, 2, 30, 7, 30), london)[0].minutesFromStart, 30);
+
+  const overnight = [{ sessionId: "overnight", timezone: "UTC", start: "22:00", end: "02:00" }];
+  const match = classifyTimestampSessions(Date.UTC(2026, 0, 10, 0, 30), overnight)[0];
+  assert.equal(match.sessionDate, "2026-01-09");
+  assert.equal(match.minutesFromStart, 150);
+  assert.equal(classifyTimestampSessions(Date.UTC(2026, 0, 10, 3), overnight).length, 0);
+});
+
+test("session clock definitions reject the reserved unmatched bucket id", () => {
+  assert.throws(() => classifyTimestampSessions(Date.UTC(2026, 0, 5, 9), [{
+    sessionId: "outside_defined_sessions", timezone: "UTC", start: "08:00", end: "10:00",
+  }]), /reserved session id/);
 });
 
 test("session profile assigns after-midnight bars to the prior cross-midnight session date", () => {

@@ -4769,6 +4769,16 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   assert.equal(preview.dryRun, true);
   assert.equal(preview.definition.regime.count, 20_000);
   assert.equal(runs, 0);
+  const invalidSessions = await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
+    pine_version: "1.0", sessions: [
+      { session_id: "duplicate", timezone: "UTC", start: "08:00", end: "10:00" },
+      { session_id: "duplicate", timezone: "UTC", start: "10:00", end: "12:00" },
+    ], confirm: true,
+  } });
+  assert.equal(invalidSessions.isError, true);
+  assert.match(invalidSessions.content[0].text, /unique session ids/);
+  assert.equal(runs, 0);
   const result = JSON.parse((await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
     pine_version: "1.0", count: 200, trend_lookback: 10, atr_lookback: 5,
@@ -4855,6 +4865,7 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
     trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
     minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
     max_regime_age_bars: 1,
+    sessions: [{ session_id: "london", timezone: "Europe/London", start: "08:00", end: "16:00" }],
     jobs: [
       { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
       { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId },
@@ -4875,6 +4886,8 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.deepEqual(result.results.map((row) => row.evaluation.coverage.joinedTrades), [4, 4]);
   assert.equal(result.results[0].evaluation.overall.profitFactor, 7 / 3);
   assert.equal(result.results[1].evaluation.overall.profitFactor, 11 / 3);
+  assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 1]);
+  assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "all_matches_non_exclusive");
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(runs, 2);
   assert.equal(removed, 2);

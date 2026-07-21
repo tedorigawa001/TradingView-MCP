@@ -44,7 +44,7 @@ import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
-import { computeSessionProfile } from "./sessionProfile.js";
+import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -119,6 +119,12 @@ export interface ServerDeps {
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
 const SYMBOL_SCHEMA = z.string().regex(/^[\w!.:&-]{1,48}$/);
+const STRATEGY_SESSION_SCHEMA = z.object({
+  session_id: z.string().regex(/^[\w.:-]{1,80}$/),
+  timezone: z.string().min(1).max(64),
+  start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+  end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+});
 const CANONICAL_ISO_TIMESTAMP_SCHEMA = z.string()
   .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
   .refine((value) => {
@@ -1207,6 +1213,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Eligible closed trades that must join to a regime. Default: 0.8"),
         max_regime_age_bars: z.number().int().min(0).max(100).optional()
           .describe("Maximum age of the prior closed regime evidence. Default: 3 bars"),
+        sessions: z.array(STRATEGY_SESSION_SCHEMA).min(1).max(8).optional()
+          .describe("Optional DST-aware session windows used for non-exclusive entry-time grouping"),
         confirm: z.boolean().optional()
           .describe("Must be true to add the strategy temporarily and run the analysis. Default: false"),
       },
@@ -1215,7 +1223,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       trend_lookback, atr_lookback, volatility_baseline_lookback, trend_efficiency_threshold,
       range_efficiency_threshold, directional_move_atr_threshold, high_volatility_ratio,
       low_volatility_ratio, minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1256,7 +1264,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumGroupTrades: minimum_group_trades ?? 30,
           minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
           maxRegimeAgeBars: max_regime_age_bars ?? 3,
+          sessions: sessions?.map((session) => ({
+            sessionId: session.session_id,
+            timezone: session.timezone,
+            start: session.start,
+            end: session.end,
+          })),
         };
+        if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const definition = {
           methodologyVersion: "strategy_regime_analysis_v1",
           symbol: initialChart.symbol,
@@ -1399,6 +1414,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         minimum_group_trades: z.number().int().min(1).max(100_000).optional(),
         minimum_coverage_ratio: z.number().finite().gt(0).max(1).optional(),
         max_regime_age_bars: z.number().int().min(0).max(100).optional(),
+        sessions: z.array(STRATEGY_SESSION_SCHEMA).min(1).max(8).optional()
+          .describe("Optional DST-aware session windows used for non-exclusive entry-time grouping"),
         max_runtime_seconds: z.number().int().min(30).max(1800).optional()
           .describe("Do not start another job after this soft deadline. Default: 900"),
         confirm: z.boolean().optional(),
@@ -1408,7 +1425,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
       directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
       minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1466,7 +1483,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumGroupTrades: minimum_group_trades ?? 30,
           minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
           maxRegimeAgeBars: max_regime_age_bars ?? 3,
+          sessions: sessions?.map((session) => ({
+            sessionId: session.session_id,
+            timezone: session.timezone,
+            start: session.start,
+            end: session.end,
+          })),
         };
+        if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const maxRuntimeSeconds = max_runtime_seconds ?? 900;
         const definition = {
           methodologyVersion: "strategy_regime_matrix_v1",
