@@ -364,6 +364,9 @@
 - **推論区間(v2)**: 全体branch×horizonの方向調整return平均には標本分散を使う90/95/99%正規近似、positive率・target到達率にはWilson score区間だけを追加した。平均は2観測未満、比率は0観測で利用不能とし、ゼロ幅や0%として補完しない。これはevent独立性を仮定する漸近区間で、session連続性・volatility regime等の系列依存を調整しない。p値、有意/非有意ラベル、因果、採用判定は返さない
 - **試行数・応答境界(v2)**: `configuration_trials`はcallerが今回までに閲覧した関連設定数を申告する監査メタデータであり、MCPが正しさを推測しない。未申告は`not_declared`、多重比較補正は常に`none`として明示する。区間は全体の主要3指標だけに限定し、foldは件数、return平均/中央値、positive率、target率だけへ圧縮する。最大fold×horizonで区間やMFE/MAE詳細を複製せず、branch×horizon×3の設定済みinterval数とfoldの省略契約を返す
 - **実機応答確認(v2)**: EURUSD 15分5,000本、43 event、4 horizon、2 foldで全体推論値を維持しながら応答を約89KBから52KBへ削減した。`event_limit:0`でもaggregate/foldは返る設計のため応答はゼロにならないが、生OHLC・event明細・fold区間・fold MFE/MAEは含めない。range coverage不足1日はpartialとして保持した
+- **event-regime時刻境界**: optional regime分解はsignal足自身のOHLC labelを使わず、`regime bar start + nominal resolution <= signal bar start`を満たす直前確定labelだけへ結合する。signalはその足のcloseで初めて成立するため、これは1本以上前の市場状態を条件にする保守的契約である。signal足で初めて分類warmupを満たす境界ケースがjoin 0件になることをテストで固定した
+- **event-regime小標本・増幅境界**: directional 4、volatility 3、combined 12の固定19セルだけを生成し、最低event数未満は`not_evaluable`として区間を返さない。評価可能セルもreturn、positive率、target率の主要3指標だけに限定し、生label列、event×regime明細、MFE/MAE、ランキングを返さない。regime分割で閲覧結果数が増える警告と、調整なしのconfigured interval数を明示する
+- **event-regime実機確認**: EURUSD 15分5,000本の43eventを43件すべて直前確定regimeへ結合し、signal足不使用、age 0、coverage 100%、固定19セル中9セル評価可能、全108区間、多重比較補正なしを確認した。event明細0の応答は約106KBで、生OHLC、全regime観測、event×label明細を含まない。評価可能セルの4本後return区間は全てゼロを跨ぎ、自動選択を行わなかった
 - **horizon連続性**: session auctionは短期session反応を対象とするため、signalから各horizonまでのtimestamp差が名目時間足の1.5倍以内で連続する場合だけ結果を有効にする。週末、休場、未ロード区間を跨ぐhorizonはnullとし、観測市場足基準の#38/#41とは契約フラグで区別する
 
 ## 追補: バックログ #37 市場レジーム初版(2026-07-21)

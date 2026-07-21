@@ -4552,6 +4552,13 @@ test("run_market_event_study binds the chart and returns session auction evidenc
       range_end: "08:00", auction_end: "10:00", minimum_range_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
     confidence_level: 0.99, configuration_trials: 7,
+    regime: {
+      trend_lookback: 2, atr_lookback: 2, volatility_baseline_lookback: 5,
+      trend_efficiency_threshold: 0.6, range_efficiency_threshold: 0.25,
+      directional_move_atr_threshold: 0.5, high_volatility_ratio: 1.5,
+      low_volatility_ratio: 0.75, minimum_classified_bars: 1,
+      minimum_group_events: 1, minimum_coverage_ratio: 0.5, max_regime_age_bars: 1,
+    },
     folds: [{ fold_id: "all", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" }],
   } });
   const parsed = JSON.parse(res.content[0].text);
@@ -4564,6 +4571,9 @@ test("run_market_event_study binds the chart and returns session auction evidenc
   assert.equal(parsed.inferenceContract.configurationTrials, 7);
   assert.equal(parsed.byBranch.accepted_up.horizons["1"].positiveRateConfidenceInterval.method,
     "wilson_score");
+  assert.equal(parsed.regimeAnalysis.coverage.joinedEvents, 1);
+  assert.equal(parsed.regimeAnalysis.joinContract.signalBarRegimeExcluded, true);
+  assert.equal(parsed.regimeAnalysis.inferenceContract.automaticRanking, false);
 });
 
 test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {

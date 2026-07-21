@@ -52,6 +52,7 @@ function input(bars, overrides = {}) {
     eventLimit: 20,
     confidenceLevel: 0.95,
     configurationTrials: 3,
+    regime: null,
     ...overrides,
   };
 }
@@ -132,4 +133,75 @@ test("session auction study returns bounded confidence intervals and explicit tr
   assert.ok(horizon.positiveRateConfidenceInterval.upper <= 1);
   assert.equal(result.inferenceContract.trialTrackingStatus, "not_declared");
   assert.ok(result.inferenceWarnings.includes("configuration_trial_count_not_declared"));
+});
+
+test("session auction study joins events only to regimes closed before the signal bar", () => {
+  const bars = [];
+  for (let day = 5; day <= 16; day += 1) bars.push(...utcDay(day, day % 2 ? "accepted_up" : "failed_up"));
+  const result = runSessionAuctionStudy(input(bars, {
+    folds: [], minimumEvents: 1, horizons: [1, 4],
+    regime: {
+      trendLookback: 2,
+      atrLookback: 2,
+      volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6,
+      rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5,
+      highVolatilityRatio: 1.5,
+      lowVolatilityRatio: 0.75,
+      minimumClassifiedBars: 1,
+      minimumGroupEvents: 1,
+      minimumCoverageRatio: 0.5,
+      maxRegimeAgeBars: 1,
+    },
+  }));
+  assert.equal(result.methodologyVersion, "session_auction_event_regime_study_v1");
+  assert.equal(result.regimeAnalysis.joinContract.signalBarRegimeExcluded, true);
+  assert.equal(result.regimeAnalysis.joinContract.labelAt,
+    "latest_regime_bar_with_nominal_close_at_or_before_signal_bar_start");
+  assert.ok(result.regimeAnalysis.coverage.joinedEvents > 0);
+  assert.ok(result.regimeAnalysis.coverage.coverageRatio >= 0.5);
+  const evaluable = Object.values(result.regimeAnalysis.byDirectionalRegime)
+    .find((group) => group.status === "evaluable");
+  assert.ok(evaluable);
+  assert.equal(evaluable.horizons["1"].directionalReturn.meanConfidenceInterval.method,
+    "normal_approximation");
+  assert.equal("mfe" in evaluable.horizons["1"], false);
+});
+
+test("session auction study keeps sparse regime groups not evaluable", () => {
+  const bars = [];
+  for (let day = 5; day <= 12; day += 1) bars.push(...utcDay(day, "accepted_up"));
+  const result = runSessionAuctionStudy(input(bars, {
+    folds: [], minimumEvents: 1, horizons: [1],
+    regime: {
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+      minimumClassifiedBars: 1, minimumGroupEvents: 100,
+      minimumCoverageRatio: 0.5, maxRegimeAgeBars: 1,
+    },
+  }));
+  assert.equal(result.regimeAnalysis.inferenceContract.groupsEvaluable, 0);
+  assert.ok(Object.values(result.regimeAnalysis.byCombinedRegime)
+    .every((group) => group.status === "not_evaluable" && group.horizons === null));
+});
+
+test("session auction study never joins the signal bar's contemporaneous regime", () => {
+  const result = runSessionAuctionStudy(input(utcDay(5, "accepted_up"), {
+    folds: [], minimumEvents: 1, horizons: [1],
+    regime: {
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 32,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+      minimumClassifiedBars: 1, minimumGroupEvents: 1,
+      minimumCoverageRatio: 0.5, maxRegimeAgeBars: 1,
+    },
+  }));
+  assert.ok(result.regimeEvidence.sample.classifiedBars > 0,
+    "the signal bar and later bars should be classifiable");
+  assert.equal(result.regimeAnalysis.coverage.joinedEvents, 0,
+    "the only classification available at the event belongs to the signal bar itself");
+  assert.equal(result.regimeAnalysis.status, "blocked");
+  assert.ok(result.regimeAnalysis.qualityIssues.includes("no_events_joined_to_regimes"));
 });

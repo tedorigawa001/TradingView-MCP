@@ -1,4 +1,9 @@
 import type { OhlcvBar } from "./tradingview.js";
+import {
+  computeMarketRegimes,
+  marketRegimeResolutionMilliseconds,
+  type ClassifiedMarketRegimeObservation,
+} from "./marketRegimes.js";
 
 export interface SessionAuctionFold {
   foldId: string;
@@ -24,6 +29,20 @@ export interface SessionAuctionStudyInput {
   eventLimit: number;
   confidenceLevel: 0.9 | 0.95 | 0.99;
   configurationTrials: number | null;
+  regime: {
+    trendLookback: number;
+    atrLookback: number;
+    volatilityBaselineLookback: number;
+    trendEfficiencyThreshold: number;
+    rangeEfficiencyThreshold: number;
+    directionalMoveAtrThreshold: number;
+    highVolatilityRatio: number;
+    lowVolatilityRatio: number;
+    minimumClassifiedBars: number;
+    minimumGroupEvents: number;
+    minimumCoverageRatio: number;
+    maxRegimeAgeBars: number;
+  } | null;
 }
 
 type LocalBar = OhlcvBar & { localDate: string; localMinute: number; weekday: string; globalIndex: number };
@@ -144,13 +163,13 @@ function summarizeOutcomes(
   events: Array<ReturnType<typeof outcomeForEvent>>,
   horizons: number[],
   confidenceLevel: 0.9 | 0.95 | 0.99,
-  includeInference: boolean,
+  mode: "global" | "fold" | "regime",
 ) {
   return Object.fromEntries(horizons.map((horizon) => {
     const outcomes = events.map((event) => event.outcomes[String(horizon)]).filter((value) => value !== null);
     const returns = outcomes.map((outcome) => outcome!.directionalReturn);
     const targetHits = outcomes.filter((outcome) => outcome!.targetHitBars !== null);
-    if (!includeInference) {
+    if (mode === "fold") {
       return [String(horizon), {
         availableEvents: outcomes.length,
         unavailableEvents: events.length - outcomes.length,
@@ -163,21 +182,30 @@ function summarizeOutcomes(
         targetHitRate: outcomes.length === 0 ? null : targetHits.length / outcomes.length,
       }];
     }
-    return [String(horizon), {
+    const directionalReturn = mode === "global"
+      ? stats(returns, confidenceLevel, true)
+      : {
+        count: returns.length,
+        mean: returns.length === 0 ? null : returns.reduce((sum, value) => sum + value, 0) / returns.length,
+        median: percentile(returns, 0.5),
+        meanConfidenceInterval: meanConfidenceInterval(returns, confidenceLevel),
+      };
+    const primary = {
       availableEvents: outcomes.length,
       unavailableEvents: events.length - outcomes.length,
-      directionalReturn: stats(returns, confidenceLevel, includeInference),
+      directionalReturn,
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
-      ...(includeInference ? { positiveRateConfidenceInterval: wilsonConfidenceInterval(
+      positiveRateConfidenceInterval: wilsonConfidenceInterval(
         returns.filter((value) => value > 0).length, returns.length, confidenceLevel),
-      } : {}),
+      targetHitRate: outcomes.length === 0 ? null : targetHits.length / outcomes.length,
+      targetHitRateConfidenceInterval: wilsonConfidenceInterval(
+        targetHits.length, outcomes.length, confidenceLevel),
+    };
+    if (mode === "regime") return [String(horizon), primary];
+    return [String(horizon), {
+      ...primary,
       mfe: stats(outcomes.map((outcome) => outcome!.mfe), confidenceLevel),
       mae: stats(outcomes.map((outcome) => outcome!.mae), confidenceLevel),
-      targetHitRate: outcomes.length === 0 ? null : targetHits.length / outcomes.length,
-      ...(includeInference ? {
-        targetHitRateConfidenceInterval: wilsonConfidenceInterval(
-          targetHits.length, outcomes.length, confidenceLevel),
-      } : {}),
       targetHitBars: stats(targetHits.map((outcome) => outcome!.targetHitBars!), confidenceLevel),
     }];
   }));
@@ -225,6 +253,126 @@ function outcomeForEvent<T extends { signalIndex: number; direction: 1 | -1 }>(
   return { ...event, signalTime: signal.timeIso, signalPrice: signal.close, outcomes };
 }
 
+function latestRegimeClosedBeforeSignal(
+  observations: ClassifiedMarketRegimeObservation[],
+  signalStartMs: number,
+  resolutionMs: number,
+): ClassifiedMarketRegimeObservation | null {
+  let low = 0;
+  let high = observations.length - 1;
+  let result: ClassifiedMarketRegimeObservation | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const observation = observations[middle];
+    if (observation.time * 1000 + resolutionMs <= signalStartMs) {
+      result = observation;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return result;
+}
+
+function buildEventRegimeAnalysis(
+  events: Array<ReturnType<typeof outcomeForEvent>>,
+  observations: ClassifiedMarketRegimeObservation[],
+  resolutionMs: number,
+  horizons: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
+  minimumGroupEvents: number,
+  minimumCoverageRatio: number,
+  maxRegimeAgeBars: number,
+) {
+  const excluded = { noPriorClosedRegime: 0, staleRegimeEvidence: 0 };
+  const maximumAgeMilliseconds = maxRegimeAgeBars * resolutionMs;
+  const joined: Array<{
+    event: ReturnType<typeof outcomeForEvent>;
+    observation: ClassifiedMarketRegimeObservation;
+    regimeAgeMilliseconds: number;
+  }> = [];
+  for (const event of events) {
+    const signalStartMs = Date.parse(event.signalTime);
+    const observation = latestRegimeClosedBeforeSignal(observations, signalStartMs, resolutionMs);
+    if (!observation) { excluded.noPriorClosedRegime += 1; continue; }
+    const regimeAgeMilliseconds = signalStartMs - (observation.time * 1000 + resolutionMs);
+    if (regimeAgeMilliseconds > maximumAgeMilliseconds) {
+      excluded.staleRegimeEvidence += 1;
+      continue;
+    }
+    joined.push({ event, observation, regimeAgeMilliseconds });
+  }
+  const coverageRatio = events.length === 0 ? 0 : joined.length / events.length;
+  const directional = ["trend_up", "trend_down", "range", "transition"] as const;
+  const volatility = ["low", "normal", "high"] as const;
+  const combined = directional.flatMap((direction) =>
+    volatility.map((volatilityLabel) => `${direction}:${volatilityLabel}`));
+  const groupEvidence = (
+    keys: readonly string[],
+    keyOf: (item: typeof joined[number]) => string,
+  ) => Object.fromEntries(keys.map((key) => {
+    const selected = joined.filter((item) => keyOf(item) === key).map((item) => item.event);
+    const minimumEventsMet = selected.length >= minimumGroupEvents;
+    return [key, {
+      status: minimumEventsMet ? "evaluable" as const : "not_evaluable" as const,
+      events: selected.length,
+      minimumEvents: minimumGroupEvents,
+      reason: minimumEventsMet ? null : "minimum_regime_group_events_not_met",
+      horizons: minimumEventsMet
+        ? summarizeOutcomes(selected, horizons, confidenceLevel, "regime")
+        : null,
+    }];
+  }));
+  const byDirectionalRegime = groupEvidence(directional,
+    (item) => item.observation.directionalRegime);
+  const byVolatilityRegime = groupEvidence(volatility,
+    (item) => item.observation.volatilityRegime);
+  const byCombinedRegime = groupEvidence(combined,
+    (item) => `${item.observation.directionalRegime}:${item.observation.volatilityRegime}`);
+  const evaluableGroups = [...Object.values(byDirectionalRegime), ...Object.values(byVolatilityRegime),
+    ...Object.values(byCombinedRegime)].filter((group) => group.status === "evaluable").length;
+  const qualityIssues = [
+    ...(joined.length === 0 ? ["no_events_joined_to_regimes"] : []),
+    ...(coverageRatio < minimumCoverageRatio ? ["minimum_event_regime_join_coverage_not_met"] : []),
+  ];
+  const ages = joined.map((item) => item.regimeAgeMilliseconds);
+  return {
+    methodologyVersion: "event_prior_closed_bar_regime_join_v1" as const,
+    status: joined.length === 0 ? "blocked" as const
+      : qualityIssues.length === 0 ? "complete" as const : "partial" as const,
+    joinContract: {
+      labelAt: "latest_regime_bar_with_nominal_close_at_or_before_signal_bar_start",
+      signalAvailability: "signal_bar_close",
+      signalBarRegimeExcluded: true,
+      resolutionMilliseconds: resolutionMs,
+      maxRegimeAgeBars,
+      maximumAgeMilliseconds,
+      minimumCoverageRatio,
+      minimumGroupEvents,
+    },
+    coverage: {
+      events: events.length,
+      joinedEvents: joined.length,
+      coverageRatio,
+      excluded,
+      averageRegimeAgeMilliseconds: ages.length === 0 ? null
+        : ages.reduce((sum, value) => sum + value, 0) / ages.length,
+      maximumRegimeAgeMilliseconds: ages.length === 0 ? null : Math.max(...ages),
+    },
+    qualityIssues,
+    inferenceContract: {
+      groupsConfigured: directional.length + volatility.length + combined.length,
+      groupsEvaluable: evaluableGroups,
+      configuredMetricIntervals: evaluableGroups * horizons.length * 3,
+      automaticRanking: false,
+      multipleTestingAdjustment: "none",
+    },
+    byDirectionalRegime,
+    byVolatilityRegime,
+    byCombinedRegime,
+  };
+}
+
 export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   const timeframe = timeframeMinutes(input.timeframe);
   const timeframeMs = timeframe * 60_000;
@@ -245,6 +393,19 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   if (input.configurationTrials !== null &&
       (!Number.isInteger(input.configurationTrials) || input.configurationTrials < 1 || input.configurationTrials > 100_000)) {
     throw new Error("configuration trials must be an integer from 1 to 100000");
+  }
+  if (input.regime !== null) {
+    if (!Number.isInteger(input.regime.minimumGroupEvents) || input.regime.minimumGroupEvents < 1 ||
+        input.regime.minimumGroupEvents > 5000) {
+      throw new Error("minimum regime group events must be an integer from 1 to 5000");
+    }
+    if (!(input.regime.minimumCoverageRatio > 0 && input.regime.minimumCoverageRatio <= 1)) {
+      throw new Error("minimum regime coverage ratio must be greater than zero and at most one");
+    }
+    if (!Number.isInteger(input.regime.maxRegimeAgeBars) || input.regime.maxRegimeAgeBars < 0 ||
+        input.regime.maxRegimeAgeBars > 100) {
+      throw new Error("maximum regime age bars must be an integer from 0 to 100");
+    }
   }
   const bars = [...input.bars].sort((left, right) => left.time - right.time);
   if (bars.some((bar, index) => index > 0 && bar.time === bars[index - 1].time)) throw new Error("duplicate OHLC timestamps");
@@ -349,7 +510,7 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   const byBranch = Object.fromEntries(branches.map((branch) => {
     const selected = events.filter((event) => event.branch === branch);
     return [branch, { events: selected.length,
-      horizons: summarizeOutcomes(selected, input.horizons, input.confidenceLevel, true) }];
+      horizons: summarizeOutcomes(selected, input.horizons, input.confidenceLevel, "global") }];
   }));
   const foldResults = folds.map((fold) => {
     const selected = events.filter((event) => {
@@ -364,18 +525,53 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
       byBranch: Object.fromEntries(branches.map((branch) => {
         const branchEvents = selected.filter((event) => event.branch === branch);
         return [branch, { events: branchEvents.length,
-          horizons: summarizeOutcomes(branchEvents, input.horizons, input.confidenceLevel, false) }];
+          horizons: summarizeOutcomes(branchEvents, input.horizons, input.confidenceLevel, "fold") }];
       })),
     };
   });
+  const regimeEvidence = input.regime === null ? null : computeMarketRegimes({
+    bars: input.bars,
+    symbol: input.symbol,
+    timeframe: input.timeframe,
+    trendLookback: input.regime.trendLookback,
+    atrLookback: input.regime.atrLookback,
+    volatilityBaselineLookback: input.regime.volatilityBaselineLookback,
+    trendEfficiencyThreshold: input.regime.trendEfficiencyThreshold,
+    rangeEfficiencyThreshold: input.regime.rangeEfficiencyThreshold,
+    directionalMoveAtrThreshold: input.regime.directionalMoveAtrThreshold,
+    highVolatilityRatio: input.regime.highVolatilityRatio,
+    lowVolatilityRatio: input.regime.lowVolatilityRatio,
+    minimumClassifiedBars: input.regime.minimumClassifiedBars,
+    observationLimit: input.bars.length,
+  });
+  const regimeResolutionMs = input.regime === null
+    ? null : marketRegimeResolutionMilliseconds(input.timeframe);
+  if (input.regime !== null && (regimeResolutionMs === null || regimeResolutionMs <= 0)) {
+    throw new Error(`event regime join does not support timeframe ${JSON.stringify(input.timeframe)}`);
+  }
+  const regimeAnalysis = input.regime === null || regimeEvidence === null || regimeResolutionMs === null
+    ? null : buildEventRegimeAnalysis(
+      events,
+      regimeEvidence.observations,
+      regimeResolutionMs,
+      input.horizons,
+      input.confidenceLevel,
+      input.regime.minimumGroupEvents,
+      input.regime.minimumCoverageRatio,
+      input.regime.maxRegimeAgeBars,
+    );
   const issues = [
     ...(events.length < input.minimumEvents ? ["minimum_event_count_not_met"] : []),
     ...(folds.length < 2 ? ["fewer_than_two_time_folds"] : []),
     ...(quality.insufficientRangeCoverage > 0 ? ["one_or_more_sessions_have_incomplete_range"] : []),
+    ...(regimeEvidence?.status === "partial" ? ["regime_classification_incomplete"] : []),
+    ...(regimeAnalysis?.qualityIssues ?? []),
   ];
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "session_auction_event_study_v2" as const,
+    methodologyVersion: input.regime === null
+      ? "session_auction_event_study_v2" as const
+      : "session_auction_event_regime_study_v1" as const,
     status: issues.length === 0 ? "complete" as const : "partial" as const,
     symbol: input.symbol,
     timeframe: input.timeframe,
@@ -408,6 +604,7 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
       ...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []),
       "confidence_intervals_do_not_adjust_for_serial_dependence",
       "no_multiple_testing_adjustment_applied",
+      ...(input.regime === null ? [] : ["regime_subgroups_expand_the_number_of_inspected_outcomes"]),
     ],
     foldContract: {
       detail: "compact_directional_outcomes",
@@ -420,6 +617,18 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
     qualityIssues: issues,
     byBranch,
     folds: foldResults,
+    ...(regimeEvidence === null ? {} : {
+      regimeEvidence: {
+        methodologyVersion: regimeEvidence.methodologyVersion,
+        status: regimeEvidence.status,
+        thresholds: regimeEvidence.thresholds,
+        sample: regimeEvidence.sample,
+        quality: regimeEvidence.quality,
+        qualityIssues: regimeEvidence.qualityIssues,
+        distribution: regimeEvidence.distribution,
+      },
+      regimeAnalysis,
+    }),
     events: events.slice(0, input.eventLimit).map((event) => ({
       eventId: event.eventId,
       localDate: event.localDate,

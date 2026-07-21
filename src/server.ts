@@ -619,7 +619,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
         "optional non-overlapping time folds with bounded mean and rate confidence intervals. The caller " +
         "can declare the number of configurations inspected; serial dependence and multiple testing are " +
-        "not silently adjusted. Signal-bar close is an event reference, not an assumed fill. " +
+        "not silently adjusted. An optional regime split joins each event only to a price/volatility label " +
+        "whose bar closed before the signal bar began, and keeps sparse cells not evaluable. Signal-bar " +
+        "close is an event reference, not an assumed fill. " +
         "It never ranks parameters, changes the chart, or places orders.",
       inputSchema: {
         expected_symbol: SYMBOL_SCHEMA,
@@ -643,6 +645,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Confidence level for normal-approximation mean and Wilson rate intervals. Default: 0.95"),
         configuration_trials: z.number().int().min(1).max(100_000).optional()
           .describe("Total related parameter/configuration trials inspected so far, including this one"),
+        regime: z.object({
+          trend_lookback: z.number().int().min(2).max(500).optional(),
+          atr_lookback: z.number().int().min(2).max(250).optional(),
+          volatility_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+          trend_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+          range_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+          directional_move_atr_threshold: z.number().finite().gt(0).max(100).optional(),
+          high_volatility_ratio: z.number().finite().gt(1).max(100).optional(),
+          low_volatility_ratio: z.number().finite().gt(0).lt(1).optional(),
+          minimum_classified_bars: z.number().int().min(1).max(5000).optional(),
+          minimum_group_events: z.number().int().min(1).max(5000).optional(),
+          minimum_coverage_ratio: z.number().finite().gt(0).max(1).optional(),
+          max_regime_age_bars: z.number().int().min(0).max(100).optional(),
+        }).nullable().optional()
+          .describe("Optional point-in-time price/volatility regime split using only bars closed before each signal bar"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
@@ -653,7 +670,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ expected_symbol, expected_timeframe, count, condition, horizons, target_return_bps,
-      minimum_events, confidence_level, configuration_trials, folds, event_limit }) => chartOperations.run(async () => {
+      minimum_events, confidence_level, configuration_trials, regime, folds, event_limit }) =>
+      chartOperations.run(async () => {
       try {
         const context = await tv.getChartContext();
         const activeIndex = context.activeChartIndex ?? 0;
@@ -688,6 +706,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumEvents: minimum_events,
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials ?? null,
+          regime: regime === null || regime === undefined ? null : {
+            trendLookback: regime.trend_lookback ?? 20,
+            atrLookback: regime.atr_lookback ?? 14,
+            volatilityBaselineLookback: regime.volatility_baseline_lookback ?? 50,
+            trendEfficiencyThreshold: regime.trend_efficiency_threshold ?? 0.6,
+            rangeEfficiencyThreshold: regime.range_efficiency_threshold ?? 0.25,
+            directionalMoveAtrThreshold: regime.directional_move_atr_threshold ?? 2,
+            highVolatilityRatio: regime.high_volatility_ratio ?? 1.5,
+            lowVolatilityRatio: regime.low_volatility_ratio ?? 0.75,
+            minimumClassifiedBars: regime.minimum_classified_bars ?? 100,
+            minimumGroupEvents: regime.minimum_group_events ?? 10,
+            minimumCoverageRatio: regime.minimum_coverage_ratio ?? 0.8,
+            maxRegimeAgeBars: regime.max_regime_age_bars ?? 3,
+          },
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           eventLimit: event_limit ?? 50,
         });
