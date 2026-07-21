@@ -4861,7 +4861,7 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
         name: "Regime Matrix Strategy", chartIndex: 0 }),
   } }));
   const args = {
-    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", count: 200,
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", count: 200, load_more_bars: 6000,
     trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
     minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
     max_regime_age_bars: 1,
@@ -4876,6 +4876,7 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   })).content[0].text);
   assert.equal(preview.status, "preview");
   assert.equal(preview.jobCount, 2);
+  assert.equal(preview.execution.historyLoadPerJob, 6000);
   assert.equal(runs, 0);
 
   const result = JSON.parse((await client.callTool({
@@ -4887,6 +4888,8 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.equal(result.results[0].evaluation.overall.profitFactor, 7 / 3);
   assert.equal(result.results[1].evaluation.overall.profitFactor, 11 / 3);
   assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 1]);
+  assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.attempts), [2, 2]);
+  assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.addedBars), [6000, 6000]);
   assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "all_matches_non_exclusive");
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(runs, 2);
@@ -5040,6 +5043,9 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "run_strategy_regime_matrix", arguments: { expected_symbol: "OANDA:USDJPY",
       expected_timeframe: "240", jobs: Array(13).fill({ symbol: "OANDA:USDJPY", timeframe: "240",
         pine_id: "USER;regimematrix123" }) } },
+    { name: "run_strategy_regime_matrix", arguments: { expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240", load_more_bars: 20_001,
+      jobs: [{ symbol: "OANDA:USDJPY", timeframe: "240", pine_id: "USER;regimematrix123" }] } },
     { name: "get_strategy_report", arguments: { trades_limit: 0 } },
     { name: "save_pine_script", arguments: {} },
     { name: "save_pine_script", arguments: { source: "x", pine_id: "PUB;abcdef1234567890" } },

@@ -795,7 +795,7 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
 
   await tv.getStrategyTradeLedger({ offset: 0, limit: 1 });
   const expr = cdp.calls[0];
-  assert.ok(expr.includes("rawTrades.map(normalizeTrade)"), "ledger identity must cover all trades");
+  assert.ok(expr.includes("const allTrades = rawTrades.map"), "ledger identity must cover all trades");
   assert.ok(expr.includes("allTrades.slice(offset, offset + limit)"), "only the requested page is returned");
   assert.ok(expr.includes('subtle.digest("SHA-256"'), "pages must be bound by a cryptographic id");
   const identityStart = expr.indexOf("const identity = JSON.stringify({");
@@ -916,6 +916,31 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
     })),
     /strategy report changed between ledger pages/,
   );
+
+  report.performance.all.totalTrades = 1;
+  report.performance.openPL = 25;
+  report.trades = [
+    report.trades[0],
+    {
+      e: { tm: 1_700_000_120_000, p: 102, c: "Long", tp: "le" },
+      x: { tm: 1_700_000_300_000, p: 103, c: "", tp: "lx" },
+      tp: { v: 25, p: 0.00025 },
+      cp: { v: 275, p: 0.00275 },
+      q: 5,
+    },
+  ];
+  await tv.getStrategyTradeLedger({ offset: 0, limit: 500 });
+  const withOpenPosition = await vm.runInContext(cdp.calls[2], vm.createContext({
+    crypto: webcrypto,
+    TextEncoder,
+    window: context.window,
+  }));
+  assert.equal(withOpenPosition.totalTrades, 1, "summary counts only closed trades");
+  assert.equal(withOpenPosition.availableTrades, 2, "ledger retains the marked-to-market open row");
+  assert.equal(withOpenPosition.countMatchesSummary, true);
+  assert.equal(withOpenPosition.trades[1].status, "open");
+  assert.equal(withOpenPosition.trades[1].exit, null, "mark-to-market pseudo exit is not a real fill");
+  assert.ok(!withOpenPosition.qualityIssues.includes("report_trade_count_mismatch"));
 });
 
 test("runBacktest validates inputs and cleans the chart up by default", async () => {

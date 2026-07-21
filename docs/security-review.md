@@ -305,7 +305,7 @@
 - **ページ整合性**: 取引全件とstrategy、symbol/timeframe、Pine ID/版、公開入力、期間、通貨、初期資本をcanonical JSON化し、ページ内Web CryptoでSHA-256 `ledgerId`を算出する。後続ページの`expected_ledger_id`が違えば、再計算前後の取引を混在させず停止する
 - **情報最小化**: 入力値はPine内部の`text`、`pineFeatures`、`__profile`を除外し、`pineId`/`pineVersion`は専用メタデータとして返す。サポート外の複合入力値は文字列化せずnullと品質問題にする。認証情報、Pineソース本文、ブラウザセッション情報は返さない
 - **応答上限**: 1ページは最大500取引、offsetは0〜10,000,000へ制限する。全件はhash計算のためページ内メモリで正規化するが、CDP/MCPへ返すのは要求ページだけとし、巨大レポートの応答増幅を抑える
-- **データ意味論**: Strategy Testerの損益とcommission/run-up/drawdownはTradingViewが返した値だけを採用し、欠落をゼロやOHLC推定で補わない。配列件数とsummary件数の不一致、時刻逆行、active study帰属不能を品質問題として返す。Strategy Testerのシミュレーションは実約定、足内順序、滑り、流動性、口座損益の証明ではない
+- **データ意味論**: Strategy Testerの損益とcommission/run-up/drawdownはTradingViewが返した値だけを採用し、欠落をゼロやOHLC推定で補わない。TradingViewがライブポジションを現在値の仮exit付き末尾行として返す場合は、summaryとの差が1件かつexit IDが空の厳格条件でのみopenへ正規化し、summary件数をclosed行数と照合する。それ以外の配列件数不一致、時刻逆行、active study帰属不能は品質問題として返す。Strategy Testerのシミュレーションは実約定、足内順序、滑り、流動性、口座損益の証明ではない
 - **内部API互換層**: 2026-07-20時点で旧`backtestingStrategyApi()`が削除されたため、現行active chart modelのstrategy sourceを読み取り専用で適応するfallbackを追加した。fallbackは`reportData()`、`metaInfo()`、`id()`相当だけを公開形状へ写し、chart modelの書き込みmethodや注文系APIを露出しない。短縮取引fieldは許可した既知キーだけを正規化し、未確認fieldから意味を推測しない
 - **残余リスク**: TradingView内部APIは非公開で、field名・chart modelへの到達経路・active strategy表現・レポート保持方式が変更され得る。旧・現行両経路のfixtureで回帰を固定するが、将来の変更は明示エラーまたは品質問題として扱い、UI操作や曖昧なfield推測へ自動fallbackしない。SHA-256はページ間同一性を保証するが、TradingViewが生成した元データの正しさや完全性までは保証しない
 
@@ -349,7 +349,7 @@
 - **事前契約**: `validate_research_protocol`はread-onlyで、具体的な自作Pine ID/版だけを取得して静的監査する。候補IDはSHA-256、窓とlifecycleはcanonical ISO timestamp、件数・配列・文字列は上限付き構造化入力とし、任意コードやPine sourceをクライアントから受け取らない。チャート、Strategy Tester、外部HTTP、注文には接続しない
 - **先読み防止**: IS/OOSとOOS同士の半開区間重複、未来窓、形成中足、凍結後変更、OOS初回閲覧後変更をblockedにする。静的監査は非リペイントの証明ではないため、request.security、pivot、varip、timenow、intrabar/realtime分岐とrestart差分未確認をwarningとして保持し、警告ゼロの場合だけ`adoptionEligible:true`にする
 - **ストレス実行境界**: `stress_test_strategy`は既定dry-runでprotocol ID、chart binding、Pine版、入力、評価窓、全シナリオ、seed/反復回数を固定する。confirm後はprocess内queueでbaseline Strategyを一時追加し、input readback一致・settle、完全ledger取得、所有確認付き削除、元chart fingerprint照合を行う。任意の再実行scenarioも同じ手順で最大8件まで直列処理し、復元不能時は後続を停止する。cleanup/復元を証明できない台帳は評価へ含めない
-- **一括レジーム分析境界**: `run_strategy_regime_matrix`は既定dry-run、最大12job、直列実行、soft deadline最大1,800秒とする。各jobで明示symbol/timeframeへ一時切替し、取得OHLCを再拘束してから完全台帳をpoint-in-time regimeへ結合する。個別失敗は他jobへ波及させず、元chart fingerprintの復元失敗時だけ後続を停止する。Pine source、注文、ランキング、異通貨のportfolio集計は扱わない
+- **一括レジーム分析境界**: `run_strategy_regime_matrix`は既定dry-run、最大12job、直列実行、soft deadline最大1,800秒とする。各jobで明示symbol/timeframeへ一時切替し、任意の履歴ロードを合計最大20,000本・1回5,000本・最大4回に制限する。series cacheの増加は元のメモリ状態へ明示的に戻せない一方、symbol/timeframeを離れた後まで保持される保証もないため、各job内でロード直後に取得・評価する。取得OHLCを再拘束してから完全台帳をpoint-in-time regimeへ結合し、個別失敗は他jobへ波及させず、元chart fingerprintの復元失敗時だけ後続を停止する。Pine source、注文、ランキング、異通貨のportfolio集計は扱わない
 - **session分類境界**: optional session分解は最大8件の明示IANA timezoneとHH:MM半開区間だけを受け、Entry timestampから決定論的に分類する。DSTはIANA database、日跨ぎはsession開始日へ帰属し、週末開始sessionを除外する。重複窓は全該当groupへ非排他的に計上して`all_matches_non_exclusive`を返し、件数合算、因果、最良session選択を行わない
 - **計算境界**: 追加コストはreport通貨/取引としてのみ受け、pipsから口座通貨への不確かな換算をしない。commission倍率はtrade commissionが全件ある場合だけ計算する。期間ずらしはentry/exitともに半開区間内のclosed tradeだけを含め、境界跨ぎを除外する。bootstrapはseed固定・100〜10,000回・同数復元抽出に限定し、市場経路や自己相関を再現したMonte Carloとは表現しない
 - **出力・増幅制限**: モデルscenario 1〜20、再実行scenario 0〜8、各入力20、開始ずらし1〜100bar、bootstrap最大10,000回。反復ごとのsampleやtrade/index列、生台帳を返さず、baseline、scenario別収集状態、集計、相対劣化、分位点、worst、破綻率だけを返す。任意parameter grid、ランキング、単一score、自動採用、注文を実装しない

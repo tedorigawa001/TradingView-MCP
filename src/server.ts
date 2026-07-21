@@ -1402,6 +1402,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           })).max(20).optional(),
         })).min(1).max(12),
         count: z.number().int().min(100).max(MAX_MARKET_REGIME_OBSERVATIONS).optional(),
+        load_more_bars: z.number().int().min(0).max(MAX_MARKET_REGIME_OBSERVATIONS).optional()
+          .describe("History load per job before OHLC capture, split into 5000-bar requests. Default: 0"),
         trend_lookback: z.number().int().min(2).max(500).optional(),
         atr_lookback: z.number().int().min(2).max(250).optional(),
         volatility_baseline_lookback: z.number().int().min(5).max(1000).optional(),
@@ -1421,7 +1423,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         confirm: z.boolean().optional(),
       },
     },
-    async ({ expected_symbol, expected_timeframe, jobs, count, trend_lookback, atr_lookback,
+    async ({ expected_symbol, expected_timeframe, jobs, count, load_more_bars, trend_lookback, atr_lookback,
       volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
       directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
       minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
@@ -1492,10 +1494,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         };
         if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const maxRuntimeSeconds = max_runtime_seconds ?? 900;
+        const loadMoreBars = load_more_bars ?? 0;
         const definition = {
           methodologyVersion: "strategy_regime_matrix_v1",
           regime: regimeDefinition,
           join: joinDefinition,
+          loadMoreBars,
           maxRuntimeSeconds,
           jobs: resolvedJobs,
         };
@@ -1512,6 +1516,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             softRuntimeDeadlineSeconds: maxRuntimeSeconds,
             restoreAfterEveryJob: true,
             stopRemainingJobsOnRestoreFailure: true,
+            historyLoadPerJob: loadMoreBars,
             ranking: false,
           },
           chartState: initialChart,
@@ -1548,6 +1553,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             initialChart.index,
             { symbol: job.symbol, resolution: job.timeframe },
             async () => {
+              const historyLoads = [];
+              let remainingHistoryBars = loadMoreBars;
+              while (remainingHistoryBars > 0) {
+                const requested = Math.min(5_000, remainingHistoryBars);
+                const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: initialChart.index });
+                historyLoads.push(loaded);
+                remainingHistoryBars -= requested;
+                if (loaded.moreAvailable === false || loaded.added === 0) break;
+              }
               const history = await tv.getOhlcv(regimeDefinition.count, initialChart.index);
               if (history.symbol.toUpperCase() !== job.symbol ||
                   normalizeResolution(history.resolution) !== job.timeframe) {
@@ -1571,7 +1585,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 timeframe: history.resolution,
                 ...joinDefinition,
               }) : null;
-              return { history, regimes, run, evaluation };
+              return { historyLoads, history, regimes, run, evaluation };
             },
           );
           let afterJob: ReturnType<typeof chartFingerprint> | null = null;
@@ -1643,6 +1657,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               distribution: value.regimes.distribution,
               source: {
                 requestedBars: regimeDefinition.count,
+                historyLoad: {
+                  requestedBars: loadMoreBars,
+                  attempts: value.historyLoads.length,
+                  addedBars: value.historyLoads.reduce((sum, load) => sum + load.added, 0),
+                  moreAvailable: value.historyLoads.at(-1)?.moreAvailable ?? null,
+                },
                 returnedBars: value.history.bars.length,
                 from: value.history.bars[0]?.timeIso ?? null,
                 to: value.history.bars.at(-1)?.timeIso ?? null,

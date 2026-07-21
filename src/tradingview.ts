@@ -2186,6 +2186,9 @@ export class TradingView {
           return v && typeof v === "object" ? num(v.value ?? v.v) : null;
         };
         const percent = (v) => v && typeof v === "object" ? num(v.percentValue ?? v.p) : null;
+        const performance = report.performance;
+        const all = performance.all || {};
+        const totalTrades = num(all.totalTrades);
         const side = (s) => (s ? {
           time: num(s.time ?? s.tm),
           timeIso: iso(s.time ?? s.tm),
@@ -2197,9 +2200,11 @@ export class TradingView {
           const type = entry ? String(entry.type ?? entry.tp ?? "") : "";
           return type.startsWith("s") ? "short" : type.startsWith("l") ? "long" : null;
         };
-        const normalizeTrade = (trade, reportIndex) => {
+        const normalizeTrade = (trade, reportIndex, markedOpen) => {
           const entry = side(trade.entry ?? trade.e);
-          const exit = side(trade.exit ?? trade.x);
+          // TradingView appends the live position with a synthetic current-price
+          // exit. It is absent from performance.all.totalTrades and has no exit id.
+          const exit = markedOpen ? null : side(trade.exit ?? trade.x);
           const runUp = trade.runUp ?? trade.runup ?? trade.maxRunUp ?? trade.rn ?? null;
           const drawDown = trade.drawDown ?? trade.drawdown ?? trade.maxDrawDown ?? trade.dd ?? null;
           const commission = trade.commission ?? trade.cm ?? null;
@@ -2209,7 +2214,7 @@ export class TradingView {
             reportIndex,
             number: num(trade.tradeNumber ?? trade.number),
             direction: dirOf(trade),
-            status: exit ? "closed" : "open",
+            status: markedOpen || !exit ? "open" : "closed",
             entry,
             exit,
             durationMilliseconds: entry && exit && entry.time !== null && exit.time !== null
@@ -2228,7 +2233,17 @@ export class TradingView {
           };
         };
         const rawTrades = Array.isArray(report.trades) ? report.trades : [];
-        const allTrades = rawTrades.map(normalizeTrade);
+        const lastRawExit = rawTrades.length > 0
+          ? (rawTrades[rawTrades.length - 1].exit ?? rawTrades[rawTrades.length - 1].x)
+          : null;
+        const lastRawExitLabel = lastRawExit ? (lastRawExit.id ?? lastRawExit.c) : null;
+        const markedOpenIndex = totalTrades !== null && rawTrades.length === totalTrades + 1 &&
+          lastRawExit !== null && lastRawExitLabel === ""
+          ? rawTrades.length - 1
+          : -1;
+        const allTrades = rawTrades.map((trade, reportIndex) =>
+          normalizeTrade(trade, reportIndex, reportIndex === markedOpenIndex));
+        const closedTradeCount = allTrades.filter((trade) => trade.status === "closed").length;
         if (offset > allTrades.length) {
           throw new Error("offset " + offset + " exceeds available trade count " + allTrades.length);
         }
@@ -2281,11 +2296,8 @@ export class TradingView {
             });
           } catch (e) {}
         }
-        const performance = report.performance;
-        const all = performance.all || {};
         const dateRange = report.settings && report.settings.dateRange && report.settings.dateRange.backtest;
         const normalizedDateRange = dateRange ? { from: iso(dateRange.from), to: iso(dateRange.to) } : null;
-        const totalTrades = num(all.totalTrades);
         const identity = JSON.stringify({
           strategy,
           symbol,
@@ -2316,7 +2328,7 @@ export class TradingView {
         if (!allTrades.some((trade) => trade.runUp !== null)) unavailableFields.push("trade_run_up");
         if (!allTrades.some((trade) => trade.drawDown !== null)) unavailableFields.push("trade_draw_down");
         const qualityIssues = [];
-        if (totalTrades !== null && totalTrades !== allTrades.length) qualityIssues.push("report_trade_count_mismatch");
+        if (totalTrades !== null && totalTrades !== closedTradeCount) qualityIssues.push("report_trade_count_mismatch");
         if (!activeStudy) qualityIssues.push(studyCandidates.length > 1 ? "ambiguous_active_strategy_study" : "active_strategy_study_not_found");
         if (unsupportedInputValue) qualityIssues.push("unsupported_strategy_input_value");
         for (let index = 1; index < allTrades.length; index += 1) {
@@ -2354,7 +2366,7 @@ export class TradingView {
           },
           totalTrades,
           availableTrades: allTrades.length,
-          countMatchesSummary: totalTrades === null ? null : totalTrades === allTrades.length,
+          countMatchesSummary: totalTrades === null ? null : totalTrades === closedTradeCount,
           ordering: "strategy_report",
           offset,
           limit,
