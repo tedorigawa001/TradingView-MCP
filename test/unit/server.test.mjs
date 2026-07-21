@@ -4779,6 +4779,13 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   assert.equal(invalidSessions.isError, true);
   assert.match(invalidSessions.content[0].text, /unique session ids/);
   assert.equal(runs, 0);
+  const invalidPolicy = await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
+    pine_version: "1.0", session_match_policy: "first_match_exclusive", confirm: true,
+  } });
+  assert.equal(invalidPolicy.isError, true);
+  assert.match(invalidPolicy.content[0].text, /requires sessions/);
+  assert.equal(runs, 0);
   const result = JSON.parse((await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
     pine_version: "1.0", count: 200, trend_lookback: 10, atr_lookback: 5,
@@ -4865,6 +4872,7 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
     trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
     minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
     max_regime_age_bars: 1,
+    session_match_policy: "first_match_exclusive",
     sessions: [{ session_id: "london", timezone: "Europe/London", start: "08:00", end: "16:00" }],
     jobs: [
       { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
@@ -4890,7 +4898,9 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 1]);
   assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.attempts), [2, 2]);
   assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.addedBars), [6000, 6000]);
-  assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "all_matches_non_exclusive");
+  assert.equal(preview.definition.join.sessionMatchPolicy, "first_match_exclusive");
+  assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "first_match_exclusive");
+  assert.deepEqual(result.results[0].evaluation.joinContract.sessionPriority, ["london"]);
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(runs, 2);
   assert.equal(removed, 2);

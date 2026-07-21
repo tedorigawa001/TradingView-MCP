@@ -125,6 +125,7 @@ const STRATEGY_SESSION_SCHEMA = z.object({
   start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
   end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
 });
+const SESSION_MATCH_POLICY_SCHEMA = z.enum(["all_matches_non_exclusive", "first_match_exclusive"]);
 const CANONICAL_ISO_TIMESTAMP_SCHEMA = z.string()
   .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
   .refine((value) => {
@@ -1214,7 +1215,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         max_regime_age_bars: z.number().int().min(0).max(100).optional()
           .describe("Maximum age of the prior closed regime evidence. Default: 3 bars"),
         sessions: z.array(STRATEGY_SESSION_SCHEMA).min(1).max(8).optional()
-          .describe("Optional DST-aware session windows used for non-exclusive entry-time grouping"),
+          .describe("Optional DST-aware session windows used for entry-time grouping"),
+        session_match_policy: SESSION_MATCH_POLICY_SCHEMA.optional()
+          .describe("Session overlap handling. Default: all_matches_non_exclusive; exclusive uses input order"),
         confirm: z.boolean().optional()
           .describe("Must be true to add the strategy temporarily and run the analysis. Default: false"),
       },
@@ -1223,7 +1226,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       trend_lookback, atr_lookback, volatility_baseline_lookback, trend_efficiency_threshold,
       range_efficiency_threshold, directional_move_atr_threshold, high_volatility_ratio,
       low_volatility_ratio, minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, sessions, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, session_match_policy, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1260,10 +1263,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           lowVolatilityRatio: low_volatility_ratio ?? 0.75,
           minimumClassifiedBars: minimum_classified_bars ?? 100,
         };
+        if (sessions === undefined && session_match_policy !== undefined) {
+          throw new Error("session_match_policy requires sessions");
+        }
         const joinDefinition = {
           minimumGroupTrades: minimum_group_trades ?? 30,
           minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
           maxRegimeAgeBars: max_regime_age_bars ?? 3,
+          sessionMatchPolicy: sessions === undefined
+            ? undefined
+            : session_match_policy ?? "all_matches_non_exclusive" as const,
           sessions: sessions?.map((session) => ({
             sessionId: session.session_id,
             timezone: session.timezone,
@@ -1417,7 +1426,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         minimum_coverage_ratio: z.number().finite().gt(0).max(1).optional(),
         max_regime_age_bars: z.number().int().min(0).max(100).optional(),
         sessions: z.array(STRATEGY_SESSION_SCHEMA).min(1).max(8).optional()
-          .describe("Optional DST-aware session windows used for non-exclusive entry-time grouping"),
+          .describe("Optional DST-aware session windows used for entry-time grouping"),
+        session_match_policy: SESSION_MATCH_POLICY_SCHEMA.optional()
+          .describe("Session overlap handling. Default: all_matches_non_exclusive; exclusive uses input order"),
         max_runtime_seconds: z.number().int().min(30).max(1800).optional()
           .describe("Do not start another job after this soft deadline. Default: 900"),
         confirm: z.boolean().optional(),
@@ -1427,7 +1438,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
       directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
       minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, sessions, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, session_match_policy, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1481,10 +1492,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           lowVolatilityRatio: low_volatility_ratio ?? 0.75,
           minimumClassifiedBars: minimum_classified_bars ?? 100,
         };
+        if (sessions === undefined && session_match_policy !== undefined) {
+          throw new Error("session_match_policy requires sessions");
+        }
         const joinDefinition = {
           minimumGroupTrades: minimum_group_trades ?? 30,
           minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
           maxRegimeAgeBars: max_regime_age_bars ?? 3,
+          sessionMatchPolicy: sessions === undefined
+            ? undefined
+            : session_match_policy ?? "all_matches_non_exclusive" as const,
           sessions: sessions?.map((session) => ({
             sessionId: session.session_id,
             timezone: session.timezone,

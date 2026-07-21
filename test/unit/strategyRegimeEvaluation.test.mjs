@@ -93,3 +93,32 @@ test("strategy regime evaluation groups entry times into non-exclusive DST-aware
   assert.equal(result.bySession.outside_defined_sessions.trades, 1);
   assert.equal(result.bySession.london.netProfit, 2);
 });
+
+test("strategy regime evaluation assigns overlaps to the first matching session when exclusive", () => {
+  const observations = Array.from({ length: 24 }, (_, index) => observation(index, "range", "normal"));
+  const londonOpen = trade(8, 4);
+  const londonNewYorkOverlap = trade(13, -2);
+  const outside = trade(22, 3);
+  const sessions = [
+    { sessionId: "london", timezone: "Europe/London", start: "08:00", end: "16:00" },
+    { sessionId: "new_york", timezone: "America/New_York", start: "08:00", end: "17:00" },
+  ];
+  const result = evaluate([londonOpen, londonNewYorkOverlap, outside], observations, {
+    minimumGroupTrades: 1,
+    minimumCoverageRatio: 1,
+    sessions,
+    sessionMatchPolicy: "first_match_exclusive",
+  });
+  assert.equal(result.joinContract.sessionMatchPolicy, "first_match_exclusive");
+  assert.deepEqual(result.joinContract.sessionPriority, ["london", "new_york"]);
+  assert.equal(result.bySession.london.trades, 2);
+  assert.equal(result.bySession.new_york.trades, 0);
+  assert.equal(result.bySession.outside_defined_sessions.trades, 1);
+  assert.equal(Object.values(result.bySession).reduce((sum, group) => sum + group.trades, 0), 3);
+});
+
+test("strategy regime evaluation rejects a session policy without sessions", () => {
+  assert.throws(() => evaluate([trade(1, 1)], [observation(0, "range", "normal")], {
+    sessionMatchPolicy: "first_match_exclusive",
+  }), /requires session definitions/);
+});

@@ -17,7 +17,10 @@ export interface StrategyRegimeEvaluationInput {
   minimumCoverageRatio: number;
   maxRegimeAgeBars: number;
   sessions?: SessionClockDefinition[];
+  sessionMatchPolicy?: SessionMatchPolicy;
 }
+
+export type SessionMatchPolicy = "all_matches_non_exclusive" | "first_match_exclusive";
 
 type JoinedTrade = {
   trade: StrategyLedgerTrade;
@@ -135,6 +138,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   if (!Number.isInteger(input.maxRegimeAgeBars) || input.maxRegimeAgeBars < 0 || input.maxRegimeAgeBars > 100) {
     throw new Error("maximum regime age bars must be an integer between 0 and 100");
   }
+  if (input.sessions === undefined && input.sessionMatchPolicy !== undefined) {
+    throw new Error("session match policy requires session definitions");
+  }
+  const sessionMatchPolicy: SessionMatchPolicy = input.sessionMatchPolicy ?? "all_matches_non_exclusive";
   const classifySession = input.sessions === undefined ? null : createSessionClockClassifier(input.sessions);
   const resolutionMs = marketRegimeResolutionMilliseconds(input.timeframe);
   if (resolutionMs === null || resolutionMs <= 0) throw new Error(`unsupported timeframe: ${input.timeframe}`);
@@ -172,9 +179,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       excluded.staleRegimeEvidence += 1;
       continue;
     }
-    const sessionIds = classifySession === null
-      ? []
-      : classifySession(trade.entry.time).map((match) => match.sessionId);
+    const sessionMatches = classifySession === null ? [] : classifySession(trade.entry.time);
+    const sessionIds = (sessionMatchPolicy === "first_match_exclusive"
+      ? sessionMatches.slice(0, 1)
+      : sessionMatches).map((match) => match.sessionId);
     joined.push({ trade, observation, regimeAgeMilliseconds, sessionIds });
   }
 
@@ -213,7 +221,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       maximumAgeMilliseconds: maximumAgeMs,
       minimumCoverageRatio: input.minimumCoverageRatio,
       minimumGroupTrades: input.minimumGroupTrades,
-      sessionMatchPolicy: input.sessions === undefined ? null : "all_matches_non_exclusive",
+      sessionMatchPolicy: input.sessions === undefined ? null : sessionMatchPolicy,
+      sessionPriority: input.sessions === undefined || sessionMatchPolicy !== "first_match_exclusive"
+        ? null
+        : input.sessions.map((session) => session.sessionId),
       unmatchedSessionLabel: input.sessions === undefined ? null : OUTSIDE_DEFINED_SESSIONS_ID,
       sessions: input.sessions ?? [],
     },
