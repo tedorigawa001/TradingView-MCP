@@ -4580,6 +4580,48 @@ test("run_market_event_study binds the chart and returns session auction evidenc
   assert.equal(parsed.regimeAnalysis.inferenceContract.automaticRanking, false);
 });
 
+test("run_market_event_study binds the chart and returns session handoff evidence", async () => {
+  const start = Date.UTC(2026, 0, 5);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) {
+    const open = 1 + index * 0.006;
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
+      open, high: open + 0.008, low: open - 0.004, close: open + 0.006, volume: 1 });
+  }
+  const priorHigh = bars.at(-1).high;
+  for (let index = 32; index < 52; index += 1) {
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
+      open: 1.19, high: 1.195, low: 1.185, close: 1.19, volume: 1 });
+  }
+  bars.push({ time: (start + 52 * 900_000) / 1000, timeIso: new Date(start + 52 * 900_000).toISOString(),
+    open: 1.19, high: priorHigh - 0.002, low: 1.16, close: 1.17, volume: 1 });
+  for (let index = 53; index < 58; index += 1) {
+    const close = 1.17 - (index - 52) * 0.002;
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
+      open: close + 0.002, high: close + 0.003, low: close - 0.003, close, volume: 1 });
+  }
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "session_exhaustion_handoff", timezone: "UTC",
+      prior_sessions: [{ session_id: "Tokyo", start: "00:00", end: "08:00" }],
+      handoff_start: "13:00", handoff_end: "16:00", prior_direction: "session_return",
+      direction_minimum_return_bps: 1, handoff_window_bars: 3, minimum_prior_coverage: 1 },
+    horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "session_exhaustion_handoff");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.byBranch.exhaustion_up.events, 1);
+  assert.equal(parsed.events[0].direction, "short");
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+});
+
 test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {
   const day = 86_400_000;
   const start = Date.UTC(2026, 0, 1);

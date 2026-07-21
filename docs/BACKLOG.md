@@ -433,6 +433,15 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機検証(2026-07-20)**: `next-bar-confirmation`仮説をsequence 1、方向確認になっていなかったSmart Money v2実験をsequence 2、シグナル足高安の外側で終値確定するよう直したv3実験を親子関係付きsequence 3として記録した。v2 evidenceは`sha256:82fcbd87e89914904150d2d7fc4adf51858608a294868ba1562446ed1823e943`、v3 evidenceは`sha256:4b78d80ae673ea122f3c20f1f6a8a310d1355081bbed233c069ed1ea36775b74`。正確な2参照による比較は`comparable: true`、不一致なしを返した
 - **実機判断**: v3の確認ONは取引数を72から37へ減らし最大DDを約5844から約3235へ抑えたが、期待値は約115.09から約6.41、PFは約1.459から約1.021へ低下した。最低37取引は満たす一方、事前PF下限1.2を割ったため候補を`rejected`として保存した。APIのmetric名は保存契約どおり`totalTrades`、`averageDurationMilliseconds`、`averageRunUp`等のcamelCaseを使う
 
+### #43 セッション引き継ぎ失速イベント(`run_market_event_study` condition: `session_exhaustion_handoff`) ✅ 初版実装
+
+- **目的**: 東京・Londonで出た方向性がNew York開始時に継続せず、失速・利食い・巻き戻しへ転じる候補を、売買Strategy化前のevent studyとして検証する。既存`session_auction`は単一session内のrange break/failed auction専用であり、先行sessionから後続sessionへの状態引き継ぎを直接表現できない
+- **初版実装(2026-07-22)**: `run_market_event_study`へ`session_exhaustion_handoff`を追加。1〜4件の先行session、handoff session、先行方向判定(`session_return`、終値位置`close_location`、先頭先行session rangeを後続終値が抜く`range_break`)、初期窓1〜24本、順方向更新幅、range内回帰・逆方向bodyの要否、coverage、horizon、target bps、fold、configuration trialsを構造化JSONで受ける。任意コードや自由記述DSLは実行しない
+- **point-in-time契約**: 先行session rangeと方向はhandoff session開始前に確定済みのclosed barsだけで計算する。handoff signal足自身はevent referenceであり、約定fillとはみなさない。形成中足、coverage不足、順方向更新、同じ初期窓内の順方向更新+逆方向回帰は、明示的な品質理由として除外する。日跨ぎ先行sessionはhandoff日の前日開始としてDST対応IANA timezone上で結合する
+- **出力**: `exhaustion_up`/`exhaustion_down`別・horizon別の反転方向調整return、MFE/MAE、positive rate、target到達率、fold別集計、coverage/除外理由、試行数、任意regime結合を返す。PF、ランキング、自動採用、売買推奨は返さない
+- **検証状況**: 先行closed-bar限定、反転方向、順方向更新+逆方向回帰のambiguous除外、日跨ぎ先行session、MCP chart binding、raw OHLC非返却を単体・MCP統合テストで固定した。DST・週末gapの実機確認は、MCP再起動後のEURUSD/XAUUSD 60分足E2Eで行う
+- **研究上の注意**: この条件はSession-Selective Dual Routerの排他session検証でNY単独の弱さを見た後に発案したため、discovery期間内の良好値を採用根拠にしない。仮説登録、configuration trials、OOS初回閲覧時刻を#42へ記録する
+
 ### 新手法研究基盤の推奨実装順
 
 1. **#31 全取引台帳**で集計値の内訳と失敗原因を観測可能にする

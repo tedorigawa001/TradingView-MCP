@@ -45,12 +45,12 @@ export interface SessionAuctionStudyInput {
   } | null;
 }
 
-type LocalBar = OhlcvBar & { localDate: string; localMinute: number; weekday: string; globalIndex: number };
+export type LocalBar = OhlcvBar & { localDate: string; localMinute: number; weekday: string; globalIndex: number };
 type Branch = "accepted_up" | "accepted_down" | "failed_up" | "failed_down";
 
 const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
 
-function canonicalTime(value: string, label: string): number {
+export function canonicalTime(value: string, label: string): number {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
     throw new Error(`${label} must be a canonical ISO timestamp`);
@@ -64,7 +64,7 @@ function clockMinute(value: string, label: string): number {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
-function timeframeMinutes(value: string): number {
+export function timeframeMinutes(value: string): number {
   if (!/^[1-9]\d*$/.test(value)) throw new Error("session auction study requires a minute-based timeframe");
   return Number(value);
 }
@@ -144,7 +144,7 @@ function formatter(timezone: string) {
   }
 }
 
-function localize(bars: OhlcvBar[], timezone: string): LocalBar[] {
+export function localize(bars: OhlcvBar[], timezone: string): LocalBar[] {
   const format = formatter(timezone);
   return bars.map((bar, globalIndex) => {
     const parts = Object.fromEntries(format.formatToParts(new Date(bar.time * 1000))
@@ -159,7 +159,7 @@ function localize(bars: OhlcvBar[], timezone: string): LocalBar[] {
   });
 }
 
-function summarizeOutcomes(
+export function summarizeOutcomes(
   events: Array<ReturnType<typeof outcomeForEvent>>,
   horizons: number[],
   confidenceLevel: 0.9 | 0.95 | 0.99,
@@ -211,7 +211,7 @@ function summarizeOutcomes(
   }));
 }
 
-function outcomeForEvent<T extends { signalIndex: number; direction: 1 | -1 }>(
+export function outcomeForEvent<T extends { signalIndex: number; direction: 1 | -1 }>(
   event: T,
   bars: OhlcvBar[],
   horizons: number[],
@@ -274,7 +274,7 @@ function latestRegimeClosedBeforeSignal(
   return result;
 }
 
-function buildEventRegimeAnalysis(
+export function buildEventRegimeAnalysis(
   events: Array<ReturnType<typeof outcomeForEvent>>,
   observations: ClassifiedMarketRegimeObservation[],
   resolutionMs: number,

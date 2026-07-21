@@ -41,6 +41,7 @@ import {
   type StrategyStressScenario,
 } from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
+import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
@@ -621,8 +622,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Run a bounded, read-only market event study on closed OHLC bars from the active chart. " +
-        "The initial condition type, session_auction, uses an IANA timezone to classify the first " +
-        "break of a prior local-session range as accepted outside closes or a failed return inside. " +
+        "Condition session_auction classifies the first break of a prior local-session range as accepted " +
+        "outside closes or a failed return inside. Condition session_exhaustion_handoff tests whether a " +
+        "closed-bar prior-session direction fails to extend in an early handoff session and reverses. " +
         "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
         "optional non-overlapping time folds with bounded mean and rate confidence intervals. The caller " +
         "can declare the number of configurations inspected; serial dependence and multiple testing are " +
@@ -635,16 +637,37 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         expected_timeframe: z.string().regex(/^[1-9]\d*$/),
         count: z.number().int().min(100).max(5000).optional()
           .describe("Most recent loaded bars to inspect. Default: 5000"),
-        condition: z.object({
-          type: z.literal("session_auction"),
-          timezone: z.string().min(1).max(64),
-          range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-          range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-          auction_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-          acceptance_closes: z.number().int().min(1).max(4).optional(),
-          failure_within_bars: z.number().int().min(0).max(4).optional(),
-          minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
-        }),
+        condition: z.discriminatedUnion("type", [
+          z.object({
+            type: z.literal("session_auction"),
+            timezone: z.string().min(1).max(64),
+            range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            auction_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            acceptance_closes: z.number().int().min(1).max(4).optional(),
+            failure_within_bars: z.number().int().min(0).max(4).optional(),
+            minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
+          }),
+          z.object({
+            type: z.literal("session_exhaustion_handoff"),
+            timezone: z.string().min(1).max(64),
+            prior_sessions: z.array(z.object({
+              session_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,80}$/),
+              start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+              end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            })).min(1).max(4),
+            handoff_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            handoff_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            prior_direction: z.enum(["range_break", "session_return", "close_location"]),
+            direction_minimum_return_bps: z.number().finite().min(0).max(10_000).optional(),
+            close_location_threshold: z.number().finite().min(0.5).lt(1).optional(),
+            handoff_window_bars: z.number().int().min(1).max(24).optional(),
+            forward_update_threshold_bps: z.number().finite().min(0).max(10_000).optional(),
+            require_range_reentry: z.boolean().optional(),
+            require_opposite_body: z.boolean().optional(),
+            minimum_prior_coverage: z.number().finite().gt(0).max(1).optional(),
+          }),
+        ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
         target_return_bps: z.number().finite().gt(0).max(1000),
         minimum_events: z.number().int().min(1).max(5000),
@@ -697,17 +720,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
           throw new Error("OHLC evidence does not match the bound chart");
         }
-        const result = runSessionAuctionStudy({
+        const common = {
           bars: history.bars,
           symbol: history.symbol,
           timeframe: history.resolution,
-          timezone: condition.timezone,
-          rangeStart: condition.range_start,
-          rangeEnd: condition.range_end,
-          auctionEnd: condition.auction_end,
-          acceptanceCloses: condition.acceptance_closes ?? 2,
-          failureWithinBars: condition.failure_within_bars ?? 2,
-          minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
           horizons,
           targetReturnBps: target_return_bps,
           minimumEvents: minimum_events,
@@ -729,7 +745,25 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           },
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           eventLimit: event_limit ?? 50,
-        });
+        };
+        const result = condition.type === "session_auction"
+          ? runSessionAuctionStudy({
+            ...common, timezone: condition.timezone, rangeStart: condition.range_start, rangeEnd: condition.range_end,
+            auctionEnd: condition.auction_end, acceptanceCloses: condition.acceptance_closes ?? 2,
+            failureWithinBars: condition.failure_within_bars ?? 2, minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
+          })
+          : runSessionExhaustionHandoffStudy({
+            ...common, timezone: condition.timezone,
+            priorSessions: condition.prior_sessions.map((session) => ({ sessionId: session.session_id, start: session.start, end: session.end })),
+            handoffStart: condition.handoff_start, handoffEnd: condition.handoff_end, priorDirection: condition.prior_direction,
+            directionMinimumReturnBps: condition.direction_minimum_return_bps ?? 0,
+            closeLocationThreshold: condition.close_location_threshold ?? 0.75,
+            handoffWindowBars: condition.handoff_window_bars ?? 3,
+            forwardUpdateThresholdBps: condition.forward_update_threshold_bps ?? 0,
+            requireRangeReentry: condition.require_range_reentry ?? true,
+            requireOppositeBody: condition.require_opposite_body ?? true,
+            minimumPriorCoverage: condition.minimum_prior_coverage ?? 0.8,
+          });
         return jsonResult({
           ...result,
           conditionType: condition.type,
