@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-seven expected tools", async () => {
+test("exposes exactly the sixty-eight expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -737,6 +737,7 @@ test("exposes exactly the sixty-seven expected tools", async () => {
       "run_market_event_study",
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
+      "run_strategy_regime_matrix",
       "run_strategy_walk_forward",
       "run_yield_price_nonconfirmation_study",
       "save_pine_script",
@@ -4180,6 +4181,9 @@ test("get_futures_flow_context binds a daily futures chart and keeps daily OI un
   assert.equal(parsed.openInterest.status, "unavailable");
   assert.equal(parsed.priceOpenInterestQuadrant.classification, null);
   assert.equal(parsed.cot.status, "partial");
+  assert.ok(parsed.qualityIssues.includes("daily_open_interest_provider_not_configured"));
+  assert.ok(parsed.qualityIssues.includes("cot_point_in_time_incomplete"));
+  assert.equal(parsed.status, parsed.qualityIssues.length === 0 ? "complete" : "partial");
   assert.deepEqual(requestedCot, { symbol: "OANDA:USDJPY", weeks: 2 });
   assert.equal(parsed.source.chartIndex, 1);
 });
@@ -4781,6 +4785,142 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   assert.equal(requestedOhlcvCount, 200);
 });
 
+test("run_strategy_regime_matrix evaluates serial jobs and restores the original chart", async () => {
+  const pineId = "USER;regimematrix123";
+  const chart = { symbol: "OANDA:USDJPY", resolution: "240" };
+  const start = Date.UTC(2026, 0, 1);
+  let activePine = null;
+  let runs = 0;
+  let removed = 0;
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: chart.symbol, resolution: chart.resolution,
+      studies: [{ id: "original", name: "RSI" }] }] });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    setSymbol: async (symbol) => ((chart.symbol = symbol),
+      { symbol, resolution: chart.resolution, bars: 200 }),
+    setResolution: async (resolution) => ((chart.resolution = resolution),
+      { symbol: chart.symbol, resolution, bars: 200 }),
+    listPineScripts: async () => [{ pineId, name: "Regime Matrix Strategy", kind: "strategy",
+      version: "2.0", usedBy: [] }],
+    getOhlcv: async (count, chartIndex) => {
+      assert.equal(count, 200);
+      assert.equal(chartIndex, 0);
+      const step = Number(chart.resolution) * 60_000;
+      const bars = Array.from({ length: 200 }, (_, index) => {
+        const open = 100 + Math.max(0, index - 1) * 0.5;
+        const close = 100 + index * 0.5;
+        const time = start + index * step;
+        return { time: time / 1000, timeIso: new Date(time).toISOString(), open,
+          high: close + 0.2, low: open - 0.2, close, volume: 1 };
+      });
+      return { symbol: chart.symbol, resolution: chart.resolution, count: bars.length, bars };
+    },
+    runBacktest: async () => ((runs += 1), (activePine = pineId), { studyId: `temporary-${runs}`,
+      pineId, keptOnChart: true, removedFromChart: false, strategy: "Regime Matrix Strategy",
+      summary: {}, totalTrades: 4, trades: [] }),
+    getStrategyReport: async () => ({ strategy: "Regime Matrix Strategy", symbol: chart.symbol,
+      timeframe: chart.resolution, studyId: `temporary-${runs}`, pineId, pineVersion: "2.0", inputs: [],
+      currency: "USD", initialCapital: 100000, dateRange: null, summary: { netProfit: 4 },
+      totalTrades: 4, trades: [] }),
+    getStrategyTradeLedger: async () => {
+      const step = Number(chart.resolution) * 60_000;
+      const profits = chart.symbol === "OANDA:EURUSD" ? [4, -2, 3, -1] : [6, -1, 5, -2];
+      const trades = profits.map((profit, index) => {
+        const entryTime = start + (100 + index * 10) * step;
+        return { reportIndex: index, number: index + 1, direction: "long", status: "closed",
+          entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+          exit: { time: entryTime + step, timeIso: new Date(entryTime + step).toISOString(),
+            price: 1, label: null }, durationMilliseconds: step, profit, profitPercent: null,
+          cumulativeProfit: null, quantity: 1, commission: 0.1, commissionPercent: null,
+          runUp: Math.max(profit, 0) + 1, runUpPercent: null, drawDown: Math.max(-profit, 0) + 1,
+          drawDownPercent: null };
+      });
+      return { schemaVersion: "1.0",
+        ledgerId: `sha256:${(chart.symbol === "OANDA:EURUSD" ? "c" : "d").repeat(64)}`,
+        strategy: "Regime Matrix Strategy", symbol: chart.symbol, timeframe: chart.resolution,
+        studyId: `temporary-${runs}`, pineId: activePine, pineVersion: "2.0", inputs: [],
+        currency: "USD", initialCapital: 100000, dateRange: null, summary: { totalTrades: 4 },
+        totalTrades: 4, availableTrades: 4, countMatchesSummary: true, ordering: "strategy_report",
+        offset: 0, limit: 500, returned: 4, nextOffset: null, complete: true,
+        unavailableFields: [], qualityIssues: [], trades };
+    },
+    removePineFromChart: async (requested, studyId) => ((removed += 1), (activePine = null),
+      { removed: true, pineId: requested, pineVersion: "2.0", studyId,
+        name: "Regime Matrix Strategy", chartIndex: 0 }),
+  } }));
+  const args = {
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", count: 200,
+    trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
+    minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
+    max_regime_age_bars: 1,
+    jobs: [
+      { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
+      { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId },
+    ],
+  };
+  const preview = JSON.parse((await client.callTool({
+    name: "run_strategy_regime_matrix", arguments: args,
+  })).content[0].text);
+  assert.equal(preview.status, "preview");
+  assert.equal(preview.jobCount, 2);
+  assert.equal(runs, 0);
+
+  const result = JSON.parse((await client.callTool({
+    name: "run_strategy_regime_matrix", arguments: { ...args, confirm: true },
+  })).content[0].text);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.results.map((row) => row.status), ["complete", "complete"]);
+  assert.deepEqual(result.results.map((row) => row.evaluation.coverage.joinedTrades), [4, 4]);
+  assert.equal(result.results[0].evaluation.overall.profitFactor, 7 / 3);
+  assert.equal(result.results[1].evaluation.overall.profitFactor, 11 / 3);
+  assert.equal(result.chartStateAfter.restored, true);
+  assert.equal(runs, 2);
+  assert.equal(removed, 2);
+  assert.deepEqual(chart, { symbol: "OANDA:USDJPY", resolution: "240" });
+});
+
+test("run_strategy_regime_matrix stops remaining jobs after a chart restore failure", async () => {
+  const pineId = "USER;regimerestore123";
+  const chart = { symbol: "OANDA:USDJPY", resolution: "240" };
+  let historyRequests = 0;
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: chart.symbol, resolution: chart.resolution, studies: [] }] });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    setSymbol: async (symbol) => {
+      if (symbol === "OANDA:USDJPY" && chart.symbol === "OANDA:EURUSD") {
+        throw new Error("regime matrix restore rejected");
+      }
+      chart.symbol = symbol;
+      return { symbol, resolution: chart.resolution, bars: 200 };
+    },
+    setResolution: async (resolution) => ((chart.resolution = resolution),
+      { symbol: chart.symbol, resolution, bars: 200 }),
+    listPineScripts: async () => [{ pineId, name: "Regime Restore Strategy", kind: "strategy",
+      version: "1.0", usedBy: [] }],
+    getOhlcv: async () => {
+      historyRequests += 1;
+      throw new Error("regime history unavailable");
+    },
+  } }));
+  const result = JSON.parse((await client.callTool({ name: "run_strategy_regime_matrix", arguments: {
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", confirm: true,
+    jobs: [
+      { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
+      { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId },
+    ],
+  } })).content[0].text);
+  assert.equal(result.status, "blocked");
+  assert.deepEqual(result.results.map((row) => row.status), ["restore_failed", "skipped"]);
+  assert.match(result.results[0].error, /regime history unavailable/);
+  assert.match(result.results[1].error, /chart restore failed/);
+  assert.equal(historyRequests, 1);
+  assert.equal(result.chartStateAfter.restored, false);
+});
+
 test("input validation rejects out-of-range or wrong-typed arguments before the handler runs", async () => {
   let handlerRan = false;
   const spyingDeps = makeDeps({
@@ -4882,6 +5022,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "run_backtest_matrix", arguments: { expected_symbol: "OANDA:USDJPY", expected_timeframe: "240",
       jobs: [{ symbol: "OANDA:USDJPY", timeframe: "240", pine_id: "USER;matrixstrategy123" }],
       max_runtime_seconds: 1801 } },
+    { name: "run_strategy_regime_matrix", arguments: { expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240", jobs: [] } },
+    { name: "run_strategy_regime_matrix", arguments: { expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "240", jobs: Array(13).fill({ symbol: "OANDA:USDJPY", timeframe: "240",
+        pine_id: "USER;regimematrix123" }) } },
     { name: "get_strategy_report", arguments: { trades_limit: 0 } },
     { name: "save_pine_script", arguments: {} },
     { name: "save_pine_script", arguments: { source: "x", pine_id: "PUB;abcdef1234567890" } },

@@ -349,6 +349,7 @@
 - **事前契約**: `validate_research_protocol`はread-onlyで、具体的な自作Pine ID/版だけを取得して静的監査する。候補IDはSHA-256、窓とlifecycleはcanonical ISO timestamp、件数・配列・文字列は上限付き構造化入力とし、任意コードやPine sourceをクライアントから受け取らない。チャート、Strategy Tester、外部HTTP、注文には接続しない
 - **先読み防止**: IS/OOSとOOS同士の半開区間重複、未来窓、形成中足、凍結後変更、OOS初回閲覧後変更をblockedにする。静的監査は非リペイントの証明ではないため、request.security、pivot、varip、timenow、intrabar/realtime分岐とrestart差分未確認をwarningとして保持し、警告ゼロの場合だけ`adoptionEligible:true`にする
 - **ストレス実行境界**: `stress_test_strategy`は既定dry-runでprotocol ID、chart binding、Pine版、入力、評価窓、全シナリオ、seed/反復回数を固定する。confirm後はprocess内queueでbaseline Strategyを一時追加し、input readback一致・settle、完全ledger取得、所有確認付き削除、元chart fingerprint照合を行う。任意の再実行scenarioも同じ手順で最大8件まで直列処理し、復元不能時は後続を停止する。cleanup/復元を証明できない台帳は評価へ含めない
+- **一括レジーム分析境界**: `run_strategy_regime_matrix`は既定dry-run、最大12job、直列実行、soft deadline最大1,800秒とする。各jobで明示symbol/timeframeへ一時切替し、取得OHLCを再拘束してから完全台帳をpoint-in-time regimeへ結合する。個別失敗は他jobへ波及させず、元chart fingerprintの復元失敗時だけ後続を停止する。Pine source、注文、ランキング、異通貨のportfolio集計は扱わない
 - **計算境界**: 追加コストはreport通貨/取引としてのみ受け、pipsから口座通貨への不確かな換算をしない。commission倍率はtrade commissionが全件ある場合だけ計算する。期間ずらしはentry/exitともに半開区間内のclosed tradeだけを含め、境界跨ぎを除外する。bootstrapはseed固定・100〜10,000回・同数復元抽出に限定し、市場経路や自己相関を再現したMonte Carloとは表現しない
 - **出力・増幅制限**: モデルscenario 1〜20、再実行scenario 0〜8、各入力20、開始ずらし1〜100bar、bootstrap最大10,000回。反復ごとのsampleやtrade/index列、生台帳を返さず、baseline、scenario別収集状態、集計、相対劣化、分位点、worst、破綻率だけを返す。任意parameter grid、ランキング、単一score、自動採用、注文を実装しない
 - **残余リスク**: trade順序bootstrapは独立同分布を仮定し、連敗のregime依存を過小評価し得る。Strategy再実行はPineが公開する入力だけを変更でき、入力の意味や妥当な近傍幅をMCPは証明しない。Entry遅延やStop/Target入力を持たないStrategyに効果を後付けせず、同一評価期間での再計算も独立OOS検証の代替とはしない
@@ -408,6 +409,7 @@
 - **読み取り境界**: `get_futures_flow_context`は固定済みspot→CME/COMEX continuous futures対応、明示chart index、exact symbol、日足をcontextと取得OHLCVで二重検証する。最大5,000本のロード済み確定足と既存CFTC APIだけを読み、chart、Pine、Strategy Tester、alert、外部ファイル、注文を変更しない。Bar Replay中は現在COTとの混在を拒否する
 - **データ源境界**: TradingView futures volumeをCME Daily Bulletin確報として扱わない。認証済み・first-seen追跡済みの日次OI providerがないためOIと価格×OI四象限はnull/unavailableとし、COT週次OIやvolumeから補完しない。将来provider追加時も取得開始前のavailable_atを遡及生成しない
 - **入力・増幅制限**: 対象mappingは5 spot symbol・4 continuous futuresに固定し、volume lookback最大250、OHLCV最大5,000、返却観測最大500、COT最大52週とする。raw OHLCVを返さず正規化観測だけを返す。COT失敗はredact済み構造化unavailableへ畳み、価格・volume結果を破棄しない
+- **品質状態**: 結合後のトップレベル`status`は最終`qualityIssues`の有無だけから導出し、日次OI provider未設定、COT取得不能、COT point-in-time不完全を明示する。個別証拠の欠落とトップレベル状態が乖離しないよう固定する
 - **解釈境界**: 6Jの方向反転とcrossの単一GBP脚proxyを明示する。volume Z-scoreは参加活発度候補であり、機関投資家、大口、aggressive buyer/seller、新規long/shortを識別しない。continuous contractのroll、basis、TradingView vendor集計、速報/確報差は残余リスクである
 
 ## 追補: バックログ #42(2026-07-20)

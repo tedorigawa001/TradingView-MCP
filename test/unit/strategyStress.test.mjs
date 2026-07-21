@@ -102,3 +102,19 @@ test("strategy rerun stress preserves collection and ledger failures", () => {
   assert.ok(result.scenarios[1].blockers.some((issue) => issue.includes("ledger_quality")));
   assert.equal(result.distribution.evaluableScenarios, 0);
 });
+
+test("strategy rerun stress shares baseline ledger blockers with modeled stress", () => {
+  const baselineLedger = ledger({ qualityIssues: ["missing_trade_profit"] });
+  const modeled = evaluateStrategyStress({ ...base, ledger: baselineLedger, bootstrap: null });
+  const rerun = evaluateStrategyRerunStress({
+    baselineLedger,
+    evaluationFrom: base.evaluationFrom,
+    evaluationTo: base.evaluationTo,
+    timeframe: base.timeframe,
+    minimumTrades: base.minimumTrades,
+    scenarios: [{ scenarioId: "entry-delay-1", ledger: ledger() }],
+  });
+  assert.equal(modeled.status, "not_evaluable");
+  assert.equal(rerun.status, "not_evaluable");
+  assert.deepEqual(rerun.blockers, modeled.blockers);
+});

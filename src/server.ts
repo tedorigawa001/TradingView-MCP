@@ -1365,6 +1365,314 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "run_strategy_regime_matrix",
+    {
+      description:
+        "Run a bounded serial matrix of exact saved Pine Strategies across explicit symbols and timeframes, " +
+        "then join each complete trade ledger to point-in-time market regimes. Each job reads loaded closed " +
+        "OHLC, temporarily adds one strategy, removes it, and verifies restoration of the original chart. " +
+        "Returns coverage and descriptive performance by regime without ranking or automatic adoption. " +
+        "Dry-run by default; confirm=true is required. It never changes saved Pine source or places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA.describe("Exact active-chart symbol before and after the matrix"),
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i)
+          .describe("Exact active-chart timeframe before and after the matrix"),
+        jobs: z.array(z.object({
+          symbol: SYMBOL_SCHEMA,
+          timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+          pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          inputs: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
+          })).max(20).optional(),
+        })).min(1).max(12),
+        count: z.number().int().min(100).max(MAX_MARKET_REGIME_OBSERVATIONS).optional(),
+        trend_lookback: z.number().int().min(2).max(500).optional(),
+        atr_lookback: z.number().int().min(2).max(250).optional(),
+        volatility_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+        trend_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+        range_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+        directional_move_atr_threshold: z.number().finite().gt(0).max(100).optional(),
+        high_volatility_ratio: z.number().finite().gt(1).max(100).optional(),
+        low_volatility_ratio: z.number().finite().gt(0).lt(1).optional(),
+        minimum_classified_bars: z.number().int().min(1).max(MAX_MARKET_REGIME_OBSERVATIONS).optional(),
+        minimum_group_trades: z.number().int().min(1).max(100_000).optional(),
+        minimum_coverage_ratio: z.number().finite().gt(0).max(1).optional(),
+        max_regime_age_bars: z.number().int().min(0).max(100).optional(),
+        max_runtime_seconds: z.number().int().min(30).max(1800).optional()
+          .describe("Do not start another job after this soft deadline. Default: 900"),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, jobs, count, trend_lookback, atr_lookback,
+      volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
+      directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
+      minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
+      max_regime_age_bars, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
+      try {
+        const initialChart = chartFingerprint(await tv.getChartContext());
+        if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+          throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+        }
+        if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+          throw new Error(
+            `active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`,
+          );
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("strategy regime matrix is blocked while Bar Replay is active");
+        }
+        const scripts = await tv.listPineScripts();
+        const resolvedJobs = jobs.map((job) => {
+          const script = scripts.find((item) => item.pineId === job.pine_id);
+          if (!script) throw new Error(`strategy not found: ${job.pine_id}`);
+          if (script.kind !== "strategy") throw new Error(`${job.pine_id} is not a saved strategy`);
+          if (typeof script.version !== "string" || script.version.length === 0) {
+            throw new Error(`saved strategy version is unavailable: ${job.pine_id}`);
+          }
+          const requestedInputs = [...(job.inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+          if (new Set(requestedInputs.map((input) => input.id)).size !== requestedInputs.length) {
+            throw new Error(`duplicate input id in regime matrix job for ${job.pine_id}`);
+          }
+          const definition = {
+            symbol: job.symbol.toUpperCase(),
+            timeframe: normalizeResolution(job.timeframe),
+            pineId: job.pine_id,
+            pineVersion: script.version,
+            name: script.name,
+            inputs: requestedInputs,
+          };
+          const jobId = "sha256:" + createHash("sha256")
+            .update(JSON.stringify(definition), "utf8").digest("hex");
+          return { jobId, ...definition };
+        });
+        if (new Set(resolvedJobs.map((job) => job.jobId)).size !== resolvedJobs.length) {
+          throw new Error("regime matrix contains duplicate resolved jobs");
+        }
+        const regimeDefinition = {
+          count: count ?? MAX_MARKET_REGIME_OBSERVATIONS,
+          trendLookback: trend_lookback ?? 20,
+          atrLookback: atr_lookback ?? 14,
+          volatilityBaselineLookback: volatility_baseline_lookback ?? 50,
+          trendEfficiencyThreshold: trend_efficiency_threshold ?? 0.6,
+          rangeEfficiencyThreshold: range_efficiency_threshold ?? 0.25,
+          directionalMoveAtrThreshold: directional_move_atr_threshold ?? 2,
+          highVolatilityRatio: high_volatility_ratio ?? 1.5,
+          lowVolatilityRatio: low_volatility_ratio ?? 0.75,
+          minimumClassifiedBars: minimum_classified_bars ?? 100,
+        };
+        const joinDefinition = {
+          minimumGroupTrades: minimum_group_trades ?? 30,
+          minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
+          maxRegimeAgeBars: max_regime_age_bars ?? 3,
+        };
+        const maxRuntimeSeconds = max_runtime_seconds ?? 900;
+        const definition = {
+          methodologyVersion: "strategy_regime_matrix_v1",
+          regime: regimeDefinition,
+          join: joinDefinition,
+          maxRuntimeSeconds,
+          jobs: resolvedJobs,
+        };
+        const matrixId = "sha256:" + createHash("sha256")
+          .update(JSON.stringify(definition), "utf8").digest("hex");
+        const preview = {
+          schemaVersion: "1.0",
+          matrixId,
+          definition,
+          jobCount: resolvedJobs.length,
+          execution: {
+            mode: "serial",
+            maxJobs: 12,
+            softRuntimeDeadlineSeconds: maxRuntimeSeconds,
+            restoreAfterEveryJob: true,
+            stopRemainingJobsOnRestoreFailure: true,
+            ranking: false,
+          },
+          chartState: initialChart,
+        };
+        if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+        const startedAt = Date.now();
+        const deadline = startedAt + maxRuntimeSeconds * 1000;
+        let abortReason: string | null = null;
+        const results: Array<Record<string, unknown>> = [];
+        for (const job of resolvedJobs) {
+          if (abortReason || Date.now() >= deadline) {
+            results.push({
+              jobId: job.jobId,
+              symbol: job.symbol,
+              timeframe: job.timeframe,
+              pineId: job.pineId,
+              pineVersion: job.pineVersion,
+              name: job.name,
+              requestedInputs: job.inputs,
+              status: "skipped",
+              qualityIssues: [abortReason ? "prior_chart_restore_failed" : "matrix_runtime_deadline_reached"],
+              error: abortReason ?? "matrix soft runtime deadline reached before this job started",
+              chartRestored: abortReason === null,
+              strategyEvidence: null,
+              regimeEvidence: null,
+              evaluation: null,
+            });
+            continue;
+          }
+
+          const transaction = await withTemporaryChartState(
+            tv,
+            initialChart.index,
+            { symbol: job.symbol, resolution: job.timeframe },
+            async () => {
+              const history = await tv.getOhlcv(regimeDefinition.count, initialChart.index);
+              if (history.symbol.toUpperCase() !== job.symbol ||
+                  normalizeResolution(history.resolution) !== job.timeframe) {
+                throw new Error(`OHLC evidence does not match regime matrix job ${job.jobId}`);
+              }
+              const regimes = computeMarketRegimes({
+                bars: history.bars,
+                symbol: history.symbol,
+                timeframe: history.resolution,
+                ...regimeDefinition,
+                observationLimit: MAX_MARKET_REGIME_OBSERVATIONS,
+              });
+              const run = await collectExperimentVariant(
+                { pineId: job.pineId, inputs: job.inputs },
+                job.pineVersion,
+                { symbol: job.symbol, timeframe: job.timeframe },
+              );
+              const evaluation = run.evidence ? evaluateStrategyByRegime({
+                ledger: run.evidence.ledger,
+                observations: regimes.observations,
+                timeframe: history.resolution,
+                ...joinDefinition,
+              }) : null;
+              return { history, regimes, run, evaluation };
+            },
+          );
+          let afterJob: ReturnType<typeof chartFingerprint> | null = null;
+          let fingerprintError: string | null = null;
+          try {
+            afterJob = chartFingerprint(await tv.getChartContext());
+          } catch (err) {
+            fingerprintError = redactSecrets(err instanceof Error ? err.message : String(err));
+          }
+          const chartRestored = transaction.restored && afterJob !== null &&
+            JSON.stringify(afterJob) === JSON.stringify(initialChart);
+          if (!chartRestored) {
+            const restoreMessage = transaction.restoreError instanceof Error
+              ? transaction.restoreError.message
+              : transaction.restoreError
+                ? String(transaction.restoreError)
+                : fingerprintError ?? "chart fingerprint differs from its pre-matrix state";
+            abortReason = `chart restore failed after ${job.jobId}: ${redactSecrets(restoreMessage)}`;
+          }
+          const operationError = transaction.operationError
+            ? redactSecrets(transaction.operationError instanceof Error
+              ? transaction.operationError.message
+              : String(transaction.operationError))
+            : null;
+          const value = transaction.value;
+          const qualityIssues = [...new Set([
+            ...(value?.regimes.qualityIssues ?? []),
+            ...(value?.evaluation?.qualityIssues ?? []),
+            ...(operationError || value?.run.error || !value?.run.evidence ? ["strategy_or_regime_evidence_unavailable"] : []),
+            ...(value?.run.cleanupError ? ["strategy_cleanup_failed"] : []),
+            ...(chartRestored ? [] : ["chart_state_restore_failed"]),
+          ])];
+          const status = !chartRestored
+            ? "restore_failed"
+            : operationError || !value
+              ? "failed"
+              : value.run.cleanupError
+                ? "cleanup_failed"
+                : value.run.error || !value.run.evidence || value.evaluation?.status === "blocked"
+                  ? "blocked"
+                  : qualityIssues.length === 0 && value.evaluation?.status === "complete"
+                    ? "complete"
+                    : "partial";
+          results.push({
+            jobId: job.jobId,
+            symbol: job.symbol,
+            timeframe: job.timeframe,
+            pineId: job.pineId,
+            pineVersion: job.pineVersion,
+            name: job.name,
+            requestedInputs: job.inputs,
+            status,
+            qualityIssues,
+            error: operationError ?? value?.run.error ?? (chartRestored ? null : abortReason),
+            chartRestored,
+            strategyEvidence: value ? {
+              ledgerId: value.run.evidence?.ledger.ledgerId ?? null,
+              reportDateRange: value.run.evidence?.ledger.dateRange ?? null,
+              currency: value.run.evidence?.ledger.currency ?? null,
+              ledgerTrades: value.run.evidence?.ledger.trades.length ?? null,
+              cleanupError: value.run.cleanupError,
+            } : null,
+            regimeEvidence: value ? {
+              methodologyVersion: value.regimes.methodologyVersion,
+              status: value.regimes.status,
+              sample: value.regimes.sample,
+              quality: value.regimes.quality,
+              qualityIssues: value.regimes.qualityIssues,
+              distribution: value.regimes.distribution,
+              source: {
+                requestedBars: regimeDefinition.count,
+                returnedBars: value.history.bars.length,
+                from: value.history.bars[0]?.timeIso ?? null,
+                to: value.history.bars.at(-1)?.timeIso ?? null,
+              },
+            } : null,
+            evaluation: value?.evaluation ?? null,
+          });
+        }
+
+        let finalChart: ReturnType<typeof chartFingerprint> | null = null;
+        try {
+          finalChart = chartFingerprint(await tv.getChartContext());
+        } catch {
+          // A per-job failure carries the actionable redacted error.
+        }
+        const chartRestored = finalChart !== null && JSON.stringify(finalChart) === JSON.stringify(initialChart);
+        const counts = results.reduce<Record<string, number>>((acc, result) => {
+          const key = String(result.status);
+          acc[key] = (acc[key] ?? 0) + 1;
+          return acc;
+        }, {});
+        const jobsWithQualityIssues = results.filter((result) =>
+          Array.isArray(result.qualityIssues) && result.qualityIssues.length > 0).length;
+        const allEvaluated = results.every((result) => result.status === "complete" || result.status === "partial");
+        const allComplete = results.every((result) => result.status === "complete");
+        return jsonResult({
+          dryRun: false,
+          status: !chartRestored || counts.restore_failed ? "blocked" : allComplete ? "complete" : "partial",
+          ...preview,
+          results,
+          counts,
+          jobsWithQualityIssues,
+          qualityIssues: [
+            ...(jobsWithQualityIssues > 0 ? ["one_or_more_jobs_have_quality_issues"] : []),
+            ...(allEvaluated ? [] : ["one_or_more_jobs_not_evaluated"]),
+            ...(counts.cleanup_failed ? ["one_or_more_job_cleanups_failed"] : []),
+            ...(counts.restore_failed || !chartRestored ? ["chart_state_restore_failed"] : []),
+            ...(counts.skipped ? ["one_or_more_jobs_were_skipped"] : []),
+          ],
+          elapsedMilliseconds: Date.now() - startedAt,
+          chartStateAfter: { fingerprint: finalChart, restored: chartRestored },
+          limitations: [
+            "Every job uses the same explicit regime and join thresholds; no threshold is optimized per market.",
+            "Results retain their native Strategy Tester currencies and are not aggregated into a portfolio metric.",
+            "Regime groups are descriptive evidence and are never ranked or adopted automatically.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
     "get_indicator_values",
     {
       description:
@@ -5181,9 +5489,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             error: redactSecrets(err instanceof Error ? err.message : String(err)),
           };
         }
+        const qualityIssues = [...new Set([
+          ...futures.qualityIssues,
+          ...(futures.openInterest.status === "unavailable"
+            ? ["daily_open_interest_provider_not_configured"]
+            : []),
+          ...(cotEvidence.status === "unavailable" ? ["cot_unavailable"] : []),
+          ...(cotEvidence.status === "partial" ? ["cot_point_in_time_incomplete"] : []),
+        ])];
         return jsonResult({
           ...futures,
-          status: "partial",
+          status: qualityIssues.length === 0 ? "complete" : "partial",
           observedAt: new Date().toISOString(),
           cot: cotEvidence,
           source: {
@@ -5193,11 +5509,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             from: history.bars[0]?.timeIso ?? null,
             to: history.bars.at(-1)?.timeIso ?? null,
           },
-          qualityIssues: [
-            ...futures.qualityIssues,
-            "daily_open_interest_provider_not_configured",
-            ...(cotEvidence.status === "unavailable" ? ["cot_unavailable"] : []),
-          ],
+          qualityIssues,
           limitations: [
             "Continuous futures price and volume are participation proxies and can be affected by contract rolls.",
             "TradingView volume is not independently verified against the final CME Daily Bulletin.",

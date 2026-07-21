@@ -367,8 +367,9 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機coverage修正(2026-07-21)**: USDJPY 4HのTurtle/RSI2完全台帳(2020年開始)に対し、当初の5,000本上限ではregime証拠が2023年以降に限られ、結合率が約49%となった。チャートに10,000本以上をロードしてもツール側が直近5,000本だけを読む問題だったため、専用上限と既定値を20,000本へ拡張した。通常の`compute_market_regimes`公開応答上限は5,000本のままとする
 - **台帳結果契約**: joined coverageと除外理由を分母付きで返し、directional、volatility、combined regime別にTradingView台帳profitを用いたPF、期待値、勝率、closed-trade equity DD、run-up/drawdown coverage、commission coverageを集計する。raw ledger/OHLC、trade明細、regimeランキング、自動採用は返さない。完全ledgerでない、件数不一致、join 0件、cleanup/chart復元失敗はblockedとする
 - **台帳結合検証**: 同一Entry足の終値を参照せず直前close済みlabelへ結合すること、regime別PF/期待値、古い証拠除外、不完全ledger拒否、dry-run境界、一時Strategy削除、chart fingerprint復元を単体・MCP統合テストで固定した
+- **一括分析実装(2026-07-21)**: `run_strategy_regime_matrix`は最大12件の明示symbol/timeframe/Pine/input jobへ同一のregime・join契約を適用し、直列にOHLC取得、完全台帳収集、regime結合、Strategy削除、元chart復元を行う。900秒既定・最大1,800秒のsoft deadline後は新規jobを開始せず、個別計算失敗は行として継続し、復元失敗時だけ後続を停止する。各jobのledger ID、証拠品質、coverage、全体およびregime別指標を保持するが、異なるreport通貨を合算せず、ランキングや自動採用を返さない
 - **実機E2E(2026-07-21)**: USDJPY 4H、2020-01-01〜2026-07-21の完全台帳でTurtle v4.0は182/183件(99.45%)を結合し、全体PF 1.253、transition PF 1.486(107件)、range PF 0.961(69件)。RSI2 v2.0は226/230件(98.26%)を結合し、全体PF 0.918、transition PF 1.156(99件)、range PF 0.769(126件)。両実行とも一時Strategy削除と元chart fingerprint復元を確認した。Forex週末等の非連続timestampは補間せず通知するため、評価本体はcompleteでもツール全体はpartialとなる
-- **残タスク**: 複数strategy/jobの一括regime分析、相関状態、session、重要event近接、複数銘柄のregime同期は未実装
+- **残タスク**: 相関状態、session、重要event近接、複数銘柄のregime同期は未実装
 
 ### #38 特徴量と将来結果の関係(`compute_feature_outcome_relationships`、優先度: 中・規模: 中〜大)
 
@@ -389,6 +390,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **初版実装(2026-07-21)**: `OANDA:EURUSD→6E1!`、`USDJPY→6J1!`、`GBPJPY/GBPAUD→6B1!`、`XAUUSD→GC1!`の固定対応だけを受ける。TradingViewの配信契約に応じた`CME`/`CME_DL`、`COMEX`/`COMEX_DL` exchange aliasは同一rootに限って明示許可する。明示したchart indexのexact continuous futures symbolと日足をcontext/OHLCVで二重拘束し、最大5,000本のロード済み確定足を読む。Bar Replay中は現在COTとの時点混在を避けるため拒否し、chart、Pine、注文を変更しない
 - **正規化**: 当日を含まない過去5〜250日volumeの平均・母標準偏差からZ-scoreと平均比を計算する。6JはUSDJPY方向へ符号反転し、6Bを使うcrossは`base_currency_single_leg`として保持する。elevated/subduedは参加活発度の記述であり、新規long/shortや主体を断定しない
 - **欠落契約**: TradingView volumeはCME確報との一致を独立検証できないため`unverified_exchange_or_vendor_aggregated_futures_volume`とする。日次OI、前日OI差、価格×OI四象限は`unavailable`を返し、週次COT OIで代用しない。COT失敗時も価格・volume証拠を保持し、COTだけをunavailableにする
+- **品質契約**: トップレベル`status`は価格・volume、日次OI、COTを結合した最終`qualityIssues`から導出する。日次OI未設定、COT取得不能、COTのpoint-in-time不完全を個別issueとして返し、将来providerが完全化した際にハードコードされた`partial`を残さない
 - **実機検証(2026-07-21)**: TradingViewが遅延CME契約を`CME_DL:6J1!`へ正規化することを確認し、同一rootの遅延aliasを固定許可へ追加した。USDJPY/6J日足1,300本で1,279正規化観測を取得し、最新6J -0.0323%をUSDJPY方向+0.0323%へ反転、volume 96,698、20日平均比0.655、Z=-0.765、`normal` participationとして返した。COTはpartialで取得し、日次OIはunavailable、生OHLCV配列なし、ツール前後chart context不変を確認した。検証後は第2ペインをXAUUSD 4H、元2 Studyへ戻し、第1ペインをactiveへ復元・全context照合済み
 - **残タスク**: 認証済みCME日次統計provider、preliminary/final版とfirst-seen保存、限月・expiry・roll calendar、期近単独とcontinuous contractの比較、basis、volumeの確報照合、OI四象限、実機複数銘柄検証は未実装
 

@@ -121,9 +121,54 @@ function windowTrades(ledger: StrategyTradeLedger, from: number, to: number) {
   return { included, excluded };
 }
 
+function evaluateLedgerWindow(input: {
+  ledger: StrategyTradeLedger;
+  evaluationFrom: string;
+  evaluationTo: string;
+  minimumTrades: number;
+}) {
+  if (!Number.isInteger(input.minimumTrades) || input.minimumTrades < 1) {
+    throw new Error("minimumTrades must be a positive integer");
+  }
+  const from = parseTime(input.evaluationFrom, "evaluation_from");
+  const to = parseTime(input.evaluationTo, "evaluation_to");
+  if (from >= to) throw new Error("evaluation_to must be after evaluation_from");
+  const ledgerFrom = input.ledger.dateRange?.from
+    ? parseTime(input.ledger.dateRange.from, "ledger.dateRange.from")
+    : null;
+  const ledgerTo = input.ledger.dateRange?.to
+    ? parseTime(input.ledger.dateRange.to, "ledger.dateRange.to")
+    : null;
+  const blockers = [
+    ...(!input.ledger.complete ? ["ledger_incomplete"] : []),
+    ...(input.ledger.countMatchesSummary === false ? ["report_trade_count_mismatch"] : []),
+    ...input.ledger.qualityIssues.map((issue) => `ledger_quality:${issue}`),
+    ...(ledgerFrom === null || ledgerTo === null || ledgerFrom > from || ledgerTo < to
+      ? ["ledger_date_range_does_not_cover_evaluation"]
+      : []),
+  ];
+  const selected = windowTrades(input.ledger, from, to);
+  const trades: StressTrade[] = [];
+  if (selected.included.some((trade) => typeof trade.profit !== "number" || !Number.isFinite(trade.profit))) {
+    blockers.push("included_trade_profit_unavailable");
+  } else {
+    trades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission })));
+  }
+  if (trades.length < input.minimumTrades) blockers.push("minimum_trade_count_not_met");
+  return {
+    status: blockers.length === 0 ? "complete" as const : "not_evaluable" as const,
+    blockers: [...new Set(blockers)],
+    window: { from: input.evaluationFrom, to: input.evaluationTo },
+    from,
+    to,
+    trades,
+    metrics: blockers.length === 0 ? metrics(trades) : null,
+    excluded: selected.excluded,
+  };
+}
+
 export function evaluateStrategyStress(input: StrategyStressInput) {
   if (input.scenarios.length < 1 || input.scenarios.length > 20) throw new Error("strategy stress requires 1 to 20 scenarios");
-  if (!Number.isInteger(input.minimumTrades) || input.minimumTrades < 1) throw new Error("minimumTrades must be a positive integer");
   if (new Set(input.scenarios.map((scenario) => scenario.scenarioId)).size !== input.scenarios.length) {
     throw new Error("strategy stress scenario ids must be unique");
   }
@@ -140,36 +185,19 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
        input.bootstrap.seed.length < 1 || input.bootstrap.seed.length > 128 || !Number.isFinite(input.bootstrap.failureNetProfit))) {
     throw new Error("invalid bootstrap contract");
   }
-  const from = parseTime(input.evaluationFrom, "evaluation_from");
-  const to = parseTime(input.evaluationTo, "evaluation_to");
-  if (from >= to) throw new Error("evaluation_to must be after evaluation_from");
-  const ledgerFrom = input.ledger.dateRange?.from ? parseTime(input.ledger.dateRange.from, "ledger.dateRange.from") : null;
-  const ledgerTo = input.ledger.dateRange?.to ? parseTime(input.ledger.dateRange.to, "ledger.dateRange.to") : null;
-  const blockers = [
-    ...(!input.ledger.complete ? ["ledger_incomplete"] : []),
-    ...(input.ledger.countMatchesSummary === false ? ["report_trade_count_mismatch"] : []),
-    ...input.ledger.qualityIssues.map((issue) => `ledger_quality:${issue}`),
-    ...(ledgerFrom === null || ledgerTo === null || ledgerFrom > from || ledgerTo < to ? ["ledger_date_range_does_not_cover_evaluation"] : []),
-  ];
-  const selected = windowTrades(input.ledger, from, to);
-  const baselineTrades: StressTrade[] = [];
-  if (selected.included.some((trade) => typeof trade.profit !== "number" || !Number.isFinite(trade.profit))) {
-    blockers.push("included_trade_profit_unavailable");
-  } else {
-    baselineTrades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission })));
-  }
-  if (baselineTrades.length < input.minimumTrades) blockers.push("minimum_trade_count_not_met");
-  if (blockers.length > 0) {
+  const baseline = evaluateLedgerWindow(input);
+  if (baseline.status === "not_evaluable") {
     return { status: "not_evaluable" as const, methodologyVersion: "ledger_stress_v1" as const,
-      blockers: [...new Set(blockers)], baseline: null, scenarios: [], distribution: null, bootstrap: null };
+      blockers: baseline.blockers, baseline: null, scenarios: [], distribution: null, bootstrap: null };
   }
 
-  const baselineMetrics = metrics(baselineTrades);
+  const { from, to, trades: baselineTrades, excluded } = baseline;
+  const baselineMetrics = baseline.metrics!;
   const timeframeMs = resolutionMilliseconds(input.timeframe);
   const scenarioResults = input.scenarios.map((scenario) => {
     let adjusted: StressTrade[] | null = null;
     let reason: string | null = null;
-    let excluded = selected.excluded;
+    let scenarioExcluded = excluded;
     if (scenario.kind === "additional_cost_per_trade") {
       adjusted = baselineTrades.map((trade) => ({ ...trade, profit: trade.profit - scenario.value }));
     } else if (scenario.kind === "commission_multiplier") {
@@ -178,7 +206,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
         profit: trade.profit - trade.commission! * (scenario.value - 1) }));
     } else {
       const shifted = windowTrades(input.ledger, from + scenario.value * timeframeMs, to);
-      excluded = shifted.excluded;
+      scenarioExcluded = shifted.excluded;
       if (shifted.included.some((trade) => typeof trade.profit !== "number" || !Number.isFinite(trade.profit))) {
         reason = "included_trade_profit_unavailable";
       } else if (shifted.included.length < input.minimumTrades) {
@@ -187,10 +215,10 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
         adjusted = shifted.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission }));
       }
     }
-    if (adjusted === null) return { ...scenario, status: "not_evaluable" as const, reason, metrics: null, degradation: null, excluded };
+    if (adjusted === null) return { ...scenario, status: "not_evaluable" as const, reason, metrics: null, degradation: null, excluded: scenarioExcluded };
     const scenarioMetrics = metrics(adjusted);
     return { ...scenario, status: "complete" as const, reason: null, metrics: scenarioMetrics,
-      degradation: degradation(baselineMetrics, scenarioMetrics), excluded };
+      degradation: degradation(baselineMetrics, scenarioMetrics), excluded: scenarioExcluded };
   });
   const evaluable = scenarioResults.filter((scenario) => scenario.metrics !== null);
   const distributionFor = (key: "expectancy" | "netProfit" | "profitFactor" | "maxClosedTradeEquityDrawdown") => {
@@ -236,7 +264,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
     status: scenarioResults.every((scenario) => scenario.status === "complete") ? "complete" as const : "partial" as const,
     methodologyVersion: "ledger_stress_v1" as const,
     blockers: [],
-    baseline: { window: { from: input.evaluationFrom, to: input.evaluationTo }, metrics: baselineMetrics, excluded: selected.excluded },
+    baseline: { window: baseline.window, metrics: baselineMetrics, excluded },
     scenarios: scenarioResults,
     distribution: deterministicDistribution,
     bootstrap,
@@ -251,17 +279,14 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
     throw new Error("strategy rerun stress scenario ids must be unique");
   }
 
-  const evaluateLedger = (ledger: StrategyTradeLedger) => evaluateStrategyStress({
+  const evaluateLedger = (ledger: StrategyTradeLedger) => evaluateLedgerWindow({
     ledger,
     evaluationFrom: input.evaluationFrom,
     evaluationTo: input.evaluationTo,
-    timeframe: input.timeframe,
     minimumTrades: input.minimumTrades,
-    scenarios: [{ scenarioId: "rerun_identity", kind: "additional_cost_per_trade", value: 0 }],
-    bootstrap: null,
   });
   const baselineEvaluation = evaluateLedger(input.baselineLedger);
-  if (baselineEvaluation.status === "not_evaluable" || baselineEvaluation.baseline === null) {
+  if (baselineEvaluation.status === "not_evaluable") {
     return {
       status: "not_evaluable" as const,
       methodologyVersion: "strategy_rerun_stress_v1" as const,
@@ -272,7 +297,7 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
     };
   }
 
-  const baselineMetrics = baselineEvaluation.baseline.metrics;
+  const baselineMetrics = baselineEvaluation.metrics!;
   const scenarioResults = input.scenarios.map((scenario) => {
     if (scenario.ledger === null) {
       return {
@@ -286,7 +311,7 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
       };
     }
     const evaluated = evaluateLedger(scenario.ledger);
-    if (evaluated.status === "not_evaluable" || evaluated.baseline === null) {
+    if (evaluated.status === "not_evaluable") {
       return {
         scenarioId: scenario.scenarioId,
         status: "not_evaluable" as const,
@@ -302,9 +327,9 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
       status: "complete" as const,
       blockers: [] as string[],
       ledgerId: scenario.ledger.ledgerId,
-      metrics: evaluated.baseline.metrics,
-      degradation: degradation(baselineMetrics, evaluated.baseline.metrics),
-      excluded: evaluated.baseline.excluded,
+      metrics: evaluated.metrics!,
+      degradation: degradation(baselineMetrics, evaluated.metrics!),
+      excluded: evaluated.excluded,
     };
   });
   const evaluable = scenarioResults.filter((scenario) => scenario.metrics !== null);
@@ -332,9 +357,9 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
     blockers: [],
     baseline: {
       ledgerId: input.baselineLedger.ledgerId,
-      window: baselineEvaluation.baseline.window,
+      window: baselineEvaluation.window,
       metrics: baselineMetrics,
-      excluded: baselineEvaluation.baseline.excluded,
+      excluded: baselineEvaluation.excluded,
     },
     scenarios: scenarioResults,
     distribution: {
