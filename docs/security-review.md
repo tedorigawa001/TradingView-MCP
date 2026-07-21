@@ -367,6 +367,10 @@
 - **先読み防止**: 各barの効率比、ATR、方向移動、volatility baselineは当該bar以前だけから計算する。未来全期間の分位点、後方修正されたthreshold、forward fillを使用しない。同一時刻のlabelが将来bar追加後も変わらないことをテストで固定する
 - **入力・応答上限**: trend lookback最大500、ATR最大250、volatility baseline最大1,000、OHLC最大5,000、明細最大500。閾値は有限値と相互順序を検証し、aggregateは全分類bar、明細は末尾だけを返す。raw OHLCは応答へ複製しない
 - **解釈境界**: labelは過去価格経路の記述であり、予測、売買signal、稼働許可ではない。初版は価格方向とvolatilityだけで、相関、session、event、Strategy台帳成績を含まない。非連続timestampは報告するが補間せず、少数barは`partial`として扱う
+- **Strategy実行境界**: `run_strategy_regime_analysis`は既定dry-runで、confirm後だけ正確な保存済みPine ID/版を一時追加する。入力settle、完全ledger pagination、所有確認付き削除、元chart fingerprint照合をprocess内queueで直列実行し、cleanupまたは復元失敗時はblockedとする。regime証拠はロード済みOHLCを最大20,000本まで内部処理するが、生OHLCや全観測行は応答せず集計と品質情報だけを返す。Pine保存、alert、Replay Trading、注文、外部HTTP、ファイルへ接続しない
+- **時刻join境界**: trade Entryと同じbarの未確定終値を参照せず、`bar start + nominal resolution <= entry time`を満たす最新labelだけを使う。最大regime ageをbar数で明示し、古い証拠、Entry時刻欠落、profit欠落、OHLC coverage外を別件数で除外する。未来bar追加で既存labelを再fitせず、forward fillや全期間分位点を使用しない
+- **台帳・出力境界**: PF、期待値、勝率、DD、run-up/drawdown、commissionは完全Strategy Tester台帳の許可済み数値だけから計算し、OHLCから約定や損益を再構成しない。raw OHLC、raw trade明細、反復列は返さず、全体とregime別aggregate、coverage、ledger ID、品質だけを返す。loss 0のPFを無限大として順位付けせず`null`にする
+- **実機確認**: USDJPY 4HのTurtle v4.0とRSI2 v2.0で、完全ledger取得、98%以上のas-of join coverage、所有確認付き一時Strategy削除、元chart fingerprint復元を確認した。Forex週末を含む非連続timestampは通常休場と欠損を推測で区別せず、品質通知として保持する
 
 ## 追補: バックログ #42(2026-07-20)
 

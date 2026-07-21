@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-two expected tools", async () => {
+test("exposes exactly the sixty-three expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -733,6 +733,7 @@ test("exposes exactly the sixty-two expected tools", async () => {
       "run_backtest_matrix",
       "run_market_event_study",
       "run_strategy_experiment",
+      "run_strategy_regime_analysis",
       "run_strategy_walk_forward",
       "save_pine_script",
       "scan_market",
@@ -4455,6 +4456,80 @@ test("compute_market_regimes binds the chart and returns point-in-time labels", 
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.source.requestedBars, 160);
   assert.ok(parsed.distribution.directional.trend_up > 20);
+});
+
+test("run_strategy_regime_analysis joins a complete temporary ledger and restores the chart", async () => {
+  const pineId = "USER;regime12345";
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 200 }, (_, index) => {
+    const open = 100 + Math.max(0, index - 1) * 0.5;
+    const close = 100 + index * 0.5;
+    return { time: (start + index * 3_600_000) / 1000,
+      timeIso: new Date(start + index * 3_600_000).toISOString(),
+      open, high: close + 0.2, low: open - 0.2, close, volume: 1 };
+  });
+  const profits = [4, -2, 3, -1];
+  const trades = profits.map((profit, index) => {
+    const entryTime = start + (100 + index * 10) * 3_600_000;
+    return { reportIndex: index, number: index + 1, direction: "long", status: "closed",
+      entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+      exit: { time: entryTime + 3_600_000, timeIso: new Date(entryTime + 3_600_000).toISOString(),
+        price: 1, label: null }, durationMilliseconds: 3_600_000, profit, profitPercent: null,
+      cumulativeProfit: null, quantity: 1, commission: 0.1, commissionPercent: null,
+      runUp: Math.max(profit, 0) + 1, runUpPercent: null, drawDown: Math.max(-profit, 0) + 1,
+      drawDownPercent: null };
+  });
+  let removed = 0;
+  let runs = 0;
+  let requestedOhlcvCount = null;
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60",
+      studies: [{ id: "original", name: "RSI" }] }] });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    listPineScripts: async () => [{ pineId, name: "Regime Strategy", kind: "strategy",
+      version: "1.0", usedBy: [] }],
+    getOhlcv: async (count) => ((requestedOhlcvCount = count),
+      { symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+    runBacktest: async () => ((runs += 1), { studyId: "temporary", pineId, keptOnChart: true,
+      removedFromChart: false, strategy: "Regime Strategy", summary: {}, totalTrades: trades.length,
+      trades: [] }),
+    getStrategyReport: async () => ({ strategy: "Regime Strategy", symbol: "OANDA:EURUSD",
+      timeframe: "60", studyId: "temporary", pineId, pineVersion: "1.0", inputs: [],
+      currency: "USD", initialCapital: 100000, dateRange: null, summary: { netProfit: 4 },
+      totalTrades: trades.length, trades: [] }),
+    getStrategyTradeLedger: async () => ({ schemaVersion: "1.0",
+      ledgerId: `sha256:${"b".repeat(64)}`, strategy: "Regime Strategy", symbol: "OANDA:EURUSD",
+      timeframe: "60", studyId: "temporary", pineId, pineVersion: "1.0", inputs: [],
+      currency: "USD", initialCapital: 100000, dateRange: null, summary: { totalTrades: trades.length },
+      totalTrades: trades.length, availableTrades: trades.length, countMatchesSummary: true,
+      ordering: "strategy_report", offset: 0, limit: 500, returned: trades.length,
+      nextOffset: null, complete: true, unavailableFields: [], qualityIssues: [], trades }),
+    removePineFromChart: async () => ((removed += 1), { removed: true, pineId,
+      pineVersion: "1.0", studyId: "temporary", name: "Regime Strategy", chartIndex: 0 }),
+  } }));
+  const preview = JSON.parse((await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
+    pine_version: "1.0",
+  } })).content[0].text);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.definition.regime.count, 20_000);
+  assert.equal(runs, 0);
+  const result = JSON.parse((await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,
+    pine_version: "1.0", count: 200, trend_lookback: 10, atr_lookback: 5,
+    volatility_baseline_lookback: 20, minimum_classified_bars: 20,
+    minimum_group_trades: 2, minimum_coverage_ratio: 1, max_regime_age_bars: 1, confirm: true,
+  } })).content[0].text);
+  assert.equal(result.status, "complete");
+  assert.equal(result.evaluation.coverage.joinedTrades, 4);
+  assert.equal(result.evaluation.byDirectionalRegime.trend_up.profitFactor, 7 / 3);
+  assert.equal(result.chartStateAfter.restored, true);
+  assert.equal(result.strategyEvidence.ledgerTrades, 4);
+  assert.equal(runs, 1);
+  assert.equal(removed, 1);
+  assert.equal(requestedOhlcvCount, 200);
 });
 
 test("input validation rejects out-of-range or wrong-typed arguments before the handler runs", async () => {

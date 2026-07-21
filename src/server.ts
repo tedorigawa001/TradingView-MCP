@@ -37,7 +37,8 @@ import {
 } from "./strategyWalkForward.js";
 import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
-import { computeMarketRegimes } from "./marketRegimes.js";
+import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
+import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -772,6 +773,200 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Thresholds are caller-specified constants; this tool does not optimize or rank them.",
             "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "Irregular timestamps are reported and never forward-filled.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "run_strategy_regime_analysis",
+    {
+      description:
+        "Run one exact saved Pine Strategy temporarily, collect its complete immutable trade ledger, " +
+        "and join each closed trade to the latest market-regime bar whose nominal close was available " +
+        "by entry time. Returns PF, expectancy, win rate, closed-trade drawdown, run-up/drawdown, and " +
+        "coverage by directional, volatility, and combined regime. Dry-run by default; confirm=true " +
+        "is required. The strategy is removed and the original chart fingerprint is verified. It never " +
+        "ranks regimes, changes the saved Pine source, or places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        pine_version: z.string().min(1).max(64),
+        inputs: z.array(z.object({
+          id: z.string().regex(/^[\w$]{1,64}$/),
+          value: z.union([z.number(), z.string().max(256), z.boolean()]),
+        })).max(20).optional(),
+        count: z.number().int().min(100).max(MAX_MARKET_REGIME_OBSERVATIONS).optional()
+          .describe("Most recent loaded bars used for regime evidence. Default: 20000"),
+        trend_lookback: z.number().int().min(2).max(500).optional(),
+        atr_lookback: z.number().int().min(2).max(250).optional(),
+        volatility_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+        trend_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+        range_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+        directional_move_atr_threshold: z.number().finite().gt(0).max(100).optional(),
+        high_volatility_ratio: z.number().finite().gt(1).max(100).optional(),
+        low_volatility_ratio: z.number().finite().gt(0).lt(1).optional(),
+        minimum_classified_bars: z.number().int().min(1).max(MAX_MARKET_REGIME_OBSERVATIONS).optional()
+          .describe("Regime observations required before evaluation is complete. Default: 100"),
+        minimum_group_trades: z.number().int().min(1).max(100_000).optional()
+          .describe("Joined trades required for an individual regime group. Default: 30"),
+        minimum_coverage_ratio: z.number().finite().gt(0).max(1).optional()
+          .describe("Eligible closed trades that must join to a regime. Default: 0.8"),
+        max_regime_age_bars: z.number().int().min(0).max(100).optional()
+          .describe("Maximum age of the prior closed regime evidence. Default: 3 bars"),
+        confirm: z.boolean().optional()
+          .describe("Must be true to add the strategy temporarily and run the analysis. Default: false"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, pine_id, pine_version, inputs, count,
+      trend_lookback, atr_lookback, volatility_baseline_lookback, trend_efficiency_threshold,
+      range_efficiency_threshold, directional_move_atr_threshold, high_volatility_ratio,
+      low_volatility_ratio, minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
+      max_regime_age_bars, confirm }) => chartOperations.run(async () => {
+      try {
+        const initialChart = chartFingerprint(await tv.getChartContext());
+        if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+          throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
+        }
+        if (normalizeResolution(initialChart.timeframe) !== normalizeResolution(expected_timeframe)) {
+          throw new Error(
+            `active chart timeframe changed: expected ${expected_timeframe}, found ${initialChart.timeframe}`,
+          );
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("strategy regime analysis is blocked while Bar Replay is active");
+        }
+        const script = (await tv.listPineScripts()).find((item) => item.pineId === pine_id);
+        if (!script) throw new Error(`strategy not found: ${pine_id}`);
+        if (script.kind !== "strategy") throw new Error(`${pine_id} is not a saved strategy`);
+        if (script.version !== pine_version) {
+          throw new Error(`strategy version changed: expected ${pine_version}, found ${script.version ?? "unavailable"}`);
+        }
+        const requestedInputs = [...(inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+        if (new Set(requestedInputs.map((input) => input.id)).size !== requestedInputs.length) {
+          throw new Error("duplicate strategy input id");
+        }
+        const regimeDefinition = {
+          count: count ?? MAX_MARKET_REGIME_OBSERVATIONS,
+          trendLookback: trend_lookback ?? 20,
+          atrLookback: atr_lookback ?? 14,
+          volatilityBaselineLookback: volatility_baseline_lookback ?? 50,
+          trendEfficiencyThreshold: trend_efficiency_threshold ?? 0.6,
+          rangeEfficiencyThreshold: range_efficiency_threshold ?? 0.25,
+          directionalMoveAtrThreshold: directional_move_atr_threshold ?? 2,
+          highVolatilityRatio: high_volatility_ratio ?? 1.5,
+          lowVolatilityRatio: low_volatility_ratio ?? 0.75,
+          minimumClassifiedBars: minimum_classified_bars ?? 100,
+        };
+        const joinDefinition = {
+          minimumGroupTrades: minimum_group_trades ?? 30,
+          minimumCoverageRatio: minimum_coverage_ratio ?? 0.8,
+          maxRegimeAgeBars: max_regime_age_bars ?? 3,
+        };
+        const definition = {
+          methodologyVersion: "strategy_regime_analysis_v1",
+          symbol: initialChart.symbol,
+          timeframe: initialChart.timeframe,
+          strategy: { pineId: pine_id, pineVersion: pine_version, name: script.name, inputs: requestedInputs },
+          regime: regimeDefinition,
+          join: joinDefinition,
+        };
+        const analysisId = "sha256:" + createHash("sha256")
+          .update(JSON.stringify(definition), "utf8").digest("hex");
+        const preview = {
+          schemaVersion: "1.0",
+          analysisId,
+          definition,
+          chartState: initialChart,
+          operations: [
+            "read_loaded_closed_ohlc",
+            "compute_point_in_time_regime_labels",
+            "temporarily_add_exact_strategy",
+            "apply_strategy_inputs",
+            "collect_complete_strategy_ledger",
+            "remove_temporary_strategy",
+            "verify_original_chart_fingerprint",
+            "join_entry_to_prior_closed_regime",
+          ],
+        };
+        if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
+
+        const history = await tv.getOhlcv(regimeDefinition.count, initialChart.index);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const regimes = computeMarketRegimes({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          ...regimeDefinition,
+          observationLimit: MAX_MARKET_REGIME_OBSERVATIONS,
+        });
+        const run = await collectExperimentVariant(
+          { pineId: pine_id, inputs: requestedInputs },
+          pine_version,
+          { symbol: initialChart.symbol, timeframe: initialChart.timeframe },
+        );
+        const finalChart = chartFingerprint(await tv.getChartContext());
+        const chartRestored = JSON.stringify(finalChart) === JSON.stringify(initialChart);
+        const evaluation = run.evidence ? evaluateStrategyByRegime({
+          ledger: run.evidence.ledger,
+          observations: regimes.observations,
+          timeframe: history.resolution,
+          ...joinDefinition,
+        }) : null;
+        const qualityIssues = [...new Set([
+          ...(regimes.qualityIssues ?? []),
+          ...(evaluation?.qualityIssues ?? []),
+          ...(run.error ? ["strategy_evidence_unavailable"] : []),
+          ...(run.cleanupError ? ["strategy_cleanup_failed"] : []),
+          ...(chartRestored ? [] : ["chart_state_restore_failed"]),
+        ])];
+        const operationallyComplete = Boolean(run.evidence && !run.error && !run.cleanupError && chartRestored);
+        const status = !operationallyComplete || evaluation?.status === "blocked"
+          ? "blocked" : qualityIssues.length === 0 && evaluation?.status === "complete" ? "complete" : "partial";
+        return jsonResult({
+          dryRun: false,
+          status,
+          ...preview,
+          strategyEvidence: {
+            ledgerId: run.evidence?.ledger.ledgerId ?? null,
+            reportDateRange: run.evidence?.ledger.dateRange ?? null,
+            currency: run.evidence?.ledger.currency ?? null,
+            ledgerTrades: run.evidence?.ledger.trades.length ?? null,
+            error: run.error,
+            cleanupError: run.cleanupError,
+          },
+          regimeEvidence: {
+            methodologyVersion: regimes.methodologyVersion,
+            status: regimes.status,
+            current: regimes.current,
+            sample: regimes.sample,
+            quality: regimes.quality,
+            qualityIssues: regimes.qualityIssues,
+            distribution: regimes.distribution,
+            source: {
+              chartIndex: initialChart.index,
+              requestedBars: regimeDefinition.count,
+              returnedBars: history.bars.length,
+              from: history.bars[0]?.timeIso ?? null,
+              to: history.bars.at(-1)?.timeIso ?? null,
+            },
+          },
+          evaluation,
+          qualityIssues,
+          chartStateAfter: { fingerprint: finalChart, restored: chartRestored },
+          limitations: [
+            "Regime attribution uses the latest nominally closed regime bar available by trade entry time.",
+            "Only trades covered by loaded OHLC and the explicit regime-age limit are aggregated.",
+            "Profit and commission fields use TradingView Strategy Tester ledger values without reconstruction.",
+            "Regime groups are descriptive evidence and are not ranked or adopted automatically.",
           ],
         });
       } catch (err) {

@@ -58,3 +58,10 @@ test("market regimes exclude forming bars and report irregular intervals", () =>
   assert.ok(result.quality.irregularIntervals > 0);
   assert.ok(result.qualityIssues.includes("one_or_more_non_contiguous_bar_intervals"));
 });
+
+test("market regimes retain up to the internal 20000-observation analysis limit", () => {
+  const bars = barsFromCloses(Array.from({ length: 80 }, (_, index) => 100 + index * 0.2));
+  const result = computeMarketRegimes(input(bars, { observationLimit: 20_000 }));
+  assert.equal(result.observationsReturned, result.sample.classifiedBars);
+  assert.equal(result.observationsTruncated, false);
+});

@@ -3,6 +3,8 @@ import type { OhlcvBar } from "./tradingview.js";
 export type DirectionalRegime = "trend_up" | "trend_down" | "range" | "transition";
 export type VolatilityRegime = "low" | "normal" | "high";
 
+export const MAX_MARKET_REGIME_OBSERVATIONS = 20_000;
+
 export interface MarketRegimeInput {
   bars: OhlcvBar[];
   symbol: string;
@@ -19,7 +21,7 @@ export interface MarketRegimeInput {
   observationLimit: number;
 }
 
-type ClassifiedObservation = {
+export type ClassifiedMarketRegimeObservation = {
   time: number;
   timeIso: string;
   close: number;
@@ -37,7 +39,7 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
-function resolutionMilliseconds(value: string): number | null {
+export function marketRegimeResolutionMilliseconds(value: string): number | null {
   if (/^[1-9]\d*$/.test(value)) return Number(value) * 60_000;
   const match = value.match(/^([1-9]\d*)?([SDWM])$/i);
   if (!match) return null;
@@ -71,8 +73,9 @@ function validateInput(input: MarketRegimeInput): void {
   if (!Number.isInteger(input.minimumClassifiedBars) || input.minimumClassifiedBars < 1) {
     throw new Error("minimum classified bars must be a positive integer");
   }
-  if (!Number.isInteger(input.observationLimit) || input.observationLimit < 0 || input.observationLimit > 500) {
-    throw new Error("observation limit must be an integer between 0 and 500");
+  if (!Number.isInteger(input.observationLimit) || input.observationLimit < 0 ||
+      input.observationLimit > MAX_MARKET_REGIME_OBSERVATIONS) {
+    throw new Error(`observation limit must be an integer between 0 and ${MAX_MARKET_REGIME_OBSERVATIONS}`);
   }
 }
 
@@ -95,7 +98,7 @@ export function computeMarketRegimes(input: MarketRegimeInput) {
 
   const formingBarsExcluded = bars.filter((bar) => bar.forming === true).length;
   const closed = bars.filter((bar) => bar.forming !== true);
-  const intervalMs = resolutionMilliseconds(input.timeframe);
+  const intervalMs = marketRegimeResolutionMilliseconds(input.timeframe);
   const irregularIntervals = intervalMs === null ? 0 : closed.slice(1).filter((bar, index) =>
     (bar.time - closed[index].time) * 1000 > intervalMs * 1.5).length;
 
@@ -113,7 +116,7 @@ export function computeMarketRegimes(input: MarketRegimeInput) {
     return numericValues.reduce((sum, value) => sum + value, 0) / numericValues.length / bar.close;
   });
 
-  const observations: ClassifiedObservation[] = [];
+  const observations: ClassifiedMarketRegimeObservation[] = [];
   for (let index = 0; index < closed.length; index += 1) {
     const trendStart = index - input.trendLookback;
     const baselineStart = index - input.volatilityBaselineLookback + 1;
