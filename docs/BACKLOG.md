@@ -382,11 +382,16 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **契約**: DSTを含むIANA timezone、休日、session境界、volume種別を明示する。FXのtick volumeを取引所実出来高として表示しない
 - **評価**: セッション開始からの経過時間、opening range、前sessionとの重なり、拡張率を#36/#37へ渡せる決定論的特徴量として返す
 
-### #41 クロスアセット先行・遅行分析(`compute_cross_asset_lead_lag`、優先度: 中・規模: 中〜大)
+### #41 クロスアセット先行・遅行分析(`run_yield_price_nonconfirmation_study`) 🟡 Yield-Price初版実装・汎用lead/lagは継続
 
 - **目的**: FX、DXY、国債金利、実質金利、金、株価指数を厳密なUTC時刻で整列し、同時相関だけでなくlead/lag候補を検証する
 - **安全性**: forward fillせず、休場・更新頻度・公表遅延が異なる系列を区別する。複数lag探索は試行数として記録し、全期間で最良lagを選んだ結果をOOS成績と呼ばない
 - **出力**: overlap、欠落、lag別効果、fold安定性、符号反転、データ鮮度を返し、方向予測はAIが他証拠と統合する
+- **Yield-Price初版(2026-07-21)**: 2つの明示`chart_index`をtarget/driverへ割り当て、両方のexact symbol/timeframeをchart contextと取得OHLCで二重拘束する読み取り専用event studyを実装した。driverのlookback変化が明示閾値を初めて超えたbarをimpulseとし、そのbarの名目close時刻より前に開始したtarget barを証拠へ使わない。targetとdriverの日足開始時刻が異なってもexact timestamp joinやforward fillを行わず、driver確定後に開始した最初のtarget barから評価する
+- **非追随契約**: callerが`direct`/`inverse`関係、driver閾値(元系列のraw unit)、価格breakout lookback、非追随本数、逆方向close break条件、最大driver ageを事前指定する。期待方向のclose breakoutが非追随窓で成立した場合はeventを取消し、その後の限定窓で逆方向の構造close breakが成立した場合だけsignal eventとする。signal足closeは約定仮定ではなく参照価格であり、将来1〜250本の方向調整return/MFE/MAE/target到達を集計する
+- **品質・境界**: 形成中足、prior不足、driver確定後のtarget欠落、stale driver、非追随窓不足、期待方向breakout、trigger不成立、重複signalを個別集計する。月足の可変期間は拒否し、Bar Replay中は実時間系列との混在を避けるため拒否する。最大5,000本/系列、event明細200件、fold 12件に制限し、生OHLCは応答しない。これはevent studyであり、コスト、fill、PF、収益性を証明しない
+- **金利データ源の制約**: `get_real_yield_context`の米10年実質金利はローカルfirst-seenが2026-07-15以降しかなく、それ以前をpoint-in-time backfillできないため長期検証には使用しない。初回実機検証はTradingViewの日次`TVC:US10Y`を名目金利proxyとしてUSDJPYと組み合わせ、公式実質金利による検証とは別物として記録する
+- **検証状況**: 日足開始時刻が22時間ずれたsynthetic系列でdirect yield-up failure、driver確定前target除外、期待方向breakout取消、inverse関係、MFE/MAEの0下限を純粋テストへ固定した。公開MCP経路でも2chart拘束、並列OHLC取得、as-of join、short eventを固定した。実機E2EはUSDJPY/US10Y日足を各約5,000本ロードし、固定定義で722 impulse、191 eventを取得した。金利上昇failureのshort 90件は1/5/10/20本の平均方向調整returnがすべて負で棄却。金利低下failureのlong 101件は全体5本平均+0.166%だったが、前半fold +0.056%に対して後半+0.362%、10/20本は前半負・後半正と不安定なため未採用とした。両ペインのsymbol/timeframe/Studyは元へ復元済み。汎用lag探索・multiple-testing記録は未実施
 
 ### #42 仮説・実験ジャーナル(`register_strategy_hypothesis` / `record_strategy_experiment` / `compare_strategy_experiments`) ✅ 実装・実機検証完了
 

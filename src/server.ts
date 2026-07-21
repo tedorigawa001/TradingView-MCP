@@ -37,6 +37,7 @@ import {
 } from "./strategyWalkForward.js";
 import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
+import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -676,6 +677,136 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           limitations: [
             "This is an event study, not a fill, execution, or profitability simulation.",
             "Loaded chart history can be shorter than the requested count and differs by TradingView plan.",
+            "MFE and MAE use bar extremes; intrabar ordering is unknown.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "run_yield_price_nonconfirmation_study",
+    {
+      description:
+        "Run a bounded, read-only cross-asset event study over two exact TradingView charts. " +
+        "A driver impulse becomes usable only after its nominal bar close; the study then tests whether " +
+        "the target fails to break in the expected direction and confirms an opposite structural close. " +
+        "It uses an as-of join without forward-fill and returns forward return, MFE, MAE, target timing, " +
+        "fold results, and explicit exclusions. Signal-bar close is an event reference, not an assumed fill. " +
+        "It never changes charts, ranks parameters, or places orders.",
+      inputSchema: {
+        target_chart_index: z.number().int().min(0),
+        driver_chart_index: z.number().int().min(0),
+        expected_target_symbol: SYMBOL_SCHEMA,
+        expected_driver_symbol: SYMBOL_SCHEMA,
+        expected_target_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDW]|[SDW])$/i),
+        expected_driver_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDW]|[SDW])$/i),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded bars to inspect on each chart. Default: 5000"),
+        relationship: z.enum(["direct", "inverse"]),
+        driver_lookback: z.number().int().min(1).max(250),
+        driver_change_threshold: z.number().finite().gt(0),
+        price_breakout_lookback: z.number().int().min(2).max(500),
+        nonconfirmation_bars: z.number().int().min(1).max(20),
+        trigger_lookback: z.number().int().min(1).max(100),
+        trigger_within_bars: z.number().int().min(1).max(20),
+        max_driver_age_bars: z.number().int().min(0).max(20),
+        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8),
+        target_return_bps: z.number().finite().gt(0).max(10_000),
+        minimum_events: z.number().int().min(1).max(5000),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: z.string().datetime({ offset: true }),
+          to: z.string().datetime({ offset: true }),
+        })).max(12).optional(),
+        event_limit: z.number().int().min(0).max(200).optional()
+          .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
+      },
+    },
+    async ({ target_chart_index, driver_chart_index, expected_target_symbol, expected_driver_symbol,
+      expected_target_timeframe, expected_driver_timeframe, count, relationship, driver_lookback,
+      driver_change_threshold, price_breakout_lookback, nonconfirmation_bars, trigger_lookback,
+      trigger_within_bars, max_driver_age_bars, horizons, target_return_bps, minimum_events, folds,
+      event_limit }) => chartOperations.run(async () => {
+      try {
+        if (target_chart_index === driver_chart_index) {
+          throw new Error("target and driver must use different chart indexes");
+        }
+        const context = await tv.getChartContext();
+        const targetChart = context.charts.find((chart) => chart.index === target_chart_index);
+        const driverChart = context.charts.find((chart) => chart.index === driver_chart_index);
+        if (!targetChart) throw new Error(`target chart ${target_chart_index} not found`);
+        if (!driverChart) throw new Error(`driver chart ${driver_chart_index} not found`);
+        if (targetChart.symbol.toUpperCase() !== expected_target_symbol.toUpperCase() ||
+            normalizeResolution(targetChart.resolution) !== normalizeResolution(expected_target_timeframe)) {
+          throw new Error("target chart does not match the expected symbol and timeframe");
+        }
+        if (driverChart.symbol.toUpperCase() !== expected_driver_symbol.toUpperCase() ||
+            normalizeResolution(driverChart.resolution) !== normalizeResolution(expected_driver_timeframe)) {
+          throw new Error("driver chart does not match the expected symbol and timeframe");
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("yield-price nonconfirmation study is blocked while Bar Replay is active");
+        }
+        const requestedBars = count ?? 5000;
+        const [targetHistory, driverHistory] = await Promise.all([
+          tv.getOhlcv(requestedBars, target_chart_index),
+          tv.getOhlcv(requestedBars, driver_chart_index),
+        ]);
+        if (targetHistory.symbol.toUpperCase() !== expected_target_symbol.toUpperCase() ||
+            normalizeResolution(targetHistory.resolution) !== normalizeResolution(expected_target_timeframe)) {
+          throw new Error("target OHLC evidence does not match the bound chart");
+        }
+        if (driverHistory.symbol.toUpperCase() !== expected_driver_symbol.toUpperCase() ||
+            normalizeResolution(driverHistory.resolution) !== normalizeResolution(expected_driver_timeframe)) {
+          throw new Error("driver OHLC evidence does not match the bound chart");
+        }
+        const result = runYieldPriceNonconfirmationStudy({
+          targetBars: targetHistory.bars,
+          driverBars: driverHistory.bars,
+          targetSymbol: targetHistory.symbol,
+          driverSymbol: driverHistory.symbol,
+          targetTimeframe: targetHistory.resolution,
+          driverTimeframe: driverHistory.resolution,
+          relationship,
+          driverLookback: driver_lookback,
+          driverChangeThreshold: driver_change_threshold,
+          priceBreakoutLookback: price_breakout_lookback,
+          nonconfirmationBars: nonconfirmation_bars,
+          triggerLookback: trigger_lookback,
+          triggerWithinBars: trigger_within_bars,
+          maxDriverAgeBars: max_driver_age_bars,
+          horizons,
+          targetReturnBps: target_return_bps,
+          minimumEvents: minimum_events,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          eventLimit: event_limit ?? 50,
+        });
+        return jsonResult({
+          ...result,
+          source: {
+            requestedBars,
+            target: {
+              chartIndex: target_chart_index,
+              returnedBars: targetHistory.bars.length,
+              from: targetHistory.bars[0]?.timeIso ?? null,
+              to: targetHistory.bars.at(-1)?.timeIso ?? null,
+            },
+            driver: {
+              chartIndex: driver_chart_index,
+              returnedBars: driverHistory.bars.length,
+              from: driverHistory.bars[0]?.timeIso ?? null,
+              to: driverHistory.bars.at(-1)?.timeIso ?? null,
+            },
+          },
+          limitations: [
+            "This is an event study, not a fill, execution, or profitability simulation.",
+            "The relationship and thresholds are caller-specified and are not optimized by this tool.",
+            "Bar availability uses nominal timeframe duration, not exchange publication metadata.",
+            "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "MFE and MAE use bar extremes; intrabar ordering is unknown.",
           ],
         });

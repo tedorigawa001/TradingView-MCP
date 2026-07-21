@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-three expected tools", async () => {
+test("exposes exactly the sixty-four expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -735,6 +735,7 @@ test("exposes exactly the sixty-three expected tools", async () => {
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
       "run_strategy_walk_forward",
+      "run_yield_price_nonconfirmation_study",
       "save_pine_script",
       "scan_market",
       "set_indicator_input",
@@ -4427,6 +4428,52 @@ test("run_market_event_study binds the chart and returns session auction evidenc
   assert.equal(parsed.conditionType, "session_auction");
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.events[0].direction, "long");
+});
+
+test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {
+  const day = 86_400_000;
+  const start = Date.UTC(2026, 0, 1);
+  const makeBars = (closes, offset = 0) => closes.map((close, index) => {
+    const previous = index === 0 ? close : closes[index - 1];
+    const time = start + offset + index * day;
+    return { time: time / 1000, timeIso: new Date(time).toISOString(), open: previous,
+      high: Math.max(previous, close) + 0.2, low: Math.min(previous, close) - 0.2,
+      close, volume: 1 };
+  });
+  const driverBars = makeBars([4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const targetBars = makeBars([100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const calls = [];
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+      charts: [
+        { index: 0, symbol: "OANDA:USDJPY", resolution: "1D", studies: [] },
+        { index: 1, symbol: "TVC:US10Y", resolution: "1D", studies: [] },
+      ] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (count, chartIndex) => {
+      calls.push({ count, chartIndex });
+      return chartIndex === 0
+        ? { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars }
+        : { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars };
+    },
+  } }));
+  const res = await client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: {
+    target_chart_index: 0, driver_chart_index: 1,
+    expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
+    expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
+    relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
+    price_breakout_lookback: 3, nonconfirmation_bars: 2, trigger_lookback: 2,
+    trigger_within_bars: 3, max_driver_age_bars: 2, horizons: [1, 2],
+    target_return_bps: 50, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.sample.events, 1);
+  assert.equal(parsed.events[0].direction, "short");
+  assert.equal(parsed.source.target.chartIndex, 0);
+  assert.equal(parsed.source.driver.chartIndex, 1);
+  assert.deepEqual(calls.sort((left, right) => left.chartIndex - right.chartIndex), [
+    { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 },
+  ]);
 });
 
 test("compute_market_regimes binds the chart and returns point-in-time labels", async () => {
