@@ -36,6 +36,8 @@ import {
   type StrategyWalkForwardFold,
 } from "./strategyWalkForward.js";
 import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
+import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
+import { computeMarketRegimes } from "./marketRegimes.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import {
@@ -584,6 +586,198 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "run_market_event_study",
+    {
+      description:
+        "Run a bounded, read-only market event study on closed OHLC bars from the active chart. " +
+        "The initial condition type, session_auction, uses an IANA timezone to classify the first " +
+        "break of a prior local-session range as accepted outside closes or a failed return inside. " +
+        "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
+        "optional non-overlapping time folds. Signal-bar close is an event reference, not an assumed fill. " +
+        "It never ranks parameters, changes the chart, or places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[1-9]\d*$/),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 5000"),
+        condition: z.object({
+          type: z.literal("session_auction"),
+          timezone: z.string().min(1).max(64),
+          range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+          range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+          auction_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+          acceptance_closes: z.number().int().min(1).max(4).optional(),
+          failure_within_bars: z.number().int().min(0).max(4).optional(),
+          minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
+        }),
+        horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
+        target_return_bps: z.number().finite().gt(0).max(1000),
+        minimum_events: z.number().int().min(1).max(5000),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: z.string().datetime({ offset: true }),
+          to: z.string().datetime({ offset: true }),
+        })).max(12).optional(),
+        event_limit: z.number().int().min(0).max(200).optional()
+          .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, condition, horizons, target_return_bps,
+      minimum_events, folds, event_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart) throw new Error(`active chart ${activeIndex} not found`);
+        if (chart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+          throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${chart.symbol}`);
+        }
+        if (normalizeResolution(chart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error(`active chart timeframe changed: expected ${expected_timeframe}, found ${chart.resolution}`);
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("market event study is blocked while Bar Replay is active");
+        const history = await tv.getOhlcv(count ?? 5000, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const result = runSessionAuctionStudy({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          timezone: condition.timezone,
+          rangeStart: condition.range_start,
+          rangeEnd: condition.range_end,
+          auctionEnd: condition.auction_end,
+          acceptanceCloses: condition.acceptance_closes ?? 2,
+          failureWithinBars: condition.failure_within_bars ?? 2,
+          minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
+          horizons,
+          targetReturnBps: target_return_bps,
+          minimumEvents: minimum_events,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          eventLimit: event_limit ?? 50,
+        });
+        return jsonResult({
+          ...result,
+          conditionType: condition.type,
+          source: {
+            chartIndex: activeIndex,
+            requestedBars: count ?? 5000,
+            returnedBars: history.bars.length,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+          },
+          limitations: [
+            "This is an event study, not a fill, execution, or profitability simulation.",
+            "Loaded chart history can be shorter than the requested count and differs by TradingView plan.",
+            "MFE and MAE use bar extremes; intrabar ordering is unknown.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "compute_market_regimes",
+    {
+      description:
+        "Classify deterministic directional and volatility regimes from closed OHLC bars already loaded " +
+        "on the active chart. Every label uses only that bar and earlier evidence: efficiency ratio and " +
+        "ATR-normalized directional movement classify trend/range/transition, while current ATR relative " +
+        "to a trailing ATR median classifies low/normal/high volatility. Thresholds are explicit and no " +
+        "future-fitted quantiles, ranking, chart changes, or trade recommendations are used.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().min(1).max(16),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 1000"),
+        trend_lookback: z.number().int().min(2).max(500).optional()
+          .describe("Bars used for direction and efficiency ratio. Default: 20"),
+        atr_lookback: z.number().int().min(2).max(250).optional()
+          .describe("Bars used for point-in-time ATR. Default: 14"),
+        volatility_baseline_lookback: z.number().int().min(5).max(1000).optional()
+          .describe("Trailing ATR-percent observations used for the baseline median. Default: 50"),
+        trend_efficiency_threshold: z.number().finite().min(0).max(1).optional()
+          .describe("Minimum efficiency ratio for a trend candidate. Default: 0.6"),
+        range_efficiency_threshold: z.number().finite().min(0).max(1).optional()
+          .describe("Maximum efficiency ratio for a range candidate. Default: 0.25"),
+        directional_move_atr_threshold: z.number().finite().gt(0).max(100).optional()
+          .describe("Minimum absolute lookback move in current ATR units for trend. Default: 2"),
+        high_volatility_ratio: z.number().finite().gt(1).max(100).optional()
+          .describe("Current ATR-percent / trailing median ratio for high volatility. Default: 1.5"),
+        low_volatility_ratio: z.number().finite().gt(0).lt(1).optional()
+          .describe("Current ATR-percent / trailing median ratio for low volatility. Default: 0.75"),
+        minimum_classified_bars: z.number().int().min(1).max(5000).optional()
+          .describe("Classified observations required for complete status. Default: 100"),
+        observation_limit: z.number().int().min(0).max(500).optional()
+          .describe("Maximum recent classified rows returned; aggregates use all rows. Default: 100"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, trend_lookback, atr_lookback,
+      volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
+      directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
+      minimum_classified_bars, observation_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart) throw new Error(`active chart ${activeIndex} not found`);
+        if (chart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
+          throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${chart.symbol}`);
+        }
+        if (normalizeResolution(chart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error(`active chart timeframe changed: expected ${expected_timeframe}, found ${chart.resolution}`);
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("market regime classification is blocked while Bar Replay is active");
+        const requestedBars = count ?? 1000;
+        const history = await tv.getOhlcv(requestedBars, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const result = computeMarketRegimes({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          trendLookback: trend_lookback ?? 20,
+          atrLookback: atr_lookback ?? 14,
+          volatilityBaselineLookback: volatility_baseline_lookback ?? 50,
+          trendEfficiencyThreshold: trend_efficiency_threshold ?? 0.6,
+          rangeEfficiencyThreshold: range_efficiency_threshold ?? 0.25,
+          directionalMoveAtrThreshold: directional_move_atr_threshold ?? 2,
+          highVolatilityRatio: high_volatility_ratio ?? 1.5,
+          lowVolatilityRatio: low_volatility_ratio ?? 0.75,
+          minimumClassifiedBars: minimum_classified_bars ?? 100,
+          observationLimit: observation_limit ?? 100,
+        });
+        return jsonResult({
+          ...result,
+          source: {
+            chartIndex: activeIndex,
+            requestedBars,
+            returnedBars: history.bars.length,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+          },
+          limitations: [
+            "Regime labels describe past price behavior and are not trade signals or forecasts.",
+            "Thresholds are caller-specified constants; this tool does not optimize or rank them.",
+            "Loaded chart history can be shorter than requested and differs by TradingView plan.",
+            "Irregular timestamps are reported and never forward-filled.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(

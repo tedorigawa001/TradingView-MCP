@@ -339,17 +339,25 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **モデル境界**: spread/slippageをpipsからreport通貨へ一般変換せず、追加コストは明示的な`report currency / trade`として扱う。commission欠落時は該当シナリオだけ`not_evaluable`にする。bootstrapは取引結果の再標本化であり、市場経路、自己相関、約定順序を再現しない。Entry 1本遅延、Stop/Target変動、パラメータ近傍は台帳やOHLCから捏造せず、次段のStrategy再実行シナリオとして未実装のまま明示する
 - **検証状況**: protocolのready/blocked/warning、ID決定性、未来・重複・OOS閲覧後変更、コスト/件数、Pine監査、台帳stressの決定性、コスト劣化、commission欠落、品質・coverage拒否、seed再現性、MCP dry-run/一時適用/cleanup/chart fingerprint復元をユニットテストで固定した
 
-### #36 条件付きイベントスタディ(`run_market_event_study`、優先度: 中〜高・規模: 中)
+### #36 条件付きイベントスタディ(`run_market_event_study`) 🟡 `session_auction`初版実装・汎用条件は継続
 
 - **目的**: いきなり売買ストラテジーを作らず、「条件発生後に優位性があるか」を将来リターン、MFE、MAE、到達時間で調べる
 - **入力**: point-in-timeで計算可能な条件、観測時刻、複数horizon、方向、セッション、コスト仮定、重複イベントの扱いを明示する。条件式は許可された特徴量DSLまたは構造化JSONとし、任意コードを実行しない
 - **出力**: 発生数、欠落数、平均/中央値/分位点、勝率、信頼区間、時系列fold別結果を返す。複数条件探索時は試行数を記録し、多重比較を無視したp値だけで採用しない
+- **初版実装(2026-07-21)**: `run_market_event_study`はアクティブchartのexact symbol/timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCだけを読む。`session_auction`条件はIANA timezone、同一local day内のrange start/endとauction end、range coverage、1〜4本のacceptance closes、0〜4本のfailure windowを構造化入力とする。各平日は最初の上下境界touchだけを対象に、両側sweepはambiguousとして除外し、外側終値の連続をaccepted、内側復帰をfailedへ排他的に分類する
+- **結果契約**: signal確定足closeを約定価格ではなくevent referenceとし、1〜8個・最大96本のhorizonごとに方向調整return、positive rate、MFE、MAE、事前bps targetの到達率/本数を集計する。週末・休場等で連続barを欠くhorizonは利用不能にし、半開区間の非重複foldを最大12件集計する。イベント明細は最大200件、集計は全件を使用し、形成中足、range不足、無touch、両側sweep、未分類を別件数で返す
+- **検証状況**: accepted-upとfailed-upの排他分類・方向反転、形成中足除外、両側sweep拒否、fold集計、London DST開始後もlocal 08:00をUTC 07:00として扱うこと、MCP chart binding/read-only履歴取得をユニットテストで固定した
+- **残タスク**: EURUSD 15分で十分な履歴をloadした実機event study、confidence interval、条件DSL、重複event policy、試行数/multiple-testing記録、経済event条件、#37のlabelとのevent結果結合は未実装。初版のsession clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
-### #37 市場レジーム分類(`compute_market_regimes`、優先度: 中〜高・規模: 中)
+### #37 市場レジーム分類(`compute_market_regimes`) 🟡 価格・volatility初版実装、台帳結合は継続
 
 - **目的**: trend/range、低/高volatility、相関状態、session、重要イベント近接を決定論的に分類し、手法の適用環境と停止環境を発見する
 - **契約**: 閾値、lookback、使用特徴量、版を明示し、各バーに当時利用可能だった証拠だけでlabelを付ける。未来全期間の分位点を過去labelへ遡及適用しない
 - **評価**: Strategy Tester台帳と厳密時刻で結合し、regime別の取引数、期待値、PF、DD、MAE/MFEを返す。少数regimeを全体成績へ隠さない
+- **初版実装(2026-07-21)**: `compute_market_regimes`はactive chartのexact symbol/timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCだけを読む。trend lookbackの効率比と現在ATR単位の方向移動から`trend_up`、`trend_down`、`range`、`transition`を分類し、現在ATR%をその時点までのtrailing ATR%中央値で割って`low`、`normal`、`high` volatilityを分類する。lookbackと全閾値は入力へ明示され、未来分位点や全期間fitを使用しない
+- **結果契約**: current label、全分類barのdirectional/volatility/combined分布、combined label遷移回数、形成中足除外、非連続timestamp、minimum classified barsを返す。明細は直近最大500件に制限し、集計は全分類barを使用する。閾値探索、ランキング、予測、売買許可は返さない
+- **検証状況**: trend/rangeの分離、trailing volatility expansion、将来bar追加前後で同一時刻labelが不変であること、形成中足除外、非連続timestamp報告、MCP chart binding/read-only履歴取得をユニットテストで固定した
+- **残タスク**: Strategy Tester完全台帳との厳密時刻joinとregime別PF/期待値/DD、相関状態、session、重要event近接、複数銘柄のregime同期は未実装
 
 ### #38 特徴量と将来結果の関係(`compute_feature_outcome_relationships`、優先度: 中・規模: 中〜大)
 

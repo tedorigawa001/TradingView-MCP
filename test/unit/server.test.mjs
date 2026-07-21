@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty expected tools", async () => {
+test("exposes exactly the sixty-two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -689,6 +689,7 @@ test("exposes exactly the sixty expected tools", async () => {
       "compare_indicator_observations",
       "compare_strategy_experiments",
       "compute_market_features",
+      "compute_market_regimes",
       "compute_position_size",
       "compute_round_trip_cost",
       "create_analysis_alerts",
@@ -730,6 +731,7 @@ test("exposes exactly the sixty expected tools", async () => {
       "remove_owned_study",
       "run_backtest",
       "run_backtest_matrix",
+      "run_market_event_study",
       "run_strategy_experiment",
       "run_strategy_walk_forward",
       "save_pine_script",
@@ -4389,6 +4391,70 @@ test("get_ohlcv defaults count to 100 and forwards chart_index", async () => {
   const parsed = JSON.parse(res2.content[0].text);
   assert.equal(parsed.count, 7);
   assert.equal(parsed.chartIndex, 1);
+});
+
+test("run_market_event_study binds the chart and returns session auction evidence", async () => {
+  const start = Date.UTC(2026, 0, 5);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) {
+    bars.push({ time: (start + index * 900_000) / 1000,
+      timeIso: new Date(start + index * 900_000).toISOString(),
+      open: 1.05, high: 1.1, low: 1, close: 1.05, volume: 1 });
+  }
+  bars.push({ time: (start + 32 * 900_000) / 1000, timeIso: new Date(start + 32 * 900_000).toISOString(),
+    open: 1.05, high: 1.12, low: 1.04, close: 1.11, volume: 1 });
+  bars.push({ time: (start + 33 * 900_000) / 1000, timeIso: new Date(start + 33 * 900_000).toISOString(),
+    open: 1.11, high: 1.13, low: 1.1, close: 1.12, volume: 1 });
+  for (let index = 34; index < 42; index += 1) {
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
+      open: 1.12, high: 1.13, low: 1.11, close: 1.12, volume: 1 });
+  }
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "session_auction", timezone: "UTC", range_start: "00:00",
+      range_end: "08:00", auction_end: "10:00", minimum_range_coverage: 1 },
+    horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.byBranch.accepted_up.events, 1);
+  assert.equal(parsed.conditionType, "session_auction");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.events[0].direction, "long");
+});
+
+test("compute_market_regimes binds the chart and returns point-in-time labels", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 160 }, (_, index) => {
+    const open = 100 + Math.max(0, index - 1) * 0.5;
+    const close = 100 + index * 0.5;
+    return { time: (start + index * 3_600_000) / 1000,
+      timeIso: new Date(start + index * 3_600_000).toISOString(),
+      open, high: close + 0.2, low: open - 0.2, close, volume: 1 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "compute_market_regimes", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 160,
+    trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
+    trend_efficiency_threshold: 0.6, range_efficiency_threshold: 0.25,
+    directional_move_atr_threshold: 2, minimum_classified_bars: 20,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.current.directionalRegime, "trend_up");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.source.requestedBars, 160);
+  assert.ok(parsed.distribution.directional.trend_up > 20);
 });
 
 test("input validation rejects out-of-range or wrong-typed arguments before the handler runs", async () => {

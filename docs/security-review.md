@@ -353,6 +353,21 @@
 - **出力・増幅制限**: シナリオ1〜20、入力20、開始ずらし1〜100bar、bootstrap最大10,000回。反復ごとのsampleやtrade/index列を返さず、baseline、シナリオ集計、相対劣化、分位点、worst、破綻率だけを返す。ランキング、単一score、自動採用、注文を実装しない
 - **残余リスク**: trade順序bootstrapは独立同分布を仮定し、連敗のregime依存を過小評価し得る。Entry遅延、Stop/Target変動、主要parameter近傍はledgerから再構成できず、現段階では`unsupportedModeledEffects`として返す。これらは監査済み入力を変えたStrategy再実行と、同じcleanup/復元契約で追加する
 
+## 追補: バックログ #36 session auction初版(2026-07-21)
+
+- **読み取り境界**: `run_market_event_study`はactive chartのsymbol/timeframeを要求値へ厳密拘束し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、symbol/timeframe変更、Pine、Strategy Tester、外部HTTP、ファイル、注文へ接続しない
+- **時間契約**: clientからUTC offsetを計算させず、64文字以下のIANA timezoneを`Intl.DateTimeFormat`へ渡す。同一local dayで`range_start < range_end < auction_end`だけを許可し、DSTに伴うUTC offset変化を日別に解決する。日跨ぎ、休日calendar、session早期終了は推測せず初版の対象外とする
+- **先読み・曖昧性**: 形成中足を除外し、range終了後の最初のboundary touchだけを分類する。上下両側sweep、OHLC矛盾、重複timestamp、境界後の反対側touchは拒否またはambiguousへ数え、足内順序を推測しない。signal bar closeはevent referenceであり約定と表現しない
+- **応答上限**: horizon 1〜8件・最大96本、fold最大12、event明細最大200、target最大1,000bps。反復ごとのbar列や全OHLCを返さず、集計とbounded event evidenceだけを返す。各horizonはtimestamp連続性を要求し、週末等をforward fillしない
+- **統計境界**: 初版は記述統計とfold分離であり、因果、有意性、収益性を証明しない。confidence interval、多重比較補正、重複event policyは未実装であるため、複数parameterを回して最良行だけを採用しない
+
+## 追補: バックログ #37 市場レジーム初版(2026-07-21)
+
+- **読み取り境界**: `compute_market_regimes`はactive chartのsymbol/timeframeを要求値へ厳密拘束し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、chart変更、Pine、Strategy Tester、外部HTTP、ファイル、注文へ接続しない
+- **先読み防止**: 各barの効率比、ATR、方向移動、volatility baselineは当該bar以前だけから計算する。未来全期間の分位点、後方修正されたthreshold、forward fillを使用しない。同一時刻のlabelが将来bar追加後も変わらないことをテストで固定する
+- **入力・応答上限**: trend lookback最大500、ATR最大250、volatility baseline最大1,000、OHLC最大5,000、明細最大500。閾値は有限値と相互順序を検証し、aggregateは全分類bar、明細は末尾だけを返す。raw OHLCは応答へ複製しない
+- **解釈境界**: labelは過去価格経路の記述であり、予測、売買signal、稼働許可ではない。初版は価格方向とvolatilityだけで、相関、session、event、Strategy台帳成績を含まない。非連続timestampは報告するが補間せず、少数barは`partial`として扱う
+
 ## 追補: バックログ #42(2026-07-20)
 
 - **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない
