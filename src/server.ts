@@ -35,7 +35,11 @@ import {
   validateStrategyWalkForwardFolds,
   type StrategyWalkForwardFold,
 } from "./strategyWalkForward.js";
-import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
+import {
+  evaluateStrategyRerunStress,
+  evaluateStrategyStress,
+  type StrategyStressScenario,
+} from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
@@ -310,6 +314,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const applied = await tv.setIndicatorInput(studyId, variant.inputs);
         if (applied.settled === false) {
           throw new Error(applied.warning ?? "strategy input recalculation did not settle");
+        }
+        const appliedById = new Map(applied.applied.map((input) => [input.id, input.value]));
+        for (const requested of variant.inputs) {
+          if (!appliedById.has(requested.id) || !Object.is(appliedById.get(requested.id), requested.value)) {
+            throw new Error(`strategy input ${requested.id} did not match its requested value after apply`);
+          }
         }
       }
       const report = await tv.getStrategyReport({ tradesLimit: 1 });
@@ -3971,12 +3981,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "stress_test_strategy",
     {
       description:
-        "Run bounded, ledger-based robustness tests for one exact saved Pine strategy. After " +
-        "a dry-run preview, confirm=true temporarily collects one complete Strategy Tester ledger, " +
-        "restores the chart, and evaluates explicit extra-cost, commission-multiplier, period-start " +
-        "shift, and seeded trade-order bootstrap scenarios. Results include distributions, worst " +
-        "cases, failure rates, and degradation without ranking or adoption. It does not fabricate " +
-        "entry-delay or Stop/Target effects from OHLC or place orders.",
+        "Run bounded robustness tests for one exact saved Pine strategy. After a dry-run preview, " +
+        "confirm=true collects a baseline full ledger, applies modeled cost, commission, period-start, " +
+        "and seeded bootstrap scenarios, and can serially rerun up to eight explicit Pine input-override " +
+        "scenarios for Entry-delay, Stop/Target, or parameter-neighbor effects. Every temporary Strategy " +
+        "is removed and the chart fingerprint is checked before continuing. Results include failures, " +
+        "distributions, worst cases, and degradation without ranking, adoption, fabricated fills, or orders.",
       inputSchema: {
         protocol_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
         expected_symbol: SYMBOL_SCHEMA,
@@ -3995,6 +4005,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           z.object({ scenario_id: z.string().regex(/^[\w.:-]{1,80}$/), kind: z.literal("commission_multiplier"), value: z.number().finite().min(1).max(100) }),
           z.object({ scenario_id: z.string().regex(/^[\w.:-]{1,80}$/), kind: z.literal("start_shift_bars"), value: z.number().int().min(1).max(100) }),
         ])).min(1).max(20),
+        rerun_scenarios: z.array(z.object({
+          scenario_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          input_overrides: z.array(z.object({
+            id: z.string().regex(/^[\w$]{1,64}$/),
+            value: z.union([z.number(), z.string().max(256), z.boolean()]),
+          })).min(1).max(20),
+        })).max(8).optional(),
         bootstrap: z.object({
           seed: z.string().min(1).max(128),
           iterations: z.number().int().min(100).max(10_000),
@@ -4004,7 +4021,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ protocol_id, expected_symbol, expected_timeframe, pine_id, pine_version, inputs,
-      evaluation_from, evaluation_to, minimum_trades, scenarios, bootstrap, confirm }) =>
+      evaluation_from, evaluation_to, minimum_trades, scenarios, rerun_scenarios, bootstrap, confirm }) =>
       chartOperations.run(async () => {
         try {
           const initialChart = chartFingerprint(await tv.getChartContext());
@@ -4032,8 +4049,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           if (new Set(resolvedScenarios.map((scenario) => scenario.scenarioId)).size !== resolvedScenarios.length) {
             throw new Error("stress test scenario ids must be unique");
           }
+          const resolvedRerunScenarios = (rerun_scenarios ?? []).map((scenario) => {
+            const inputOverrides = [...scenario.input_overrides]
+              .sort((left, right) => left.id.localeCompare(right.id));
+            if (new Set(inputOverrides.map((input) => input.id)).size !== inputOverrides.length) {
+              throw new Error(`rerun scenario ${scenario.scenario_id} contains duplicate input ids`);
+            }
+            return { scenarioId: scenario.scenario_id, inputOverrides };
+          });
+          const allScenarioIds = [
+            ...resolvedScenarios.map((scenario) => scenario.scenarioId),
+            ...resolvedRerunScenarios.map((scenario) => scenario.scenarioId),
+          ];
+          if (new Set(allScenarioIds).size !== allScenarioIds.length) {
+            throw new Error("modeled and rerun stress scenario ids must be unique");
+          }
+          const hasReruns = resolvedRerunScenarios.length > 0;
           const definition = {
-            methodologyVersion: "ledger_stress_v1",
+            methodologyVersion: hasReruns ? "strategy_stress_v2" : "ledger_stress_v1",
             protocolId: protocol_id,
             symbol: initialChart.symbol,
             timeframe: initialChart.timeframe,
@@ -4044,6 +4077,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             evaluationTo: evaluation_to,
             minimumTrades: minimum_trades,
             scenarios: resolvedScenarios,
+            ...(hasReruns ? { rerunScenarios: resolvedRerunScenarios } : {}),
             bootstrap: bootstrap === null || bootstrap === undefined ? null : {
               seed: bootstrap.seed,
               iterations: bootstrap.iterations,
@@ -4057,11 +4091,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             stressTestId,
             definition,
             execution: {
-              mode: "single_ledger_collection_then_modeled_stress",
+              mode: hasReruns
+                ? "baseline_ledger_plus_serial_strategy_reruns_then_modeled_stress"
+                : "single_ledger_collection_then_modeled_stress",
               chartWrites: "temporary_strategy_add_input_apply_remove",
               automaticRanking: false,
               automaticAdoption: false,
-              unsupportedModeledEffects: ["entry_delay", "stop_target_perturbation", "parameter_neighbors"],
+              ...(hasReruns ? {
+                rerunEffects: "caller_defined_pine_input_overrides_executed_by_strategy_tester",
+                maximumReruns: 8,
+              } : {
+                unsupportedModeledEffects: ["entry_delay", "stop_target_perturbation", "parameter_neighbors"],
+              }),
             },
             chartState: initialChart,
           };
@@ -4072,10 +4113,81 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             pine_version,
             { symbol: initialChart.symbol, timeframe: initialChart.timeframe },
           );
+          let afterBaseline: ReturnType<typeof chartFingerprint> | null = null;
+          try { afterBaseline = chartFingerprint(await tv.getChartContext()); } catch { /* represented below */ }
+          const baselineRestored = afterBaseline !== null &&
+            JSON.stringify(afterBaseline) === JSON.stringify(initialChart);
+          const baselineCollectionComplete = run.evidence !== null && run.error === null &&
+            run.cleanupError === null && baselineRestored;
+          const rerunCollections: Array<{
+            scenarioId: string;
+            inputOverrides: typeof resolvedInputs;
+            appliedInputs: typeof resolvedInputs;
+            status: "complete" | "failed" | "skipped";
+            ledgerId: string | null;
+            reportDateRange: StrategyTradeLedger["dateRange"] | null;
+            ledgerQualityIssues: string[];
+            countMatchesSummary: boolean | null;
+            error: string | null;
+            cleanupError: string | null;
+            chartRestored: boolean;
+            ledger: StrategyTradeLedger | null;
+          }> = [];
+          let stopReruns = !baselineCollectionComplete;
+          for (const scenario of resolvedRerunScenarios) {
+            const merged = new Map(resolvedInputs.map((input) => [input.id, input]));
+            for (const override of scenario.inputOverrides) merged.set(override.id, override);
+            const appliedInputs = [...merged.values()].sort((left, right) => left.id.localeCompare(right.id));
+            if (stopReruns) {
+              rerunCollections.push({
+                scenarioId: scenario.scenarioId,
+                inputOverrides: scenario.inputOverrides,
+                appliedInputs,
+                status: "skipped",
+                ledgerId: null,
+                reportDateRange: null,
+                ledgerQualityIssues: [],
+                countMatchesSummary: null,
+                error: baselineCollectionComplete
+                  ? "prior_rerun_did_not_restore_chart"
+                  : "baseline_collection_incomplete",
+                cleanupError: null,
+                chartRestored: false,
+                ledger: null,
+              });
+              continue;
+            }
+            const rerun = await collectExperimentVariant(
+              { pineId: pine_id, inputs: appliedInputs },
+              pine_version,
+              { symbol: initialChart.symbol, timeframe: initialChart.timeframe },
+            );
+            let afterRerun: ReturnType<typeof chartFingerprint> | null = null;
+            try { afterRerun = chartFingerprint(await tv.getChartContext()); } catch { /* represented below */ }
+            const rerunRestored = afterRerun !== null &&
+              JSON.stringify(afterRerun) === JSON.stringify(initialChart);
+            const complete = rerun.evidence !== null && rerun.error === null &&
+              rerun.cleanupError === null && rerunRestored;
+            rerunCollections.push({
+              scenarioId: scenario.scenarioId,
+              inputOverrides: scenario.inputOverrides,
+              appliedInputs,
+              status: complete ? "complete" : "failed",
+              ledgerId: rerun.evidence?.ledger.ledgerId ?? null,
+              reportDateRange: rerun.evidence?.ledger.dateRange ?? null,
+              ledgerQualityIssues: rerun.evidence?.ledger.qualityIssues ?? [],
+              countMatchesSummary: rerun.evidence?.ledger.countMatchesSummary ?? null,
+              error: rerun.error,
+              cleanupError: rerun.cleanupError,
+              chartRestored: rerunRestored,
+              ledger: complete ? rerun.evidence!.ledger : null,
+            });
+            if (!rerunRestored) stopReruns = true;
+          }
           let finalChart: ReturnType<typeof chartFingerprint> | null = null;
           try { finalChart = chartFingerprint(await tv.getChartContext()); } catch { /* represented below */ }
           const chartRestored = finalChart !== null && JSON.stringify(finalChart) === JSON.stringify(initialChart);
-          const collectionComplete = run.evidence !== null && run.error === null && run.cleanupError === null && chartRestored;
+          const collectionComplete = baselineCollectionComplete && chartRestored;
           const evaluation = collectionComplete ? evaluateStrategyStress({
             ledger: run.evidence!.ledger,
             evaluationFrom: evaluation_from,
@@ -4085,9 +4197,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             scenarios: resolvedScenarios,
             bootstrap: definition.bootstrap,
           }) : null;
+          const rerunEvaluation = collectionComplete && hasReruns ? evaluateStrategyRerunStress({
+            baselineLedger: run.evidence!.ledger,
+            evaluationFrom: evaluation_from,
+            evaluationTo: evaluation_to,
+            timeframe: initialChart.timeframe,
+            minimumTrades: minimum_trades,
+            scenarios: rerunCollections.map((item) => ({
+              scenarioId: item.scenarioId,
+              ledger: item.ledger,
+              collectionIssue: item.error ?? item.cleanupError ??
+                (item.chartRestored ? null : "chart_state_restore_failed"),
+            })),
+          }) : null;
+          const combinedStatus = evaluation === null
+            ? "partial"
+            : evaluation.status !== "complete" || (hasReruns && rerunEvaluation?.status !== "complete")
+              ? "partial"
+              : "complete";
           return jsonResult({
             dryRun: false,
-            status: evaluation?.status ?? "partial",
+            status: combinedStatus,
             ...preview,
             collection: {
               status: collectionComplete ? "complete" : "failed",
@@ -4098,12 +4228,22 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               error: run.error,
               cleanupError: run.cleanupError,
             },
+            ...(hasReruns ? {
+              rerunCollections: rerunCollections.map(({ ledger: _ledger, ...item }) => item),
+            } : {}),
             evaluation,
+            ...(hasReruns ? { rerunEvaluation } : {}),
             qualityIssues: [
               ...(!collectionComplete ? ["ledger_collection_incomplete"] : []),
               ...(!chartRestored ? ["chart_state_restore_failed"] : []),
               ...(evaluation?.status === "not_evaluable" ? ["stress_not_evaluable"] : []),
               ...(evaluation?.status === "partial" ? ["one_or_more_scenarios_not_evaluable"] : []),
+              ...(hasReruns && rerunCollections.some((item) => item.status !== "complete")
+                ? ["one_or_more_rerun_collections_incomplete"] : []),
+              ...(hasReruns && rerunEvaluation?.status === "not_evaluable"
+                ? ["rerun_stress_not_evaluable"] : []),
+              ...(hasReruns && rerunEvaluation?.status === "partial"
+                ? ["one_or_more_rerun_scenarios_not_evaluable"] : []),
             ],
             chartState: { before: initialChart, after: finalChart, restored: chartRestored },
           });

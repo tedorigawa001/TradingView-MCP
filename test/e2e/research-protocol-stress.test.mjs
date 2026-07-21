@@ -47,6 +47,7 @@ test("research protocol and ledger stress over MCP stdio and live TradingView", 
     assert.equal(walkForward.isError, false);
     assert.equal(walkForward.value.status, "preview");
     const candidate = walkForward.value.definition.candidates[0];
+    const rerunInput = candidate.inputs[0] ?? null;
     const firstFold = config.folds[0];
     const lastFold = config.folds.at(-1);
 
@@ -93,6 +94,12 @@ test("research protocol and ledger stress over MCP stdio and live TradingView", 
         { scenario_id: "e2e-commission", kind: "commission_multiplier", value: 2 },
         { scenario_id: "e2e-start-shift", kind: "start_shift_bars", value: 1 },
       ],
+      ...(rerunInput ? {
+        rerun_scenarios: [{
+          scenario_id: "e2e-input-rerun",
+          input_overrides: [{ id: rerunInput.id, value: rerunInput.value }],
+        }],
+      } : {}),
       bootstrap: { seed: "e2e-fixed-seed", iterations: 100, failure_net_profit: 0 },
     };
 
@@ -105,12 +112,16 @@ test("research protocol and ledger stress over MCP stdio and live TradingView", 
     });
 
     await t.test("collects one ledger, returns bounded stress evidence, and restores", async () => {
-      const completed = await call("stress_test_strategy", { ...stressArgs, confirm: true }, 210_000);
+      const completed = await call("stress_test_strategy", { ...stressArgs, confirm: true }, 300_000);
       assert.equal(completed.isError, false);
       assert.ok(["complete", "partial"].includes(completed.value.status));
       assert.equal(completed.value.collection.status, "complete");
       assert.ok(completed.value.evaluation.baseline.metrics.totalTrades >= stressArgs.minimum_trades);
       assert.equal(completed.value.evaluation.bootstrap.iterations, 100);
+      if (rerunInput) {
+        assert.equal(completed.value.rerunCollections[0].status, "complete");
+        assert.equal(completed.value.rerunEvaluation.scenarios[0].status, "complete");
+      }
       assert.equal(containsKey(completed.value, "trades"), false);
       assert.equal(completed.value.chartState.restored, true);
       assert.deepEqual((await call("get_chart_context", {})).value, before);

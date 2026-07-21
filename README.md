@@ -247,7 +247,7 @@ npm run evaluate -- --log evaluation.jsonl --snapshot snapshot.json
 | `run_backtest_matrix` | 最大24件の明示的なsymbol/timeframe/Pine入力組合せを直列実行。既定dry-run、最大30分のsoft deadline、各行の全取引台帳ID・不足/失敗理由・毎回のチャート復元を返し、結果を順位付けしない |
 | `run_strategy_walk_forward` | 2〜8候補の全取引台帳を2〜12個の明示train/embargo/test窓へ分割。trainだけで候補選定し、選択候補のOOSだけを返す。anchored/rolling、同点拒否、最低取引数、条件・品質・期間coverageを検証 |
 | `validate_research_protocol` | 具体的Pine版と凍結済み研究契約を読み取り検証。IS/OOS重複、未来期間、形成中足、候補数、最低取引数、コスト未指定、Pine静的リスク、OOS閲覧後の変更をblocked/warningへ分類 |
-| `stress_test_strategy` | 凍結済みprotocol IDに紐づけ、完全取引台帳へ追加コスト、commission倍率、期間開始ずらし、seed固定bootstrapを適用。中央値・worst・破綻率・劣化率を返し、自動採用や順位付けはしない |
+| `stress_test_strategy` | 凍結済みprotocol IDに紐づけ、完全台帳へのコスト・期間・bootstrapモデルに加え、最大8件の明示Pine入力上書きをStrategy Testerで直列再実行。Entry遅延・Stop/Target・近傍parameterをStrategy自身のロジックで評価し、各回削除・復元、失敗、劣化率を返す |
 | `register_strategy_hypothesis` | 仮説と事前評価契約を、ライブ分析とは別のローカルappend-only研究ジャーナルへ登録 |
 | `record_strategy_experiment` | 実験ID、Pine版、台帳ID、既知指標、guardrail、採否を仮説へ拘束して記録 |
 | `compare_strategy_experiments` | 正確な実験ID+証拠hashを比較し、母集団・銘柄・時間足・methodology不一致を拒否 |

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateStrategyStress } from "../../build/strategyStress.js";
+import { evaluateStrategyRerunStress, evaluateStrategyStress } from "../../build/strategyStress.js";
 
 const side = (time) => ({ time, timeIso: new Date(time).toISOString(), price: 1, label: null });
 
@@ -62,4 +62,43 @@ test("strategy stress fails closed for ledger quality and uncovered windows", ()
   assert.ok(badQuality.blockers.some((issue) => issue.includes("ledger_quality")));
   const uncovered = evaluateStrategyStress({ ...base, evaluationFrom: "2024-01-01T00:00:00.000Z", ledger: ledger() });
   assert.ok(uncovered.blockers.includes("ledger_date_range_does_not_cover_evaluation"));
+});
+
+test("strategy rerun stress compares independently collected ledgers", () => {
+  const baseline = ledger();
+  const weaker = ledger({ profits: [50, -70, 20, -40] });
+  weaker.ledgerId = `sha256:${"b".repeat(64)}`;
+  const result = evaluateStrategyRerunStress({
+    baselineLedger: baseline,
+    evaluationFrom: base.evaluationFrom,
+    evaluationTo: base.evaluationTo,
+    timeframe: base.timeframe,
+    minimumTrades: 2,
+    scenarios: [{ scenarioId: "entry-delay-1", ledger: weaker }],
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(result.baseline.metrics.netProfit, 110);
+  assert.equal(result.scenarios[0].metrics.netProfit, -40);
+  assert.ok(result.scenarios[0].degradation.netProfit < -1);
+  assert.equal(result.distribution.failureRate, 1);
+});
+
+test("strategy rerun stress preserves collection and ledger failures", () => {
+  const poorQuality = ledger({ qualityIssues: ["missing_trade_profit"] });
+  poorQuality.ledgerId = `sha256:${"c".repeat(64)}`;
+  const result = evaluateStrategyRerunStress({
+    baselineLedger: ledger(),
+    evaluationFrom: base.evaluationFrom,
+    evaluationTo: base.evaluationTo,
+    timeframe: base.timeframe,
+    minimumTrades: 2,
+    scenarios: [
+      { scenarioId: "failed-collection", ledger: null, collectionIssue: "strategy_cleanup_failed" },
+      { scenarioId: "poor-quality", ledger: poorQuality },
+    ],
+  });
+  assert.equal(result.status, "partial");
+  assert.deepEqual(result.scenarios[0].blockers, ["strategy_cleanup_failed"]);
+  assert.ok(result.scenarios[1].blockers.some((issue) => issue.includes("ledger_quality")));
+  assert.equal(result.distribution.evaluableScenarios, 0);
 });

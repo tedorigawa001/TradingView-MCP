@@ -3457,32 +3457,46 @@ test("stress_test_strategy previews, evaluates a complete ledger, and restores",
   });
   let runs = 0;
   let removes = 0;
+  let entryDelay = 0;
   const client = await connectedClient(makeDeps({ tv: {
     getChartContext: async () => context(),
     listPineScripts: async () => [{ pineId, name: "Stress", kind: "strategy", version: "3.0", usedBy: [] }],
     runBacktest: async () => (runs++, { pineId, studyId: "temporary", keptOnChart: true,
       removedFromChart: false, strategy: "Stress", currency: "JPY", initialCapital: 1_000_000,
       dateRange: null, summary: {}, totalTrades: trades.length, trades: [] }),
+    setIndicatorInput: async (_studyId, appliedInputs) => {
+      entryDelay = appliedInputs.find((input) => input.id === "entryDelay")?.value ?? 0;
+      return { applied: appliedInputs, settled: true };
+    },
     getStrategyReport: async () => ({ strategy: "Stress", currency: "JPY", initialCapital: 1_000_000,
       dateRange: null, summary: { netProfit: 110 }, totalTrades: trades.length, trades: [] }),
-    getStrategyTradeLedger: async () => ({ schemaVersion: "1.0", ledgerId: `sha256:${"d".repeat(64)}`,
+    getStrategyTradeLedger: async () => {
+      const ledgerTrades = entryDelay === 0 ? trades : trades.map((trade) => ({
+        ...trade, profit: trade.profit / 2,
+      }));
+      return { schemaVersion: "1.0", ledgerId: `sha256:${(entryDelay === 0 ? "d" : "e").repeat(64)}`,
       strategy: "Stress", symbol: "OANDA:USDJPY", timeframe: "240", studyId: "temporary", pineId,
       pineVersion: "3.0", inputs: [], currency: "JPY", initialCapital: 1_000_000,
       dateRange: { from: "2025-01-01T00:00:00.000Z", to: "2025-02-01T00:00:00.000Z" },
-      summary: {}, totalTrades: trades.length, availableTrades: trades.length, countMatchesSummary: true,
-      ordering: "strategy_report", offset: 0, limit: 500, returned: trades.length, nextOffset: null,
-      complete: true, unavailableFields: [], qualityIssues: [], trades }),
+      summary: {}, totalTrades: ledgerTrades.length, availableTrades: ledgerTrades.length, countMatchesSummary: true,
+      ordering: "strategy_report", offset: 0, limit: 500, returned: ledgerTrades.length, nextOffset: null,
+      complete: true, unavailableFields: [], qualityIssues: [], trades: ledgerTrades };
+    },
     removePineFromChart: async () => (removes++, { removed: true, pineId, pineVersion: "3.0",
       studyId: "temporary", name: "Stress", chartIndex: 0 }),
   } }));
   const args = {
     protocol_id: `sha256:${"a".repeat(64)}`,
     expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", pine_id: pineId, pine_version: "3.0",
+    inputs: [{ id: "entryDelay", value: 0 }],
     evaluation_from: "2025-01-01T00:00:00.000Z", evaluation_to: "2025-02-01T00:00:00.000Z",
     minimum_trades: 2,
     scenarios: [
       { scenario_id: "cost-10", kind: "additional_cost_per_trade", value: 10 },
       { scenario_id: "commission-2x", kind: "commission_multiplier", value: 2 },
+    ],
+    rerun_scenarios: [
+      { scenario_id: "entry-delay-1", input_overrides: [{ id: "entryDelay", value: 1 }] },
     ],
     bootstrap: { seed: "fixed", iterations: 100, failure_net_profit: 0 },
   };
@@ -3494,9 +3508,72 @@ test("stress_test_strategy previews, evaluates a complete ledger, and restores",
   assert.equal(result.status, "complete");
   assert.equal(result.evaluation.baseline.metrics.netProfit, 110);
   assert.equal(result.evaluation.scenarios[0].metrics.netProfit, 70);
+  assert.equal(result.rerunEvaluation.scenarios[0].metrics.netProfit, 55);
+  assert.equal(result.rerunCollections[0].appliedInputs[0].value, 1);
   assert.equal(result.chartState.restored, true);
-  assert.equal(runs, 1);
-  assert.equal(removes, 1);
+  assert.equal(runs, 2);
+  assert.equal(removes, 2);
+});
+
+test("stress_test_strategy stops reruns after a chart restore failure", async () => {
+  const pineId = "USER;stressrestore1";
+  const originalStudies = [{ id: "original", name: "RSI" }];
+  let contextReads = 0;
+  let runs = 0;
+  let removes = 0;
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+    charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240",
+      studies: contextReads++ >= 2
+        ? [...originalStudies, { id: "stuck", name: "Stress" }]
+        : originalStudies }] });
+  const trades = [100, -20].map((profit, index) => {
+    const entryTime = Date.UTC(2025, 0, 2 + index);
+    return { reportIndex: index, number: index + 1, direction: "long", status: "closed",
+      entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+      exit: { time: entryTime + 3_600_000, timeIso: new Date(entryTime + 3_600_000).toISOString(), price: 1, label: null },
+      durationMilliseconds: 3_600_000, profit, profitPercent: null, cumulativeProfit: null,
+      quantity: 1, commission: 0, commissionPercent: null, runUp: null, runUpPercent: null,
+      drawDown: null, drawDownPercent: null };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    listPineScripts: async () => [{ pineId, name: "Stress", kind: "strategy", version: "1.0", usedBy: [] }],
+    runBacktest: async () => ({ pineId, studyId: ++runs === 1 ? "baseline" : "stuck",
+      keptOnChart: true, removedFromChart: false, strategy: "Stress", currency: "JPY",
+      initialCapital: 1_000_000, dateRange: null, summary: {}, totalTrades: 2, trades: [] }),
+    setIndicatorInput: async (_studyId, applied) => ({ applied, settled: true }),
+    getStrategyReport: async () => ({ strategy: "Stress", currency: "JPY", initialCapital: 1_000_000,
+      dateRange: null, summary: { netProfit: 80 }, totalTrades: 2, trades: [] }),
+    getStrategyTradeLedger: async () => ({ schemaVersion: "1.0", ledgerId: `sha256:${"f".repeat(64)}`,
+      strategy: "Stress", symbol: "OANDA:USDJPY", timeframe: "240", studyId: "temporary", pineId,
+      pineVersion: "1.0", inputs: [], currency: "JPY", initialCapital: 1_000_000,
+      dateRange: { from: "2025-01-01T00:00:00.000Z", to: "2025-02-01T00:00:00.000Z" },
+      summary: {}, totalTrades: 2, availableTrades: 2, countMatchesSummary: true,
+      ordering: "strategy_report", offset: 0, limit: 500, returned: 2, nextOffset: null,
+      complete: true, unavailableFields: [], qualityIssues: [], trades }),
+    removePineFromChart: async (_requested, studyId) => {
+      removes += 1;
+      if (studyId === "stuck") throw new Error("removal failed");
+      return { removed: true, pineId, pineVersion: "1.0", studyId, name: "Stress", chartIndex: 0 };
+    },
+  } }));
+  const result = JSON.parse((await client.callTool({ name: "stress_test_strategy", arguments: {
+    protocol_id: `sha256:${"a".repeat(64)}`, expected_symbol: "OANDA:USDJPY",
+    expected_timeframe: "240", pine_id: pineId, pine_version: "1.0",
+    evaluation_from: "2025-01-01T00:00:00.000Z", evaluation_to: "2025-02-01T00:00:00.000Z",
+    minimum_trades: 2, scenarios: [{ scenario_id: "cost", kind: "additional_cost_per_trade", value: 0 }],
+    rerun_scenarios: [
+      { scenario_id: "first", input_overrides: [{ id: "in_0", value: 2 }] },
+      { scenario_id: "second", input_overrides: [{ id: "in_0", value: 3 }] },
+    ], confirm: true,
+  } })).content[0].text);
+  assert.equal(result.status, "partial");
+  assert.equal(result.rerunCollections[0].status, "failed");
+  assert.equal(result.rerunCollections[0].chartRestored, false);
+  assert.equal(result.rerunCollections[1].status, "skipped");
+  assert.equal(runs, 2);
+  assert.equal(removes, 2);
+  assert.ok(result.qualityIssues.includes("chart_state_restore_failed"));
 });
 
 test("strategy research journal tools map immutable records without chart access", async () => {

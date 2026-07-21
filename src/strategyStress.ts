@@ -16,6 +16,19 @@ export interface StrategyStressInput {
   bootstrap: { seed: string; iterations: number; failureNetProfit: number } | null;
 }
 
+export interface StrategyRerunStressInput {
+  baselineLedger: StrategyTradeLedger;
+  evaluationFrom: string;
+  evaluationTo: string;
+  timeframe: string;
+  minimumTrades: number;
+  scenarios: Array<{
+    scenarioId: string;
+    ledger: StrategyTradeLedger | null;
+    collectionIssue?: string | null;
+  }>;
+}
+
 type StressTrade = { profit: number; commission: number | null };
 
 const parseTime = (value: string, label: string): number => {
@@ -227,5 +240,113 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
     scenarios: scenarioResults,
     distribution: deterministicDistribution,
     bootstrap,
+  };
+}
+
+export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
+  if (input.scenarios.length < 1 || input.scenarios.length > 8) {
+    throw new Error("strategy rerun stress requires 1 to 8 scenarios");
+  }
+  if (new Set(input.scenarios.map((scenario) => scenario.scenarioId)).size !== input.scenarios.length) {
+    throw new Error("strategy rerun stress scenario ids must be unique");
+  }
+
+  const evaluateLedger = (ledger: StrategyTradeLedger) => evaluateStrategyStress({
+    ledger,
+    evaluationFrom: input.evaluationFrom,
+    evaluationTo: input.evaluationTo,
+    timeframe: input.timeframe,
+    minimumTrades: input.minimumTrades,
+    scenarios: [{ scenarioId: "rerun_identity", kind: "additional_cost_per_trade", value: 0 }],
+    bootstrap: null,
+  });
+  const baselineEvaluation = evaluateLedger(input.baselineLedger);
+  if (baselineEvaluation.status === "not_evaluable" || baselineEvaluation.baseline === null) {
+    return {
+      status: "not_evaluable" as const,
+      methodologyVersion: "strategy_rerun_stress_v1" as const,
+      blockers: baselineEvaluation.blockers,
+      baseline: null,
+      scenarios: [],
+      distribution: null,
+    };
+  }
+
+  const baselineMetrics = baselineEvaluation.baseline.metrics;
+  const scenarioResults = input.scenarios.map((scenario) => {
+    if (scenario.ledger === null) {
+      return {
+        scenarioId: scenario.scenarioId,
+        status: "not_evaluable" as const,
+        blockers: [scenario.collectionIssue ?? "ledger_collection_incomplete"],
+        ledgerId: null,
+        metrics: null,
+        degradation: null,
+        excluded: null,
+      };
+    }
+    const evaluated = evaluateLedger(scenario.ledger);
+    if (evaluated.status === "not_evaluable" || evaluated.baseline === null) {
+      return {
+        scenarioId: scenario.scenarioId,
+        status: "not_evaluable" as const,
+        blockers: evaluated.blockers,
+        ledgerId: scenario.ledger.ledgerId,
+        metrics: null,
+        degradation: null,
+        excluded: null,
+      };
+    }
+    return {
+      scenarioId: scenario.scenarioId,
+      status: "complete" as const,
+      blockers: [] as string[],
+      ledgerId: scenario.ledger.ledgerId,
+      metrics: evaluated.baseline.metrics,
+      degradation: degradation(baselineMetrics, evaluated.baseline.metrics),
+      excluded: evaluated.baseline.excluded,
+    };
+  });
+  const evaluable = scenarioResults.filter((scenario) => scenario.metrics !== null);
+  const distributionFor = (
+    key: "expectancy" | "netProfit" | "profitFactor" | "maxClosedTradeEquityDrawdown",
+  ) => {
+    const values = evaluable
+      .map((scenario) => scenario.metrics![key])
+      .filter((value): value is number => value !== null);
+    const minimum = values.length ? Math.min(...values) : null;
+    const maximum = values.length ? Math.max(...values) : null;
+    return {
+      minimum,
+      median: quantile(values, 0.5),
+      maximum,
+      worst: key === "maxClosedTradeEquityDrawdown" ? maximum : minimum,
+    };
+  };
+
+  return {
+    status: scenarioResults.every((scenario) => scenario.status === "complete")
+      ? "complete" as const
+      : "partial" as const,
+    methodologyVersion: "strategy_rerun_stress_v1" as const,
+    blockers: [],
+    baseline: {
+      ledgerId: input.baselineLedger.ledgerId,
+      window: baselineEvaluation.baseline.window,
+      metrics: baselineMetrics,
+      excluded: baselineEvaluation.baseline.excluded,
+    },
+    scenarios: scenarioResults,
+    distribution: {
+      evaluableScenarios: evaluable.length,
+      totalScenarios: scenarioResults.length,
+      failureRate: evaluable.length === 0
+        ? null
+        : evaluable.filter((scenario) => scenario.metrics!.netProfit <= 0).length / evaluable.length,
+      expectancy: distributionFor("expectancy"),
+      netProfit: distributionFor("netProfit"),
+      profitFactor: distributionFor("profitFactor"),
+      maxClosedTradeEquityDrawdown: distributionFor("maxClosedTradeEquityDrawdown"),
+    },
   };
 }
