@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-six expected tools", async () => {
+test("exposes exactly the sixty-seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -708,6 +708,7 @@ test("exposes exactly the sixty-six expected tools", async () => {
       "get_chart_screenshot",
       "get_economic_events",
       "get_execution_snapshot",
+      "get_futures_flow_context",
       "get_indicator_graphics",
       "get_indicator_inputs",
       "get_indicator_tables",
@@ -4055,6 +4056,55 @@ test("get_positioning_context exposes delayed COT data with limitations", async 
   assert.equal(parsed.cot.symbol, "OANDA:EURUSD");
   assert.equal(parsed.cot.positioning_features.point_in_time_status, "blocked");
   assert.match(parsed.limitations[0], /weekly/);
+});
+
+test("get_futures_flow_context binds a daily futures chart and keeps daily OI unavailable", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 30 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: index === 29 ? 500 : 100 + index };
+  });
+  let requestedCot = null;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 2, charts: [
+        { index: 0, symbol: "OANDA:USDJPY", resolution: "1D", studies: [] },
+        { index: 1, symbol: "CME:6J1!", resolution: "1D", studies: [] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async (count, chartIndex) => {
+        assert.equal(count, 100);
+        assert.equal(chartIndex, 1);
+        return { symbol: "CME:6J1!", resolution: "1D", count: bars.length, bars };
+      },
+    },
+    cot: {
+      getHistory: async (symbol, weeks) => {
+        requestedCot = { symbol, weeks };
+        return { symbol, requested_weeks: weeks,
+          observations: [{ symbol, report_date: "2026-01-27T00:00:00.000Z", positions: [] }],
+          positioning_features: { point_in_time_status: "blocked", groups: [] }, cache_status: "miss" };
+      },
+    },
+  }));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:USDJPY", futures_chart_index: 1, expected_futures_symbol: "CME:6J1!",
+    count: 100, volume_lookback: 5, elevated_volume_z_score: 1, minimum_observations: 1,
+    observation_limit: 2, cot_weeks: 2,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "partial");
+  assert.equal(parsed.mapping.targetDirectionMultiplier, -1);
+  assert.equal(parsed.current.targetOrientedDirection, "down");
+  assert.equal(parsed.current.participation, "elevated");
+  assert.equal(parsed.openInterest.status, "unavailable");
+  assert.equal(parsed.priceOpenInterestQuadrant.classification, null);
+  assert.equal(parsed.cot.status, "partial");
+  assert.deepEqual(requestedCot, { symbol: "OANDA:USDJPY", weeks: 2 });
+  assert.equal(parsed.source.chartIndex, 1);
 });
 
 test("get_real_yield_context exposes official daily macro context", async () => {

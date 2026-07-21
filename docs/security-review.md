@@ -396,6 +396,13 @@
 - **入力・出力境界**: minute OHLC最大5,000本、opening range最大100本、明細最大500件。raw bar列は返さず全session-day aggregateとbounded observationsだけを返す。形成中足を除外し、非連続timestampや不足barをforward fillしない
 - **解釈境界**: TradingView bar volumeは`unverified_tick_or_exchange_volume`と明示し、FXの集中取引所出来高や大口フローと断定しない。結果は過去sessionの記述であり、予測、約定、コスト、PF、売買許可を表さない
 
+## 追補: バックログ #39 Futures Flow Context(2026-07-21)
+
+- **読み取り境界**: `get_futures_flow_context`は固定済みspot→CME/COMEX continuous futures対応、明示chart index、exact symbol、日足をcontextと取得OHLCVで二重検証する。最大5,000本のロード済み確定足と既存CFTC APIだけを読み、chart、Pine、Strategy Tester、alert、外部ファイル、注文を変更しない。Bar Replay中は現在COTとの混在を拒否する
+- **データ源境界**: TradingView futures volumeをCME Daily Bulletin確報として扱わない。認証済み・first-seen追跡済みの日次OI providerがないためOIと価格×OI四象限はnull/unavailableとし、COT週次OIやvolumeから補完しない。将来provider追加時も取得開始前のavailable_atを遡及生成しない
+- **入力・増幅制限**: 対象mappingは5 spot symbol・4 continuous futuresに固定し、volume lookback最大250、OHLCV最大5,000、返却観測最大500、COT最大52週とする。raw OHLCVを返さず正規化観測だけを返す。COT失敗はredact済み構造化unavailableへ畳み、価格・volume結果を破棄しない
+- **解釈境界**: 6Jの方向反転とcrossの単一GBP脚proxyを明示する。volume Z-scoreは参加活発度候補であり、機関投資家、大口、aggressive buyer/seller、新規long/shortを識別しない。continuous contractのroll、basis、TradingView vendor集計、速報/確報差は残余リスクである
+
 ## 追補: バックログ #42(2026-07-20)
 
 - **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない

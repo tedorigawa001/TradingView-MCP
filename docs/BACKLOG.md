@@ -374,11 +374,17 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **horizon時計(2026-07-21)**: horizonは`subsequent_observed_bars`であり、週末や休場をforward fillせず、その後に実際に観測されたN本を数える。calendar gapを跨いだreturnも市場再開時の価格変化として含め、`horizonClock: observed_market_bars`、`contiguousBarsRequired: false`、`calendarGapsIncluded: true`を返す。短期連続反応を測る#36の`contiguousBarsRequired: true`とは異なる母集団であり、無言で比較しない
 - **検証状況**: 上昇/下降系列でbucket化と将来分布、後続bar追加後も既存barのfeature labelが不変、形成中足除外、不規則timestamp非補間、公開MCPのchart拘束と応答上限を単体・統合テストで固定した。実機E2EはXAUUSD 4Hの300本で235観測、形成中1本除外、不規則timestamp 10件を非補間として確認した。これは探索用の短期窓であり、feature 6個×bucket×horizonを同時閲覧した結果を採用根拠にしない。特徴量候補数/multiple-testingを研究ジャーナルへ結び付ける記録、十分な履歴を使う複数銘柄・fold検証は次段
 
-### #39 大口フロー代理証拠(`get_futures_flow_context`、優先度: 中・規模: 大・要データ源調査)
+### #39 大口フロー代理証拠(`get_futures_flow_context`) 🟡 価格・volume・COT初版実装、日次OIは継続
 
 - **目的**: 既存の週次COTに、利用可能ならCME通貨・金先物の出来高、建玉、建玉変化、価格変化を加え、`price up + OI up`とshort covering等の候補を区別する
 - **限界**: FX現物に集中取引所の完全な出来高や板は存在しない。CME先物、TradingView tick volume、COTはいずれも大口動向の代理証拠であり、リアルタイム注文フローや主体別売買と断定しない
 - **データ品質**: symbol mapping、取引所タイムゾーン、限月・ロール、公開遅延、改訂、first-seen時刻を保存し、将来公表されたOI/COTを過去判断へ混入させない
+- **データ源調査(2026-07-21)**: CME公式のDaily Volume and Open Interest Reportは取引日終了時の速報で、確報は翌営業日のDaily Bulletinで公開される。無認証FTPには最新・日付別XLSXがあるが、速報/確報の版管理、公開時刻、schema安定性をAPI契約として保証しない。DataMine APIとリアルタイムmarket data APIは認証・entitlementを要求するため、資格情報なしのMCP初版で日次OIを推測取得しない
+- **初版実装(2026-07-21)**: `OANDA:EURUSD→6E1!`、`USDJPY→6J1!`、`GBPJPY/GBPAUD→6B1!`、`XAUUSD→GC1!`の固定対応だけを受ける。TradingViewの配信契約に応じた`CME`/`CME_DL`、`COMEX`/`COMEX_DL` exchange aliasは同一rootに限って明示許可する。明示したchart indexのexact continuous futures symbolと日足をcontext/OHLCVで二重拘束し、最大5,000本のロード済み確定足を読む。Bar Replay中は現在COTとの時点混在を避けるため拒否し、chart、Pine、注文を変更しない
+- **正規化**: 当日を含まない過去5〜250日volumeの平均・母標準偏差からZ-scoreと平均比を計算する。6JはUSDJPY方向へ符号反転し、6Bを使うcrossは`base_currency_single_leg`として保持する。elevated/subduedは参加活発度の記述であり、新規long/shortや主体を断定しない
+- **欠落契約**: TradingView volumeはCME確報との一致を独立検証できないため`unverified_exchange_or_vendor_aggregated_futures_volume`とする。日次OI、前日OI差、価格×OI四象限は`unavailable`を返し、週次COT OIで代用しない。COT失敗時も価格・volume証拠を保持し、COTだけをunavailableにする
+- **実機検証(2026-07-21)**: TradingViewが遅延CME契約を`CME_DL:6J1!`へ正規化することを確認し、同一rootの遅延aliasを固定許可へ追加した。USDJPY/6J日足1,300本で1,279正規化観測を取得し、最新6J -0.0323%をUSDJPY方向+0.0323%へ反転、volume 96,698、20日平均比0.655、Z=-0.765、`normal` participationとして返した。COTはpartialで取得し、日次OIはunavailable、生OHLCV配列なし、ツール前後chart context不変を確認した。検証後は第2ペインをXAUUSD 4H、元2 Studyへ戻し、第1ペインをactiveへ復元・全context照合済み
+- **残タスク**: 認証済みCME日次統計provider、preliminary/final版とfirst-seen保存、限月・expiry・roll calendar、期近単独とcontinuous contractの比較、basis、volumeの確報照合、OI四象限、実機複数銘柄検証は未実装
 
 ### #40 セッションプロファイル(`compute_session_profile`、優先度: 中・規模: 中)
 

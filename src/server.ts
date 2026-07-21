@@ -39,6 +39,7 @@ import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyS
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
+import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
@@ -4913,6 +4914,121 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         });
       }
     },
+  );
+
+  server.registerTool(
+    "get_futures_flow_context",
+    {
+      description:
+        "Combine one exact TradingView CME/COMEX continuous-futures daily chart with delayed CFTC COT " +
+        "positioning. It returns target-oriented futures price change, trailing volume z-score, participation " +
+        "hypotheses, mapping and data-quality evidence. Daily open interest and price/OI quadrants remain " +
+        "explicitly unavailable until an authenticated, first-seen-tracked provider is configured. This is a " +
+        "market-participation proxy, not realtime institutional order flow, and it never changes the chart.",
+      inputSchema: {
+        target_symbol: SYMBOL_SCHEMA.describe("Supported spot target mapped to 6E, 6J, 6B, or GC"),
+        futures_chart_index: z.number().int().min(0),
+        expected_futures_symbol: SYMBOL_SCHEMA.describe("Exact continuous futures symbol required by the fixed mapping"),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded daily futures bars to inspect. Default: 1000"),
+        volume_lookback: z.number().int().min(5).max(250).optional()
+          .describe("Prior bars used for volume mean and z-score. Current bar is excluded. Default: 20"),
+        elevated_volume_z_score: z.number().finite().gt(0).max(10).optional()
+          .describe("Absolute z-score threshold for elevated/subdued participation. Default: 1.5"),
+        minimum_observations: z.number().int().min(1).max(5000).optional()
+          .describe("Minimum normalized daily observations. Default: 20"),
+        observation_limit: z.number().int().min(0).max(500).optional()
+          .describe("Maximum recent normalized observations returned. Default: 20"),
+        cot_weeks: z.number().int().min(1).max(52).optional()
+          .describe("Recent delayed CFTC observations to include. Default: 2"),
+      },
+    },
+    async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
+      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks }) => chartOperations.run(async () => {
+      try {
+        const mapping = futuresFlowMapping(target_symbol);
+        if (!mapping) throw new Error(`futures flow mapping is unavailable for ${JSON.stringify(target_symbol)}`);
+        if (!mapping.allowedFuturesSymbols.includes(expected_futures_symbol.toUpperCase())) {
+          throw new Error(`expected one of ${mapping.allowedFuturesSymbols.join(", ")} for ${mapping.targetSymbol}`);
+        }
+        const context = await tv.getChartContext();
+        const chart = context.charts.find((item) => item.index === futures_chart_index);
+        if (!chart) throw new Error(`futures chart ${futures_chart_index} not found`);
+        if (chart.symbol.toUpperCase() !== expected_futures_symbol.toUpperCase() ||
+            normalizeResolution(chart.resolution) !== "1D") {
+          throw new Error("futures chart does not match the expected symbol and daily timeframe");
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("futures flow context is blocked while Bar Replay is active");
+        }
+        const requestedBars = count ?? 1000;
+        const history = await tv.getOhlcv(requestedBars, futures_chart_index);
+        if (history.symbol.toUpperCase() !== expected_futures_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== "1D") {
+          throw new Error("futures OHLCV evidence does not match the bound chart");
+        }
+        const futures = computeFuturesFlowContext({
+          bars: history.bars,
+          targetSymbol: mapping.targetSymbol,
+          futuresSymbol: expected_futures_symbol,
+          timeframe: history.resolution,
+          volumeLookback: volume_lookback ?? 20,
+          elevatedVolumeZScore: elevated_volume_z_score ?? 1.5,
+          minimumObservations: minimum_observations ?? 20,
+          observationLimit: observation_limit ?? 20,
+        });
+        let cotEvidence;
+        try {
+          const data = await cot.getHistory(mapping.targetSymbol, cot_weeks ?? 2);
+          const latest = data.observations[0];
+          cotEvidence = {
+            status: "partial" as const,
+            source: "cftc_cot" as const,
+            asOf: latest?.report_date ?? null,
+            freshness: cotFreshness(latest?.report_date ?? null),
+            pointInTimeStatus: data.positioning_features?.point_in_time_status ?? "blocked",
+            data,
+          };
+        } catch (err) {
+          cotEvidence = {
+            status: "unavailable" as const,
+            source: "cftc_cot" as const,
+            asOf: null,
+            freshness: null,
+            pointInTimeStatus: "blocked" as const,
+            error: redactSecrets(err instanceof Error ? err.message : String(err)),
+          };
+        }
+        return jsonResult({
+          ...futures,
+          status: "partial",
+          observedAt: new Date().toISOString(),
+          cot: cotEvidence,
+          source: {
+            chartIndex: futures_chart_index,
+            requestedBars,
+            returnedBars: history.bars.length,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+          },
+          qualityIssues: [
+            ...futures.qualityIssues,
+            "daily_open_interest_provider_not_configured",
+            ...(cotEvidence.status === "unavailable" ? ["cot_unavailable"] : []),
+          ],
+          limitations: [
+            "Continuous futures price and volume are participation proxies and can be affected by contract rolls.",
+            "TradingView volume is not independently verified against the final CME Daily Bulletin.",
+            "Daily open interest is unavailable; price/OI quadrant labels are not inferred from COT weekly open interest.",
+            "COT is weekly delayed positioning with unavailable publication timestamps, not an intraday trigger.",
+            "No result identifies institutions, aggressive buyers or sellers, order-book flow, fills, or profitability.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(
