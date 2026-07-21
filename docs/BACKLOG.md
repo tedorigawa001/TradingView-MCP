@@ -369,6 +369,9 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **目的**: RSI/MAだけでなく、ATR収縮率、実体・ヒゲ比率、連続性、ギャップ、相関変化、セッション位置などから次に検証すべき仮説候補を見つける
 - **境界**: 売買判断や「最適閾値」を直接返さず、欠落率、分布、将来horizon別効果、fold安定性、多重試行数を返す。特徴量算出は確定足かつpoint-in-timeで決定論的に行う
 - **リーク防止**: 正規化、閾値、特徴量選択を全期間でfitしない。trainで決めた変換をtestへ固定適用する
+- **初版実装(2026-07-21)**: active chartのexact symbol/timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCだけを読む。`atr_compression`、`body_direction`、`wick_imbalance`、`directional_streak`、`range_position`、`gap_direction`を選択可能にし、ATR lookbackとそれ以前のATR中央値、直近range、直近close方向、当該確定足のOHLCだけでbucketを決める。全期間分位点、未来fit、forward fill、閾値探索、ランキングは使わない
+- **結果契約**: signal足closeをevent referenceとして、後続の観測済み1〜250本のforward return、max upside、max downside、positive rateをfeature/bucket/horizon別に集計する。各barでの因果や売買方向を主張せず、intrabar ordering・fill・コスト・PFを扱わない。最大12件の非重複fold、最新最大500件のlabelled observation、形成中足・不規則timestamp・warmupを品質情報として返す
+- **検証状況**: 上昇/下降系列でbucket化と将来分布、後続bar追加後も既存barのfeature labelが不変、形成中足除外、不規則timestamp非補間、公開MCPのchart拘束と応答上限を単体・統合テストで固定した。実機E2EはXAUUSD 4Hの300本で235観測、形成中1本除外、不規則timestamp 10件を非補間として確認した。これは探索用の短期窓であり、feature 6個×bucket×horizonを同時閲覧した結果を採用根拠にしない。特徴量候補数/multiple-testingを研究ジャーナルへ結び付ける記録、十分な履歴を使う複数銘柄・fold検証は次段
 
 ### #39 大口フロー代理証拠(`get_futures_flow_context`、優先度: 中・規模: 大・要データ源調査)
 
@@ -381,6 +384,10 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **目的**: 東京・ロンドン・NY別の高安、値幅、VWAP、出来高、前日高安からの反応を統一計算し、時間帯固有のEntry/Exit仮説を作る
 - **契約**: DSTを含むIANA timezone、休日、session境界、volume種別を明示する。FXのtick volumeを取引所実出来高として表示しない
 - **評価**: セッション開始からの経過時間、opening range、前sessionとの重なり、拡張率を#36/#37へ渡せる決定論的特徴量として返す
+- **初版実装(2026-07-21)**: active chartのexact symbol/minute timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCを読む。1〜8件のIANA timezone sessionを受け、DSTと日跨ぎを現地時刻で処理する。曜日は各barの日付ではなくsession開始日で判定するため、金曜夜から土曜未明へ跨ぐsessionを分断しない
+- **結果契約**: session-dayごとのOHLC、値幅、return、opening rangeと拡張率、高安到達分、coverage、volume coverageを集計する。直前sessionとのgapとrange overlapは、そのsessionが現在session開始前に確定済みの場合だけ結合する。形成中足は除外し、欠落足を補間せず、不完全日と不規則timestampを品質情報へ残す
+- **volume境界**: `tickVolume`という項目名と`tradingview_bar_volume_unverified_tick_or_exchange_volume`種別を返し、symbolごとのTradingView volumeがFX tickか取引所出来高かを推測しない。全barにvolumeがあるsessionだけ合計し、部分欠落時はnullとcoverageを返す
+- **検証状況**: London DST切替、日跨ぎ、金曜夜跨ぎ、形成中足除外、不完全coverage、欠落volume、直前確定session結合、MCP chart bindingを単体・統合テストで固定した。実機E2EはUSDJPY 60分足1,800本で東京・London・New Yorkを各75日、計225 session-dayとして取得し、不完全日0、形成中足1本除外、週末等の不規則timestamp 15件を非補間として確認した。median rangeは東京0.270円、London 0.439円、New York 0.385円だったが、これは約75日の記述証拠であり採用根拠にはしない。検証後はUSDJPY 4Hと全Studyを復元・照合済み。初版は休日カレンダー、VWAP、前日高安反応、#36/#37への直接入力、仮説最適化、PF評価は未実装
 
 ### #41 クロスアセット先行・遅行分析(`run_yield_price_nonconfirmation_study`) 🟡 Yield-Price初版実装・汎用lead/lagは継続
 

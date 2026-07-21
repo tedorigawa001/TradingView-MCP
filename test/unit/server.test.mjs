@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-four expected tools", async () => {
+test("exposes exactly the sixty-six expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -688,10 +688,12 @@ test("exposes exactly the sixty-four expected tools", async () => {
       "audit_pine_indicator",
       "compare_indicator_observations",
       "compare_strategy_experiments",
+      "compute_feature_outcome_relationships",
       "compute_market_features",
       "compute_market_regimes",
       "compute_position_size",
       "compute_round_trip_cost",
+      "compute_session_profile",
       "create_analysis_alerts",
       "ensure_analysis_overlay",
       "evaluate_analysis_overlay_outcome",
@@ -4474,6 +4476,62 @@ test("run_yield_price_nonconfirmation_study binds two charts and returns as-of j
   assert.deepEqual(calls.sort((left, right) => left.chartIndex - right.chartIndex), [
     { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 },
   ]);
+});
+
+test("compute_feature_outcome_relationships binds closed OHLC to the active chart", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 30 }, (_, index) => {
+    const open = 100 + Math.sin(index / 3);
+    const close = open + (index % 3 === 0 ? 0.8 : -0.35);
+    return { time: (start + index * 3_600_000) / 1000,
+      timeIso: new Date(start + index * 3_600_000).toISOString(),
+      open, high: Math.max(open, close) + 0.3, low: Math.min(open, close) - 0.3, close, volume: 1 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "compute_feature_outcome_relationships", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+    features: ["body_direction", "range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
+    range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5,
+    observation_limit: 2,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.symbol, "OANDA:EURUSD");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.outcomeContract.forwardFill, false);
+  assert.ok(parsed.byFeature.body_direction.bullish_body.observations > 0);
+  assert.equal(parsed.observations.length, 2);
+});
+
+test("compute_session_profile binds minute OHLC to the active chart", async () => {
+  const start = Date.UTC(2026, 0, 5, 8);
+  const bars = Array.from({ length: 4 }, (_, index) => ({
+    time: (start + index * 3_600_000) / 1000,
+    timeIso: new Date(start + index * 3_600_000).toISOString(),
+    open: 100 + index, high: 101.2 + index, low: 99.8 + index, close: 101 + index, volume: 10 + index,
+  }));
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "compute_session_profile", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+    sessions: [{ session_id: "london", timezone: "Europe/London", start: "08:00", end: "12:00",
+      minimum_coverage: 1 }],
+    opening_range_bars: 2, minimum_session_days: 1, observation_limit: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.bySession.london.completeSessionDays, 1);
+  assert.equal(parsed.volumeKind, "tradingview_bar_volume_unverified_tick_or_exchange_volume");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.observations.length, 1);
 });
 
 test("compute_market_regimes binds the chart and returns point-in-time labels", async () => {

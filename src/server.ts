@@ -38,6 +38,8 @@ import {
 import { evaluateStrategyStress, type StrategyStressScenario } from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
+import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
+import { computeSessionProfile } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -808,6 +810,204 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Bar availability uses nominal timeframe duration, not exchange publication metadata.",
             "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "MFE and MAE use bar extremes; intrabar ordering is unknown.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "compute_feature_outcome_relationships",
+    {
+      description:
+        "Measure point-in-time relationships between selected closed-bar price features and later observed " +
+        "returns on one exact TradingView chart. It classifies ATR compression, candle body direction, wick " +
+        "imbalance, directional streaks, range position, and opening gaps using only the signal bar and prior " +
+        "OHLC. It returns bucketed forward-return, upside, downside, and fold distributions without optimizing " +
+        "thresholds, changing the chart, or making a trade recommendation.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDW]|[SDW])$/i),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 5000"),
+        features: z.array(z.enum([
+          "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+        ])).min(1).max(6).optional()
+          .describe("Point-in-time features to classify. Default: all six"),
+        atr_lookback: z.number().int().min(2).max(250).optional(),
+        atr_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+        range_lookback: z.number().int().min(2).max(500).optional(),
+        streak_minimum_bars: z.number().int().min(1).max(100).optional(),
+        body_ratio_threshold: z.number().finite().min(0).lt(1).optional(),
+        wick_imbalance_threshold: z.number().finite().min(0).max(1).optional(),
+        atr_compression_low_ratio: z.number().finite().gt(0).lt(1).optional(),
+        atr_compression_high_ratio: z.number().finite().gt(1).optional(),
+        range_position_lower: z.number().finite().gt(0).lt(0.5).optional(),
+        range_position_upper: z.number().finite().gt(0.5).lt(1).optional(),
+        gap_atr_threshold: z.number().finite().min(0).optional(),
+        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8),
+        minimum_observations: z.number().int().min(1).max(5000).optional(),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: z.string().datetime({ offset: true }),
+          to: z.string().datetime({ offset: true }),
+        })).max(12).optional(),
+        observation_limit: z.number().int().min(0).max(500).optional()
+          .describe("Maximum labelled observations to return. Aggregates always use all rows. Default: 100"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, features, atr_lookback, atr_baseline_lookback,
+      range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
+      atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
+      gap_atr_threshold, horizons, minimum_observations, folds, observation_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart) throw new Error(`active chart ${activeIndex} not found`);
+        if (chart.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(chart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("active chart does not match the expected symbol and timeframe");
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("feature-outcome relationships are blocked while Bar Replay is active");
+        }
+        const requestedBars = count ?? 5000;
+        const history = await tv.getOhlcv(requestedBars, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const result = computeFeatureOutcomeRelationships({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          features: features ?? [
+            "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+          ],
+          atrLookback: atr_lookback ?? 14,
+          atrBaselineLookback: atr_baseline_lookback ?? 50,
+          rangeLookback: range_lookback ?? 20,
+          streakMinimumBars: streak_minimum_bars ?? 3,
+          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
+          rangePositionLower: range_position_lower ?? 0.33,
+          rangePositionUpper: range_position_upper ?? 0.67,
+          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          horizons,
+          minimumObservations: minimum_observations ?? 100,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          observationLimit: observation_limit ?? 100,
+        });
+        return jsonResult({
+          ...result,
+          source: {
+            chartIndex: activeIndex,
+            requestedBars,
+            returnedBars: history.bars.length,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+          },
+          limitations: [
+            "This is an observational event study, not a fill, execution, or profitability simulation.",
+            "Feature thresholds are caller-specified constants and are not optimized or ranked by this tool.",
+            "Associations do not establish causality or imply a trade direction.",
+            "Loaded chart history can be shorter than requested and differs by TradingView plan.",
+            "Upside and downside use bar extremes; intrabar ordering is unknown.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "compute_session_profile",
+    {
+      description:
+        "Summarize deterministic session-day profiles from closed minute bars on one exact TradingView chart. " +
+        "Sessions use caller-specified IANA timezones and support daylight-saving and cross-midnight boundaries. " +
+        "The tool returns coverage, OHLC range, return, opening-range extension, high/low timing, prior closed-session " +
+        "overlap, and TradingView bar volume clearly labelled as unverified tick-or-exchange volume. It does not " +
+        "change the chart, optimize session definitions, or make a trade recommendation.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[1-9]\d*$/)
+          .describe("Exact active minute timeframe, such as 5, 15, or 60"),
+        count: z.number().int().min(100).max(5000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 5000"),
+        sessions: z.array(z.object({
+          session_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          timezone: z.string().min(1).max(64),
+          start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+          end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+          minimum_coverage: z.number().finite().gt(0).max(1).optional(),
+        })).min(1).max(8),
+        opening_range_bars: z.number().int().min(1).max(100).optional()
+          .describe("Bars from session start used for the opening range. Default: 3"),
+        minimum_session_days: z.number().int().min(1).max(5000).optional()
+          .describe("Minimum complete days required for each session. Default: 20"),
+        observation_limit: z.number().int().min(0).max(500).optional()
+          .describe("Maximum recent session observations returned. Aggregates use all rows. Default: 100"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, sessions, opening_range_bars,
+      minimum_session_days, observation_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart) throw new Error(`active chart ${activeIndex} not found`);
+        if (chart.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(chart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("active chart does not match the expected symbol and timeframe");
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("session profile is blocked while Bar Replay is active");
+        }
+        const requestedBars = count ?? 5000;
+        const history = await tv.getOhlcv(requestedBars, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const result = computeSessionProfile({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          sessions: sessions.map((session) => ({
+            sessionId: session.session_id,
+            timezone: session.timezone,
+            start: session.start,
+            end: session.end,
+            minimumCoverage: session.minimum_coverage ?? 0.8,
+          })),
+          openingRangeBars: opening_range_bars ?? 3,
+          minimumSessionDays: minimum_session_days ?? 20,
+          observationLimit: observation_limit ?? 100,
+        });
+        return jsonResult({
+          ...result,
+          source: {
+            chartIndex: activeIndex,
+            requestedBars,
+            returnedBars: history.bars.length,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+          },
+          limitations: [
+            "This is a retrospective session description, not a forecast, fill, execution, or profitability simulation.",
+            "TradingView bar volume can be tick volume or exchange volume depending on the symbol and is not independently verified.",
+            "Sessions, coverage thresholds, and opening-range length are caller-specified and are not optimized by this tool.",
+            "Weekday filtering uses the local session start date; exchange holidays are reported through incomplete coverage, not inferred.",
+            "Loaded chart history can be shorter than requested and differs by TradingView plan.",
           ],
         });
       } catch (err) {
