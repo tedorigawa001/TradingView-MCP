@@ -214,14 +214,17 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     const rangeHigh = Math.max(...rangeBars.map((item) => item.high));
     const rangeLow = Math.min(...rangeBars.map((item) => item.low));
     const rangePosition = rangeHigh === rangeLow ? 0.5 : (bar.close - rangeLow) / (rangeHigh - rangeLow);
-    const signs: Array<1 | -1 | 0> = [];
-    for (let cursor = index; cursor > 0; cursor -= 1) {
-      const change = bars[cursor].close - bars[cursor - 1].close;
-      signs.push(change > 0 ? 1 : change < 0 ? -1 : 0);
+    let firstSign: 1 | -1 | 0 = 0;
+    let effectiveStreak = 0;
+    if (input.features.includes("directional_streak")) {
+      for (let cursor = index; cursor > 0 && effectiveStreak < input.streakMinimumBars; cursor -= 1) {
+        const change = bars[cursor].close - bars[cursor - 1].close;
+        const sign = change > 0 ? 1 : change < 0 ? -1 : 0;
+        if (effectiveStreak === 0) firstSign = sign;
+        if (sign === 0 || sign !== firstSign) break;
+        effectiveStreak += 1;
+      }
     }
-    const firstSign = signs[0];
-    const streakLength = firstSign === 0 ? 0 : signs.findIndex((sign) => sign !== firstSign);
-    const effectiveStreak = streakLength < 0 ? signs.length : streakLength;
     const gapAtr = (bar.open - bars[index - 1].close) / currentAtr;
     const labels: Partial<Record<FeatureOutcomeFeature, string>> = {};
     if (input.features.includes("atr_compression")) {
@@ -289,6 +292,9 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       reference: "signal_bar_close_event_study_only_not_assumed_fill" as const,
       horizons: input.horizons,
       horizonUnit: "subsequent_observed_bars" as const,
+      horizonClock: "observed_market_bars" as const,
+      contiguousBarsRequired: false,
+      calendarGapsIncluded: true,
       forwardFill: false,
       intrabarOrderingAssumed: false,
     },

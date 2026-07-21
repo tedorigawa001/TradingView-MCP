@@ -151,9 +151,15 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   const driverFormingExcluded = driverAll.filter((bar) => bar.forming === true).length;
   const target = targetAll.filter((bar) => bar.forming !== true);
   const driver = driverAll.filter((bar) => bar.forming !== true);
+  const targetIrregularIntervals = target.slice(1).filter((bar, index) =>
+    bar.time * 1_000 - target[index].time * 1_000 > targetResolutionMs * 1.5).length;
+  const driverIrregularIntervals = driver.slice(1).filter((bar, index) =>
+    bar.time * 1_000 - driver[index].time * 1_000 > driverResolutionMs * 1.5).length;
   const quality = {
     targetFormingBarsExcluded: targetFormingExcluded,
     driverFormingBarsExcluded: driverFormingExcluded,
+    targetIrregularIntervals,
+    driverIrregularIntervals,
     driverImpulses: 0,
     insufficientPriorTargetBars: 0,
     noTargetBarAfterDriverClose: 0,
@@ -261,6 +267,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   const qualityIssues = [
     ...(events.length < input.minimumEvents ? ["minimum_event_count_not_met"] : []),
     ...(folds.length < 2 ? ["fewer_than_two_time_folds"] : []),
+    ...(targetIrregularIntervals > 0 ? ["irregular_target_timestamps_not_forward_filled"] : []),
+    ...(driverIrregularIntervals > 0 ? ["irregular_driver_timestamps_not_forward_filled"] : []),
   ];
   return {
     schemaVersion: "1.0" as const,
@@ -289,6 +297,10 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       reference: "signal_bar_close_event_study_only_not_assumed_fill" as const,
       horizons: input.horizons,
       horizonUnit: "subsequent_observed_target_bars" as const,
+      horizonClock: "observed_market_bars" as const,
+      contiguousBarsRequired: false,
+      calendarGapsIncluded: true,
+      forwardFill: false,
       targetReturnBps: input.targetReturnBps,
       intrabarOrderingAssumed: false,
     },

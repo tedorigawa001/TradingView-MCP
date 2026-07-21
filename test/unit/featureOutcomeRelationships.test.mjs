@@ -34,6 +34,9 @@ test("feature-outcome relationships classify only closed-bar evidence and return
   assert.equal(result.byFeature.directional_streak.up_streak.observations > 0, true);
   assert.equal(result.byFeature.range_position.upper_range.observations > 0, true);
   assert.equal(result.outcomeContract.forwardFill, false);
+  assert.equal(result.outcomeContract.horizonClock, "observed_market_bars");
+  assert.equal(result.outcomeContract.contiguousBarsRequired, false);
+  assert.equal(result.outcomeContract.calendarGapsIncluded, true);
   assert.ok(result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.count > 0);
 });
 
@@ -56,4 +59,17 @@ test("feature-outcome relationships exclude forming bars and preserve irregular 
   assert.equal(result.quality.formingBarsExcluded, 1);
   assert.ok(result.quality.irregularIntervals > 0);
   assert.ok(result.qualityIssues.includes("irregular_timestamps_not_forward_filled"));
+});
+
+test("feature-outcome relationships retain observed-bar outcomes across a calendar gap", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103, 104, 105]);
+  for (let index = 8; index < series.length; index += 1) {
+    series[index].time += 48 * HOUR / 1000;
+    series[index].timeIso = new Date(series[index].time * 1000).toISOString();
+  }
+  const result = computeFeatureOutcomeRelationships(input(series, { horizons: [1] }));
+  const beforeGap = result.observations.find((row) => row.signalTime === series[7].timeIso);
+  assert.ok(beforeGap);
+  assert.notEqual(beforeGap.outcomes["1"], null);
+  assert.equal(result.quality.irregularIntervals, 1);
 });

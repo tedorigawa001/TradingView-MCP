@@ -4424,12 +4424,14 @@ test("run_market_event_study binds the chart and returns session auction evidenc
     condition: { type: "session_auction", timezone: "UTC", range_start: "00:00",
       range_end: "08:00", auction_end: "10:00", minimum_range_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
+    folds: [{ fold_id: "all", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" }],
   } });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.byBranch.accepted_up.events, 1);
   assert.equal(parsed.conditionType, "session_auction");
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.events[0].direction, "long");
+  assert.equal(parsed.folds[0].events, 1);
 });
 
 test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {
@@ -4707,6 +4709,12 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_mtf_overview", arguments: { symbols: [] } },
     { name: "get_mtf_overview", arguments: { symbols: Array(21).fill("OANDA:EURUSD") } },
     { name: "get_mtf_overview", arguments: { symbols: ["bad ticker!"] } },
+    { name: "run_market_event_study", arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+      condition: { type: "session_auction", timezone: "UTC", range_start: "08:00", range_end: "09:00",
+        auction_end: "10:00" }, horizons: [1], target_return_bps: 10, minimum_events: 1,
+      folds: [{ fold_id: "offset", from: "2026-01-01T09:00:00.000+09:00", to: "2026-01-02T09:00:00.000+09:00" }],
+    } },
     { name: "get_indicator_graphics", arguments: { study_id: "has space" } },
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },

@@ -360,6 +360,7 @@
 - **先読み・曖昧性**: 形成中足を除外し、range終了後の最初のboundary touchだけを分類する。上下両側sweep、OHLC矛盾、重複timestamp、境界後の反対側touchは拒否またはambiguousへ数え、足内順序を推測しない。signal bar closeはevent referenceであり約定と表現しない
 - **応答上限**: horizon 1〜8件・最大96本、fold最大12、event明細最大200、target最大1,000bps。反復ごとのbar列や全OHLCを返さず、集計とbounded event evidenceだけを返す。各horizonはtimestamp連続性を要求し、週末等をforward fillしない
 - **統計境界**: 初版は記述統計とfold分離であり、因果、有意性、収益性を証明しない。confidence interval、多重比較補正、重複event policyは未実装であるため、複数parameterを回して最良行だけを採用しない
+- **horizon連続性**: session auctionは短期session反応を対象とするため、signalから各horizonまでのtimestamp差が名目時間足の1.5倍以内で連続する場合だけ結果を有効にする。週末、休場、未ロード区間を跨ぐhorizonはnullとし、観測市場足基準の#38/#41とは契約フラグで区別する
 
 ## 追補: バックログ #37 市場レジーム初版(2026-07-21)
 
@@ -378,12 +379,15 @@
 - **時刻リーク防止**: driver barは`bar start + fixed nominal duration`まで利用不能とし、その時刻より前に開始したtarget barへ結合しない。timestamp完全一致やforward fillは行わない。月足は期間が可変なため拒否し、Bar Replay中はリアルタイムdriverとの混在を避けるため拒否する
 - **出力境界**: 生OHLCを返さず、全eventを使った集計、最大12 fold、最大200 event明細、除外件数、source coverageだけを返す。signal bar closeはevent referenceでありfillではなく、MFE/MAEの足内順序、コスト、slippage、PF、収益性は評価しない
 - **残余リスク**: 名目closeは市場固有の公表時刻や遅延ではなく時間足から算出した保守的proxyである。caller指定のdirect/inverse関係と閾値は妥当性を保証せず、複数閾値探索を行う場合の試行数・多重比較補正は未実装である
+- **horizon・欠落境界**: outcomeは次の観測target barを単位とし、週末等のcalendar gapを実際の再開価格変化として含める。gapをforward fillせず、target/driver別の不規則intervalを品質情報へ出す。`contiguousBarsRequired:false`を返すため、連続名目足を要求する#36の結果と同じhorizon保証として扱わない
 
 ## 追補: バックログ #38 Feature-Outcome Relationships(2026-07-21)
 
 - **読み取り境界**: `compute_feature_outcome_relationships`はactive chartのexact symbol/timeframeをchart contextと取得OHLCで二重検証し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、chart、Pine、Strategy Tester、alert、外部HTTP、ファイル、注文を変更しない
 - **未来リーク防止**: 各feature labelはsignal足の確定OHLCとそれ以前のATR、range、closeだけで計算する。全期間分位点、未来bar、forward fill、閾値最適化は使わない。後続barは結果のforward return/upside/downside集計にだけ使い、不規則timestampは補間せず品質問題として返す
 - **出力境界**: raw OHLCを返さず、feature/bucket/horizon集計、最大12fold、最新最大500観測、品質カウント、source coverageだけを返す。associationは因果、予測、売買方向、fill、コスト、PFを意味しない
+- **horizon・欠落境界**: outcomeは次の観測barを単位とし、calendar gapを跨いだ再開価格変化を含む。不規則intervalは品質issueへ出すが、forward fillやhorizon除外は行わない。`horizonClock:observed_market_bars`、`contiguousBarsRequired:false`、`calendarGapsIncluded:true`を返し、#36の連続名目足契約と区別する
+- **時刻入力境界**: #36/#38/#41のfold境界はMCP schemaと内部validatorの両方でcanonical UTC ISO(`YYYY-MM-DDTHH:mm:ss.sssZ`)だけを受理する。オフセット表記や秒・ミリ秒省略を入口で拒否し、schema通過後に異なる形式条件で失敗する非対称をなくす
 
 ## 追補: バックログ #40 Session Profile(2026-07-21)
 

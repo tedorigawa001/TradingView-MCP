@@ -114,6 +114,12 @@ export interface ServerDeps {
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
 const SYMBOL_SCHEMA = z.string().regex(/^[\w!.:&-]{1,48}$/);
+const CANONICAL_ISO_TIMESTAMP_SCHEMA = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  .refine((value) => {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+  }, "must be a canonical ISO timestamp");
 const RESEARCH_POPULATION_SCHEMA = z.enum(["in_sample", "out_of_sample", "walk_forward", "stress", "live"]);
 const RESEARCH_METRICS_SCHEMA = z.record(z.string().min(1).max(64), z.number().nullable());
 const REAL_YIELD_OUTPUT_SCHEMA = {
@@ -622,8 +628,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         minimum_events: z.number().int().min(1).max(5000),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
-          from: z.string().datetime({ offset: true }),
-          to: z.string().datetime({ offset: true }),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
         })).max(12).optional(),
         event_limit: z.number().int().min(0).max(200).optional()
           .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
@@ -720,8 +726,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         minimum_events: z.number().int().min(1).max(5000),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
-          from: z.string().datetime({ offset: true }),
-          to: z.string().datetime({ offset: true }),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
         })).max(12).optional(),
         event_limit: z.number().int().min(0).max(200).optional()
           .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
@@ -851,8 +857,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         minimum_observations: z.number().int().min(1).max(5000).optional(),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
-          from: z.string().datetime({ offset: true }),
-          to: z.string().datetime({ offset: true }),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
         })).max(12).optional(),
         observation_limit: z.number().int().min(0).max(500).optional()
           .describe("Maximum labelled observations to return. Aggregates always use all rows. Default: 100"),

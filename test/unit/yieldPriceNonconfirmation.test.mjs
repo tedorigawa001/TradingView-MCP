@@ -37,6 +37,10 @@ test("yield-price study detects a direct yield-up price failure without exact ti
   assert.equal(result.events[0].direction, "short");
   assert.ok(result.byBranch.driver_up_target_failure.horizons["2"].directionalReturn.mean > 0);
   assert.equal(result.joinContract.policy, "driver_nominal_close_then_target_bar_start");
+  assert.equal(result.outcomeContract.horizonClock, "observed_market_bars");
+  assert.equal(result.outcomeContract.contiguousBarsRequired, false);
+  assert.equal(result.outcomeContract.calendarGapsIncluded, true);
+  assert.equal(result.outcomeContract.forwardFill, false);
 });
 
 test("yield-price study never uses a target bar that started before driver availability", () => {
@@ -79,4 +83,18 @@ test("yield-price study never reports negative favorable or adverse excursion", 
   const horizon = result.byBranch.driver_up_target_failure.horizons["1"];
   assert.equal(horizon.mfe.minimum, 0);
   assert.ok(horizon.mae.minimum >= 0);
+});
+
+test("yield-price study reports calendar gaps without dropping observed target-bar outcomes", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  for (let index = 8; index < target.length; index += 1) {
+    target[index].time += 2 * DAY / 1000;
+    target[index].timeIso = new Date(target[index].time * 1000).toISOString();
+  }
+  const result = runYieldPriceNonconfirmationStudy(input(target, driver));
+  assert.equal(result.quality.targetIrregularIntervals, 1);
+  assert.ok(result.qualityIssues.includes("irregular_target_timestamps_not_forward_filled"));
+  assert.notEqual(result.events[0].outcomes["1"], null);
 });
