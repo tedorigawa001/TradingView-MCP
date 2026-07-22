@@ -355,7 +355,9 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **regime結合実機検証(2026-07-21)**: 同じEURUSD 15分5,000本・43eventへ20本効率比、ATR14、volatility baseline 50、group最低3event、最大age 1本を適用し、43/43件(100%)を直前確定regimeへ結合した。全件age 0msは直前15分足の名目closeがsignal足startと一致することを示し、signal足自身は不使用。固定19セル中9セルが評価可能、108主要intervalを返した。4本後returnはrange-highが+0.0345%で最良に見えたが95%区間-0.0153%〜+0.0844%、transition-highは-0.0179%で区間-0.0491%〜+0.0134%となり、評価可能9セルすべてゼロを跨いだため採用根拠なし。応答はevent明細0で約106KB、生OHLC/label列なし。検証後は元chartを完全復元した
 - **検証状況**: accepted-upとfailed-upの排他分類・方向反転、形成中足除外、両側sweep拒否、fold集計、London DST開始後もlocal 08:00をUTC 07:00として扱うこと、MCP chart binding/read-only履歴取得をユニットテストで固定した
 - **Event Aftershock Retest初版(2026-07-22)**: `event_aftershock_retest`は1〜200件のcaller-supplied canonical UTC event時刻を受け、イベント時刻と正確に一致する確定足から初動レンジを形成する。レンジ外への最初の終値break後、最初の境界touchが外側で終値を維持した場合だけ継続方向eventとする。時刻を次の足へずらさず、形成中足、初動レンジ・breakout/retest窓の欠落や不規則timestamp、境界内終値を明示的に除外する。calendarの現在92日取得制約を歴史データへ暗黙補完せず、event sourceと時刻の妥当性はcaller側の研究契約に残す。これはsignal bar closeのevent studyであり、約定・PF・収益性を主張しない
-- **残タスク**: 条件DSL、重複event policy、多重比較補正を採用する場合の事前方式。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
+- **重複窓ポリシー(2026-07-22)**: `overlap_policy: "exclude_later_event"`を既定かつ唯一の選択肢として追加した。canonical eventを時刻順に並べ、初動range + breakout window + retest window + 最大horizonの評価窓に入る後続eventを決定論的に除外する。返却する`eventContract`へ最大評価本数と最小分離時間を明示し、品質情報へポリシー適用後件数と除外件数を残す。同一UTC時刻の複数eventは、ID・経済的意味を推測して集約せず引き続き入力エラーとする
+- **実機E2E(2026-07-22)**: EURUSD 15分足の確定5,000本(2026-05-11〜07-22)に、TradingView calendarの米国highイベントを適用した。2026-05-05〜07-22の74 raw eventから、同一UTC時刻はID昇順の先頭だけを残し、初動4本 + breakout/retest各16本 + 最大horizon 16本の評価窓(13時間)に近接する後続eventを呼び出し側で除外して30時刻を入力した。初期履歴外2件、breakoutなし7件、retestなし3件、境界内終値9件を除外し、retest-up 6件/retest-down 3件の計9 eventとなった。minimum 10に届かず`partial`であり、foldも少数かつ符号不安定のため採用根拠なし。実行後はEURUSD 60分足へ復元した。同時刻の集約だけはcaller側の意味論として残し、近接後続eventの除外は以後ツール契約として固定した
+- **残タスク**: 条件DSL、同時刻eventの意味論を含む重複event policy、多重比較補正を採用する場合の事前方式。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
 ### #37 市場レジーム分類(`compute_market_regimes`) 🟡 台帳・一括・session分解実装、他要因は継続
 

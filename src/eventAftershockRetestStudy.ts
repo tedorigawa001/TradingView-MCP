@@ -20,6 +20,7 @@ export interface EventAftershockRetestStudyInput {
   initialRangeBars: number;
   breakoutWithinBars: number;
   retestWithinBars: number;
+  overlapPolicy: "exclude_later_event";
   requireRetestCloseOutside: boolean;
   minimumInitialRangeCoverage: number;
   horizons: number[];
@@ -83,8 +84,25 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
   const closed = bars.filter((bar) => bar.forming !== true);
   const byStartTime = new Map(closed.map((bar, index) => [bar.time * 1000, { bar, index }]));
   const minimumInitialBars = Math.ceil(input.initialRangeBars * input.minimumInitialRangeCoverage);
+  const maximumEvaluationWindowBars = input.initialRangeBars + input.breakoutWithinBars + input.retestWithinBars + Math.max(...input.horizons);
+  const minimumEventSeparationMilliseconds = maximumEvaluationWindowBars * timeframeMs;
+  const orderedEvents = input.events.map((event) => ({ ...event,
+    occurredAtMs: canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`) }))
+    .sort((left, right) => left.occurredAtMs - right.occurredAtMs);
+  const selectedEvents: typeof orderedEvents = [];
+  let overlappingEventsExcluded = 0;
+  for (const event of orderedEvents) {
+    const prior = selectedEvents.at(-1);
+    if (prior && event.occurredAtMs - prior.occurredAtMs < minimumEventSeparationMilliseconds) {
+      overlappingEventsExcluded += 1;
+      continue;
+    }
+    selectedEvents.push(event);
+  }
   const quality = {
     suppliedEvents: input.events.length,
+    eventsAfterOverlapPolicy: selectedEvents.length,
+    overlappingEventsExcluded,
     alignedEvents: 0,
     insufficientInitialRangeCoverage: 0,
     irregularInitialRange: 0,
@@ -102,9 +120,8 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
     initialRangeBars: number; breakoutTime: string; signalIndex: number;
   }> = [];
 
-  for (const event of input.events) {
-    const occurredAtMs = canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`);
-    const aligned = byStartTime.get(occurredAtMs);
+  for (const event of selectedEvents) {
+    const aligned = byStartTime.get(event.occurredAtMs);
     if (!aligned) { quality.insufficientInitialRangeCoverage += 1; continue; }
     quality.alignedEvents += 1;
     const initial = closed.slice(aligned.index, aligned.index + input.initialRangeBars);
@@ -187,8 +204,8 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
   return {
     schemaVersion: "1.0" as const, methodologyVersion: input.regime === null ? "event_aftershock_retest_study_v1" as const : "event_aftershock_retest_regime_study_v1" as const,
     status: issues.length === 0 ? "complete" as const : "partial" as const, symbol: input.symbol, timeframe: input.timeframe,
-    eventContract: { eventTimes: "caller_supplied_canonical_utc_timestamps", eventBar: "closed_bar_starting_exactly_at_occurred_at", initialRange: "first_closed_bars_after_event", breakout: "first_close_outside_initial_range", retest: "first_boundary_touch_after_breakout", requireRetestCloseOutside: input.requireRetestCloseOutside, duplicateEventTimestampsRejected: true },
-    parameters: { initialRangeBars: input.initialRangeBars, breakoutWithinBars: input.breakoutWithinBars, retestWithinBars: input.retestWithinBars, minimumInitialRangeCoverage: input.minimumInitialRangeCoverage },
+    eventContract: { eventTimes: "caller_supplied_canonical_utc_timestamps", eventBar: "closed_bar_starting_exactly_at_occurred_at", initialRange: "first_closed_bars_after_event", breakout: "first_close_outside_initial_range", retest: "first_boundary_touch_after_breakout", requireRetestCloseOutside: input.requireRetestCloseOutside, duplicateEventTimestampsRejected: true, overlapPolicy: input.overlapPolicy, laterEventExcludedWhenStartWithinMaximumEvaluationWindow: true, maximumEvaluationWindowBars, minimumEventSeparationMilliseconds },
+    parameters: { initialRangeBars: input.initialRangeBars, breakoutWithinBars: input.breakoutWithinBars, retestWithinBars: input.retestWithinBars, minimumInitialRangeCoverage: input.minimumInitialRangeCoverage, overlapPolicy: input.overlapPolicy },
     outcomeContract: { reference: "retest_bar_close_event_study_only_not_assumed_fill", horizons: input.horizons, targetReturnBps: input.targetReturnBps, contiguousBarsRequired: true },
     inferenceContract: { confidenceLevel: input.confidenceLevel, meanIntervalMethod: "normal_approximation", rateIntervalMethod: "wilson_score", serialDependenceAdjustment: "none", multipleTestingAdjustment: "none", configurationTrials: input.configurationTrials, trialTrackingStatus: input.configurationTrials === null ? "not_declared" : "declared", inferenceScope: "global_branch_horizon_primary_outcomes_only", configuredMetricIntervals: branches.length * input.horizons.length * 3 },
     inferenceWarnings: [...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []), "confidence_intervals_do_not_adjust_for_serial_dependence", "no_multiple_testing_adjustment_applied", "economic_event_times_are_caller_supplied_and_not_independently_verified", ...(input.regime === null ? [] : ["regime_subgroups_expand_the_number_of_inspected_outcomes"])],

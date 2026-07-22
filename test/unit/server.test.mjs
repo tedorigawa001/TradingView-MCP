@@ -4638,8 +4638,11 @@ test("run_market_event_study binds caller-supplied event times to aftershock ret
   } }));
   const res = await client.callTool({ name: "run_market_event_study", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
-    condition: { type: "event_aftershock_retest", events: [{ event_id: "us-cpi", occurred_at: "2026-01-05T13:30:00.000Z" }],
-      initial_range_bars: 4, breakout_within_bars: 1, retest_within_bars: 1 },
+    condition: { type: "event_aftershock_retest", events: [
+      { event_id: "us-cpi", occurred_at: "2026-01-05T13:30:00.000Z" },
+      { event_id: "later-event", occurred_at: "2026-01-05T13:45:00.000Z" },
+    ], initial_range_bars: 4, breakout_within_bars: 1, retest_within_bars: 1,
+      overlap_policy: "exclude_later_event" },
     horizons: [1], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
   } });
   const parsed = JSON.parse(res.content[0].text);
@@ -4647,6 +4650,8 @@ test("run_market_event_study binds caller-supplied event times to aftershock ret
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.byBranch.retest_up.events, 1);
   assert.equal(parsed.events[0].direction, "long");
+  assert.equal(parsed.quality.overlappingEventsExcluded, 1);
+  assert.equal(parsed.eventContract.overlapPolicy, "exclude_later_event");
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 

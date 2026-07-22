@@ -679,6 +679,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             initial_range_bars: z.number().int().min(1).max(24).optional(),
             breakout_within_bars: z.number().int().min(1).max(96).optional(),
             retest_within_bars: z.number().int().min(1).max(96).optional(),
+            // A literal keeps today's fail-closed contract while reserving this named extension point.
+            overlap_policy: z.literal("exclude_later_event").optional()
+              .describe("Exclude later event timestamps whose maximum evaluation window overlaps an earlier event. Default: exclude_later_event"),
             require_retest_close_outside: z.boolean().optional(),
             minimum_initial_range_coverage: z.number().finite().gt(0).max(1).optional(),
           }),
@@ -786,6 +789,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             initialRangeBars: condition.initial_range_bars ?? 4,
             breakoutWithinBars: condition.breakout_within_bars ?? 16,
             retestWithinBars: condition.retest_within_bars ?? 16,
+            overlapPolicy: condition.overlap_policy ?? "exclude_later_event",
             requireRetestCloseOutside: condition.require_retest_close_outside ?? true,
             minimumInitialRangeCoverage: condition.minimum_initial_range_coverage ?? 1,
           });

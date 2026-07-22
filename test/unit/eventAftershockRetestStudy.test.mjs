@@ -26,7 +26,7 @@ function input(bars, overrides = {}) {
   return {
     bars, symbol: "OANDA:EURUSD", timeframe: "15",
     events: [{ eventId: "us-cpi-2026-01-05", occurredAt: "2026-01-05T13:30:00.000Z" }],
-    initialRangeBars: 4, breakoutWithinBars: 1, retestWithinBars: 1,
+    initialRangeBars: 4, breakoutWithinBars: 1, retestWithinBars: 1, overlapPolicy: "exclude_later_event",
     requireRetestCloseOutside: true, minimumInitialRangeCoverage: 1,
     horizons: [1, 2], targetReturnBps: 10, minimumEvents: 1,
     folds: [], eventLimit: 20, confidenceLevel: 0.95, configurationTrials: 1, regime: null,
@@ -59,4 +59,41 @@ test("event aftershock study never shifts an unaligned event timestamp to the ne
   assert.equal(result.sample.events, 0);
   assert.equal(result.quality.alignedEvents, 0);
   assert.equal(result.quality.insufficientInitialRangeCoverage, 1);
+});
+
+test("event aftershock study excludes a later event with an overlapping maximum evaluation window", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    events: [
+      { eventId: "first", occurredAt: "2026-01-05T13:30:00.000Z" },
+      { eventId: "later", occurredAt: "2026-01-05T13:45:00.000Z" },
+    ],
+  }));
+  assert.equal(result.quality.eventsAfterOverlapPolicy, 1);
+  assert.equal(result.quality.overlappingEventsExcluded, 1);
+  assert.equal(result.eventContract.overlapPolicy, "exclude_later_event");
+  assert.equal(result.eventContract.maximumEvaluationWindowBars, 8);
+});
+
+test("event aftershock overlap policy compares each event with the last selected event", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    events: [
+      { eventId: "a", occurredAt: "2026-01-05T13:30:00.000Z" },
+      { eventId: "b", occurredAt: "2026-01-05T14:30:00.000Z" },
+      { eventId: "c", occurredAt: "2026-01-05T15:15:00.000Z" },
+    ],
+  }));
+  // B is excluded, so C must still be compared with selected event A, not B.
+  assert.equal(result.quality.eventsAfterOverlapPolicy, 1);
+  assert.equal(result.quality.overlappingEventsExcluded, 2);
+});
+
+test("event aftershock overlap policy retains events separated by the full maximum window", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    events: [
+      { eventId: "first", occurredAt: "2026-01-05T13:30:00.000Z" },
+      { eventId: "separate", occurredAt: "2026-01-05T15:30:00.000Z" },
+    ],
+  }));
+  assert.equal(result.quality.eventsAfterOverlapPolicy, 2);
+  assert.equal(result.quality.overlappingEventsExcluded, 0);
 });
