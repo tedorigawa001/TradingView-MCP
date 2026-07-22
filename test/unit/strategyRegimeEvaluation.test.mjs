@@ -122,3 +122,40 @@ test("strategy regime evaluation rejects a session policy without sessions", () 
     sessionMatchPolicy: "first_match_exclusive",
   }), /requires session definitions/);
 });
+
+test("strategy regime evaluation groups entries by caller-supplied scheduled event proximity", () => {
+  const observations = Array.from({ length: 10 }, (_, index) => observation(index, "range", "normal"));
+  const result = evaluate([trade(2, 3), trade(4, -2), trade(6, 1), trade(8, 2)], observations, {
+    minimumGroupTrades: 1,
+    minimumCoverageRatio: 1,
+    eventProximity: {
+      events: [
+        { eventId: "us-cpi", occurredAt: "2026-01-01T02:00:00.000Z" },
+        { eventId: "fed", occurredAt: "2026-01-01T06:00:00.000Z" },
+      ],
+      coverageFrom: "2026-01-01T01:30:00.000Z",
+      coverageTo: "2026-01-01T07:00:00.000Z",
+      beforeMinutes: 30,
+      afterMinutes: 60,
+    },
+  });
+  assert.equal(result.joinContract.eventProximity.interval, "[event_time - before_minutes, event_time + after_minutes)");
+  assert.equal(result.byEventProximity.near_scheduled_event.trades, 2);
+  assert.equal(result.byEventProximity.outside_scheduled_event_window.trades, 1);
+  assert.equal(result.byEventProximity.outside_event_calendar_coverage.trades, 1);
+});
+
+test("strategy regime evaluation rejects duplicate scheduled event timestamps", () => {
+  assert.throws(() => evaluate([trade(2, 1)], [observation(0, "range", "normal")], {
+    eventProximity: {
+      events: [
+        { eventId: "first", occurredAt: "2026-01-01T02:00:00.000Z" },
+        { eventId: "second", occurredAt: "2026-01-01T02:00:00.000Z" },
+      ],
+      coverageFrom: "2026-01-01T01:30:00.000Z",
+      coverageTo: "2026-01-01T03:00:00.000Z",
+      beforeMinutes: 30,
+      afterMinutes: 30,
+    },
+  }), /timestamps must be unique/);
+});

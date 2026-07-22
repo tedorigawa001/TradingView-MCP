@@ -18,16 +18,26 @@ export interface StrategyRegimeEvaluationInput {
   maxRegimeAgeBars: number;
   sessions?: SessionClockDefinition[];
   sessionMatchPolicy?: SessionMatchPolicy;
+  eventProximity?: {
+    events: Array<{ eventId: string; occurredAt: string }>;
+    coverageFrom: string;
+    coverageTo: string;
+    beforeMinutes: number;
+    afterMinutes: number;
+  };
 }
 
 export type SessionMatchPolicy = "all_matches_non_exclusive" | "first_match_exclusive";
 
 type JoinedTrade = {
   trade: StrategyLedgerTrade;
+  entryTime: number;
   observation: ClassifiedMarketRegimeObservation;
   regimeAgeMilliseconds: number;
   sessionIds: string[];
 };
+
+type EventProximityLabel = "near_scheduled_event" | "outside_scheduled_event_window" | "outside_event_calendar_coverage";
 
 function average(values: number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -128,6 +138,54 @@ function latestClosedObservation(
   return result;
 }
 
+function canonicalEventTime(value: string, label: string): number {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new Error(`${label} must be a canonical ISO timestamp`);
+  }
+  return parsed;
+}
+
+function validateEventProximity(eventProximity: StrategyRegimeEvaluationInput["eventProximity"]) {
+  if (eventProximity === undefined) return null;
+  if (eventProximity.events.length < 1 || eventProximity.events.length > 200) {
+    throw new Error("event proximity requires one to 200 events");
+  }
+  if (!Number.isInteger(eventProximity.beforeMinutes) || !Number.isInteger(eventProximity.afterMinutes) ||
+      eventProximity.beforeMinutes < 0 || eventProximity.beforeMinutes > 1440 ||
+      eventProximity.afterMinutes < 0 || eventProximity.afterMinutes > 1440 ||
+      eventProximity.beforeMinutes + eventProximity.afterMinutes === 0) {
+    throw new Error("event proximity windows must be integers from zero to 1440 minutes with one non-zero window");
+  }
+  if (eventProximity.events.some((event) => !/^[A-Za-z0-9_.:-]{1,120}$/.test(event.eventId))) {
+    throw new Error("event proximity ids must use letters, digits, _, ., :, or -");
+  }
+  if (new Set(eventProximity.events.map((event) => event.eventId)).size !== eventProximity.events.length) {
+    throw new Error("event proximity ids must be unique");
+  }
+  const events = eventProximity.events.map((event) => ({ ...event,
+    occurredAtMs: canonicalEventTime(event.occurredAt, `${event.eventId}.occurredAt`) }));
+  if (new Set(events.map((event) => event.occurredAtMs)).size !== events.length) {
+    throw new Error("event proximity timestamps must be unique");
+  }
+  const coverageFromMs = canonicalEventTime(eventProximity.coverageFrom, "eventProximity.coverageFrom");
+  const coverageToMs = canonicalEventTime(eventProximity.coverageTo, "eventProximity.coverageTo");
+  if (coverageFromMs >= coverageToMs || events.some((event) => event.occurredAtMs < coverageFromMs || event.occurredAtMs >= coverageToMs)) {
+    throw new Error("event proximity coverage must be ordered and contain every event timestamp");
+  }
+  return { events: events.sort((left, right) => left.occurredAtMs - right.occurredAtMs), coverageFromMs, coverageToMs };
+}
+
+function eventProximityLabel(entryTime: number, eventTimes: Array<{ occurredAtMs: number }>, coverageFromMs: number,
+  coverageToMs: number, beforeMinutes: number,
+  afterMinutes: number): EventProximityLabel {
+  if (entryTime < coverageFromMs || entryTime >= coverageToMs) return "outside_event_calendar_coverage";
+  const beforeMs = beforeMinutes * 60_000;
+  const afterMs = afterMinutes * 60_000;
+  return eventTimes.some((event) => entryTime >= event.occurredAtMs - beforeMs && entryTime < event.occurredAtMs + afterMs)
+    ? "near_scheduled_event" : "outside_scheduled_event_window";
+}
+
 export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   if (!Number.isInteger(input.minimumGroupTrades) || input.minimumGroupTrades < 1) {
     throw new Error("minimum group trades must be a positive integer");
@@ -143,6 +201,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   }
   const sessionMatchPolicy: SessionMatchPolicy = input.sessionMatchPolicy ?? "all_matches_non_exclusive";
   const classifySession = input.sessions === undefined ? null : createSessionClockClassifier(input.sessions);
+  const eventTimes = validateEventProximity(input.eventProximity);
   const resolutionMs = marketRegimeResolutionMilliseconds(input.timeframe);
   if (resolutionMs === null || resolutionMs <= 0) throw new Error(`unsupported timeframe: ${input.timeframe}`);
   const observations = [...input.observations].sort((left, right) => left.time - right.time);
@@ -183,7 +242,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
     const sessionIds = (sessionMatchPolicy === "first_match_exclusive"
       ? sessionMatches.slice(0, 1)
       : sessionMatches).map((match) => match.sessionId);
-    joined.push({ trade, observation, regimeAgeMilliseconds, sessionIds });
+    joined.push({ trade, entryTime: trade.entry.time, observation, regimeAgeMilliseconds, sessionIds });
   }
 
   const eligibleClosedTrades = closedTrades.length - excluded.missingEntryTime - excluded.missingProfit;
@@ -227,6 +286,16 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
         : input.sessions.map((session) => session.sessionId),
       unmatchedSessionLabel: input.sessions === undefined ? null : OUTSIDE_DEFINED_SESSIONS_ID,
       sessions: input.sessions ?? [],
+      eventProximity: eventTimes === null ? null : {
+        labelAt: "trade_entry_time",
+        eventTime: "caller_supplied_scheduled_canonical_utc_timestamp",
+        interval: "[event_time - before_minutes, event_time + after_minutes)",
+        events: eventTimes.events.length,
+        coverageFrom: input.eventProximity!.coverageFrom,
+        coverageTo: input.eventProximity!.coverageTo,
+        beforeMinutes: input.eventProximity!.beforeMinutes,
+        afterMinutes: input.eventProximity!.afterMinutes,
+      },
     },
     coverage: {
       ledgerTrades: input.ledger.trades.length,
@@ -247,5 +316,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
     bySession: input.sessions === undefined
       ? null
       : sessionEvidence(joined, input.sessions, input.minimumGroupTrades),
+    byEventProximity: eventTimes === null
+      ? null
+      : groupEvidence(joined, (item) => eventProximityLabel(item.entryTime, eventTimes.events,
+        eventTimes.coverageFromMs, eventTimes.coverageToMs,
+        input.eventProximity!.beforeMinutes, input.eventProximity!.afterMinutes), input.minimumGroupTrades),
   };
 }

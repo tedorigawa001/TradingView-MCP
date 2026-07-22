@@ -48,6 +48,7 @@ import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationship
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
+import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
@@ -134,6 +135,19 @@ const CANONICAL_ISO_TIMESTAMP_SCHEMA = z.string()
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
   }, "must be a canonical ISO timestamp");
+const STRATEGY_EVENT_PROXIMITY_SCHEMA = z.object({
+  events: z.array(z.object({
+    event_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/),
+    occurred_at: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+  })).min(1).max(200),
+  coverage_from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+  coverage_to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+  before_minutes: z.number().int().min(0).max(1440),
+  after_minutes: z.number().int().min(0).max(1440),
+}).refine((value) => value.before_minutes + value.after_minutes > 0,
+  "event proximity requires a non-zero before or after window")
+  .refine((value) => value.coverage_from < value.coverage_to,
+    "event proximity coverage_from must be before coverage_to");
 const RESEARCH_POPULATION_SCHEMA = z.enum(["in_sample", "out_of_sample", "walk_forward", "stress", "live"]);
 const RESEARCH_METRICS_SCHEMA = z.record(z.string().min(1).max(64), z.number().nullable());
 const REAL_YIELD_OUTPUT_SCHEMA = {
@@ -1281,6 +1295,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Optional DST-aware session windows used for entry-time grouping"),
         session_match_policy: SESSION_MATCH_POLICY_SCHEMA.optional()
           .describe("Session overlap handling. Default: all_matches_non_exclusive; exclusive uses input order"),
+        event_proximity: STRATEGY_EVENT_PROXIMITY_SCHEMA.optional()
+          .describe("Optional scheduled-event entry-time groups; caller supplies canonical UTC timestamps"),
         confirm: z.boolean().optional()
           .describe("Must be true to add the strategy temporarily and run the analysis. Default: false"),
       },
@@ -1289,7 +1305,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       trend_lookback, atr_lookback, volatility_baseline_lookback, trend_efficiency_threshold,
       range_efficiency_threshold, directional_move_atr_threshold, high_volatility_ratio,
       low_volatility_ratio, minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, sessions, session_match_policy, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, session_match_policy, event_proximity, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1342,6 +1358,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             start: session.start,
             end: session.end,
           })),
+          eventProximity: event_proximity === undefined ? undefined : {
+            events: event_proximity.events.map((event) => ({ eventId: event.event_id, occurredAt: event.occurred_at })),
+            coverageFrom: event_proximity.coverage_from,
+            coverageTo: event_proximity.coverage_to,
+            beforeMinutes: event_proximity.before_minutes,
+            afterMinutes: event_proximity.after_minutes,
+          },
         };
         if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const definition = {
@@ -1492,6 +1515,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Optional DST-aware session windows used for entry-time grouping"),
         session_match_policy: SESSION_MATCH_POLICY_SCHEMA.optional()
           .describe("Session overlap handling. Default: all_matches_non_exclusive; exclusive uses input order"),
+        event_proximity: STRATEGY_EVENT_PROXIMITY_SCHEMA.optional()
+          .describe("Optional scheduled-event entry-time groups; caller supplies canonical UTC timestamps"),
         max_runtime_seconds: z.number().int().min(30).max(1800).optional()
           .describe("Do not start another job after this soft deadline. Default: 900"),
         confirm: z.boolean().optional(),
@@ -1501,7 +1526,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       volatility_baseline_lookback, trend_efficiency_threshold, range_efficiency_threshold,
       directional_move_atr_threshold, high_volatility_ratio, low_volatility_ratio,
       minimum_classified_bars, minimum_group_trades, minimum_coverage_ratio,
-      max_regime_age_bars, sessions, session_match_policy, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
+      max_regime_age_bars, sessions, session_match_policy, event_proximity, max_runtime_seconds, confirm }) => chartOperations.run(async () => {
       try {
         const initialChart = chartFingerprint(await tv.getChartContext());
         if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
@@ -1571,6 +1596,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             start: session.start,
             end: session.end,
           })),
+          eventProximity: event_proximity === undefined ? undefined : {
+            events: event_proximity.events.map((event) => ({ eventId: event.event_id, occurredAt: event.occurred_at })),
+            coverageFrom: event_proximity.coverage_from,
+            coverageTo: event_proximity.coverage_to,
+            beforeMinutes: event_proximity.before_minutes,
+            afterMinutes: event_proximity.after_minutes,
+          },
         };
         if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const maxRuntimeSeconds = max_runtime_seconds ?? 900;
@@ -5679,6 +5711,56 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     },
+  );
+
+  server.registerTool(
+    "compute_correlation_regimes",
+    {
+      description: "Classify rolling return correlation between two explicitly bound layout charts. Closed bars must share an exact UTC timestamp; missing bars are never forward-filled. This is descriptive evidence, not a trading signal.",
+      inputSchema: {
+        primary_chart_index: z.number().int().min(0),
+        reference_chart_index: z.number().int().min(0),
+        expected_primary_symbol: SYMBOL_SCHEMA,
+        expected_reference_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+        count: z.number().int().min(20).max(5000).optional(),
+        window: z.number().int().min(2).max(500).optional(),
+        strong_threshold: z.number().finite().gt(0).max(1).optional(),
+        neutral_threshold: z.number().finite().min(0).lt(1).optional(),
+      },
+    },
+    async ({ primary_chart_index, reference_chart_index, expected_primary_symbol, expected_reference_symbol,
+      expected_timeframe, count, window, strong_threshold, neutral_threshold }) => chartOperations.run(async () => {
+      try {
+        if (primary_chart_index === reference_chart_index) throw new Error("primary and reference chart indexes must differ");
+        const context = await tv.getChartContext();
+        const primaryChart = context.charts.find((chart) => chart.index === primary_chart_index);
+        const referenceChart = context.charts.find((chart) => chart.index === reference_chart_index);
+        if (!primaryChart || !referenceChart) throw new Error("requested correlation charts are not present in the layout");
+        if (primaryChart.symbol.toUpperCase() !== expected_primary_symbol.toUpperCase() ||
+            referenceChart.symbol.toUpperCase() !== expected_reference_symbol.toUpperCase() ||
+            normalizeResolution(primaryChart.resolution) !== normalizeResolution(expected_timeframe) ||
+            normalizeResolution(referenceChart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("correlation chart binding does not match the requested symbols and timeframe");
+        }
+        const [primary, reference] = await Promise.all([
+          tv.getOhlcv(count ?? 1000, primary_chart_index), tv.getOhlcv(count ?? 1000, reference_chart_index),
+        ]);
+        if (primary.symbol.toUpperCase() !== expected_primary_symbol.toUpperCase() ||
+            reference.symbol.toUpperCase() !== expected_reference_symbol.toUpperCase() ||
+            normalizeResolution(primary.resolution) !== normalizeResolution(expected_timeframe) ||
+            normalizeResolution(reference.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("correlation OHLC evidence does not match the bound charts");
+        }
+        const result = computeCorrelationRegimes({ primaryBars: primary.bars, referenceBars: reference.bars, timeframe: primary.resolution,
+          window: window ?? 20, strongThreshold: strong_threshold ?? 0.7, neutralThreshold: neutral_threshold ?? 0.2 });
+        return jsonResult({ schemaVersion: "1.0", status: result.qualityIssues.length === 0 ? "complete" : "partial",
+          primary: { chartIndex: primary_chart_index, symbol: primary.symbol }, reference: { chartIndex: reference_chart_index, symbol: reference.symbol },
+          timeframe: primary.resolution, window: window ?? 20, strongThreshold: strong_threshold ?? 0.7,
+          neutralThreshold: neutral_threshold ?? 0.2, ...result,
+          limitations: ["Correlation is calculated only from exact-time-aligned closed-bar returns.", "It is descriptive and does not imply a causal or stable relationship."], });
+      } catch (err) { return errorResult(err); }
+    }),
   );
 
   server.registerTool(

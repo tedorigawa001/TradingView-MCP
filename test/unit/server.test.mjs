@@ -677,7 +677,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-eight expected tools", async () => {
+test("exposes exactly the sixty-nine expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -688,6 +688,7 @@ test("exposes exactly the sixty-eight expected tools", async () => {
       "audit_pine_indicator",
       "compare_indicator_observations",
       "compare_strategy_experiments",
+      "compute_correlation_regimes",
       "compute_feature_outcome_relationships",
       "compute_market_features",
       "compute_market_regimes",
@@ -915,6 +916,29 @@ test("get_aligned_history aligns closed bars without forward filling", async () 
   assert.equal(parsed.observations.length, 2);
   assert.equal(parsed.observations[0].bars.length, 2);
   assert.equal(parsed.forming_bars_excluded["0"], 1);
+});
+
+test("compute_correlation_regimes binds two exact-time chart histories", async () => {
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+      { index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] },
+      { index: 1, symbol: "TVC:DXY", resolution: "60", studies: [] },
+    ] }),
+    getOhlcv: async (_count, chartIndex) => {
+      const closes = chartIndex === 0 ? [100, 101, 103, 106] : [100, 99, 97, 94];
+      return { symbol: chartIndex === 0 ? "OANDA:EURUSD" : "TVC:DXY", resolution: "60", count: closes.length,
+        bars: closes.map((close, index) => ({ time: index * 3600, timeIso: new Date(index * 3_600_000).toISOString(),
+          open: close, high: close, low: close, close, volume: 1 })) };
+    },
+  }}));
+  const response = await client.callTool({ name: "compute_correlation_regimes", arguments: {
+    primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:EURUSD",
+    expected_reference_symbol: "TVC:DXY", expected_timeframe: "60", window: 2,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
+  assert.equal(parsed.observations.at(-1).regime, "strong_negative");
 });
 
 test("audit_pine_indicator identifies repaint-prone source constructs", async () => {
@@ -4866,10 +4890,16 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
     pine_version: "1.0", count: 200, trend_lookback: 10, atr_lookback: 5,
     volatility_baseline_lookback: 20, minimum_classified_bars: 20,
     minimum_group_trades: 2, minimum_coverage_ratio: 1, max_regime_age_bars: 1, confirm: true,
+    event_proximity: { events: [{ event_id: "us-cpi", occurred_at: "2026-01-05T04:00:00.000Z" }],
+      coverage_from: "2026-01-05T03:30:00.000Z", coverage_to: "2026-01-05T05:00:00.000Z",
+      before_minutes: 30, after_minutes: 60 },
   } })).content[0].text);
   assert.equal(result.status, "complete");
   assert.equal(result.evaluation.coverage.joinedTrades, 4);
   assert.equal(result.evaluation.byDirectionalRegime.trend_up.profitFactor, 7 / 3);
+  assert.equal(result.evaluation.byEventProximity.near_scheduled_event.trades, 1);
+  assert.equal(result.definition.join.eventProximity.events.length, 1);
+  assert.equal(result.definition.join.eventProximity.coverageFrom, "2026-01-05T03:30:00.000Z");
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(result.strategyEvidence.ledgerTrades, 4);
   assert.equal(runs, 1);
@@ -4949,6 +4979,11 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
     max_regime_age_bars: 1,
     session_match_policy: "first_match_exclusive",
     sessions: [{ session_id: "london", timezone: "Europe/London", start: "08:00", end: "16:00" }],
+    event_proximity: {
+      events: [{ event_id: "us-cpi", occurred_at: "2026-01-05T04:00:00.000Z" }],
+      coverage_from: "2026-01-05T03:30:00.000Z", coverage_to: "2026-01-05T05:00:00.000Z",
+      before_minutes: 30, after_minutes: 60,
+    },
     jobs: [
       { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
       { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId },
@@ -4960,6 +4995,8 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.equal(preview.status, "preview");
   assert.equal(preview.jobCount, 2);
   assert.equal(preview.execution.historyLoadPerJob, 6000);
+  assert.equal(preview.definition.join.eventProximity.events.length, 1);
+  assert.equal(preview.definition.join.eventProximity.coverageFrom, "2026-01-05T03:30:00.000Z");
   assert.equal(runs, 0);
 
   const result = JSON.parse((await client.callTool({
@@ -4976,6 +5013,10 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.equal(preview.definition.join.sessionMatchPolicy, "first_match_exclusive");
   assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "first_match_exclusive");
   assert.deepEqual(result.results[0].evaluation.joinContract.sessionPriority, ["london"]);
+  assert.deepEqual(result.results.map((row) => row.evaluation.joinContract.eventProximity.events), [1, 1]);
+  assert.deepEqual(result.results.map((row) => row.evaluation.joinContract.eventProximity.coverageTo), [
+    "2026-01-05T05:00:00.000Z", "2026-01-05T05:00:00.000Z",
+  ]);
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(runs, 2);
   assert.equal(removed, 2);
