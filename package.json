@@ -36,5 +36,8 @@
     "@types/node": "^26.1.0",
     "@types/ws": "^8.18.1",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.11"
   }
 }
