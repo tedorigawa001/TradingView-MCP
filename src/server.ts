@@ -42,6 +42,7 @@ import {
 } from "./strategyStress.js";
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
+import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
@@ -625,6 +626,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Condition session_auction classifies the first break of a prior local-session range as accepted " +
         "outside closes or a failed return inside. Condition session_exhaustion_handoff tests whether a " +
         "closed-bar prior-session direction fails to extend in an early handoff session and reverses. " +
+        "Condition event_aftershock_retest evaluates caller-supplied, canonical economic-event timestamps " +
+        "through a post-event initial range, close breakout, and first boundary retest. " +
         "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
         "optional non-overlapping time folds with bounded mean and rate confidence intervals. The caller " +
         "can declare the number of configurations inspected; serial dependence and multiple testing are " +
@@ -666,6 +669,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             require_range_reentry: z.boolean().optional(),
             require_opposite_body: z.boolean().optional(),
             minimum_prior_coverage: z.number().finite().gt(0).max(1).optional(),
+          }),
+          z.object({
+            type: z.literal("event_aftershock_retest"),
+            events: z.array(z.object({
+              event_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/),
+              occurred_at: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+            })).min(1).max(200),
+            initial_range_bars: z.number().int().min(1).max(24).optional(),
+            breakout_within_bars: z.number().int().min(1).max(96).optional(),
+            retest_within_bars: z.number().int().min(1).max(96).optional(),
+            require_retest_close_outside: z.boolean().optional(),
+            minimum_initial_range_coverage: z.number().finite().gt(0).max(1).optional(),
           }),
         ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
@@ -752,7 +767,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             auctionEnd: condition.auction_end, acceptanceCloses: condition.acceptance_closes ?? 2,
             failureWithinBars: condition.failure_within_bars ?? 2, minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
           })
-          : runSessionExhaustionHandoffStudy({
+          : condition.type === "session_exhaustion_handoff"
+          ? runSessionExhaustionHandoffStudy({
             ...common, timezone: condition.timezone,
             priorSessions: condition.prior_sessions.map((session) => ({ sessionId: session.session_id, start: session.start, end: session.end })),
             handoffStart: condition.handoff_start, handoffEnd: condition.handoff_end, priorDirection: condition.prior_direction,
@@ -763,6 +779,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             requireRangeReentry: condition.require_range_reentry ?? true,
             requireOppositeBody: condition.require_opposite_body ?? true,
             minimumPriorCoverage: condition.minimum_prior_coverage ?? 0.8,
+          })
+          : runEventAftershockRetestStudy({
+            ...common,
+            events: condition.events.map((event) => ({ eventId: event.event_id, occurredAt: event.occurred_at })),
+            initialRangeBars: condition.initial_range_bars ?? 4,
+            breakoutWithinBars: condition.breakout_within_bars ?? 16,
+            retestWithinBars: condition.retest_within_bars ?? 16,
+            requireRetestCloseOutside: condition.require_retest_close_outside ?? true,
+            minimumInitialRangeCoverage: condition.minimum_initial_range_coverage ?? 1,
           });
         return jsonResult({
           ...result,

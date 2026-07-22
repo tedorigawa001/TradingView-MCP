@@ -4622,6 +4622,34 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 
+test("run_market_event_study binds caller-supplied event times to aftershock retests", async () => {
+  const start = Date.UTC(2026, 0, 5, 13, 30);
+  const bars = [
+    [1.05, 1.10, 1.00, 1.06], [1.06, 1.09, 1.01, 1.04], [1.04, 1.08, 1.02, 1.07],
+    [1.07, 1.10, 1.03, 1.08], [1.08, 1.14, 1.07, 1.12], [1.12, 1.14, 1.09, 1.11],
+    [1.11, 1.15, 1.10, 1.14], [1.14, 1.17, 1.13, 1.16],
+  ].map(([open, high, low, close], index) => ({ time: (start + index * 900_000) / 1000,
+    timeIso: new Date(start + index * 900_000).toISOString(), open, high, low, close, volume: 1 }));
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "event_aftershock_retest", events: [{ event_id: "us-cpi", occurred_at: "2026-01-05T13:30:00.000Z" }],
+      initial_range_bars: 4, breakout_within_bars: 1, retest_within_bars: 1 },
+    horizons: [1], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "event_aftershock_retest");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.byBranch.retest_up.events, 1);
+  assert.equal(parsed.events[0].direction, "long");
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+});
+
 test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {
   const day = 86_400_000;
   const start = Date.UTC(2026, 0, 1);

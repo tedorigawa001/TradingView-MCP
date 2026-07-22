@@ -342,7 +342,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **モデル境界**: spread/slippageをpipsからreport通貨へ一般変換せず、追加コストは明示的な`report currency / trade`として扱う。commission欠落時は該当シナリオだけ`not_evaluable`にする。bootstrapは取引結果の再標本化であり、市場経路、自己相関、約定順序を再現しない。再実行入力がStrategy内で何を意味するかはPine sourceの契約であり、同じ入力名でも異なるStrategy間で同一効果とみなさない
 - **検証状況**: protocolのready/blocked/warning、ID決定性、未来・重複・OOS閲覧後変更、コスト/件数、Pine監査、台帳stressの決定性、コスト劣化、commission欠落、品質・coverage拒否、seed再現性、MCP dry-run/一時適用/cleanup/chart fingerprint復元をユニットテストで固定した
 
-### #36 条件付きイベントスタディ(`run_market_event_study`) 🟡 `session_auction`初版実装・汎用条件は継続
+### #36 条件付きイベントスタディ(`run_market_event_study`) 🟡 固定条件3種・汎用条件は継続
 
 - **目的**: いきなり売買ストラテジーを作らず、「条件発生後に優位性があるか」を将来リターン、MFE、MAE、到達時間で調べる
 - **入力**: point-in-timeで計算可能な条件、観測時刻、複数horizon、方向、セッション、コスト仮定、重複イベントの扱いを明示する。条件式は許可された特徴量DSLまたは構造化JSONとし、任意コードを実行しない
@@ -354,7 +354,8 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **regime時刻結合(2026-07-21)**: optional `regime`設定で既存の効率比/ATR方向・trailing volatility labelを同じ確定OHLCからpoint-in-time生成し、各eventを`regime bar start + nominal resolution <= signal bar start`を満たす最新labelだけへas-of joinする。signal足自身のregimeは同時確定でも意図的に除外し、最大age、join coverage、分類warmup欠落を別集計する。directional 4、volatility 3、combined 12の全19セルを返すが、最低event数未満はhorizonを計算せず`not_evaluable`とする。評価可能セルもreturn平均/区間、positive率/区間、target率/区間だけに制限し、MFE/MAEや自動ランキングを展開しない
 - **regime結合実機検証(2026-07-21)**: 同じEURUSD 15分5,000本・43eventへ20本効率比、ATR14、volatility baseline 50、group最低3event、最大age 1本を適用し、43/43件(100%)を直前確定regimeへ結合した。全件age 0msは直前15分足の名目closeがsignal足startと一致することを示し、signal足自身は不使用。固定19セル中9セルが評価可能、108主要intervalを返した。4本後returnはrange-highが+0.0345%で最良に見えたが95%区間-0.0153%〜+0.0844%、transition-highは-0.0179%で区間-0.0491%〜+0.0134%となり、評価可能9セルすべてゼロを跨いだため採用根拠なし。応答はevent明細0で約106KB、生OHLC/label列なし。検証後は元chartを完全復元した
 - **検証状況**: accepted-upとfailed-upの排他分類・方向反転、形成中足除外、両側sweep拒否、fold集計、London DST開始後もlocal 08:00をUTC 07:00として扱うこと、MCP chart binding/read-only履歴取得をユニットテストで固定した
-- **残タスク**: 条件DSL、重複event policy、多重比較補正を採用する場合の事前方式、経済event条件は未実装。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
+- **Event Aftershock Retest初版(2026-07-22)**: `event_aftershock_retest`は1〜200件のcaller-supplied canonical UTC event時刻を受け、イベント時刻と正確に一致する確定足から初動レンジを形成する。レンジ外への最初の終値break後、最初の境界touchが外側で終値を維持した場合だけ継続方向eventとする。時刻を次の足へずらさず、形成中足、初動レンジ・breakout/retest窓の欠落や不規則timestamp、境界内終値を明示的に除外する。calendarの現在92日取得制約を歴史データへ暗黙補完せず、event sourceと時刻の妥当性はcaller側の研究契約に残す。これはsignal bar closeのevent studyであり、約定・PF・収益性を主張しない
+- **残タスク**: 条件DSL、重複event policy、多重比較補正を採用する場合の事前方式。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
 ### #37 市場レジーム分類(`compute_market_regimes`) 🟡 台帳・一括・session分解実装、他要因は継続
 
