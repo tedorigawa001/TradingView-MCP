@@ -44,6 +44,7 @@ import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
+import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
@@ -912,10 +913,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_dxy_context_gate_template",
+    {
+      description: "Return the fixed Pine Study template that reads confirmed DXY daily data with lookahead_off and exposes dxy_return_20 and dxy_gate plots. Read-only.",
+      inputSchema: {},
+    },
+    async () => jsonResult({ name: DXY_CONTEXT_GATE_NAME, version: DXY_CONTEXT_GATE_VERSION, plots: { return20: DXY_CONTEXT_GATE_RETURN_PLOT, gate: DXY_CONTEXT_GATE_PLOT }, source: DXY_CONTEXT_GATE_SOURCE }),
+  );
+
+  server.registerTool(
     "run_yield_price_nonconfirmation_study",
     {
       description:
-        "Run a bounded, read-only cross-asset event study over two exact TradingView charts. " +
+        "Run a bounded, read-only cross-asset event study over two exact TradingView charts, " +
+        "with an optional third-chart OHLC regime or fixed DXY Pine gate on the target chart. " +
         "A driver impulse becomes usable only after its nominal bar close; the study then tests whether " +
         "the target fails to break in the expected direction and confirms an opposite structural close. " +
         "It uses an as-of join without forward-fill and returns forward return, MFE, MAE, target timing, " +
@@ -924,6 +935,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       inputSchema: {
         target_chart_index: z.number().int().min(0),
         driver_chart_index: z.number().int().min(0),
+        context_regime: z.object({ chart_index: z.number().int().min(0), expected_symbol: SYMBOL_SCHEMA, expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDW]|[SDW])$/i), lookback: z.number().int().min(1).max(250), minimum_return: z.number().finite(), max_age_bars: z.number().int().min(0).max(20) }).optional(),
+        context_indicator: z.object({ study_id: z.string().regex(/^[\w$]{1,64}$/), gate_plot_id: z.string().min(1).max(80), max_age_bars: z.number().int().min(0).max(20), accepted_gate_value: z.union([z.literal(0), z.literal(1)]).optional().describe("Gate polarity to retain. Default: 1") }).optional(),
         expected_target_symbol: SYMBOL_SCHEMA,
         expected_driver_symbol: SYMBOL_SCHEMA,
         expected_target_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDW]|[SDW])$/i),
@@ -950,20 +963,23 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
       },
     },
-    async ({ target_chart_index, driver_chart_index, expected_target_symbol, expected_driver_symbol,
+    async ({ target_chart_index, driver_chart_index, context_regime, context_indicator, expected_target_symbol, expected_driver_symbol,
       expected_target_timeframe, expected_driver_timeframe, count, relationship, driver_lookback,
       driver_change_threshold, price_breakout_lookback, nonconfirmation_bars, trigger_lookback,
       trigger_within_bars, max_driver_age_bars, horizons, target_return_bps, minimum_events, folds,
       event_limit }) => chartOperations.run(async () => {
       try {
-        if (target_chart_index === driver_chart_index) {
+        if (context_regime && context_indicator) throw new Error("context_regime and context_indicator are mutually exclusive");
+        if (target_chart_index === driver_chart_index || (context_regime && [target_chart_index, driver_chart_index].includes(context_regime.chart_index))) {
           throw new Error("target and driver must use different chart indexes");
         }
         const context = await tv.getChartContext();
         const targetChart = context.charts.find((chart) => chart.index === target_chart_index);
         const driverChart = context.charts.find((chart) => chart.index === driver_chart_index);
+        const contextChart = context_regime ? context.charts.find((chart) => chart.index === context_regime.chart_index) : null;
         if (!targetChart) throw new Error(`target chart ${target_chart_index} not found`);
         if (!driverChart) throw new Error(`driver chart ${driver_chart_index} not found`);
+        if (context_regime && !contextChart) throw new Error(`context chart ${context_regime.chart_index} not found`);
         if (targetChart.symbol.toUpperCase() !== expected_target_symbol.toUpperCase() ||
             normalizeResolution(targetChart.resolution) !== normalizeResolution(expected_target_timeframe)) {
           throw new Error("target chart does not match the expected symbol and timeframe");
@@ -972,14 +988,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             normalizeResolution(driverChart.resolution) !== normalizeResolution(expected_driver_timeframe)) {
           throw new Error("driver chart does not match the expected symbol and timeframe");
         }
+        if (context_regime && (contextChart!.symbol.toUpperCase() !== context_regime.expected_symbol.toUpperCase() || normalizeResolution(contextChart!.resolution) !== normalizeResolution(context_regime.expected_timeframe))) throw new Error("context chart does not match the expected symbol and timeframe");
         const replay = await tv.getReplayStatus();
         if (replay.started || replay.toolbarVisible) {
           throw new Error("yield-price nonconfirmation study is blocked while Bar Replay is active");
         }
         const requestedBars = count ?? 5000;
-        const [targetHistory, driverHistory] = await Promise.all([
+        const [targetHistory, driverHistory, contextHistory, contextIndicatorValues] = await Promise.all([
           tv.getOhlcv(requestedBars, target_chart_index),
           tv.getOhlcv(requestedBars, driver_chart_index),
+          context_regime ? tv.getOhlcv(requestedBars, context_regime.chart_index) : Promise.resolve(null),
+          context_indicator ? tv.getIndicatorValues({ studyId: context_indicator.study_id,
+            count: requestedBars, chartIndex: target_chart_index, includeAllPlots: true }) : Promise.resolve(null),
         ]);
         if (targetHistory.symbol.toUpperCase() !== expected_target_symbol.toUpperCase() ||
             normalizeResolution(targetHistory.resolution) !== normalizeResolution(expected_target_timeframe)) {
@@ -988,6 +1008,29 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         if (driverHistory.symbol.toUpperCase() !== expected_driver_symbol.toUpperCase() ||
             normalizeResolution(driverHistory.resolution) !== normalizeResolution(expected_driver_timeframe)) {
           throw new Error("driver OHLC evidence does not match the bound chart");
+        }
+        if (context_regime && (!contextHistory || contextHistory.symbol.toUpperCase() !== context_regime.expected_symbol.toUpperCase() || normalizeResolution(contextHistory.resolution) !== normalizeResolution(context_regime.expected_timeframe))) throw new Error("context OHLC evidence does not match the bound chart");
+        let normalizedContextIndicator: null | {
+          observations: Array<{ time: number; timeIso: string; gate: 0 | 1 | null }>;
+          studyId: string; plotId: string; timeframe: string; maxAgeBars: number; acceptedGateValue: 0 | 1;
+        } = null;
+        if (context_indicator) {
+          const study = contextIndicatorValues?.find((item) => item.id === context_indicator.study_id);
+          if (!study || study.name !== DXY_CONTEXT_GATE_NAME || study.hasError === true) {
+            throw new Error("context indicator does not match the fixed DXY gate template");
+          }
+          const gatePlot = study.plots.find((plot) =>
+            (plot.id === context_indicator.gate_plot_id || plot.title === context_indicator.gate_plot_id) &&
+            plot.title === DXY_CONTEXT_GATE_PLOT);
+          if (!gatePlot) throw new Error("context indicator dxy_gate plot not found");
+          const observations = study.bars.map((bar) => {
+            const raw = bar.values[gatePlot.id] ?? bar.values[gatePlot.title] ?? null;
+            if (raw !== null && raw !== 0 && raw !== 1) throw new Error("context indicator dxy_gate must be 0, 1, or null");
+            return { time: bar.time, timeIso: bar.timeIso, gate: raw as 0 | 1 | null };
+          });
+          normalizedContextIndicator = { observations, studyId: study.id, plotId: gatePlot.id,
+            timeframe: targetHistory.resolution, maxAgeBars: context_indicator.max_age_bars,
+            acceptedGateValue: context_indicator.accepted_gate_value ?? 1 };
         }
         const result = runYieldPriceNonconfirmationStudy({
           targetBars: targetHistory.bars,
@@ -1009,6 +1052,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumEvents: minimum_events,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           eventLimit: event_limit ?? 50,
+          contextRegime: context_regime === undefined ? null : { bars: contextHistory!.bars, symbol: contextHistory!.symbol, timeframe: contextHistory!.resolution, lookback: context_regime.lookback, minimumReturn: context_regime.minimum_return, maxAgeBars: context_regime.max_age_bars },
+          contextIndicator: normalizedContextIndicator,
         });
         return jsonResult({
           ...result,
@@ -1026,6 +1071,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               from: driverHistory.bars[0]?.timeIso ?? null,
               to: driverHistory.bars.at(-1)?.timeIso ?? null,
             },
+            ...(context_regime ? { context: { chartIndex: context_regime.chart_index, returnedBars: contextHistory!.bars.length, from: contextHistory!.bars[0]?.timeIso ?? null, to: contextHistory!.bars.at(-1)?.timeIso ?? null } } : {}),
+            ...(context_indicator && normalizedContextIndicator ? { contextIndicator: { chartIndex: target_chart_index, studyId: normalizedContextIndicator.studyId, plotId: normalizedContextIndicator.plotId, returnedObservations: normalizedContextIndicator.observations.length, from: normalizedContextIndicator.observations[0]?.timeIso ?? null, to: normalizedContextIndicator.observations.at(-1)?.timeIso ?? null } } : {}),
           },
           limitations: [
             "This is an event study, not a fill, execution, or profitability simulation.",

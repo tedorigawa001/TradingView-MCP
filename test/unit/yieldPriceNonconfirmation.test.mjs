@@ -98,3 +98,66 @@ test("yield-price study reports calendar gaps without dropping observed target-b
   assert.ok(result.qualityIssues.includes("irregular_target_timestamps_not_forward_filled"));
   assert.notEqual(result.events[0].outcomes["1"], null);
 });
+
+test("yield-price context gate never uses a future context bar and rejects an unmet regime", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const futureOnly = bars(start + 30 * DAY, [100, 101, 102, 103]);
+  const future = runYieldPriceNonconfirmationStudy(input(target, driver, { contextRegime: { bars: futureOnly, symbol: "TVC:DXY", timeframe: "1D", lookback: 2, minimumReturn: 0, maxAgeBars: 2 } }));
+  assert.equal(future.sample.events, 0);
+  assert.equal(future.quality.noContextBarBeforeSignal, 1);
+  const context = bars(start, [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
+  const rejected = runYieldPriceNonconfirmationStudy(input(target, driver, { contextRegime: { bars: context, symbol: "TVC:DXY", timeframe: "1D", lookback: 2, minimumReturn: 0.01, maxAgeBars: 2 } }));
+  assert.equal(rejected.sample.events, 0);
+  assert.equal(rejected.quality.contextRegimeRejected, 1);
+});
+
+test("yield-price study rejects simultaneous OHLC and Pine context gates", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  assert.throws(() => runYieldPriceNonconfirmationStudy(input(target, driver, {
+    contextRegime: { bars: target, symbol: "TVC:DXY", timeframe: "1D",
+      lookback: 2, minimumReturn: 0, maxAgeBars: 2 },
+    contextIndicator: { observations: [], studyId: "gate1", plotId: "plot_1",
+      timeframe: "1D", maxAgeBars: 2 },
+  })), /context regime and context indicator are mutually exclusive/);
+});
+
+test("yield-price Pine context gate uses only closed prior values and treats na as unavailable", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const observations = target.map((bar) => ({ time: bar.time, timeIso: bar.timeIso, gate: 1 }));
+  const passed = runYieldPriceNonconfirmationStudy(input(target, driver, { contextIndicator: {
+    observations, studyId: "gate1", plotId: "plot_1", timeframe: "1D", maxAgeBars: 2,
+  } }));
+  assert.equal(passed.sample.events, 1);
+  const rejected = runYieldPriceNonconfirmationStudy(input(target, driver, { contextIndicator: {
+    observations: observations.map((item) => ({ ...item, gate: 0 })),
+    studyId: "gate1", plotId: "plot_1", timeframe: "1D", maxAgeBars: 2,
+  } }));
+  assert.equal(rejected.sample.events, 0);
+  assert.equal(rejected.quality.contextIndicatorRejected, 1);
+  const inversePolarity = runYieldPriceNonconfirmationStudy(input(target, driver, { contextIndicator: {
+    observations: observations.map((item) => ({ ...item, gate: 0 })),
+    studyId: "gate1", plotId: "plot_1", timeframe: "1D", maxAgeBars: 2,
+    acceptedGateValue: 0,
+  } }));
+  assert.equal(inversePolarity.sample.events, 1);
+  assert.equal(inversePolarity.definition.contextIndicator.acceptedGateValue, 0);
+  const unavailable = runYieldPriceNonconfirmationStudy(input(target, driver, { contextIndicator: {
+    observations: observations.map((item) => ({ ...item, gate: null })),
+    studyId: "gate1", plotId: "plot_1", timeframe: "1D", maxAgeBars: 2,
+  } }));
+  assert.equal(unavailable.sample.events, 0);
+  assert.equal(unavailable.quality.contextIndicatorUnavailable, 1);
+  const future = runYieldPriceNonconfirmationStudy(input(target, driver, { contextIndicator: {
+    observations: [{ time: target.at(-1).time + 30 * DAY / 1000,
+      timeIso: new Date(target.at(-1).time * 1000 + 30 * DAY).toISOString(), gate: 1 }],
+    studyId: "gate1", plotId: "plot_1", timeframe: "1D", maxAgeBars: 2,
+  } }));
+  assert.equal(future.sample.events, 0);
+  assert.equal(future.quality.noContextBarBeforeSignal, 1);
+});

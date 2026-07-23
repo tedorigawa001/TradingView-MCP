@@ -27,6 +27,15 @@ export interface YieldPriceNonconfirmationInput {
   minimumEvents: number;
   folds: YieldPriceNonconfirmationFold[];
   eventLimit: number;
+  contextRegime: null | { bars: OhlcvBar[]; symbol: string; timeframe: string; lookback: number; minimumReturn: number; maxAgeBars: number };
+  contextIndicator?: null | {
+    observations: Array<{ time: number; timeIso: string; gate: 0 | 1 | null }>;
+    studyId: string;
+    plotId: string;
+    timeframe: string;
+    maxAgeBars: number;
+    acceptedGateValue?: 0 | 1;
+  };
 }
 
 type Branch = "driver_up_target_failure" | "driver_down_target_failure";
@@ -71,6 +80,19 @@ function validateBars(bars: OhlcvBar[], label: string): OhlcvBar[] {
       !Number.isFinite(bar.low) || !Number.isFinite(bar.close) || bar.low > bar.high ||
       bar.open < bar.low || bar.open > bar.high || bar.close < bar.low || bar.close > bar.high ||
       bar.close <= 0)) throw new Error(`${label} contains invalid OHLC`);
+  return ordered;
+}
+
+function validateGateObservations(
+  observations: Array<{ time: number; timeIso: string; gate: 0 | 1 | null }>,
+) {
+  const ordered = [...observations].sort((left, right) => left.time - right.time);
+  if (ordered.some((item, index) => !Number.isFinite(item.time) ||
+      new Date(item.time * 1000).toISOString() !== item.timeIso ||
+      (index > 0 && item.time === ordered[index - 1].time) ||
+      (item.gate !== null && item.gate !== 0 && item.gate !== 1))) {
+    throw new Error("context indicator contains invalid observations");
+  }
   return ordered;
 }
 
@@ -126,6 +148,11 @@ function outcome<T extends { signalIndex: number; direction: 1 | -1 }>(
 }
 
 export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmationInput) {
+  const contextRegime = input.contextRegime ?? null;
+  const contextIndicator = input.contextIndicator ?? null;
+  if (contextRegime !== null && contextIndicator !== null) {
+    throw new Error("context regime and context indicator are mutually exclusive");
+  }
   const targetResolutionMs = marketRegimeResolutionMilliseconds(input.targetTimeframe);
   const driverResolutionMs = marketRegimeResolutionMilliseconds(input.driverTimeframe);
   if (!targetResolutionMs || !driverResolutionMs || /M$/i.test(input.targetTimeframe) || /M$/i.test(input.driverTimeframe)) {
@@ -147,10 +174,24 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
 
   const targetAll = validateBars(input.targetBars, "target bars");
   const driverAll = validateBars(input.driverBars, "driver bars");
+  const contextAll = contextRegime === null ? null : validateBars(contextRegime.bars, "context bars");
   const targetFormingExcluded = targetAll.filter((bar) => bar.forming === true).length;
   const driverFormingExcluded = driverAll.filter((bar) => bar.forming === true).length;
   const target = targetAll.filter((bar) => bar.forming !== true);
   const driver = driverAll.filter((bar) => bar.forming !== true);
+  const context = contextAll?.filter((bar) => bar.forming !== true) ?? null;
+  const contextResolutionMs = contextRegime === null ? null : marketRegimeResolutionMilliseconds(contextRegime.timeframe);
+  if (contextRegime !== null && (!contextResolutionMs || /M$/i.test(contextRegime.timeframe) || !Number.isInteger(contextRegime.lookback) || contextRegime.lookback < 1 || contextRegime.lookback > 250 || !Number.isFinite(contextRegime.minimumReturn) || !Number.isInteger(contextRegime.maxAgeBars) || contextRegime.maxAgeBars < 0 || contextRegime.maxAgeBars > 20)) throw new Error("invalid context regime definition");
+  const contextIndicatorResolutionMs = contextIndicator === null ? null
+    : marketRegimeResolutionMilliseconds(contextIndicator.timeframe);
+  if (contextIndicator !== null && (!contextIndicatorResolutionMs ||
+      /M$/i.test(contextIndicator.timeframe) || !Number.isInteger(contextIndicator.maxAgeBars) ||
+      contextIndicator.maxAgeBars < 0 || contextIndicator.maxAgeBars > 20 ||
+      ![0, 1].includes(contextIndicator.acceptedGateValue ?? 1))) {
+    throw new Error("invalid context indicator definition");
+  }
+  const contextIndicatorObservations = contextIndicator === null ? null
+    : validateGateObservations(contextIndicator.observations);
   const targetIrregularIntervals = target.slice(1).filter((bar, index) =>
     bar.time * 1_000 - target[index].time * 1_000 > targetResolutionMs * 1.5).length;
   const driverIrregularIntervals = driver.slice(1).filter((bar, index) =>
@@ -168,6 +209,12 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     expectedBreakoutConfirmed: 0,
     triggerNotConfirmed: 0,
     overlappingSignalsExcluded: 0,
+    noContextBarBeforeSignal: 0,
+    staleContextEvidence: 0,
+    insufficientContextLookback: 0,
+    contextRegimeRejected: 0,
+    contextIndicatorUnavailable: 0,
+    contextIndicatorRejected: 0,
   };
   const detected: Array<{
     eventId: string;
@@ -224,6 +271,41 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     }
     if (signalIndex < 0) { quality.triggerNotConfirmed += 1; continue; }
     if (usedSignals.has(signalIndex)) { quality.overlappingSignalsExcluded += 1; continue; }
+    if (context !== null && contextRegime !== null && contextResolutionMs !== null) {
+      const signalStart = target[signalIndex].time * 1000;
+      let contextIndex = -1;
+      for (let candidate = context.length - 1; candidate >= 0; candidate -= 1) {
+        if (context[candidate].time * 1000 + contextResolutionMs <= signalStart) { contextIndex = candidate; break; }
+      }
+      if (contextIndex < 0) { quality.noContextBarBeforeSignal += 1; continue; }
+      if (signalStart - (context[contextIndex].time * 1000 + contextResolutionMs) > contextRegime.maxAgeBars * contextResolutionMs) { quality.staleContextEvidence += 1; continue; }
+      if (contextIndex < contextRegime.lookback) { quality.insufficientContextLookback += 1; continue; }
+      const contextReturn = context[contextIndex].close / context[contextIndex - contextRegime.lookback].close - 1;
+      if (contextReturn < contextRegime.minimumReturn) { quality.contextRegimeRejected += 1; continue; }
+    }
+    if (contextIndicatorObservations !== null && contextIndicator !== null &&
+        contextIndicatorResolutionMs !== null) {
+      const signalStart = target[signalIndex].time * 1000;
+      let observationIndex = -1;
+      for (let candidate = contextIndicatorObservations.length - 1; candidate >= 0; candidate -= 1) {
+        if (contextIndicatorObservations[candidate].time * 1000 + contextIndicatorResolutionMs <= signalStart) {
+          observationIndex = candidate;
+          break;
+        }
+      }
+      if (observationIndex < 0) { quality.noContextBarBeforeSignal += 1; continue; }
+      const observation = contextIndicatorObservations[observationIndex];
+      if (signalStart - (observation.time * 1000 + contextIndicatorResolutionMs) >
+          contextIndicator.maxAgeBars * contextIndicatorResolutionMs) {
+        quality.staleContextEvidence += 1;
+        continue;
+      }
+      if (observation.gate === null) { quality.contextIndicatorUnavailable += 1; continue; }
+      if (observation.gate !== (contextIndicator.acceptedGateValue ?? 1)) {
+        quality.contextIndicatorRejected += 1;
+        continue;
+      }
+    }
     usedSignals.add(signalIndex);
     const branch: Branch = direction === 1 ? "driver_up_target_failure" : "driver_down_target_failure";
     detected.push({
@@ -285,6 +367,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       triggerLookback: input.triggerLookback,
       triggerWithinBars: input.triggerWithinBars,
       maxDriverAgeBars: input.maxDriverAgeBars,
+      contextRegime: contextRegime === null ? null : { symbol: contextRegime.symbol, timeframe: contextRegime.timeframe, lookback: contextRegime.lookback, minimumReturn: contextRegime.minimumReturn, maxAgeBars: contextRegime.maxAgeBars },
+      contextIndicator: contextIndicator === null ? null : { studyId: contextIndicator.studyId, plotId: contextIndicator.plotId, timeframe: contextIndicator.timeframe, maxAgeBars: contextIndicator.maxAgeBars, acceptedGateValue: contextIndicator.acceptedGateValue ?? 1 },
     },
     joinContract: {
       policy: "driver_nominal_close_then_target_bar_start" as const,
@@ -309,6 +393,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       targetClosedBars: target.length,
       driverBarsReceived: input.driverBars.length,
       driverClosedBars: driver.length,
+      ...(context === null ? {} : { contextBarsReceived: contextRegime!.bars.length, contextClosedBars: context.length }),
+      ...(contextIndicatorObservations === null ? {} : { contextIndicatorObservations: contextIndicatorObservations.length }),
       events: events.length,
       minimumEvents: input.minimumEvents,
     },

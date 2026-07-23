@@ -681,7 +681,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-one expected tools", async () => {
+test("exposes exactly the seventy-two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -711,6 +711,7 @@ test("exposes exactly the seventy-one expected tools", async () => {
       "get_analysis_performance",
       "get_chart_context",
       "get_chart_screenshot",
+      "get_dxy_context_gate_template",
       "get_economic_events",
       "get_event_study_journal",
       "get_execution_snapshot",
@@ -3676,6 +3677,16 @@ test("strategy research journal tools map immutable records without chart access
   assert.equal(calls[5][0], "event-compare");
 });
 
+test("get_dxy_context_gate_template returns the fixed Pine and plot contract", async () => {
+  const client = await connectedClient(makeDeps());
+  const response = await client.callTool({ name: "get_dxy_context_gate_template", arguments: {} });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.name, "Bushido DXY Context Gate v1");
+  assert.equal(parsed.plots.gate, "dxy_gate");
+  assert.match(parsed.source, /barmerge\.lookahead_off/);
+  assert.match(parsed.source, /barmerge\.gaps_on/);
+});
+
 test("list_alerts returns the user's alerts", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "list_alerts", arguments: {} });
@@ -4709,7 +4720,7 @@ test("run_market_event_study binds caller-supplied event times to aftershock ret
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 
-test("run_yield_price_nonconfirmation_study binds two charts and returns as-of joined evidence", async () => {
+test("run_yield_price_nonconfirmation_study binds optional third-chart context evidence", async () => {
   const day = 86_400_000;
   const start = Date.UTC(2026, 0, 1);
   const makeBars = (closes, offset = 0) => closes.map((close, index) => {
@@ -4721,23 +4732,26 @@ test("run_yield_price_nonconfirmation_study binds two charts and returns as-of j
   });
   const driverBars = makeBars([4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
   const targetBars = makeBars([100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const contextBars = makeBars([100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
   const calls = [];
   const client = await connectedClient(makeDeps({ tv: {
-    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 3,
       charts: [
         { index: 0, symbol: "OANDA:USDJPY", resolution: "1D", studies: [] },
         { index: 1, symbol: "TVC:US10Y", resolution: "1D", studies: [] },
+        { index: 2, symbol: "TVC:DXY", resolution: "1D", studies: [] },
       ] }),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
     getOhlcv: async (count, chartIndex) => {
       calls.push({ count, chartIndex });
-      return chartIndex === 0
-        ? { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars }
-        : { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars };
+      if (chartIndex === 0) return { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars };
+      if (chartIndex === 1) return { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars };
+      return { symbol: "TVC:DXY", resolution: "1D", count: contextBars.length, bars: contextBars };
     },
   } }));
   const res = await client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: {
     target_chart_index: 0, driver_chart_index: 1,
+    context_regime: { chart_index: 2, expected_symbol: "TVC:DXY", expected_timeframe: "1D", lookback: 2, minimum_return: 0, max_age_bars: 2 },
     expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
     expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
     relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
@@ -4750,9 +4764,138 @@ test("run_yield_price_nonconfirmation_study binds two charts and returns as-of j
   assert.equal(parsed.events[0].direction, "short");
   assert.equal(parsed.source.target.chartIndex, 0);
   assert.equal(parsed.source.driver.chartIndex, 1);
+  assert.equal(parsed.source.context.chartIndex, 2);
+  assert.equal(parsed.definition.contextRegime.symbol, "TVC:DXY");
   assert.deepEqual(calls.sort((left, right) => left.chartIndex - right.chartIndex), [
-    { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 },
+    { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 }, { count: 100, chartIndex: 2 },
   ]);
+});
+
+test("run_yield_price_nonconfirmation_study reads the fixed DXY Pine gate from the target chart", async () => {
+  const day = 86_400_000;
+  const start = Date.UTC(2026, 0, 1);
+  const makeBars = (closes, offset = 0) => closes.map((close, index) => {
+    const previous = index === 0 ? close : closes[index - 1];
+    const time = start + offset + index * day;
+    return { time: time / 1000, timeIso: new Date(time).toISOString(), open: previous,
+      high: Math.max(previous, close) + 0.2, low: Math.min(previous, close) - 0.2,
+      close, volume: 1 };
+  });
+  const driverBars = makeBars([4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const targetBars = makeBars([100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const ohlcvCalls = [];
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+      charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "1D", studies: [{ id: "gate1", name: "Bushido DXY Context Gate v1" }] },
+        { index: 1, symbol: "TVC:US10Y", resolution: "1D", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (count, chartIndex) => {
+      ohlcvCalls.push(chartIndex);
+      return chartIndex === 0
+        ? { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars }
+        : { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars };
+    },
+    getIndicatorValues: async () => [{ id: "gate1", name: "Bushido DXY Context Gate v1",
+      plots: [{ id: "plot_1", title: "dxy_gate", type: "line" }],
+      bars: targetBars.map((bar) => ({ time: bar.time, timeIso: bar.timeIso, values: { plot_1: 0 } })) }],
+  } }));
+  const res = await client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: {
+    target_chart_index: 0, driver_chart_index: 1,
+    context_indicator: { study_id: "gate1", gate_plot_id: "dxy_gate", max_age_bars: 2,
+      accepted_gate_value: 0 },
+    expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
+    expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
+    relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
+    price_breakout_lookback: 3, nonconfirmation_bars: 2, trigger_lookback: 2,
+    trigger_within_bars: 3, max_driver_age_bars: 2, horizons: [1, 2],
+    target_return_bps: 50, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.sample.events, 1);
+  assert.equal(parsed.definition.contextIndicator.studyId, "gate1");
+  assert.equal(parsed.definition.contextIndicator.acceptedGateValue, 0);
+  assert.equal(parsed.source.contextIndicator.chartIndex, 0);
+  assert.deepEqual(ohlcvCalls.sort(), [0, 1]);
+});
+
+test("run_yield_price_nonconfirmation_study rejects simultaneous OHLC and Pine context gates", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: {
+    target_chart_index: 0, driver_chart_index: 1,
+    context_regime: { chart_index: 2, expected_symbol: "TVC:DXY",
+      expected_timeframe: "1D", lookback: 20, minimum_return: 0, max_age_bars: 2 },
+    context_indicator: { study_id: "gate1", gate_plot_id: "dxy_gate", max_age_bars: 2 },
+    expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
+    expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
+    relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
+    price_breakout_lookback: 3, nonconfirmation_bars: 2, trigger_lookback: 2,
+    trigger_within_bars: 3, max_driver_age_bars: 2, horizons: [1, 2],
+    target_return_bps: 50, minimum_events: 1, event_limit: 10,
+  } });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /context_regime and context_indicator are mutually exclusive/);
+});
+
+test("run_yield_price_nonconfirmation_study fails closed for an untrusted DXY gate study", async (t) => {
+  const day = 86_400_000;
+  const start = Date.UTC(2026, 0, 1);
+  const makeBars = (closes, offset = 0) => closes.map((close, index) => {
+    const previous = index === 0 ? close : closes[index - 1];
+    const time = start + offset + index * day;
+    return { time: time / 1000, timeIso: new Date(time).toISOString(), open: previous,
+      high: Math.max(previous, close) + 0.2, low: Math.min(previous, close) - 0.2,
+      close, volume: 1 };
+  });
+  const driverBars = makeBars([4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const targetBars = makeBars([100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const arguments_ = {
+    target_chart_index: 0, driver_chart_index: 1,
+    context_indicator: { study_id: "gate1", gate_plot_id: "dxy_gate", max_age_bars: 2 },
+    expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
+    expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
+    relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
+    price_breakout_lookback: 3, nonconfirmation_bars: 2, trigger_lookback: 2,
+    trigger_within_bars: 3, max_driver_age_bars: 2, horizons: [1, 2],
+    target_return_bps: 50, minimum_events: 1, event_limit: 10,
+  };
+  const run = async (indicator) => {
+    const client = await connectedClient(makeDeps({ tv: {
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "1D",
+          studies: [{ id: "gate1", name: indicator.name }] },
+        { index: 1, symbol: "TVC:US10Y", resolution: "1D", studies: [] }] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async (count, chartIndex) => chartIndex === 0
+        ? { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars }
+        : { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars },
+      getIndicatorValues: async () => [indicator],
+    } }));
+    return client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: arguments_ });
+  };
+  const validBars = targetBars.map((bar) => ({
+    time: bar.time, timeIso: bar.timeIso, values: { plot_1: 1 },
+  }));
+
+  await t.test("rejects a different study name", async () => {
+    const res = await run({ id: "gate1", name: "Another Indicator", hasError: false,
+      plots: [{ id: "plot_1", title: "dxy_gate", type: "line" }], bars: validBars });
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /does not match the fixed DXY gate template/);
+  });
+
+  await t.test("rejects a study calculation error", async () => {
+    const res = await run({ id: "gate1", name: "Bushido DXY Context Gate v1", hasError: true,
+      plots: [{ id: "plot_1", title: "dxy_gate", type: "line" }], bars: validBars });
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /does not match the fixed DXY gate template/);
+  });
+
+  await t.test("rejects a missing gate plot", async () => {
+    const res = await run({ id: "gate1", name: "Bushido DXY Context Gate v1", hasError: false,
+      plots: [{ id: "plot_0", title: "dxy_return_20", type: "line" }], bars: validBars });
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /dxy_gate plot not found/);
+  });
 });
 
 test("compute_feature_outcome_relationships binds closed OHLC to the active chart", async () => {
