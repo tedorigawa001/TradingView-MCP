@@ -159,3 +159,32 @@ test("strategy regime evaluation rejects duplicate scheduled event timestamps", 
     },
   }), /timestamps must be unique/);
 });
+
+test("strategy regime evaluation joins only prior fresh correlation observations", () => {
+  const observations = Array.from({ length: 6 }, (_, index) => observation(index, "range", "normal"));
+  const result = evaluate([trade(2, 3), trade(3, -2), trade(5, 1)], observations, {
+    minimumGroupTrades: 1,
+    minimumCoverageRatio: 0.75,
+    correlationRegime: {
+      referenceSymbol: "TVC:DXY",
+      observations: [
+        { time: observation(1, "range", "normal").time, timeIso: observation(1, "range", "normal").timeIso,
+          correlation: -0.8, regime: "strong_negative" },
+        { time: observation(2, "range", "normal").time, timeIso: observation(2, "range", "normal").timeIso,
+          correlation: -0.4, regime: "negative" },
+      ],
+      maximumAgeBars: 1,
+      window: 20,
+      strongThreshold: 0.7,
+      neutralThreshold: 0.2,
+    },
+  });
+  assert.equal(result.joinContract.correlationRegime.referenceSymbol, "TVC:DXY");
+  assert.equal(result.coverage.correlationJoinedTrades, 2);
+  assert.equal(result.coverage.correlationCoverageRatio, 2 / 3);
+  assert.equal(result.byCorrelationRegime.strong_negative.trades, 1);
+  assert.equal(result.byCorrelationRegime.negative.trades, 1);
+  assert.equal(result.byCorrelationRegime.outside_correlation_evidence.trades, 1);
+  assert.ok(result.qualityIssues.includes("minimum_correlation_join_coverage_not_met"));
+  assert.equal(result.status, "partial");
+});

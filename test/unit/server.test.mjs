@@ -4834,16 +4834,23 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   let removed = 0;
   let runs = 0;
   let requestedOhlcvCount = null;
-  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
-    charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60",
-      studies: [{ id: "original", name: "RSI" }] }] });
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+    charts: [
+      { index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [{ id: "original", name: "RSI" }] },
+      { index: 1, symbol: "TVC:DXY", resolution: "60", studies: [] },
+    ] });
   const client = await connectedClient(makeDeps({ tv: {
     getChartContext: async () => context(),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
     listPineScripts: async () => [{ pineId, name: "Regime Strategy", kind: "strategy",
       version: "1.0", usedBy: [] }],
-    getOhlcv: async (count) => ((requestedOhlcvCount = count),
-      { symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+    getOhlcv: async (count, chartIndex = 0) => ((requestedOhlcvCount = count),
+      chartIndex === 0
+        ? { symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }
+        : { symbol: "TVC:DXY", resolution: "60", count: bars.length, bars: bars.map((bar, index) => ({
+          ...bar, open: 300 - Math.max(0, index - 1) * 0.5, high: 300 - index * 0.5 + 0.2,
+          low: 300 - index * 0.5 - 0.2, close: 300 - index * 0.5,
+        })) }),
     runBacktest: async () => ((runs += 1), { studyId: "temporary", pineId, keptOnChart: true,
       removedFromChart: false, strategy: "Regime Strategy", summary: {}, totalTrades: trades.length,
       trades: [] }),
@@ -4893,6 +4900,8 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
     event_proximity: { events: [{ event_id: "us-cpi", occurred_at: "2026-01-05T04:00:00.000Z" }],
       coverage_from: "2026-01-05T03:30:00.000Z", coverage_to: "2026-01-05T05:00:00.000Z",
       before_minutes: 30, after_minutes: 60 },
+    correlation_regime: { reference_chart_index: 1, expected_reference_symbol: "TVC:DXY", count: 200,
+      window: 20, strong_threshold: 0.7, neutral_threshold: 0.2, max_age_bars: 1 },
   } })).content[0].text);
   assert.equal(result.status, "complete");
   assert.equal(result.evaluation.coverage.joinedTrades, 4);
@@ -4900,6 +4909,11 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   assert.equal(result.evaluation.byEventProximity.near_scheduled_event.trades, 1);
   assert.equal(result.definition.join.eventProximity.events.length, 1);
   assert.equal(result.definition.join.eventProximity.coverageFrom, "2026-01-05T03:30:00.000Z");
+  assert.equal(result.definition.join.correlationRegime.referenceSymbol, "TVC:DXY");
+  assert.equal(result.correlationEvidence.sample.observations, 180);
+  assert.equal(Object.values(result.evaluation.byCorrelationRegime)
+    .reduce((sum, group) => sum + group.trades, 0), 4);
+  assert.equal(result.evaluation.byCorrelationRegime.outside_correlation_evidence, undefined);
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(result.strategyEvidence.ledgerTrades, 4);
   assert.equal(runs, 1);
@@ -4909,39 +4923,57 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
 
 test("run_strategy_regime_matrix evaluates serial jobs and restores the original chart", async () => {
   const pineId = "USER;regimematrix123";
-  const chart = { symbol: "OANDA:USDJPY", resolution: "240" };
+  const chart = { symbol: "OANDA:USDJPY", resolution: "60" };
+  const referenceChart = { symbol: "TVC:DXY", resolution: "60" };
   const start = Date.UTC(2026, 0, 1);
   let activePine = null;
   let runs = 0;
   let removed = 0;
-  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+  const historyLoadsByChart = [];
+  const operations = [];
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
     charts: [{ index: 0, symbol: chart.symbol, resolution: chart.resolution,
-      studies: [{ id: "original", name: "RSI" }] }] });
+      studies: [{ id: "original", name: "RSI" }] },
+    { index: 1, symbol: referenceChart.symbol, resolution: referenceChart.resolution, studies: [] }] });
   const client = await connectedClient(makeDeps({ tv: {
     getChartContext: async () => context(),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
-    setSymbol: async (symbol) => ((chart.symbol = symbol),
-      { symbol, resolution: chart.resolution, bars: 200 }),
-    setResolution: async (resolution) => ((chart.resolution = resolution),
-      { symbol: chart.symbol, resolution, bars: 200 }),
+    setSymbol: async (symbol, chartIndex = 0) => {
+      const target = chartIndex === 1 ? referenceChart : chart;
+      target.symbol = symbol;
+      return { symbol, resolution: target.resolution, bars: 200 };
+    },
+    setResolution: async (resolution, chartIndex = 0) => {
+      const target = chartIndex === 1 ? referenceChart : chart;
+      target.resolution = resolution;
+      operations.push(`resolution:${chartIndex}:${resolution}`);
+      return { symbol: target.symbol, resolution, bars: 200 };
+    },
     listPineScripts: async () => [{ pineId, name: "Regime Matrix Strategy", kind: "strategy",
       version: "2.0", usedBy: [] }],
     getOhlcv: async (count, chartIndex) => {
       assert.equal(count, 200);
-      assert.equal(chartIndex, 0);
-      const step = Number(chart.resolution) * 60_000;
+      assert.ok(chartIndex === 0 || chartIndex === 1);
+      const source = chartIndex === 0 ? chart : referenceChart;
+      const step = Number(source.resolution) * 60_000;
       const bars = Array.from({ length: 200 }, (_, index) => {
-        const open = 100 + Math.max(0, index - 1) * 0.5;
-        const close = 100 + index * 0.5;
+        const open = chartIndex === 0
+          ? 100 + Math.max(0, index - 1) * 0.5
+          : 200 - Math.max(0, index - 1) * 0.5;
+        const close = chartIndex === 0 ? 100 + index * 0.5 : 200 - index * 0.5;
         const time = start + index * step;
         return { time: time / 1000, timeIso: new Date(time).toISOString(), open,
           high: close + 0.2, low: open - 0.2, close, volume: 1 };
       });
-      return { symbol: chart.symbol, resolution: chart.resolution, count: bars.length, bars };
+      return { symbol: source.symbol, resolution: source.resolution, count: bars.length, bars };
     },
-    runBacktest: async () => ((runs += 1), (activePine = pineId), { studyId: `temporary-${runs}`,
-      pineId, keptOnChart: true, removedFromChart: false, strategy: "Regime Matrix Strategy",
-      summary: {}, totalTrades: 4, trades: [] }),
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      historyLoadsByChart.push({ count, chartIndex });
+      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+    },
+    runBacktest: async () => ((runs += 1), (activePine = pineId), operations.push(`run:${runs}`),
+      { studyId: `temporary-${runs}`, pineId, keptOnChart: true, removedFromChart: false,
+        strategy: "Regime Matrix Strategy", summary: {}, totalTrades: 4, trades: [] }),
     getStrategyReport: async () => ({ strategy: "Regime Matrix Strategy", symbol: chart.symbol,
       timeframe: chart.resolution, studyId: `temporary-${runs}`, pineId, pineVersion: "2.0", inputs: [],
       currency: "USD", initialCapital: 100000, dateRange: null, summary: { netProfit: 4 },
@@ -4973,7 +5005,7 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
         name: "Regime Matrix Strategy", chartIndex: 0 }),
   } }));
   const args = {
-    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", count: 200, load_more_bars: 6000,
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "60", count: 200, load_more_bars: 6000,
     trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
     minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
     max_regime_age_bars: 1,
@@ -4984,9 +5016,13 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
       coverage_from: "2026-01-05T03:30:00.000Z", coverage_to: "2026-01-05T05:00:00.000Z",
       before_minutes: 30, after_minutes: 60,
     },
+    correlation_regime: {
+      reference_chart_index: 1, expected_reference_symbol: "TVC:DXY", count: 200,
+      window: 10, strong_threshold: 0.7, neutral_threshold: 0.2, max_age_bars: 1,
+    },
     jobs: [
       { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
-      { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId },
+      { symbol: "OANDA:XAUUSD", timeframe: "60", pine_id: pineId },
     ],
   };
   const preview = JSON.parse((await client.callTool({
@@ -4995,8 +5031,12 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.equal(preview.status, "preview");
   assert.equal(preview.jobCount, 2);
   assert.equal(preview.execution.historyLoadPerJob, 6000);
+  assert.deepEqual(preview.execution.correlationReferenceHistoryLoad, {
+    chartIndex: 1, requestedBars: 6000, onceBeforeJobs: true, perJobBeforeCapture: false,
+  });
   assert.equal(preview.definition.join.eventProximity.events.length, 1);
   assert.equal(preview.definition.join.eventProximity.coverageFrom, "2026-01-05T03:30:00.000Z");
+  assert.equal(preview.definition.join.correlationRegime.referenceSymbol, "TVC:DXY");
   assert.equal(runs, 0);
 
   const result = JSON.parse((await client.callTool({
@@ -5007,9 +5047,15 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.deepEqual(result.results.map((row) => row.evaluation.coverage.joinedTrades), [4, 4]);
   assert.equal(result.results[0].evaluation.overall.profitFactor, 7 / 3);
   assert.equal(result.results[1].evaluation.overall.profitFactor, 11 / 3);
-  assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 1]);
+  assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 2]);
   assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.attempts), [2, 2]);
   assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.addedBars), [6000, 6000]);
+  assert.deepEqual(result.correlationReferenceHistoryLoad, {
+    chartIndex: 1, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
+  });
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1), [
+    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
+  ]);
   assert.equal(preview.definition.join.sessionMatchPolicy, "first_match_exclusive");
   assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "first_match_exclusive");
   assert.deepEqual(result.results[0].evaluation.joinContract.sessionPriority, ["london"]);
@@ -5017,10 +5063,44 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.deepEqual(result.results.map((row) => row.evaluation.joinContract.eventProximity.coverageTo), [
     "2026-01-05T05:00:00.000Z", "2026-01-05T05:00:00.000Z",
   ]);
+  assert.deepEqual(result.results.map((row) => row.correlationEvidence.referenceSymbol), ["TVC:DXY", "TVC:DXY"]);
+  assert.deepEqual(result.results.map((row) => row.correlationEvidence.sample.observations), [190, 190]);
+  assert.deepEqual(result.results.map((row) => Object.values(row.evaluation.byCorrelationRegime)
+    .reduce((sum, group) => sum + group.trades, 0)), [4, 4]);
+
+  const operationCountBeforeMixed = operations.length;
+  const mixedTimeframe = JSON.parse((await client.callTool({
+    name: "run_strategy_regime_matrix",
+    arguments: {
+      ...args,
+      correlation_regime: { ...args.correlation_regime, allow_reference_timeframe_switch: true },
+      jobs: [{ symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId }],
+      confirm: true,
+    },
+  })).content[0].text);
+  assert.equal(mixedTimeframe.status, "complete");
+  assert.equal(mixedTimeframe.definition.join.correlationRegime.allowReferenceTimeframeSwitch, true);
+  assert.deepEqual(mixedTimeframe.execution.correlationReferenceHistoryLoad, {
+    chartIndex: 1, requestedBars: 6000, onceBeforeJobs: false, perJobBeforeCapture: true,
+  });
+  assert.equal(mixedTimeframe.results[0].correlationEvidence.referenceTimeframeSwitched, true);
+  assert.deepEqual(mixedTimeframe.results[0].correlationEvidence.source.historyLoad, {
+    requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
+  });
+  assert.equal(mixedTimeframe.results[0].referenceChartRestored, true);
+  assert.equal(mixedTimeframe.chartStateAfter.referenceRestored, true);
+  const mixedOperations = operations.slice(operationCountBeforeMixed);
+  assert.ok(mixedOperations.indexOf("run:3") < mixedOperations.indexOf("resolution:1:240"),
+    "the primary strategy ledger must be collected before the reference pane becomes active");
   assert.equal(result.chartStateAfter.restored, true);
-  assert.equal(runs, 2);
-  assert.equal(removed, 2);
-  assert.deepEqual(chart, { symbol: "OANDA:USDJPY", resolution: "240" });
+  assert.equal(runs, 3);
+  assert.equal(removed, 3);
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1), [
+    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
+    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
+  ]);
+  assert.deepEqual(chart, { symbol: "OANDA:USDJPY", resolution: "60" });
+  assert.deepEqual(referenceChart, { symbol: "TVC:DXY", resolution: "60" });
 });
 
 test("run_strategy_regime_matrix stops remaining jobs after a chart restore failure", async () => {

@@ -8,6 +8,7 @@ import {
   OUTSIDE_DEFINED_SESSIONS_ID,
   type SessionClockDefinition,
 } from "./sessionProfile.js";
+import type { CorrelationRegimeObservation } from "./correlationRegimes.js";
 
 export interface StrategyRegimeEvaluationInput {
   ledger: StrategyTradeLedger;
@@ -25,6 +26,14 @@ export interface StrategyRegimeEvaluationInput {
     beforeMinutes: number;
     afterMinutes: number;
   };
+  correlationRegime?: {
+    referenceSymbol: string;
+    observations: CorrelationRegimeObservation[];
+    maximumAgeBars: number;
+    window: number;
+    strongThreshold: number;
+    neutralThreshold: number;
+  };
 }
 
 export type SessionMatchPolicy = "all_matches_non_exclusive" | "first_match_exclusive";
@@ -38,6 +47,7 @@ type JoinedTrade = {
 };
 
 type EventProximityLabel = "near_scheduled_event" | "outside_scheduled_event_window" | "outside_event_calendar_coverage";
+type CorrelationLabel = CorrelationRegimeObservation["regime"] | "outside_correlation_evidence";
 
 function average(values: number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -117,14 +127,14 @@ function sessionEvidence(
   }]));
 }
 
-function latestClosedObservation(
-  observations: ClassifiedMarketRegimeObservation[],
+function latestClosedObservation<T extends { time: number }>(
+  observations: T[],
   entryTime: number,
   resolutionMs: number,
-): ClassifiedMarketRegimeObservation | null {
+): T | null {
   let low = 0;
   let high = observations.length - 1;
-  let result: ClassifiedMarketRegimeObservation | null = null;
+  let result: T | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const observation = observations[middle];
@@ -186,6 +196,36 @@ function eventProximityLabel(entryTime: number, eventTimes: Array<{ occurredAtMs
     ? "near_scheduled_event" : "outside_scheduled_event_window";
 }
 
+function validateCorrelationRegime(correlationRegime: StrategyRegimeEvaluationInput["correlationRegime"]) {
+  if (correlationRegime === undefined) return null;
+  if (!/^[A-Za-z0-9:._-]{1,80}$/.test(correlationRegime.referenceSymbol)) {
+    throw new Error("correlation reference symbol is invalid");
+  }
+  if (!Number.isInteger(correlationRegime.maximumAgeBars) || correlationRegime.maximumAgeBars < 0 || correlationRegime.maximumAgeBars > 100) {
+    throw new Error("correlation maximum age bars must be an integer between 0 and 100");
+  }
+  if (!Number.isInteger(correlationRegime.window) || correlationRegime.window < 2 || correlationRegime.window > 500 ||
+      !(correlationRegime.neutralThreshold >= 0 && correlationRegime.neutralThreshold < correlationRegime.strongThreshold &&
+        correlationRegime.strongThreshold <= 1)) {
+    throw new Error("correlation regime contract is invalid");
+  }
+  const observations = [...correlationRegime.observations].sort((left, right) => left.time - right.time);
+  if (observations.some((item, index) => !Number.isFinite(item.time) || !Number.isFinite(item.correlation) ||
+      index > 0 && item.time === observations[index - 1].time)) {
+    throw new Error("correlation observations must have unique finite timestamps and values");
+  }
+  return observations;
+}
+
+function correlationLabel(entryTime: number, observations: CorrelationRegimeObservation[], resolutionMs: number,
+  maximumAgeBars: number): CorrelationLabel {
+  const observation = latestClosedObservation(observations, entryTime, resolutionMs);
+  if (observation === null || entryTime - (observation.time * 1000 + resolutionMs) > maximumAgeBars * resolutionMs) {
+    return "outside_correlation_evidence";
+  }
+  return observation.regime;
+}
+
 export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   if (!Number.isInteger(input.minimumGroupTrades) || input.minimumGroupTrades < 1) {
     throw new Error("minimum group trades must be a positive integer");
@@ -205,6 +245,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
   const resolutionMs = marketRegimeResolutionMilliseconds(input.timeframe);
   if (resolutionMs === null || resolutionMs <= 0) throw new Error(`unsupported timeframe: ${input.timeframe}`);
   const observations = [...input.observations].sort((left, right) => left.time - right.time);
+  const correlationObservations = validateCorrelationRegime(input.correlationRegime);
   if (observations.some((observation, index) => index > 0 && observation.time === observations[index - 1].time)) {
     throw new Error("duplicate regime timestamps");
   }
@@ -247,6 +288,10 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
 
   const eligibleClosedTrades = closedTrades.length - excluded.missingEntryTime - excluded.missingProfit;
   const coverageRatio = eligibleClosedTrades === 0 ? 0 : joined.length / eligibleClosedTrades;
+  const correlationJoinedTrades = correlationObservations === null ? null : joined.filter((item) =>
+    correlationLabel(item.entryTime, correlationObservations, resolutionMs, input.correlationRegime!.maximumAgeBars) !== "outside_correlation_evidence").length;
+  const correlationCoverageRatio = correlationJoinedTrades === null ? null :
+    (joined.length === 0 ? 0 : correlationJoinedTrades / joined.length);
   const fatalLedgerIssues = [
     ...(!input.ledger.complete ? ["strategy_ledger_incomplete"] : []),
     ...(input.ledger.countMatchesSummary === false ? ["strategy_ledger_count_mismatch"] : []),
@@ -255,6 +300,8 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
     ...fatalLedgerIssues,
     ...input.ledger.qualityIssues.map((issue) => `strategy_ledger:${issue}`),
     ...(coverageRatio < input.minimumCoverageRatio ? ["minimum_regime_join_coverage_not_met"] : []),
+    ...(correlationCoverageRatio !== null && correlationCoverageRatio < input.minimumCoverageRatio
+      ? ["minimum_correlation_join_coverage_not_met"] : []),
     ...(joined.length === 0 ? ["no_trades_joined_to_regimes"] : []),
   ])];
   const blocked = fatalLedgerIssues.length > 0 || joined.length === 0;
@@ -296,6 +343,16 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
         beforeMinutes: input.eventProximity!.beforeMinutes,
         afterMinutes: input.eventProximity!.afterMinutes,
       },
+      correlationRegime: correlationObservations === null ? null : {
+        labelAt: "latest_correlation_bar_with_nominal_close_at_or_before_entry",
+        referenceSymbol: input.correlationRegime!.referenceSymbol,
+        window: input.correlationRegime!.window,
+        strongThreshold: input.correlationRegime!.strongThreshold,
+        neutralThreshold: input.correlationRegime!.neutralThreshold,
+        maximumAgeBars: input.correlationRegime!.maximumAgeBars,
+        maximumAgeMilliseconds: input.correlationRegime!.maximumAgeBars * resolutionMs,
+        observations: correlationObservations.length,
+      },
     },
     coverage: {
       ledgerTrades: input.ledger.trades.length,
@@ -304,6 +361,8 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       joinedTrades: joined.length,
       coverageRatio,
       excluded,
+      correlationJoinedTrades,
+      correlationCoverageRatio,
     },
     qualityIssues,
     overall: metrics(joined),
@@ -321,5 +380,9 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       : groupEvidence(joined, (item) => eventProximityLabel(item.entryTime, eventTimes.events,
         eventTimes.coverageFromMs, eventTimes.coverageToMs,
         input.eventProximity!.beforeMinutes, input.eventProximity!.afterMinutes), input.minimumGroupTrades),
+    byCorrelationRegime: correlationObservations === null
+      ? null
+      : groupEvidence(joined, (item) => correlationLabel(item.entryTime, correlationObservations,
+        resolutionMs, input.correlationRegime!.maximumAgeBars), input.minimumGroupTrades),
   };
 }
