@@ -446,6 +446,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **検証状況**: 仮説の冪等登録と定義衝突、孤立実験拒否、同一実験の複数証拠、同一証拠の冪等性、未知metric拒否、symlink拒否、0600、比較互換性、3 MCPツールのチャート非アクセスを固定した
 - **実機検証(2026-07-20)**: `next-bar-confirmation`仮説をsequence 1、方向確認になっていなかったSmart Money v2実験をsequence 2、シグナル足高安の外側で終値確定するよう直したv3実験を親子関係付きsequence 3として記録した。v2 evidenceは`sha256:82fcbd87e89914904150d2d7fc4adf51858608a294868ba1562446ed1823e943`、v3 evidenceは`sha256:4b78d80ae673ea122f3c20f1f6a8a310d1355081bbed233c069ed1ea36775b74`。正確な2参照による比較は`comparable: true`、不一致なしを返した
 - **実機判断**: v3の確認ONは取引数を72から37へ減らし最大DDを約5844から約3235へ抑えたが、期待値は約115.09から約6.41、PFは約1.459から約1.021へ低下した。最低37取引は満たす一方、事前PF下限1.2を割ったため候補を`rejected`として保存した。APIのmetric名は保存契約どおり`totalTrades`、`averageDurationMilliseconds`、`averageRunUp`等のcamelCaseを使う
+- **イベント研究ジャーナル(2026-07-23)**: Strategy Tester台帳のPF/expectancy契約へevent studyの方向調整returnを無理に格納せず、同じappend-only・owner-only JSONL内で種別を分離した。`register_event_study_hypothesis`は主指標(mean/median directional return、positive rate、target-hit rate)、horizon、最低event数、対象市場を凍結する。`run_market_event_study`の任意`journal`指定は、計算済みの条件定義hash、取得範囲、branch/horizon集計、品質問題、判断をサーバー側で自動追記する。`get_event_study_journal`は一覧または正確なstudy/evidence参照の比較を行い、仮説、population、市場、時間足、methodology、condition definitionが異なる記録を`comparable:false`として混在させない。GBPUSD 60分のSession Handoff Exhaustion実機で、19 event・minimum 20未達・`inconclusive`判断を定義hash/evidence hash付きで記録し、終了後はXAUUSD 60分へ復元した
 
 ### #43 セッション引き継ぎ失速イベント(`run_market_event_study` condition: `session_exhaustion_handoff`) ✅ 初版実装
 

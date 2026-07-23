@@ -372,6 +372,10 @@ function makeDeps(overrides = {}) {
     researchJournal: {
       registerHypothesis: async (payload) => ({ recorded: true, idempotent: false, entry: { payload } }),
       recordExperiment: async (payload) => ({ recorded: true, idempotent: false, entry: { payload, evidence_hash: `sha256:${"e".repeat(64)}` } }),
+      registerEventHypothesis: async (payload) => ({ recorded: true, idempotent: false, entry: { payload } }),
+      recordEventStudy: async (payload) => ({ recorded: true, idempotent: false, entry: { payload, evidence_hash: `sha256:${"f".repeat(64)}` } }),
+      listEventStudies: async () => [],
+      compareEventStudies: async (references) => ({ comparable: true, incompatibilities: [], studies: references }),
       compare: async (references) => ({ comparable: true, incompatibilities: [], experiments: references }),
       ...overrides.researchJournal,
     },
@@ -677,7 +681,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the sixty-nine expected tools", async () => {
+test("exposes exactly the seventy-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -708,6 +712,7 @@ test("exposes exactly the sixty-nine expected tools", async () => {
       "get_chart_context",
       "get_chart_screenshot",
       "get_economic_events",
+      "get_event_study_journal",
       "get_execution_snapshot",
       "get_futures_flow_context",
       "get_indicator_graphics",
@@ -731,6 +736,7 @@ test("exposes exactly the sixty-nine expected tools", async () => {
       "list_pine_scripts",
       "load_more_history",
       "record_strategy_experiment",
+      "register_event_study_hypothesis",
       "register_strategy_hypothesis",
       "remove_owned_study",
       "run_backtest",
@@ -3609,6 +3615,9 @@ test("strategy research journal tools map immutable records without chart access
     researchJournal: {
       registerHypothesis: async (payload) => (calls.push(["hypothesis", payload]), { recorded: true, entry: { payload } }),
       recordExperiment: async (payload) => (calls.push(["experiment", payload]), { recorded: true, entry: { payload, evidence_hash: hash("e") } }),
+      registerEventHypothesis: async (payload) => (calls.push(["event-hypothesis", payload]), { recorded: true, entry: { payload } }),
+      listEventStudies: async (hypothesisId) => (calls.push(["event-list", hypothesisId]), [{ studyId: hash("a") }]),
+      compareEventStudies: async (references) => (calls.push(["event-compare", references]), { comparable: true, studies: references }),
       compare: async (references) => (calls.push(["compare", references]), { comparable: true, experiments: references }),
     },
   });
@@ -3653,6 +3662,18 @@ test("strategy research journal tools map immutable records without chart access
   });
   assert.equal(JSON.parse(compared.content[0].text).comparable, true);
   assert.equal(calls[2][1][0].experimentId, hash("a"));
+
+  const eventHypothesis = await client.callTool({ name: "register_event_study_hypothesis", arguments: {
+    hypothesis_id: "handoff-eurusd", title: "Handoff", thesis: "A failed handoff may reverse.",
+    evaluation_contract: { population: "out_of_sample", primary_metric: "meanDirectionalReturn", primary_horizon_bars: 4, minimum_events: 20, symbols: ["OANDA:EURUSD"], timeframes: ["60"] },
+  } });
+  assert.equal(JSON.parse(eventHypothesis.content[0].text).recorded, true);
+  const listed = await client.callTool({ name: "get_event_study_journal", arguments: { hypothesis_id: "handoff-eurusd" } });
+  assert.equal(JSON.parse(listed.content[0].text)[0].studyId, hash("a"));
+  const eventCompared = await client.callTool({ name: "get_event_study_journal", arguments: { study_ids: [hash("a"), hash("b")], evidence_hashes: [hash("c"), hash("d")] } });
+  assert.equal(JSON.parse(eventCompared.content[0].text).comparable, true);
+  assert.equal(calls[3][0], "event-hypothesis");
+  assert.equal(calls[5][0], "event-compare");
 });
 
 test("list_alerts returns the user's alerts", async () => {
@@ -4605,6 +4626,7 @@ test("run_market_event_study binds the chart and returns session auction evidenc
 });
 
 test("run_market_event_study binds the chart and returns session handoff evidence", async () => {
+  const journalRecords = [];
   const start = Date.UTC(2026, 0, 5);
   const bars = [];
   for (let index = 0; index < 32; index += 1) {
@@ -4624,7 +4646,9 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
     bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
       open: close + 0.002, high: close + 0.003, low: close - 0.003, close, volume: 1 });
   }
-  const client = await connectedClient(makeDeps({ tv: {
+  const client = await connectedClient(makeDeps({ researchJournal: {
+    recordEventStudy: async (payload) => (journalRecords.push(payload), { recorded: true, entry: { payload, evidence_hash: `sha256:${"f".repeat(64)}` } }),
+  }, tv: {
     getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
       charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
@@ -4637,12 +4661,18 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
       handoff_start: "13:00", handoff_end: "16:00", prior_direction: "session_return",
       direction_minimum_return_bps: 1, handoff_window_bars: 3, minimum_prior_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
+    journal: { hypothesis_id: "handoff-eurusd", population: "out_of_sample", decision: "inconclusive" },
   } });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.conditionType, "session_exhaustion_handoff");
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.byBranch.exhaustion_up.events, 1);
   assert.equal(parsed.events[0].direction, "short");
+  assert.match(parsed.studyId, /^sha256:/);
+  assert.match(parsed.definitionHash, /^sha256:/);
+  assert.equal(parsed.journal.recorded, true);
+  assert.equal(journalRecords[0].conditionType, "session_exhaustion_handoff");
+  assert.equal(journalRecords[0].outcomes.some((item) => item.branch === "exhaustion_up" && item.horizonBars === 4), true);
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 

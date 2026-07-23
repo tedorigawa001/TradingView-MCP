@@ -17,6 +17,7 @@ const METRICS = new Set([
   "sharpeRatio", "sortinoRatio", "totalTrades", "expectancy", "averageDurationMilliseconds",
   "averageRunUp", "averageDrawDown", "worstTradeDrawDown",
 ]);
+const EVENT_METRICS = new Set(["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"]);
 
 export const resolveStrategyResearchJournalPath = (
   configuredPath = process.env.TRADINGVIEW_MCP_STRATEGY_RESEARCH_JOURNAL_PATH,
@@ -66,16 +67,49 @@ export type StrategyExperimentRecord = {
   note: string;
 };
 
+export type EventStudyHypothesis = {
+  hypothesisId: string;
+  title: string;
+  thesis: string;
+  evaluationContract: {
+    population: ResearchPopulation;
+    primaryMetric: "meanDirectionalReturn" | "medianDirectionalReturn" | "positiveRate" | "targetHitRate";
+    primaryHorizonBars: number;
+    minimumEvents: number;
+    symbols: string[];
+    timeframes: string[];
+  };
+};
+
+export type EventStudyRecord = {
+  studyId: string;
+  hypothesisId: string;
+  population: ResearchPopulation;
+  methodologyVersion: string;
+  symbol: string;
+  timeframe: string;
+  conditionType: "session_auction" | "session_exhaustion_handoff" | "event_aftershock_retest";
+  definitionHash: string;
+  source: { chartIndex: number; requestedBars: number; returnedBars: number; from: string | null; to: string | null };
+  sampleEvents: number;
+  minimumEvents: number;
+  outcomes: Array<{ branch: string; horizonBars: number; events: number; meanDirectionalReturn: number | null; medianDirectionalReturn: number | null; positiveRate: number | null; targetHitRate: number | null }>;
+  qualityIssues: string[];
+  minimumEventsMet: boolean;
+  decision: "adopted" | "rejected" | "inconclusive";
+  note: string;
+};
+
 export type ResearchJournalEntry = {
   schema_version: "1.0";
   event_id: string;
   sequence: number;
   recorded_at: string;
-  kind: "hypothesis_registered" | "experiment_recorded";
+  kind: "hypothesis_registered" | "experiment_recorded" | "event_hypothesis_registered" | "event_study_recorded";
   entity_id: string;
   definition_hash: string;
   evidence_hash: string | null;
-  payload: StrategyHypothesis | StrategyExperimentRecord;
+  payload: StrategyHypothesis | StrategyExperimentRecord | EventStudyHypothesis | EventStudyRecord;
 };
 
 const canonicalHash = (value: unknown): string =>
@@ -118,6 +152,42 @@ function validateHypothesis(value: StrategyHypothesis): StrategyHypothesis {
       timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort(),
     },
   };
+}
+
+function validateEventHypothesis(value: EventStudyHypothesis): EventStudyHypothesis {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("event hypothesis must be an object");
+  if (!ID_PATTERN.test(value.hypothesisId)) throw new Error("invalid event hypothesis_id");
+  if (typeof value.title !== "string" || value.title.length < 1 || value.title.length > 120) throw new Error("invalid event hypothesis title");
+  if (typeof value.thesis !== "string" || value.thesis.length < 1 || value.thesis.length > 2000) throw new Error("invalid event hypothesis thesis");
+  const contract = value.evaluationContract;
+  if (!contract || typeof contract !== "object") throw new Error("event evaluation contract is required");
+  if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(contract.population)) throw new Error("invalid event research population");
+  if (!EVENT_METRICS.has(contract.primaryMetric)) throw new Error("invalid event primary metric");
+  if (!Number.isInteger(contract.primaryHorizonBars) || contract.primaryHorizonBars < 1 || contract.primaryHorizonBars > 250) throw new Error("invalid event primary horizon");
+  if (!Number.isInteger(contract.minimumEvents) || contract.minimumEvents < 1 || contract.minimumEvents > 100_000) throw new Error("invalid event minimum events");
+  if (!Array.isArray(contract.symbols) || contract.symbols.length < 1 || contract.symbols.length > 20 || contract.symbols.some((item) => !SYMBOL_PATTERN.test(item))) throw new Error("invalid event hypothesis symbols");
+  if (!Array.isArray(contract.timeframes) || contract.timeframes.length < 1 || contract.timeframes.length > 20 || contract.timeframes.some((item) => !TIMEFRAME_PATTERN.test(item))) throw new Error("invalid event hypothesis timeframes");
+  return { ...value, evaluationContract: { ...contract, symbols: [...new Set(contract.symbols.map((item) => item.toUpperCase()))].sort(), timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort() } };
+}
+
+function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("event study record must be an object");
+  if (!HASH_PATTERN.test(value.studyId) || !ID_PATTERN.test(value.hypothesisId) || !HASH_PATTERN.test(value.definitionHash)) throw new Error("invalid event study identity");
+  if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(value.population)) throw new Error("invalid event research population");
+  if (typeof value.methodologyVersion !== "string" || value.methodologyVersion.length < 1 || value.methodologyVersion.length > 80) throw new Error("invalid event methodology version");
+  if (!SYMBOL_PATTERN.test(value.symbol) || !TIMEFRAME_PATTERN.test(value.timeframe)) throw new Error("invalid event study market");
+  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
+  if (!Number.isInteger(value.source.chartIndex) || value.source.chartIndex < 0 || !Number.isInteger(value.source.requestedBars) || !Number.isInteger(value.source.returnedBars) || value.source.requestedBars < 1 || value.source.returnedBars < 0) throw new Error("invalid event study source");
+  for (const time of [value.source.from, value.source.to]) if (time !== null && new Date(time).toISOString() !== time) throw new Error("invalid event study source time");
+  if (!Number.isInteger(value.sampleEvents) || !Number.isInteger(value.minimumEvents) || value.sampleEvents < 0 || value.minimumEvents < 1) throw new Error("invalid event study sample");
+  if (!Array.isArray(value.outcomes) || value.outcomes.length < 1 || value.outcomes.length > 100) throw new Error("invalid event outcomes");
+  for (const outcome of value.outcomes) {
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(outcome.branch) || !Number.isInteger(outcome.horizonBars) || outcome.horizonBars < 1 || outcome.horizonBars > 250 || !Number.isInteger(outcome.events) || outcome.events < 0) throw new Error("invalid event outcome identity");
+    for (const metric of [outcome.meanDirectionalReturn, outcome.medianDirectionalReturn, outcome.positiveRate, outcome.targetHitRate]) if (metric !== null && (typeof metric !== "number" || !Number.isFinite(metric))) throw new Error("invalid event outcome metric");
+  }
+  if (!Array.isArray(value.qualityIssues) || value.qualityIssues.length > 100 || value.qualityIssues.some((item) => typeof item !== "string" || !/^[a-z0-9_]{1,120}$/.test(item))) throw new Error("invalid event quality issues");
+  if (typeof value.minimumEventsMet !== "boolean" || !(["adopted", "rejected", "inconclusive"] as unknown[]).includes(value.decision) || typeof value.note !== "string" || value.note.length > 500) throw new Error("invalid event study decision");
+  return { ...value, symbol: value.symbol.toUpperCase(), timeframe: value.timeframe.toUpperCase(), outcomes: [...value.outcomes].sort((a, b) => a.branch.localeCompare(b.branch) || a.horizonBars - b.horizonBars), qualityIssues: [...new Set(value.qualityIssues)].sort() };
 }
 
 function validateVariant(value: StrategyExperimentRecord["baseline"], label: string) {
@@ -175,6 +245,14 @@ function experimentDefinitionHash(payload: StrategyExperimentRecord): string {
     baseline: { pineId: payload.baseline.pineId, pineVersion: payload.baseline.pineVersion },
     candidate: { pineId: payload.candidate.pineId, pineVersion: payload.candidate.pineVersion },
   });
+}
+
+function eventStudyEvidenceHash(payload: EventStudyRecord): string {
+  return canonicalHash({ studyId: payload.studyId, source: payload.source, sampleEvents: payload.sampleEvents, outcomes: payload.outcomes, qualityIssues: payload.qualityIssues, minimumEventsMet: payload.minimumEventsMet });
+}
+
+function eventStudyDefinitionHash(payload: EventStudyRecord): string {
+  return canonicalHash({ studyId: payload.studyId, hypothesisId: payload.hypothesisId, population: payload.population, methodologyVersion: payload.methodologyVersion, symbol: payload.symbol, timeframe: payload.timeframe, conditionType: payload.conditionType, definitionHash: payload.definitionHash, minimumEvents: payload.minimumEvents });
 }
 
 export class StrategyResearchJournalStore {
@@ -291,11 +369,18 @@ export class StrategyResearchJournalStore {
               parsed.definition_hash !== experimentDefinitionHash(payload)) {
             throw new Error(`strategy experiment identity mismatch at line ${index + 1}`);
           }
+        } else if (parsed.kind === "event_hypothesis_registered") {
+          const payload = validateEventHypothesis(parsed.payload as EventStudyHypothesis);
+          if (parsed.entity_id !== payload.hypothesisId || parsed.evidence_hash !== null || parsed.definition_hash !== canonicalHash(payload)) throw new Error(`event hypothesis identity mismatch at line ${index + 1}`);
+        } else if (parsed.kind === "event_study_recorded") {
+          const payload = validateEventStudy(parsed.payload as EventStudyRecord);
+          if (parsed.entity_id !== payload.studyId || parsed.evidence_hash !== eventStudyEvidenceHash(payload) || parsed.definition_hash !== eventStudyDefinitionHash(payload)) throw new Error(`event study identity mismatch at line ${index + 1}`);
         } else throw new Error(`invalid strategy research journal kind at line ${index + 1}`);
         return parsed;
       });
       if (new Set(entries.map((entry) => entry.event_id)).size !== entries.length) throw new Error("duplicate strategy research journal event id");
       const hypotheses = new Set<string>();
+      const eventHypotheses = new Set<string>();
       const experiments = new Set<string>();
       const evidence = new Set<string>();
       for (const [index, entry] of entries.entries()) {
@@ -304,7 +389,7 @@ export class StrategyResearchJournalStore {
           const payload = entry.payload as StrategyHypothesis;
           if (payload.parentExperimentId && !experiments.has(payload.parentExperimentId)) throw new Error(`orphaned strategy hypothesis parent at line ${index + 1}`);
           hypotheses.add(entry.entity_id);
-        } else {
+        } else if (entry.kind === "experiment_recorded") {
           const payload = entry.payload as StrategyExperimentRecord;
           if (!hypotheses.has(payload.hypothesisId)) throw new Error(`orphaned strategy experiment at line ${index + 1}`);
           if (payload.parentExperimentId && !experiments.has(payload.parentExperimentId)) throw new Error(`orphaned strategy experiment parent at line ${index + 1}`);
@@ -312,6 +397,15 @@ export class StrategyResearchJournalStore {
           if (evidence.has(identity)) throw new Error(`duplicate strategy experiment evidence at line ${index + 1}`);
           evidence.add(identity);
           experiments.add(entry.entity_id);
+        } else if (entry.kind === "event_hypothesis_registered") {
+          if (eventHypotheses.has(entry.entity_id)) throw new Error(`duplicate event hypothesis at line ${index + 1}`);
+          eventHypotheses.add(entry.entity_id);
+        } else {
+          const payload = entry.payload as EventStudyRecord;
+          if (!eventHypotheses.has(payload.hypothesisId)) throw new Error(`orphaned event study at line ${index + 1}`);
+          const identity = `${entry.entity_id}:${entry.evidence_hash}`;
+          if (evidence.has(identity)) throw new Error(`duplicate event study evidence at line ${index + 1}`);
+          evidence.add(identity);
         }
       }
       return entries;
@@ -377,6 +471,63 @@ export class StrategyResearchJournalStore {
       const entry: ResearchJournalEntry = { schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1, recorded_at: new Date().toISOString(), kind: "experiment_recorded", entity_id: payload.experimentId, definition_hash: definition, evidence_hash: evidence, payload };
       await this.appendUnlocked(entry);
       return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async registerEventHypothesis(value: EventStudyHypothesis) {
+    const payload = validateEventHypothesis(value); const hash = canonicalHash(payload);
+    return this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      const existing = entries.find((entry) => entry.kind === "event_hypothesis_registered" && entry.entity_id === payload.hypothesisId);
+      if (existing) { if (existing.definition_hash !== hash) throw new Error(`event hypothesis_id ${payload.hypothesisId} is already bound to a different definition`); return { recorded: false, idempotent: true, entry: existing }; }
+      const entry: ResearchJournalEntry = { schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1, recorded_at: new Date().toISOString(), kind: "event_hypothesis_registered", entity_id: payload.hypothesisId, definition_hash: hash, evidence_hash: null, payload };
+      await this.appendUnlocked(entry); return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async recordEventStudy(value: EventStudyRecord) {
+    const payload = validateEventStudy(value); const evidence = eventStudyEvidenceHash(payload); const definition = eventStudyDefinitionHash(payload);
+    return this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      if (!entries.some((entry) => entry.kind === "event_hypothesis_registered" && entry.entity_id === payload.hypothesisId)) throw new Error("event hypothesis_id is not registered");
+      const existing = entries.find((entry) => entry.kind === "event_study_recorded" && entry.entity_id === payload.studyId && entry.evidence_hash === evidence);
+      if (existing) { if (existing.definition_hash !== definition || canonicalHash(existing.payload) !== canonicalHash(payload)) throw new Error("event study evidence is already bound to a different record"); return { recorded: false, idempotent: true, entry: existing }; }
+      const entry: ResearchJournalEntry = { schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1, recorded_at: new Date().toISOString(), kind: "event_study_recorded", entity_id: payload.studyId, definition_hash: definition, evidence_hash: evidence, payload };
+      await this.appendUnlocked(entry); return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async listEventStudies(hypothesisId?: string) {
+    if (hypothesisId !== undefined && !ID_PATTERN.test(hypothesisId)) throw new Error("invalid event hypothesis_id");
+    return this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      return entries.filter((entry) => entry.kind === "event_study_recorded")
+        .filter((entry) => hypothesisId === undefined || (entry.payload as EventStudyRecord).hypothesisId === hypothesisId)
+        .map((entry) => ({ studyId: entry.entity_id, evidenceHash: entry.evidence_hash, recordedAt: entry.recorded_at, definitionHash: entry.definition_hash, payload: entry.payload }));
+    });
+  }
+
+  async compareEventStudies(references: Array<{ studyId: string; evidenceHash: string }>) {
+    if (references.length < 2 || references.length > 20) throw new Error("compare requires two to twenty event study references");
+    return this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      const selected = references.map((reference) => {
+        if (!HASH_PATTERN.test(reference.studyId) || !HASH_PATTERN.test(reference.evidenceHash)) throw new Error("invalid event study comparison reference");
+        const entry = entries.find((candidate) => candidate.kind === "event_study_recorded" && candidate.entity_id === reference.studyId && candidate.evidence_hash === reference.evidenceHash);
+        if (!entry) throw new Error(`event study evidence not found: ${reference.studyId}`);
+        return entry;
+      });
+      const payloads = selected.map((entry) => entry.payload as EventStudyRecord); const first = payloads[0]; const differences: string[] = [];
+      for (const current of payloads.slice(1)) {
+        if (current.hypothesisId !== first.hypothesisId) differences.push("hypothesis_id");
+        if (current.population !== first.population) differences.push("population");
+        if (current.symbol !== first.symbol) differences.push("symbol");
+        if (current.timeframe !== first.timeframe) differences.push("timeframe");
+        if (current.methodologyVersion !== first.methodologyVersion) differences.push("methodology_version");
+        if (current.conditionType !== first.conditionType) differences.push("condition_type");
+        if (current.definitionHash !== first.definitionHash) differences.push("condition_definition");
+      }
+      return { comparable: differences.length === 0, incompatibilities: [...new Set(differences)], contract: { hypothesisId: first.hypothesisId, population: first.population, symbol: first.symbol, timeframe: first.timeframe, methodologyVersion: first.methodologyVersion, conditionType: first.conditionType, definitionHash: first.definitionHash }, studies: selected.map((entry) => ({ studyId: entry.entity_id, evidenceHash: entry.evidence_hash, recordedAt: entry.recorded_at, payload: entry.payload })) };
     });
   }
 

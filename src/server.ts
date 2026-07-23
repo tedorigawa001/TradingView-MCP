@@ -29,7 +29,7 @@ import {
   compareStrategyMetrics,
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
-import type { StrategyResearchJournalStore } from "./strategyResearchJournal.js";
+import type { EventStudyRecord, StrategyResearchJournalStore } from "./strategyResearchJournal.js";
 import {
   evaluateStrategyWalkForward,
   validateStrategyWalkForwardFolds,
@@ -117,7 +117,7 @@ export interface ServerDeps {
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
-  researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare">;
+  researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -779,12 +779,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
           to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
         })).max(12).optional(),
+        journal: z.object({
+          hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          population: RESEARCH_POPULATION_SCHEMA,
+          decision: z.enum(["adopted", "rejected", "inconclusive"]),
+          note: z.string().max(500).optional(),
+        }).optional(),
         event_limit: z.number().int().min(0).max(200).optional()
           .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
       },
     },
     async ({ expected_symbol, expected_timeframe, count, condition, horizons, target_return_bps,
-      minimum_events, confidence_level, configuration_trials, regime, folds, event_limit }) =>
+      minimum_events, confidence_level, configuration_trials, regime, folds, journal, event_limit }) =>
       chartOperations.run(async () => {
       try {
         const context = await tv.getChartContext();
@@ -859,16 +865,39 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             requireRetestCloseOutside: condition.require_retest_close_outside ?? true,
             minimumInitialRangeCoverage: condition.minimum_initial_range_coverage ?? 1,
           });
+        const source = {
+          chartIndex: activeIndex,
+          requestedBars: count ?? 5000,
+          returnedBars: history.bars.length,
+          from: history.bars[0]?.timeIso ?? null,
+          to: history.bars.at(-1)?.timeIso ?? null,
+        };
+        const definition = { condition, horizons, targetReturnBps: target_return_bps, minimumEvents: minimum_events,
+          confidenceLevel: confidence_level ?? 0.95, configurationTrials: configuration_trials ?? null, regime: regime ?? null, folds: folds ?? [] };
+        const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const branchSummaries = Object.entries(result.byBranch as Record<string, { events: number; horizons: Record<string, { availableEvents: number; directionalReturn: { mean: number | null; median: number | null }; positiveRate: number | null; targetHitRate: number | null }> }>).flatMap(([branch, summary]) =>
+          Object.entries(summary.horizons).map(([horizon, outcome]) => ({ branch, horizonBars: Number(horizon), events: outcome.availableEvents,
+            meanDirectionalReturn: outcome.directionalReturn.mean, medianDirectionalReturn: outcome.directionalReturn.median,
+            positiveRate: outcome.positiveRate, targetHitRate: outcome.targetHitRate })));
+        let journalResult: unknown = null;
+        if (journal) {
+          try {
+            const record: EventStudyRecord = { studyId, hypothesisId: journal.hypothesis_id, population: journal.population,
+              methodologyVersion: result.methodologyVersion, symbol: result.symbol, timeframe: result.timeframe, conditionType: condition.type,
+              definitionHash, source, sampleEvents: result.sample.events, minimumEvents: result.sample.minimumEvents, outcomes: branchSummaries,
+              qualityIssues: result.qualityIssues, minimumEventsMet: result.sample.events >= result.sample.minimumEvents,
+              decision: journal.decision, note: journal.note ?? "" };
+            journalResult = await researchJournal.recordEventStudy(record);
+          } catch (err) { journalResult = { recorded: false, error: err instanceof Error ? err.message : String(err) }; }
+        }
         return jsonResult({
           ...result,
           conditionType: condition.type,
-          source: {
-            chartIndex: activeIndex,
-            requestedBars: count ?? 5000,
-            returnedBars: history.bars.length,
-            from: history.bars[0]?.timeIso ?? null,
-            to: history.bars.at(-1)?.timeIso ?? null,
-          },
+          studyId,
+          definitionHash,
+          source,
+          ...(journal ? { journal: journalResult } : {}),
           limitations: [
             "This is an event study, not a fill, execution, or profitability simulation.",
             "Loaded chart history can be shorter than the requested count and differs by TradingView plan.",
@@ -5045,6 +5074,56 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       } catch (err) {
         return errorResult(err);
       }
+    },
+  );
+
+  server.registerTool(
+    "register_event_study_hypothesis",
+    {
+      description:
+        "Register one immutable event-study hypothesis and its outcome contract in the local append-only research journal. " +
+        "Use the optional journal field of run_market_event_study to record the computed evidence without copying results by hand.",
+      inputSchema: {
+        hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        title: z.string().min(1).max(120),
+        thesis: z.string().min(1).max(2000),
+        evaluation_contract: z.object({
+          population: RESEARCH_POPULATION_SCHEMA,
+          primary_metric: z.enum(["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"]),
+          primary_horizon_bars: z.number().int().min(1).max(250),
+          minimum_events: z.number().int().min(1).max(100_000),
+          symbols: z.array(SYMBOL_SCHEMA).min(1).max(20),
+          timeframes: z.array(z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i)).min(1).max(20),
+        }),
+      },
+    },
+    async ({ hypothesis_id, title, thesis, evaluation_contract }) => {
+      try {
+        return jsonResult(await researchJournal.registerEventHypothesis({
+          hypothesisId: hypothesis_id, title, thesis,
+          evaluationContract: { population: evaluation_contract.population, primaryMetric: evaluation_contract.primary_metric,
+            primaryHorizonBars: evaluation_contract.primary_horizon_bars, minimumEvents: evaluation_contract.minimum_events,
+            symbols: evaluation_contract.symbols, timeframes: evaluation_contract.timeframes },
+        }));
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "get_event_study_journal",
+    {
+      description: "List append-only event-study evidence records, or compare exact selected records when both study_ids and evidence_hashes are supplied. It never accesses a chart.",
+      inputSchema: { hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/).optional(), study_ids: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(2).max(20).optional(), evidence_hashes: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(2).max(20).optional() },
+    },
+    async ({ hypothesis_id, study_ids, evidence_hashes }) => {
+      try {
+        if (study_ids || evidence_hashes) {
+          if (!study_ids || !evidence_hashes || study_ids.length !== evidence_hashes.length) throw new Error("study_ids and evidence_hashes must both be supplied with the same length");
+          return jsonResult(await researchJournal.compareEventStudies(study_ids.map((studyId, index) => ({ studyId, evidenceHash: evidence_hashes[index] }))));
+        }
+        return jsonResult(await researchJournal.listEventStudies(hypothesis_id));
+      }
+      catch (err) { return errorResult(err); }
     },
   );
 
