@@ -97,3 +97,59 @@ test("event aftershock overlap policy retains events separated by the full maxim
   assert.equal(result.quality.eventsAfterOverlapPolicy, 2);
   assert.equal(result.quality.overlappingEventsExcluded, 0);
 });
+
+test("event aftershock handles duplicate event timestamps via represent_first policy", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    events: [
+      { eventId: "z-cpi", occurredAt: "2026-01-05T13:30:00.000Z" },
+      { eventId: "a-nfp", occurredAt: "2026-01-05T13:30:00.000Z" },
+    ],
+    sameTimestampPolicy: "represent_first",
+  }));
+  assert.equal(result.quality.suppliedEvents, 2);
+  assert.equal(result.quality.duplicateTimestampEventsExcluded, 1);
+  assert.equal(result.quality.eventsAfterOverlapPolicy, 1);
+  assert.equal(result.eventContract.sameTimestampPolicy, "represent_first");
+});
+
+test("event aftershock rejects duplicate event timestamps when sameTimestampPolicy is reject", () => {
+  assert.throws(() => {
+    runEventAftershockRetestStudy(input(aftershockBars(), {
+      events: [
+        { eventId: "first", occurredAt: "2026-01-05T13:30:00.000Z" },
+        { eventId: "second", occurredAt: "2026-01-05T13:30:00.000Z" },
+      ],
+      sameTimestampPolicy: "reject",
+    }));
+  }, /event timestamps must be unique/);
+});
+
+test("event aftershock calculates Bonferroni adjusted alpha for declared configuration trials", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    confidenceLevel: 0.95,
+    configurationTrials: 10,
+  }));
+  assert.equal(result.inferenceContract.multipleTestingAdjustment, "bonferroni_reference");
+  assert.equal(result.inferenceContract.nominalAlpha, 0.05);
+  assert.equal(result.inferenceContract.bonferroniAdjustedAlpha, 0.005);
+  assert.ok(result.inferenceWarnings.includes("confidence_intervals_do_not_adjust_for_multiple_testing_bonferroni_reference_only"));
+  assert.ok(!result.inferenceWarnings.includes("no_multiple_testing_adjustment_applied"));
+});
+
+test("event aftershock maintains precision for maximum trial count of 100,000", () => {
+  const result = runEventAftershockRetestStudy(input(aftershockBars(), {
+    confidenceLevel: 0.95,
+    configurationTrials: 100_000,
+  }));
+  assert.equal(result.inferenceContract.bonferroniAdjustedAlpha, 0.0000005);
+});
+
+test("event aftershock rejects invalid sameTimestampPolicy value", () => {
+  assert.throws(() => {
+    runEventAftershockRetestStudy(input(aftershockBars(), {
+      sameTimestampPolicy: "invalid_policy",
+    }));
+  }, /invalid sameTimestampPolicy/);
+});
+
+

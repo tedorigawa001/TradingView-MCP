@@ -342,7 +342,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **モデル境界**: spread/slippageをpipsからreport通貨へ一般変換せず、追加コストは明示的な`report currency / trade`として扱う。commission欠落時は該当シナリオだけ`not_evaluable`にする。bootstrapは取引結果の再標本化であり、市場経路、自己相関、約定順序を再現しない。再実行入力がStrategy内で何を意味するかはPine sourceの契約であり、同じ入力名でも異なるStrategy間で同一効果とみなさない
 - **検証状況**: protocolのready/blocked/warning、ID決定性、未来・重複・OOS閲覧後変更、コスト/件数、Pine監査、台帳stressの決定性、コスト劣化、commission欠落、品質・coverage拒否、seed再現性、MCP dry-run/一時適用/cleanup/chart fingerprint復元をユニットテストで固定した
 
-### #36 条件付きイベントスタディ(`run_market_event_study`) 🟡 固定条件3種・汎用条件は継続
+### #36 条件付きイベントスタディ(`run_market_event_study`) 🟡 同時刻ポリシー・Bonferroni参考値完了、条件DSLは継続
 
 - **目的**: いきなり売買ストラテジーを作らず、「条件発生後に優位性があるか」を将来リターン、MFE、MAE、到達時間で調べる
 - **入力**: point-in-timeで計算可能な条件、観測時刻、複数horizon、方向、セッション、コスト仮定、重複イベントの扱いを明示する。条件式は許可された特徴量DSLまたは構造化JSONとし、任意コードを実行しない
@@ -358,7 +358,10 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **重複窓ポリシー(2026-07-22)**: `overlap_policy: "exclude_later_event"`を既定かつ唯一の選択肢として追加した。canonical eventを時刻順に並べ、初動range + breakout window + retest window + 最大horizonの評価窓に入る後続eventを決定論的に除外する。返却する`eventContract`へ最大評価本数と最小分離時間を明示し、品質情報へポリシー適用後件数と除外件数を残す。同一UTC時刻の複数eventは、ID・経済的意味を推測して集約せず引き続き入力エラーとする
 - **実機E2E(2026-07-22)**: EURUSD 15分足の確定5,000本(2026-05-11〜07-22)に、TradingView calendarの米国highイベントを適用した。2026-05-05〜07-22の74 raw eventから、同一UTC時刻はID昇順の先頭だけを残し、初動4本 + breakout/retest各16本 + 最大horizon 16本の評価窓(13時間)に近接する後続eventを呼び出し側で除外して30時刻を入力した。初期履歴外2件、breakoutなし7件、retestなし3件、境界内終値9件を除外し、retest-up 6件/retest-down 3件の計9 eventとなった。minimum 10に届かず`partial`であり、foldも少数かつ符号不安定のため採用根拠なし。実行後はEURUSD 60分足へ復元した。同時刻の集約だけはcaller側の意味論として残し、近接後続eventの除外は以後ツール契約として固定した
 - **重複窓ポリシー実機E2E(2026-07-22)**: MCP再起動後、同じEURUSD 15分・確定5,000本へcalendarの62 raw eventを再取得した。同時刻をID昇順で代表化した37 canonical timestampを入力し、`exclude_later_event`が評価窓52本(13時間)内の後続7件を自動除外して30件へ縮約した。初回E2Eの手動近接除外後の件数と一致し、初期履歴外2件、breakoutなし7件、retestなし3件、境界内終値9件の内訳とretest-up 6/retest-down 3の検出件数も不変だった。9件でminimum 10未達、foldも7件/2件に偏るため、従来どおり採用根拠なし。検証後はactive第2ペインをXAUUSD 60分足へ復元し、既存StudyのID・名前を照合した
-- **残タスク**: 条件DSL、同時刻eventの意味論を含む重複event policy、多重比較補正を採用する場合の事前方式。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
+- **同時刻イベントポリシー(2026-07-24)**: 経済カレンダー等で同一UTC時刻に複数の重要イベントが重複して発生した場合に、`eventId` 昇順で決定論的に代表イベントを1件抽出し、後続を `duplicateTimestampEventsExcluded` カウントへ分類する `same_timestamp_policy: "represent_first"`(既定)および厳格エラー拒否する `"reject"` を追加した
+- **多重比較補正(2026-07-24)**: `configuration_trials` 申告時に Bonferroni 補正後の調整済み有意水準 (`bonferroniAdjustedAlpha = (1 - confidenceLevel) / configurationTrials`) を推論契約へ自動付与し、過剰適合・Pハッキングの自己診断を支援する仕組みを追加した。実際の信頼区間自体は非調整のままであることを`inferenceWarnings`へ明示し、`bonferroniAdjustedAlpha`は参考値であって自動適用ではないことを contract 側でも区別する
+- **検証状況**: 代表化・除外カウント、同一時刻拒否、無効ポリシー値拒否、Bonferroni α計算(最大試行数10万件の精度含む)を単体テストで固定した
+- **残タスク**: 条件DSL。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
 ### #37 市場レジーム分類(`compute_market_regimes`) 🟡 台帳・一括・session分解実装、他要因は継続
 

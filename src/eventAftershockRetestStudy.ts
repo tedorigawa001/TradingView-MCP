@@ -17,6 +17,7 @@ export interface EventAftershockRetestStudyInput {
   symbol: string;
   timeframe: string;
   events: Array<{ eventId: string; occurredAt: string }>;
+  sameTimestampPolicy?: "represent_first" | "reject";
   initialRangeBars: number;
   breakoutWithinBars: number;
   retestWithinBars: number;
@@ -51,8 +52,13 @@ function validate(input: EventAftershockRetestStudyInput) {
     throw new Error("event ids must use letters, digits, _, ., :, or -");
   }
   if (new Set(input.events.map((event) => event.eventId)).size !== input.events.length) throw new Error("event ids must be unique");
-  const eventTimes = input.events.map((event) => canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`));
-  if (new Set(eventTimes).size !== eventTimes.length) throw new Error("event timestamps must be unique");
+  if (input.sameTimestampPolicy !== undefined && !["represent_first", "reject"].includes(input.sameTimestampPolicy)) {
+    throw new Error("invalid sameTimestampPolicy");
+  }
+  if (input.sameTimestampPolicy === "reject") {
+    const eventTimes = input.events.map((event) => canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`));
+    if (new Set(eventTimes).size !== eventTimes.length) throw new Error("event timestamps must be unique");
+  }
   for (const [label, value, maximum] of [
     ["initial range bars", input.initialRangeBars, 24],
     ["breakout window", input.breakoutWithinBars, 96],
@@ -86,12 +92,25 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
   const minimumInitialBars = Math.ceil(input.initialRangeBars * input.minimumInitialRangeCoverage);
   const maximumEvaluationWindowBars = input.initialRangeBars + input.breakoutWithinBars + input.retestWithinBars + Math.max(...input.horizons);
   const minimumEventSeparationMilliseconds = maximumEvaluationWindowBars * timeframeMs;
-  const orderedEvents = input.events.map((event) => ({ ...event,
-    occurredAtMs: canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`) }))
-    .sort((left, right) => left.occurredAtMs - right.occurredAtMs);
-  const selectedEvents: typeof orderedEvents = [];
+  const rawOrdered = input.events.map((event) => ({
+    ...event,
+    occurredAtMs: canonicalTime(event.occurredAt, `${event.eventId}.occurredAt`),
+  })).sort((left, right) => left.occurredAtMs - right.occurredAtMs || left.eventId.localeCompare(right.eventId));
+
+  const deduplicatedEvents: typeof rawOrdered = [];
+  let duplicateTimestampEventsExcluded = 0;
+  for (const event of rawOrdered) {
+    const last = deduplicatedEvents.at(-1);
+    if (last && last.occurredAtMs === event.occurredAtMs) {
+      duplicateTimestampEventsExcluded += 1;
+      continue;
+    }
+    deduplicatedEvents.push(event);
+  }
+
+  const selectedEvents: typeof deduplicatedEvents = [];
   let overlappingEventsExcluded = 0;
-  for (const event of orderedEvents) {
+  for (const event of deduplicatedEvents) {
     const prior = selectedEvents.at(-1);
     if (prior && event.occurredAtMs - prior.occurredAtMs < minimumEventSeparationMilliseconds) {
       overlappingEventsExcluded += 1;
@@ -101,6 +120,7 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
   }
   const quality = {
     suppliedEvents: input.events.length,
+    duplicateTimestampEventsExcluded,
     eventsAfterOverlapPolicy: selectedEvents.length,
     overlappingEventsExcluded,
     alignedEvents: 0,
@@ -201,14 +221,16 @@ export function runEventAftershockRetestStudy(input: EventAftershockRetestStudyI
     ...(regimeEvidence?.status === "partial" ? ["regime_classification_incomplete"] : []),
     ...(regimeAnalysis?.qualityIssues ?? []),
   ];
+  const nominalAlpha = Number((1 - input.confidenceLevel).toFixed(4));
+  const bonferroniAdjustedAlpha = input.configurationTrials === null ? null : Number(((1 - input.confidenceLevel) / input.configurationTrials).toFixed(10));
   return {
     schemaVersion: "1.0" as const, methodologyVersion: input.regime === null ? "event_aftershock_retest_study_v1" as const : "event_aftershock_retest_regime_study_v1" as const,
     status: issues.length === 0 ? "complete" as const : "partial" as const, symbol: input.symbol, timeframe: input.timeframe,
-    eventContract: { eventTimes: "caller_supplied_canonical_utc_timestamps", eventBar: "closed_bar_starting_exactly_at_occurred_at", initialRange: "first_closed_bars_after_event", breakout: "first_close_outside_initial_range", retest: "first_boundary_touch_after_breakout", requireRetestCloseOutside: input.requireRetestCloseOutside, duplicateEventTimestampsRejected: true, overlapPolicy: input.overlapPolicy, laterEventExcludedWhenStartWithinMaximumEvaluationWindow: true, maximumEvaluationWindowBars, minimumEventSeparationMilliseconds },
-    parameters: { initialRangeBars: input.initialRangeBars, breakoutWithinBars: input.breakoutWithinBars, retestWithinBars: input.retestWithinBars, minimumInitialRangeCoverage: input.minimumInitialRangeCoverage, overlapPolicy: input.overlapPolicy },
+    eventContract: { eventTimes: "caller_supplied_canonical_utc_timestamps", eventBar: "closed_bar_starting_exactly_at_occurred_at", initialRange: "first_closed_bars_after_event", breakout: "first_close_outside_initial_range", retest: "first_boundary_touch_after_breakout", requireRetestCloseOutside: input.requireRetestCloseOutside, sameTimestampPolicy: input.sameTimestampPolicy ?? "represent_first", overlapPolicy: input.overlapPolicy, laterEventExcludedWhenStartWithinMaximumEvaluationWindow: true, maximumEvaluationWindowBars, minimumEventSeparationMilliseconds },
+    parameters: { initialRangeBars: input.initialRangeBars, breakoutWithinBars: input.breakoutWithinBars, retestWithinBars: input.retestWithinBars, minimumInitialRangeCoverage: input.minimumInitialRangeCoverage, sameTimestampPolicy: input.sameTimestampPolicy ?? "represent_first", overlapPolicy: input.overlapPolicy },
     outcomeContract: { reference: "retest_bar_close_event_study_only_not_assumed_fill", horizons: input.horizons, targetReturnBps: input.targetReturnBps, contiguousBarsRequired: true },
-    inferenceContract: { confidenceLevel: input.confidenceLevel, meanIntervalMethod: "normal_approximation", rateIntervalMethod: "wilson_score", serialDependenceAdjustment: "none", multipleTestingAdjustment: "none", configurationTrials: input.configurationTrials, trialTrackingStatus: input.configurationTrials === null ? "not_declared" : "declared", inferenceScope: "global_branch_horizon_primary_outcomes_only", configuredMetricIntervals: branches.length * input.horizons.length * 3 },
-    inferenceWarnings: [...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []), "confidence_intervals_do_not_adjust_for_serial_dependence", "no_multiple_testing_adjustment_applied", "economic_event_times_are_caller_supplied_and_not_independently_verified", ...(input.regime === null ? [] : ["regime_subgroups_expand_the_number_of_inspected_outcomes"])],
+    inferenceContract: { confidenceLevel: input.confidenceLevel, meanIntervalMethod: "normal_approximation", rateIntervalMethod: "wilson_score", serialDependenceAdjustment: "none", multipleTestingAdjustment: input.configurationTrials === null ? "none" : "bonferroni_reference", nominalAlpha, bonferroniAdjustedAlpha, configurationTrials: input.configurationTrials, trialTrackingStatus: input.configurationTrials === null ? "not_declared" : "declared", inferenceScope: "global_branch_horizon_primary_outcomes_only", configuredMetricIntervals: branches.length * input.horizons.length * 3 },
+    inferenceWarnings: [...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []), "confidence_intervals_do_not_adjust_for_serial_dependence", ...(input.configurationTrials === null ? ["no_multiple_testing_adjustment_applied"] : ["confidence_intervals_do_not_adjust_for_multiple_testing_bonferroni_reference_only"]), "economic_event_times_are_caller_supplied_and_not_independently_verified", ...(input.regime === null ? [] : ["regime_subgroups_expand_the_number_of_inspected_outcomes"])],
     foldContract: { detail: "compact_directional_outcomes", fields: ["availableEvents", "unavailableEvents", "directionalReturn.count", "directionalReturn.mean", "directionalReturn.median", "positiveRate", "targetHitRate"], omitted: ["confidenceIntervals", "mfe", "mae", "targetHitBars"] },
     sample: { barsReceived: input.bars.length, closedBars: closed.length, suppliedEvents: input.events.length, events: events.length, minimumEvents: input.minimumEvents }, quality, qualityIssues: issues, byBranch, folds: foldResults,
     ...(regimeEvidence === null ? {} : { regimeEvidence: { methodologyVersion: regimeEvidence.methodologyVersion, status: regimeEvidence.status, thresholds: regimeEvidence.thresholds, sample: regimeEvidence.sample, quality: regimeEvidence.quality, qualityIssues: regimeEvidence.qualityIssues, distribution: regimeEvidence.distribution }, regimeAnalysis }),

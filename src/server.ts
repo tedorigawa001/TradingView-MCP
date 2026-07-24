@@ -749,6 +749,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             initial_range_bars: z.number().int().min(1).max(24).optional(),
             breakout_within_bars: z.number().int().min(1).max(96).optional(),
             retest_within_bars: z.number().int().min(1).max(96).optional(),
+            same_timestamp_policy: z.enum(["represent_first", "reject"]).optional()
+              .describe("Policy when multiple event timestamps are identical. Default: represent_first"),
             // A literal keeps today's fail-closed contract while reserving this named extension point.
             overlap_policy: z.literal("exclude_later_event").optional()
               .describe("Exclude later event timestamps whose maximum evaluation window overlaps an earlier event. Default: exclude_later_event"),
@@ -877,6 +879,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           : runEventAftershockRetestStudy({
             ...common,
             events: condition.events.map((event) => ({ eventId: event.event_id, occurredAt: event.occurred_at })),
+            sameTimestampPolicy: condition.same_timestamp_policy ?? "represent_first",
             initialRangeBars: condition.initial_range_bars ?? 4,
             breakoutWithinBars: condition.breakout_within_bars ?? 16,
             retestWithinBars: condition.retest_within_bars ?? 16,
