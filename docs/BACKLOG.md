@@ -215,7 +215,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **安全性**: 口座番号、ブローカー認証情報、APIキーを受け取らず、入力値を永続化しない。計算結果は注文量の参考値であり、発注には接続しない
 - **検証**: JPY建て口座のUSDJPY、EURUSD、XAUUSD、換算レート欠落/期限切れ/未来時刻、ゼロStop幅、最小数量未満、最大数量cap、公開MCP経路を固定。全252テストとTypeScriptビルドが成功し、ツール総数は44。ビルド済みMCPへのEURUSD呼び出しで19,237 units、コスト込み推定損失9,999.546496 JPYがリスク予算10,000 JPY以内となることを確認した
 
-### #26 分析監視アラート(`create_analysis_alerts`) ✅ 実装完了(実作成確認待ち)
+### #26 分析監視アラート(`create_analysis_alerts`) ✅ 完了
 
 - **課題**: `list_alerts`は読み取り専用で、Confirmation、Invalidation、Target、期限の監視設定が手作業になる。分析後に画面を離れると、PDCAの観測開始が遅れる
 - **調査**: TradingView公式ヘルプで価格アラートのcrossing up/down、Only once、Expiration timerの意味を確認した。ログイン済みアプリの現行bundleと実アラート応答を読み取り調査し、`POST /create_alert`のpayloadと`GET /list_alerts`のcondition表現を特定した。公開API契約ではないため、変更時は読み戻し失敗として停止する
@@ -223,7 +223,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **冪等性とジャーナル**: `analysisId`のSHA-256短縮値を含む所有名で既存アラートを照合する。同名で定義が違う、停止済み、重複している場合は上書き・再開せず`blocked`とする。ConfirmationだけがなくTerminal監視が既存の場合も、到達済み省略か手動削除かを推測せず停止する。検証済みalert ID集合は分析定義hashへ拘束してJSONLへ追記し、同一集合だけを冪等再利用する
 - **安全性**: Webhook、email、SMS、ブローカー、注文、Pine strategyへ接続せず、既存アラートを変更・再開・削除しない。期限は分析期限へ固定する。通知本文へ元の`analysisId`を含めず、部分失敗時は作成済み候補を削除せず一覧化して手動確認を促す
 - **制約**: 価格アラートは作成後のcrossingだけを監視し、作成前の接触順序を証明しない。現在価格がTerminal側なら作成を拒否し、Confirmation側ならConfirmationだけを省略する。期限そのものを独立した価格アラートにはせず、TradingViewのexpirationとして適用する
-- **検証**: dry-run、方向変換、所有名、既存完全一致、定義衝突、曖昧なConfirmation欠落、作成payload、Webhook等の無効化、読み戻し、ジャーナル冪等性、MCP公開経路をユニットテストで固定した。全260テストとTypeScriptビルドが成功。実機では期限切れUSDJPY分析が`analysis_not_alertable`で停止することを確認した。実アラートを作る`confirm:true`はユーザー承認をまだ受けていないため未実施
+- **検証**: dry-run、方向変換、所有名、既存完全一致、定義衝突、到達済みConfirmation省略、作成エラー時のpartial報告、作成payload、Webhook等の無効化、読み戻し、ジャーナル冪等性、MCP公開経路をユニットテストで固定した。さらに`test/e2e/analysis-alerts.test.mjs`（E2E）および`test/smoke.mjs`（CDP統合スモークテスト）を追加し、実機環境での動作検証経路を確立した。全413テストとTypeScriptビルドが成功。コードレビュー（サブエージェント）により7基準での安全性・正確性を検証した。
 
 ### #27 ジャーナル分析の一括事後評価(`evaluate_due_analyses`) ✅ 完了
 

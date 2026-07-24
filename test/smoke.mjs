@@ -297,6 +297,26 @@ await check("list_alerts", async () => {
   return `${alerts.length} alert(s)${alerts[0] ? `, e.g. ${alerts[0].symbol} active=${alerts[0].active}` : ""}`;
 });
 
+await check("create_analysis_alerts guard validation", async () => {
+  const scripts = await tv.listPineScripts();
+  const overlayScript = scripts.find((s) => s.name === "Bushido Analysis Overlay");
+  if (!overlayScript) {
+    const dummyId = "USER;00000000000000000000000000000000";
+    const res = await tv.createAnalysisAlerts({
+      pineId: dummyId,
+      expectedSymbol: originalSymbol,
+      expectedTimeframe: originalResolution,
+      analysisId: "smoke-test-001",
+      confirm: false,
+    }).then(v => v, e => e);
+    if (res instanceof Error && !/analysis_overlay_not_owned|not saved|not owned/.test(res.message)) {
+      throw res;
+    }
+    return `correctly refused unowned overlay script ${dummyId}`;
+  }
+  return `found saved overlay script ${overlayScript.pineId} (${overlayScript.usedBy.length} chart instance(s))`;
+});
+
 await check("load_more_history", async () => {
   const r = await tv.loadMoreHistory({ count: 50 });
   if (r.barsAfter < r.barsBefore) throw new Error("bar count decreased");

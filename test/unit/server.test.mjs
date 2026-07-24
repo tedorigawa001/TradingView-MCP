@@ -10,6 +10,7 @@ import {
   ANALYSIS_OVERLAY_SOURCE,
 } from "../../build/analysisOverlay.js";
 import { AnalysisDefinitionConflictError } from "../../build/analysisJournal.js";
+import { analysisAlertOwnershipName } from "../../build/analysisAlerts.js";
 
 function makeDeps(overrides = {}) {
   return {
@@ -3823,6 +3824,133 @@ test("create_analysis_alerts previews, creates, verifies, and reuses owned alert
   assert.equal(ambiguous.status, "blocked");
   assert.equal(ambiguous.reason, "ambiguous_missing_confirmation_alert");
   assert.equal(creates, 3);
+});
+
+test("create_analysis_alerts blocks execution when owned alert definition conflicts", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const now = Date.now();
+  const analysisId = "USDJPY-conflict-test";
+  const values = {
+    in_0: analysisId, in_1: now - 60_000, in_2: "bullish", in_3: 162.1, in_4: 162.2, in_5: 162.3,
+    in_6: 161.9, in_7: 161.8, in_8: 162.6, in_9: 0, in_10: 0, in_11: 0.65, in_12: now + 3600_000, in_13: "",
+  };
+  const conflictingAlert = {
+    id: 999,
+    name: analysisAlertOwnershipName(analysisId, "confirmation"),
+    symbol: "OANDA:USDJPY",
+    resolution: "240",
+    condition: { type: "cross_up", series: [{ type: "value", value: 999.9 }] }, // Mismatched level!
+    message: "conflict",
+    active: true,
+    expiration: new Date(now + 3600_000).toISOString(),
+  };
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }] }),
+      listPineScripts: async () => [{ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", usedBy: [{ chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }] }],
+      getPineSource: async () => ({ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", source: ANALYSIS_OVERLAY_SOURCE }),
+      getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+      getOhlcv: async () => ({ symbol: "OANDA:USDJPY", resolution: "240", count: 1, bars: [{ time: now / 1000, open: 162.0, high: 162.1, low: 161.9, close: 162.0 }] }),
+      listAlerts: async () => [conflictingAlert],
+    },
+  }));
+  const res = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { pine_id: pineId, expected_symbol: "OANDA:USDJPY", expected_timeframe: "4H", analysis_id: analysisId, confirm: true },
+  })).content[0].text);
+  assert.equal(res.status, "blocked");
+  assert.equal(res.reason, "owned_alert_definition_conflict");
+});
+
+test("create_analysis_alerts omits confirmation alert when price already reached confirmation", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const now = Date.now();
+  const analysisId = "USDJPY-reached-test";
+  const values = {
+    in_0: analysisId, in_1: now - 60_000, in_2: "bullish", in_3: 162.0, in_4: 162.1, in_5: 162.2,
+    in_6: 161.9, in_7: 161.8, in_8: 162.6, in_9: 0, in_10: 0, in_11: 0.65, in_12: now + 3600_000, in_13: "",
+  };
+  const alerts = [];
+  let creates = 0;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }] }),
+      listPineScripts: async () => [{ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", usedBy: [{ chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }] }],
+      getPineSource: async () => ({ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", source: ANALYSIS_OVERLAY_SOURCE }),
+      getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+      getOhlcv: async () => ({ symbol: "OANDA:USDJPY", resolution: "240", count: 1, bars: [{ time: now / 1000, open: 162.2, high: 162.28, low: 162.15, close: 162.25 }] }), // > confirmation 162.2 and < target_1 162.3
+      listAlerts: async () => alerts,
+      createPriceAlert: async (options) => {
+        creates += 1;
+        const alert = {
+          id: creates,
+          name: options.name,
+          symbol: options.symbol,
+          resolution: options.resolution,
+          condition: { type: options.operator, series: [{ type: "value", value: options.level }] },
+          message: options.message,
+          active: true,
+          expiration: options.expiration,
+        };
+        alerts.push(alert);
+        return { alertId: creates, name: options.name, symbol: options.symbol, verified: true };
+      },
+    },
+  }));
+  const res = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { pine_id: pineId, expected_symbol: "OANDA:USDJPY", expected_timeframe: "4H", analysis_id: analysisId, confirm: true },
+  })).content[0].text);
+  assert.equal(res.status, "complete");
+  assert.equal(creates, 2); // Invalidation & Target 1 only
+  assert.equal(res.omitted[0].kind, "confirmation");
+  assert.equal(res.omitted[0].reason, "confirmation_currently_reached");
+});
+
+test("create_analysis_alerts reports partial status when alert creation fails midway", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const now = Date.now();
+  const analysisId = "USDJPY-partial-fail-test";
+  const values = {
+    in_0: analysisId, in_1: now - 60_000, in_2: "bullish", in_3: 162.1, in_4: 162.2, in_5: 162.3,
+    in_6: 161.9, in_7: 161.8, in_8: 162.6, in_9: 0, in_10: 0, in_11: 0.65, in_12: now + 3600_000, in_13: "",
+  };
+  const alerts = [];
+  let creates = 0;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }] }),
+      listPineScripts: async () => [{ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", usedBy: [{ chartIndex: 0, studyId: "overlay2", name: ANALYSIS_OVERLAY_NAME, version: "2.0" }] }],
+      getPineSource: async () => ({ pineId, name: ANALYSIS_OVERLAY_NAME, kind: "study", version: "2.0", source: ANALYSIS_OVERLAY_SOURCE }),
+      getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+      getOhlcv: async () => ({ symbol: "OANDA:USDJPY", resolution: "240", count: 1, bars: [{ time: now / 1000, open: 162.0, high: 162.1, low: 161.9, close: 162.0 }] }),
+      listAlerts: async () => alerts,
+      createPriceAlert: async (options) => {
+        creates += 1;
+        if (creates > 1) throw new Error("TradingView API rate limit");
+        const alert = {
+          id: creates,
+          name: options.name,
+          symbol: options.symbol,
+          resolution: options.resolution,
+          condition: { type: options.operator, series: [{ type: "value", value: options.level }] },
+          message: options.message,
+          active: true,
+          expiration: options.expiration,
+        };
+        alerts.push(alert);
+        return { alertId: creates, name: options.name, symbol: options.symbol, verified: true };
+      },
+    },
+  }));
+  const res = JSON.parse((await client.callTool({
+    name: "create_analysis_alerts",
+    arguments: { pine_id: pineId, expected_symbol: "OANDA:USDJPY", expected_timeframe: "4H", analysis_id: analysisId, confirm: true },
+  })).content[0].text);
+  assert.equal(res.status, "partial");
+  assert.equal(creates, 2);
+  assert.equal(res.failures.length, 1);
+  assert.equal(res.failures[0].error, "TradingView API rate limit");
 });
 
 test("get_watchlist returns the user's lists", async () => {
