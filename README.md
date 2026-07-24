@@ -297,6 +297,12 @@ TRADINGVIEW_WALK_FORWARD_E2E_CONFIG='{"expected_symbol":"OANDA:USDJPY","expected
 TRADINGVIEW_ANALYSIS_ALERTS_E2E_CONFIG='{"pine_id":"USER;YOUR_PINE_ID","expected_symbol":"OANDA:USDJPY","expected_timeframe":"4H","analysis_id":"USDJPY-20260724-001","confirm":false}' npm run test:e2e
 ```
 
+Fair Value Gap Retest イベントスタディ E2Eは、チャートに適合する設定を `TRADINGVIEW_FVG_RETEST_E2E_CONFIG` へ指定して実行します。
+
+```bash
+TRADINGVIEW_FVG_RETEST_E2E_CONFIG='{"expected_symbol":"OANDA:EURUSD","expected_timeframe":"60","count":5000,"condition":{"type":"fair_value_gap_retest","minimum_gap_bps":10,"retest_within_bars":24,"min_impulse_body_ratio":0.5,"require_boundary_hold":true},"horizons":[1,2,4,8],"target_return_bps":20,"minimum_events":1,"event_limit":50,"confidence_level":0.95,"configuration_trials":1}' npm run test:e2e
+```
+
 E2Eは誤ったチャート束縛の拒否、dry-runの決定性、train-only選定、非選択候補OOSの非公開に加え、研究protocol検証、ledger stress、seed固定bootstrap、アラート実作成・所有名照合、レスポンス非増幅、実行後のチャート完全復元を検証します。設定がない場合はskipします。
 
 ### フォルダ構成

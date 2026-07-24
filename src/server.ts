@@ -44,6 +44,7 @@ import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runFailedBreakoutStudy } from "./failedBreakoutStudy.js";
+import { runFvgRetestStudy } from "./fvgRetestStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
@@ -766,6 +767,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             confirmation_bars: z.number().int().min(0).max(4).optional(),
             minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
           }),
+          z.object({
+            type: z.literal("fair_value_gap_retest"),
+            minimum_gap_bps: z.number().finite().gt(0).max(1000).optional(),
+            retest_within_bars: z.number().int().min(1).max(96).optional(),
+            min_impulse_body_ratio: z.number().finite().min(0).max(1).optional(),
+            require_boundary_hold: z.boolean().optional(),
+          }),
         ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
         target_return_bps: z.number().finite().gt(0).max(1000),
@@ -875,6 +883,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             ...common, timezone: condition.timezone, rangeStart: condition.range_start, rangeEnd: condition.range_end,
             failureEnd: condition.failure_end, confirmationBars: condition.confirmation_bars ?? 1,
             minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
+          })
+          : condition.type === "fair_value_gap_retest"
+          ? runFvgRetestStudy({
+            ...common,
+            minimumGapBps: condition.minimum_gap_bps ?? 10,
+            retestWithinBars: condition.retest_within_bars ?? 24,
+            minImpulseBodyRatio: condition.min_impulse_body_ratio ?? 0.5,
+            requireBoundaryHold: condition.require_boundary_hold ?? true,
           })
           : runEventAftershockRetestStudy({
             ...common,

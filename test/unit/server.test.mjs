@@ -5005,6 +5005,50 @@ test("run_market_event_study binds failed breakout evidence to the active chart"
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 
+test("run_market_event_study evaluates fair_value_gap_retest and records evidence to research journal", async () => {
+  const start = Date.UTC(2026, 0, 1, 0, 0);
+  const hour = 3_600_000;
+  const ohlc = [
+    [100, 100.2, 99.8, 100],
+    [100.3, 101.8, 100.2, 101.6],
+    [101.7, 103, 101.4, 102.8],
+    [102.8, 103, 102.5, 102.7],
+    [102.7, 102.8, 100.5, 101],
+    [101, 102.5, 100.8, 102.2],
+    [102.2, 104, 102, 103.8],
+  ];
+  const bars = ohlc.map(([open, high, low, close], index) => {
+    const time = (start + index * hour) / 1000;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open, high, low, close, volume: 1000 };
+  });
+
+  const journalRecords = [];
+  const client = await connectedClient(makeDeps({
+    researchJournal: {
+      recordEventStudy: async (payload) => (journalRecords.push(payload), { recorded: true, entry: { payload } }),
+    },
+    tv: {
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+    },
+  }));
+
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+    condition: { type: "fair_value_gap_retest", minimum_gap_bps: 10, retest_within_bars: 12, min_impulse_body_ratio: 0.5, require_boundary_hold: true },
+    horizons: [1, 2, 4], target_return_bps: 20, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+    journal: { hypothesis_id: "hyp_fvg_test", population: "in_sample", decision: "adopted" },
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "fair_value_gap_retest");
+  assert.equal(parsed.sample.events, 1);
+  assert.equal(parsed.events[0].branch, "fvg_retest_bullish");
+  assert.equal(parsed.events[0].direction, "long");
+  assert.equal(parsed.journal.recorded, true);
+  assert.equal(journalRecords[0].conditionType, "fair_value_gap_retest");
+});
+
 test("run_yield_price_nonconfirmation_study binds optional third-chart context evidence", async () => {
   const day = 86_400_000;
   const start = Date.UTC(2026, 0, 1);

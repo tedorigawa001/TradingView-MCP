@@ -360,7 +360,8 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **重複窓ポリシー実機E2E(2026-07-22)**: MCP再起動後、同じEURUSD 15分・確定5,000本へcalendarの62 raw eventを再取得した。同時刻をID昇順で代表化した37 canonical timestampを入力し、`exclude_later_event`が評価窓52本(13時間)内の後続7件を自動除外して30件へ縮約した。初回E2Eの手動近接除外後の件数と一致し、初期履歴外2件、breakoutなし7件、retestなし3件、境界内終値9件の内訳とretest-up 6/retest-down 3の検出件数も不変だった。9件でminimum 10未達、foldも7件/2件に偏るため、従来どおり採用根拠なし。検証後はactive第2ペインをXAUUSD 60分足へ復元し、既存StudyのID・名前を照合した
 - **同時刻イベントポリシー(2026-07-24)**: 経済カレンダー等で同一UTC時刻に複数の重要イベントが重複して発生した場合に、`eventId` 昇順で決定論的に代表イベントを1件抽出し、後続を `duplicateTimestampEventsExcluded` カウントへ分類する `same_timestamp_policy: "represent_first"`(既定)および厳格エラー拒否する `"reject"` を追加した
 - **多重比較補正(2026-07-24)**: `configuration_trials` 申告時に Bonferroni 補正後の調整済み有意水準 (`bonferroniAdjustedAlpha = (1 - confidenceLevel) / configurationTrials`) を推論契約へ自動付与し、過剰適合・Pハッキングの自己診断を支援する仕組みを追加した。実際の信頼区間自体は非調整のままであることを`inferenceWarnings`へ明示し、`bonferroniAdjustedAlpha`は参考値であって自動適用ではないことを contract 側でも区別する
-- **検証状況**: 代表化・除外カウント、同一時刻拒否、無効ポリシー値拒否、Bonferroni α計算(最大試行数10万件の精度含む)を単体テストで固定した
+- **Fair Value Gap Retestイベント(2026-07-25)**: `run_market_event_study` へ `fair_value_gap_retest` (`schemaVersion: "1.0"`, `methodologyVersion: "fvg_retest_event_study_v1"`) を追加した。3本足の価格ギャップ（強気: `bar[i-2].high < bar[i].low`、弱気: `bar[i-2].low > bar[i].high`）、最小幅 `minimum_gap_bps` (既定10bps)、モメンタム実体比率 `min_impulse_body_ratio` (既定0.5) を確定足のみで判定。形成後の指定窓 `retest_within_bars` (1〜96本) 内でゾーンへ進入した最初の足をシグナル参照足とし、`require_boundary_hold` でゾーン破断の有無を分離。方向調整 forward return, MFE, MAE, 信頼区間, 時系列 fold, および `register_event_study_hypothesis` 連携をサポート。単体テスト (`test/unit/fvgRetestStudy.test.mjs`) がパス。
+- **検証状況**: 代表化・除外カウント、同一時刻拒否、無効ポリシー値拒否、Bonferroni α計算(最大試行数10万件の精度含む)、および FVG 検出・再テスト・境界保持判定を単体テストで固定した
 - **残タスク**: 条件DSL。session clockは`range_start < range_end < auction_end`となる同一local dayだけを受け、日跨ぎsessionは#40で扱う
 
 ### #37 市場レジーム分類(`compute_market_regimes`) 🟡 台帳・一括・session分解実装、他要因は継続
