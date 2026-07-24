@@ -4,7 +4,7 @@ export type FuturesFlowMapping = {
   targetSymbol: string;
   futuresSymbol: string;
   allowedFuturesSymbols: string[];
-  venue: "CME" | "COMEX";
+  venue: "CME" | "COMEX" | "CBOT" | "NYMEX";
   instrument: string;
   targetDirectionMultiplier: 1 | -1;
   proxyScope: "direct_base_asset" | "base_currency_single_leg";
@@ -33,6 +33,7 @@ export interface FuturesFlowContextInput {
   observationLimit: number;
   openInterestData?: OpenInterestPoint[];
   openInterestSource?: "tradingview_chart_indicator" | "caller_supplied_open_interest_data";
+  rollAnomalyThreshold?: number;
 }
 
 const MAPPINGS: Record<string, FuturesFlowMapping> = {
@@ -48,9 +49,51 @@ const MAPPINGS: Record<string, FuturesFlowMapping> = {
   "OANDA:GBPAUD": { targetSymbol: "OANDA:GBPAUD", futuresSymbol: "CME:6B1!", venue: "CME",
     allowedFuturesSymbols: ["CME:6B1!", "CME_DL:6B1!"],
     instrument: "British Pound continuous futures", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
+  "OANDA:AUDUSD": { targetSymbol: "OANDA:AUDUSD", futuresSymbol: "CME:6A1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6A1!", "CME_DL:6A1!"],
+    instrument: "Australian Dollar continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:USDCAD": { targetSymbol: "OANDA:USDCAD", futuresSymbol: "CME:6C1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6C1!", "CME_DL:6C1!"],
+    instrument: "Canadian Dollar continuous futures", targetDirectionMultiplier: -1, proxyScope: "direct_base_asset" },
+  "OANDA:USDCHF": { targetSymbol: "OANDA:USDCHF", futuresSymbol: "CME:6S1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6S1!", "CME_DL:6S1!"],
+    instrument: "Swiss Franc continuous futures", targetDirectionMultiplier: -1, proxyScope: "direct_base_asset" },
+  "OANDA:NZDUSD": { targetSymbol: "OANDA:NZDUSD", futuresSymbol: "CME:6N1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6N1!", "CME_DL:6N1!"],
+    instrument: "New Zealand Dollar continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:EURJPY": { targetSymbol: "OANDA:EURJPY", futuresSymbol: "CME:6E1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6E1!", "CME_DL:6E1!"],
+    instrument: "Euro FX continuous futures", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
+  "OANDA:AUDJPY": { targetSymbol: "OANDA:AUDJPY", futuresSymbol: "CME:6A1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:6A1!", "CME_DL:6A1!"],
+    instrument: "Australian Dollar continuous futures", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
+  "OANDA:SPX500USD": { targetSymbol: "OANDA:SPX500USD", futuresSymbol: "CME:ES1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:ES1!", "CME_DL:ES1!"],
+    instrument: "E-mini S&P 500 continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "CAPITALCOM:US500": { targetSymbol: "CAPITALCOM:US500", futuresSymbol: "CME:ES1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:ES1!", "CME_DL:ES1!"],
+    instrument: "E-mini S&P 500 continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:NAS100USD": { targetSymbol: "OANDA:NAS100USD", futuresSymbol: "CME:NQ1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:NQ1!", "CME_DL:NQ1!"],
+    instrument: "E-mini Nasdaq 100 continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "CAPITALCOM:US100": { targetSymbol: "CAPITALCOM:US100", futuresSymbol: "CME:NQ1!", venue: "CME",
+    allowedFuturesSymbols: ["CME:NQ1!", "CME_DL:NQ1!"],
+    instrument: "E-mini Nasdaq 100 continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:US30USD": { targetSymbol: "OANDA:US30USD", futuresSymbol: "CBOT:YM1!", venue: "CBOT",
+    allowedFuturesSymbols: ["CBOT:YM1!", "CBOT_DL:YM1!"],
+    instrument: "E-mini Dow Jones continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "CAPITALCOM:US30": { targetSymbol: "CAPITALCOM:US30", futuresSymbol: "CBOT:YM1!", venue: "CBOT",
+    allowedFuturesSymbols: ["CBOT:YM1!", "CBOT_DL:YM1!"],
+    instrument: "E-mini Dow Jones continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
   "OANDA:XAUUSD": { targetSymbol: "OANDA:XAUUSD", futuresSymbol: "COMEX:GC1!", venue: "COMEX",
     allowedFuturesSymbols: ["COMEX:GC1!", "COMEX_DL:GC1!"],
     instrument: "Gold continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:XAGUSD": { targetSymbol: "OANDA:XAGUSD", futuresSymbol: "COMEX:SI1!", venue: "COMEX",
+    allowedFuturesSymbols: ["COMEX:SI1!", "COMEX_DL:SI1!"],
+    instrument: "Silver continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:WTICOUSD": { targetSymbol: "OANDA:WTICOUSD", futuresSymbol: "NYMEX:CL1!", venue: "NYMEX",
+    allowedFuturesSymbols: ["NYMEX:CL1!", "NYMEX_DL:CL1!"],
+    instrument: "Crude Oil continuous futures", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
 };
 
 export function futuresFlowMapping(targetSymbol: string): FuturesFlowMapping | null {
@@ -155,12 +198,19 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     }
   }
 
+  const rollAnomalyThreshold = input.rollAnomalyThreshold ?? 0.20;
+  if (!Number.isFinite(rollAnomalyThreshold) || rollAnomalyThreshold <= 0 || rollAnomalyThreshold > 1.0) {
+    throw new Error("roll anomaly threshold must be a number greater than zero and at most 1.0");
+  }
+
   const allBars = validateBars(input.bars);
   const formingBarsExcluded = allBars.filter((bar) => bar.forming === true).length;
   const bars = allBars.filter((bar) => bar.forming !== true);
   const missingVolumeBars = bars.filter((bar) => bar.volume === null).length;
   const calendarOrDataGaps = bars.slice(1).filter((bar, index) =>
     bar.time * 1_000 - bars[index].time * 1_000 > 36 * 3_600_000).length;
+  let rollAnomalyBarsCount = 0;
+
   const observations = [] as Array<{
     time: string;
     futuresClose: number;
@@ -218,6 +268,9 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
       openInterest = curOi;
       openInterestChange = curOi - prevOi;
       openInterestChangeRatio = prevOi > 0 ? openInterestChange / prevOi : 0;
+      if (Math.abs(openInterestChangeRatio) >= rollAnomalyThreshold) {
+        rollAnomalyBarsCount += 1;
+      }
       futuresQuadrant = classifyFuturesQuadrant(futuresReturn, openInterestChange);
       targetOrientedQuadrant = mapTargetOrientedQuadrant(futuresQuadrant, mapping.targetDirectionMultiplier);
     }
@@ -253,9 +306,15 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     ...(missingVolumeBars > 0 ? ["one_or_more_closed_bars_missing_volume"] : []),
     ...(calendarOrDataGaps > 0 ? ["calendar_or_data_gaps_not_forward_filled"] : []),
     ...(openInterestStatus === "partial" ? ["daily_open_interest_partially_missing"] : []),
+    ...(rollAnomalyBarsCount > 0 ? ["contract_roll_anomaly_detected"] : []),
   ];
 
   const latestOiObs = [...validOiObs].pop() ?? null;
+  const latestVolume = latestOiObs?.volume ?? (observations.at(-1)?.volume ?? null);
+  const latestOi = latestOiObs?.openInterest ?? null;
+  const volumeOpenInterestRatio = (latestOi !== null && latestOi > 0 && latestVolume !== null && latestVolume > 0)
+    ? latestVolume / latestOi
+    : null;
 
   const openInterestSummary = openInterestStatus === "unavailable"
     ? {
@@ -263,6 +322,7 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
         value: null,
         changeFromPrevious: null,
         changeRatio: null,
+        volumeOpenInterestRatio: null,
         reason: "no_authenticated_or_first_seen_tracked_daily_open_interest_provider_configured" as const,
       }
     : {
@@ -270,6 +330,7 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
         value: latestOiObs?.openInterest ?? null,
         changeFromPrevious: latestOiObs?.openInterestChange ?? null,
         changeRatio: latestOiObs?.openInterestChangeRatio ?? null,
+        volumeOpenInterestRatio,
         source: input.openInterestSource ?? "caller_supplied_open_interest_data" as const,
         reason: null,
       };
@@ -336,7 +397,7 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
       observations: observations.length,
       minimumObservations: input.minimumObservations,
     },
-    quality: { formingBarsExcluded, missingVolumeBars, calendarOrDataGaps },
+    quality: { formingBarsExcluded, missingVolumeBars, calendarOrDataGaps, rollAnomalyBars: rollAnomalyBarsCount },
     qualityIssues,
     current: observations.at(-1) ?? null,
     observations: returned,

@@ -39,6 +39,7 @@ test("futures flow context over MCP stdio and live TradingView", {
     assert.equal(result.mapping.targetSymbol.toUpperCase(), config.target_symbol.toUpperCase());
     assert.equal(result.mapping.futuresSymbol.toUpperCase(), config.expected_futures_symbol.toUpperCase());
     assert.ok(["unavailable", "available", "partial"].includes(result.openInterest.status));
+    assert.equal(typeof result.quality.rollAnomalyBars, "number");
     assert.equal(containsArrayAtKey(result, "bars"), false, "raw OHLCV arrays must not be returned");
     assert.ok(result.sample.observations > 0);
     t.diagnostic(`current=${JSON.stringify(result.current)} quality=${JSON.stringify(result.quality)}`);

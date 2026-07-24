@@ -4499,6 +4499,54 @@ test("get_futures_flow_context fails closed to unavailable when on-chart study i
   assert.equal(parsedB.openInterest.status, "unavailable");
 });
 
+test("get_futures_flow_context handles roll_anomaly_threshold and new symbol mappings", async () => {
+  const bars = [
+    { time: 1700000000, timeIso: "2026-01-01T00:00:00.000Z", open: 100, high: 105, low: 99, close: 101, volume: 1000 },
+    { time: 1700086400, timeIso: "2026-01-02T00:00:00.000Z", open: 101, high: 106, low: 100, close: 102, volume: 1000 },
+    { time: 1700172800, timeIso: "2026-01-03T00:00:00.000Z", open: 102, high: 107, low: 101, close: 103, volume: 1000 },
+    { time: 1700259200, timeIso: "2026-01-04T00:00:00.000Z", open: 103, high: 108, low: 102, close: 104, volume: 1000 },
+    { time: 1700345600, timeIso: "2026-01-05T00:00:00.000Z", open: 104, high: 109, low: 103, close: 105, volume: 1000 },
+    { time: 1700432000, timeIso: "2026-01-06T00:00:00.000Z", open: 105, high: 110, low: 104, close: 106, volume: 5000 },
+  ];
+  const oiData = [
+    { time: "2026-01-01T00:00:00.000Z", openInterest: 10000 },
+    { time: "2026-01-02T00:00:00.000Z", openInterest: 10000 },
+    { time: "2026-01-03T00:00:00.000Z", openInterest: 10000 },
+    { time: "2026-01-04T00:00:00.000Z", openInterest: 10000 },
+    { time: "2026-01-05T00:00:00.000Z", openInterest: 10000 },
+    { time: "2026-01-06T00:00:00.000Z", openInterest: 13000 }, // 30% jump
+  ];
+
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:ES1!", resolution: "1D", studies: [] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:ES1!", resolution: "1D", count: bars.length, bars }),
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  }));
+
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:SPX500USD",
+    futures_chart_index: 0,
+    expected_futures_symbol: "CME:ES1!",
+    volume_lookback: 5,
+    roll_anomaly_threshold: 0.20,
+    open_interest_data: oiData,
+  } });
+
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.mapping.targetSymbol, "OANDA:SPX500USD");
+  assert.equal(parsed.mapping.futuresSymbol, "CME:ES1!");
+  assert.equal(parsed.quality.rollAnomalyBars, 1);
+  assert.ok(parsed.qualityIssues.includes("contract_roll_anomaly_detected"));
+  assert.equal(parsed.openInterest.volumeOpenInterestRatio, 5000 / 13000);
+});
+
+
 test("get_real_yield_context exposes official daily macro context", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "get_real_yield_context", arguments: {} });

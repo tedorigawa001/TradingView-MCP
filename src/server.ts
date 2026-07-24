@@ -6070,12 +6070,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "get_futures_flow_context",
     {
       description:
-        "Combine one exact TradingView CME/COMEX continuous-futures daily chart with delayed CFTC COT " +
-        "positioning, trailing volume z-scores, and optional daily Open Interest (OI) 4-quadrant analysis " +
-        "(long_build, short_build, long_unwinding, short_covering). This is a market-participation proxy, " +
+        "Combine one exact TradingView CME/COMEX/CBOT/NYMEX continuous-futures daily chart with delayed CFTC COT " +
+        "positioning, trailing volume z-scores, daily Open Interest (OI) 4-quadrant analysis, " +
+        "and contract roll anomaly detection. This is a market-participation proxy, " +
         "not realtime institutional order flow, and it never changes the chart.",
       inputSchema: {
-        target_symbol: SYMBOL_SCHEMA.describe("Supported spot target mapped to 6E, 6J, 6B, or GC"),
+        target_symbol: SYMBOL_SCHEMA.describe("Supported spot target mapped to 6E, 6J, 6B, 6A, 6C, 6S, 6N, ES, NQ, YM, GC, SI, CL"),
         futures_chart_index: z.number().int().min(0),
         expected_futures_symbol: SYMBOL_SCHEMA.describe("Exact continuous futures symbol required by the fixed mapping"),
         count: z.number().int().min(100).max(5000).optional()
@@ -6090,6 +6090,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Maximum recent normalized observations returned. Default: 20"),
         cot_weeks: z.number().int().min(1).max(52).optional()
           .describe("Recent delayed CFTC observations to include. Default: 2"),
+        roll_anomaly_threshold: z.number().finite().gt(0).max(1.0).optional()
+          .describe("Daily Open Interest change ratio threshold for contract roll anomaly detection. Default: 0.20 (20%)"),
         open_interest_data: z.array(z.object({
           time: z.union([z.string(), z.number()]),
           openInterest: z.number().finite().min(0),
@@ -6097,7 +6099,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
-      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, open_interest_data }) => chartOperations.run(async () => {
+      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, roll_anomaly_threshold, open_interest_data }) => chartOperations.run(async () => {
       try {
         const mapping = futuresFlowMapping(target_symbol);
         if (!mapping) throw new Error(`futures flow mapping is unavailable for ${JSON.stringify(target_symbol)}`);
@@ -6170,6 +6172,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           observationLimit: observation_limit ?? 20,
           openInterestData: autoOiData,
           openInterestSource,
+          rollAnomalyThreshold: roll_anomaly_threshold,
         });
         let cotEvidence;
         try {

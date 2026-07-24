@@ -151,3 +151,43 @@ test("futures flow context reports partial status and quality issue when open in
   assert.equal(result.status, "partial");
   assert.ok(result.qualityIssues.includes("daily_open_interest_partially_missing"));
 });
+
+test("futures flow context supports expanded symbol mappings for majors, indices, and commodities", () => {
+  const aud = futuresFlowMapping("OANDA:AUDUSD");
+  assert.equal(aud.futuresSymbol, "CME:6A1!");
+  assert.equal(aud.targetDirectionMultiplier, 1);
+
+  const cad = futuresFlowMapping("OANDA:USDCAD");
+  assert.equal(cad.futuresSymbol, "CME:6C1!");
+  assert.equal(cad.targetDirectionMultiplier, -1);
+
+  const spx = futuresFlowMapping("OANDA:SPX500USD");
+  assert.equal(spx.futuresSymbol, "CME:ES1!");
+  assert.equal(spx.venue, "CME");
+
+  const oil = futuresFlowMapping("OANDA:WTICOUSD");
+  assert.equal(oil.futuresSymbol, "NYMEX:CL1!");
+  assert.equal(oil.venue, "NYMEX");
+});
+
+test("futures flow context detects contract roll anomaly and calculates volumeOpenInterestRatio", () => {
+  const series = bars([100, 101, 102, 103, 104, 105], [10, 11, 9, 10, 10, 500]);
+  const oiData = [
+    { time: series[0].timeIso, openInterest: 1000 },
+    { time: series[1].timeIso, openInterest: 1000 },
+    { time: series[2].timeIso, openInterest: 1000 },
+    { time: series[3].timeIso, openInterest: 1000 },
+    { time: series[4].timeIso, openInterest: 1000 },
+    { time: series[5].timeIso, openInterest: 1300 }, // 30% jump => roll anomaly detected
+  ];
+
+  const result = computeFuturesFlowContext(input(series, {
+    openInterestData: oiData,
+    rollAnomalyThreshold: 0.20,
+  }));
+
+  assert.equal(result.quality.rollAnomalyBars, 1);
+  assert.ok(result.qualityIssues.includes("contract_roll_anomaly_detected"));
+  assert.equal(result.openInterest.volumeOpenInterestRatio, 500 / 1300);
+});
+

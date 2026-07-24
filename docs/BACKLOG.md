@@ -404,16 +404,16 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **限定特徴量×レジーム条件(2026-07-24)**: `compute_feature_outcome_relationships`へ任意`regime` filterを追加した。呼出側はdirectional regimeと任意のvolatility regime、全レジーム閾値を事前固定し、一致する同じsignal足の確定レジームだけを残して特徴量結果を集計する。レジームは当該足までのOHLCだけで算出し、結果は後続観測足だけを用いるため未来情報をlabelへ混入させない。全組合せをランキングする機能は設けず、filter、除外数、未分類数、レジーム品質を定義・応答・研究証拠へ残す
 - **検証状況**: 上昇/下降系列でbucket化と将来分布、後続bar追加後も既存barのfeature labelが不変、形成中足除外、不規則timestamp非補間、公開MCPのchart拘束と応答上限を単体・統合テストで固定した。研究ジャーナル連携では新しい指標契約、冪等記録、試行数変更時のevidence hash差分、異種指標混入拒否、journal障害時の分析結果保持を単体・MCP統合テストで固定した。実機E2EはXAUUSD 4Hの300本で235観測、形成中1本除外、不規則timestamp 10件を非補間として確認した。これは探索用の短期窓であり、feature 6個×bucket×horizonを同時閲覧した結果を採用根拠にしない。十分な履歴を使う複数銘柄・fold検証と、事前登録した仮説によるout-of-sample証拠蓄積は次段
 
-### #39 大口フロー代理証拠(`get_futures_flow_context`) 🟡 価格・volume・COT初版実装および日次OI 4象限拡張、CME公式直接連携は継続
-
-- **目的**: 既存の週次COTに、利用可能ならCME通貨・金先物の出来高、建玉、建玉変化、価格変化を加え、`price up + OI up`とshort covering等の候補を区別する
-- **限界**: FX現物に集中取引所の完全な出来高や板は存在しない。CME先物、TradingView tick volume、COTはいずれも大口動向の代理証拠であり、リアルタイム注文フローや主体別売買と断定しない
+### #39 大口フロー代理証拠(`get_futures_flow_context`) ✅ 先物マッピング・ロール異常検出・Volume/OI比率拡張完了
+- **目的**: 既存の週次COTに、利用可能ならCME/COMEX/CBOT/NYMEX通貨・金・銀・原油・株価指数先物の出来高、建玉、建玉変化、価格変化を加え、`price up + OI up`とshort covering等の候補を区別する
+- **限界**: FX現物に集中取引所の完全な出来高や板は存在しない。先物出来高、TradingView tick volume、COTはいずれも大口動向の代理証拠であり、リアルタイム注文フローや主体別売買と断定しない
 - **データ品質**: symbol mapping、取引所タイムゾーン、限月・ロール、公開遅延、改訂、first-seen時刻を保存し、将来公表されたOI/COTを過去判断へ混入させない
 - **データ源調査(2026-07-21)**: CME公式のDaily Volume and Open Interest Reportは取引日終了時の速報で、確報は翌営業日のDaily Bulletinで公開される。無認証FTPには最新・日付別XLSXがあるが、速報/確報の版管理、公開時刻、schema安定性をAPI契約として保証しない。DataMine APIとリアルタイムmarket data APIは認証・entitlementを要求するため、資格情報なしのMCP初版で日次OIを推測取得しない
 - **初版実装(2026-07-21)**: `OANDA:EURUSD→6E1!`、`USDJPY→6J1!`、`GBPJPY/GBPAUD→6B1!`、`XAUUSD→GC1!`の固定対応だけを受ける。TradingViewの配信契約に応じた`CME`/`CME_DL`、`COMEX`/`COMEX_DL` exchange aliasは同一rootに限って明示許可する。明示したchart indexのexact continuous futures symbolと日足をcontext/OHLCVで二重拘束し、最大5,000本のロード済み確定足を読む。Bar Replay中は現在COTとの時点混在を避けるため拒否し、chart、Pine、注文を変更しない
 - **正規化**: 当日を含まない過去5〜250日volumeの平均・母標準偏差からZ-scoreと平均比を計算する。6JはUSDJPY方向へ符号反転し、6Bを使うcrossは`base_currency_single_leg`として保持する。elevated/subduedは参加活発度の記述であり、新規long/shortや主体を断定しない
 - **日次OI・4象限拡張(2026-07-24)**: `schemaVersion: "1.1"` / `methodologyVersion: "futures_flow_context_v2"` へ更新。呼び出し元からの `open_interest_data` または対象チャート上にロードされた公式 Open Interest インジケーター (`Open Interest`, 厳格なタイトル/プロットID一致判定かつ arbitrary `plot_0` 誤判定防止策を適用) から日次OIを取得・自動結合。前日比建玉変化 (`openInterestChange`, `openInterestChangeRatio`) を計算し、先物変動 × 建玉変動の `long_build`, `short_build`, `long_unwinding`, `short_covering`, `neutral` 4象限分析を算出。対象銘柄方向の `targetOrientedQuadrant`（USDJPY / 6J1! の逆方向マルチプライヤー `-1` 対応）と原本 `futuresQuadrant` を両立出力し、標本期間全体の分布 (`distribution`) を算出。OI データ非供給/ミスマッチ時は従来どおり `status: "unavailable"` として完全な fail-closed 後方互換性を保持する。
-- **残タスク**: 認証済みCME日次統計provider (DataMine API / FTP Bulletin 自動取得)、preliminary/final版およびfirst-seenタイムスタンプのPoint-in-Time保存、限月・expiry・roll calendar判定、期近単独(Front-month)と連続繋ぎ足(Continuous contract)の乖離・roll時OI変動補正、先物現物スプレッド(Basis)追跡、CME確報Volumeとの独立検証、実機における複数銘柄（6E, 6J, 6B, GC）の継続実地検証。
+- **マッピング拡張・ロール異常検出・Volume/OI比率(2026-07-25)**: 対象マッピングを FX 主要通貨ペア・クロス足（`AUDUSD→6A1!`, `USDCAD→6C1!`, `USDCHF→6S1!`, `NZDUSD→6N1!`, `EURJPY→6E1!`, `AUDJPY→6A1!`）、株価指数先物（`SPX500USD/US500→ES1!`, `NAS100USD/US100→NQ1!`, `US30USD/US30→YM1!`）、コモディティ先物（`XAGUSD→SI1!`, `WTICOUSD→CL1!`）へ拡張。連続繋ぎ足の限月乗り換えに伴う建玉の単日急変（`roll_anomaly_threshold` 既定20%）を自動検出し `quality.rollAnomalyBars` および `qualityIssues: ["contract_roll_anomaly_detected"]` へ記録。最新出来高と建玉の比率 `volumeOpenInterestRatio` を算出出力。単体テスト (`test/unit/futuresFlowContext.test.mjs`) および E2E テスト (`test/e2e/futures-flow-context.test.mjs`) がパス。
+- **残タスク**: 認証済みCME日次統計provider (DataMine API / FTP Bulletin 自動取得)、preliminary/final版およびfirst-seenタイムスタンプのPoint-in-Time保存、限月・expiry・roll calendar判定、期近単独(Front-month)と連続繋ぎ足(Continuous contract)の乖離・roll時OI変動補正、先物現物スプレッド(Basis)追跡、CME確報Volumeとの独立検証、実機における複数銘柄（6E, 6J, 6B, 6A, 6C, 6S, 6N, ES, NQ, YM, GC, SI, CL）の継続実地検証。
 
 ### #40 セッションプロファイル(`compute_session_profile`) ✅ VWAP・PDH/PDL反動・品質拡張完了
 
