@@ -69,3 +69,47 @@ test("failed breakout study accepts zero confirmation bars without changing reje
   assert.equal(result.events[0].direction, "short");
   assert.equal(result.events[0].signalTime, "2026-01-05T08:00:00.000Z");
 });
+
+test("failed breakout study excludes days with no sweep and days where the sweep bar closes outside the range", () => {
+  const noSweep = day(5, "up").map((candle, index) => index < 32
+    ? candle
+    : bar(Date.UTC(2026, 0, 5) + index * 900_000, 1.05, 1.08, 1.02, 1.05));
+  const genuineBreakout = day(6, "up");
+  genuineBreakout[32] = bar(Date.UTC(2026, 0, 6, 8), 1.05, 1.15, 1.03, 1.13);
+  const result = runFailedBreakoutStudy(input([...noSweep, ...genuineBreakout], { minimumEvents: 1, folds: [] }));
+  assert.equal(result.sample.events, 0);
+  assert.equal(result.quality.noSweep, 2);
+  assert.ok(result.qualityIssues.includes("minimum_event_count_not_met"));
+});
+
+test("failed breakout study excludes a local day whose range window has too few bars", () => {
+  const incompleteRange = day(5, "up");
+  incompleteRange.splice(31, 1);
+  const result = runFailedBreakoutStudy(input(incompleteRange, { minimumEvents: 1, folds: [] }));
+  assert.equal(result.sample.events, 0);
+  assert.equal(result.quality.insufficientRangeCoverage, 1);
+  assert.ok(result.qualityIssues.includes("one_or_more_sessions_have_incomplete_range"));
+});
+
+test("failed breakout study joins events only to regimes closed before the signal bar", () => {
+  const bars = [
+    ...day(5, "up"), ...day(6, "down"), ...day(7, "up"), ...day(8, "down"),
+    ...day(9, "up"), ...day(12, "down"),
+  ];
+  const result = runFailedBreakoutStudy(input(bars, {
+    minimumEvents: 1, folds: [],
+    regime: {
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+      minimumClassifiedBars: 1, minimumGroupEvents: 1, minimumCoverageRatio: 0.5, maxRegimeAgeBars: 1,
+    },
+  }));
+  assert.equal(result.methodologyVersion, "failed_breakout_regime_study_v1");
+  assert.equal(result.regimeAnalysis.joinContract.signalBarRegimeExcluded, true);
+  assert.ok(result.regimeAnalysis.coverage.joinedEvents > 0);
+  assert.ok(result.regimeAnalysis.coverage.coverageRatio >= 0.5);
+  const evaluable = Object.values(result.regimeAnalysis.byDirectionalRegime)
+    .find((group) => group.status === "evaluable");
+  assert.ok(evaluable);
+});
