@@ -77,3 +77,77 @@ test("futures flow context accepts TradingView delayed exchange aliases for the 
   ));
   assert.equal(result.mapping.futuresSymbol, "CME_DL:6E1!");
 });
+
+test("futures flow context classifies 4-quadrant price x Open Interest analysis when OI data is supplied", () => {
+  const series = bars([100, 101, 102, 103, 101, 103], [10, 11, 9, 10, 10, 30]);
+  const oiData = [
+    { time: series[0].timeIso, openInterest: 1000 },
+    { time: series[1].timeIso, openInterest: 1000 },
+    { time: series[2].timeIso, openInterest: 1100 }, // price up (101->102) + OI up (1000->1100) => long_build
+    { time: series[3].timeIso, openInterest: 1050 }, // price up (102->103) + OI down (1100->1050) => short_covering
+    { time: series[4].timeIso, openInterest: 1150 }, // price down (103->101) + OI up (1050->1150) => short_build
+    { time: series[5].timeIso, openInterest: 1100 }, // price up (101->103) + OI down (1150->1100) => short_covering
+  ];
+
+  const result = computeFuturesFlowContext(input(series, { openInterestData: oiData }));
+  assert.equal(result.schemaVersion, "1.1");
+  assert.equal(result.methodologyVersion, "futures_flow_context_v2");
+  assert.equal(result.openInterest.status, "available");
+  assert.equal(result.openInterest.value, 1100);
+  assert.equal(result.openInterest.changeFromPrevious, -50);
+  assert.equal(result.priceOpenInterestQuadrant.status, "available");
+  assert.equal(result.priceOpenInterestQuadrant.classification, "short_covering");
+  assert.equal(result.priceOpenInterestQuadrant.futuresClassification, "short_covering");
+  assert.equal(result.priceOpenInterestQuadrant.distribution.short_covering.count, 1);
+  assert.equal(result.priceOpenInterestQuadrant.distribution.long_build.count, 0);
+
+  // Check observation level fields
+  const obs1 = result.observations[0]; // index 5
+  assert.equal(obs1.openInterest, 1100);
+  assert.equal(obs1.openInterestChange, -50);
+  assert.equal(obs1.futuresQuadrant, "short_covering");
+  assert.equal(obs1.targetOrientedQuadrant, "short_covering");
+});
+
+test("futures flow context reverses 4-quadrant classification for USDJPY inverse multiplier (-1)", () => {
+  const series = bars([100, 101, 102, 103, 104, 105], [10, 11, 9, 10, 10, 30]);
+  const oiData = [
+    { time: series[0].timeIso, openInterest: 1000 },
+    { time: series[1].timeIso, openInterest: 1000 },
+    { time: series[2].timeIso, openInterest: 1000 },
+    { time: series[3].timeIso, openInterest: 1000 },
+    { time: series[4].timeIso, openInterest: 1000 },
+    { time: series[5].timeIso, openInterest: 1200 }, // 6J price up (104->105) + 6J OI up (1000->1200) => 6J long_build => USDJPY short_build
+  ];
+
+  const result = computeFuturesFlowContext(input(series, {
+    targetSymbol: "OANDA:USDJPY",
+    futuresSymbol: "CME:6J1!",
+    openInterestData: oiData,
+  }));
+
+  assert.equal(result.priceOpenInterestQuadrant.futuresClassification, "long_build");
+  assert.equal(result.priceOpenInterestQuadrant.classification, "short_build"); // mapped to USDJPY
+  assert.equal(result.current.futuresQuadrant, "long_build");
+  assert.equal(result.current.targetOrientedQuadrant, "short_build");
+});
+
+test("futures flow context reports partial status and quality issue when open interest is partially missing", () => {
+  const series = bars([100, 101, 102, 103, 104, 105, 106, 107, 108, 109], [10, 11, 9, 10, 10, 30, 20, 15, 25, 30]);
+  // Supply OI for first 7 bars out of 10 (series[0..6]), so observations 5, 6 have OI, observations 7, 8, 9 do not
+  const oiData = [
+    { time: series[0].timeIso, openInterest: 1000 },
+    { time: series[1].timeIso, openInterest: 1000 },
+    { time: series[2].timeIso, openInterest: 1100 },
+    { time: series[3].timeIso, openInterest: 1200 },
+    { time: series[4].timeIso, openInterest: 1250 },
+    { time: series[5].timeIso, openInterest: 1300 },
+    { time: series[6].timeIso, openInterest: 1350 },
+  ];
+
+  const result = computeFuturesFlowContext(input(series, { volumeLookback: 5, openInterestData: oiData }));
+  assert.equal(result.openInterest.status, "partial");
+  assert.equal(result.priceOpenInterestQuadrant.status, "partial");
+  assert.equal(result.status, "partial");
+  assert.ok(result.qualityIssues.includes("daily_open_interest_partially_missing"));
+});

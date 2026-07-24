@@ -4373,6 +4373,132 @@ test("get_futures_flow_context binds a daily futures chart and keeps daily OI un
   assert.equal(parsed.source.chartIndex, 1);
 });
 
+test("get_futures_flow_context forwards open_interest_data and returns 4-quadrant price x OI classification", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+  const open_interest_data = bars.map((bar, i) => ({ time: bar.timeIso, openInterest: 5000 + i * 100 }));
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+    },
+    cot: {
+      getHistory: async () => { throw new Error("COT unavailable"); },
+    },
+  }));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5, open_interest_data,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.schemaVersion, "1.1");
+  assert.equal(parsed.methodologyVersion, "futures_flow_context_v2");
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterest.value, 5900);
+  assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
+  assert.equal(parsed.priceOpenInterestQuadrant.distribution.long_build.count, 5);
+});
+
+test("get_futures_flow_context automatically detects official on-chart Open Interest study when open_interest_data is omitted", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "oi_123", name: "Open Interest" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async ({ studyId }) => {
+        assert.equal(studyId, "oi_123");
+        return [{
+          id: "oi_123", name: "Open Interest", plots: [{ id: "open_interest", title: "Open Interest", type: "line" }],
+          bars: bars.map((b, i) => ({ time: b.time, timeIso: b.timeIso, values: { open_interest: 5000 + i * 100 } })),
+        }];
+      },
+    },
+    cot: {
+      getHistory: async () => { throw new Error("COT unavailable"); },
+    },
+  }));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterest.source, "tradingview_chart_indicator");
+  assert.equal(parsed.openInterest.value, 5900);
+  assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
+});
+
+test("get_futures_flow_context fails closed to unavailable when on-chart study is loose or plot title is unrelated", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+
+  // Case A: Loose study name "Open Interest Oscillator"
+  const clientA = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "custom_oi", name: "Open Interest Oscillator" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async () => {
+        throw new Error("Should not be called for unmatched study name");
+      },
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  }));
+  const resA = await clientA.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+  } });
+  const parsedA = JSON.parse(resA.content[0].text);
+  assert.equal(parsedA.openInterest.status, "unavailable");
+
+  // Case B: Official study name "Open Interest", but plot is unrelated "plot_0" with title "Delta Signal"
+  const clientB = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "oi_unrelated", name: "Open Interest" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async () => [{
+        id: "oi_unrelated", name: "Open Interest", plots: [{ id: "plot_0", title: "Delta Signal", type: "line" }],
+        bars: bars.map((b) => ({ time: b.time, timeIso: b.timeIso, values: { plot_0: 12345 } })),
+      }],
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  }));
+  const resB = await clientB.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+  } });
+  const parsedB = JSON.parse(resB.content[0].text);
+  assert.equal(parsedB.openInterest.status, "unavailable");
+});
+
 test("get_real_yield_context exposes official daily macro context", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "get_real_yield_context", arguments: {} });

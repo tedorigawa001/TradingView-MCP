@@ -10,6 +10,18 @@ export type FuturesFlowMapping = {
   proxyScope: "direct_base_asset" | "base_currency_single_leg";
 };
 
+export type PriceOpenInterestQuadrant =
+  | "long_build"
+  | "short_build"
+  | "long_unwinding"
+  | "short_covering"
+  | "neutral";
+
+export interface OpenInterestPoint {
+  time: string | number;
+  openInterest: number;
+}
+
 export interface FuturesFlowContextInput {
   bars: OhlcvBar[];
   targetSymbol: string;
@@ -19,6 +31,8 @@ export interface FuturesFlowContextInput {
   elevatedVolumeZScore: number;
   minimumObservations: number;
   observationLimit: number;
+  openInterestData?: OpenInterestPoint[];
+  openInterestSource?: "tradingview_chart_indicator" | "caller_supplied_open_interest_data";
 }
 
 const MAPPINGS: Record<string, FuturesFlowMapping> = {
@@ -41,6 +55,44 @@ const MAPPINGS: Record<string, FuturesFlowMapping> = {
 
 export function futuresFlowMapping(targetSymbol: string): FuturesFlowMapping | null {
   return MAPPINGS[targetSymbol.toUpperCase()] ?? null;
+}
+
+export function classifyFuturesQuadrant(
+  futuresReturn: number,
+  openInterestChange: number,
+): PriceOpenInterestQuadrant {
+  if (futuresReturn > 0 && openInterestChange > 0) return "long_build";
+  if (futuresReturn < 0 && openInterestChange > 0) return "short_build";
+  if (futuresReturn < 0 && openInterestChange < 0) return "long_unwinding";
+  if (futuresReturn > 0 && openInterestChange < 0) return "short_covering";
+  return "neutral";
+}
+
+export function mapTargetOrientedQuadrant(
+  futuresQuadrant: PriceOpenInterestQuadrant,
+  targetDirectionMultiplier: 1 | -1,
+): PriceOpenInterestQuadrant {
+  if (targetDirectionMultiplier === 1 || futuresQuadrant === "neutral") {
+    return futuresQuadrant;
+  }
+  switch (futuresQuadrant) {
+    case "long_build":
+      return "short_build";
+    case "short_build":
+      return "long_build";
+    case "long_unwinding":
+      return "short_covering";
+    case "short_covering":
+      return "long_unwinding";
+  }
+}
+
+function normalizeTimestampKey(value: string | number): string {
+  if (typeof value === "number") {
+    const epochSec = value > 1e11 ? value / 1000 : value;
+    return new Date(epochSec * 1000).toISOString().slice(0, 10);
+  }
+  return String(value).slice(0, 10);
 }
 
 function validateBars(input: OhlcvBar[]): OhlcvBar[] {
@@ -92,6 +144,17 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     throw new Error(`expected one of ${mapping.allowedFuturesSymbols.join(", ")} for ${mapping.targetSymbol}`);
   }
 
+  const oiMap = new Map<string, number>();
+  if (input.openInterestData) {
+    for (const point of input.openInterestData) {
+      if (Number.isFinite(point.openInterest) && point.openInterest >= 0) {
+        const key = normalizeTimestampKey(point.time);
+        oiMap.set(key, point.openInterest);
+        oiMap.set(String(point.time), point.openInterest);
+      }
+    }
+  }
+
   const allBars = validateBars(input.bars);
   const formingBarsExcluded = allBars.filter((bar) => bar.forming === true).length;
   const bars = allBars.filter((bar) => bar.forming !== true);
@@ -109,6 +172,11 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     volumeRatioToTrailingMean: number;
     participation: "elevated" | "normal" | "subdued" | "unavailable";
     hypothesis: string;
+    openInterest: number | null;
+    openInterestChange: number | null;
+    openInterestChangeRatio: number | null;
+    futuresQuadrant: PriceOpenInterestQuadrant | null;
+    targetOrientedQuadrant: PriceOpenInterestQuadrant | null;
   }>;
 
   for (let index = input.volumeLookback; index < bars.length; index += 1) {
@@ -121,7 +189,8 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     if (mean <= 0) continue;
     const deviation = populationDeviation(volumes, mean);
     const volumeZScore = deviation === 0 ? null : (bar.volume - mean) / deviation;
-    const targetOrientedReturn = mapping.targetDirectionMultiplier * (bar.close / previous.close - 1);
+    const futuresReturn = bar.close / previous.close - 1;
+    const targetOrientedReturn = mapping.targetDirectionMultiplier * futuresReturn;
     const targetOrientedDirection = direction(targetOrientedReturn);
     const participation = volumeZScore === null ? "unavailable"
       : volumeZScore >= input.elevatedVolumeZScore ? "elevated"
@@ -133,10 +202,30 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
         : participation === "normal"
           ? `target_${targetOrientedDirection}_with_normal_futures_volume`
           : "participation_unavailable";
+
+    const dateKey = bar.timeIso.slice(0, 10);
+    const prevDateKey = previous.timeIso.slice(0, 10);
+    const curOi = oiMap.get(dateKey) ?? oiMap.get(String(bar.time)) ?? null;
+    const prevOi = oiMap.get(prevDateKey) ?? oiMap.get(String(previous.time)) ?? null;
+
+    let openInterest: number | null = null;
+    let openInterestChange: number | null = null;
+    let openInterestChangeRatio: number | null = null;
+    let futuresQuadrant: PriceOpenInterestQuadrant | null = null;
+    let targetOrientedQuadrant: PriceOpenInterestQuadrant | null = null;
+
+    if (curOi !== null && prevOi !== null && curOi >= 0 && prevOi >= 0) {
+      openInterest = curOi;
+      openInterestChange = curOi - prevOi;
+      openInterestChangeRatio = prevOi > 0 ? openInterestChange / prevOi : 0;
+      futuresQuadrant = classifyFuturesQuadrant(futuresReturn, openInterestChange);
+      targetOrientedQuadrant = mapTargetOrientedQuadrant(futuresQuadrant, mapping.targetDirectionMultiplier);
+    }
+
     observations.push({
       time: bar.timeIso,
       futuresClose: bar.close,
-      futuresReturn: bar.close / previous.close - 1,
+      futuresReturn,
       targetOrientedReturn,
       targetOrientedDirection,
       volume: bar.volume,
@@ -144,18 +233,90 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
       volumeRatioToTrailingMean: bar.volume / mean,
       participation,
       hypothesis,
+      openInterest,
+      openInterestChange,
+      openInterestChangeRatio,
+      futuresQuadrant,
+      targetOrientedQuadrant,
     });
   }
+
+  const validOiObs = observations.filter((item) => item.openInterest !== null);
+  const openInterestStatus = validOiObs.length === 0
+    ? "unavailable" as const
+    : validOiObs.length === observations.length
+      ? "available" as const
+      : "partial" as const;
 
   const qualityIssues = [
     ...(observations.length < input.minimumObservations ? ["minimum_observation_count_not_met"] : []),
     ...(missingVolumeBars > 0 ? ["one_or_more_closed_bars_missing_volume"] : []),
     ...(calendarOrDataGaps > 0 ? ["calendar_or_data_gaps_not_forward_filled"] : []),
+    ...(openInterestStatus === "partial" ? ["daily_open_interest_partially_missing"] : []),
   ];
+
+  const latestOiObs = [...validOiObs].pop() ?? null;
+
+  const openInterestSummary = openInterestStatus === "unavailable"
+    ? {
+        status: "unavailable" as const,
+        value: null,
+        changeFromPrevious: null,
+        changeRatio: null,
+        reason: "no_authenticated_or_first_seen_tracked_daily_open_interest_provider_configured" as const,
+      }
+    : {
+        status: openInterestStatus,
+        value: latestOiObs?.openInterest ?? null,
+        changeFromPrevious: latestOiObs?.openInterestChange ?? null,
+        changeRatio: latestOiObs?.openInterestChangeRatio ?? null,
+        source: input.openInterestSource ?? "caller_supplied_open_interest_data" as const,
+        reason: null,
+      };
+
+  const quadrantCounts: Record<PriceOpenInterestQuadrant, number> = {
+    long_build: 0,
+    short_build: 0,
+    long_unwinding: 0,
+    short_covering: 0,
+    neutral: 0,
+  };
+  for (const item of validOiObs) {
+    if (item.targetOrientedQuadrant) {
+      quadrantCounts[item.targetOrientedQuadrant] += 1;
+    }
+  }
+
+  const totalOiCount = validOiObs.length;
+  const quadrantDistribution = Object.fromEntries(
+    (Object.keys(quadrantCounts) as PriceOpenInterestQuadrant[]).map((key) => [
+      key,
+      {
+        count: quadrantCounts[key],
+        percentage: totalOiCount > 0 ? quadrantCounts[key] / totalOiCount : 0,
+      },
+    ]),
+  );
+
+  const priceOpenInterestQuadrantSummary = openInterestStatus === "unavailable"
+    ? {
+        status: "unavailable" as const,
+        classification: null,
+        futuresClassification: null,
+        reason: "daily_open_interest_unavailable" as const,
+      }
+    : {
+        status: openInterestStatus,
+        classification: latestOiObs?.targetOrientedQuadrant ?? null,
+        futuresClassification: latestOiObs?.futuresQuadrant ?? null,
+        distribution: quadrantDistribution,
+        reason: null,
+      };
+
   const returned = input.observationLimit === 0 ? [] : observations.slice(-input.observationLimit);
   return {
-    schemaVersion: "1.0" as const,
-    methodologyVersion: "futures_flow_context_v1" as const,
+    schemaVersion: "1.1" as const,
+    methodologyVersion: "futures_flow_context_v2" as const,
     status: qualityIssues.length === 0 ? "complete" as const : "partial" as const,
     mapping: { ...mapping, futuresSymbol },
     timeframe: input.timeframe,
@@ -167,17 +328,8 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
       elevatedZScore: input.elevatedVolumeZScore,
       forwardFill: false,
     },
-    openInterest: {
-      status: "unavailable" as const,
-      value: null,
-      changeFromPrevious: null,
-      reason: "no_authenticated_or_first_seen_tracked_daily_open_interest_provider_configured" as const,
-    },
-    priceOpenInterestQuadrant: {
-      status: "unavailable" as const,
-      classification: null,
-      reason: "daily_open_interest_unavailable" as const,
-    },
+    openInterest: openInterestSummary,
+    priceOpenInterestQuadrant: priceOpenInterestQuadrantSummary,
     sample: {
       barsReceived: input.bars.length,
       closedBars: bars.length,

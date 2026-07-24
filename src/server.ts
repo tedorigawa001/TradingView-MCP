@@ -6049,10 +6049,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Combine one exact TradingView CME/COMEX continuous-futures daily chart with delayed CFTC COT " +
-        "positioning. It returns target-oriented futures price change, trailing volume z-score, participation " +
-        "hypotheses, mapping and data-quality evidence. Daily open interest and price/OI quadrants remain " +
-        "explicitly unavailable until an authenticated, first-seen-tracked provider is configured. This is a " +
-        "market-participation proxy, not realtime institutional order flow, and it never changes the chart.",
+        "positioning, trailing volume z-scores, and optional daily Open Interest (OI) 4-quadrant analysis " +
+        "(long_build, short_build, long_unwinding, short_covering). This is a market-participation proxy, " +
+        "not realtime institutional order flow, and it never changes the chart.",
       inputSchema: {
         target_symbol: SYMBOL_SCHEMA.describe("Supported spot target mapped to 6E, 6J, 6B, or GC"),
         futures_chart_index: z.number().int().min(0),
@@ -6069,10 +6068,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Maximum recent normalized observations returned. Default: 20"),
         cot_weeks: z.number().int().min(1).max(52).optional()
           .describe("Recent delayed CFTC observations to include. Default: 2"),
+        open_interest_data: z.array(z.object({
+          time: z.union([z.string(), z.number()]),
+          openInterest: z.number().finite().min(0),
+        })).optional().describe("Caller-supplied daily Open Interest observations (time ISO/epoch, openInterest value)"),
       },
     },
     async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
-      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks }) => chartOperations.run(async () => {
+      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, open_interest_data }) => chartOperations.run(async () => {
       try {
         const mapping = futuresFlowMapping(target_symbol);
         if (!mapping) throw new Error(`futures flow mapping is unavailable for ${JSON.stringify(target_symbol)}`);
@@ -6096,6 +6099,44 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             normalizeResolution(history.resolution) !== "1D") {
           throw new Error("futures OHLCV evidence does not match the bound chart");
         }
+
+        // Automatically inspect on-chart Open Interest indicator if available and no caller data supplied
+        let autoOiData: Array<{ time: string | number; openInterest: number }> | undefined = open_interest_data;
+        let openInterestSource: "tradingview_chart_indicator" | "caller_supplied_open_interest_data" | undefined =
+          open_interest_data ? "caller_supplied_open_interest_data" : undefined;
+
+        if (!autoOiData && chart.studies?.length > 0) {
+          // Strictly match official TradingView Open Interest study names
+          const oiStudy = chart.studies.find((s) => /^open\s*interest(\s*\(oi\))?$/i.test(s.name.trim()));
+          if (oiStudy) {
+            try {
+              const vals = await tv.getIndicatorValues({ studyId: oiStudy.id, count: requestedBars, chartIndex: futures_chart_index });
+              const studyVal = vals[0];
+              if (studyVal) {
+                // Strictly match plot title or plot id for open interest (no fallback to arbitrary plot_0)
+                const oiPlots = studyVal.plots.filter((p) =>
+                  /^open\s*interest$/i.test(p.title?.trim() ?? "") ||
+                  /^(open_interest|openinterest|oi)$/i.test(p.id.trim())
+                );
+                if (oiPlots.length > 0) {
+                  const targetPlot = oiPlots[0];
+                  const extracted = studyVal.bars.map((bar) => ({
+                    time: bar.timeIso,
+                    openInterest: bar.values[targetPlot.id] as number,
+                  })).filter((item) => typeof item.openInterest === "number" && Number.isFinite(item.openInterest) && item.openInterest >= 0);
+
+                  if (extracted.length > 0) {
+                    autoOiData = extracted;
+                    openInterestSource = "tradingview_chart_indicator";
+                  }
+                }
+              }
+            } catch {
+              // Silently ignore indicator read failures and fall back to unavailable
+            }
+          }
+        }
+
         const futures = computeFuturesFlowContext({
           bars: history.bars,
           targetSymbol: mapping.targetSymbol,
@@ -6105,6 +6146,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           elevatedVolumeZScore: elevated_volume_z_score ?? 1.5,
           minimumObservations: minimum_observations ?? 20,
           observationLimit: observation_limit ?? 20,
+          openInterestData: autoOiData,
+          openInterestSource,
         });
         let cotEvidence;
         try {
