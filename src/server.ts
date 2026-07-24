@@ -983,13 +983,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         })).max(12).optional(),
         event_limit: z.number().int().min(0).max(200).optional()
           .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
+        driver_lag_bars: z.number().int().min(0).max(20).optional()
+          .describe("Lag offset in target bars after driver impulse close (default: 0)"),
+        configuration_trials: z.number().int().min(1).max(1000).optional()
+          .describe("Number of evaluated lead/lag and parameter trials for multiple testing reference (default: 1)"),
       },
     },
     async ({ target_chart_index, driver_chart_index, context_regime, context_indicator, expected_target_symbol, expected_driver_symbol,
       expected_target_timeframe, expected_driver_timeframe, count, relationship, driver_lookback,
       driver_change_threshold, price_breakout_lookback, nonconfirmation_bars, trigger_lookback,
       trigger_within_bars, max_driver_age_bars, horizons, target_return_bps, minimum_events, folds,
-      event_limit }) => chartOperations.run(async () => {
+      event_limit, driver_lag_bars, configuration_trials }) => chartOperations.run(async () => {
       try {
         if (context_regime && context_indicator) throw new Error("context_regime and context_indicator are mutually exclusive");
         if (target_chart_index === driver_chart_index || (context_regime && [target_chart_index, driver_chart_index].includes(context_regime.chart_index))) {
@@ -1063,6 +1067,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           driverTimeframe: driverHistory.resolution,
           relationship,
           driverLookback: driver_lookback,
+          driverLagBars: driver_lag_bars,
+          configurationTrials: configuration_trials,
           driverChangeThreshold: driver_change_threshold,
           priceBreakoutLookback: price_breakout_lookback,
           nonconfirmationBars: nonconfirmation_bars,

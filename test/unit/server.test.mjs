@@ -5183,6 +5183,51 @@ test("run_yield_price_nonconfirmation_study fails closed for an untrusted DXY ga
   });
 });
 
+test("run_yield_price_nonconfirmation_study forwards driver_lag_bars and configuration_trials over MCP", async () => {
+  const day = 86_400_000;
+  const start = Date.UTC(2026, 0, 1);
+  const makeBars = (closes, offset = 0) => closes.map((close, index) => {
+    const previous = index === 0 ? close : closes[index - 1];
+    const time = start + offset + index * day;
+    return { time: time / 1000, timeIso: new Date(time).toISOString(), open: previous,
+      high: Math.max(previous, close) + 0.2, low: Math.min(previous, close) - 0.2,
+      close, volume: 1 };
+  });
+  const driverBars = makeBars([4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const targetBars = makeBars([100, 100.1, 100, 100.2, 100.1, 100.1, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
+      charts: [
+        { index: 0, symbol: "OANDA:USDJPY", resolution: "1D", studies: [] },
+        { index: 1, symbol: "TVC:US10Y", resolution: "1D", studies: [] },
+      ] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (count, chartIndex) => chartIndex === 0
+      ? { symbol: "OANDA:USDJPY", resolution: "1D", count: targetBars.length, bars: targetBars }
+      : { symbol: "TVC:US10Y", resolution: "1D", count: driverBars.length, bars: driverBars },
+  } }));
+
+  const res = await client.callTool({ name: "run_yield_price_nonconfirmation_study", arguments: {
+    target_chart_index: 0, driver_chart_index: 1,
+    expected_target_symbol: "OANDA:USDJPY", expected_driver_symbol: "TVC:US10Y",
+    expected_target_timeframe: "1D", expected_driver_timeframe: "1D", count: 100,
+    relationship: "direct", driver_lookback: 2, driver_change_threshold: 0.1,
+    driver_lag_bars: 2, configuration_trials: 10,
+    price_breakout_lookback: 3, nonconfirmation_bars: 2, trigger_lookback: 2,
+    trigger_within_bars: 3, max_driver_age_bars: 2, horizons: [1, 2],
+    target_return_bps: 50, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.schemaVersion, "1.1");
+  assert.equal(parsed.methodologyVersion, "yield_price_nonconfirmation_event_study_v2");
+  assert.equal(parsed.definition.driverLagBars, 2);
+  assert.equal(parsed.definition.configurationTrials, 10);
+  assert.equal(parsed.inferenceContract.configurationTrials, 10);
+  assert.equal(parsed.inferenceContract.bonferroniAdjustedAlphaReference, 0.005);
+  assert.ok(parsed.inferenceWarnings.includes("confidence_intervals_do_not_adjust_for_multiple_testing_bonferroni_reference_only"));
+  assert.equal(parsed.sample.events, 1);
+});
+
 test("compute_feature_outcome_relationships binds closed OHLC to the active chart", async () => {
   const journalRecords = [];
   let journalFailure = null;

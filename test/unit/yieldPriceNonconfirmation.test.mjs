@@ -161,3 +161,32 @@ test("yield-price Pine context gate uses only closed prior values and treats na 
   assert.equal(future.sample.events, 0);
   assert.equal(future.quality.noContextBarBeforeSignal, 1);
 });
+
+test("yield-price study evaluates multi-lag driver impulse offsets and multiple testing reference metrics", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100.1, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+
+  // Verifies driverLagBars: 2 works with default maxDriverAgeBars: 2 (driverAge evaluated on baseTargetIndex)
+  const result = runYieldPriceNonconfirmationStudy(input(target, driver, {
+    driverLagBars: 2,
+    configurationTrials: 10,
+  }));
+
+  assert.equal(result.schemaVersion, "1.1");
+  assert.equal(result.methodologyVersion, "yield_price_nonconfirmation_event_study_v2");
+  assert.equal(result.definition.driverLagBars, 2);
+  assert.equal(result.definition.configurationTrials, 10);
+  assert.equal(result.inferenceContract.configurationTrials, 10);
+  assert.equal(result.inferenceContract.bonferroniAdjustedAlphaReference, 0.005);
+  assert.ok(result.inferenceWarnings.includes("confidence_intervals_do_not_adjust_for_multiple_testing_bonferroni_reference_only"));
+  assert.equal(result.sample.events, 1);
+  assert.equal(result.quality.staleDriverEvidence, 0);
+
+  // Verifies excessive driverLagBars is cleanly reported under quality.noTargetBarAfterDriverClose
+  const overflow = runYieldPriceNonconfirmationStudy(input(target, driver, {
+    driverLagBars: 10,
+  }));
+  assert.equal(overflow.sample.events, 0);
+  assert.equal(overflow.quality.noTargetBarAfterDriverClose, 1);
+});

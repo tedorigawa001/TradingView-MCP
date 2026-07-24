@@ -27,6 +27,8 @@ export interface YieldPriceNonconfirmationInput {
   minimumEvents: number;
   folds: YieldPriceNonconfirmationFold[];
   eventLimit: number;
+  configurationTrials?: number;
+  driverLagBars?: number;
   contextRegime: null | { bars: OhlcvBar[]; symbol: string; timeframe: string; lookback: number; minimumReturn: number; maxAgeBars: number };
   contextIndicator?: null | {
     observations: Array<{ time: number; timeIso: string; gate: 0 | 1 | null }>;
@@ -158,6 +160,14 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   if (!targetResolutionMs || !driverResolutionMs || /M$/i.test(input.targetTimeframe) || /M$/i.test(input.driverTimeframe)) {
     throw new Error("yield-price study requires fixed-duration target and driver timeframes");
   }
+  const driverLagBars = input.driverLagBars ?? 0;
+  const configurationTrials = input.configurationTrials ?? 1;
+  if (!Number.isInteger(driverLagBars) || driverLagBars < 0 || driverLagBars > 20) {
+    throw new Error("driver lag bars must be an integer between 0 and 20");
+  }
+  if (!Number.isInteger(configurationTrials) || configurationTrials < 1 || configurationTrials > 1000) {
+    throw new Error("configuration trials must be an integer between 1 and 1000");
+  }
   if (!Number.isInteger(input.driverLookback) || input.driverLookback < 1 || input.driverLookback > 250 ||
       !(input.driverChangeThreshold > 0)) throw new Error("invalid driver impulse definition");
   if (!Number.isInteger(input.priceBreakoutLookback) || input.priceBreakoutLookback < 2 ||
@@ -243,10 +253,12 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     const prior = target.filter((bar) => bar.time * 1000 + targetResolutionMs <= availableAt)
       .slice(-input.priceBreakoutLookback);
     if (prior.length < input.priceBreakoutLookback) { quality.insufficientPriorTargetBars += 1; continue; }
-    const firstTargetIndex = target.findIndex((bar) => bar.time * 1000 >= availableAt);
-    if (firstTargetIndex < 0) { quality.noTargetBarAfterDriverClose += 1; continue; }
-    const driverAge = target[firstTargetIndex].time * 1000 - availableAt;
+    const baseTargetIndex = target.findIndex((bar) => bar.time * 1000 >= availableAt);
+    if (baseTargetIndex < 0) { quality.noTargetBarAfterDriverClose += 1; continue; }
+    const driverAge = target[baseTargetIndex].time * 1000 - availableAt;
     if (driverAge > input.maxDriverAgeBars * driverResolutionMs) { quality.staleDriverEvidence += 1; continue; }
+    const firstTargetIndex = baseTargetIndex + driverLagBars;
+    if (firstTargetIndex >= target.length) { quality.noTargetBarAfterDriverClose += 1; continue; }
     const nonconfirmation = target.slice(firstTargetIndex, firstTargetIndex + input.nonconfirmationBars);
     if (nonconfirmation.length !== input.nonconfirmationBars) {
       quality.incompleteNonconfirmationWindow += 1; continue;
@@ -353,8 +365,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     ...(driverIrregularIntervals > 0 ? ["irregular_driver_timestamps_not_forward_filled"] : []),
   ];
   return {
-    schemaVersion: "1.0" as const,
-    methodologyVersion: "yield_price_nonconfirmation_event_study_v1" as const,
+    schemaVersion: "1.1" as const,
+    methodologyVersion: "yield_price_nonconfirmation_event_study_v2" as const,
     status: qualityIssues.length === 0 ? "complete" as const : "partial" as const,
     target: { symbol: input.targetSymbol, timeframe: input.targetTimeframe },
     driver: { symbol: input.driverSymbol, timeframe: input.driverTimeframe },
@@ -362,6 +374,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     definition: {
       driverLookback: input.driverLookback,
       driverChangeThreshold: input.driverChangeThreshold,
+      driverLagBars,
+      configurationTrials,
       priceBreakoutLookback: input.priceBreakoutLookback,
       nonconfirmationBars: input.nonconfirmationBars,
       triggerLookback: input.triggerLookback,
@@ -370,6 +384,13 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       contextRegime: contextRegime === null ? null : { symbol: contextRegime.symbol, timeframe: contextRegime.timeframe, lookback: contextRegime.lookback, minimumReturn: contextRegime.minimumReturn, maxAgeBars: contextRegime.maxAgeBars },
       contextIndicator: contextIndicator === null ? null : { studyId: contextIndicator.studyId, plotId: contextIndicator.plotId, timeframe: contextIndicator.timeframe, maxAgeBars: contextIndicator.maxAgeBars, acceptedGateValue: contextIndicator.acceptedGateValue ?? 1 },
     },
+    inferenceContract: {
+      configurationTrials,
+      bonferroniAdjustedAlphaReference: 0.05 / configurationTrials,
+    },
+    inferenceWarnings: configurationTrials > 1
+      ? ["confidence_intervals_do_not_adjust_for_multiple_testing_bonferroni_reference_only"]
+      : [],
     joinContract: {
       policy: "driver_nominal_close_then_target_bar_start" as const,
       exactTimestampRequired: false,
