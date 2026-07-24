@@ -1310,9 +1310,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Summarize deterministic session-day profiles from closed minute bars on one exact TradingView chart. " +
         "Sessions use caller-specified IANA timezones and support daylight-saving and cross-midnight boundaries. " +
-        "The tool returns coverage, OHLC range, return, opening-range extension, high/low timing, prior closed-session " +
-        "overlap, and TradingView bar volume clearly labelled as unverified tick-or-exchange volume. It does not " +
-        "change the chart, optimize session definitions, or make a trade recommendation.",
+        "The tool returns coverage, OHLC range, return, opening-range extension, high/low timing, VWAP, prior closed-session " +
+        "overlap and high/low reaction tests (PDH/PDL/PDC), and TradingView bar volume clearly labelled as unverified " +
+        "tick-or-exchange volume. It does not change the chart, optimize session definitions, or make a trade recommendation.",
       inputSchema: {
         expected_symbol: SYMBOL_SCHEMA,
         expected_timeframe: z.string().regex(/^[1-9]\d*$/)

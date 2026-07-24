@@ -57,9 +57,21 @@ type SessionObservation = {
   lowMinutesFromStart: number;
   tickVolume: number | null;
   volumeCoverage: number;
+  vwap: number | null;
+  vwapDistanceRatio: number | null;
   previousClosedSessionId: string | null;
+  previousHigh: number | null;
+  previousLow: number | null;
+  previousClose: number | null;
   gapFromPreviousClose: number | null;
   previousRangeOverlapRatio: number | null;
+  testedPreviousHigh: boolean | null;
+  testedPreviousLow: boolean | null;
+  brokePreviousHigh: boolean | null;
+  brokePreviousLow: boolean | null;
+  failedPreviousHighBreak: boolean | null;
+  failedPreviousLowBreak: boolean | null;
+  holidayOrEarlyCloseDetected: boolean;
   firstTimeMs: number;
   lastCloseAvailableMs: number;
 };
@@ -233,10 +245,19 @@ function summarizeSession(rows: SessionObservation[]) {
     lowMinutesFromStart: stats(complete.map((row) => row.lowMinutesFromStart)),
     tickVolume: stats(complete.map((row) => row.tickVolume).filter((value): value is number => value !== null)),
     volumeCoverage: stats(complete.map((row) => row.volumeCoverage)),
+    vwapDistanceRatio: stats(complete.map((row) => row.vwapDistanceRatio).filter((value): value is number => value !== null)),
     gapFromPreviousClose: stats(complete.map((row) => row.gapFromPreviousClose)
       .filter((value): value is number => value !== null)),
     previousRangeOverlapRatio: stats(complete.map((row) => row.previousRangeOverlapRatio)
       .filter((value): value is number => value !== null)),
+    testedPreviousHighRate: complete.filter((row) => row.testedPreviousHigh !== null).length === 0 ? null
+      : complete.filter((row) => row.testedPreviousHigh === true).length / complete.filter((row) => row.testedPreviousHigh !== null).length,
+    testedPreviousLowRate: complete.filter((row) => row.testedPreviousLow !== null).length === 0 ? null
+      : complete.filter((row) => row.testedPreviousLow === true).length / complete.filter((row) => row.testedPreviousLow !== null).length,
+    failedPreviousHighBreakRate: complete.filter((row) => row.failedPreviousHighBreak !== null).length === 0 ? null
+      : complete.filter((row) => row.failedPreviousHighBreak === true).length / complete.filter((row) => row.failedPreviousHighBreak !== null).length,
+    failedPreviousLowBreakRate: complete.filter((row) => row.failedPreviousLowBreak !== null).length === 0 ? null
+      : complete.filter((row) => row.failedPreviousLowBreak === true).length / complete.filter((row) => row.failedPreviousLowBreak !== null).length,
   };
 }
 
@@ -284,6 +305,21 @@ export function computeSessionProfile(input: SessionProfileInput) {
       const highBar = group.find((bar) => bar.high === high)!;
       const lowBar = group.find((bar) => bar.low === low)!;
       const volumeValues = group.map((bar) => bar.volume).filter((value): value is number => value !== null);
+
+      let vwap: number | null = null;
+      let vwapDistanceRatio: number | null = null;
+      if (volumeValues.length === group.length && volumeValues.length > 0) {
+        const sumVol = volumeValues.reduce((sum, v) => sum + v, 0);
+        if (sumVol > 0) {
+          const sumPv = group.reduce((sum, bar) => {
+            const tp = (bar.high + bar.low + bar.close) / 3;
+            return sum + tp * (bar.volume ?? 0);
+          }, 0);
+          vwap = sumPv / sumVol;
+          vwapDistanceRatio = group.at(-1)!.close / vwap - 1;
+        }
+      }
+
       rows.push({
         sessionId: session.sessionId,
         timezone: session.timezone,
@@ -306,9 +342,21 @@ export function computeSessionProfile(input: SessionProfileInput) {
         lowMinutesFromStart: lowBar.minutesFromStart,
         tickVolume: volumeValues.length === group.length ? volumeValues.reduce((sum, value) => sum + value, 0) : null,
         volumeCoverage: volumeValues.length / group.length,
+        vwap,
+        vwapDistanceRatio,
         previousClosedSessionId: null,
+        previousHigh: null,
+        previousLow: null,
+        previousClose: null,
         gapFromPreviousClose: null,
         previousRangeOverlapRatio: null,
+        testedPreviousHigh: null,
+        testedPreviousLow: null,
+        brokePreviousHigh: null,
+        brokePreviousLow: null,
+        failedPreviousHighBreak: null,
+        failedPreviousLowBreak: null,
+        holidayOrEarlyCloseDetected: coverage < 0.5,
         firstTimeMs: group[0].time * 1_000,
         lastCloseAvailableMs: group.at(-1)!.time * 1_000 + timeframeMs,
       });
@@ -325,8 +373,18 @@ export function computeSessionProfile(input: SessionProfileInput) {
     const overlap = Math.max(0, Math.min(current.high, previous.high) - Math.max(current.low, previous.low));
     const denominator = Math.min(current.range, previous.range);
     current.previousClosedSessionId = previous.sessionId;
+    current.previousHigh = previous.high;
+    current.previousLow = previous.low;
+    current.previousClose = previous.close;
     current.gapFromPreviousClose = current.open / previous.close - 1;
     current.previousRangeOverlapRatio = denominator === 0 ? null : overlap / denominator;
+
+    current.testedPreviousHigh = current.high >= previous.high;
+    current.testedPreviousLow = current.low <= previous.low;
+    current.brokePreviousHigh = current.close > previous.high;
+    current.brokePreviousLow = current.close < previous.low;
+    current.failedPreviousHighBreak = current.high >= previous.high && current.close < previous.high;
+    current.failedPreviousLowBreak = current.low <= previous.low && current.close > previous.low;
   }
 
   const bySession = Object.fromEntries(input.sessions.map((session) => {
@@ -334,6 +392,7 @@ export function computeSessionProfile(input: SessionProfileInput) {
     return [session.sessionId, { definition: session, ...summarizeSession(selected) }];
   }));
   const incompleteSessionDays = rows.filter((row) => !row.complete).length;
+  const holidayOrEarlyCloseDays = rows.filter((row) => row.holidayOrEarlyCloseDetected).length;
   const irregularIntervals = bars.slice(1).filter((bar, index) => bar.time * 1_000 - bars[index].time * 1_000 > timeframeMs * 1.5).length;
   const qualityIssues = [
     ...input.sessions.filter((session) => rows.filter((row) => row.sessionId === session.sessionId && row.complete).length < input.minimumSessionDays)
@@ -343,15 +402,15 @@ export function computeSessionProfile(input: SessionProfileInput) {
   ];
   const returned = input.observationLimit === 0 ? [] : rows.slice(-input.observationLimit);
   return {
-    schemaVersion: "1.0" as const,
-    methodologyVersion: "session_profile_v1" as const,
+    schemaVersion: "1.1" as const,
+    methodologyVersion: "session_profile_v2" as const,
     status: qualityIssues.length === 0 ? "complete" as const : "partial" as const,
     symbol: input.symbol,
     timeframe: input.timeframe,
     volumeKind: "tradingview_bar_volume_unverified_tick_or_exchange_volume" as const,
     openingRangeBars: input.openingRangeBars,
     sample: { barsReceived: input.bars.length, closedBars: bars.length, sessionObservations: rows.length },
-    quality: { formingBarsExcluded, incompleteSessionDays, irregularIntervals },
+    quality: { formingBarsExcluded, incompleteSessionDays, holidayOrEarlyCloseDays, irregularIntervals },
     qualityIssues,
     bySession,
     observations: returned.map(({ firstTimeMs: _first, lastCloseAvailableMs: _last, ...row }) => row),

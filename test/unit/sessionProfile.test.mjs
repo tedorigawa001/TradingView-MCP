@@ -104,3 +104,34 @@ test("session profile selects the most recently closed overlapping session", () 
   const current = result.observations.find((row) => row.sessionId === "current");
   assert.equal(current.previousClosedSessionId, "long");
 });
+
+test("session profile computes vwap, PDH/PDL reactions, and holiday signal", () => {
+  const bars = [
+    // Session 1 (first): 08:00 to 10:00. Open 100, High 102, Low 99, Close 101, Volume 100
+    bar(Date.UTC(2026, 0, 5, 8), 100, 101, 50),
+    bar(Date.UTC(2026, 0, 5, 9), 101, 101.5, 50),
+
+    // Session 2 (second): 10:00 to 12:00. Open 101, High 103 (tested PDH 102), Low 100, Close 101.5 (failed PDH break). Volume 100
+    bar(Date.UTC(2026, 0, 5, 10), 101, 102.5, 60),
+    bar(Date.UTC(2026, 0, 5, 11), 102.5, 101.5, 40),
+  ];
+  const result = computeSessionProfile(input(bars, [
+    { sessionId: "first", timezone: "UTC", start: "08:00", end: "10:00", minimumCoverage: 1 },
+    { sessionId: "second", timezone: "UTC", start: "10:00", end: "12:00", minimumCoverage: 1 },
+  ]));
+
+  assert.equal(result.schemaVersion, "1.1");
+  assert.equal(result.methodologyVersion, "session_profile_v2");
+
+  const first = result.observations.find((row) => row.sessionId === "first");
+  assert.ok(first.vwap !== null);
+  assert.equal(first.previousHigh, null);
+
+  const second = result.observations.find((row) => row.sessionId === "second");
+  assert.ok(second.vwap !== null);
+  assert.equal(second.previousHigh, 101.6); // max(open,close)+0.1 for bar 9 is 101.5+0.1 = 101.6
+  assert.equal(second.testedPreviousHigh, true);
+  assert.equal(second.failedPreviousHighBreak, true);
+  assert.equal(second.brokePreviousHigh, false);
+});
+

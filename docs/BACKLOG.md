@@ -413,7 +413,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **実機検証(2026-07-21)**: TradingViewが遅延CME契約を`CME_DL:6J1!`へ正規化することを確認し、同一rootの遅延aliasを固定許可へ追加した。USDJPY/6J日足1,300本で1,279正規化観測を取得し、最新6J -0.0323%をUSDJPY方向+0.0323%へ反転、volume 96,698、20日平均比0.655、Z=-0.765、`normal` participationとして返した。COTはpartialで取得し、日次OIはunavailable、生OHLCV配列なし、ツール前後chart context不変を確認した。検証後は第2ペインをXAUUSD 4H、元2 Studyへ戻し、第1ペインをactiveへ復元・全context照合済み
 - **残タスク**: 認証済みCME日次統計provider、preliminary/final版とfirst-seen保存、限月・expiry・roll calendar、期近単独とcontinuous contractの比較、basis、volumeの確報照合、OI四象限、実機複数銘柄検証は未実装
 
-### #40 セッションプロファイル(`compute_session_profile`、優先度: 中・規模: 中)
+### #40 セッションプロファイル(`compute_session_profile`) ✅ VWAP・PDH/PDL反動・品質拡張完了
 
 - **目的**: 東京・ロンドン・NY別の高安、値幅、VWAP、出来高、前日高安からの反応を統一計算し、時間帯固有のEntry/Exit仮説を作る
 - **契約**: DSTを含むIANA timezone、休日、session境界、volume種別を明示する。FXのtick volumeを取引所実出来高として表示しない
@@ -421,7 +421,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **初版実装(2026-07-21)**: active chartのexact symbol/minute timeframeを拘束し、Bar Replay中を拒否して最大5,000本のロード済み確定OHLCを読む。1〜8件のIANA timezone sessionを受け、DSTと日跨ぎを現地時刻で処理する。曜日は各barの日付ではなくsession開始日で判定するため、金曜夜から土曜未明へ跨ぐsessionを分断しない
 - **結果契約**: session-dayごとのOHLC、値幅、return、opening rangeと拡張率、高安到達分、coverage、volume coverageを集計する。直前sessionとのgapとrange overlapは、そのsessionが現在session開始前に確定済みの場合だけ結合する。形成中足は除外し、欠落足を補間せず、不完全日と不規則timestampを品質情報へ残す
 - **volume境界**: `tickVolume`という項目名と`tradingview_bar_volume_unverified_tick_or_exchange_volume`種別を返し、symbolごとのTradingView volumeがFX tickか取引所出来高かを推測しない。全barにvolumeがあるsessionだけ合計し、部分欠落時はnullとcoverageを返す
-- **検証状況**: London DST切替、日跨ぎ、金曜夜跨ぎ、形成中足除外、不完全coverage、欠落volume、直前確定session結合、MCP chart bindingを単体・統合テストで固定した。実機E2EはUSDJPY 60分足1,800本で東京・London・New Yorkを各75日、計225 session-dayとして取得し、不完全日0、形成中足1本除外、週末等の不規則timestamp 15件を非補間として確認した。median rangeは東京0.270円、London 0.439円、New York 0.385円だったが、これは約75日の記述証拠であり採用根拠にはしない。検証後はUSDJPY 4Hと全Studyを復元・照合済み。初版は休日カレンダー、VWAP、前日高安反応、#36/#37への直接入力、仮説最適化、PF評価は未実装
+- **拡張実装(2026-07-24)**: `schemaVersion: "1.1"` / `methodologyVersion: "session_profile_v2"` へ更新。セッション累計VWAP (`vwap`) と終値VWAP離脱率 (`vwapDistanceRatio`) を追加し、出来高欠落時は `null` 安全にフォールバック。前セッション高安 (`previousHigh`, `previousLow`, `previousClose`) と反動・テスト指標 (`testedPreviousHigh`, `testedPreviousLow`, `brokePreviousHigh`, `brokePreviousLow`, `failedPreviousHighBreak`, `failedPreviousLowBreak`) を各観察および `bySession` 出現率へ追加。網羅率低下 (`coverage < 0.5`) を `holidayOrEarlyCloseDetected` として検出・記録。全ユニットテストおよびMCP動作を固定済み
 
 ### #41 クロスアセット先行・遅行分析(`run_yield_price_nonconfirmation_study`) 🟡 Yield-Price初版実装・汎用lead/lagは継続
 
