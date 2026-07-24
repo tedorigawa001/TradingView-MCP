@@ -22,7 +22,7 @@ function input(series, overrides = {}) {
     bodyRatioThreshold: 0.2, wickImbalanceThreshold: 0.2,
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
     rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.2,
-    horizons: [1, 3], minimumObservations: 2, folds: [], observationLimit: 50,
+    horizons: [1, 3], minimumObservations: 2, folds: [], regime: null, observationLimit: 50,
     ...overrides,
   };
 }
@@ -72,4 +72,36 @@ test("feature-outcome relationships retain observed-bar outcomes across a calend
   assert.ok(beforeGap);
   assert.notEqual(beforeGap.outcomes["1"], null);
   assert.equal(result.quality.irregularIntervals, 1);
+});
+
+test("feature-outcome relationships condition only on a predeclared same-bar regime", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113]);
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["range_position"],
+    horizons: [1],
+    regime: {
+      directionalRegime: "trend_up", volatilityRegime: null,
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+    },
+  }));
+  assert.ok(result.sample.observations > 0);
+  assert.equal(result.quality.regimeExcluded, 0);
+  assert.equal(result.definition.regime.directionalRegime, "trend_up");
+  assert.equal(result.regimeEvidence.filter.directionalRegime, "trend_up");
+
+  const excluded = computeFeatureOutcomeRelationships(input(series, {
+    features: ["range_position"],
+    horizons: [1],
+    regime: {
+      directionalRegime: "range", volatilityRegime: null,
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+    },
+  }));
+  assert.equal(excluded.sample.observations, 0);
+  assert.ok(excluded.quality.regimeExcluded > 0);
+  assert.ok(excluded.qualityIssues.includes("no_observations_match_regime"));
 });

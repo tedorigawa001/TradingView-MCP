@@ -3665,11 +3665,12 @@ test("strategy research journal tools map immutable records without chart access
   assert.equal(calls[2][1][0].experimentId, hash("a"));
 
   const eventHypothesis = await client.callTool({ name: "register_event_study_hypothesis", arguments: {
-    hypothesis_id: "handoff-eurusd", title: "Handoff", thesis: "A failed handoff may reverse.",
-    evaluation_contract: { population: "out_of_sample", primary_metric: "meanDirectionalReturn", primary_horizon_bars: 4, minimum_events: 20, symbols: ["OANDA:EURUSD"], timeframes: ["60"] },
+    hypothesis_id: "feature-eurusd", title: "Feature relationship", thesis: "A predeclared feature may separate later returns.",
+    evaluation_contract: { population: "out_of_sample", primary_metric: "meanForwardReturn", primary_horizon_bars: 4, minimum_events: 20, symbols: ["OANDA:EURUSD"], timeframes: ["60"] },
   } });
   assert.equal(JSON.parse(eventHypothesis.content[0].text).recorded, true);
-  const listed = await client.callTool({ name: "get_event_study_journal", arguments: { hypothesis_id: "handoff-eurusd" } });
+  assert.equal(calls[3][1].evaluationContract.primaryMetric, "meanForwardReturn");
+  const listed = await client.callTool({ name: "get_event_study_journal", arguments: { hypothesis_id: "feature-eurusd" } });
   assert.equal(JSON.parse(listed.content[0].text)[0].studyId, hash("a"));
   const eventCompared = await client.callTool({ name: "get_event_study_journal", arguments: { study_ids: [hash("a"), hash("b")], evidence_hashes: [hash("c"), hash("d")] } });
   assert.equal(JSON.parse(eventCompared.content[0].text).comparable, true);
@@ -4720,6 +4721,36 @@ test("run_market_event_study binds caller-supplied event times to aftershock ret
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 
+test("run_market_event_study binds failed breakout evidence to the active chart", async () => {
+  const start = Date.UTC(2026, 0, 5);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) bars.push({ time: (start + index * 900_000) / 1000,
+    timeIso: new Date(start + index * 900_000).toISOString(), open: 1.05, high: 1.1, low: 1, close: 1.05, volume: 1 });
+  bars.push({ time: (start + 32 * 900_000) / 1000, timeIso: new Date(start + 32 * 900_000).toISOString(), open: 1.05, high: 1.12, low: 1.03, close: 1.06, volume: 1 });
+  bars.push({ time: (start + 33 * 900_000) / 1000, timeIso: new Date(start + 33 * 900_000).toISOString(), open: 1.06, high: 1.07, low: 1.02, close: 1.04, volume: 1 });
+  for (let index = 34; index < 40; index += 1) {
+    const close = 1.04 - (index - 34) * 0.002;
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(), open: close + 0.002, high: close + 0.003, low: close - 0.003, close, volume: 1 });
+  }
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "failed_breakout", timezone: "UTC", range_start: "00:00", range_end: "08:00", failure_end: "10:00", confirmation_bars: 1, minimum_range_coverage: 1 },
+    horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "failed_breakout");
+  assert.equal(parsed.source.chartIndex, 0);
+  assert.equal(parsed.byBranch.failed_breakout_up.events, 1);
+  assert.equal(parsed.events[0].direction, "short");
+  assert.equal(parsed.conditionContract.oneEventPerLocalDay, true);
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+});
+
 test("run_yield_price_nonconfirmation_study binds optional third-chart context evidence", async () => {
   const day = 86_400_000;
   const start = Date.UTC(2026, 0, 1);
@@ -4899,6 +4930,8 @@ test("run_yield_price_nonconfirmation_study fails closed for an untrusted DXY ga
 });
 
 test("compute_feature_outcome_relationships binds closed OHLC to the active chart", async () => {
+  const journalRecords = [];
+  let journalFailure = null;
   const start = Date.UTC(2026, 0, 1);
   const bars = Array.from({ length: 30 }, (_, index) => {
     const open = 100 + Math.sin(index / 3);
@@ -4907,7 +4940,13 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
       timeIso: new Date(start + index * 3_600_000).toISOString(),
       open, high: Math.max(open, close) + 0.3, low: Math.min(open, close) - 0.3, close, volume: 1 };
   });
-  const client = await connectedClient(makeDeps({ tv: {
+  const client = await connectedClient(makeDeps({ researchJournal: {
+    recordEventStudy: async (payload) => {
+      if (journalFailure) throw journalFailure;
+      journalRecords.push(payload);
+      return { recorded: true, entry: { payload, evidence_hash: `sha256:${"f".repeat(64)}` } };
+    },
+  }, tv: {
     getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
       charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
@@ -4917,14 +4956,59 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
     features: ["body_direction", "range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
     range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5,
+    configuration_trials: 18,
+    journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
     observation_limit: 2,
   } });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.symbol, "OANDA:EURUSD");
+  assert.equal(parsed.conditionType, "feature_outcome_relationships");
+  assert.match(parsed.studyId, /^sha256:/);
+  assert.match(parsed.definitionHash, /^sha256:/);
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.outcomeContract.forwardFill, false);
   assert.ok(parsed.byFeature.body_direction.bullish_body.observations > 0);
   assert.equal(parsed.observations.length, 2);
+  assert.equal(parsed.journal.recorded, true);
+  assert.equal(journalRecords[0].configurationTrials, 18);
+  assert.equal(journalRecords[0].conditionType, "feature_outcome_relationships");
+  const bullish = journalRecords[0].outcomes.find((item) => item.branch === "body_direction:bullish_body" &&
+    item.horizonBars === 1);
+  assert.equal(typeof bullish.meanForwardReturn, "number");
+  assert.equal("meanDirectionalReturn" in bullish, false);
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+
+  journalFailure = new Error("research journal unavailable");
+  const failedJournal = JSON.parse((await client.callTool({
+    name: "compute_feature_outcome_relationships",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+      features: ["body_direction"], atr_lookback: 2, atr_baseline_lookback: 5,
+      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 5,
+      journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
+      observation_limit: 0,
+    },
+  })).content[0].text);
+  assert.ok(failedJournal.byFeature.body_direction);
+  assert.equal(failedJournal.journal.recorded, false);
+  assert.match(failedJournal.journal.error, /research journal unavailable/);
+
+  const regimeFiltered = JSON.parse((await client.callTool({
+    name: "compute_feature_outcome_relationships",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+      features: ["range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
+      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 1,
+      regime: {
+        directional_regime: "trend_up", trend_lookback: 2, atr_lookback: 2,
+        volatility_baseline_lookback: 5, directional_move_atr_threshold: 0.1,
+      }, observation_limit: 0,
+    },
+  })).content[0].text);
+  assert.equal(regimeFiltered.definition.regime.directionalRegime, "trend_up");
+  assert.equal(regimeFiltered.regimeEvidence.filter.directionalRegime, "trend_up");
+  assert.ok(regimeFiltered.sample.observations < parsed.sample.observations);
+  assert.ok(regimeFiltered.quality.regimeExcluded > 0);
 });
 
 test("compute_session_profile binds minute OHLC to the active chart", async () => {

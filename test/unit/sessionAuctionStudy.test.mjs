@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runSessionAuctionStudy } from "../../build/sessionAuctionStudy.js";
+import { outcomeForEvent, runSessionAuctionStudy } from "../../build/sessionAuctionStudy.js";
 
 function bar(timeMs, open, high, low, close, forming = false) {
   return { time: timeMs / 1000, timeIso: new Date(timeMs).toISOString(), open, high, low, close,
@@ -204,4 +204,15 @@ test("session auction study never joins the signal bar's contemporaneous regime"
     "the only classification available at the event belongs to the signal bar itself");
   assert.equal(result.regimeAnalysis.status, "blocked");
   assert.ok(result.regimeAnalysis.qualityIssues.includes("no_events_joined_to_regimes"));
+});
+
+test("event outcomes keep MFE and MAE at zero when future bars never cross the entry", () => {
+  const start = Date.UTC(2026, 0, 5);
+  const bars = [
+    bar(start, 100, 101, 99, 100),
+    bar(start + 900_000, 99, 99.5, 98, 99),
+  ];
+  const outcome = outcomeForEvent({ signalIndex: 0, direction: 1 }, bars, [1], 900_000, 10);
+  assert.equal(outcome.outcomes["1"].mfe, 0);
+  assert.ok(outcome.outcomes["1"].mae > 0);
 });

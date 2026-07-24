@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,8 +109,18 @@ test("strategy research journal keeps event-study hypotheses and computed eviden
   const eventHypothesis = { hypothesisId: "handoff-gbpusd", title: "NY handoff exhaustion", thesis: "A failed handoff may reverse.", evaluationContract: { population: "out_of_sample", primaryMetric: "meanDirectionalReturn", primaryHorizonBars: 4, minimumEvents: 20, symbols: ["OANDA:GBPUSD"], timeframes: ["60"] } };
   await store.registerEventHypothesis(eventHypothesis);
   assert.equal((await store.registerEventHypothesis(eventHypothesis)).idempotent, true);
-  const recorded = await store.recordEventStudy({ studyId: hash("a"), hypothesisId: "handoff-gbpusd", population: "out_of_sample", methodologyVersion: "session_exhaustion_handoff_event_study_v1", symbol: "OANDA:GBPUSD", timeframe: "60", conditionType: "session_exhaustion_handoff", definitionHash: hash("b"), source: { chartIndex: 1, requestedBars: 5000, returnedBars: 5000, from: "2026-01-01T00:00:00.000Z", to: "2026-07-01T00:00:00.000Z" }, sampleEvents: 19, minimumEvents: 20, outcomes: [{ branch: "exhaustion_down", horizonBars: 4, events: 13, meanDirectionalReturn: 0.001, medianDirectionalReturn: 0.001, positiveRate: 0.6, targetHitRate: 0.5 }], qualityIssues: ["minimum_event_count_not_met"], minimumEventsMet: false, decision: "inconclusive", note: "Too few events." });
+  const legacyRecord = { studyId: hash("a"), hypothesisId: "handoff-gbpusd", population: "out_of_sample", methodologyVersion: "session_exhaustion_handoff_event_study_v1", symbol: "OANDA:GBPUSD", timeframe: "60", conditionType: "session_exhaustion_handoff", definitionHash: hash("b"), source: { chartIndex: 1, requestedBars: 5000, returnedBars: 5000, from: "2026-01-01T00:00:00.000Z", to: "2026-07-01T00:00:00.000Z" }, sampleEvents: 19, minimumEvents: 20, outcomes: [{ branch: "exhaustion_down", horizonBars: 4, events: 13, meanDirectionalReturn: 0.001, medianDirectionalReturn: 0.001, positiveRate: 0.6, targetHitRate: 0.5 }], qualityIssues: ["minimum_event_count_not_met"], minimumEventsMet: false, decision: "inconclusive", note: "Too few events." };
+  const recorded = await store.recordEventStudy(legacyRecord);
   assert.match(recorded.entry.evidence_hash, /^sha256:/);
+  const expectedLegacyEvidenceHash = `sha256:${createHash("sha256").update(JSON.stringify({
+    studyId: legacyRecord.studyId,
+    source: legacyRecord.source,
+    sampleEvents: legacyRecord.sampleEvents,
+    outcomes: legacyRecord.outcomes,
+    qualityIssues: legacyRecord.qualityIssues,
+    minimumEventsMet: legacyRecord.minimumEventsMet,
+  }), "utf8").digest("hex")}`;
+  assert.equal(recorded.entry.evidence_hash, expectedLegacyEvidenceHash);
   assert.equal((await store.listEventStudies("handoff-gbpusd")).length, 1);
   const second = await store.recordEventStudy({ ...recorded.entry.payload, studyId: hash("c"), source: { ...recorded.entry.payload.source, to: "2026-07-02T00:00:00.000Z" } });
   const comparison = await store.compareEventStudies([{ studyId: hash("a"), evidenceHash: recorded.entry.evidence_hash }, { studyId: hash("c"), evidenceHash: second.entry.evidence_hash }]);
@@ -120,4 +131,83 @@ test("strategy research journal keeps event-study hypotheses and computed eviden
   const mismatch = await store.compareEventStudies([{ studyId: hash("a"), evidenceHash: recorded.entry.evidence_hash }, { studyId: hash("e"), evidenceHash: incompatible.entry.evidence_hash }]);
   assert.equal(mismatch.comparable, false);
   assert.ok(mismatch.incompatibilities.includes("condition_definition"));
+});
+
+test("strategy research journal records feature-outcome evidence without directional-return coercion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "feature-research-"));
+  const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));
+  const hypothesis = {
+    hypothesisId: "xauusd-feature-discovery",
+    title: "Point-in-time price feature discovery",
+    thesis: "Predeclared price features may separate later returns.",
+    evaluationContract: {
+      population: "out_of_sample",
+      primaryMetric: "meanForwardReturn",
+      primaryHorizonBars: 4,
+      minimumEvents: 100,
+      symbols: ["OANDA:XAUUSD"],
+      timeframes: ["60"],
+    },
+  };
+  await store.registerEventHypothesis(hypothesis);
+  const record = {
+    studyId: hash("a"),
+    hypothesisId: hypothesis.hypothesisId,
+    population: "out_of_sample",
+    methodologyVersion: "feature_outcome_relationships_v1",
+    symbol: "OANDA:XAUUSD",
+    timeframe: "60",
+    conditionType: "feature_outcome_relationships",
+    definitionHash: hash("b"),
+    source: {
+      chartIndex: 0,
+      requestedBars: 5000,
+      returnedBars: 5000,
+      from: "2026-01-01T00:00:00.000Z",
+      to: "2026-07-01T00:00:00.000Z",
+    },
+    sampleEvents: 4900,
+    minimumEvents: 100,
+    configurationTrials: 18,
+    outcomes: [{
+      branch: "body_direction:bullish_body",
+      horizonBars: 4,
+      events: 1600,
+      meanForwardReturn: 0.001,
+      medianForwardReturn: 0.0005,
+      positiveRate: 0.54,
+      meanMaxUpside: 0.004,
+      meanMaxDownside: 0.003,
+    }],
+    qualityIssues: [],
+    minimumEventsMet: true,
+    decision: "inconclusive",
+    note: "Discovery evidence only.",
+  };
+  const recorded = await store.recordEventStudy(record);
+  assert.equal((await store.recordEventStudy(record)).idempotent, true);
+  assert.equal(recorded.entry.payload.outcomes[0].meanDirectionalReturn, undefined);
+  assert.equal(recorded.entry.payload.outcomes[0].meanForwardReturn, 0.001);
+  const retriedWithMoreTrials = await store.recordEventStudy({
+    ...record,
+    configurationTrials: 24,
+  });
+  assert.notEqual(retriedWithMoreTrials.entry.evidence_hash, recorded.entry.evidence_hash);
+  await assert.rejects(
+    () => store.recordEventStudy({
+      ...record,
+      configurationTrials: 0,
+    }),
+    /invalid event configuration trials/,
+  );
+  await assert.rejects(
+    () => store.recordEventStudy({
+      ...record,
+      outcomes: [{
+        ...record.outcomes[0],
+        meanDirectionalReturn: 0.001,
+      }],
+    }),
+    /metrics do not match the condition type/,
+  );
 });

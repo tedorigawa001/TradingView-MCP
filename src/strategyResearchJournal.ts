@@ -17,7 +17,10 @@ const METRICS = new Set([
   "sharpeRatio", "sortinoRatio", "totalTrades", "expectancy", "averageDurationMilliseconds",
   "averageRunUp", "averageDrawDown", "worstTradeDrawDown",
 ]);
-const EVENT_METRICS = new Set(["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"]);
+const EVENT_METRICS = new Set([
+  "meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate",
+  "meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside",
+]);
 
 export const resolveStrategyResearchJournalPath = (
   configuredPath = process.env.TRADINGVIEW_MCP_STRATEGY_RESEARCH_JOURNAL_PATH,
@@ -73,7 +76,15 @@ export type EventStudyHypothesis = {
   thesis: string;
   evaluationContract: {
     population: ResearchPopulation;
-    primaryMetric: "meanDirectionalReturn" | "medianDirectionalReturn" | "positiveRate" | "targetHitRate";
+    primaryMetric:
+      | "meanDirectionalReturn"
+      | "medianDirectionalReturn"
+      | "positiveRate"
+      | "targetHitRate"
+      | "meanForwardReturn"
+      | "medianForwardReturn"
+      | "meanMaxUpside"
+      | "meanMaxDownside";
     primaryHorizonBars: number;
     minimumEvents: number;
     symbols: string[];
@@ -88,12 +99,30 @@ export type EventStudyRecord = {
   methodologyVersion: string;
   symbol: string;
   timeframe: string;
-  conditionType: "session_auction" | "session_exhaustion_handoff" | "event_aftershock_retest";
+  conditionType:
+    | "session_auction"
+    | "session_exhaustion_handoff"
+    | "event_aftershock_retest"
+    | "failed_breakout"
+    | "feature_outcome_relationships";
   definitionHash: string;
   source: { chartIndex: number; requestedBars: number; returnedBars: number; from: string | null; to: string | null };
   sampleEvents: number;
   minimumEvents: number;
-  outcomes: Array<{ branch: string; horizonBars: number; events: number; meanDirectionalReturn: number | null; medianDirectionalReturn: number | null; positiveRate: number | null; targetHitRate: number | null }>;
+  configurationTrials?: number | null;
+  outcomes: Array<{
+    branch: string;
+    horizonBars: number;
+    events: number;
+    positiveRate: number | null;
+    meanDirectionalReturn?: number | null;
+    medianDirectionalReturn?: number | null;
+    targetHitRate?: number | null;
+    meanForwardReturn?: number | null;
+    medianForwardReturn?: number | null;
+    meanMaxUpside?: number | null;
+    meanMaxDownside?: number | null;
+  }>;
   qualityIssues: string[];
   minimumEventsMet: boolean;
   decision: "adopted" | "rejected" | "inconclusive";
@@ -176,14 +205,29 @@ function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
   if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(value.population)) throw new Error("invalid event research population");
   if (typeof value.methodologyVersion !== "string" || value.methodologyVersion.length < 1 || value.methodologyVersion.length > 80) throw new Error("invalid event methodology version");
   if (!SYMBOL_PATTERN.test(value.symbol) || !TIMEFRAME_PATTERN.test(value.timeframe)) throw new Error("invalid event study market");
-  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
+  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout", "feature_outcome_relationships"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
   if (!Number.isInteger(value.source.chartIndex) || value.source.chartIndex < 0 || !Number.isInteger(value.source.requestedBars) || !Number.isInteger(value.source.returnedBars) || value.source.requestedBars < 1 || value.source.returnedBars < 0) throw new Error("invalid event study source");
   for (const time of [value.source.from, value.source.to]) if (time !== null && new Date(time).toISOString() !== time) throw new Error("invalid event study source time");
   if (!Number.isInteger(value.sampleEvents) || !Number.isInteger(value.minimumEvents) || value.sampleEvents < 0 || value.minimumEvents < 1) throw new Error("invalid event study sample");
-  if (!Array.isArray(value.outcomes) || value.outcomes.length < 1 || value.outcomes.length > 100) throw new Error("invalid event outcomes");
+  if (value.configurationTrials !== undefined && value.configurationTrials !== null &&
+      (!Number.isInteger(value.configurationTrials) || value.configurationTrials < 1 || value.configurationTrials > 100_000)) {
+    throw new Error("invalid event configuration trials");
+  }
+  if (!Array.isArray(value.outcomes) || value.outcomes.length < 1 || value.outcomes.length > 200) throw new Error("invalid event outcomes");
   for (const outcome of value.outcomes) {
     if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(outcome.branch) || !Number.isInteger(outcome.horizonBars) || outcome.horizonBars < 1 || outcome.horizonBars > 250 || !Number.isInteger(outcome.events) || outcome.events < 0) throw new Error("invalid event outcome identity");
-    for (const metric of [outcome.meanDirectionalReturn, outcome.medianDirectionalReturn, outcome.positiveRate, outcome.targetHitRate]) if (metric !== null && (typeof metric !== "number" || !Number.isFinite(metric))) throw new Error("invalid event outcome metric");
+    const metricKeys = value.conditionType === "feature_outcome_relationships"
+      ? ["meanForwardReturn", "medianForwardReturn", "positiveRate", "meanMaxUpside", "meanMaxDownside"] as const
+      : ["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"] as const;
+    for (const key of metricKeys) {
+      if (!(key in outcome)) throw new Error(`missing event outcome metric: ${key}`);
+      const metric = outcome[key];
+      if (metric !== null && (typeof metric !== "number" || !Number.isFinite(metric))) throw new Error("invalid event outcome metric");
+    }
+    const incompatibleKeys = value.conditionType === "feature_outcome_relationships"
+      ? ["meanDirectionalReturn", "medianDirectionalReturn", "targetHitRate"] as const
+      : ["meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside"] as const;
+    if (incompatibleKeys.some((key) => key in outcome)) throw new Error("event outcome metrics do not match the condition type");
   }
   if (!Array.isArray(value.qualityIssues) || value.qualityIssues.length > 100 || value.qualityIssues.some((item) => typeof item !== "string" || !/^[a-z0-9_]{1,120}$/.test(item))) throw new Error("invalid event quality issues");
   if (typeof value.minimumEventsMet !== "boolean" || !(["adopted", "rejected", "inconclusive"] as unknown[]).includes(value.decision) || typeof value.note !== "string" || value.note.length > 500) throw new Error("invalid event study decision");
@@ -248,7 +292,9 @@ function experimentDefinitionHash(payload: StrategyExperimentRecord): string {
 }
 
 function eventStudyEvidenceHash(payload: EventStudyRecord): string {
-  return canonicalHash({ studyId: payload.studyId, source: payload.source, sampleEvents: payload.sampleEvents, outcomes: payload.outcomes, qualityIssues: payload.qualityIssues, minimumEventsMet: payload.minimumEventsMet });
+  return canonicalHash({ studyId: payload.studyId, source: payload.source, sampleEvents: payload.sampleEvents,
+    configurationTrials: payload.configurationTrials, outcomes: payload.outcomes,
+    qualityIssues: payload.qualityIssues, minimumEventsMet: payload.minimumEventsMet });
 }
 
 function eventStudyDefinitionHash(payload: EventStudyRecord): string {

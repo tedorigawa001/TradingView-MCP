@@ -233,12 +233,12 @@ export function outcomeForEvent<T extends { signalIndex: number; direction: 1 | 
     if (!contiguous) { outcomes[String(horizon)] = null; continue; }
     const entry = signal.close;
     const directionalReturn = event.direction * (future.at(-1)!.close / entry - 1);
-    const favorable = event.direction === 1
+    const favorable = Math.max(0, event.direction === 1
       ? Math.max(...future.map((bar) => bar.high / entry - 1))
-      : Math.max(...future.map((bar) => 1 - bar.low / entry));
-    const adverse = event.direction === 1
+      : Math.max(...future.map((bar) => 1 - bar.low / entry)));
+    const adverse = Math.max(0, event.direction === 1
       ? Math.max(...future.map((bar) => 1 - bar.low / entry))
-      : Math.max(...future.map((bar) => bar.high / entry - 1));
+      : Math.max(...future.map((bar) => bar.high / entry - 1)));
     const targetFraction = targetReturnBps / 10_000;
     const targetIndex = future.findIndex((bar) => event.direction === 1
       ? bar.high >= entry * (1 + targetFraction)

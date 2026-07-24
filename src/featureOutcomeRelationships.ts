@@ -1,5 +1,10 @@
 import type { OhlcvBar } from "./tradingview.js";
-import { marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
+import {
+  computeMarketRegimes,
+  marketRegimeResolutionMilliseconds,
+  type DirectionalRegime,
+  type VolatilityRegime,
+} from "./marketRegimes.js";
 
 export type FeatureOutcomeFeature =
   | "atr_compression"
@@ -13,6 +18,19 @@ export interface FeatureOutcomeFold {
   foldId: string;
   from: string;
   to: string;
+}
+
+export interface FeatureOutcomeRegimeFilter {
+  trendLookback: number;
+  atrLookback: number;
+  volatilityBaselineLookback: number;
+  trendEfficiencyThreshold: number;
+  rangeEfficiencyThreshold: number;
+  directionalMoveAtrThreshold: number;
+  highVolatilityRatio: number;
+  lowVolatilityRatio: number;
+  directionalRegime: DirectionalRegime;
+  volatilityRegime: VolatilityRegime | null;
 }
 
 export interface FeatureOutcomeRelationshipsInput {
@@ -34,6 +52,7 @@ export interface FeatureOutcomeRelationshipsInput {
   horizons: number[];
   minimumObservations: number;
   folds: FeatureOutcomeFold[];
+  regime: FeatureOutcomeRegimeFilter | null;
   observationLimit: number;
 }
 
@@ -184,6 +203,24 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
   const allBars = validateBars(input.bars);
   const formingBarsExcluded = allBars.filter((bar) => bar.forming === true).length;
   const bars = allBars.filter((bar) => bar.forming !== true);
+  const regimeEvidence = input.regime === null ? null : computeMarketRegimes({
+    bars: input.bars,
+    symbol: input.symbol,
+    timeframe: input.timeframe,
+    trendLookback: input.regime.trendLookback,
+    atrLookback: input.regime.atrLookback,
+    volatilityBaselineLookback: input.regime.volatilityBaselineLookback,
+    trendEfficiencyThreshold: input.regime.trendEfficiencyThreshold,
+    rangeEfficiencyThreshold: input.regime.rangeEfficiencyThreshold,
+    directionalMoveAtrThreshold: input.regime.directionalMoveAtrThreshold,
+    highVolatilityRatio: input.regime.highVolatilityRatio,
+    lowVolatilityRatio: input.regime.lowVolatilityRatio,
+    minimumClassifiedBars: 1,
+    observationLimit: 20_000,
+  });
+  const regimesByTime = new Map(regimeEvidence?.observations.map((item) => [item.time, item]) ?? []);
+  let regimeUnclassified = 0;
+  let regimeExcluded = 0;
   const trueRanges: Array<number | null> = bars.map((bar, index) => index === 0 ? null : Math.max(
     bar.high - bar.low,
     Math.abs(bar.high - bars[index - 1].close),
@@ -252,6 +289,15 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       labels.gap_direction = gapAtr > input.gapAtrThreshold ? "gap_up"
         : gapAtr < -input.gapAtrThreshold ? "gap_down" : "no_material_gap";
     }
+    if (input.regime !== null) {
+      const regime = regimesByTime.get(bar.time);
+      if (!regime) { regimeUnclassified += 1; continue; }
+      if (regime.directionalRegime !== input.regime.directionalRegime ||
+          (input.regime.volatilityRegime !== null && regime.volatilityRegime !== input.regime.volatilityRegime)) {
+        regimeExcluded += 1;
+        continue;
+      }
+    }
     observations.push({ signalIndex: index, signalTime: bar.timeIso, labels, outcomes: outcomeFor(bars, index, input.horizons) });
   }
 
@@ -266,6 +312,8 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     ...(observations.length < input.minimumObservations ? ["minimum_observation_count_not_met"] : []),
     ...(folds.length < 2 ? ["fewer_than_two_time_folds"] : []),
     ...(irregularIntervals > 0 ? ["irregular_timestamps_not_forward_filled"] : []),
+    ...(input.regime !== null && observations.length === 0 ? ["no_observations_match_regime"] : []),
+    ...(regimeEvidence?.qualityIssues ?? []).map((issue) => `regime_${issue}`),
   ];
   const returnedObservations = input.observationLimit === 0 ? [] : observations.slice(-input.observationLimit);
   return {
@@ -287,6 +335,7 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       rangePositionLower: input.rangePositionLower,
       rangePositionUpper: input.rangePositionUpper,
       gapAtrThreshold: input.gapAtrThreshold,
+      regime: input.regime,
     },
     outcomeContract: {
       reference: "signal_bar_close_event_study_only_not_assumed_fill" as const,
@@ -304,8 +353,16 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       observations: observations.length,
       minimumObservations: input.minimumObservations,
     },
-    quality: { formingBarsExcluded, irregularIntervals, warmupBars },
+    quality: { formingBarsExcluded, irregularIntervals, warmupBars, regimeUnclassified, regimeExcluded },
     qualityIssues,
+    ...(regimeEvidence === null ? {} : { regimeEvidence: {
+      methodologyVersion: regimeEvidence.methodologyVersion,
+      thresholds: regimeEvidence.thresholds,
+      sample: regimeEvidence.sample,
+      quality: regimeEvidence.quality,
+      qualityIssues: regimeEvidence.qualityIssues,
+      filter: input.regime,
+    } }),
     byFeature: classify(observations, input.features, input.horizons),
     folds: folds.map((fold) => {
       const selected = observations.filter((row) => {

@@ -43,6 +43,7 @@ import {
 import { runSessionAuctionStudy } from "./sessionAuctionStudy.js";
 import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
+import { runFailedBreakoutStudy } from "./failedBreakoutStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
@@ -695,6 +696,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "closed-bar prior-session direction fails to extend in an early handoff session and reverses. " +
         "Condition event_aftershock_retest evaluates caller-supplied, canonical economic-event timestamps " +
         "through a post-event initial range, close breakout, and first boundary retest. " +
+        "Condition failed_breakout evaluates a first sweep beyond a completed local-session range that closes " +
+        "back inside it, with optional opposite-direction confirmation closes. " +
         "It returns directional forward returns, MFE, MAE, target timing, explicit exclusions, and " +
         "optional non-overlapping time folds with bounded mean and rate confidence intervals. The caller " +
         "can declare the number of configurations inspected; serial dependence and multiple testing are " +
@@ -751,6 +754,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               .describe("Exclude later event timestamps whose maximum evaluation window overlaps an earlier event. Default: exclude_later_event"),
             require_retest_close_outside: z.boolean().optional(),
             minimum_initial_range_coverage: z.number().finite().gt(0).max(1).optional(),
+          }),
+          z.object({
+            type: z.literal("failed_breakout"),
+            timezone: z.string().min(1).max(64),
+            range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            failure_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            confirmation_bars: z.number().int().min(0).max(4).optional(),
+            minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
           }),
         ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
@@ -856,6 +868,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             requireOppositeBody: condition.require_opposite_body ?? true,
             minimumPriorCoverage: condition.minimum_prior_coverage ?? 0.8,
           })
+          : condition.type === "failed_breakout"
+          ? runFailedBreakoutStudy({
+            ...common, timezone: condition.timezone, rangeStart: condition.range_start, rangeEnd: condition.range_end,
+            failureEnd: condition.failure_end, confirmationBars: condition.confirmation_bars ?? 1,
+            minimumRangeCoverage: condition.minimum_range_coverage ?? 0.8,
+          })
           : runEventAftershockRetestStudy({
             ...common,
             events: condition.events.map((event) => ({ eventId: event.event_id, occurredAt: event.occurred_at })),
@@ -886,7 +904,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           try {
             const record: EventStudyRecord = { studyId, hypothesisId: journal.hypothesis_id, population: journal.population,
               methodologyVersion: result.methodologyVersion, symbol: result.symbol, timeframe: result.timeframe, conditionType: condition.type,
-              definitionHash, source, sampleEvents: result.sample.events, minimumEvents: result.sample.minimumEvents, outcomes: branchSummaries,
+              definitionHash, source, sampleEvents: result.sample.events, minimumEvents: result.sample.minimumEvents,
+              configurationTrials: configuration_trials ?? null, outcomes: branchSummaries,
               qualityIssues: result.qualityIssues, minimumEventsMet: result.sample.events >= result.sample.minimumEvents,
               decision: journal.decision, note: journal.note ?? "" };
             journalResult = await researchJournal.recordEventStudy(record);
@@ -1124,6 +1143,26 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
           to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
         })).max(12).optional(),
+        regime: z.object({
+          directional_regime: z.enum(["trend_up", "trend_down", "range", "transition"]),
+          volatility_regime: z.enum(["low", "normal", "high"]).optional(),
+          trend_lookback: z.number().int().min(2).max(500).optional(),
+          atr_lookback: z.number().int().min(2).max(250).optional(),
+          volatility_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+          trend_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+          range_efficiency_threshold: z.number().finite().min(0).max(1).optional(),
+          directional_move_atr_threshold: z.number().finite().gt(0).max(100).optional(),
+          high_volatility_ratio: z.number().finite().gt(1).max(100).optional(),
+          low_volatility_ratio: z.number().finite().gt(0).lt(1).optional(),
+        }).optional().describe("Optional predeclared point-in-time market-regime filter for a limited feature hypothesis"),
+        configuration_trials: z.number().int().min(1).max(100_000).optional()
+          .describe("Total related feature/threshold configurations inspected so far, including this one"),
+        journal: z.object({
+          hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          population: RESEARCH_POPULATION_SCHEMA,
+          decision: z.enum(["adopted", "rejected", "inconclusive"]),
+          note: z.string().max(500).optional(),
+        }).optional(),
         observation_limit: z.number().int().min(0).max(500).optional()
           .describe("Maximum labelled observations to return. Aggregates always use all rows. Default: 100"),
       },
@@ -1131,7 +1170,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ expected_symbol, expected_timeframe, count, features, atr_lookback, atr_baseline_lookback,
       range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
       atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
-      gap_atr_threshold, horizons, minimum_observations, folds, observation_limit }) => chartOperations.run(async () => {
+      gap_atr_threshold, horizons, minimum_observations, folds, regime, configuration_trials, journal,
+      observation_limit }) => chartOperations.run(async () => {
       try {
         const context = await tv.getChartContext();
         const activeIndex = context.activeChartIndex ?? 0;
@@ -1172,23 +1212,90 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           horizons,
           minimumObservations: minimum_observations ?? 100,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          regime: regime === undefined ? null : {
+            directionalRegime: regime.directional_regime,
+            volatilityRegime: regime.volatility_regime ?? null,
+            trendLookback: regime.trend_lookback ?? 20,
+            atrLookback: regime.atr_lookback ?? 14,
+            volatilityBaselineLookback: regime.volatility_baseline_lookback ?? 50,
+            trendEfficiencyThreshold: regime.trend_efficiency_threshold ?? 0.6,
+            rangeEfficiencyThreshold: regime.range_efficiency_threshold ?? 0.25,
+            directionalMoveAtrThreshold: regime.directional_move_atr_threshold ?? 2,
+            highVolatilityRatio: regime.high_volatility_ratio ?? 1.5,
+            lowVolatilityRatio: regime.low_volatility_ratio ?? 0.75,
+          },
           observationLimit: observation_limit ?? 100,
         });
+        const source = {
+          chartIndex: activeIndex,
+          requestedBars,
+          returnedBars: history.bars.length,
+          from: history.bars[0]?.timeIso ?? null,
+          to: history.bars.at(-1)?.timeIso ?? null,
+        };
+        const definition = {
+          features: result.features,
+          classification: result.definition,
+          outcomeContract: result.outcomeContract,
+          minimumObservations: result.sample.minimumObservations,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+        };
+        const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const outcomes: EventStudyRecord["outcomes"] = Object.entries(result.byFeature).flatMap(([feature, buckets]) =>
+          Object.entries(buckets).flatMap(([bucket, summary]) =>
+            Object.entries(summary.horizons).map(([horizon, outcome]) => ({
+              branch: `${feature}:${bucket}`,
+              horizonBars: Number(horizon),
+              events: outcome.availableObservations,
+              meanForwardReturn: outcome.forwardReturn.mean,
+              medianForwardReturn: outcome.forwardReturn.median,
+              positiveRate: outcome.positiveRate,
+              meanMaxUpside: outcome.maxUpside.mean,
+              meanMaxDownside: outcome.maxDownside.mean,
+            }))));
+        let journalResult: unknown = null;
+        if (journal) {
+          try {
+            const record: EventStudyRecord = {
+              studyId,
+              hypothesisId: journal.hypothesis_id,
+              population: journal.population,
+              methodologyVersion: result.methodologyVersion,
+              symbol: result.symbol,
+              timeframe: result.timeframe,
+              conditionType: "feature_outcome_relationships",
+              definitionHash,
+              source,
+              sampleEvents: result.sample.observations,
+              minimumEvents: result.sample.minimumObservations,
+              configurationTrials: configuration_trials ?? null,
+              outcomes,
+              qualityIssues: result.qualityIssues,
+              minimumEventsMet: result.sample.observations >= result.sample.minimumObservations,
+              decision: journal.decision,
+              note: journal.note ?? "",
+            };
+            journalResult = await researchJournal.recordEventStudy(record);
+          } catch (err) {
+            journalResult = { recorded: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
         return jsonResult({
           ...result,
-          source: {
-            chartIndex: activeIndex,
-            requestedBars,
-            returnedBars: history.bars.length,
-            from: history.bars[0]?.timeIso ?? null,
-            to: history.bars.at(-1)?.timeIso ?? null,
-          },
+          conditionType: "feature_outcome_relationships",
+          studyId,
+          definitionHash,
+          configurationTrials: configuration_trials ?? null,
+          source,
+          ...(journal ? { journal: journalResult } : {}),
           limitations: [
             "This is an observational event study, not a fill, execution, or profitability simulation.",
             "Feature thresholds are caller-specified constants and are not optimized or ranked by this tool.",
             "Associations do not establish causality or imply a trade direction.",
             "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "Upside and downside use bar extremes; intrabar ordering is unknown.",
+            "Reported statistics do not adjust for serial dependence or multiple testing; configurationTrials is descriptive evidence only.",
           ],
         });
       } catch (err) {
@@ -5128,15 +5235,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "register_event_study_hypothesis",
     {
       description:
-        "Register one immutable event-study hypothesis and its outcome contract in the local append-only research journal. " +
-        "Use the optional journal field of run_market_event_study to record the computed evidence without copying results by hand.",
+        "Register one immutable event-study or observational feature-study hypothesis and its outcome contract in the local append-only research journal. " +
+        "Use the optional journal field of run_market_event_study or compute_feature_outcome_relationships to record evidence without copying results by hand.",
       inputSchema: {
         hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
         title: z.string().min(1).max(120),
         thesis: z.string().min(1).max(2000),
         evaluation_contract: z.object({
           population: RESEARCH_POPULATION_SCHEMA,
-          primary_metric: z.enum(["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"]),
+          primary_metric: z.enum([
+            "meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate",
+            "meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside",
+          ]),
           primary_horizon_bars: z.number().int().min(1).max(250),
           minimum_events: z.number().int().min(1).max(100_000),
           symbols: z.array(SYMBOL_SCHEMA).min(1).max(20),
@@ -5159,7 +5269,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   server.registerTool(
     "get_event_study_journal",
     {
-      description: "List append-only event-study evidence records, or compare exact selected records when both study_ids and evidence_hashes are supplied. It never accesses a chart.",
+      description: "List append-only market-event and observational feature-study evidence records, or compare exact selected records when both study_ids and evidence_hashes are supplied. It never accesses a chart.",
       inputSchema: { hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/).optional(), study_ids: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(2).max(20).optional(), evidence_hashes: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(2).max(20).optional() },
     },
     async ({ hypothesis_id, study_ids, evidence_hashes }) => {
