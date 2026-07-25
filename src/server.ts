@@ -53,6 +53,7 @@ import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowCont
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
+import { computeLeadLagRelationships } from "./leadLagRelationships.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
@@ -6482,6 +6483,81 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           timeframe: primary.resolution, window: window ?? 20, strongThreshold: strong_threshold ?? 0.7,
           neutralThreshold: neutral_threshold ?? 0.2, ...result,
           limitations: ["Correlation is calculated only from exact-time-aligned closed-bar returns.", "It is descriptive and does not imply a causal or stable relationship."], });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "compute_lead_lag_relationships",
+    {
+      description: "Scan return correlation between two explicitly bound layout charts across a symmetric range of lags, so a caller can see whether a reference market leads the primary. Closed bars must share an exact UTC timestamp; missing bars are never forward-filled. Every scanned lag is returned with its own interval and per-fold stability, and no best lag is selected: picking the strongest lag from a scan and quoting its interval is not an out-of-sample result. Descriptive evidence only, never a trading signal.",
+      inputSchema: {
+        primary_chart_index: z.number().int().min(0),
+        reference_chart_index: z.number().int().min(0),
+        expected_primary_symbol: SYMBOL_SCHEMA,
+        expected_reference_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+        count: z.number().int().min(20).max(5000).optional(),
+        max_lag_bars: z.number().int().min(1).max(50).optional()
+          .describe("Scan every lag from -max_lag_bars to +max_lag_bars. Default: 10"),
+        minimum_observations: z.number().int().min(4).max(5000).optional()
+          .describe("Lags with fewer paired returns are reported as insufficient. Default: 30"),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+        configuration_trials: z.number().int().min(1).max(100000).optional()
+          .describe("Total related scans inspected so far, including this one. Default: 1"),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+        })).max(12).optional(),
+      },
+    },
+    async ({ primary_chart_index, reference_chart_index, expected_primary_symbol, expected_reference_symbol,
+      expected_timeframe, count, max_lag_bars, minimum_observations, confidence_level, configuration_trials,
+      folds }) => chartOperations.run(async () => {
+      try {
+        if (primary_chart_index === reference_chart_index) throw new Error("primary and reference chart indexes must differ");
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("lead/lag analysis is blocked while Bar Replay is active");
+        }
+        const context = await tv.getChartContext();
+        const primaryChart = context.charts.find((chart) => chart.index === primary_chart_index);
+        const referenceChart = context.charts.find((chart) => chart.index === reference_chart_index);
+        if (!primaryChart || !referenceChart) throw new Error("requested lead/lag charts are not present in the layout");
+        if (primaryChart.symbol.toUpperCase() !== expected_primary_symbol.toUpperCase() ||
+            referenceChart.symbol.toUpperCase() !== expected_reference_symbol.toUpperCase() ||
+            normalizeResolution(primaryChart.resolution) !== normalizeResolution(expected_timeframe) ||
+            normalizeResolution(referenceChart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("lead/lag chart binding does not match the requested symbols and timeframe");
+        }
+        const [primary, reference] = await Promise.all([
+          tv.getOhlcv(count ?? 1000, primary_chart_index), tv.getOhlcv(count ?? 1000, reference_chart_index),
+        ]);
+        if (primary.symbol.toUpperCase() !== expected_primary_symbol.toUpperCase() ||
+            reference.symbol.toUpperCase() !== expected_reference_symbol.toUpperCase() ||
+            normalizeResolution(primary.resolution) !== normalizeResolution(expected_timeframe) ||
+            normalizeResolution(reference.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("lead/lag OHLC evidence does not match the bound charts");
+        }
+        const result = computeLeadLagRelationships({
+          primaryBars: primary.bars,
+          referenceBars: reference.bars,
+          primarySymbol: primary.symbol,
+          referenceSymbol: reference.symbol,
+          timeframe: primary.resolution,
+          maxLagBars: max_lag_bars ?? 10,
+          minimumObservations: minimum_observations ?? 30,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials ?? 1,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+        });
+        return jsonResult({
+          primary: { chartIndex: primary_chart_index, symbol: primary.symbol },
+          reference: { chartIndex: reference_chart_index, symbol: reference.symbol },
+          source: { requestedBars: count ?? 1000, returnedBars: primary.bars.length },
+          ...result,
+        });
       } catch (err) { return errorResult(err); }
     }),
   );

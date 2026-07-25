@@ -181,6 +181,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `run_strategy_regime_matrix` | 最大12件のsymbol/timeframe/Strategyを直列実行し、共通regime・session契約で台帳を一括分解。sessionは非排他または入力順優先の排他分類を固定できる。任意でjobごとに最大20,000本を5,000本単位で追加ロードし、soft deadline、個別失敗隔離、各job後のchart復元、復元失敗時の後続停止を行う。ランキングや異通貨合算はしない |
 | `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す |
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
+| `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない |
 | `compute_feature_outcome_relationships` | 確定OHLCからATR圧縮、実体方向、ヒゲ不均衡、連続方向、レンジ内位置、gapをその時点までの証拠だけで分類し、各bucketの将来return・upside/downside・fold別分布を返す。閾値の最適化や売買推奨は行わない |
 | `compute_session_profile` | IANA timezoneとDST・日跨ぎに対応して、セッション別の値幅、return、opening range拡張、高安時刻、VWAP・VWAP離脱率、前セッション高安テスト・反応（PDH/PDL/PDC）、休日/短縮営業日品質シグナル、直前確定セッションとのgap・重なり、volume coverageを集計。TradingView volumeは未検証のtick/取引所volumeとして明示 |
 | `compute_round_trip_cost` | spread・slippage・commissionを明示した往復コスト計算 |

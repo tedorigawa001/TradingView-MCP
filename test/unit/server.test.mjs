@@ -682,7 +682,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-two expected tools", async () => {
+test("exposes exactly the seventy-three expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -695,6 +695,7 @@ test("exposes exactly the seventy-two expected tools", async () => {
       "compare_strategy_experiments",
       "compute_correlation_regimes",
       "compute_feature_outcome_relationships",
+      "compute_lead_lag_relationships",
       "compute_market_features",
       "compute_market_regimes",
       "compute_position_size",
@@ -6408,4 +6409,94 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
   assert.deepEqual(referencePanes.get(2), { symbol: "TVC:US10Y", resolution: "60" });
   assert.equal(runs, 2);
   assert.equal(removed, 2);
+});
+
+test("compute_lead_lag_relationships binds both charts and returns every scanned lag", async () => {
+  const driver = [0.004, -0.003, 0.006, -0.002, 0.005, -0.007, 0.003, 0.008, -0.004, 0.002,
+    0.007, -0.006, 0.001, 0.009, -0.005, 0.004, -0.008, 0.006, -0.001, 0.003];
+  // The primary echoes the reference one bar later, so the planted lead sits at lag +1.
+  const primaryReturns = driver.map((_, index) =>
+    (index >= 1 ? driver[index - 1] : 0) + ((index % 3) - 1) * 0.0006);
+  const closesFrom = (returns) => {
+    const closes = [100];
+    for (const value of returns) closes.push(closes.at(-1) * Math.exp(value));
+    return closes;
+  };
+  const primaryCloses = closesFrom(primaryReturns);
+  const referenceCloses = closesFrom(driver);
+  const barsFor = (closes) => closes.map((close, index) => ({
+    time: index * 3600, timeIso: new Date(index * 3_600_000).toISOString(),
+    open: close, high: close, low: close, close, volume: 1,
+  }));
+
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+      { index: 0, symbol: "OANDA:USDJPY", resolution: "60", studies: [] },
+      { index: 1, symbol: "TVC:US10Y", resolution: "60", studies: [] },
+    ] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (_count, chartIndex) => ({
+      symbol: chartIndex === 0 ? "OANDA:USDJPY" : "TVC:US10Y",
+      resolution: "60",
+      count: primaryCloses.length,
+      bars: barsFor(chartIndex === 0 ? primaryCloses : referenceCloses),
+    }),
+  }}));
+
+  const response = await client.callTool({ name: "compute_lead_lag_relationships", arguments: {
+    primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
+    expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
+    max_lag_bars: 3, minimum_observations: 10,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
+  assert.equal(parsed.methodologyVersion, "exact_timestamp_lead_lag_return_correlation_v1");
+  assert.deepEqual(parsed.byLag.map((entry) => entry.lagBars), [-3, -2, -1, 0, 1, 2, 3]);
+  const lagOne = parsed.byLag.find((entry) => entry.lagBars === 1);
+  assert.equal(lagOne.leadDirection, "reference_leads_primary");
+  assert.equal(lagOne.tradableOnPrimary, true);
+  assert.ok(lagOne.correlation > 0.9, `planted lead correlation was ${lagOne.correlation}`);
+  assert.equal(parsed.inferenceContract.automaticLagSelection, false);
+  assert.equal(parsed.primary.chartIndex, 0);
+  assert.equal(parsed.reference.symbol, "TVC:US10Y");
+  // Raw OHLC must never leak back through the response.
+  assert.equal(JSON.stringify(parsed).includes("\"open\""), false);
+});
+
+test("compute_lead_lag_relationships rejects a mismatched binding, an identical pane and Bar Replay", async () => {
+  const makeClient = (overrides) => connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+      { index: 0, symbol: "OANDA:USDJPY", resolution: "60", studies: [] },
+      { index: 1, symbol: "TVC:US10Y", resolution: "60", studies: [] },
+    ] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (_count, chartIndex) => ({
+      symbol: chartIndex === 0 ? "OANDA:USDJPY" : "TVC:US10Y", resolution: "60", count: 2,
+      bars: [0, 1].map((index) => ({ time: index * 3600, timeIso: new Date(index * 3_600_000).toISOString(),
+        open: 100, high: 100, low: 100, close: 100 + index, volume: 1 })),
+    }),
+    ...overrides,
+  }}));
+  const args = {
+    primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
+    expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60", max_lag_bars: 2,
+  };
+
+  const bound = await makeClient({});
+  const samePane = await bound.callTool({ name: "compute_lead_lag_relationships",
+    arguments: { ...args, reference_chart_index: 0 } });
+  assert.equal(samePane.isError, true);
+  assert.match(samePane.content[0].text, /chart indexes must differ/);
+
+  const wrongSymbol = await bound.callTool({ name: "compute_lead_lag_relationships",
+    arguments: { ...args, expected_reference_symbol: "TVC:DXY" } });
+  assert.equal(wrongSymbol.isError, true);
+  assert.match(wrongSymbol.content[0].text, /binding does not match/);
+
+  const replaying = await makeClient({
+    getReplayStatus: async () => ({ started: true, toolbarVisible: true }),
+  });
+  const blocked = await replaying.callTool({ name: "compute_lead_lag_relationships", arguments: args });
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.content[0].text, /Bar Replay/);
 });
