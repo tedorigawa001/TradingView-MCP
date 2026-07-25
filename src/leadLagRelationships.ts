@@ -256,7 +256,7 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       "This is a descriptive correlation scan, not an event study, a forecast, or a tradable signal.",
       "Correlation between contemporaneous or lagged returns does not establish a causal lead.",
       "Only positive lags describe the reference leading the primary; negative lags are not tradable on the primary.",
-      "Overlapping return windows are serially dependent, so the intervals are narrower than the effective sample supports.",
+      "Single-bar returns do not overlap, but financial returns are still autocorrelated and volatility-clustered, and the Fisher interval assumes independent pairs, so it is narrower than the effective sample supports.",
       "Selecting the strongest lag from this scan and quoting its interval as an out-of-sample result is invalid.",
     ],
   };
