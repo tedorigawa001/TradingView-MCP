@@ -6317,10 +6317,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 );
                 if (oiPlots.length > 0) {
                   const targetPlot = oiPlots[0];
-                  const extracted = studyVal.bars.map((bar) => ({
-                    time: bar.timeIso,
-                    openInterest: bar.values[targetPlot.id] as number,
-                  })).filter((item) => typeof item.openInterest === "number" && Number.isFinite(item.openInterest) && item.openInterest >= 0);
+                  // Bar values are keyed by the plot title when the study names its plot, and only
+                  // fall back to the plot id for untitled plots. Reading the id alone yields
+                  // undefined for the official Open Interest study and silently drops every row.
+                  const titleKey = targetPlot.title?.trim();
+                  const extracted = studyVal.bars.map((bar) => {
+                    const byTitle = titleKey === undefined || titleKey === ""
+                      ? undefined
+                      : bar.values[titleKey];
+                    return {
+                      time: bar.timeIso,
+                      openInterest: (byTitle === undefined ? bar.values[targetPlot.id] : byTitle) as number,
+                    };
+                  }).filter((item) => typeof item.openInterest === "number" && Number.isFinite(item.openInterest) && item.openInterest >= 0);
 
                   if (extracted.length > 0) {
                     autoOiData = extracted;
@@ -6393,7 +6402,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           limitations: [
             "Continuous futures price and volume are participation proxies and can be affected by contract rolls.",
             "TradingView volume is not independently verified against the final CME Daily Bulletin.",
-            "Daily open interest is unavailable; price/OI quadrant labels are not inferred from COT weekly open interest.",
+            // Stating that open interest is unavailable while returning quadrant labels from it
+            // would contradict the same payload, so the wording follows the actual status.
+            ...(futures.openInterest.status === "unavailable"
+              ? ["Daily open interest is unavailable; price/OI quadrant labels are not inferred from COT weekly open interest."]
+              : [
+                "Daily open interest is read as-is from the bound source and is not independently verified against the final CME Daily Bulletin.",
+                "Continuous-contract open interest declines as the front month approaches expiry, so unwinding and covering labels absorb roll mechanics that are not position liquidation.",
+              ]),
             "COT is weekly delayed positioning with unavailable publication timestamps, not an intraday trigger.",
             "No result identifies institutions, aggressive buyers or sellers, order-book flow, fills, or profitability.",
           ],

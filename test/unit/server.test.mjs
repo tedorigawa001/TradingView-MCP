@@ -4479,6 +4479,52 @@ test("get_futures_flow_context automatically detects official on-chart Open Inte
   assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
 });
 
+test("get_futures_flow_context reads the official Open Interest plot whose bar values are keyed by title", async () => {
+  // The official TradingView study exposes plot id "plot_0" and carries the name in the title.
+  // Bar values are keyed by that title, so reading the plot id yields undefined and silently
+  // drops every observation, leaving open interest unavailable even though it was on the chart.
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "K9FNVr", name: "Open Interest" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async ({ studyId }) => {
+        assert.equal(studyId, "K9FNVr");
+        return [{
+          id: "K9FNVr", name: "Open Interest",
+          plots: [{ id: "plot_0", title: "Open Interest", type: "line" }],
+          bars: bars.map((bar, index) => ({ time: bar.time, timeIso: bar.timeIso,
+            values: { "Open Interest": 5000 + index * 100 } })),
+        }];
+      },
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  }));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterest.source, "tradingview_chart_indicator");
+  assert.equal(parsed.openInterest.value, 5900);
+  assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
+  // The payload must not simultaneously return quadrant labels and claim OI was unavailable.
+  assert.equal(parsed.limitations.some((item) => /open interest is unavailable/i.test(item)), false);
+  assert.ok(parsed.limitations.some((item) => /front month approaches expiry/i.test(item)),
+    "roll contamination of continuous-contract open interest must be disclosed");
+});
+
 test("get_futures_flow_context fails closed to unavailable when on-chart study is loose or plot title is unrelated", async () => {
   const start = Date.UTC(2026, 0, 1);
   const bars = Array.from({ length: 10 }, (_, index) => {
