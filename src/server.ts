@@ -163,6 +163,7 @@ const STRATEGY_CORRELATION_REGIME_SCHEMA = z.object({
 });
 const STRATEGY_MATRIX_CORRELATION_REGIME_SCHEMA = STRATEGY_CORRELATION_REGIME_SCHEMA.extend({
   allow_reference_timeframe_switch: z.boolean().optional(),
+  allow_reference_symbol_switch: z.boolean().optional(),
 });
 const RESEARCH_POPULATION_SCHEMA = z.enum(["in_sample", "out_of_sample", "walk_forward", "stress", "live"]);
 const RESEARCH_METRICS_SCHEMA = z.record(z.string().min(1).max(64), z.number().nullable());
@@ -780,12 +781,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           ...PRIMITIVE_EVENT_CONDITION_SCHEMA.options,
           z.object({
             type: z.literal("composite_condition"),
-            operator: z.enum(["intersection", "filter_gate", "union"]),
+            operator: z.enum(["intersection", "filter_gate", "union", "negation", "sequence"]),
             conditions: z.array(PRIMITIVE_EVENT_CONDITION_SCHEMA).min(2).max(4),
             max_alignment_bars: z.number().int().min(0).max(24).optional(),
+            sequence_window_bars: z.number().int().min(1).max(24).optional(),
+            lookback_bars: z.number().int().min(0).max(48).optional(),
+            lookahead_bars: z.number().int().min(0).max(48).optional(),
             require_same_direction: z.boolean().optional(),
             overlap_policy: z.literal("exclude_later_event").optional()
               .describe("Exclude later composite event timestamps whose evaluation window overlaps an earlier event. Default: exclude_later_event"),
+            regime_gate: z.object({
+              directional: z.array(z.enum(["trend_up", "trend_down", "range", "transition"])).optional(),
+              volatility: z.array(z.enum(["low", "normal", "high"])).optional(),
+            }).optional(),
           }),
         ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
@@ -911,8 +919,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             operator: condition.operator,
             conditions: condition.conditions,
             maxAlignmentBars: condition.max_alignment_bars ?? 0,
+            sequenceWindowBars: condition.sequence_window_bars,
+            lookbackBars: condition.lookback_bars,
+            lookaheadBars: condition.lookahead_bars,
             requireSameDirection: condition.require_same_direction ?? true,
             overlapPolicy: condition.overlap_policy ?? "exclude_later_event",
+            regimeGate: condition.regime_gate ?? null,
           })
           : runEventAftershockRetestStudy({
             ...common,
@@ -1810,6 +1822,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             id: z.string().regex(/^[\w$]{1,64}$/),
             value: z.union([z.number(), z.string().max(256), z.boolean()]),
           })).max(20).optional(),
+          correlation_regime: STRATEGY_MATRIX_CORRELATION_REGIME_SCHEMA.optional()
+            .describe("Optional job-specific correlation regime override (reference symbol, window, etc.)"),
         })).min(1).max(12),
         count: z.number().int().min(100).max(MAX_MARKET_REGIME_OBSERVATIONS).optional(),
         load_more_bars: z.number().int().min(0).max(MAX_MARKET_REGIME_OBSERVATIONS).optional()
@@ -1833,7 +1847,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         event_proximity: STRATEGY_EVENT_PROXIMITY_SCHEMA.optional()
           .describe("Optional scheduled-event entry-time groups; caller supplies canonical UTC timestamps"),
         correlation_regime: STRATEGY_MATRIX_CORRELATION_REGIME_SCHEMA.optional()
-          .describe("Optional rolling correlation groups from one reference chart; mixed job timeframes require explicit reference switching"),
+          .describe("Optional matrix-default rolling correlation groups from one reference chart"),
         max_runtime_seconds: z.number().int().min(30).max(1800).optional()
           .describe("Do not start another job after this soft deadline. Default: 900"),
         confirm: z.boolean().optional(),
@@ -1871,6 +1885,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           if (new Set(requestedInputs.map((input) => input.id)).size !== requestedInputs.length) {
             throw new Error(`duplicate input id in regime matrix job for ${job.pine_id}`);
           }
+          const effectiveCorr = job.correlation_regime ?? correlation_regime;
           const definition = {
             symbol: job.symbol.toUpperCase(),
             timeframe: normalizeResolution(job.timeframe),
@@ -1878,6 +1893,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             pineVersion: script.version,
             name: script.name,
             inputs: requestedInputs,
+            correlationRegime: effectiveCorr === undefined ? undefined : {
+              referenceChartIndex: effectiveCorr.reference_chart_index,
+              referenceSymbol: effectiveCorr.expected_reference_symbol.toUpperCase(),
+              count: effectiveCorr.count ?? 1_000,
+              window: effectiveCorr.window ?? 20,
+              strongThreshold: effectiveCorr.strong_threshold ?? 0.7,
+              neutralThreshold: effectiveCorr.neutral_threshold ?? 0.2,
+              maximumAgeBars: effectiveCorr.max_age_bars ?? 3,
+              allowReferenceTimeframeSwitch: effectiveCorr.allow_reference_timeframe_switch === true,
+              allowReferenceSymbolSwitch: effectiveCorr.allow_reference_symbol_switch === true,
+            },
           };
           const jobId = "sha256:" + createHash("sha256")
             .update(JSON.stringify(definition), "utf8").digest("hex");
@@ -1886,23 +1912,39 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         if (new Set(resolvedJobs.map((job) => job.jobId)).size !== resolvedJobs.length) {
           throw new Error("regime matrix contains duplicate resolved jobs");
         }
-        let initialReferenceChart: ReturnType<typeof chartFingerprintAt> | null = null;
-        if (correlation_regime !== undefined) {
-          if (correlation_regime.reference_chart_index === initialChart.index) {
-            throw new Error("correlation reference chart index must differ from the strategy chart index");
-          }
-          const context = await tv.getChartContext();
-          const referenceChart = context.charts.find((chart) => chart.index === correlation_regime.reference_chart_index);
-          if (!referenceChart || referenceChart.symbol.toUpperCase() !== correlation_regime.expected_reference_symbol.toUpperCase()) {
-            throw new Error("correlation reference chart does not match the requested symbol");
-          }
-          initialReferenceChart = chartFingerprintAt(context, correlation_regime.reference_chart_index);
-          const referenceTimeframe = normalizeResolution(referenceChart.resolution);
-          if (correlation_regime.allow_reference_timeframe_switch !== true &&
-              !resolvedJobs.every((job) => job.timeframe === referenceTimeframe)) {
-            throw new Error("matrix correlation requires every job timeframe to match the reference chart timeframe");
+
+        const uniqueReferenceSymbols = [...new Set(resolvedJobs
+          .map((job) => job.correlationRegime?.referenceSymbol)
+          .filter((sym): sym is string => typeof sym === "string" && sym.length > 0))];
+        const referenceComparisonCount = resolvedJobs.filter((job) => job.correlationRegime !== undefined).length;
+
+        const initialReferenceCharts = new Map<number, ReturnType<typeof chartFingerprintAt>>();
+        const context = await tv.getChartContext();
+
+        for (const job of resolvedJobs) {
+          if (job.correlationRegime !== undefined) {
+            const refCorr = job.correlationRegime;
+            if (refCorr.referenceChartIndex === initialChart.index) {
+              throw new Error("correlation reference chart index must differ from the strategy chart index");
+            }
+            const refChart = context.charts.find((chart) => chart.index === refCorr.referenceChartIndex);
+            if (!refChart) {
+              throw new Error(`correlation reference chart pane ${refCorr.referenceChartIndex} not found`);
+            }
+            if (refCorr.allowReferenceSymbolSwitch !== true &&
+                refChart.symbol.toUpperCase() !== refCorr.referenceSymbol) {
+              throw new Error(`correlation reference chart pane ${refCorr.referenceChartIndex} symbol (${refChart.symbol}) does not match expected (${refCorr.referenceSymbol}); allow_reference_symbol_switch=true is required to switch`);
+            }
+            if (!initialReferenceCharts.has(refCorr.referenceChartIndex)) {
+              initialReferenceCharts.set(refCorr.referenceChartIndex, chartFingerprintAt(context, refCorr.referenceChartIndex));
+            }
+            if (refCorr.allowReferenceTimeframeSwitch !== true &&
+                normalizeResolution(refChart.resolution) !== job.timeframe) {
+              throw new Error("matrix correlation requires every job timeframe to match the reference chart timeframe or allow_reference_timeframe_switch=true");
+            }
           }
         }
+
         const regimeDefinition = {
           count: count ?? MAX_MARKET_REGIME_OBSERVATIONS,
           trendLookback: trend_lookback ?? 20,
@@ -1947,21 +1989,40 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             neutralThreshold: correlation_regime.neutral_threshold ?? 0.2,
             maximumAgeBars: correlation_regime.max_age_bars ?? 3,
             allowReferenceTimeframeSwitch: correlation_regime.allow_reference_timeframe_switch === true,
+            allowReferenceSymbolSwitch: correlation_regime.allow_reference_symbol_switch === true,
           },
         };
         if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const maxRuntimeSeconds = max_runtime_seconds ?? 900;
         const loadMoreBars = load_more_bars ?? 0;
+        const inferenceWarnings = [
+          ...(uniqueReferenceSymbols.length > 1 ? ["multiple_reference_symbols_inspected_in_matrix"] : []),
+        ];
         const definition = {
           methodologyVersion: "strategy_regime_matrix_v1",
           regime: regimeDefinition,
           join: joinDefinition,
           loadMoreBars,
           maxRuntimeSeconds,
+          uniqueReferenceSymbols,
+          referenceComparisonCount,
+          inferenceWarnings,
           jobs: resolvedJobs,
         };
         const matrixId = "sha256:" + createHash("sha256")
           .update(JSON.stringify(definition), "utf8").digest("hex");
+
+        const onceBeforeJobs = correlation_regime !== undefined &&
+          correlation_regime.allow_reference_timeframe_switch !== true &&
+          !resolvedJobs.some((j) => j.correlationRegime?.allowReferenceSymbolSwitch === true || j.correlationRegime?.allowReferenceTimeframeSwitch === true);
+
+        const correlationReferenceHistoryLoad = initialReferenceCharts.size === 0 ? null : {
+          ...(correlation_regime !== undefined ? { chartIndex: correlation_regime.reference_chart_index } : { referenceChartIndices: [...initialReferenceCharts.keys()] }),
+          requestedBars: loadMoreBars,
+          onceBeforeJobs,
+          perJobBeforeCapture: !onceBeforeJobs,
+        };
+
         const preview = {
           schemaVersion: "1.0",
           matrixId,
@@ -1974,12 +2035,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             restoreAfterEveryJob: true,
             stopRemainingJobsOnRestoreFailure: true,
             historyLoadPerJob: loadMoreBars,
-            correlationReferenceHistoryLoad: correlation_regime === undefined ? null : {
-              chartIndex: correlation_regime.reference_chart_index,
-              requestedBars: loadMoreBars,
-              onceBeforeJobs: correlation_regime.allow_reference_timeframe_switch !== true,
-              perJobBeforeCapture: correlation_regime.allow_reference_timeframe_switch === true,
-            },
+            uniqueReferenceSymbols,
+            referenceComparisonCount,
+            inferenceWarnings,
+            correlationReferenceHistoryLoad,
             ranking: false,
           },
           chartState: initialChart,
@@ -1991,7 +2050,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         let abortReason: string | null = null;
         const results: Array<Record<string, unknown>> = [];
         const correlationReferenceHistoryLoads = [];
-        if (correlation_regime !== undefined && correlation_regime.allow_reference_timeframe_switch !== true) {
+
+        if (onceBeforeJobs && correlation_regime !== undefined) {
           let remainingReferenceHistoryBars = loadMoreBars;
           while (remainingReferenceHistoryBars > 0) {
             const requested = Math.min(5_000, remainingReferenceHistoryBars);
@@ -2001,6 +2061,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             if (loaded.moreAvailable === false || loaded.added === 0) break;
           }
         }
+
         for (const job of resolvedJobs) {
           if (abortReason || Date.now() >= deadline) {
             results.push({
@@ -2015,7 +2076,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               qualityIssues: [abortReason ? "prior_chart_restore_failed" : "matrix_runtime_deadline_reached"],
               error: abortReason ?? "matrix soft runtime deadline reached before this job started",
               chartRestored: abortReason === null,
-              referenceChartRestored: initialReferenceChart === null || abortReason === null,
+              referenceChartRestored: initialReferenceCharts.size === 0 || abortReason === null,
               strategyEvidence: null,
               regimeEvidence: null,
               correlationEvidence: null,
@@ -2059,25 +2120,50 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 evidence: Awaited<ReturnType<typeof readStrategyCorrelationRegime>>;
                 historyLoads: Awaited<ReturnType<typeof tv.loadMoreHistory>>[];
                 referenceTimeframeSwitched: boolean;
+                referenceSymbolSwitched: boolean;
               } | null = null;
-              if (correlation_regime !== undefined) {
+              if (job.correlationRegime !== undefined) {
+                const corr = job.correlationRegime;
                 const primaryBinding = { index: initialChart.index, symbol: job.symbol, timeframe: job.timeframe };
-                if (correlation_regime.allow_reference_timeframe_switch === true) {
+                const currentContext = await tv.getChartContext();
+                const refChart = currentContext.charts.find((c) => c.index === corr.referenceChartIndex);
+                if (!refChart) {
+                  throw new Error(`correlation reference chart pane ${corr.referenceChartIndex} not found`);
+                }
+                const needsTimeframeSwitch = corr.allowReferenceTimeframeSwitch === true &&
+                  normalizeResolution(refChart.resolution) !== job.timeframe;
+                const needsSymbolSwitch = corr.allowReferenceSymbolSwitch === true &&
+                  refChart.symbol.toUpperCase() !== corr.referenceSymbol;
+
+                if (needsTimeframeSwitch || needsSymbolSwitch) {
+                  const targetRefSymbol = corr.referenceSymbol;
+                  const targetRefResolution = needsTimeframeSwitch ? job.timeframe : refChart.resolution;
                   const referenceTransaction = await withTemporaryChartState(
                     tv,
-                    correlation_regime.reference_chart_index,
-                    { symbol: correlation_regime.expected_reference_symbol, resolution: job.timeframe },
+                    corr.referenceChartIndex,
+                    { symbol: targetRefSymbol, resolution: targetRefResolution },
                     async () => {
                       const referenceHistoryLoads = [];
                       let remainingReferenceHistoryBars = loadMoreBars;
                       while (remainingReferenceHistoryBars > 0) {
                         const requested = Math.min(5_000, remainingReferenceHistoryBars);
-                        const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: correlation_regime.reference_chart_index });
+                        const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: corr.referenceChartIndex });
                         referenceHistoryLoads.push(loaded);
                         remainingReferenceHistoryBars -= requested;
                         if (loaded.moreAvailable === false || loaded.added === 0) break;
                       }
-                      const evidence = await readStrategyCorrelationRegime(correlation_regime, primaryBinding);
+                      const evidence = await readStrategyCorrelationRegime(
+                        {
+                          reference_chart_index: corr.referenceChartIndex,
+                          expected_reference_symbol: corr.referenceSymbol,
+                          count: corr.count,
+                          window: corr.window,
+                          strong_threshold: corr.strongThreshold,
+                          neutral_threshold: corr.neutralThreshold,
+                          max_age_bars: corr.maximumAgeBars,
+                        },
+                        primaryBinding,
+                      );
                       return { evidence, historyLoads: referenceHistoryLoads };
                     },
                   );
@@ -2090,22 +2176,39 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                       : referenceTransaction.restoreError ? String(referenceTransaction.restoreError) : null;
                     throw new Error(`correlation reference transaction failed${operationMessage ? ` (${operationMessage})` : ""}${restoreMessage ? `; restore failed (${restoreMessage})` : ""}`);
                   }
+                  const initialRefFp = initialReferenceCharts.get(corr.referenceChartIndex);
                   const referenceAfterCapture = chartFingerprintAt(
-                    await tv.getChartContext(), correlation_regime.reference_chart_index,
+                    await tv.getChartContext(), corr.referenceChartIndex,
                   );
-                  if (JSON.stringify(referenceAfterCapture) !== JSON.stringify(initialReferenceChart)) {
-                    throw new Error("correlation reference chart fingerprint differs after temporary timeframe capture");
+                  if (initialRefFp && JSON.stringify(referenceAfterCapture) !== JSON.stringify(initialRefFp)) {
+                    throw new Error("correlation reference chart fingerprint differs after temporary capture");
                   }
                   correlationCapture = {
                     evidence: referenceTransaction.value.evidence,
                     historyLoads: referenceTransaction.value.historyLoads,
-                    referenceTimeframeSwitched: true,
+                    referenceTimeframeSwitched: needsTimeframeSwitch,
+                    referenceSymbolSwitched: needsSymbolSwitch,
                   };
                 } else {
+                  if (refChart.symbol.toUpperCase() !== corr.referenceSymbol) {
+                    throw new Error(`correlation reference chart symbol (${refChart.symbol}) does not match expected (${corr.referenceSymbol}); allow_reference_symbol_switch=true is required to switch`);
+                  }
                   correlationCapture = {
-                    evidence: await readStrategyCorrelationRegime(correlation_regime, primaryBinding),
+                    evidence: await readStrategyCorrelationRegime(
+                      {
+                        reference_chart_index: corr.referenceChartIndex,
+                        expected_reference_symbol: corr.referenceSymbol,
+                        count: corr.count,
+                        window: corr.window,
+                        strong_threshold: corr.strongThreshold,
+                        neutral_threshold: corr.neutralThreshold,
+                        max_age_bars: corr.maximumAgeBars,
+                      },
+                      primaryBinding,
+                    ),
                     historyLoads: [],
                     referenceTimeframeSwitched: false,
+                    referenceSymbolSwitched: false,
                   };
                 }
               }
@@ -2127,19 +2230,22 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             },
           );
           let afterJob: ReturnType<typeof chartFingerprint> | null = null;
-          let afterReferenceChart: ReturnType<typeof chartFingerprintAt> | null = null;
+          let allReferenceChartsRestored = true;
           let fingerprintError: string | null = null;
           try {
-            const context = await tv.getChartContext();
-            afterJob = chartFingerprintAt(context, initialChart.index);
-            if (initialReferenceChart !== null) {
-              afterReferenceChart = chartFingerprintAt(context, initialReferenceChart.index);
+            const currentContext = await tv.getChartContext();
+            afterJob = chartFingerprintAt(currentContext, initialChart.index);
+            for (const [refIdx, initialRefFp] of initialReferenceCharts) {
+              const currentRefFp = chartFingerprintAt(currentContext, refIdx);
+              if (JSON.stringify(currentRefFp) !== JSON.stringify(initialRefFp)) {
+                allReferenceChartsRestored = false;
+                break;
+              }
             }
           } catch (err) {
             fingerprintError = redactSecrets(err instanceof Error ? err.message : String(err));
           }
-          const referenceChartRestored = initialReferenceChart === null || (afterReferenceChart !== null &&
-            JSON.stringify(afterReferenceChart) === JSON.stringify(initialReferenceChart));
+          const referenceChartRestored = allReferenceChartsRestored;
           const chartRestored = transaction.restored && afterJob !== null && referenceChartRestored &&
             JSON.stringify(afterJob) === JSON.stringify(initialChart);
           if (!chartRestored) {
@@ -2238,18 +2344,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }
 
         let finalChart: ReturnType<typeof chartFingerprint> | null = null;
-        let finalReferenceChart: ReturnType<typeof chartFingerprintAt> | null = null;
+        let allFinalReferenceChartsRestored = true;
         try {
-          const context = await tv.getChartContext();
-          finalChart = chartFingerprintAt(context, initialChart.index);
-          if (initialReferenceChart !== null) {
-            finalReferenceChart = chartFingerprintAt(context, initialReferenceChart.index);
+          const currentContext = await tv.getChartContext();
+          finalChart = chartFingerprintAt(currentContext, initialChart.index);
+          for (const [refIdx, initialRefFp] of initialReferenceCharts) {
+            const currentRefFp = chartFingerprintAt(currentContext, refIdx);
+            if (JSON.stringify(currentRefFp) !== JSON.stringify(initialRefFp)) {
+              allFinalReferenceChartsRestored = false;
+              break;
+            }
           }
         } catch {
           // A per-job failure carries the actionable redacted error.
         }
-        const referenceChartRestored = initialReferenceChart === null || (finalReferenceChart !== null &&
-          JSON.stringify(finalReferenceChart) === JSON.stringify(initialReferenceChart));
+        const referenceChartRestored = allFinalReferenceChartsRestored;
         const chartRestored = finalChart !== null && referenceChartRestored &&
           JSON.stringify(finalChart) === JSON.stringify(initialChart);
         const counts = results.reduce<Record<string, number>>((acc, result) => {
@@ -2276,17 +2385,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             ...(counts.skipped ? ["one_or_more_jobs_were_skipped"] : []),
           ],
           elapsedMilliseconds: Date.now() - startedAt,
-          correlationReferenceHistoryLoad: correlation_regime === undefined ? null : {
-            chartIndex: correlation_regime.reference_chart_index,
+          correlationReferenceHistoryLoad: initialReferenceCharts.size === 0 ? null : {
+            ...(correlation_regime !== undefined ? { chartIndex: correlation_regime.reference_chart_index } : { referenceChartIndices: [...initialReferenceCharts.keys()] }),
             requestedBars: loadMoreBars,
-            attempts: correlationReferenceHistoryLoads.length,
-            addedBars: correlationReferenceHistoryLoads.reduce((sum, load) => sum + load.added, 0),
-            moreAvailable: correlationReferenceHistoryLoads.at(-1)?.moreAvailable ?? null,
+            ...(onceBeforeJobs ? {
+              attempts: correlationReferenceHistoryLoads.length,
+              addedBars: correlationReferenceHistoryLoads.reduce((sum, load) => sum + load.added, 0),
+              moreAvailable: correlationReferenceHistoryLoads.at(-1)?.moreAvailable ?? null,
+            } : {
+              perJobBeforeCapture: true,
+            }),
           },
           chartStateAfter: {
             fingerprint: finalChart,
             restored: chartRestored,
-            referenceFingerprint: finalReferenceChart,
             referenceRestored: referenceChartRestored,
           },
           limitations: [

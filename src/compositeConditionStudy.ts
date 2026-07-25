@@ -14,7 +14,7 @@ import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { computeMarketRegimes, marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
 
-export type CompositeOperator = "intersection" | "filter_gate" | "union";
+export type CompositeOperator = "intersection" | "filter_gate" | "union" | "negation" | "sequence";
 
 export type PrimitiveConditionInput =
   | {
@@ -92,8 +92,15 @@ export interface CompositeConditionStudyInput {
   operator: CompositeOperator;
   conditions: PrimitiveConditionInput[];
   maxAlignmentBars?: number;
+  sequenceWindowBars?: number;
+  lookbackBars?: number;
+  lookaheadBars?: number;
   requireSameDirection?: boolean;
   overlapPolicy?: "exclude_later_event";
+  regimeGate?: {
+    directional?: Array<"trend_up" | "trend_down" | "range" | "transition">;
+    volatility?: Array<"low" | "normal" | "high">;
+  } | null;
   horizons: number[];
   targetReturnBps: number;
   minimumEvents: number;
@@ -289,10 +296,41 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
   if (input.conditions.length < 2 || input.conditions.length > 4) {
     throw new Error("composite_condition requires 2 to 4 sub-conditions");
   }
+  if (input.operator === "sequence" && input.conditions.length !== 2) {
+    throw new Error("sequence operator requires exactly 2 conditions");
+  }
   const maxAlignmentBars = input.maxAlignmentBars ?? 0;
   if (!Number.isInteger(maxAlignmentBars) || maxAlignmentBars < 0 || maxAlignmentBars > 24) {
     throw new Error("max_alignment_bars must be an integer between 0 and 24");
   }
+  const sequenceWindowBars = input.sequenceWindowBars ?? (maxAlignmentBars > 0 ? maxAlignmentBars : 4);
+  if (!Number.isInteger(sequenceWindowBars) || sequenceWindowBars < 1 || sequenceWindowBars > 24) {
+    throw new Error("sequence_window_bars must be an integer between 1 and 24");
+  }
+  const lookbackBars = input.lookbackBars ?? (input.maxAlignmentBars ?? 0);
+  if (!Number.isInteger(lookbackBars) || lookbackBars < 0 || lookbackBars > 48) {
+    throw new Error("lookback_bars must be an integer between 0 and 48");
+  }
+  const lookaheadBars = input.lookaheadBars ?? 0;
+  if (!Number.isInteger(lookaheadBars) || lookaheadBars < 0 || lookaheadBars > 48) {
+    throw new Error("lookahead_bars must be an integer between 0 and 48");
+  }
+
+  if (input.regimeGate) {
+    if (input.regimeGate.directional) {
+      const valid = ["trend_up", "trend_down", "range", "transition"];
+      if (input.regimeGate.directional.some((d) => !valid.includes(d as any))) {
+        throw new Error("invalid regime_gate directional label");
+      }
+    }
+    if (input.regimeGate.volatility) {
+      const valid = ["low", "normal", "high"];
+      if (input.regimeGate.volatility.some((v) => !valid.includes(v as any))) {
+        throw new Error("invalid regime_gate volatility label");
+      }
+    }
+  }
+
   const requireSameDirection = input.requireSameDirection ?? true;
   const overlapPolicy = input.overlapPolicy ?? "exclude_later_event";
   if (input.horizons.length < 1 || input.horizons.length > 8 ||
@@ -427,6 +465,59 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
         signalIndex: sIndex,
       });
     }
+  } else if (input.operator === "negation") {
+    // Negation (NOT gate): Primary condition [0] is accepted ONLY IF exclusion conditions [1..N-1] do NOT occur within [-lookbackBars, +lookaheadBars]
+    const primary = subSignals[0];
+    for (const pSignal of primary) {
+      let isExcluded = false;
+      for (let cIdx = 1; cIdx < subSignals.length; cIdx += 1) {
+        const candidate = subSignals[cIdx].find((s) => {
+          const delta = s.signalIndex - pSignal.signalIndex;
+          const inWindow = delta >= -lookbackBars && delta <= lookaheadBars;
+          const dirMatch = !requireSameDirection || s.direction === pSignal.direction;
+          return inWindow && dirMatch;
+        });
+        if (candidate) {
+          isExcluded = true;
+          quality.alignmentExclusions += 1;
+          break;
+        }
+      }
+      if (!isExcluded) {
+        quality.eligibleCompositeEvents += 1;
+        const branch: CompositeBranch = pSignal.direction === 1 ? "composite_long" : "composite_short";
+        rawDetected.push({
+          eventId: `composite_negation:${pSignal.signalIndex}:${pSignal.direction}`,
+          branch,
+          direction: pSignal.direction,
+          signalIndex: pSignal.signalIndex,
+        });
+      }
+    }
+  } else if (input.operator === "sequence") {
+    // Sequence (A -> B): Primary condition [0] followed by Secondary condition [1] within (0, sequenceWindowBars]
+    const primary = subSignals[0];
+    const secondary = subSignals[1];
+    for (const pSignal of primary) {
+      const matchingSec = secondary.find((s) => {
+        const delta = s.signalIndex - pSignal.signalIndex;
+        const inWindow = delta > 0 && delta <= sequenceWindowBars;
+        const dirMatch = !requireSameDirection || s.direction === pSignal.direction;
+        return inWindow && dirMatch;
+      });
+      if (matchingSec) {
+        quality.eligibleCompositeEvents += 1;
+        const branch: CompositeBranch = matchingSec.direction === 1 ? "composite_long" : "composite_short";
+        rawDetected.push({
+          eventId: `composite_sequence:${matchingSec.signalIndex}:${matchingSec.direction}`,
+          branch,
+          direction: matchingSec.direction,
+          signalIndex: matchingSec.signalIndex,
+        });
+      } else {
+        quality.alignmentExclusions += 1;
+      }
+    }
   }
 
   // Deduplicate events by signalIndex + direction and sort by signalIndex ascending
@@ -440,12 +531,73 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
       return true;
     });
 
+  // Filter by regimeGate if provided
+  let gateFilteredDetected = sortedDetected;
+  if (input.regimeGate && (input.regimeGate.directional || input.regimeGate.volatility)) {
+    const effRegimeConfig = input.regime ?? {
+      trendLookback: 20,
+      atrLookback: 14,
+      volatilityBaselineLookback: 50,
+      trendEfficiencyThreshold: 0.6,
+      rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 1.5,
+      highVolatilityRatio: 1.5,
+      lowVolatilityRatio: 0.7,
+      minimumClassifiedBars: 30,
+      minimumGroupEvents: 5,
+      minimumCoverageRatio: 0.8,
+      maxRegimeAgeBars: 4,
+    };
+    const gateRegimeEvidence = computeMarketRegimes({
+      bars: input.bars,
+      symbol: input.symbol,
+      timeframe: input.timeframe,
+      trendLookback: effRegimeConfig.trendLookback,
+      atrLookback: effRegimeConfig.atrLookback,
+      volatilityBaselineLookback: effRegimeConfig.volatilityBaselineLookback,
+      trendEfficiencyThreshold: effRegimeConfig.trendEfficiencyThreshold,
+      rangeEfficiencyThreshold: effRegimeConfig.rangeEfficiencyThreshold,
+      directionalMoveAtrThreshold: effRegimeConfig.directionalMoveAtrThreshold,
+      highVolatilityRatio: effRegimeConfig.highVolatilityRatio,
+      lowVolatilityRatio: effRegimeConfig.lowVolatilityRatio,
+      minimumClassifiedBars: effRegimeConfig.minimumClassifiedBars,
+      observationLimit: input.bars.length,
+    });
+
+    const obsMap = new Map<number, (typeof gateRegimeEvidence.observations)[0]>();
+    for (const obs of gateRegimeEvidence.observations) {
+      obsMap.set(obs.time, obs);
+    }
+
+    gateFilteredDetected = sortedDetected.filter((ev) => {
+      const priorBarTime = ev.signalIndex > 0 ? closed[ev.signalIndex - 1]?.time : undefined;
+      if (priorBarTime === undefined) {
+        quality.alignmentExclusions += 1;
+        return false;
+      }
+      const obs = obsMap.get(priorBarTime);
+      if (!obs) {
+        quality.alignmentExclusions += 1;
+        return false;
+      }
+      if (input.regimeGate!.directional && !input.regimeGate!.directional.includes(obs.directionalRegime as any)) {
+        quality.alignmentExclusions += 1;
+        return false;
+      }
+      if (input.regimeGate!.volatility && !input.regimeGate!.volatility.includes(obs.volatilityRegime as any)) {
+        quality.alignmentExclusions += 1;
+        return false;
+      }
+      return true;
+    });
+  }
+
   // Apply outcome window overlap policy: exclude later events whose evaluation window overlaps an earlier event
   const maxHorizonBars = Math.max(...input.horizons);
   const detected: typeof sortedDetected = [];
   let lastEvaluatedIndex = -Infinity;
 
-  for (const ev of sortedDetected) {
+  for (const ev of gateFilteredDetected) {
     if (overlapPolicy === "exclude_later_event" && ev.signalIndex - lastEvaluatedIndex < maxHorizonBars) {
       quality.overlappingEventsExcluded += 1;
       continue;
@@ -548,13 +700,21 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
     ? "pairwise_span" as const
     : input.operator === "filter_gate"
     ? "primary_anchored_lookback" as const
-    : "exact_signal_bar" as const;
+    : input.operator === "union"
+    ? "exact_signal_bar" as const
+    : input.operator === "negation"
+    ? "exclusion_window" as const
+    : "sequential_window" as const;
+
+  const isV2 = input.operator === "negation" || input.operator === "sequence" || input.regimeGate != null;
+
+  const methodologyVersion = isV2
+    ? (input.regime === null ? "composite_condition_event_study_v2" as const : "composite_condition_event_regime_study_v2" as const)
+    : (input.regime === null ? "composite_condition_event_study_v1" as const : "composite_condition_event_regime_study_v1" as const);
 
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: input.regime === null
-      ? "composite_condition_event_study_v1" as const
-      : "composite_condition_event_regime_study_v1" as const,
+    methodologyVersion,
     status: issues.length === 0 ? "complete" as const : "partial" as const,
     symbol: input.symbol,
     timeframe: input.timeframe,
@@ -564,8 +724,12 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
       subConditionCount: input.conditions.length,
       subConditionTypes: input.conditions.map((c) => c.type),
       maxAlignmentBars,
+      sequenceWindowBars,
+      lookbackBars,
+      lookaheadBars,
       requireSameDirection,
       overlapPolicy,
+      regimeGate: input.regimeGate ?? null,
     },
     outcomeContract: {
       reference: "signal_bar_close_event_study_only_not_assumed_fill",
@@ -588,6 +752,9 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
       ...(input.configurationTrials === null ? ["configuration_trial_count_not_declared"] : []),
       "confidence_intervals_do_not_adjust_for_serial_dependence",
       "no_multiple_testing_adjustment_applied",
+      ...(input.operator === "negation" && lookaheadBars > 0
+        ? ["lookahead_bars_gt_zero_introduces_future_information_relative_to_primary_signal"]
+        : []),
       ...(input.regime === null ? [] : ["regime_subgroups_expand_the_number_of_inspected_outcomes"]),
     ],
     foldContract: {

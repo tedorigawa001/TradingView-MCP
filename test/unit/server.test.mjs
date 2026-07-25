@@ -949,6 +949,37 @@ test("compute_correlation_regimes binds two exact-time chart histories", async (
   assert.equal(parsed.observations.at(-1).regime, "strong_negative");
 });
 
+test("compute_correlation_regimes with confirm:true performs multi-ref symbol verification and restores chart state", async () => {
+  const symbolLog = [];
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+      { index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] },
+      { index: 1, symbol: "TVC:DXY", resolution: "60", studies: [] },
+    ] }),
+    getOhlcv: async (_count, chartIndex) => {
+      const closes = chartIndex === 0 ? [100, 101, 103, 106] : [100, 99, 97, 94];
+      return { symbol: chartIndex === 0 ? "OANDA:EURUSD" : "TVC:DXY", resolution: "60", count: closes.length,
+        bars: closes.map((close, index) => ({ time: index * 3600, timeIso: new Date(index * 3_600_000).toISOString(),
+          open: close, high: close, low: close, close, volume: 1 })) };
+    },
+    setSymbol: async (symbol, chartIndex) => {
+      symbolLog.push({ action: "setSymbol", symbol, chartIndex });
+      return { symbol, chartIndex };
+    },
+  }}));
+
+  const response = await client.callTool({ name: "compute_correlation_regimes", arguments: {
+    primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:EURUSD",
+    expected_reference_symbol: "TVC:DXY", expected_timeframe: "60", window: 2,
+    confirm: true,
+  } });
+
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
+  assert.equal(parsed.observations.at(-1).regime, "strong_negative");
+});
+
 test("audit_pine_indicator identifies repaint-prone source constructs", async () => {
   const client = await connectedClient(
     makeDeps({
@@ -5159,6 +5190,49 @@ test("run_market_event_study evaluates composite_condition and records evidence 
   assert.equal(parsed.journal.recorded, true);
 });
 
+test("run_market_event_study evaluates composite_condition_v2 with negation operator", async () => {
+  const start = Date.UTC(2026, 0, 1, 0, 0);
+  const hour = 3_600_000;
+  const ohlc = [
+    [100, 100.2, 99.8, 100],
+    [100.3, 101.8, 100.2, 101.6],
+    [101.7, 103, 101.4, 102.8],
+    [102.8, 103, 102.5, 102.7],
+    [102.7, 102.8, 100.5, 101],
+    [101, 102.5, 100.8, 102.2],
+    [102.2, 104, 102, 103.8],
+  ];
+  const bars = ohlc.map(([open, high, low, close], index) => {
+    const time = (start + index * hour) / 1000;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open, high, low, close, volume: 1000 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+    condition: {
+      type: "composite_condition",
+      operator: "negation",
+      lookback_bars: 2,
+      lookahead_bars: 2,
+      conditions: [
+        { type: "fair_value_gap_retest", minimum_gap_bps: 10, retest_within_bars: 10 },
+        { type: "fair_value_gap_retest", minimum_gap_bps: 500, retest_within_bars: 10 },
+      ],
+    },
+    horizons: [1, 2], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "composite_condition");
+  assert.equal(parsed.methodologyVersion, "composite_condition_event_study_v2");
+  assert.equal(parsed.conditionContract.alignmentRule, "exclusion_window");
+});
+
 test("run_market_event_study evaluates fair_value_gap_retest and records evidence to research journal", async () => {
   const start = Date.UTC(2026, 0, 1, 0, 0);
   const hour = 3_600_000;
@@ -6081,4 +6155,121 @@ test("dependency failures come back as isError results, not crashes", async () =
   const res = await client.callTool({ name: "get_chart_context", arguments: {} });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /not reachable via CDP/);
+});
+
+test("run_strategy_regime_matrix supports per-job correlation_regime override and reference symbol switching", async () => {
+  const bars = [
+    { time: 1767225600, timeIso: "2026-01-01T00:00:00.000Z", open: 100, high: 101, low: 99, close: 100.5, volume: 100 },
+    { time: 1767229200, timeIso: "2026-01-01T01:00:00.000Z", open: 100.5, high: 102, low: 100, close: 101.5, volume: 110 },
+    { time: 1767232800, timeIso: "2026-01-01T02:00:00.000Z", open: 101.5, high: 103, low: 101, close: 102.5, volume: 120 },
+  ];
+
+  let chart0Symbol = "OANDA:EURUSD";
+  let chart1Symbol = "TVC:DXY";
+
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test_layout",
+        activeChartIndex: 0,
+        chartsCount: 2,
+        charts: [
+          { index: 0, symbol: chart0Symbol, resolution: "60", studies: [] },
+          { index: 1, symbol: chart1Symbol, resolution: "60", studies: [] },
+        ],
+      }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      listPineScripts: async () => [
+        { pineId: "USER;strat12345", kind: "strategy", version: "v1.0", name: "Test Strategy" },
+      ],
+      getOhlcv: async (count, chartIndex) => {
+        const sym = chartIndex === 0 ? chart0Symbol : chart1Symbol;
+        return { symbol: sym, resolution: "60", count: bars.length, bars };
+      },
+      setSymbol: async (sym, chartIndex) => {
+        if (chartIndex === 0) chart0Symbol = sym;
+        else if (chartIndex === 1) chart1Symbol = sym;
+        return { symbol: sym };
+      },
+      setResolution: async (res, chartIndex) => ({ resolution: res }),
+    },
+  }));
+
+  const previewRes = await client.callTool({
+    name: "run_strategy_regime_matrix",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD",
+      expected_timeframe: "60",
+      jobs: [
+        {
+          symbol: "OANDA:EURUSD",
+          timeframe: "60",
+          pine_id: "USER;strat12345",
+          correlation_regime: {
+            reference_chart_index: 1,
+            expected_reference_symbol: "TVC:DXY",
+          },
+        },
+        {
+          symbol: "OANDA:EURUSD",
+          timeframe: "60",
+          pine_id: "USER;strat12345",
+          correlation_regime: {
+            reference_chart_index: 1,
+            expected_reference_symbol: "TVC:US10Y",
+            allow_reference_symbol_switch: true,
+          },
+        },
+      ],
+    },
+  });
+
+  const preview = JSON.parse(previewRes.content[0].text);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.status, "preview");
+  assert.deepEqual(preview.definition.uniqueReferenceSymbols, ["TVC:DXY", "TVC:US10Y"]);
+  assert.equal(preview.definition.referenceComparisonCount, 2);
+  assert.equal(preview.definition.inferenceWarnings.includes("multiple_reference_symbols_inspected_in_matrix"), true);
+});
+
+test("run_strategy_regime_matrix rejects reference symbol switch when allow_reference_symbol_switch is omitted", async () => {
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test_layout",
+        activeChartIndex: 0,
+        chartsCount: 2,
+        charts: [
+          { index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] },
+          { index: 1, symbol: "TVC:DXY", resolution: "60", studies: [] },
+        ],
+      }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      listPineScripts: async () => [
+        { pineId: "USER;strat12345", kind: "strategy", version: "v1.0", name: "Test Strategy" },
+      ],
+    },
+  }));
+
+  const res = await client.callTool({
+    name: "run_strategy_regime_matrix",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD",
+      expected_timeframe: "60",
+      jobs: [
+        {
+          symbol: "OANDA:EURUSD",
+          timeframe: "60",
+          pine_id: "USER;strat12345",
+          correlation_regime: {
+            reference_chart_index: 1,
+            expected_reference_symbol: "TVC:US10Y",
+          },
+        },
+      ],
+    },
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /allow_reference_symbol_switch=true is required/);
 });
