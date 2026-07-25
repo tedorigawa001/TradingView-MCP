@@ -6282,11 +6282,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           time: z.union([z.string(), z.number()]),
           openInterest: z.number().finite().min(0),
         })).optional().describe("Caller-supplied daily Open Interest observations (time ISO/epoch, openInterest value)"),
+        open_interest_study_id: z.string().regex(/^[\w$]{1,64}$/).optional()
+          .describe("Read daily OI from this on-chart study instead of the official Open Interest study, e.g. an aggregated all-months OI indicator"),
+        open_interest_plot_title: z.string().min(1).max(120).optional()
+          .describe("Plot title or id carrying open interest on open_interest_study_id"),
       },
     },
     async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
-      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, roll_anomaly_threshold, open_interest_data }) => chartOperations.run(async () => {
+      elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, roll_anomaly_threshold,
+      open_interest_data, open_interest_study_id, open_interest_plot_title }) => chartOperations.run(async () => {
       try {
+        if (open_interest_plot_title !== undefined && open_interest_study_id === undefined) {
+          throw new Error("open_interest_plot_title requires open_interest_study_id");
+        }
         const mapping = futuresFlowMapping(target_symbol);
         if (!mapping) throw new Error(`futures flow mapping is unavailable for ${JSON.stringify(target_symbol)}`);
         if (!mapping.allowedFuturesSymbols.includes(expected_futures_symbol.toUpperCase())) {
@@ -6314,6 +6322,45 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         let autoOiData: Array<{ time: string | number; openInterest: number }> | undefined = open_interest_data;
         let openInterestSource: "tradingview_chart_indicator" | "caller_supplied_open_interest_data" | undefined =
           open_interest_data ? "caller_supplied_open_interest_data" : undefined;
+
+        // An explicitly named study bypasses the strict official-name match, so an aggregated
+        // all-months OI indicator can be used. Failures surface instead of degrading to
+        // unavailable: the caller named this study, so silence would hide their mistake.
+        if (!autoOiData && open_interest_study_id !== undefined) {
+          const vals = await tv.getIndicatorValues({
+            studyId: open_interest_study_id,
+            count: requestedBars,
+            chartIndex: futures_chart_index,
+            plotTitles: open_interest_plot_title === undefined ? undefined : [open_interest_plot_title],
+          });
+          const studyVal = vals[0];
+          if (!studyVal) throw new Error(`open interest study ${open_interest_study_id} returned no data`);
+          const plot = open_interest_plot_title === undefined
+            ? studyVal.plots.find((p) =>
+              /^open\s*interest$/i.test(p.title?.trim() ?? "") ||
+              /^(open_interest|openinterest|oi)$/i.test(p.id.trim()))
+            : studyVal.plots[0];
+          if (!plot) {
+            throw new Error(
+              `no open interest plot found on study ${open_interest_study_id}; ` +
+              `pass open_interest_plot_title (available: ${studyVal.plots.map((p) => p.title).join(", ")})`,
+            );
+          }
+          const titleKey = plot.title?.trim();
+          const extracted = studyVal.bars.map((bar) => {
+            const byTitle = titleKey === undefined || titleKey === "" ? undefined : bar.values[titleKey];
+            return {
+              time: bar.timeIso,
+              openInterest: (byTitle === undefined ? bar.values[plot.id] : byTitle) as number,
+            };
+          }).filter((item) => typeof item.openInterest === "number" &&
+            Number.isFinite(item.openInterest) && item.openInterest > 0);
+          if (extracted.length === 0) {
+            throw new Error(`open interest study ${open_interest_study_id} produced no positive values`);
+          }
+          autoOiData = extracted;
+          openInterestSource = "tradingview_chart_indicator";
+        }
 
         if (!autoOiData && chart.studies?.length > 0) {
           // Strictly match official TradingView Open Interest study names

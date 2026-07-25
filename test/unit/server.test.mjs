@@ -4525,6 +4525,93 @@ test("get_futures_flow_context reads the official Open Interest plot whose bar v
     "roll contamination of continuous-contract open interest must be disclosed");
 });
 
+test("get_futures_flow_context reads open interest from an explicitly named study and plot", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const open = 100 + index;
+    const close = open + 1;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+  let requested = null;
+  const deps = {
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        // An aggregated all-months OI indicator whose name cannot match the official study.
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "1STpgW", name: "Total Volume / OI" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async (options) => {
+        requested = options;
+        return [{
+          id: "1STpgW", name: "Total Volume / OI",
+          plots: [{ id: "plot_8", title: "Total OI", type: "line" }],
+          bars: bars.map((bar, index) => ({ time: bar.time, timeIso: bar.timeIso,
+            values: { "Total OI": 5000 + index * 100 } })),
+        }];
+      },
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  };
+
+  const client = await connectedClient(makeDeps(deps));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5,
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterest.source, "tradingview_chart_indicator");
+  assert.equal(parsed.openInterest.value, 5900);
+  assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
+  // The named plot must be pushed down so a deep read stays small.
+  assert.deepEqual(requested.plotTitles, ["Total OI"]);
+  assert.equal(requested.studyId, "1STpgW");
+
+  // A plot title alone is meaningless without the study it belongs to.
+  const orphan = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    open_interest_plot_title: "Total OI",
+  } });
+  assert.equal(orphan.isError, true);
+  assert.match(orphan.content[0].text, /requires open_interest_study_id/);
+});
+
+test("get_futures_flow_context surfaces a named open interest study that yields nothing", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => ({
+    time: (start + index * 86_400_000) / 1000,
+    timeIso: new Date(start + index * 86_400_000).toISOString(),
+    open: 100 + index, high: 102 + index, low: 99 + index, close: 101 + index, volume: 100,
+  }));
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+        { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "1STpgW", name: "Total Volume / OI" }] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+      getIndicatorValues: async () => ([{
+        id: "1STpgW", name: "Total Volume / OI",
+        plots: [{ id: "plot_8", title: "Total OI", type: "line" }],
+        // Zeros are what an aggregated indicator emits where it cannot rebuild the contract set.
+        bars: bars.map((bar) => ({ time: bar.time, timeIso: bar.timeIso, values: { "Total OI": 0 } })),
+      }]),
+    },
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+  }));
+  const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+  } });
+  // Naming a study explicitly means a failure is the caller mistake, not a reason to degrade.
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /produced no positive values/);
+});
+
 test("get_futures_flow_context fails closed to unavailable when on-chart study is loose or plot title is unrelated", async () => {
   const start = Date.UTC(2026, 0, 1);
   const bars = Array.from({ length: 10 }, (_, index) => {
