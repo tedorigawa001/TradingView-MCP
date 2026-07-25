@@ -380,6 +380,10 @@ function makeDeps(overrides = {}) {
       compare: async (references) => ({ comparable: true, incompatibilities: [], experiments: references }),
       ...overrides.researchJournal,
     },
+    // Collecting first-seen open interest is optional, so it is only present when a test asks for it.
+    ...(overrides.futuresOpenInterestHistory
+      ? { futuresOpenInterestHistory: overrides.futuresOpenInterestHistory }
+      : {}),
     calendar: {
       getEvents: async (options) => ({
         from: "2026-07-08T00:00:00.000Z",
@@ -4611,6 +4615,69 @@ test("get_futures_flow_context surfaces a named open interest study that yields 
   // Naming a study explicitly means a failure is the caller mistake, not a reason to degrade.
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /produced no positive values/);
+});
+
+test("get_futures_flow_context records what open interest it just saw, and survives a failing store", async () => {
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 10 }, (_, index) => {
+    const close = 101 + index;
+    return { time: (start + index * 86_400_000) / 1000,
+      timeIso: new Date(start + index * 86_400_000).toISOString(), open: 100 + index,
+      high: close + 0.2, low: 99 + index, close, volume: 100 };
+  });
+  const baseTv = {
+    getChartContext: async () => ({ layoutName: "flow", activeChartIndex: 0, chartsCount: 1, charts: [
+      { index: 0, symbol: "CME:6E1!", resolution: "1D", studies: [{ id: "1STpgW", name: "Total Volume / OI" }] },
+    ] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "CME:6E1!", resolution: "1D", count: bars.length, bars }),
+    getIndicatorValues: async () => ([{
+      id: "1STpgW", name: "Total Volume / OI",
+      plots: [{ id: "plot_8", title: "Total OI", type: "line" }],
+      bars: bars.map((bar, index) => ({ time: bar.time, timeIso: bar.timeIso,
+        values: { "Total OI": 5000 + index * 100 } })),
+    }]),
+  };
+  const args = {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5,
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+  };
+
+  let captured = null;
+  const client = await connectedClient(makeDeps({
+    tv: baseTv,
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+    futuresOpenInterestHistory: {
+      observeMany: async (observations) => {
+        captured = observations;
+        return { recorded: observations, unchanged: 0, revisions: 0 };
+      },
+    },
+  }));
+  const parsed = JSON.parse((await client.callTool({ name: "get_futures_flow_context", arguments: args })).content[0].text);
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterestFirstSeen.recorded, captured.length);
+  assert.ok(captured.length > 0, "the open interest just read must be offered to the log");
+  // An explicitly named aggregated study is a different quantity from front-month open interest.
+  assert.ok(captured.every((item) => item.scope === "all_months_aggregated"));
+  assert.ok(captured.every((item) => item.futures_symbol === "CME:6E1!"));
+  assert.ok(captured.every((item) => item.observation_date <= item.observed_at.slice(0, 10)),
+    "an observation can never be dated after the moment it was seen");
+
+  // Collecting history is a side benefit; losing it must not cost the caller their context.
+  const failing = await connectedClient(makeDeps({
+    tv: baseTv,
+    cot: { getHistory: async () => { throw new Error("COT unavailable"); } },
+    futuresOpenInterestHistory: {
+      observeMany: async () => { throw new Error("disk is full"); },
+    },
+  }));
+  const survived = JSON.parse((await failing.callTool({ name: "get_futures_flow_context", arguments: args })).content[0].text);
+  assert.equal(survived.openInterest.status, "available");
+  assert.equal(survived.priceOpenInterestQuadrant.status, "available");
+  assert.equal(survived.openInterestFirstSeen.recorded, 0);
+  assert.match(survived.openInterestFirstSeen.error, /disk is full/);
 });
 
 test("get_futures_flow_context fails closed to unavailable when on-chart study is loose or plot title is unrelated", async () => {

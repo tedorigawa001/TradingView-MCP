@@ -55,6 +55,7 @@ import { computeSessionProfile, validateSessionClockDefinitions } from "./sessio
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { computeLeadLagRelationships } from "./leadLagRelationships.js";
+import type { FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
@@ -124,6 +125,7 @@ export interface ServerDeps {
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
+  futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -306,7 +308,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue();
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -6417,6 +6419,40 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           openInterestSource,
           rollAnomalyThreshold: roll_anomaly_threshold,
         });
+        const observedAt = new Date().toISOString();
+        // Open interest for a session is published after it closes and revised once, so a series
+        // downloaded later is not what was visible at the time. Recording what we just read, and
+        // when, is the only way a future study can ask what was known on a past date. Collection
+        // can only ever run forward, and a read that fails must not fail the whole context call.
+        let openInterestFirstSeen: unknown = null;
+        if (futuresOpenInterestHistory && futures.openInterest.status !== "unavailable") {
+          try {
+            const observations = futures.observations.flatMap((item: { time: string; openInterest: number | null }) =>
+              typeof item.openInterest === "number" && item.openInterest > 0
+                ? [{
+                  futures_symbol: expected_futures_symbol.toUpperCase(),
+                  scope: (open_interest_study_id !== undefined || open_interest_data !== undefined
+                    ? "all_months_aggregated" : "front_month") as "all_months_aggregated" | "front_month",
+                  observation_date: item.time.slice(0, 10),
+                  open_interest: item.openInterest,
+                  source: openInterestSource ?? "tradingview_chart_indicator",
+                  source_detail: open_interest_study_id ?? null,
+                  observed_at: observedAt,
+                }]
+                : []);
+            // Only bars already closed before now can have been observed.
+            const usable = observations.filter((item) => item.observation_date <= observedAt.slice(0, 10));
+            openInterestFirstSeen = usable.length === 0
+              ? { recorded: 0, unchanged: 0, revisions: 0, skipped: observations.length }
+              : await (async () => {
+                const result = await futuresOpenInterestHistory.observeMany(usable.slice(-5000));
+                return { recorded: result.recorded.length, unchanged: result.unchanged,
+                  revisions: result.revisions, skipped: observations.length - usable.length };
+              })();
+          } catch (err) {
+            openInterestFirstSeen = { recorded: 0, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
+          }
+        }
         let cotEvidence;
         try {
           const data = await cot.getHistory(mapping.targetSymbol, cot_weeks ?? 2);
@@ -6450,7 +6486,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return jsonResult({
           ...futures,
           status: qualityIssues.length === 0 ? "complete" : "partial",
-          observedAt: new Date().toISOString(),
+          observedAt,
+          openInterestFirstSeen,
           cot: cotEvidence,
           source: {
             chartIndex: futures_chart_index,

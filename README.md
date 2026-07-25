@@ -190,6 +190,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `evaluate_due_analyses` | ジャーナル上の期限到来・非終端分析をpreviewし、確認後に指定チャートで銘柄/証拠時間足を一時切替、評価・記録・復元 |
 | `get_analysis_performance` | ライブ分析ジャーナルを勝敗、gross/net R、MFE/MAE、到達時間へ集計。指標ごとの母集団と除外数を明示 |
 | `validate_trade_plan` | 反映前の分析案を方向・期限・現在価格・証拠鮮度・イベント停止時間・コスト控除後RRで検証(チャート非干渉) |
+| `get_futures_flow_context`(first-seen収集) | 日次建玉を読むたびに、値と**初回観測時刻**を追記専用ログへ記録する。建玉は当該取引日の終了後に速報が出て確報へ改訂されるため、後からダウンロードした系列は当時見えていたものではない。値が変わった時だけ追記し、期近と全限月合算は別系列として分離。`observation_date > first_seen_at` と初回観測時刻の逆行は拒否。**vintageは前向きにしか蓄積できず、収集開始前の日付は復元できない**。収集失敗はcontext取得を巻き込まない |
 | `get_positioning_context` | CFTC COTの履歴・OI正規化・前回差・3年パーセンタイル |
 | `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。日次OIと価格×OI四象限は認証済みfirst-seenデータ源がない限りunavailableとして返す |
 | `get_real_yield_context` | 米財務省の10年Par Real CMT。`as_of`指定時はローカルでfirst-seen済みの版だけを返す |
@@ -201,6 +202,8 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 `compute_position_size`は数量をブローカー固有のlotではなくinstrument unitとして返します。`quantity_step`、`minimum_quantity`、必要なら`maximum_quantity`と`contract_multiplier`を利用する取引環境の仕様に合わせて明示してください。損失はEntryからStopまでの値幅に`compute_round_trip_cost.total_price_per_unit`等の往復コストを加え、口座通貨へ換算して計算します。quote通貨と口座通貨が異なる場合は、口座通貨/quote通貨のレート、symbol、観測時刻がすべて新鮮な場合だけ数量を返します。口座接続、残高取得、発注、永続化は行いません。
 
 実質金利のfirst-seen履歴は既定で`~/.tradingview-mcp/real-yield-first-seen.jsonl`へ追記されます。保存先はMCPプロセスの環境変数`TRADINGVIEW_MCP_REAL_YIELD_HISTORY_PATH`で変更できます。初回起動時に取得した過去行は過去の公表時刻へ遡及せず、その起動で実際に保存できた時刻以後だけバックテストに利用されます。
+
+先物建玉のfirst-seen履歴は既定で`~/.tradingview-mcp/futures-open-interest-first-seen.jsonl`へ追記されます。保存先は環境変数`TRADINGVIEW_MCP_FUTURES_OI_HISTORY_PATH`で変更できます。`get_futures_flow_context`が建玉を読むたびに自動で記録されるため、**ツールを実行した日の分しか貯まりません**。また収集を開始する前の日付についてはvintageを復元できないため、過去分は「今日ダウンロードした改訂後の値」であってその時点で見えていた値ではない、という区別が必要です。
 
 履歴書込み中にプロセスが異常終了して`.lock`が残った場合、安全のため自動削除せず履歴照会を停止します。他のTradingView-MCPプロセスが動作していないことを確認してから、履歴ファイルと同じ場所の`.lock`だけを削除してください。
 

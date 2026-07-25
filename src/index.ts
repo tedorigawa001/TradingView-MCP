@@ -9,6 +9,7 @@ import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
 import { AnalysisJournalStore, resolveAnalysisJournalPath } from "./analysisJournal.js";
 import { StrategyResearchJournalStore, resolveStrategyResearchJournalPath } from "./strategyResearchJournal.js";
+import { FuturesOpenInterestFirstSeenStore, resolveFuturesOpenInterestHistoryPath } from "./futuresOpenInterestHistory.js";
 import { createServer } from "./server.js";
 
 const cdp = new CdpClient();
@@ -25,6 +26,7 @@ const server = createServer({
   realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldHistory),
   journal: analysisJournal,
   researchJournal: strategyResearchJournal,
+  futuresOpenInterestHistory: new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath()),
 });
 
 const transport = new StdioServerTransport();
