@@ -249,6 +249,10 @@ export function outcomeForEvent<T extends { signalIndex: number; direction: 1 | 
   horizons: number[],
   timeframeMs: number,
   targetReturnBps: number,
+  // Contiguous nominal bars by default. A study whose horizon counts subsequent observed bars
+  // instead, such as a daily series that skips weekends, passes a wider tolerance and says so
+  // in its own contract rather than silently dropping every window that spans a gap.
+  maxGapMs: number = timeframeMs * 1.5,
 ) {
   const signal = bars[event.signalIndex];
   const outcomes: Record<string, {
@@ -261,7 +265,7 @@ export function outcomeForEvent<T extends { signalIndex: number; direction: 1 | 
     const future = bars.slice(event.signalIndex + 1, event.signalIndex + horizon + 1);
     const sequence = [signal, ...future];
     const contiguous = future.length === horizon && sequence.slice(1).every((bar, index) =>
-      bar.time * 1000 - sequence[index].time * 1000 <= timeframeMs * 1.5);
+      bar.time * 1000 - sequence[index].time * 1000 <= maxGapMs);
     if (!contiguous) { outcomes[String(horizon)] = null; continue; }
     const entry = signal.close;
     const directionalReturn = event.direction * (future.at(-1)!.close / entry - 1);

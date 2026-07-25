@@ -103,6 +103,42 @@ test("strategy research journal rejects orphaned experiments, unknown metrics, a
   await assert.rejects(() => linked.registerHypothesis(hypothesis()), /regular file/);
 });
 
+test("strategy research journal accepts every condition type the server can record", async () => {
+  // The condition type lives in a TypeScript union and again in a runtime whitelist. They have
+  // drifted apart before, and the type union alone cannot catch it because writes are validated at
+  // runtime, so a new condition would compile and then fail every journal write.
+  const directory = await mkdtemp(join(tmpdir(), "condition-types-"));
+  const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));
+  // feature_outcome_relationships is excluded: it carries forward-return metrics rather than
+  // directional ones and has its own test.
+  const conditionTypes = [
+    "session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout",
+    "fair_value_gap_retest", "composite_condition", "external_label_event",
+  ];
+  await store.registerEventHypothesis({
+    hypothesisId: "all-condition-types", title: "Every condition type is writable",
+    thesis: "Each condition type the server emits must pass runtime validation.",
+    evaluationContract: { population: "in_sample", primaryMetric: "meanDirectionalReturn",
+      primaryHorizonBars: 5, minimumEvents: 1, symbols: ["OANDA:EURUSD"], timeframes: ["60"] },
+  });
+  for (const [index, conditionType] of conditionTypes.entries()) {
+    const record = {
+      studyId: `sha256:${createHash("sha256").update(`study-${index}`).digest("hex")}`,
+      hypothesisId: "all-condition-types", population: "in_sample",
+      methodologyVersion: "v1", symbol: "OANDA:EURUSD", timeframe: "60", conditionType,
+      definitionHash: `sha256:${createHash("sha256").update(`definition-${index}`).digest("hex")}`,
+      source: { chartIndex: 0, requestedBars: 100, returnedBars: 100,
+        from: "2026-01-01T00:00:00.000Z", to: "2026-02-01T00:00:00.000Z" },
+      sampleEvents: 5, minimumEvents: 1, outcomes: [{ branch: "b", horizonBars: 5, events: 5,
+        meanDirectionalReturn: 0, medianDirectionalReturn: 0, positiveRate: 0.5, targetHitRate: 0.5 }],
+      qualityIssues: [], minimumEventsMet: true, decision: "inconclusive", note: "",
+    };
+    const written = await store.recordEventStudy(record);
+    assert.equal(written.recorded, true, `${conditionType} must be writable`);
+  }
+  assert.equal((await store.listEventStudies("all-condition-types")).length, conditionTypes.length);
+});
+
 test("strategy research journal keeps event-study hypotheses and computed evidence separate from strategy metrics", async () => {
   const directory = await mkdtemp(join(tmpdir(), "event-research-"));
   const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));

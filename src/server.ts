@@ -45,6 +45,7 @@ import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runFailedBreakoutStudy } from "./failedBreakoutStudy.js";
 import { runFvgRetestStudy } from "./fvgRetestStudy.js";
+import { runExternalLabelStudy } from "./externalLabelStudy.js";
 import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
@@ -6559,6 +6560,140 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           timeframe: primary.resolution, window: window ?? 20, strongThreshold: strong_threshold ?? 0.7,
           neutralThreshold: neutral_threshold ?? 0.2, ...result,
           limitations: ["Correlation is calculated only from exact-time-aligned closed-bar returns.", "It is descriptive and does not imply a causal or stable relationship."], });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "run_external_label_study",
+    {
+      description:
+        "Measure forward outcomes for caller-supplied point-in-time labels on the active chart, so an " +
+        "external series such as daily open interest, settlement statistics or survey data can be tested " +
+        "with the same outcome, fold, interval and journal machinery as the built-in conditions. Each label " +
+        "is attached to a bar at least one bar after the one it carries, because an external label is rarely " +
+        "public when its own bar closes; a zero lag is refused rather than trusted. Horizons count subsequent " +
+        "observed bars, so a daily series is not voided by weekends. Unlike run_market_event_study this accepts " +
+        "daily and weekly timeframes. Label correctness and revisions belong to whoever supplied them; only the " +
+        "join is point-in-time here. Signal-bar close is an event reference, not an assumed fill. It never ranks " +
+        "labels, changes the chart, or places orders.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i),
+        count: z.number().int().min(20).max(5000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 1000"),
+        observations: z.array(z.object({
+          time: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          label: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/),
+        })).min(1).max(5000)
+          .describe("Point-in-time labels. time must identify a loaded bar, exactly or by a UTC date only one bar carries"),
+        accepted_labels: z.array(z.object({
+          label: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/),
+          direction: z.enum(["long", "short"]),
+        })).min(1).max(8)
+          .describe("Labels to evaluate and the direction each one implies. Other labels are counted and dropped"),
+        observation_lag_bars: z.number().int().min(1).max(20)
+          .describe("Closed bars between the observation bar and the signal bar. Minimum 1"),
+        overlap_policy: z.literal("exclude_later_event").optional()
+          .describe("Exclude later events whose evaluation window overlaps an earlier one. Default: exclude_later_event"),
+        horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
+        target_return_bps: z.number().finite().gt(0).max(1000),
+        minimum_events: z.number().int().min(1).max(5000),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+        configuration_trials: z.number().int().min(1).max(100000).optional(),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+        })).max(12).optional(),
+        journal: z.object({
+          hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          population: RESEARCH_POPULATION_SCHEMA,
+          decision: z.enum(["adopted", "rejected", "inconclusive"]),
+          note: z.string().max(500).optional(),
+        }).optional(),
+        event_limit: z.number().int().min(0).max(200).optional()
+          .describe("Maximum per-event rows to return. Aggregate metrics always use all events. Default: 50"),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, observations, accepted_labels, observation_lag_bars,
+      overlap_policy, horizons, target_return_bps, minimum_events, confidence_level, configuration_trials,
+      folds, journal, event_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart) throw new Error(`active chart ${activeIndex} not found`);
+        if (chart.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(chart.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error(`active chart binding does not match: found ${chart.symbol} ${chart.resolution}`);
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("external label study is blocked while Bar Replay is active");
+        }
+        const history = await tv.getOhlcv(count ?? 1000, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const result = runExternalLabelStudy({
+          bars: history.bars,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          observations,
+          acceptedLabels: accepted_labels,
+          observationLagBars: observation_lag_bars,
+          overlapPolicy: overlap_policy ?? "exclude_later_event",
+          horizons,
+          targetReturnBps: target_return_bps,
+          minimumEvents: minimum_events,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          eventLimit: event_limit ?? 50,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials ?? null,
+          regime: null,
+        });
+        const source = {
+          chartIndex: activeIndex,
+          requestedBars: count ?? 1000,
+          returnedBars: history.bars.length,
+          from: history.bars[0]?.timeIso ?? null,
+          to: history.bars.at(-1)?.timeIso ?? null,
+        };
+        // The label series is part of the definition: the same window with different labels is a
+        // different study, so its hash must move with them.
+        const definition = { observations, acceptedLabels: accepted_labels, observationLagBars: observation_lag_bars,
+          overlapPolicy: overlap_policy ?? "exclude_later_event", horizons, targetReturnBps: target_return_bps,
+          minimumEvents: minimum_events, confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials ?? null, folds: folds ?? [] };
+        const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const branchSummaries = Object.entries(result.byBranch as Record<string, { events: number; horizons: Record<string, { availableEvents: number; directionalReturn: { mean: number | null; median: number | null }; positiveRate: number | null; targetHitRate: number | null }> }>).flatMap(([branch, summary]) =>
+          Object.entries(summary.horizons).map(([horizon, outcome]) => ({ branch, horizonBars: Number(horizon), events: outcome.availableEvents,
+            meanDirectionalReturn: outcome.directionalReturn.mean, medianDirectionalReturn: outcome.directionalReturn.median,
+            positiveRate: outcome.positiveRate, targetHitRate: outcome.targetHitRate })));
+        let journalResult: unknown = null;
+        if (journal) {
+          try {
+            const record: EventStudyRecord = { studyId, hypothesisId: journal.hypothesis_id, population: journal.population,
+              methodologyVersion: result.methodologyVersion, symbol: result.symbol, timeframe: result.timeframe,
+              conditionType: "external_label_event", definitionHash, source, sampleEvents: result.sample.events,
+              minimumEvents: result.sample.minimumEvents, configurationTrials: configuration_trials ?? null,
+              outcomes: branchSummaries, qualityIssues: result.qualityIssues,
+              minimumEventsMet: result.sample.events >= result.sample.minimumEvents,
+              decision: journal.decision, note: journal.note ?? "" };
+            journalResult = await researchJournal.recordEventStudy(record);
+          } catch (err) { journalResult = { recorded: false, error: err instanceof Error ? err.message : String(err) }; }
+        }
+        return jsonResult({
+          ...result,
+          conditionType: "external_label_event",
+          studyId,
+          definitionHash,
+          source,
+          ...(journal ? { journal: journalResult } : {}),
+        });
       } catch (err) { return errorResult(err); }
     }),
   );

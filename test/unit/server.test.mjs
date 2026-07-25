@@ -682,7 +682,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-three expected tools", async () => {
+test("exposes exactly the seventy-four expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -744,6 +744,7 @@ test("exposes exactly the seventy-three expected tools", async () => {
       "remove_owned_study",
       "run_backtest",
       "run_backtest_matrix",
+      "run_external_label_study",
       "run_market_event_study",
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
@@ -6563,6 +6564,69 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
   assert.deepEqual(referencePanes.get(2), { symbol: "TVC:US10Y", resolution: "60" });
   assert.equal(runs, 2);
   assert.equal(removed, 2);
+});
+
+test("run_external_label_study binds a daily chart, lags the label and records to the journal", async () => {
+  const bars = [];
+  let day = Date.UTC(2026, 0, 5, 22);
+  for (let index = 0; index < 40; index += 1) {
+    const date = new Date(day);
+    while (date.getUTCDay() === 0 || date.getUTCDay() === 6) date.setUTCDate(date.getUTCDate() + 1);
+    const close = 100 + index;
+    bars.push({ time: date.getTime() / 1000, timeIso: new Date(date.getTime()).toISOString(),
+      open: close - 0.5, high: close + 1, low: close - 1, close, volume: 1 });
+    day = date.getTime() + 86_400_000;
+  }
+  let recorded = null;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "t", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "COMEX_DL:GC1!", resolution: "1D", studies: [] }] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async () => ({ symbol: "COMEX_DL:GC1!", resolution: "1D", count: bars.length, bars }),
+    },
+    researchJournal: {
+      recordEventStudy: async (payload) => { recorded = payload; return { recorded: true, idempotent: false, entry: { payload } }; },
+    },
+  }));
+
+  const res = await client.callTool({ name: "run_external_label_study", arguments: {
+    expected_symbol: "COMEX_DL:GC1!", expected_timeframe: "1D", count: 100,
+    observations: [{ time: bars[5].timeIso, label: "long_build" }, { time: bars[25].timeIso, label: "long_unwinding" }],
+    accepted_labels: [{ label: "long_build", direction: "long" }, { label: "long_unwinding", direction: "short" }],
+    observation_lag_bars: 2, horizons: [1, 5], target_return_bps: 20, minimum_events: 1,
+    journal: { hypothesis_id: "oi-quadrant", population: "in_sample", decision: "inconclusive" },
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.methodologyVersion, "external_label_forward_outcome_study_v1");
+  assert.equal(parsed.conditionType, "external_label_event");
+  assert.equal(parsed.sample.events, 2);
+  // The signal must sit two bars after the observation, never on it.
+  assert.equal(parsed.events[0].observationTime, bars[5].timeIso);
+  assert.equal(parsed.events[0].signalTime, bars[7].timeIso);
+  // Daily bars skip weekends, so the five bar window only exists under the observed-bar clock.
+  assert.equal(parsed.outcomeContract.contiguousBarsRequired, false);
+  assert.ok(parsed.byBranch.long_build.horizons["5"].directionalReturn.mean !== null);
+  assert.equal(parsed.journal.recorded, true);
+  assert.equal(recorded.conditionType, "external_label_event");
+  assert.equal(recorded.hypothesisId, "oi-quadrant");
+
+  const zeroLag = await client.callTool({ name: "run_external_label_study", arguments: {
+    expected_symbol: "COMEX_DL:GC1!", expected_timeframe: "1D",
+    observations: [{ time: bars[5].timeIso, label: "long_build" }],
+    accepted_labels: [{ label: "long_build", direction: "long" }],
+    observation_lag_bars: 0, horizons: [1], target_return_bps: 20, minimum_events: 1,
+  } });
+  assert.equal(zeroLag.isError, true);
+
+  const wrongChart = await client.callTool({ name: "run_external_label_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "1D",
+    observations: [{ time: bars[5].timeIso, label: "long_build" }],
+    accepted_labels: [{ label: "long_build", direction: "long" }],
+    observation_lag_bars: 1, horizons: [1], target_return_bps: 20, minimum_events: 1,
+  } });
+  assert.equal(wrongChart.isError, true);
+  assert.match(wrongChart.content[0].text, /binding does not match/);
 });
 
 test("compute_lead_lag_relationships binds both charts and returns every scanned lag", async () => {
