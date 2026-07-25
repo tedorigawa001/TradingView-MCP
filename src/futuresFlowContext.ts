@@ -403,5 +403,9 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     observations: returned,
     observationsReturned: returned.length,
     observationsTruncated: observations.length > returned.length,
+    // The displayed observations are capped by observationLimit. First-seen collection must not
+    // depend on a display setting, so the full set is exposed separately for callers that persist
+    // it; server.ts strips this before the response is serialized.
+    allObservations: observations,
   };
 }

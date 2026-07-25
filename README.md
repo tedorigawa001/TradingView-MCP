@@ -308,6 +308,12 @@ Fair Value Gap Retest イベントスタディ E2Eは、チャートに適合す
 TRADINGVIEW_FVG_RETEST_E2E_CONFIG='{"expected_symbol":"OANDA:EURUSD","expected_timeframe":"60","count":5000,"condition":{"type":"fair_value_gap_retest","minimum_gap_bps":10,"retest_within_bars":24,"min_impulse_body_ratio":0.5,"require_boundary_hold":true},"horizons":[1,2,4,8],"target_return_bps":20,"minimum_events":1,"event_limit":50,"confidence_level":0.95,"configuration_trials":1}' npm run test:e2e
 ```
 
+先物フローE2Eは、`TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG` へ `open_interest_study_id` と `open_interest_plot_title` を必ず含める必要があります。建玉が取得できない設定は明示的に失敗します(黙って素通りすると first-seen 収集が壊れていても気づけないため)。収集先は一時ファイルへ切り替わるので、実運用のログは汚染されません。
+
+```bash
+TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG='{"target_symbol":"OANDA:XAUUSD","futures_chart_index":1,"expected_futures_symbol":"COMEX_DL:GC1!","count":250,"observation_limit":0,"minimum_observations":100,"cot_weeks":1,"open_interest_study_id":"YOUR_STUDY_ID","open_interest_plot_title":"Total OI"}' npm run test:e2e
+```
+
 E2Eは誤ったチャート束縛の拒否、dry-runの決定性、train-only選定、非選択候補OOSの非公開に加え、研究protocol検証、ledger stress、seed固定bootstrap、アラート実作成・所有名照合、レスポンス非増幅、実行後のチャート完全復元を検証します。設定がない場合はskipします。
 
 ### フォルダ構成

@@ -6419,6 +6419,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           openInterestSource,
           rollAnomalyThreshold: roll_anomaly_threshold,
         });
+        // The full observation set feeds collection only; it never reaches the response.
+        const { allObservations: _allObservations, ...futuresResponse } = futures;
         const observedAt = new Date().toISOString();
         // Open interest for a session is published after it closes and revised once, so a series
         // downloaded later is not what was visible at the time. Recording what we just read, and
@@ -6427,7 +6429,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         let openInterestFirstSeen: unknown = null;
         if (futuresOpenInterestHistory && futures.openInterest.status !== "unavailable") {
           try {
-            const observations = futures.observations.flatMap((item: { time: string; openInterest: number | null }) =>
+            const observations = futures.allObservations.flatMap((item: { time: string; openInterest: number | null }) =>
               typeof item.openInterest === "number" && item.openInterest > 0
                 ? [{
                   futures_symbol: expected_futures_symbol.toUpperCase(),
@@ -6484,7 +6486,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           ...(cotEvidence.status === "partial" ? ["cot_point_in_time_incomplete"] : []),
         ])];
         return jsonResult({
-          ...futures,
+          ...futuresResponse,
           status: qualityIssues.length === 0 ? "complete" : "partial",
           observedAt,
           openInterestFirstSeen,
