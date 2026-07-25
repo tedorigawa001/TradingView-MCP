@@ -2032,12 +2032,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
 
         const onceBeforeJobs = correlation_regime !== undefined &&
           invariantReferenceChartIndices.includes(correlation_regime.reference_chart_index);
+        // Only panes a job switches are reloaded inside that job; invariant panes were already
+        // loaded once before the matrix, so reporting a per-job load for them would be false.
+        const perJobBeforeCapture = [...initialReferenceCharts.keys()]
+          .some((refIdx) => !invariantReferenceChartIndices.includes(refIdx));
 
         const correlationReferenceHistoryLoad = initialReferenceCharts.size === 0 ? null : {
           ...(correlation_regime !== undefined ? { chartIndex: correlation_regime.reference_chart_index } : { referenceChartIndices: [...initialReferenceCharts.keys()] }),
           requestedBars: loadMoreBars,
           onceBeforeJobs,
-          perJobBeforeCapture: !onceBeforeJobs,
+          perJobBeforeCapture,
         };
 
         const preview = {
@@ -2417,7 +2421,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               addedBars: correlationReferenceHistoryLoads.reduce((sum, load) => sum + load.added, 0),
               moreAvailable: correlationReferenceHistoryLoads.at(-1)?.moreAvailable ?? null,
             } : {
-              perJobBeforeCapture: true,
+              perJobBeforeCapture,
             }),
           },
           invariantReferenceHistoryLoads: invariantReferenceChartIndices.map((chartIndex) => {

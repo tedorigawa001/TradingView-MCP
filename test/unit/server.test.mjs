@@ -6378,6 +6378,9 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
   assert.equal(preview.status, "preview");
   assert.deepEqual(preview.execution.invariantReferenceChartIndices, [1, 2]);
   assert.deepEqual(preview.execution.uniqueReferenceSymbols, ["TVC:DXY", "TVC:US10Y"]);
+  // Every pane is invariant, so nothing is reloaded inside a job; claiming otherwise would
+  // contradict invariantReferenceHistoryLoads in the same response.
+  assert.equal(preview.execution.correlationReferenceHistoryLoad.perJobBeforeCapture, false);
   assert.equal(historyLoadsByChart.length, 0);
 
   const result = JSON.parse((await client.callTool({
