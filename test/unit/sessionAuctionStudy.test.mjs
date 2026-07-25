@@ -216,3 +216,38 @@ test("event outcomes keep MFE and MAE at zero when future bars never cross the e
   assert.equal(outcome.outcomes["1"].mfe, 0);
   assert.ok(outcome.outcomes["1"].mae > 0);
 });
+
+test("session auction study handles cross-day session windows (22:00 -> 06:00 -> 12:00)", () => {
+  // Start Monday 22:00 UTC (Jan 5 2026 22:00 UTC)
+  const start = Date.UTC(2026, 0, 5, 22, 0);
+  const bars = [];
+  // Range: 22:00 to 06:00 (32 bars of 15 min)
+  for (let index = 0; index < 32; index += 1) {
+    bars.push(bar(start + index * 900_000, 1.05, 1.10, 1.00, 1.05));
+  }
+  // Auction: 06:00 to 12:00. Breakout up at 06:00 (index 32 & 33)
+  bars.push(bar(start + 32 * 900_000, 1.05, 1.12, 1.04, 1.11));
+  bars.push(bar(start + 33 * 900_000, 1.11, 1.13, 1.10, 1.12));
+  for (let index = 34; index < 56; index += 1) {
+    const close = 1.12 + (index - 33) * 0.001;
+    bars.push(bar(start + index * 900_000, close, close + 0.002, close - 0.002, close));
+  }
+
+  const result = runSessionAuctionStudy(input(bars, {
+    rangeStart: "22:00",
+    rangeEnd: "06:00",
+    auctionEnd: "12:00",
+    minimumEvents: 1,
+    folds: [
+      { foldId: "d1", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" },
+      { foldId: "d2", from: "2026-01-06T00:00:00.000Z", to: "2026-01-07T00:00:00.000Z" },
+    ],
+    horizons: [1, 4],
+  }));
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.byBranch.accepted_up.events, 1);
+  assert.equal(result.events[0].branch, "accepted_up");
+  assert.equal(result.events[0].localDate, "2026-01-05");
+});
+

@@ -2,10 +2,11 @@ import type { OhlcvBar } from "./tradingview.js";
 import {
   buildEventRegimeAnalysis,
   canonicalTime,
-  localize,
+  localizeAnchor,
   outcomeForEvent,
   summarizeOutcomes,
   timeframeMinutes,
+  type AnchorBar,
   type SessionAuctionFold,
 } from "./sessionAuctionStudy.js";
 import { computeMarketRegimes, marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
@@ -50,9 +51,13 @@ function clockMinute(value: string, label: string): number {
 function validate(input: FailedBreakoutStudyInput) {
   const timeframe = timeframeMinutes(input.timeframe);
   const start = clockMinute(input.rangeStart, "range_start");
-  const end = clockMinute(input.rangeEnd, "range_end");
-  const failureEnd = clockMinute(input.failureEnd, "failure_end");
-  if (!(start < end && end < failureEnd)) throw new Error("failed breakout clocks must satisfy range_start < range_end < failure_end on one local day");
+  let end = clockMinute(input.rangeEnd, "range_end");
+  let failureEnd = clockMinute(input.failureEnd, "failure_end");
+
+  if (end <= start) end += 1440;
+  while (failureEnd <= end) failureEnd += 1440;
+
+  if (failureEnd - start >= 1440) throw new Error("total failed breakout session window (range_start to failure_end) must span strictly less than 24 hours (1440 minutes)");
   if (failureEnd - start < timeframe) throw new Error("failed breakout session must span at least one chart bar");
   if (!Number.isInteger(input.confirmationBars) || input.confirmationBars < 0 || input.confirmationBars > 4) {
     throw new Error("confirmation bars must be an integer from 0 to 4");
@@ -67,28 +72,41 @@ export function runFailedBreakoutStudy(input: FailedBreakoutStudyInput) {
   validate(input);
   const timeframe = timeframeMinutes(input.timeframe);
   const timeframeMs = timeframe * 60_000;
-  const rangeStart = clockMinute(input.rangeStart, "range_start");
-  const rangeEnd = clockMinute(input.rangeEnd, "range_end");
-  const failureEnd = clockMinute(input.failureEnd, "failure_end");
+  const start = clockMinute(input.rangeStart, "range_start");
+  let end = clockMinute(input.rangeEnd, "range_end");
+  let failureEnd = clockMinute(input.failureEnd, "failure_end");
+  if (end <= start) end += 1440;
+  while (failureEnd <= end) failureEnd += 1440;
+
   const bars = [...input.bars].sort((left, right) => left.time - right.time);
   if (bars.length < 3) throw new Error("at least three OHLC bars are required");
   if (bars.some((bar, index) => index > 0 && bar.time === bars[index - 1].time)) throw new Error("duplicate OHLC timestamps");
   if (bars.some((bar) => !Number.isFinite(bar.open) || !Number.isFinite(bar.high) || !Number.isFinite(bar.low) || !Number.isFinite(bar.close) || bar.low > bar.high || bar.open < bar.low || bar.open > bar.high || bar.close < bar.low || bar.close > bar.high)) throw new Error("invalid OHLC bar");
   const closed = bars.filter((bar) => bar.forming !== true);
-  const localized = localize(closed, input.timezone);
-  const expectedRangeBars = Math.ceil((rangeEnd - rangeStart) / timeframe);
+  const localized = localizeAnchor(closed, input.timezone, start);
+  const perDay = new Map<string, AnchorBar[]>();
+  for (const bar of localized) {
+    const day = perDay.get(bar.anchorDate) ?? [];
+    day.push(bar);
+    perDay.set(bar.anchorDate, day);
+  }
+  const expectedRangeBars = Math.ceil((end - start) / timeframe);
   const minimumRangeBars = Math.ceil(expectedRangeBars * input.minimumRangeCoverage);
-  const dates = [...new Set(localized.filter((bar) => bar.weekday !== "Sat" && bar.weekday !== "Sun" && bar.localMinute >= rangeStart && bar.localMinute < rangeEnd).map((bar) => bar.localDate))];
-  const quality = { localDays: new Set(localized.map((bar) => bar.localDate)).size, candidateDays: dates.length, eligibleDays: 0, insufficientRangeCoverage: 0, noSweep: 0, ambiguousBothSides: 0, failedConfirmation: 0, formingBarsExcluded: bars.length - closed.length };
+  const dates = [...perDay.keys()].filter((anchorDate) => {
+    const day = perDay.get(anchorDate)!;
+    return day[0]?.anchorWeekday !== "Sat" && day[0]?.anchorWeekday !== "Sun" &&
+      day.some((bar) => bar.relativeMinute >= start && bar.relativeMinute < end);
+  });
+  const quality = { localDays: perDay.size, candidateDays: dates.length, eligibleDays: 0, insufficientRangeCoverage: 0, noSweep: 0, ambiguousBothSides: 0, failedConfirmation: 0, formingBarsExcluded: bars.length - closed.length };
   const detected: Array<{ eventId: string; localDate: string; branch: Branch; direction: Direction; rangeHigh: number; rangeLow: number; rangeBars: number; sweepTime: string; signalIndex: number }> = [];
 
-  for (const localDate of dates) {
-    const day = localized.filter((bar) => bar.localDate === localDate);
-    const range = day.filter((bar) => bar.localMinute >= rangeStart && bar.localMinute < rangeEnd);
+  for (const anchorDate of dates) {
+    const day = perDay.get(anchorDate)!;
+    const range = day.filter((bar) => bar.relativeMinute >= start && bar.relativeMinute < end);
     if (range.length < minimumRangeBars) { quality.insufficientRangeCoverage += 1; continue; }
     const rangeHigh = Math.max(...range.map((bar) => bar.high));
     const rangeLow = Math.min(...range.map((bar) => bar.low));
-    const window = day.filter((bar) => bar.localMinute >= rangeEnd && bar.localMinute < failureEnd);
+    const window = day.filter((bar) => bar.relativeMinute >= end && bar.relativeMinute < failureEnd);
     const sweep = window.find((bar) => bar.high > rangeHigh || bar.low < rangeLow);
     if (!sweep) { quality.noSweep += 1; continue; }
     const sweptUp = sweep.high > rangeHigh;
@@ -106,7 +124,7 @@ export function runFailedBreakoutStudy(input: FailedBreakoutStudyInput) {
     if (!confirmationPasses) { quality.failedConfirmation += 1; continue; }
     const terminal = confirmation.at(-1) ?? sweep;
     quality.eligibleDays += 1;
-    detected.push({ eventId: `${localDate}:${sweptUp ? "failed_breakout_up" : "failed_breakout_down"}`, localDate,
+    detected.push({ eventId: `${anchorDate}:${sweptUp ? "failed_breakout_up" : "failed_breakout_down"}`, localDate: anchorDate,
       branch: sweptUp ? "failed_breakout_up" : "failed_breakout_down", direction, rangeHigh, rangeLow,
       rangeBars: range.length, sweepTime: sweep.timeIso, signalIndex: terminal.globalIndex });
   }

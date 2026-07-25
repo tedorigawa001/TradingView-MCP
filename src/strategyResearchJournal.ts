@@ -105,6 +105,7 @@ export type EventStudyRecord = {
     | "event_aftershock_retest"
     | "failed_breakout"
     | "fair_value_gap_retest"
+    | "composite_condition"
     | "feature_outcome_relationships";
   definitionHash: string;
   source: { chartIndex: number; requestedBars: number; returnedBars: number; from: string | null; to: string | null };
@@ -206,7 +207,7 @@ function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
   if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(value.population)) throw new Error("invalid event research population");
   if (typeof value.methodologyVersion !== "string" || value.methodologyVersion.length < 1 || value.methodologyVersion.length > 80) throw new Error("invalid event methodology version");
   if (!SYMBOL_PATTERN.test(value.symbol) || !TIMEFRAME_PATTERN.test(value.timeframe)) throw new Error("invalid event study market");
-  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout", "fair_value_gap_retest", "feature_outcome_relationships"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
+  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout", "fair_value_gap_retest", "composite_condition", "feature_outcome_relationships"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
   if (!Number.isInteger(value.source.chartIndex) || value.source.chartIndex < 0 || !Number.isInteger(value.source.requestedBars) || !Number.isInteger(value.source.returnedBars) || value.source.requestedBars < 1 || value.source.returnedBars < 0) throw new Error("invalid event study source");
   for (const time of [value.source.from, value.source.to]) if (time !== null && new Date(time).toISOString() !== time) throw new Error("invalid event study source time");
   if (!Number.isInteger(value.sampleEvents) || !Number.isInteger(value.minimumEvents) || value.sampleEvents < 0 || value.minimumEvents < 1) throw new Error("invalid event study sample");

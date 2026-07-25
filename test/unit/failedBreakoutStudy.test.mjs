@@ -113,3 +113,37 @@ test("failed breakout study joins events only to regimes closed before the signa
     .find((group) => group.status === "evaluable");
   assert.ok(evaluable);
 });
+
+test("failed breakout study handles cross-day session windows (22:00 -> 06:00 -> 12:00)", () => {
+  const start = Date.UTC(2026, 0, 5, 22, 0);
+  const bars = [];
+  // Range: 22:00 to 06:00 (32 bars of 15 min)
+  for (let index = 0; index < 32; index += 1) {
+    bars.push(bar(start + index * 900_000, 1.05, 1.10, 1.00, 1.05));
+  }
+  // Failure window: 06:00 to 12:00. Sweep up & rejection at 06:00 (index 32 & 33)
+  bars.push(bar(start + 32 * 900_000, 1.05, 1.12, 1.03, 1.06));
+  bars.push(bar(start + 33 * 900_000, 1.06, 1.07, 1.02, 1.04));
+  for (let index = 34; index < 44; index += 1) {
+    const close = 1.04 - (index - 34) * 0.002;
+    bars.push(bar(start + index * 900_000, close + 0.002, close + 0.003, close - 0.003, close));
+  }
+
+  const result = runFailedBreakoutStudy(input(bars, {
+    rangeStart: "22:00",
+    rangeEnd: "06:00",
+    failureEnd: "12:00",
+    minimumEvents: 1,
+    folds: [
+      { foldId: "up", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" },
+      { foldId: "down", from: "2026-01-06T00:00:00.000Z", to: "2026-01-07T00:00:00.000Z" },
+    ],
+    horizons: [1, 4],
+  }));
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.byBranch.failed_breakout_up.events, 1);
+  assert.equal(result.events[0].branch, "failed_breakout_up");
+  assert.equal(result.events[0].localDate, "2026-01-05");
+});
+

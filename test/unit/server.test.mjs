@@ -5053,6 +5053,112 @@ test("run_market_event_study binds failed breakout evidence to the active chart"
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
 });
 
+test("run_market_event_study handles cross-day session windows (22:00 -> 06:00 -> 12:00)", async () => {
+  const start = Date.UTC(2026, 0, 5, 22, 0);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) {
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(), open: 1.05, high: 1.10, low: 1.00, close: 1.05, volume: 1 });
+  }
+  bars.push({ time: (start + 32 * 900_000) / 1000, timeIso: new Date(start + 32 * 900_000).toISOString(), open: 1.05, high: 1.12, low: 1.04, close: 1.11, volume: 1 });
+  bars.push({ time: (start + 33 * 900_000) / 1000, timeIso: new Date(start + 33 * 900_000).toISOString(), open: 1.11, high: 1.13, low: 1.10, close: 1.12, volume: 1 });
+  for (let index = 34; index < 56; index += 1) {
+    const close = 1.12 + (index - 33) * 0.001;
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(), open: close, high: close + 0.002, low: close - 0.002, close, volume: 1 });
+  }
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "session_auction", timezone: "UTC", range_start: "22:00", range_end: "06:00", auction_end: "12:00", acceptance_closes: 2, failure_within_bars: 2, minimum_range_coverage: 1 },
+    horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "session_auction");
+  assert.equal(parsed.byBranch.accepted_up.events, 1);
+  assert.equal(parsed.events[0].branch, "accepted_up");
+  assert.equal(parsed.events[0].localDate, "2026-01-05");
+});
+
+test("run_market_event_study handles cross-day failed_breakout session windows (22:00 -> 06:00 -> 12:00)", async () => {
+  const start = Date.UTC(2026, 0, 5, 22, 0);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) {
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(), open: 1.05, high: 1.10, low: 1.00, close: 1.05, volume: 1 });
+  }
+  bars.push({ time: (start + 32 * 900_000) / 1000, timeIso: new Date(start + 32 * 900_000).toISOString(), open: 1.05, high: 1.12, low: 1.03, close: 1.06, volume: 1 });
+  bars.push({ time: (start + 33 * 900_000) / 1000, timeIso: new Date(start + 33 * 900_000).toISOString(), open: 1.06, high: 1.07, low: 1.02, close: 1.04, volume: 1 });
+  for (let index = 34; index < 44; index += 1) {
+    const close = 1.04 - (index - 34) * 0.002;
+    bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(), open: close + 0.002, high: close + 0.003, low: close - 0.003, close, volume: 1 });
+  }
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    condition: { type: "failed_breakout", timezone: "UTC", range_start: "22:00", range_end: "06:00", failure_end: "12:00", confirmation_bars: 1, minimum_range_coverage: 1 },
+    horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "failed_breakout");
+  assert.equal(parsed.byBranch.failed_breakout_up.events, 1);
+  assert.equal(parsed.events[0].branch, "failed_breakout_up");
+  assert.equal(parsed.events[0].localDate, "2026-01-05");
+});
+
+test("run_market_event_study evaluates composite_condition and records evidence to research journal", async () => {
+  const start = Date.UTC(2026, 0, 1, 0, 0);
+  const hour = 3_600_000;
+  const ohlc = [
+    [100, 100.2, 99.8, 100],
+    [100.3, 101.8, 100.2, 101.6],
+    [101.7, 103, 101.4, 102.8],
+    [102.8, 103, 102.5, 102.7],
+    [102.7, 102.8, 100.5, 101],
+    [101, 102.5, 100.8, 102.2],
+    [102.2, 104, 102, 103.8],
+  ];
+  const bars = ohlc.map(([open, high, low, close], index) => {
+    const time = (start + index * hour) / 1000;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open, high, low, close, volume: 1000 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+    condition: {
+      type: "composite_condition",
+      operator: "intersection",
+      max_alignment_bars: 5,
+      require_same_direction: false,
+      conditions: [
+        { type: "fair_value_gap_retest", minimum_gap_bps: 10, retest_within_bars: 10 },
+        { type: "fair_value_gap_retest", minimum_gap_bps: 5, retest_within_bars: 10 },
+      ],
+    },
+    horizons: [1, 2], target_return_bps: 10, minimum_events: 1, event_limit: 10, configuration_trials: 1,
+    journal: { hypothesis_id: "hyp_composite_1", population: "in_sample", decision: "adopted", note: "composite test" },
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.conditionType, "composite_condition");
+  assert.equal(parsed.methodologyVersion, "composite_condition_event_study_v1");
+  assert.equal(parsed.conditionContract.alignmentRule, "pairwise_span");
+  assert.equal(parsed.conditionContract.overlapPolicy, "exclude_later_event");
+  assert.equal(parsed.journal.recorded, true);
+});
+
 test("run_market_event_study evaluates fair_value_gap_retest and records evidence to research journal", async () => {
   const start = Date.UTC(2026, 0, 1, 0, 0);
   const hour = 3_600_000;

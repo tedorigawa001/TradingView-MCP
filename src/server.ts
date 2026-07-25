@@ -45,6 +45,7 @@ import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runFailedBreakoutStudy } from "./failedBreakoutStudy.js";
 import { runFvgRetestStudy } from "./fvgRetestStudy.js";
+import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
@@ -687,6 +688,70 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       }),
   );
 
+  const PRIMITIVE_EVENT_CONDITION_SCHEMA = z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("session_auction"),
+      timezone: z.string().min(1).max(64),
+      range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      auction_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      acceptance_closes: z.number().int().min(1).max(4).optional(),
+      failure_within_bars: z.number().int().min(0).max(4).optional(),
+      minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
+    }),
+    z.object({
+      type: z.literal("session_exhaustion_handoff"),
+      timezone: z.string().min(1).max(64),
+      prior_sessions: z.array(z.object({
+        session_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,80}$/),
+        start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+        end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      })).min(1).max(4),
+      handoff_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      handoff_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      prior_direction: z.enum(["range_break", "session_return", "close_location"]),
+      direction_minimum_return_bps: z.number().finite().min(0).max(10_000).optional(),
+      close_location_threshold: z.number().finite().min(0.5).lt(1).optional(),
+      handoff_window_bars: z.number().int().min(1).max(24).optional(),
+      forward_update_threshold_bps: z.number().finite().min(0).max(10_000).optional(),
+      require_range_reentry: z.boolean().optional(),
+      require_opposite_body: z.boolean().optional(),
+      minimum_prior_coverage: z.number().finite().gt(0).max(1).optional(),
+    }),
+    z.object({
+      type: z.literal("event_aftershock_retest"),
+      events: z.array(z.object({
+        event_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/),
+        occurred_at: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+      })).min(1).max(200),
+      initial_range_bars: z.number().int().min(1).max(24).optional(),
+      breakout_within_bars: z.number().int().min(1).max(96).optional(),
+      retest_within_bars: z.number().int().min(1).max(96).optional(),
+      same_timestamp_policy: z.enum(["represent_first", "reject"]).optional()
+        .describe("Policy when multiple event timestamps are identical. Default: represent_first"),
+      overlap_policy: z.literal("exclude_later_event").optional()
+        .describe("Exclude later event timestamps whose maximum evaluation window overlaps an earlier event. Default: exclude_later_event"),
+      require_retest_close_outside: z.boolean().optional(),
+      minimum_initial_range_coverage: z.number().finite().gt(0).max(1).optional(),
+    }),
+    z.object({
+      type: z.literal("failed_breakout"),
+      timezone: z.string().min(1).max(64),
+      range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      failure_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+      confirmation_bars: z.number().int().min(0).max(4).optional(),
+      minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
+    }),
+    z.object({
+      type: z.literal("fair_value_gap_retest"),
+      minimum_gap_bps: z.number().finite().gt(0).max(1000).optional(),
+      retest_within_bars: z.number().int().min(1).max(96).optional(),
+      min_impulse_body_ratio: z.number().finite().min(0).max(1).optional(),
+      require_boundary_hold: z.boolean().optional(),
+    }),
+  ]);
+
   server.registerTool(
     "run_market_event_study",
     {
@@ -712,67 +777,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         count: z.number().int().min(100).max(5000).optional()
           .describe("Most recent loaded bars to inspect. Default: 5000"),
         condition: z.discriminatedUnion("type", [
+          ...PRIMITIVE_EVENT_CONDITION_SCHEMA.options,
           z.object({
-            type: z.literal("session_auction"),
-            timezone: z.string().min(1).max(64),
-            range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            auction_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            acceptance_closes: z.number().int().min(1).max(4).optional(),
-            failure_within_bars: z.number().int().min(0).max(4).optional(),
-            minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
-          }),
-          z.object({
-            type: z.literal("session_exhaustion_handoff"),
-            timezone: z.string().min(1).max(64),
-            prior_sessions: z.array(z.object({
-              session_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,80}$/),
-              start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-              end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            })).min(1).max(4),
-            handoff_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            handoff_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            prior_direction: z.enum(["range_break", "session_return", "close_location"]),
-            direction_minimum_return_bps: z.number().finite().min(0).max(10_000).optional(),
-            close_location_threshold: z.number().finite().min(0.5).lt(1).optional(),
-            handoff_window_bars: z.number().int().min(1).max(24).optional(),
-            forward_update_threshold_bps: z.number().finite().min(0).max(10_000).optional(),
-            require_range_reentry: z.boolean().optional(),
-            require_opposite_body: z.boolean().optional(),
-            minimum_prior_coverage: z.number().finite().gt(0).max(1).optional(),
-          }),
-          z.object({
-            type: z.literal("event_aftershock_retest"),
-            events: z.array(z.object({
-              event_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/),
-              occurred_at: CANONICAL_ISO_TIMESTAMP_SCHEMA,
-            })).min(1).max(200),
-            initial_range_bars: z.number().int().min(1).max(24).optional(),
-            breakout_within_bars: z.number().int().min(1).max(96).optional(),
-            retest_within_bars: z.number().int().min(1).max(96).optional(),
-            same_timestamp_policy: z.enum(["represent_first", "reject"]).optional()
-              .describe("Policy when multiple event timestamps are identical. Default: represent_first"),
-            // A literal keeps today's fail-closed contract while reserving this named extension point.
+            type: z.literal("composite_condition"),
+            operator: z.enum(["intersection", "filter_gate", "union"]),
+            conditions: z.array(PRIMITIVE_EVENT_CONDITION_SCHEMA).min(2).max(4),
+            max_alignment_bars: z.number().int().min(0).max(24).optional(),
+            require_same_direction: z.boolean().optional(),
             overlap_policy: z.literal("exclude_later_event").optional()
-              .describe("Exclude later event timestamps whose maximum evaluation window overlaps an earlier event. Default: exclude_later_event"),
-            require_retest_close_outside: z.boolean().optional(),
-            minimum_initial_range_coverage: z.number().finite().gt(0).max(1).optional(),
-          }),
-          z.object({
-            type: z.literal("failed_breakout"),
-            timezone: z.string().min(1).max(64),
-            range_start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            range_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            failure_end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
-            confirmation_bars: z.number().int().min(0).max(4).optional(),
-            minimum_range_coverage: z.number().finite().gt(0).max(1).optional(),
-          }),
-          z.object({
-            type: z.literal("fair_value_gap_retest"),
-            minimum_gap_bps: z.number().finite().gt(0).max(1000).optional(),
-            retest_within_bars: z.number().int().min(1).max(96).optional(),
-            min_impulse_body_ratio: z.number().finite().min(0).max(1).optional(),
-            require_boundary_hold: z.boolean().optional(),
+              .describe("Exclude later composite event timestamps whose evaluation window overlaps an earlier event. Default: exclude_later_event"),
           }),
         ]),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
@@ -891,6 +904,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             retestWithinBars: condition.retest_within_bars ?? 24,
             minImpulseBodyRatio: condition.min_impulse_body_ratio ?? 0.5,
             requireBoundaryHold: condition.require_boundary_hold ?? true,
+          })
+          : condition.type === "composite_condition"
+          ? runCompositeConditionStudy({
+            ...common,
+            operator: condition.operator,
+            conditions: condition.conditions,
+            maxAlignmentBars: condition.max_alignment_bars ?? 0,
+            requireSameDirection: condition.require_same_direction ?? true,
+            overlapPolicy: condition.overlap_policy ?? "exclude_later_event",
           })
           : runEventAftershockRetestStudy({
             ...common,

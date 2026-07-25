@@ -46,6 +46,7 @@ export interface SessionAuctionStudyInput {
 }
 
 export type LocalBar = OhlcvBar & { localDate: string; localMinute: number; weekday: string; globalIndex: number };
+export type AnchorBar = LocalBar & { anchorDate: string; anchorWeekday: string; relativeMinute: number };
 type Branch = "accepted_up" | "accepted_down" | "failed_up" | "failed_down";
 
 const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
@@ -154,6 +155,37 @@ export function localize(bars: OhlcvBar[], timezone: string): LocalBar[] {
       localDate: `${parts.year}-${parts.month}-${parts.day}`,
       localMinute: Number(parts.hour) * 60 + Number(parts.minute),
       weekday: parts.weekday,
+      globalIndex,
+    };
+  });
+}
+
+export function localizeAnchor(bars: OhlcvBar[], timezone: string, rangeStartMinute: number): AnchorBar[] {
+  const format = formatter(timezone);
+  return bars.map((bar, globalIndex) => {
+    const barMs = bar.time * 1000;
+    const parts = Object.fromEntries(format.formatToParts(new Date(barMs))
+      .filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+    const localMinute = Number(parts.hour) * 60 + Number(parts.minute);
+    let relativeMinute = localMinute;
+    let anchorMs = barMs;
+    if (localMinute < rangeStartMinute) {
+      relativeMinute += 1440;
+      anchorMs = barMs - 86_400_000;
+    }
+    const anchorParts = relativeMinute === localMinute
+      ? parts
+      : Object.fromEntries(format.formatToParts(new Date(anchorMs))
+          .filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+
+    return {
+      ...bar,
+      localDate: `${parts.year}-${parts.month}-${parts.day}`,
+      localMinute,
+      weekday: parts.weekday,
+      anchorDate: `${anchorParts.year}-${anchorParts.month}-${anchorParts.day}`,
+      anchorWeekday: anchorParts.weekday,
+      relativeMinute,
       globalIndex,
     };
   });
@@ -377,10 +409,13 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
   const timeframe = timeframeMinutes(input.timeframe);
   const timeframeMs = timeframe * 60_000;
   const rangeStart = clockMinute(input.rangeStart, "range_start");
-  const rangeEnd = clockMinute(input.rangeEnd, "range_end");
-  const auctionEnd = clockMinute(input.auctionEnd, "auction_end");
-  if (!(rangeStart < rangeEnd && rangeEnd < auctionEnd)) {
-    throw new Error("session clocks must satisfy range_start < range_end < auction_end on one local day");
+  let rangeEnd = clockMinute(input.rangeEnd, "range_end");
+  let auctionEnd = clockMinute(input.auctionEnd, "auction_end");
+
+  if (rangeEnd <= rangeStart) rangeEnd += 1440;
+  while (auctionEnd <= rangeEnd) auctionEnd += 1440;
+  if (auctionEnd - rangeStart >= 1440) {
+    throw new Error("total session window (range_start to auction_end) must span strictly less than 24 hours (1440 minutes)");
   }
   if (input.horizons.length < 1 || input.horizons.length > 8 ||
       input.horizons.some((value) => !Number.isInteger(value) || value < 1 || value > 96) ||
@@ -415,12 +450,12 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
 
   const formingBarsExcluded = bars.filter((bar) => bar.forming === true).length;
   const closed = bars.filter((bar) => bar.forming !== true);
-  const localized = localize(closed, input.timezone);
-  const perDay = new Map<string, LocalBar[]>();
+  const localized = localizeAnchor(closed, input.timezone, rangeStart);
+  const perDay = new Map<string, AnchorBar[]>();
   for (const bar of localized) {
-    const day = perDay.get(bar.localDate) ?? [];
+    const day = perDay.get(bar.anchorDate) ?? [];
     day.push(bar);
-    perDay.set(bar.localDate, day);
+    perDay.set(bar.anchorDate, day);
   }
   const expectedRangeBars = Math.ceil((rangeEnd - rangeStart) / timeframe);
   const minimumRangeBars = Math.ceil(expectedRangeBars * input.minimumRangeCoverage);
@@ -445,10 +480,10 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
     signalIndex: number;
   }> = [];
 
-  for (const [localDate, day] of perDay) {
-    if (!WEEKDAYS.has(day[0]?.weekday)) continue;
-    const range = day.filter((bar) => bar.localMinute >= rangeStart && bar.localMinute < rangeEnd);
-    const auction = day.filter((bar) => bar.localMinute >= rangeEnd && bar.localMinute < auctionEnd);
+  for (const [anchorDate, day] of perDay) {
+    if (!WEEKDAYS.has(day[0]?.anchorWeekday)) continue;
+    const range = day.filter((bar) => bar.relativeMinute >= rangeStart && bar.relativeMinute < rangeEnd);
+    const auction = day.filter((bar) => bar.relativeMinute >= rangeEnd && bar.relativeMinute < auctionEnd);
     if (range.length < minimumRangeBars) { quality.insufficientRangeCoverage += 1; continue; }
     if (auction.length === 0) continue;
     quality.eligibleDays += 1;
@@ -486,8 +521,8 @@ export function runSessionAuctionStudy(input: SessionAuctionStudyInput) {
     const signal = classification[terminal];
     const direction: 1 | -1 = branch === "accepted_up" || branch === "failed_down" ? 1 : -1;
     detected.push({
-      eventId: `${localDate}:${branch}`,
-      localDate,
+      eventId: `${anchorDate}:${branch}`,
+      localDate: anchorDate,
       branch,
       direction,
       rangeHigh,
