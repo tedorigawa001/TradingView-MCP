@@ -35,7 +35,7 @@ export interface ExternalLabelStudyInput {
   observations: ExternalLabelObservation[];
   acceptedLabels: ExternalLabelAcceptance[];
   observationLagBars: number;
-  overlapPolicy: "exclude_later_event";
+  overlapPolicy: "exclude_later_event" | "allow_overlapping_windows";
   horizons: number[];
   targetReturnBps: number;
   minimumEvents: number;
@@ -142,17 +142,23 @@ export function runExternalLabelStudy(input: ExternalLabelStudyInput) {
   }
   const maxHorizon = Math.max(...input.horizons);
 
-  // Overlapping evaluation windows would reuse the same forward bars across events, which makes the
-  // sample look larger and more independent than it is. Compare against the last kept event.
+  // Overlapping evaluation windows reuse the same forward bars across events, which makes the sample
+  // look larger and more independent than it is. Excluding them is the default. A dense label series
+  // that carries a label on nearly every bar loses most of its sample that way, so the caller can
+  // keep the overlap instead and accept intervals that are narrower than the effective sample
+  // supports. The choice applies to every branch equally, so it cannot move a branch difference.
   const sorted = [...detected].sort((left, right) => left.signalIndex - right.signalIndex);
-  const kept: typeof sorted = [];
-  for (const event of sorted) {
-    const last = kept.at(-1);
-    if (last !== undefined && event.signalIndex - last.signalIndex <= maxHorizon) {
-      quality.overlappingEventsExcluded += 1;
-      continue;
+  let kept: typeof sorted = sorted;
+  if (input.overlapPolicy === "exclude_later_event") {
+    kept = [];
+    for (const event of sorted) {
+      const last = kept.at(-1);
+      if (last !== undefined && event.signalIndex - last.signalIndex <= maxHorizon) {
+        quality.overlappingEventsExcluded += 1;
+        continue;
+      }
+      kept.push(event);
     }
-    kept.push(event);
   }
 
   const events = kept.map((event) =>
@@ -232,6 +238,7 @@ export function runExternalLabelStudy(input: ExternalLabelStudyInput) {
     ...(quality.ambiguousDateObservations > 0 ? ["one_or_more_observation_dates_matched_multiple_bars"] : []),
     ...(quality.duplicateObservationTimes > 0 ? ["duplicate_observation_timestamps_ignored"] : []),
     ...(quality.overlappingEventsExcluded > 0 ? ["overlapping_evaluation_windows_excluded"] : []),
+    ...(input.overlapPolicy === "allow_overlapping_windows" ? ["overlapping_evaluation_windows_kept"] : []),
   ];
 
   return {
@@ -273,6 +280,9 @@ export function runExternalLabelStudy(input: ExternalLabelStudyInput) {
     inferenceWarnings: [
       "confidence_intervals_do_not_adjust_for_serial_dependence",
       "no_multiple_testing_adjustment_applied",
+      ...(input.overlapPolicy === "allow_overlapping_windows"
+        ? ["overlapping_evaluation_windows_kept_so_intervals_are_narrower_than_the_effective_sample"]
+        : []),
       ...(input.configurationTrials === null ? ["configuration_trials_not_declared_by_caller"] : []),
       ...(branches.length > 1
         ? ["comparing_branches_requires_the_caller_to_account_for_the_shared_unconditional_drift"]

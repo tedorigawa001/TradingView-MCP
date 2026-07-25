@@ -118,6 +118,30 @@ test("external label study excludes overlapping evaluation windows", () => {
   assert.ok(result.qualityIssues.includes("overlapping_evaluation_windows_excluded"));
 });
 
+test("external label study can keep overlapping windows, and says the intervals are then narrower", () => {
+  const bars = dailyBars(60);
+  const observations = [0, 1, 2, 30].map((i) => ({ time: bars[i].timeIso, label: "up" }));
+  const acceptedLabels = [{ label: "up", direction: "long" }];
+
+  const excluded = runExternalLabelStudy({
+    ...BASE, bars, observations, acceptedLabels, observationLagBars: 1,
+    overlapPolicy: "exclude_later_event",
+  });
+  const kept = runExternalLabelStudy({
+    ...BASE, bars, observations, acceptedLabels, observationLagBars: 1,
+    overlapPolicy: "allow_overlapping_windows",
+  });
+
+  // A dense series loses most of its sample under exclusion, which is the reason the option exists.
+  assert.equal(excluded.sample.events, 2);
+  assert.equal(kept.sample.events, 4);
+  assert.equal(kept.quality.overlappingEventsExcluded, 0);
+  assert.ok(kept.inferenceWarnings.includes(
+    "overlapping_evaluation_windows_kept_so_intervals_are_narrower_than_the_effective_sample"));
+  assert.ok(kept.qualityIssues.includes("overlapping_evaluation_windows_kept"));
+  assert.equal(excluded.inferenceWarnings.some((w) => /overlapping_evaluation_windows_kept/.test(w)), false);
+});
+
 test("external label study counts unmatched, unaccepted and duplicate observations", () => {
   const bars = dailyBars(40);
   const result = runExternalLabelStudy({

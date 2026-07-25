@@ -6594,8 +6594,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Labels to evaluate and the direction each one implies. Other labels are counted and dropped"),
         observation_lag_bars: z.number().int().min(1).max(20)
           .describe("Closed bars between the observation bar and the signal bar. Minimum 1"),
-        overlap_policy: z.literal("exclude_later_event").optional()
-          .describe("Exclude later events whose evaluation window overlaps an earlier one. Default: exclude_later_event"),
+        overlap_policy: z.enum(["exclude_later_event", "allow_overlapping_windows"]).optional()
+          .describe("Exclude later events whose window overlaps an earlier one, or keep them for a dense daily label series and accept intervals narrower than the effective sample. Default: exclude_later_event"),
         horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
         target_return_bps: z.number().finite().gt(0).max(1000),
         minimum_events: z.number().int().min(1).max(5000),
