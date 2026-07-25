@@ -297,6 +297,30 @@ test("getIndicatorValues validates studyId, count and chartIndex before touching
   assert.equal(cdp.calls.length, 0, "no expression should reach the page");
 });
 
+test("getIndicatorValues normalizes and embeds the plot filter, or disables it entirely", async () => {
+  const cdp = fakeCdp([]);
+  const tv = new TradingView(cdp);
+  await tv.getIndicatorValues({ studyId: "mlahPw", count: 2000, plotTitles: ["  Total OI ", "OPEN_INTEREST"] });
+  const expr = cdp.calls[0];
+  // Titles are matched case-insensitively on the trimmed value, so the filter is normalized once
+  // here rather than repeatedly inside the page.
+  assert.ok(expr.includes('const plotFilter = ["total oi","open_interest"]'),
+    "normalized filter should be embedded as a JSON literal");
+  assert.ok(expr.includes("out.plots = selected.map"), "only selected plots may be described");
+  assert.ok(expr.includes("for (const k of selected)"), "only selected plots may be read into values");
+
+  await tv.getIndicatorValues({ studyId: "mlahPw", count: 5 });
+  assert.ok(cdp.calls[1].includes("const plotFilter = null"),
+    "an absent filter must not narrow anything");
+});
+
+test("getIndicatorValues rejects an empty plot filter before touching the page", () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getIndicatorValues({ plotTitles: [] }), /at least one plot/);
+  assert.equal(cdp.calls.length, 0, "no expression should reach the page");
+});
+
 test("getIndicatorValues embeds studyId as a JSON literal and honors options", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);

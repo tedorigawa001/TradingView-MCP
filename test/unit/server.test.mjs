@@ -4895,6 +4895,26 @@ test("get_indicator_values forwards options with defaults applied", async () => 
   assert.equal(study.bars[0].values.Signal, 42);
 });
 
+test("get_indicator_values requires plot_titles before reading more than 500 bars", async () => {
+  const client = await connectedClient(makeDeps());
+  // Returning every plot over thousands of bars produces a payload no caller can use, so the
+  // deep read has to name its plots instead of silently emitting one.
+  const unfiltered = await client.callTool({
+    name: "get_indicator_values", arguments: { study_id: "st1", count: 2000 },
+  });
+  assert.equal(unfiltered.isError, true);
+  assert.match(unfiltered.content[0].text, /count above 500 requires plot_titles/);
+
+  const filtered = await client.callTool({
+    name: "get_indicator_values",
+    arguments: { study_id: "st1", count: 2000, plot_titles: ["Total OI"] },
+  });
+  assert.notEqual(filtered.isError, true);
+  const [study] = JSON.parse(filtered.content[0].text);
+  assert.equal(study.options.count, 2000);
+  assert.deepEqual(study.options.plotTitles, ["Total OI"]);
+});
+
 test("get_indicator_inputs returns named parameters", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "get_indicator_inputs", arguments: {} });
@@ -6066,7 +6086,8 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "stop_chart_replay", arguments: { confirm: "yes" } },
     { name: "get_chart_screenshot", arguments: { format: "gif" } },
     { name: "get_indicator_values", arguments: { study_id: '"); hack(); ("' } },
-    { name: "get_indicator_values", arguments: { count: 501 } },
+    { name: "get_indicator_values", arguments: { count: 5001 } },
+    { name: "get_indicator_values", arguments: { plot_titles: [] } },
     { name: "get_indicator_inputs", arguments: { study_id: "has space" } },
     { name: "set_indicator_input", arguments: {} },
     { name: "set_indicator_input", arguments: { study_id: "has space", inputs: [{ id: "in_0", value: 1 }] } },

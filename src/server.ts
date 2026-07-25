@@ -2460,7 +2460,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Get recent plot values of indicators (studies) on a TradingView chart — e.g. " +
         "signal levels, bands, oscillator readings. Plot names come from the indicator's " +
         "own style titles. Cosmetic plots (colors, alert flags) are excluded by default. " +
-        "Use get_chart_context first to see which indicators exist.",
+        "Use get_chart_context first to see which indicators exist. Narrow to specific plots " +
+        "with plot_titles, which is required above 500 bars so a long history stays readable.",
       inputSchema: {
         study_id: z
           .string()
@@ -2471,9 +2472,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .number()
           .int()
           .min(1)
-          .max(500)
+          .max(5000)
           .optional()
-          .describe("Number of most recent bars to return per indicator. Default: 10"),
+          .describe("Number of most recent bars to return per indicator. Above 500 requires plot_titles. Default: 10"),
+        plot_titles: z
+          .array(z.string().min(1).max(120))
+          .min(1)
+          .max(20)
+          .optional()
+          .describe("Only return these plots, matched case-insensitively on plot title or plot id"),
         chart_index: z
           .number()
           .int()
@@ -2486,15 +2493,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Include cosmetic plots (colorers, alert conditions). Default: false"),
       },
     },
-    async ({ study_id, count, chart_index, include_all_plots }) =>
+    async ({ study_id, count, chart_index, include_all_plots, plot_titles }) =>
       chartOperations.run(async () => {
         try {
+        // Every plot over thousands of bars is large enough to be unusable, so a deep read has
+        // to say which plots it wants rather than silently returning an unreadable payload.
+        if ((count ?? 10) > 500 && plot_titles === undefined) {
+          throw new Error("count above 500 requires plot_titles to narrow the returned plots");
+        }
         return jsonResult(
           await tv.getIndicatorValues({
             studyId: study_id,
             count: count ?? 10,
             chartIndex: chart_index,
             includeAllPlots: include_all_plots ?? false,
+            plotTitles: plot_titles,
           }),
         );
         } catch (err) {

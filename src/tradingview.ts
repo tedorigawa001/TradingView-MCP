@@ -907,13 +907,20 @@ export class TradingView {
       count?: number;
       chartIndex?: number;
       includeAllPlots?: boolean;
+      plotTitles?: string[];
     } = {},
   ): Promise<IndicatorValues[]> {
-    const { studyId, count = 10, chartIndex, includeAllPlots = false } = options;
+    const { studyId, count = 10, chartIndex, includeAllPlots = false, plotTitles } = options;
     if (studyId !== undefined) assertStudyId(studyId);
     if (!Number.isFinite(count) || count < 1) {
       throw new Error(`count must be a positive number, got ${count}`);
     }
+    if (plotTitles !== undefined && plotTitles.length === 0) {
+      throw new Error("plotTitles must name at least one plot when provided");
+    }
+    // Matching is case-insensitive on the trimmed title or plot id, so callers can pass what
+    // get_indicator_values already showed them without worrying about casing.
+    const normalizedPlotTitles = plotTitles?.map((title) => title.trim().toLowerCase());
     assertChartIndex(chartIndex);
     const chartExpr =
       chartIndex === undefined ? "api.activeChart()" : `api.chart(${chartIndex})`;
@@ -924,6 +931,7 @@ export class TradingView {
         const studyIdFilter = ${studyId === undefined ? "null" : JSON.stringify(studyId)};
         const includeAllPlots = ${includeAllPlots ? "true" : "false"};
         const maxBars = ${Math.floor(count)};
+        const plotFilter = ${normalizedPlotTitles === undefined ? "null" : JSON.stringify(normalizedPlotTitles)};
 
         const sourceById = {};
         for (const s of chart.chartModel().dataSources()) {
@@ -970,7 +978,23 @@ export class TradingView {
             usedTitles.add(title);
             keep.push({ col: i + 1, id: p.id, type: p.type, title });
           });
-          out.plots = keep.map((k) => ({ id: k.id, title: k.title, type: k.type }));
+          // Narrowing to the requested plots keeps a long history readable: one plot over
+          // thousands of bars is small, while every plot over the same range is not.
+          let selected = keep;
+          if (plotFilter !== null) {
+            const wanted = {};
+            for (const name of plotFilter) wanted[name] = true;
+            selected = keep.filter((k) =>
+              wanted[String(k.title).trim().toLowerCase()] === true ||
+              wanted[String(k.id).trim().toLowerCase()] === true);
+            if (selected.length === 0 && studyIdFilter !== null) {
+              throw new Error(
+                "no plot on study " + st.id + " matched " + JSON.stringify(plotFilter) +
+                "; available plots: " + keep.map((k) => k.title).join(", "),
+              );
+            }
+          }
+          out.plots = selected.map((k) => ({ id: k.id, title: k.title, type: k.type }));
 
           const items = src.data()._items || [];
           out.bars = items.slice(-maxBars).map((it) => {
@@ -979,7 +1003,7 @@ export class TradingView {
               timeIso: new Date(it.value[0] * 1000).toISOString(),
               values: {},
             };
-            for (const k of keep) {
+            for (const k of selected) {
               const v = it.value[k.col];
               row.values[k.title] = v === undefined ? null : v;
             }
