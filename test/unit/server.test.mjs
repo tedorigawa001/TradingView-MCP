@@ -6273,3 +6273,136 @@ test("run_strategy_regime_matrix rejects reference symbol switch when allow_refe
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /allow_reference_symbol_switch=true is required/);
 });
+
+test("run_strategy_regime_matrix loads history once for every invariant reference pane", async () => {
+  const pineId = "USER;regimemultiref123";
+  const chart = { symbol: "OANDA:USDJPY", resolution: "60" };
+  const referencePanes = new Map([
+    [1, { symbol: "TVC:DXY", resolution: "60" }],
+    [2, { symbol: "TVC:US10Y", resolution: "60" }],
+  ]);
+  const start = Date.UTC(2026, 0, 1);
+  let runs = 0;
+  let removed = 0;
+  let activePine = null;
+  const historyLoadsByChart = [];
+  const paneFor = (chartIndex) => (chartIndex === 0 ? chart : referencePanes.get(chartIndex));
+  const context = () => ({
+    layoutName: "test", activeChartIndex: 0, chartsCount: 3,
+    charts: [0, 1, 2].map((index) => ({
+      index, symbol: paneFor(index).symbol, resolution: paneFor(index).resolution, studies: [],
+    })),
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    setSymbol: async (symbol, chartIndex = 0) => {
+      const target = paneFor(chartIndex);
+      target.symbol = symbol;
+      return { symbol, resolution: target.resolution, bars: 200 };
+    },
+    setResolution: async (resolution, chartIndex = 0) => {
+      const target = paneFor(chartIndex);
+      target.resolution = resolution;
+      return { symbol: target.symbol, resolution, bars: 200 };
+    },
+    listPineScripts: async () => [{ pineId, name: "MultiRef Strategy", kind: "strategy",
+      version: "2.0", usedBy: [] }],
+    getOhlcv: async (count, chartIndex) => {
+      const source = paneFor(chartIndex);
+      const step = Number(source.resolution) * 60_000;
+      const drift = chartIndex === 0 ? 0.5 : chartIndex === 1 ? -0.5 : 0.25;
+      const bars = Array.from({ length: 200 }, (_, index) => {
+        const open = 100 + Math.max(0, index - 1) * drift;
+        const close = 100 + index * drift;
+        const time = start + index * step;
+        return { time: time / 1000, timeIso: new Date(time).toISOString(), open,
+          high: Math.max(open, close) + 0.2, low: Math.min(open, close) - 0.2, close, volume: 1 };
+      });
+      return { symbol: source.symbol, resolution: source.resolution, count: bars.length, bars };
+    },
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      historyLoadsByChart.push({ count, chartIndex });
+      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+    },
+    runBacktest: async () => ((runs += 1), (activePine = pineId),
+      { studyId: `temporary-${runs}`, pineId, keptOnChart: true, removedFromChart: false,
+        strategy: "MultiRef Strategy", summary: {}, totalTrades: 4, trades: [] }),
+    getStrategyReport: async () => ({ strategy: "MultiRef Strategy", symbol: chart.symbol,
+      timeframe: chart.resolution, studyId: `temporary-${runs}`, pineId, pineVersion: "2.0", inputs: [],
+      currency: "USD", initialCapital: 100000, dateRange: null, summary: { netProfit: 4 },
+      totalTrades: 4, trades: [] }),
+    getStrategyTradeLedger: async () => {
+      const step = Number(chart.resolution) * 60_000;
+      const trades = [4, -2, 3, -1].map((profit, index) => {
+        const entryTime = start + (100 + index * 10) * step;
+        return { reportIndex: index, number: index + 1, direction: "long", status: "closed",
+          entry: { time: entryTime, timeIso: new Date(entryTime).toISOString(), price: 1, label: null },
+          exit: { time: entryTime + step, timeIso: new Date(entryTime + step).toISOString(),
+            price: 1, label: null }, durationMilliseconds: step, profit, profitPercent: null,
+          cumulativeProfit: null, quantity: 1, commission: 0.1, commissionPercent: null,
+          runUp: Math.max(profit, 0) + 1, runUpPercent: null, drawDown: Math.max(-profit, 0) + 1,
+          drawDownPercent: null };
+      });
+      return { schemaVersion: "1.0", ledgerId: `sha256:${"e".repeat(64)}`,
+        strategy: "MultiRef Strategy", symbol: chart.symbol, timeframe: chart.resolution,
+        studyId: `temporary-${runs}`, pineId: activePine, pineVersion: "2.0", inputs: [],
+        currency: "USD", initialCapital: 100000, dateRange: null, summary: { totalTrades: 4 },
+        totalTrades: 4, availableTrades: 4, countMatchesSummary: true, ordering: "strategy_report",
+        offset: 0, limit: 500, returned: 4, nextOffset: null, complete: true,
+        unavailableFields: [], qualityIssues: [], trades };
+    },
+    removePineFromChart: async (requested, studyId) => ((removed += 1), (activePine = null),
+      { removed: true, pineId: requested, pineVersion: "2.0", studyId,
+        name: "MultiRef Strategy", chartIndex: 0 }),
+  } }));
+
+  const args = {
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "60", count: 200, load_more_bars: 6000,
+    trend_lookback: 10, atr_lookback: 5, volatility_baseline_lookback: 20,
+    minimum_classified_bars: 20, minimum_group_trades: 1, minimum_coverage_ratio: 1,
+    max_regime_age_bars: 1,
+    jobs: [
+      { symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId,
+        correlation_regime: { reference_chart_index: 1, expected_reference_symbol: "TVC:DXY",
+          count: 200, window: 10, max_age_bars: 1 } },
+      { symbol: "OANDA:XAUUSD", timeframe: "60", pine_id: pineId,
+        correlation_regime: { reference_chart_index: 2, expected_reference_symbol: "TVC:US10Y",
+          count: 200, window: 10, max_age_bars: 1 } },
+    ],
+  };
+
+  const preview = JSON.parse((await client.callTool({
+    name: "run_strategy_regime_matrix", arguments: args,
+  })).content[0].text);
+  assert.equal(preview.status, "preview");
+  assert.deepEqual(preview.execution.invariantReferenceChartIndices, [1, 2]);
+  assert.deepEqual(preview.execution.uniqueReferenceSymbols, ["TVC:DXY", "TVC:US10Y"]);
+  assert.equal(historyLoadsByChart.length, 0);
+
+  const result = JSON.parse((await client.callTool({
+    name: "run_strategy_regime_matrix", arguments: { ...args, confirm: true },
+  })).content[0].text);
+
+  // Every invariant pane must have its history extended once before the jobs run; without this the
+  // correlation evidence would silently be computed on whatever bars each pane happened to hold.
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1),
+    [{ count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 }]);
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 2),
+    [{ count: 5000, chartIndex: 2 }, { count: 1000, chartIndex: 2 }]);
+  assert.deepEqual(result.invariantReferenceHistoryLoads, [
+    { chartIndex: 1, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true },
+    { chartIndex: 2, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true },
+  ]);
+
+  assert.deepEqual(result.results.map((row) => row.correlationEvidence.referenceSymbol),
+    ["TVC:DXY", "TVC:US10Y"]);
+  assert.deepEqual(result.results.map((row) => row.correlationEvidence.referenceChartIndex), [1, 2]);
+  assert.equal(result.chartStateAfter.referenceRestored, true);
+  assert.equal(result.chartStateAfter.restored, true);
+  assert.deepEqual(chart, { symbol: "OANDA:USDJPY", resolution: "60" });
+  assert.deepEqual(referencePanes.get(1), { symbol: "TVC:DXY", resolution: "60" });
+  assert.deepEqual(referencePanes.get(2), { symbol: "TVC:US10Y", resolution: "60" });
+  assert.equal(runs, 2);
+  assert.equal(removed, 2);
+});

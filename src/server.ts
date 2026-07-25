@@ -1945,6 +1945,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           }
         }
 
+        // A reference pane is invariant when no job temporarily switches its symbol or timeframe.
+        // Those panes keep whatever bars are loaded before the matrix starts, so their history is
+        // extended once up front instead of being reloaded inside every job transaction. Panes that
+        // a job does switch are reloaded inside that job, because the restore discards the extra bars.
+        const invariantReferenceChartIndices = [...initialReferenceCharts.keys()].filter((refIdx) => {
+          const refChart = context.charts.find((chart) => chart.index === refIdx);
+          if (!refChart) return false;
+          return resolvedJobs.every((job) => {
+            const corr = job.correlationRegime;
+            if (corr === undefined || corr.referenceChartIndex !== refIdx) return true;
+            const switchesSymbol = corr.allowReferenceSymbolSwitch &&
+              refChart.symbol.toUpperCase() !== corr.referenceSymbol;
+            const switchesTimeframe = corr.allowReferenceTimeframeSwitch &&
+              normalizeResolution(refChart.resolution) !== job.timeframe;
+            return !switchesSymbol && !switchesTimeframe;
+          });
+        });
+
         const regimeDefinition = {
           count: count ?? MAX_MARKET_REGIME_OBSERVATIONS,
           trendLookback: trend_lookback ?? 20,
@@ -2013,8 +2031,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .update(JSON.stringify(definition), "utf8").digest("hex");
 
         const onceBeforeJobs = correlation_regime !== undefined &&
-          correlation_regime.allow_reference_timeframe_switch !== true &&
-          !resolvedJobs.some((j) => j.correlationRegime?.allowReferenceSymbolSwitch === true || j.correlationRegime?.allowReferenceTimeframeSwitch === true);
+          invariantReferenceChartIndices.includes(correlation_regime.reference_chart_index);
 
         const correlationReferenceHistoryLoad = initialReferenceCharts.size === 0 ? null : {
           ...(correlation_regime !== undefined ? { chartIndex: correlation_regime.reference_chart_index } : { referenceChartIndices: [...initialReferenceCharts.keys()] }),
@@ -2039,6 +2056,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             referenceComparisonCount,
             inferenceWarnings,
             correlationReferenceHistoryLoad,
+            invariantReferenceChartIndices,
             ranking: false,
           },
           chartState: initialChart,
@@ -2051,14 +2069,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const results: Array<Record<string, unknown>> = [];
         const correlationReferenceHistoryLoads = [];
 
-        if (onceBeforeJobs && correlation_regime !== undefined) {
+        const invariantReferenceHistoryLoadsByChart = new Map<number, Awaited<ReturnType<typeof tv.loadMoreHistory>>[]>();
+        for (const refIdx of invariantReferenceChartIndices) {
+          const loads: Awaited<ReturnType<typeof tv.loadMoreHistory>>[] = [];
           let remainingReferenceHistoryBars = loadMoreBars;
           while (remainingReferenceHistoryBars > 0) {
             const requested = Math.min(5_000, remainingReferenceHistoryBars);
-            const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: correlation_regime.reference_chart_index });
-            correlationReferenceHistoryLoads.push(loaded);
+            const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: refIdx });
+            loads.push(loaded);
             remainingReferenceHistoryBars -= requested;
             if (loaded.moreAvailable === false || loaded.added === 0) break;
+          }
+          invariantReferenceHistoryLoadsByChart.set(refIdx, loads);
+          if (correlation_regime !== undefined && refIdx === correlation_regime.reference_chart_index) {
+            correlationReferenceHistoryLoads.push(...loads);
           }
         }
 
@@ -2396,6 +2420,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               perJobBeforeCapture: true,
             }),
           },
+          invariantReferenceHistoryLoads: invariantReferenceChartIndices.map((chartIndex) => {
+            const loads = invariantReferenceHistoryLoadsByChart.get(chartIndex) ?? [];
+            return {
+              chartIndex,
+              requestedBars: loadMoreBars,
+              attempts: loads.length,
+              addedBars: loads.reduce((sum, load) => sum + load.added, 0),
+              moreAvailable: loads.at(-1)?.moreAvailable ?? null,
+            };
+          }),
           chartStateAfter: {
             fingerprint: finalChart,
             restored: chartRestored,
@@ -2405,7 +2439,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Every job uses the same explicit regime and join thresholds; no threshold is optimized per market.",
             "Results retain their native Strategy Tester currencies and are not aggregated into a portfolio metric.",
             "Regime groups are descriptive evidence and are never ranked or adopted automatically.",
-            "When correlation groups are requested, all jobs use the one unchanged reference chart timeframe.",
+            "Correlation evidence is collected serially per job; invariant reference panes keep their pre-matrix symbol and timeframe, and any pane a job switches is restored before the next job starts.",
           ],
         });
       } catch (err) {
