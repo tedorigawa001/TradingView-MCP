@@ -157,4 +157,26 @@ export class RealYieldFirstSeenStore {
       return eligible[0] ?? null;
     });
   }
+
+  async coverage(): Promise<{
+    records: number;
+    dates: number;
+    revisions: number;
+    earliest_date: string | null;
+    latest_date: string | null;
+    first_collected_at: string | null;
+  }> {
+    return this.serialize(async () => {
+      const records = await this.readAllUnlocked();
+      const dates = new Set(records.map((record) => record.observation_date));
+      return {
+        records: records.length,
+        dates: dates.size,
+        revisions: records.length - dates.size,
+        earliest_date: dates.size === 0 ? null : [...dates].sort()[0],
+        latest_date: dates.size === 0 ? null : [...dates].sort().at(-1)!,
+        first_collected_at: records.length === 0 ? null : records.map((record) => record.first_seen_at).sort()[0],
+      };
+    });
+  }
 }

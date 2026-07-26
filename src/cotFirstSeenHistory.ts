@@ -80,4 +80,33 @@ export class CotFirstSeenStore {
       return results;
     });
   }
+
+  async coverage(): Promise<{
+    records: number;
+    series: Array<{ symbol: string; dates: number; revisions: number; earliest_date: string;
+      latest_date: string; first_collected_at: string }>;
+  }> {
+    return this.log.serialize(async () => {
+      const records = await this.log.readAllUnlocked();
+      const groups = new Map<string, CotFirstSeenRecord[]>();
+      for (const record of records) {
+        const list = groups.get(record.symbol);
+        if (list === undefined) groups.set(record.symbol, [record]); else list.push(record);
+      }
+      return {
+        records: records.length,
+        series: [...groups.values()].map((group) => {
+          const dates = new Set(group.map((record) => record.observation_date));
+          return {
+            symbol: group[0].symbol,
+            dates: dates.size,
+            revisions: group.length - dates.size,
+            earliest_date: [...dates].sort()[0],
+            latest_date: [...dates].sort().at(-1)!,
+            first_collected_at: group.map((record) => record.first_seen_at).sort()[0],
+          };
+        }).sort((a, b) => a.symbol.localeCompare(b.symbol)),
+      };
+    });
+  }
 }

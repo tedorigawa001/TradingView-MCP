@@ -47,6 +47,14 @@ test("RealYieldFirstSeenStore retains revisions and selects only versions availa
   assert.equal(reverted.value, 2.01, "a revision that returns to an earlier value is still a new version");
   assert.equal(reverted.sequence, 3);
   assert.equal(await store.getAsOf(new Date("2026-07-14T00:59:59.000Z")), null);
+  assert.deepEqual(await store.coverage(), {
+    records: 3,
+    dates: 1,
+    revisions: 2,
+    earliest_date: "2026-07-13",
+    latest_date: "2026-07-13",
+    first_collected_at: "2026-07-14T01:00:00.000Z",
+  });
 });
 
 test("RealYieldFirstSeenStore uses sequence when revisions share a timestamp", async () => {

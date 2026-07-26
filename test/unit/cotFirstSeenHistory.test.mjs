@@ -24,6 +24,17 @@ test("CotFirstSeenStore retains the original observation and appends revisions",
   assert.equal(revised.sequence, 2);
   assert.equal(first.first_seen_at, "2026-07-24T19:30:00.000Z");
   assert.equal((await readFile(path, "utf8")).trim().split("\n").length, 2);
+  assert.deepEqual(await store.coverage(), {
+    records: 2,
+    series: [{
+      symbol: "OANDA:EURUSD",
+      dates: 1,
+      revisions: 1,
+      earliest_date: "2026-07-21",
+      latest_date: "2026-07-21",
+      first_collected_at: "2026-07-24T19:30:00.000Z",
+    }],
+  });
 });
 
 test("CotFirstSeenStore rejects duplicate dates and clock regression", async () => {
