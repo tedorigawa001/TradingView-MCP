@@ -1,4 +1,5 @@
 import { CotClient } from "./cot.js";
+import { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import { pathToFileURL } from "node:url";
 import { CotFirstSeenStore, resolveCotFirstSeenHistoryPath } from "./cotFirstSeenHistory.js";
 import { collectFirstSeenSources, getUnifiedFirstSeenCoverage } from "./firstSeenCollection.js";
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
     : await collectFirstSeenSources({
       cot: new CotClient(undefined, undefined, cotStore),
       realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldStore),
+      cmeGoldOpenInterest: new CmeDailyBulletinClient(),
       cotSymbols: args.cotSymbols,
       cotWeeks: args.cotWeeks,
       coverage,

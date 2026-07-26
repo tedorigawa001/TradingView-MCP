@@ -42,10 +42,11 @@ test("fair value gap retest event study over MCP stdio and live TradingView", {
     const before = await call("get_chart_context", {});
     const result = await call("run_market_event_study", config, 60_000);
     assert.equal(result.conditionType, "fair_value_gap_retest");
-    assert.equal(result.methodologyVersion, "fvg_retest_event_study_v1");
+    assert.equal(result.methodologyVersion, "fvg_retest_event_study_v2");
     assert.equal(result.symbol.toUpperCase(), config.expected_symbol.toUpperCase());
     assert.equal(result.timeframe, config.expected_timeframe);
-    assert.ok(result.sample.events >= 1);
+    if (config.condition?.signal_from === undefined) assert.ok(result.sample.events >= 1);
+    else assert.ok(result.sample.events >= 0);
     assert.equal(result.eventsTruncated, result.sample.events > (config.event_limit ?? 50));
     assert.equal(result.inferenceContract.confidenceLevel, config.confidence_level ?? 0.95);
     assert.equal(result.inferenceContract.configurationTrials, config.configuration_trials ?? 1);
@@ -53,13 +54,22 @@ test("fair value gap retest event study over MCP stdio and live TradingView", {
     assert.equal(result.conditionContract.retestWithinBars, config.condition?.retest_within_bars ?? 24);
     assert.equal(result.conditionContract.minImpulseBodyRatio, config.condition?.min_impulse_body_ratio ?? 0.5);
     assert.equal(result.conditionContract.requireBoundaryHold, config.condition?.require_boundary_hold ?? true);
+    assert.equal(result.selectionContract.signalFrom, config.condition?.signal_from ?? null);
+    assert.equal(result.selectionContract.signalTo, config.condition?.signal_to ?? null);
+    assert.equal(result.selectionContract.branch, config.condition?.direction ?? null);
+    assert.deepEqual(Object.keys(result.byBranch), config.condition?.direction === "bullish"
+      ? ["fvg_retest_bullish"] : config.condition?.direction === "bearish"
+      ? ["fvg_retest_bearish"] : ["fvg_retest_bullish", "fvg_retest_bearish"]);
+    assert.equal(result.selectionContract.regime?.directional ?? null,
+      config.condition?.regime_filter?.directional ?? null);
 
     if (config.journal) {
       assert.equal(result.journal.recorded, true);
     }
     assert.equal(containsKey(result, "bars"), false, "raw OHLC arrays must not amplify the response");
     t.diagnostic(`source=${result.source.from}..${result.source.to} events=${result.sample.events} ` +
-      `fvg_bullish=${result.byBranch.fvg_retest_bullish.events} fvg_bearish=${result.byBranch.fvg_retest_bearish.events}`);
+      `branches=${JSON.stringify(Object.fromEntries(Object.entries(result.byBranch)
+        .map(([branch, evidence]) => [branch, evidence.events])))}`);
     const after = await call("get_chart_context", {});
     assert.deepEqual(after, before);
   } catch (error) {

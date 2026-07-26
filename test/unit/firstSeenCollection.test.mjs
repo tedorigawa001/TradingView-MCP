@@ -30,6 +30,7 @@ test("collection continues after an individual source failure and returns covera
       return { observations: [{ report_date: "2026-07-21" }] };
     } },
     realYield: { getLatest: async () => ({ observation_date: "2026-07-25", available_at: "2026-07-26T00:00:00.000Z" }) },
+    cmeGoldOpenInterest: { getLatestGoldOpenInterest: async () => ({ observation_date: "2026-07-24", open_interest: 376079, report_status: "final" }) },
     cotSymbols: ["OANDA:EURUSD", "OANDA:XAUUSD"],
     cotWeeks: 52,
     coverage: async () => coverage,
@@ -38,6 +39,7 @@ test("collection continues after an individual source failure and returns covera
   assert.equal(result.cot[0].status, "error");
   assert.deepEqual(result.cot[1], { symbol: "OANDA:XAUUSD", status: "complete", observations: 1 });
   assert.equal(result.real_yield.status, "complete");
+  assert.deepEqual(result.cme_gold_open_interest, { status: "complete", observation_date: "2026-07-24", open_interest: 376079, report_status: "final" });
   assert.equal(result.coverage, coverage);
 });
 

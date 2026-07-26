@@ -18,6 +18,8 @@
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
+    "migrate:futures-oi-dates": "node build/migrateFuturesOiDatesCli.js",
+    "migrate:futures-oi-cme-cleanup": "node build/migrateFuturesOiCmeCleanupCli.js",
     "pretest": "npm run build",
     "test": "node --test test/unit/*.test.mjs",
     "test:integration": "node test/smoke.mjs",
@@ -31,6 +33,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "fast-xml-parser": "^5.10.0",
+    "pdfjs-dist": "^6.1.200",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },

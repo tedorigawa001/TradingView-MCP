@@ -179,7 +179,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `compute_market_regimes` | アクティブチャートの確定OHLCを、明示閾値と各バー以前の証拠だけでtrend/range/transitionおよびlow/normal/high volatilityへ分類。分布・遷移・品質を返し、最適化や売買推奨は行わない |
 | `run_strategy_regime_analysis` | 正確な保存済みStrategyを一時実行して完全台帳を取得し、Entry時点までにclose済みのregime labelと結合。方向・volatility・複合regimeに加え、任意のDST対応session窓別のPF、期待値、勝率、DD、coverageを返す。session重複は全一致または入力順の先頭一致を明示選択でき、Strategy削除とchart復元を検証 |
 | `run_strategy_regime_matrix` | 最大12件のsymbol/timeframe/Strategyを直列実行し、共通regime・session契約で台帳を一括分解。sessionは非排他または入力順優先の排他分類を固定できる。任意でjobごとに最大20,000本を5,000本単位で追加ロードし、soft deadline、個別失敗隔離、各job後のchart復元、復元失敗時の後続停止を行う。ランキングや異通貨合算はしない |
-| `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。Session handoffは設定窓全体の確定後を評価起点とし、窓内の未来情報をsignal時点へ混入させない。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す |
+| `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。Session handoffは設定窓全体の確定後を評価起点とし、窓内の未来情報をsignal時点へ混入させない。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す。FVG条件は`signal_from`/`signal_to`、単一`direction`、単一`regime_filter`で事前登録後の一次母集団を固定できる |
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
 | `run_external_label_study` | 呼出側が供給した点時系列ラベル(日次建玉、清算統計、調査データ等)の将来結果を、既存のfold・信頼区間・ジャーナル機構で測定。ラベルは必ず**自バーより後**のバーへ結合し(`observation_lag_bars` 最小1)、ゼロラグは拒否する。外部ラベルは自バー確定時点では通常未公表のため。horizonは後続の観測足を数えるので日足が週末で無効化されない。`run_market_event_study` と異なり日足・週足を受け付ける。ラベルの正しさと改訂は供給側の責任で、point-in-timeを保証するのは結合のみ |
 | `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない |
@@ -191,11 +191,16 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `get_analysis_performance` | ライブ分析ジャーナルを勝敗、gross/net R、MFE/MAE、到達時間へ集計。指標ごとの母集団と除外数を明示 |
 | `validate_trade_plan` | 反映前の分析案を方向・期限・現在価格・証拠鮮度・イベント停止時間・コスト控除後RRで検証(チャート非干渉) |
 | `get_futures_flow_context`(first-seen収集) | 日次建玉を読むたびに、値と**初回観測時刻**を追記専用ログへ記録する。建玉は当該取引日の終了後に速報が出て確報へ改訂されるため、後からダウンロードした系列は当時見えていたものではない。値が変わった時だけ追記し、期近と全限月合算は別系列として分離。`observation_date > first_seen_at` と初回観測時刻の逆行は拒否。**vintageは前向きにしか蓄積できず、収集開始前の日付は復元できない**。収集失敗はcontext取得を巻き込まない |
-| `get_positioning_context` | CFTC COTの履歴・OI正規化・前回差・3年パーセンタイル |
+| `get_cme_gold_open_interest` | CME Daily Bulletinの`TOTAL GC FUT`からGC全限月OIを取得し、速報/確報状態とともに公式系列へfirst-seen記録。チャート内の限月バスケットとは混在させない |
+| `get_positioning_context` | CFTC COTの履歴・OI正規化・前回差・3年パーセンタイル。ローカルfirst-seen蓄積が有効なら、推定せず実際の初回観測時刻を`available_at`として返す |
 | `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。日次OIと価格×OI四象限は認証済みfirst-seenデータ源がない限りunavailableとして返す |
 | `get_real_yield_context` | 米財務省の10年Par Real CMT。`as_of`指定時はローカルでfirst-seen済みの版だけを返す |
 | `audit_pine_indicator` | 自作Pineのリペイント要因を静的監査 |
 | `compare_indicator_observations` | 再読込前後の同一バー値を比較し、変化を検出 |
+
+### First-seen collection CLI
+
+`npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OIの収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
 
 `get_execution_snapshot`は開いているTradingViewチャートの`bid`、`ask`、`lp_time`、session状態、realtime-load状態、価格刻みを最優先で読み取ります。`lp_time`は同じquote snapshot内のlast-price時刻でありbid/ask個別のexchange timestampではありませんが、その時刻が既定5秒以内、streaming、active session、realtime loadedをすべて満たす場合だけ`ready`です。対象銘柄がチャートにない場合はscannerへフォールバックしますが、scannerはbid/askの市場側timestampとsession calendarを返さないため、受信時刻を市場時刻へ置き換えません。フォールバックでは既定最大1.2秒間にbid/ask変化を観測できた場合だけreadyとし、価格が動かなければ`wait`です。これは約定可能性や流動性を保証せず、口座・注文・チャートを変更しません。
 
@@ -203,7 +208,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 
 実質金利のfirst-seen履歴は既定で`~/.tradingview-mcp/real-yield-first-seen.jsonl`へ追記されます。保存先はMCPプロセスの環境変数`TRADINGVIEW_MCP_REAL_YIELD_HISTORY_PATH`で変更できます。初回起動時に取得した過去行は過去の公表時刻へ遡及せず、その起動で実際に保存できた時刻以後だけバックテストに利用されます。
 
-先物建玉のfirst-seen履歴は既定で`~/.tradingview-mcp/futures-open-interest-first-seen.jsonl`へ追記されます。保存先は環境変数`TRADINGVIEW_MCP_FUTURES_OI_HISTORY_PATH`で変更できます。`get_futures_flow_context`が建玉を読むたびに自動で記録されるため、**ツールを実行した日の分しか貯まりません**。また収集を開始する前の日付についてはvintageを復元できないため、過去分は「今日ダウンロードした改訂後の値」であってその時点で見えていた値ではない、という区別が必要です。
+先物建玉のfirst-seen履歴は既定で`~/.tradingview-mcp/futures-open-interest-first-seen-v3.jsonl`へ追記されます。保存先は環境変数`TRADINGVIEW_MCP_FUTURES_OI_HISTORY_PATH`で変更できます。`get_futures_flow_context`がチャート由来の建玉を読むたび、および`get_cme_gold_open_interest`や収集CLIがCME公式GC全限月OIを読むたびに自動で記録されます。チャート近似値とCME公式値は別系列であり、収集開始前の日付についてはvintageを復元できないため、過去分は「今日ダウンロードした改訂後の値」であってその時点で見えていた値ではない、という区別が必要です。
 
 履歴書込み中にプロセスが異常終了して`.lock`が残った場合、安全のため自動削除せず履歴照会を停止します。他のTradingView-MCPプロセスが動作していないことを確認してから、履歴ファイルと同じ場所の`.lock`だけを削除してください。
 

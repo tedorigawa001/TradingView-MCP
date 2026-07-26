@@ -2,12 +2,18 @@ import type { OhlcvBar } from "./tradingview.js";
 import {
   buildEventRegimeAnalysis,
   canonicalTime,
+  joinEventsToPriorClosedRegimes,
   outcomeForEvent,
   summarizeOutcomes,
   timeframeMinutes,
   type SessionAuctionFold,
 } from "./sessionAuctionStudy.js";
-import { computeMarketRegimes, marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
+import {
+  computeMarketRegimes,
+  marketRegimeResolutionMilliseconds,
+  type DirectionalRegime,
+  type VolatilityRegime,
+} from "./marketRegimes.js";
 
 type Direction = 1 | -1;
 type Branch = "fvg_retest_bullish" | "fvg_retest_bearish";
@@ -36,6 +42,13 @@ export interface FvgRetestStudyInput {
   confidenceLevel: 0.9 | 0.95 | 0.99;
   configurationTrials: number | null;
   regime: RegimeInput | null;
+  signalFrom?: string | null;
+  signalTo?: string | null;
+  branchFilter?: "bullish" | "bearish" | null;
+  regimeFilter?: {
+    directional: DirectionalRegime;
+    volatility?: VolatilityRegime | null;
+  } | null;
 }
 
 function validate(input: FvgRetestStudyInput) {
@@ -59,6 +72,21 @@ function validate(input: FvgRetestStudyInput) {
   if (input.configurationTrials !== null && (!Number.isInteger(input.configurationTrials) || input.configurationTrials < 1 || input.configurationTrials > 100_000)) {
     throw new Error("configuration trials must be an integer from 1 to 100000");
   }
+  const signalFromMs = input.signalFrom === null || input.signalFrom === undefined
+    ? null : canonicalTime(input.signalFrom, "signal_from");
+  const signalToMs = input.signalTo === null || input.signalTo === undefined
+    ? null : canonicalTime(input.signalTo, "signal_to");
+  if (signalFromMs !== null && signalToMs !== null && signalFromMs >= signalToMs) {
+    throw new Error("signal_to must be after signal_from");
+  }
+  if (input.branchFilter !== null && input.branchFilter !== undefined &&
+      !["bullish", "bearish"].includes(input.branchFilter)) {
+    throw new Error("branch filter must be bullish or bearish");
+  }
+  if (input.regimeFilter !== null && input.regimeFilter !== undefined &&
+      (input.regime === null || input.regime === undefined)) {
+    throw new Error("regime_filter requires regime configuration");
+  }
 }
 
 export function runFvgRetestStudy(input: FvgRetestStudyInput) {
@@ -77,6 +105,13 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     retestWindowExpired: 0,
     boundaryHoldFailed: 0,
     overlappingSignalsExcluded: 0,
+    overlappingSignalsExcludedByBranch: { fvg_retest_bullish: 0, fvg_retest_bearish: 0 },
+    signalBeforeWindowExcluded: 0,
+    signalAtOrAfterWindowExcluded: 0,
+    branchExcluded: 0,
+    noPriorClosedRegime: 0,
+    staleRegimeEvidence: 0,
+    regimeMismatchExcluded: 0,
   };
 
   const detected: Array<{
@@ -89,7 +124,24 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     signalIndex: number;
   }> = [];
 
-  const usedSignals = new Set<number>();
+  // A signal bar is claimed per branch, never across branches. Sharing one set let a bullish FVG
+  // consume the signal bar of a bearish one, so a study frozen to a single `direction` lost events
+  // for a reason outside its own branch, and how many it lost depended on how far back the loaded
+  // history began. Within a branch the competitors share the same signal bar, so the surviving
+  // event carries the same outcome and only its originating FVG differs.
+  const usedSignals: Record<Branch, Set<number>> = {
+    fvg_retest_bullish: new Set<number>(),
+    fvg_retest_bearish: new Set<number>(),
+  };
+  const claimSignal = (branch: Branch, signalIndex: number): boolean => {
+    if (usedSignals[branch].has(signalIndex)) {
+      quality.overlappingSignalsExcluded += 1;
+      quality.overlappingSignalsExcludedByBranch[branch] += 1;
+      return false;
+    }
+    usedSignals[branch].add(signalIndex);
+    return true;
+  };
 
   for (let i = 2; i < closed.length; i += 1) {
     const bar1 = closed[i - 2];
@@ -128,12 +180,8 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
           continue;
         }
 
-        if (usedSignals.has(signalIndex)) {
-          quality.overlappingSignalsExcluded += 1;
-          continue;
-        }
+        if (!claimSignal("fvg_retest_bullish", signalIndex)) continue;
 
-        usedSignals.add(signalIndex);
         detected.push({
           eventId: `${bar3.timeIso}:fvg_retest_bullish`,
           branch: "fvg_retest_bullish",
@@ -174,12 +222,8 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
           continue;
         }
 
-        if (usedSignals.has(signalIndex)) {
-          quality.overlappingSignalsExcluded += 1;
-          continue;
-        }
+        if (!claimSignal("fvg_retest_bearish", signalIndex)) continue;
 
-        usedSignals.add(signalIndex);
         detected.push({
           eventId: `${bar3.timeIso}:fvg_retest_bearish`,
           branch: "fvg_retest_bearish",
@@ -196,7 +240,27 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
   const timeframe = timeframeMinutes(input.timeframe);
   const timeframeMs = timeframe * 60_000;
 
-  const events = detected.map((event) => outcomeForEvent(event, closed, input.horizons, timeframeMs, input.targetReturnBps));
+  const detectedEvents = detected.map((event) =>
+    outcomeForEvent(event, closed, input.horizons, timeframeMs, input.targetReturnBps));
+  const signalFromMs = input.signalFrom === null || input.signalFrom === undefined
+    ? null : canonicalTime(input.signalFrom, "signal_from");
+  const signalToMs = input.signalTo === null || input.signalTo === undefined
+    ? null : canonicalTime(input.signalTo, "signal_to");
+  quality.signalBeforeWindowExcluded = signalFromMs === null ? 0
+    : detectedEvents.filter((event) => Date.parse(event.signalTime) < signalFromMs).length;
+  quality.signalAtOrAfterWindowExcluded = signalToMs === null ? 0
+    : detectedEvents.filter((event) => Date.parse(event.signalTime) >= signalToMs).length;
+  const windowEvents = detectedEvents.filter((event) => {
+    const signalMs = Date.parse(event.signalTime);
+    return (signalFromMs === null || signalMs >= signalFromMs) &&
+      (signalToMs === null || signalMs < signalToMs);
+  });
+  const selectedBranch = input.branchFilter === "bullish" ? "fvg_retest_bullish"
+    : input.branchFilter === "bearish" ? "fvg_retest_bearish" : null;
+  quality.branchExcluded = selectedBranch === null ? 0
+    : windowEvents.filter((event) => event.branch !== selectedBranch).length;
+  const branchEvents = selectedBranch === null ? windowEvents
+    : windowEvents.filter((event) => event.branch === selectedBranch);
   const folds = input.folds.map((fold) => ({
     ...fold,
     fromMs: canonicalTime(fold.from, `${fold.foldId}.from`),
@@ -208,29 +272,6 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
   if (folds.some((left, index) => folds.slice(index + 1).some((right) => left.fromMs < right.toMs && right.fromMs < left.toMs))) {
     throw new Error("folds must not overlap");
   }
-
-  const branches: Branch[] = ["fvg_retest_bullish", "fvg_retest_bearish"];
-  const byBranch = Object.fromEntries(branches.map((branch) => {
-    const selected = events.filter((event) => event.branch === branch);
-    return [branch, { events: selected.length, horizons: summarizeOutcomes(selected, input.horizons, input.confidenceLevel, "global") }];
-  }));
-
-  const foldResults = folds.map((fold) => {
-    const selected = events.filter((event) => {
-      const time = Date.parse(event.signalTime);
-      return time >= fold.fromMs && time < fold.toMs;
-    });
-    return {
-      foldId: fold.foldId,
-      from: fold.from,
-      to: fold.to,
-      events: selected.length,
-      byBranch: Object.fromEntries(branches.map((branch) => {
-        const branchEvents = selected.filter((event) => event.branch === branch);
-        return [branch, { events: branchEvents.length, horizons: summarizeOutcomes(branchEvents, input.horizons, input.confidenceLevel, "fold") }];
-      })),
-    };
-  });
 
   const regimeEvidence = input.regime === null ? null
     : computeMarketRegimes({
@@ -254,6 +295,46 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     throw new Error(`event regime join does not support timeframe ${JSON.stringify(input.timeframe)}`);
   }
 
+  let events = branchEvents;
+  if (input.regimeFilter !== null && input.regimeFilter !== undefined &&
+      input.regime !== null && regimeEvidence !== null && regimeResolutionMs !== null) {
+    const joined = joinEventsToPriorClosedRegimes(
+      branchEvents, regimeEvidence.observations, regimeResolutionMs, input.regime.maxRegimeAgeBars);
+    quality.noPriorClosedRegime = joined.excluded.noPriorClosedRegime;
+    quality.staleRegimeEvidence = joined.excluded.staleRegimeEvidence;
+    const matched = joined.joined.filter(({ observation }) =>
+      observation.directionalRegime === input.regimeFilter!.directional &&
+      (input.regimeFilter!.volatility === null || input.regimeFilter!.volatility === undefined ||
+        observation.volatilityRegime === input.regimeFilter!.volatility));
+    quality.regimeMismatchExcluded = joined.joined.length - matched.length;
+    events = matched.map(({ event }) => event);
+  }
+
+  const branches: Branch[] = selectedBranch === null
+    ? ["fvg_retest_bullish", "fvg_retest_bearish"] : [selectedBranch];
+  const byBranch = Object.fromEntries(branches.map((branch) => {
+    const selected = events.filter((event) => event.branch === branch);
+    return [branch, { events: selected.length, horizons: summarizeOutcomes(selected, input.horizons, input.confidenceLevel, "global") }];
+  }));
+
+  const foldResults = folds.map((fold) => {
+    const selected = events.filter((event) => {
+      const time = Date.parse(event.signalTime);
+      return time >= fold.fromMs && time < fold.toMs;
+    });
+    return {
+      foldId: fold.foldId,
+      from: fold.from,
+      to: fold.to,
+      events: selected.length,
+      byBranch: Object.fromEntries(branches.map((branch) => {
+        const branchEventsForFold = selected.filter((event) => event.branch === branch);
+        return [branch, { events: branchEventsForFold.length,
+          horizons: summarizeOutcomes(branchEventsForFold, input.horizons, input.confidenceLevel, "fold") }];
+      })),
+    };
+  });
+
   const regimeAnalysis = input.regime === null || regimeEvidence === null || regimeResolutionMs === null ? null
     : buildEventRegimeAnalysis(events, regimeEvidence.observations, regimeResolutionMs, input.horizons, input.confidenceLevel, input.regime.minimumGroupEvents, input.regime.minimumCoverageRatio, input.regime.maxRegimeAgeBars);
 
@@ -270,7 +351,7 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
 
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "fvg_retest_event_study_v1" as const,
+    methodologyVersion: "fvg_retest_event_study_v2" as const,
     status: qualityIssues.length === 0 ? ("complete" as const) : ("partial" as const),
     conditionType: "fair_value_gap_retest" as const,
     symbol: input.symbol,
@@ -280,6 +361,18 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
       retestWithinBars: input.retestWithinBars,
       minImpulseBodyRatio: input.minImpulseBodyRatio,
       requireBoundaryHold: input.requireBoundaryHold,
+    },
+    selectionContract: {
+      signalFrom: input.signalFrom ?? null,
+      signalFromInclusive: true,
+      signalTo: input.signalTo ?? null,
+      signalToExclusive: true,
+      branch: input.branchFilter ?? null,
+      regime: input.regimeFilter === null || input.regimeFilter === undefined ? null : {
+        directional: input.regimeFilter.directional,
+        volatility: input.regimeFilter.volatility ?? null,
+        labelAt: "latest_regime_bar_with_nominal_close_at_or_before_signal_bar_start" as const,
+      },
     },
     inferenceContract: {
       confidenceLevel: input.confidenceLevel,
@@ -302,6 +395,7 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     sample: {
       barsReceived: input.bars.length,
       closedBars: closed.length,
+      detectedEvents: detectedEvents.length,
       events: events.length,
       minimumEvents: input.minimumEvents,
     },

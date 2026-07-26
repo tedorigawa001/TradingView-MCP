@@ -5,6 +5,7 @@ import { TradingView } from "./tradingview.js";
 import { Scanner } from "./scanner.js";
 import { EconomicCalendar } from "./calendar.js";
 import { CotClient } from "./cot.js";
+import { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import { CotFirstSeenStore, resolveCotFirstSeenHistoryPath } from "./cotFirstSeenHistory.js";
 import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
@@ -28,6 +29,7 @@ const server = createServer({
   journal: analysisJournal,
   researchJournal: strategyResearchJournal,
   futuresOpenInterestHistory: new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath()),
+  cmeGoldOpenInterest: new CmeDailyBulletinClient(),
 });
 
 const transport = new StdioServerTransport();

@@ -5,8 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FuturesOpenInterestFirstSeenStore,
+  futuresSessionObservationDate,
   resolveFuturesOpenInterestHistoryPath,
+  resolveFuturesOpenInterestV2HistoryPath,
+  resolveLegacyFuturesOpenInterestHistoryPath,
 } from "../../build/futuresOpenInterestHistory.js";
+import { migrateFuturesOpenInterestDates } from "../../build/futuresOpenInterestMigration.js";
+import { migrateFuturesOpenInterestCmeCleanup } from "../../build/futuresOpenInterestCmeCleanupMigration.js";
 
 const newStore = async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-"));
@@ -89,6 +94,26 @@ test("futures open interest keeps front month and aggregated scopes apart", asyn
   assert.equal(aggregated[0].open_interest, 383317);
 });
 
+test("futures open interest keeps an exchange aggregate separate from a chart-built basket", async () => {
+  const { store } = await newStore();
+  await store.observeMany([
+    observation({ open_interest: 379963, source: "tradingview_chart_indicator", source_detail: "gc_basket_12_contracts" }),
+    observation({ open_interest: 383368, source: "cme_daily_bulletin", source_detail: "GC_FUT" }),
+  ]);
+  const exchange = await store.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated",
+    source: "cme_daily_bulletin", sourceDetail: "GC_FUT", asOf: new Date("2026-07-25T00:00:00.000Z"),
+  });
+  const chart = await store.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated",
+    source: "tradingview_chart_indicator", sourceDetail: "gc_basket_12_contracts", asOf: new Date("2026-07-25T00:00:00.000Z"),
+  });
+  assert.equal(exchange[0].open_interest, 383368);
+  assert.equal(chart[0].open_interest, 379963);
+  const coverage = await store.coverage();
+  assert.equal(coverage.series.length, 2);
+});
+
 test("futures open interest refuses an observation dated after it was seen", async () => {
   const { store } = await newStore();
   await assert.rejects(() => store.observeMany([observation({
@@ -143,7 +168,80 @@ test("futures open interest coverage reports what has actually been collected", 
   assert.equal(coverage.series[0].first_collected_at, "2026-07-22T00:00:00.000Z");
 });
 
+test("futures OI date migration preserves first-seen history while shifting session dates", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-migration-"));
+  const source = new FuturesOpenInterestFirstSeenStore(join(directory, "legacy.jsonl"));
+  const destination = new FuturesOpenInterestFirstSeenStore(join(directory, "v2.jsonl"));
+  await source.observeMany([observation({
+    observation_date: "2026-07-19", open_interest: 100, observed_at: "2026-07-21T00:00:00.000Z",
+  })]);
+  await source.observeMany([observation({
+    observation_date: "2026-07-19", open_interest: 110, observed_at: "2026-07-22T00:00:00.000Z",
+  })]);
+
+  assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination }), {
+    source_records: 2, migrated: 2, unchanged: 0, revisions: 1,
+  });
+  assert.deepEqual(await destination.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", asOf: new Date("2026-07-23T00:00:00.000Z"),
+  }), [{ observation_date: "2026-07-20", open_interest: 110, first_seen_at: "2026-07-22T00:00:00.000Z" }]);
+  assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination }), {
+    source_records: 2, migrated: 0, unchanged: 2, revisions: 0,
+  });
+});
+
+test("futures OI CME cleanup migration removes only the known malformed parser record", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-cme-cleanup-"));
+  const source = new FuturesOpenInterestFirstSeenStore(join(directory, "v2.jsonl"));
+  const destination = new FuturesOpenInterestFirstSeenStore(join(directory, "v3.jsonl"));
+  await source.observeMany([observation({ open_interest: 379963, observed_at: "2026-07-25T00:00:00.000Z" })]);
+  await source.observeMany([observation({
+    observation_date: "2026-07-24", open_interest: 12136, source: "cme_daily_bulletin", source_detail: "GC_FUT",
+    observed_at: "2026-07-26T22:43:36.668Z",
+  })]);
+  await source.observeMany([observation({
+    observation_date: "2026-07-24", open_interest: 376079, source: "cme_daily_bulletin", source_detail: "GC_FUT",
+    observed_at: "2026-07-26T22:50:20.177Z",
+  })]);
+  assert.deepEqual(await migrateFuturesOpenInterestCmeCleanup({ source, destination }), {
+    source_records: 3, migrated: 2, unchanged: 0, revisions: 0, discarded_malformed_cme_records: 1,
+  });
+  const official = await destination.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", source: "cme_daily_bulletin", sourceDetail: "GC_FUT",
+    asOf: new Date("2026-07-27T00:00:00.000Z"),
+  });
+  assert.deepEqual(official, [{ observation_date: "2026-07-24", open_interest: 376079, first_seen_at: "2026-07-26T22:50:20.177Z" }]);
+});
+
 test("futures open interest history path falls back to the per-user directory", () => {
   assert.equal(resolveFuturesOpenInterestHistoryPath("  /tmp/custom.jsonl "), "/tmp/custom.jsonl");
-  assert.match(resolveFuturesOpenInterestHistoryPath(""), /futures-open-interest-first-seen\.jsonl$/);
+  assert.match(resolveFuturesOpenInterestHistoryPath(""), /futures-open-interest-first-seen-v3\.jsonl$/);
+  assert.match(resolveFuturesOpenInterestV2HistoryPath(""), /futures-open-interest-first-seen-v2\.jsonl$/);
+  assert.match(resolveLegacyFuturesOpenInterestHistoryPath(""), /futures-open-interest-first-seen\.jsonl$/);
+});
+
+test("futures session observation date resolves the exchange trading date under both US offsets", () => {
+  // EDT: the session opens 18:00 ET = 22:00 UTC on the previous calendar day. The bar stamped
+  // Thursday evening is Friday's trading date, which is why the log used to hold no Fridays.
+  assert.equal(futuresSessionObservationDate("2026-07-23T22:00:00.000Z"), "2026-07-24");
+  // EST: the same 18:00 ET open lands at 23:00 UTC.
+  assert.equal(futuresSessionObservationDate("2026-01-15T23:00:00.000Z"), "2026-01-16");
+  // Sunday evening opens Monday's trading date; a Sunday date in the log is the old defect.
+  assert.equal(futuresSessionObservationDate("2025-07-27T22:00:00.000Z"), "2025-07-28");
+});
+
+test("futures session observation date accepts only the two CME evening open hours", () => {
+  // 17:00 CT is 22:00 UTC under CDT and 23:00 UTC under CST. Nothing else can be shifted a day and
+  // still name the right session, and the store's observation_date <= first_seen_at check cannot
+  // see a date that is early by a day, so every other stamping convention must fail closed.
+  const rejected = /does not open a CME evening session/;
+  assert.throws(() => futuresSessionObservationDate("2026-07-24T00:00:00.000Z"), rejected);
+  assert.throws(() => futuresSessionObservationDate("2026-07-24T11:59:59.000Z"), rejected);
+  assert.throws(() => futuresSessionObservationDate("2026-07-24T12:00:00.000Z"), rejected);
+  // A feed stamping the bar an hour before the CME open is the case a "sometime in the evening"
+  // check would have waved through while shifting it to the wrong trading date.
+  assert.throws(() => futuresSessionObservationDate("2026-07-24T21:00:00.000Z"), rejected);
+  assert.equal(futuresSessionObservationDate("2026-07-24T22:00:00.000Z"), "2026-07-25");
+  assert.equal(futuresSessionObservationDate("2026-07-24T23:00:00.000Z"), "2026-07-25");
+  assert.throws(() => futuresSessionObservationDate("2026-07-24"), /canonical timestamp/);
 });

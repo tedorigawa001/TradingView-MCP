@@ -1,4 +1,5 @@
 import type { CotClient } from "./cot.js";
+import type { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
 import type { FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
@@ -6,6 +7,7 @@ import type { RealYieldFirstSeenStore } from "./realYieldHistory.js";
 
 type CotCollector = Pick<CotClient, "getHistory">;
 type RealYieldCollector = Pick<TreasuryRealYieldClient, "getLatest">;
+type CmeGoldOpenInterestCollector = Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -40,6 +42,7 @@ export async function getUnifiedFirstSeenCoverage(input: {
 export async function collectFirstSeenSources(input: {
   cot: CotCollector;
   realYield: RealYieldCollector;
+  cmeGoldOpenInterest: CmeGoldOpenInterestCollector;
   cotSymbols: string[];
   cotWeeks: number;
   coverage: () => Promise<UnifiedFirstSeenCoverage>;
@@ -48,6 +51,7 @@ export async function collectFirstSeenSources(input: {
   status: "complete" | "partial";
   cot: Array<{ symbol: string; status: "complete" | "error"; observations?: number; error?: string }>;
   real_yield: { status: "complete" | "error"; observation_date?: string; available_at?: string | null; error?: string };
+  cme_gold_open_interest: { status: "complete" | "error"; observation_date?: string; open_interest?: number; report_status?: string; error?: string };
   coverage: UnifiedFirstSeenCoverage;
 }> {
   const cot = await Promise.all(input.cotSymbols.map(async (symbol) => {
@@ -69,13 +73,26 @@ export async function collectFirstSeenSources(input: {
   } catch (error) {
     realYield = { status: "error", error: errorMessage(error) };
   }
+  let cmeGoldOpenInterest: { status: "complete" | "error"; observation_date?: string; open_interest?: number; report_status?: string; error?: string };
+  try {
+    const latest = await input.cmeGoldOpenInterest.getLatestGoldOpenInterest();
+    cmeGoldOpenInterest = {
+      status: "complete",
+      observation_date: latest.observation_date,
+      open_interest: latest.open_interest,
+      report_status: latest.report_status,
+    };
+  } catch (error) {
+    cmeGoldOpenInterest = { status: "error", error: errorMessage(error) };
+  }
   const coverage = await input.coverage();
   return {
     observed_at: new Date().toISOString(),
-    status: cot.some((item) => item.status === "error") || realYield.status === "error" || coverage.status === "partial"
+    status: cot.some((item) => item.status === "error") || realYield.status === "error" || cmeGoldOpenInterest.status === "error" || coverage.status === "partial"
       ? "partial" : "complete",
     cot,
     real_yield: realYield,
+    cme_gold_open_interest: cmeGoldOpenInterest,
     coverage,
   };
 }

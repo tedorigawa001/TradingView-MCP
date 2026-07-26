@@ -487,6 +487,22 @@ function makeDeps(overrides = {}) {
       }),
       ...overrides.realYield,
     },
+    cmeGoldOpenInterest: {
+      getLatestGoldOpenInterest: async () => ({
+        schema_version: "1.0",
+        status: "complete",
+        observation_date: "2026-07-24",
+        open_interest: 376079,
+        report_status: "final",
+        bulletin_number: 141,
+        source: "cme_daily_bulletin",
+        source_detail: "GC_FUT",
+        source_url: "https://example.test/Section62.pdf",
+        observed_at: "2026-07-25T15:00:00.000Z",
+      }),
+      ...overrides.cmeGoldOpenInterest,
+    },
+    futuresOpenInterestHistory: overrides.futuresOpenInterestHistory,
   };
 }
 
@@ -686,7 +702,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-four expected tools", async () => {
+test("exposes exactly the seventy-five expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -717,6 +733,7 @@ test("exposes exactly the seventy-four expected tools", async () => {
       "get_analysis_performance",
       "get_chart_context",
       "get_chart_screenshot",
+      "get_cme_gold_open_interest",
       "get_dxy_context_gate_template",
       "get_economic_events",
       "get_event_study_journal",
@@ -768,6 +785,31 @@ test("exposes exactly the seventy-four expected tools", async () => {
       "validate_trade_plan",
     ],
   );
+});
+
+test("get_cme_gold_open_interest records the official aggregate in its own source series", async () => {
+  const observations = [];
+  const client = await connectedClient(makeDeps({
+    futuresOpenInterestHistory: {
+      observeMany: async (items) => {
+        observations.push(...items);
+        return { recorded: items, unchanged: 0, revisions: 0 };
+      },
+    },
+  }));
+  const response = await client.callTool({ name: "get_cme_gold_open_interest", arguments: {} });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.open_interest, 376079);
+  assert.deepEqual(parsed.first_seen, { recorded: 1, unchanged: 0, revisions: 0 });
+  assert.deepEqual(observations, [{
+    futures_symbol: "COMEX_DL:GC1!",
+    scope: "all_months_aggregated",
+    observation_date: "2026-07-24",
+    open_interest: 376079,
+    source: "cme_daily_bulletin",
+    source_detail: "GC_FUT",
+    observed_at: "2026-07-25T15:00:00.000Z",
+  }]);
 });
 
 test("Bar Replay tools preview writes, context-bind start, step, and stop", async () => {
@@ -4634,7 +4676,9 @@ test("get_futures_flow_context surfaces a named open interest study that yields 
 });
 
 test("get_futures_flow_context records what open interest it just saw, and survives a failing store", async () => {
-  const start = Date.UTC(2026, 0, 1);
+  // CME daily sessions start on the previous UTC date. The Sunday 22:00 UTC bar is Monday's
+  // trading session and must not be persisted as a Sunday observation.
+  const start = Date.UTC(2026, 0, 4, 22);
   const bars = Array.from({ length: 10 }, (_, index) => {
     const close = 101 + index;
     return { time: (start + index * 86_400_000) / 1000,
@@ -4681,6 +4725,7 @@ test("get_futures_flow_context records what open interest it just saw, and survi
   // An explicitly named aggregated study is a different quantity from front-month open interest.
   assert.ok(captured.every((item) => item.scope === "all_months_aggregated"));
   assert.ok(captured.every((item) => item.futures_symbol === "CME:6E1!"));
+  assert.equal(captured[0].observation_date, "2026-01-05");
   assert.ok(captured.every((item) => item.observation_date <= item.observed_at.slice(0, 10)),
     "an observation can never be dated after the moment it was seen");
 
@@ -5526,7 +5571,16 @@ test("run_market_event_study evaluates fair_value_gap_retest and records evidenc
 
   const res = await client.callTool({ name: "run_market_event_study", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
-    condition: { type: "fair_value_gap_retest", minimum_gap_bps: 10, retest_within_bars: 12, min_impulse_body_ratio: 0.5, require_boundary_hold: true },
+    condition: {
+      type: "fair_value_gap_retest",
+      minimum_gap_bps: 10,
+      retest_within_bars: 12,
+      min_impulse_body_ratio: 0.5,
+      require_boundary_hold: true,
+      direction: "bullish",
+      signal_from: new Date(start + 4 * hour).toISOString(),
+      signal_to: new Date(start + 6 * hour).toISOString(),
+    },
     horizons: [1, 2, 4], target_return_bps: 20, minimum_events: 1, event_limit: 10, configuration_trials: 1,
     journal: { hypothesis_id: "hyp_fvg_test", population: "in_sample", decision: "adopted" },
   } });
@@ -5535,8 +5589,73 @@ test("run_market_event_study evaluates fair_value_gap_retest and records evidenc
   assert.equal(parsed.sample.events, 1);
   assert.equal(parsed.events[0].branch, "fvg_retest_bullish");
   assert.equal(parsed.events[0].direction, "long");
+  assert.equal(parsed.selectionContract.signalFrom, new Date(start + 4 * hour).toISOString());
+  assert.equal(parsed.selectionContract.signalTo, new Date(start + 6 * hour).toISOString());
+  assert.equal(parsed.selectionContract.branch, "bullish");
+  assert.deepEqual(Object.keys(parsed.byBranch), ["fvg_retest_bullish"]);
   assert.equal(parsed.journal.recorded, true);
   assert.equal(journalRecords[0].conditionType, "fair_value_gap_retest");
+  assert.equal(journalRecords[0].outcomes.every((outcome) => outcome.branch === "fvg_retest_bullish"), true);
+});
+
+test("run_market_event_study applies a single prior-closed regime to FVG primary aggregates", async () => {
+  const start = Date.UTC(2026, 0, 1, 0, 0);
+  const hour = 3_600_000;
+  const descending = Array.from({ length: 18 }, (_, index) => {
+    const close = 110 - index * 0.5;
+    return [close + 0.2, close + 1, close - 1, close];
+  });
+  const ohlc = [
+    ...descending,
+    [101.2, 101.3, 100.7, 101],
+    [100.8, 100.9, 98.8, 99],
+    [98.8, 99.2, 98.2, 98.4],
+    [98.4, 98.6, 97.9, 98.1],
+    [98.1, 100.8, 97.9, 100.5],
+    [100.5, 100.6, 99.2, 99.4],
+    [99.4, 99.5, 98.4, 98.7],
+  ];
+  const bars = ohlc.map(([open, high, low, close], index) => {
+    const time = (start + index * hour) / 1000;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open, high, low, close, volume: 1000 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:XAUUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:XAUUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+
+  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+    expected_symbol: "OANDA:XAUUSD", expected_timeframe: "60", count: 100,
+    condition: {
+      type: "fair_value_gap_retest",
+      minimum_gap_bps: 10,
+      retest_within_bars: 12,
+      min_impulse_body_ratio: 0.5,
+      require_boundary_hold: true,
+      direction: "bearish",
+      regime_filter: { directional: "trend_down" },
+    },
+    regime: {
+      trend_lookback: 5,
+      atr_lookback: 2,
+      volatility_baseline_lookback: 5,
+      trend_efficiency_threshold: 0.5,
+      range_efficiency_threshold: 0.2,
+      directional_move_atr_threshold: 0.5,
+      minimum_classified_bars: 1,
+      minimum_group_events: 1,
+      minimum_coverage_ratio: 0.8,
+      max_regime_age_bars: 1,
+    },
+    horizons: [1, 2], target_return_bps: 20, minimum_events: 1, event_limit: 10,
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.sample.events, 1);
+  assert.deepEqual(Object.keys(parsed.byBranch), ["fvg_retest_bearish"]);
+  assert.equal(parsed.selectionContract.regime.directional, "trend_down");
+  assert.equal(parsed.quality.regimeMismatchExcluded, 0);
 });
 
 test("run_yield_price_nonconfirmation_study binds optional third-chart context evidence", async () => {

@@ -310,6 +310,36 @@ function latestRegimeClosedBeforeSignal(
   return result;
 }
 
+export function joinEventsToPriorClosedRegimes<T extends { signalTime: string }>(
+  events: T[],
+  observations: ClassifiedMarketRegimeObservation[],
+  resolutionMs: number,
+  maxRegimeAgeBars: number,
+) {
+  const excluded = { noPriorClosedRegime: 0, staleRegimeEvidence: 0 };
+  const maximumAgeMilliseconds = maxRegimeAgeBars * resolutionMs;
+  const joined: Array<{
+    event: T;
+    observation: ClassifiedMarketRegimeObservation;
+    regimeAgeMilliseconds: number;
+  }> = [];
+  for (const event of events) {
+    const signalStartMs = Date.parse(event.signalTime);
+    const observation = latestRegimeClosedBeforeSignal(observations, signalStartMs, resolutionMs);
+    if (!observation) {
+      excluded.noPriorClosedRegime += 1;
+      continue;
+    }
+    const regimeAgeMilliseconds = signalStartMs - (observation.time * 1000 + resolutionMs);
+    if (regimeAgeMilliseconds > maximumAgeMilliseconds) {
+      excluded.staleRegimeEvidence += 1;
+      continue;
+    }
+    joined.push({ event, observation, regimeAgeMilliseconds });
+  }
+  return { joined, excluded, maximumAgeMilliseconds };
+}
+
 export function buildEventRegimeAnalysis(
   events: Array<ReturnType<typeof outcomeForEvent>>,
   observations: ClassifiedMarketRegimeObservation[],
@@ -320,24 +350,8 @@ export function buildEventRegimeAnalysis(
   minimumCoverageRatio: number,
   maxRegimeAgeBars: number,
 ) {
-  const excluded = { noPriorClosedRegime: 0, staleRegimeEvidence: 0 };
-  const maximumAgeMilliseconds = maxRegimeAgeBars * resolutionMs;
-  const joined: Array<{
-    event: ReturnType<typeof outcomeForEvent>;
-    observation: ClassifiedMarketRegimeObservation;
-    regimeAgeMilliseconds: number;
-  }> = [];
-  for (const event of events) {
-    const signalStartMs = Date.parse(event.signalTime);
-    const observation = latestRegimeClosedBeforeSignal(observations, signalStartMs, resolutionMs);
-    if (!observation) { excluded.noPriorClosedRegime += 1; continue; }
-    const regimeAgeMilliseconds = signalStartMs - (observation.time * 1000 + resolutionMs);
-    if (regimeAgeMilliseconds > maximumAgeMilliseconds) {
-      excluded.staleRegimeEvidence += 1;
-      continue;
-    }
-    joined.push({ event, observation, regimeAgeMilliseconds });
-  }
+  const { joined, excluded, maximumAgeMilliseconds } = joinEventsToPriorClosedRegimes(
+    events, observations, resolutionMs, maxRegimeAgeBars);
   const coverageRatio = events.length === 0 ? 0 : joined.length / events.length;
   const directional = ["trend_up", "trend_down", "range", "transition"] as const;
   const volatility = ["low", "normal", "high"] as const;

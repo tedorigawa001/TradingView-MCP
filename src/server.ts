@@ -11,6 +11,7 @@ import {
 } from "./scanner.js";
 import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
 import { cotFreshness, type CotClient } from "./cot.js";
+import type { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
 import { computeRoundTripCost } from "./costModel.js";
@@ -55,7 +56,7 @@ import { computeSessionProfile, validateSessionClockDefinitions } from "./sessio
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { computeLeadLagRelationships } from "./leadLagRelationships.js";
-import type { FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
+import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
@@ -126,6 +127,7 @@ export interface ServerDeps {
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
+  cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -308,7 +310,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue();
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -754,6 +756,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       retest_within_bars: z.number().int().min(1).max(96).optional(),
       min_impulse_body_ratio: z.number().finite().min(0).max(1).optional(),
       require_boundary_hold: z.boolean().optional(),
+      direction: z.enum(["bullish", "bearish"]).optional()
+        .describe("Optional single FVG direction included in primary aggregates"),
+      signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+        .describe("Inclusive signal timestamp for prospective evidence"),
+      signal_to: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+        .describe("Exclusive signal timestamp for a frozen evaluation window"),
+      regime_filter: z.object({
+        directional: z.enum(["trend_up", "trend_down", "range", "transition"]),
+        volatility: z.enum(["low", "normal", "high"]).optional(),
+      }).optional()
+        .describe("Optional single point-in-time regime included in primary aggregates; requires top-level regime"),
     }),
   ]);
 
@@ -842,6 +855,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       minimum_events, confidence_level, configuration_trials, regime, folds, journal, event_limit }) =>
       chartOperations.run(async () => {
       try {
+        if (condition.type === "fair_value_gap_retest" && condition.regime_filter !== undefined &&
+            (regime === null || regime === undefined)) {
+          throw new Error("fair_value_gap_retest regime_filter requires top-level regime configuration");
+        }
         const context = await tv.getChartContext();
         const activeIndex = context.activeChartIndex ?? 0;
         const chart = context.charts.find((item) => item.index === activeIndex);
@@ -917,6 +934,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             retestWithinBars: condition.retest_within_bars ?? 24,
             minImpulseBodyRatio: condition.min_impulse_body_ratio ?? 0.5,
             requireBoundaryHold: condition.require_boundary_hold ?? true,
+            signalFrom: condition.signal_from ?? null,
+            signalTo: condition.signal_to ?? null,
+            branchFilter: condition.direction ?? null,
+            regimeFilter: condition.regime_filter ?? null,
           })
           : condition.type === "composite_condition"
           ? runCompositeConditionStudy({
@@ -6263,6 +6284,40 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_cme_gold_open_interest",
+    {
+      description:
+        "Get CME's Daily Bulletin aggregate open interest for COMEX Gold futures (TOTAL GC FUT). " +
+        "This is an exchange-wide all-listed-month total, independent from TradingView chart indicators. " +
+        "The observation is appended to the local first-seen history so a later analysis can distinguish " +
+        "what was initially published from a final revision. It never changes a chart, Pine script, alert, or order.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        if (!cmeGoldOpenInterest) throw new Error("CME Daily Bulletin provider is not configured");
+        const latest = await cmeGoldOpenInterest.getLatestGoldOpenInterest();
+        let firstSeen: unknown = null;
+        if (futuresOpenInterestHistory) {
+          const result = await futuresOpenInterestHistory.observeMany([{
+            futures_symbol: "COMEX_DL:GC1!",
+            scope: "all_months_aggregated",
+            observation_date: latest.observation_date,
+            open_interest: latest.open_interest,
+            source: latest.source,
+            source_detail: latest.source_detail,
+            observed_at: latest.observed_at,
+          }]);
+          firstSeen = { recorded: result.recorded.length, unchanged: result.unchanged, revisions: result.revisions };
+        }
+        return jsonResult({ ...latest, first_seen: firstSeen });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_futures_flow_context",
     {
       description:
@@ -6452,7 +6507,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             const observations = allOpenInterestObservations.map((item) => ({
                   futures_symbol: expected_futures_symbol.toUpperCase(),
                   scope: open_interest_scope ?? "front_month",
-                  observation_date: item.time.slice(0, 10),
+                  observation_date: futuresSessionObservationDate(item.time),
                   open_interest: item.openInterest,
                   source: openInterestSource ?? "tradingview_chart_indicator",
                   source_detail: open_interest_study_id ?? null,
