@@ -82,6 +82,9 @@ test("futures flow context over MCP stdio and live TradingView", {
       }
       const scopes = new Set(records.map((record) => record.scope));
       assert.equal(scopes.size, 1, "one call reads one scope");
+      // The scope is now the caller's declaration, so what matters is that the log agrees with it.
+      assert.equal([...scopes][0], config.open_interest_scope,
+        "the recorded scope must be the one the caller declared");
       t.diagnostic(`first_seen scope=${[...scopes][0]} records=${records.length}`);
     });
 

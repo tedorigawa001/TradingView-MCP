@@ -112,6 +112,36 @@ test("runCompositeConditionStudy evaluates intersection (AND) composite conditio
   assert.equal(res.byBranch.composite_long.events >= 1, true);
 });
 
+test("runCompositeConditionStudy versions handoff composites separately after the decision-time correction", () => {
+  const res = runCompositeConditionStudy({
+    bars: makeHourBars(100),
+    symbol: "EURUSD",
+    timeframe: "60",
+    operator: "intersection",
+    conditions: [
+      {
+        type: "session_exhaustion_handoff",
+        timezone: "UTC",
+        prior_sessions: [{ session_id: "prior", start: "00:00", end: "08:00" }],
+        handoff_start: "08:00",
+        handoff_end: "11:00",
+        prior_direction: "session_return",
+      },
+      { type: "fair_value_gap_retest", minimum_gap_bps: 10 },
+    ],
+    horizons: [1],
+    targetReturnBps: 20,
+    minimumEvents: 1,
+    folds: [],
+    eventLimit: 50,
+    confidenceLevel: 0.95,
+    configurationTrials: 1,
+    regime: null,
+  });
+
+  assert.equal(res.methodologyVersion, "composite_condition_event_study_v3");
+});
+
 test("runCompositeConditionStudy excludes overlapping composite events via overlap_policy", () => {
   const start = Date.UTC(2026, 0, 5, 0, 0);
   const hour = 3_600_000;

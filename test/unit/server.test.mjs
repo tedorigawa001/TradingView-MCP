@@ -4434,7 +4434,7 @@ test("get_futures_flow_context forwards open_interest_data and returns 4-quadran
   }));
   const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
     target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
-    count: 100, volume_lookback: 5, open_interest_data,
+    count: 100, volume_lookback: 5, open_interest_data, open_interest_scope: "front_month",
   } });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.schemaVersion, "1.1");
@@ -4443,6 +4443,22 @@ test("get_futures_flow_context forwards open_interest_data and returns 4-quadran
   assert.equal(parsed.openInterest.value, 5900);
   assert.equal(parsed.priceOpenInterestQuadrant.status, "available");
   assert.equal(parsed.priceOpenInterestQuadrant.distribution.long_build.count, 5);
+
+  const missingScope = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5, open_interest_data,
+  } });
+  assert.equal(missingScope.isError, true);
+  assert.match(missingScope.content[0].text, /open_interest_scope is required/);
+
+  // Automatic detection only matches the official front-month study, so a declared scope there
+  // could only ever file front-month values under the wrong series.
+  const unsupportedScope = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
+    count: 100, volume_lookback: 5, open_interest_scope: "all_months_aggregated",
+  } });
+  assert.equal(unsupportedScope.isError, true);
+  assert.match(unsupportedScope.content[0].text, /open_interest_scope must not be set without/);
 });
 
 test("get_futures_flow_context automatically detects official on-chart Open Interest study when open_interest_data is omitted", async () => {
@@ -4565,7 +4581,7 @@ test("get_futures_flow_context reads open interest from an explicitly named stud
   const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
     target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
     count: 100, volume_lookback: 5,
-    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI", open_interest_scope: "all_months_aggregated",
   } });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.openInterest.status, "available");
@@ -4610,7 +4626,7 @@ test("get_futures_flow_context surfaces a named open interest study that yields 
   }));
   const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
     target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
-    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI", open_interest_scope: "all_months_aggregated",
   } });
   // Naming a study explicitly means a failure is the caller mistake, not a reason to degrade.
   assert.equal(res.isError, true);
@@ -4641,7 +4657,7 @@ test("get_futures_flow_context records what open interest it just saw, and survi
   const args = {
     target_symbol: "OANDA:EURUSD", futures_chart_index: 0, expected_futures_symbol: "CME:6E1!",
     count: 100, volume_lookback: 5,
-    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI",
+    open_interest_study_id: "1STpgW", open_interest_plot_title: "Total OI", open_interest_scope: "all_months_aggregated",
   };
 
   let captured = null;
@@ -4658,7 +4674,10 @@ test("get_futures_flow_context records what open interest it just saw, and survi
   const parsed = JSON.parse((await client.callTool({ name: "get_futures_flow_context", arguments: args })).content[0].text);
   assert.equal(parsed.openInterest.status, "available");
   assert.equal(parsed.openInterestFirstSeen.recorded, captured.length);
-  assert.ok(captured.length > 0, "the open interest just read must be offered to the log");
+  // Collection must cover every closed bar carrying open interest. Reading it from the displayed
+  // observations instead would silently drop the first volume_lookback bars.
+  assert.equal(captured.length, bars.length,
+    "the log must receive every closed OI point, not only the volume-normalised observations");
   // An explicitly named aggregated study is a different quantity from front-month open interest.
   assert.ok(captured.every((item) => item.scope === "all_months_aggregated"));
   assert.ok(captured.every((item) => item.futures_symbol === "CME:6E1!"));
@@ -4768,6 +4787,7 @@ test("get_futures_flow_context handles roll_anomaly_threshold and new symbol map
     volume_lookback: 5,
     roll_anomaly_threshold: 0.20,
     open_interest_data: oiData,
+    open_interest_scope: "front_month",
   } });
 
   const parsed = JSON.parse(res.content[0].text);
@@ -5221,7 +5241,7 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
     getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
   } }));
-  const res = await client.callTool({ name: "run_market_event_study", arguments: {
+  const handoffArguments = {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
     condition: { type: "session_exhaustion_handoff", timezone: "UTC",
       prior_sessions: [{ session_id: "Tokyo", start: "00:00", end: "08:00" }],
@@ -5229,18 +5249,38 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
       direction_minimum_return_bps: 1, handoff_window_bars: 3, minimum_prior_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
     journal: { hypothesis_id: "handoff-eurusd", population: "out_of_sample", decision: "inconclusive" },
-  } });
+  };
+  const res = await client.callTool({ name: "run_market_event_study", arguments: handoffArguments });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.conditionType, "session_exhaustion_handoff");
+  assert.equal(parsed.methodologyVersion, "session_exhaustion_handoff_event_study_v2");
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.byBranch.exhaustion_up.events, 1);
   assert.equal(parsed.events[0].direction, "short");
+  assert.equal(parsed.events[0].signalTime, bars[54].timeIso);
+  assert.equal(parsed.conditionContract.decisionTiming, "after_complete_handoff_window");
+  assert.equal(parsed.outcomeContract.reference,
+    "handoff_window_final_bar_close_event_study_only_not_assumed_fill");
   assert.match(parsed.studyId, /^sha256:/);
   assert.match(parsed.definitionHash, /^sha256:/);
   assert.equal(parsed.journal.recorded, true);
   assert.equal(journalRecords[0].conditionType, "session_exhaustion_handoff");
   assert.equal(journalRecords[0].outcomes.some((item) => item.branch === "exhaustion_up" && item.horizonBars === 4), true);
   assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+
+  const otherClient = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:NZDUSD", resolution: "15", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:NZDUSD", resolution: "15", count: bars.length, bars }),
+  } }));
+  const { journal: _journal, ...otherArguments } = handoffArguments;
+  const otherResponse = await otherClient.callTool({ name: "run_market_event_study", arguments: {
+    ...otherArguments,
+    expected_symbol: "OANDA:NZDUSD",
+  } });
+  const otherParsed = JSON.parse(otherResponse.content[0].text);
+  assert.notEqual(otherParsed.studyId, parsed.studyId);
 });
 
 test("run_market_event_study binds caller-supplied event times to aftershock retests", async () => {

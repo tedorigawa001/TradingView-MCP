@@ -179,7 +179,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `compute_market_regimes` | アクティブチャートの確定OHLCを、明示閾値と各バー以前の証拠だけでtrend/range/transitionおよびlow/normal/high volatilityへ分類。分布・遷移・品質を返し、最適化や売買推奨は行わない |
 | `run_strategy_regime_analysis` | 正確な保存済みStrategyを一時実行して完全台帳を取得し、Entry時点までにclose済みのregime labelと結合。方向・volatility・複合regimeに加え、任意のDST対応session窓別のPF、期待値、勝率、DD、coverageを返す。session重複は全一致または入力順の先頭一致を明示選択でき、Strategy削除とchart復元を検証 |
 | `run_strategy_regime_matrix` | 最大12件のsymbol/timeframe/Strategyを直列実行し、共通regime・session契約で台帳を一括分解。sessionは非排他または入力順優先の排他分類を固定できる。任意でjobごとに最大20,000本を5,000本単位で追加ロードし、soft deadline、個別失敗隔離、各job後のchart復元、復元失敗時の後続停止を行う。ランキングや異通貨合算はしない |
-| `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す |
+| `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。Session handoffは設定窓全体の確定後を評価起点とし、窓内の未来情報をsignal時点へ混入させない。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す |
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
 | `run_external_label_study` | 呼出側が供給した点時系列ラベル(日次建玉、清算統計、調査データ等)の将来結果を、既存のfold・信頼区間・ジャーナル機構で測定。ラベルは必ず**自バーより後**のバーへ結合し(`observation_lag_bars` 最小1)、ゼロラグは拒否する。外部ラベルは自バー確定時点では通常未公表のため。horizonは後続の観測足を数えるので日足が週末で無効化されない。`run_market_event_study` と異なり日足・週足を受け付ける。ラベルの正しさと改訂は供給側の責任で、point-in-timeを保証するのは結合のみ |
 | `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない |
@@ -308,10 +308,10 @@ Fair Value Gap Retest イベントスタディ E2Eは、チャートに適合す
 TRADINGVIEW_FVG_RETEST_E2E_CONFIG='{"expected_symbol":"OANDA:EURUSD","expected_timeframe":"60","count":5000,"condition":{"type":"fair_value_gap_retest","minimum_gap_bps":10,"retest_within_bars":24,"min_impulse_body_ratio":0.5,"require_boundary_hold":true},"horizons":[1,2,4,8],"target_return_bps":20,"minimum_events":1,"event_limit":50,"confidence_level":0.95,"configuration_trials":1}' npm run test:e2e
 ```
 
-先物フローE2Eは、`TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG` へ `open_interest_study_id` と `open_interest_plot_title` を必ず含める必要があります。建玉が取得できない設定は明示的に失敗します(黙って素通りすると first-seen 収集が壊れていても気づけないため)。収集先は一時ファイルへ切り替わるので、実運用のログは汚染されません。
+先物フローE2Eは、`TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG` へ `open_interest_study_id`、`open_interest_plot_title`、および値の意味を固定する`open_interest_scope`を必ず含める必要があります。`open_interest_scope` は `open_interest_data` かスタディ明示指定と対で使うもので、自動検出のみに任せる場合は指定できません(自動検出は公式のfront-month Open Interestスタディしか読まないため、scopeを宣言できてしまうと front-month の値が集計系列に紛れ込みます)。建玉が取得できない設定は明示的に失敗します(黙って素通りすると first-seen 収集が壊れていても気づけないため)。収集先は一時ファイルへ切り替わるので、実運用のログは汚染されません。
 
 ```bash
-TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG='{"target_symbol":"OANDA:XAUUSD","futures_chart_index":1,"expected_futures_symbol":"COMEX_DL:GC1!","count":250,"observation_limit":0,"minimum_observations":100,"cot_weeks":1,"open_interest_study_id":"YOUR_STUDY_ID","open_interest_plot_title":"Total OI"}' npm run test:e2e
+TRADINGVIEW_FUTURES_FLOW_E2E_CONFIG='{"target_symbol":"OANDA:XAUUSD","futures_chart_index":1,"expected_futures_symbol":"COMEX_DL:GC1!","count":250,"observation_limit":0,"minimum_observations":100,"cot_weeks":1,"open_interest_study_id":"YOUR_STUDY_ID","open_interest_plot_title":"Total OI","open_interest_scope":"all_months_aggregated"}' npm run test:e2e
 ```
 
 E2Eは誤ったチャート束縛の拒否、dry-runの決定性、train-only選定、非選択候補OOSの非公開に加え、研究protocol検証、ledger stress、seed固定bootstrap、アラート実作成・所有名照合、レスポンス非増幅、実行後のチャート完全復元を検証します。設定がない場合はskipします。

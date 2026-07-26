@@ -764,7 +764,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Run a bounded, read-only market event study on closed OHLC bars from the active chart. " +
         "Condition session_auction classifies the first break of a prior local-session range as accepted " +
         "outside closes or a failed return inside. Condition session_exhaustion_handoff tests whether a " +
-        "closed-bar prior-session direction fails to extend in an early handoff session and reverses. " +
+        "closed-bar prior-session direction fails to extend in an early handoff session and reverses; " +
+        "its outcomes begin only after the configured handoff window has fully closed. " +
         "Condition event_aftershock_retest evaluates caller-supplied, canonical economic-event timestamps " +
         "through a post-event initial range, close breakout, and first boundary retest. " +
         "Condition failed_breakout evaluates a first sweep beyond a completed local-session range that closes " +
@@ -951,7 +952,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const definition = { condition, horizons, targetReturnBps: target_return_bps, minimumEvents: minimum_events,
           confidenceLevel: confidence_level ?? 0.95, configurationTrials: configuration_trials ?? null, regime: regime ?? null, folds: folds ?? [] };
         const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
-        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({
+          methodologyVersion: result.methodologyVersion, symbol: result.symbol,
+          timeframe: result.timeframe, definitionHash, source,
+        }), "utf8").digest("hex")}`;
         const branchSummaries = Object.entries(result.byBranch as Record<string, { events: number; horizons: Record<string, { availableEvents: number; directionalReturn: { mean: number | null; median: number | null }; positiveRate: number | null; targetHitRate: number | null }> }>).flatMap(([branch, summary]) =>
           Object.entries(summary.horizons).map(([horizon, outcome]) => ({ branch, horizonBars: Number(horizon), events: outcome.availableEvents,
             meanDirectionalReturn: outcome.directionalReturn.mean, medianDirectionalReturn: outcome.directionalReturn.median,
@@ -1304,7 +1308,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
         };
         const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
-        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({
+          methodologyVersion: result.methodologyVersion, symbol: result.symbol,
+          timeframe: result.timeframe, definitionHash, source,
+        }), "utf8").digest("hex")}`;
         const outcomes: EventStudyRecord["outcomes"] = Object.entries(result.byFeature).flatMap(([feature, buckets]) =>
           Object.entries(buckets).flatMap(([bucket, summary]) =>
             Object.entries(summary.horizons).map(([horizon, outcome]) => ({
@@ -6285,6 +6292,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           time: z.union([z.string(), z.number()]),
           openInterest: z.number().finite().min(0),
         })).optional().describe("Caller-supplied daily Open Interest observations (time ISO/epoch, openInterest value)"),
+        open_interest_scope: z.enum(["front_month", "all_months_aggregated"]).optional()
+          .describe("Required with caller-supplied OI or an explicitly named OI study, and rejected without either; keeps front-month and all-months data separate"),
         open_interest_study_id: z.string().regex(/^[\w$]{1,64}$/).optional()
           .describe("Read daily OI from this on-chart study instead of the official Open Interest study, e.g. an aggregated all-months OI indicator"),
         open_interest_plot_title: z.string().min(1).max(120).optional()
@@ -6293,10 +6302,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     },
     async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
       elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, roll_anomaly_threshold,
-      open_interest_data, open_interest_study_id, open_interest_plot_title }) => chartOperations.run(async () => {
+      open_interest_data, open_interest_scope, open_interest_study_id, open_interest_plot_title }) => chartOperations.run(async () => {
       try {
         if (open_interest_plot_title !== undefined && open_interest_study_id === undefined) {
           throw new Error("open_interest_plot_title requires open_interest_study_id");
+        }
+        if ((open_interest_data !== undefined || open_interest_study_id !== undefined) && open_interest_scope === undefined) {
+          throw new Error("open_interest_scope is required with caller-supplied OI or an explicitly named OI study");
+        }
+        // Automatic detection only ever matches the official Open Interest study, which is front
+        // month. Honouring a caller-declared scope here would let front-month values be filed as
+        // aggregated, the very mixing the required scope above exists to prevent. A study that is
+        // aggregated despite carrying the official name must be named explicitly instead.
+        if (open_interest_data === undefined && open_interest_study_id === undefined && open_interest_scope !== undefined) {
+          throw new Error("open_interest_scope must not be set without open_interest_data or open_interest_study_id: " +
+            "automatic detection reads the official front-month Open Interest study");
         }
         const mapping = futuresFlowMapping(target_symbol);
         if (!mapping) throw new Error(`futures flow mapping is unavailable for ${JSON.stringify(target_symbol)}`);
@@ -6419,8 +6439,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           openInterestSource,
           rollAnomalyThreshold: roll_anomaly_threshold,
         });
-        // The full observation set feeds collection only; it never reaches the response.
-        const { allObservations: _allObservations, ...futuresResponse } = futures;
+        // Full OI points feed collection only; they never reach the response.
+        const { allOpenInterestObservations, ...futuresResponse } = futures;
         const observedAt = new Date().toISOString();
         // Open interest for a session is published after it closes and revised once, so a series
         // downloaded later is not what was visible at the time. Recording what we just read, and
@@ -6429,19 +6449,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         let openInterestFirstSeen: unknown = null;
         if (futuresOpenInterestHistory && futures.openInterest.status !== "unavailable") {
           try {
-            const observations = futures.allObservations.flatMap((item: { time: string; openInterest: number | null }) =>
-              typeof item.openInterest === "number" && item.openInterest > 0
-                ? [{
+            const observations = allOpenInterestObservations.map((item) => ({
                   futures_symbol: expected_futures_symbol.toUpperCase(),
-                  scope: (open_interest_study_id !== undefined || open_interest_data !== undefined
-                    ? "all_months_aggregated" : "front_month") as "all_months_aggregated" | "front_month",
+                  scope: open_interest_scope ?? "front_month",
                   observation_date: item.time.slice(0, 10),
                   open_interest: item.openInterest,
                   source: openInterestSource ?? "tradingview_chart_indicator",
                   source_detail: open_interest_study_id ?? null,
                   observed_at: observedAt,
-                }]
-                : []);
+                }));
             // Only bars already closed before now can have been observed.
             const usable = observations.filter((item) => item.observation_date <= observedAt.slice(0, 10));
             openInterestFirstSeen = usable.length === 0
@@ -6707,7 +6723,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumEvents: minimum_events, confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials ?? null, folds: folds ?? [] };
         const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
-        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({ definitionHash, source }), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({
+          methodologyVersion: result.methodologyVersion, symbol: result.symbol,
+          timeframe: result.timeframe, definitionHash, source,
+        }), "utf8").digest("hex")}`;
         const branchSummaries = Object.entries(result.byBranch as Record<string, { events: number; horizons: Record<string, { availableEvents: number; directionalReturn: { mean: number | null; median: number | null }; positiveRate: number | null; targetHitRate: number | null }> }>).flatMap(([branch, summary]) =>
           Object.entries(summary.horizons).map(([horizon, outcome]) => ({ branch, horizonBars: Number(horizon), events: outcome.availableEvents,
             meanDirectionalReturn: outcome.directionalReturn.mean, medianDirectionalReturn: outcome.directionalReturn.median,

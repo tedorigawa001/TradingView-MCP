@@ -49,12 +49,24 @@ function input(bars, overrides = {}) {
 test("session handoff study uses only prior closed sessions and studies the reversal direction", () => {
   const result = runSessionExhaustionHandoffStudy(input([...handoffDay(5), ...handoffDay(6)]));
   assert.equal(result.status, "complete");
-  assert.equal(result.methodologyVersion, "session_exhaustion_handoff_event_study_v1");
+  assert.equal(result.methodologyVersion, "session_exhaustion_handoff_event_study_v2");
   assert.equal(result.byBranch.exhaustion_up.events, 2);
   assert.equal(result.events[0].priorDirection, "up");
   assert.equal(result.events[0].direction, "short");
   assert.ok(result.byBranch.exhaustion_up.horizons["4"].directionalReturn.mean > 0);
   assert.equal(result.conditionContract.ambiguousForwardAndReversalExcluded, true);
+  assert.equal(result.conditionContract.decisionTiming, "after_complete_handoff_window");
+  assert.equal(result.outcomeContract.reference,
+    "handoff_window_final_bar_close_event_study_only_not_assumed_fill");
+});
+
+test("session handoff study waits for the complete no-extension window before measuring outcomes", () => {
+  const bars = handoffDay(5);
+  const result = runSessionExhaustionHandoffStudy(input(bars, {
+    minimumEvents: 1, folds: [],
+  }));
+  assert.equal(result.events[0].signalTime, bars[54].timeIso);
+  assert.equal(result.events[0].signalPrice, bars[54].close);
 });
 
 test("session handoff study excludes an early window that both extends and reverses", () => {

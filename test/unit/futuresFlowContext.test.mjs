@@ -63,6 +63,16 @@ test("futures flow context excludes forming bars and does not invent missing vol
   assert.ok(result.qualityIssues.includes("one_or_more_closed_bars_missing_volume"));
 });
 
+test("futures flow context exposes every closed OI point for first-seen collection independently of volume", () => {
+  const series = bars([100, 101, 102, 103, 104, 105], [null, null, null, null, null, 30]);
+  const oiData = series.map((bar, index) => ({ time: bar.timeIso, openInterest: 1_000 + index }));
+  const result = computeFuturesFlowContext(input(series, { openInterestData: oiData }));
+  // No volume-normalized observation exists, but all closed OI values remain collectable.
+  assert.equal(result.observations.length, 0);
+  assert.deepEqual(result.allOpenInterestObservations.map((item) => item.openInterest),
+    [1_000, 1_001, 1_002, 1_003, 1_004, 1_005]);
+});
+
 test("futures flow context rejects an unbound futures symbol", () => {
   assert.throws(() => computeFuturesFlowContext(input(
     bars([100, 101, 102, 103, 104, 105], [10, 11, 9, 10, 10, 30]),
@@ -190,4 +200,3 @@ test("futures flow context detects contract roll anomaly and calculates volumeOp
   assert.ok(result.qualityIssues.includes("contract_roll_anomaly_detected"));
   assert.equal(result.openInterest.volumeOpenInterestRatio, 500 / 1300);
 });
-

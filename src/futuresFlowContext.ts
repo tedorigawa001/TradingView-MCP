@@ -206,6 +206,16 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
   const allBars = validateBars(input.bars);
   const formingBarsExcluded = allBars.filter((bar) => bar.forming === true).length;
   const bars = allBars.filter((bar) => bar.forming !== true);
+  // First-seen persistence must retain every closed OI point that was available on this chart.
+  // It deliberately does not share the volume-normalisation filters below: those filters are
+  // appropriate for a price/volume observation, but would make the historical OI record sparse.
+  const allOpenInterestObservations = bars.flatMap((bar) => {
+    const dateKey = bar.timeIso.slice(0, 10);
+    const openInterest = oiMap.get(dateKey) ?? oiMap.get(String(bar.time));
+    return typeof openInterest === "number" && Number.isFinite(openInterest) && openInterest > 0
+      ? [{ time: bar.timeIso, openInterest }]
+      : [];
+  });
   const missingVolumeBars = bars.filter((bar) => bar.volume === null).length;
   const calendarOrDataGaps = bars.slice(1).filter((bar, index) =>
     bar.time * 1_000 - bars[index].time * 1_000 > 36 * 3_600_000).length;
@@ -403,9 +413,8 @@ export function computeFuturesFlowContext(input: FuturesFlowContextInput) {
     observations: returned,
     observationsReturned: returned.length,
     observationsTruncated: observations.length > returned.length,
-    // The displayed observations are capped by observationLimit. First-seen collection must not
-    // depend on a display setting, so the full set is exposed separately for callers that persist
-    // it; server.ts strips this before the response is serialized.
-    allObservations: observations,
+    // These are internal persistence inputs. They are stripped by server.ts before serialization.
+    // The OI collection is independent of the display limit and of volume-normalisation eligibility.
+    allOpenInterestObservations,
   };
 }

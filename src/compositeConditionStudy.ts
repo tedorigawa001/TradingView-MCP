@@ -707,8 +707,11 @@ export function runCompositeConditionStudy(input: CompositeConditionStudyInput) 
     : "sequential_window" as const;
 
   const isV2 = input.operator === "negation" || input.operator === "sequence" || input.regimeGate != null;
+  const usesHandoffV2 = input.conditions.some((condition) => condition.type === "session_exhaustion_handoff");
 
-  const methodologyVersion = isV2
+  const methodologyVersion = usesHandoffV2
+    ? (input.regime === null ? "composite_condition_event_study_v3" as const : "composite_condition_event_regime_study_v3" as const)
+    : isV2
     ? (input.regime === null ? "composite_condition_event_study_v2" as const : "composite_condition_event_regime_study_v2" as const)
     : (input.regime === null ? "composite_condition_event_study_v1" as const : "composite_condition_event_regime_study_v1" as const);
 
