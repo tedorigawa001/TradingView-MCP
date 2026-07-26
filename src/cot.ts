@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
 
 const rowsSchema = z.array(z.record(z.string(), z.unknown()));
 type CotSpec = {
@@ -15,7 +16,7 @@ export type CotObservation = {
   report_type: string;
   market: unknown;
   report_date: string | null;
-  available_at: null;
+  available_at: string | null;
   open_interest: number | null;
   positions: CotPosition[];
   target_direction_multiplier?: 1 | -1;
@@ -165,8 +166,10 @@ export function computeCotPositioningFeatures(observations: CotObservation[]) {
     as_of: latest.report_date,
     lookback: "3_calendar_years_excluding_current",
     observations_available: observations.length,
-    point_in_time_status: "blocked",
-    point_in_time_reason: "available_at is unavailable; historical backtests must not infer publication time from report_date",
+    point_in_time_status: typeof latest.available_at !== "string" ? "blocked" : "observed_first_seen",
+    ...(typeof latest.available_at !== "string"
+      ? { point_in_time_reason: "available_at is unavailable; historical backtests must not infer publication time from report_date" }
+      : { point_in_time_reason: "local first-seen timestamps are available only from collection start" }),
     groups,
   };
 }
@@ -174,7 +177,11 @@ export function computeCotPositioningFeatures(observations: CotObservation[]) {
 export class CotClient {
   private lastRequestAt = 0;
   private readonly cache = new Map<string, { expiresAt: number; rows: CotRow[] }>();
-  constructor(private readonly baseUrl = "https://publicreporting.cftc.gov", private readonly timeoutMs = 15_000) {}
+  constructor(
+    private readonly baseUrl = "https://publicreporting.cftc.gov",
+    private readonly timeoutMs = 15_000,
+    private readonly firstSeenStore?: Pick<CotFirstSeenStore, "observeMany">,
+  ) {}
 
   private async fetchRows(spec: CotSpec): Promise<{ rows: CotRow[]; cacheStatus: "hit" | "miss" }> {
     const datasetId = spec.dataset === "tff" ? "gpe5-46if" : "72hh-3qpy";
@@ -266,7 +273,25 @@ export class CotClient {
     if (matching.length < weeks) {
       throw new Error(`requested ${weeks} COT weeks for ${spec.market}, but only ${matching.length} are available`);
     }
-    const observations = matching.map((row) => this.normalizeRow(symbol, spec, row));
+    let observations = matching.map((row) => this.normalizeRow(symbol, spec, row));
+    if (this.firstSeenStore) {
+      try {
+        const observedAt = new Date().toISOString();
+        const records = await this.firstSeenStore.observeMany(observations.map((observation) => ({
+          symbol: observation.symbol,
+          observation_date: observation.report_date!.slice(0, 10),
+          value: { report_type: observation.report_type, market: observation.market, open_interest: observation.open_interest,
+            positions: observation.positions, target_direction_multiplier: observation.target_direction_multiplier,
+            proxy_scope: observation.proxy_scope },
+          observed_at: observedAt,
+        })));
+        const availableAt = new Map(records.map((record) => [`${record.symbol}:${record.observation_date}`, record.first_seen_at]));
+        observations = observations.map((observation) => ({ ...observation,
+          available_at: availableAt.get(`${observation.symbol}:${observation.report_date!.slice(0, 10)}`) ?? null }));
+      } catch {
+        // COT remains usable as delayed context when local provenance storage is unavailable.
+      }
+    }
     return {
       symbol,
       requested_weeks: weeks,

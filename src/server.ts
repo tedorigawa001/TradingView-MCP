@@ -6560,7 +6560,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           freshness,
           limitations: [
             "COT is a weekly futures positioning report and is not realtime institutional flow.",
-            "available_at is unavailable from this API response and must not be inferred from report_date.",
+            typeof latest.available_at === "string"
+              ? "available_at is the local first-seen timestamp, not an inferred CFTC publication time; coverage starts when collection begins."
+              : "available_at is unavailable from this API response and must not be inferred from report_date.",
           ],
         });
       } catch (err) {

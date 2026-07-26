@@ -5,6 +5,7 @@ import { TradingView } from "./tradingview.js";
 import { Scanner } from "./scanner.js";
 import { EconomicCalendar } from "./calendar.js";
 import { CotClient } from "./cot.js";
+import { CotFirstSeenStore, resolveCotFirstSeenHistoryPath } from "./cotFirstSeenHistory.js";
 import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
 import { AnalysisJournalStore, resolveAnalysisJournalPath } from "./analysisJournal.js";
@@ -22,7 +23,7 @@ const server = createServer({
   tv: new TradingView(cdp),
   scanner: new Scanner(),
   calendar: new EconomicCalendar(),
-  cot: new CotClient(),
+  cot: new CotClient(undefined, undefined, new CotFirstSeenStore(resolveCotFirstSeenHistoryPath())),
   realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldHistory),
   journal: analysisJournal,
   researchJournal: strategyResearchJournal,

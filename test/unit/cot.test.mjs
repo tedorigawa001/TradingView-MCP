@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { CotClient, computeCotPositioningFeatures, cotFreshness } from "../../build/cot.js";
+import { CotFirstSeenStore } from "../../build/cotFirstSeenHistory.js";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("CotClient maps TFF positions and rejects unsupported symbols", async (t) => {
   const server = http.createServer((_req, res) => res.end(JSON.stringify([{ market_and_exchange_names: "EURO FX - CME", cftc_contract_market_code: "099741", report_date_as_yyyy_mm_dd: "2026-07-07T00:00:00.000", open_interest_all: "100", dealer_positions_long_all: "20", dealer_positions_short_all: "30", asset_mgr_positions_long: "40", asset_mgr_positions_short: "10", lev_money_positions_long: "5", lev_money_positions_short: "8", other_rept_positions_long: "1", other_rept_positions_short: "2" }])));
@@ -46,6 +50,21 @@ test("CotClient shares raw COT rows between latest and history requests", async 
   assert.equal((await client.getLatest("OANDA:EURUSD")).cache_status, "miss");
   assert.equal((await client.getHistory("OANDA:EURUSD", 2)).cache_status, "hit");
   assert.equal(calls, 1);
+});
+
+test("CotClient exposes local first-seen availability without inferring publication time", async (t) => {
+  const server = http.createServer((_req, res) => res.end(JSON.stringify([{
+    market_and_exchange_names: "EURO FX", cftc_contract_market_code: "099741", report_date_as_yyyy_mm_dd: "2026-07-07",
+    open_interest_all: "100", dealer_positions_long_all: "20", dealer_positions_short_all: "30",
+  }])));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-cot-client-"));
+  const client = new CotClient(`http://127.0.0.1:${server.address().port}`, 15_000, new CotFirstSeenStore(join(dir, "history.jsonl")));
+  const result = await client.getLatest("OANDA:EURUSD");
+  assert.match(result.available_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.positioning_features.point_in_time_status, "observed_first_seen");
+  assert.match(result.positioning_features.point_in_time_reason, /collection start/);
 });
 
 test("CotClient validates history weeks and rejects incomplete history", async (t) => {
