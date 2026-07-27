@@ -40,6 +40,10 @@ export interface SyntheticNullSeriesInput {
 }
 
 const MAX_BARS = 50_000;
+/** Exported so a caller recording what it ran can name the value actually used, not `undefined`. */
+export const MAX_SEED = 0xffffffff;
+export const DEFAULT_VOLATILITY = 0.008;
+export const DEFAULT_FACTOR_RHO = 0.7;
 
 /**
  * mulberry32. The audit is only meaningful if a reported candidate rate can be reproduced exactly,
@@ -93,13 +97,13 @@ function validateInput(input: SyntheticNullSeriesInput) {
   }
   // mulberry32 keeps 32 bits of state, so a wider seed would silently fold onto one already used
   // and an audit counting independent seeds would overstate how many trials it actually ran.
-  if (!Number.isInteger(input.seed) || input.seed < 0 || input.seed > 0xffffffff) {
+  if (!Number.isInteger(input.seed) || input.seed < 0 || input.seed > MAX_SEED) {
     throw new Error("synthetic null seed must be an integer from 0 to 4294967295");
   }
   if (!Number.isInteger(input.timeframeMinutes) || input.timeframeMinutes < 1 || input.timeframeMinutes > 10_080) {
     throw new Error("synthetic null timeframe minutes must be an integer from 1 to 10080");
   }
-  const volatility = input.volatility ?? 0.008;
+  const volatility = input.volatility ?? DEFAULT_VOLATILITY;
   if (!Number.isFinite(volatility) || volatility <= 0 || volatility > 0.5) {
     throw new Error("synthetic null volatility must be greater than zero and at most 0.5");
   }
@@ -216,7 +220,7 @@ export function generateFactorNullPair(
   // `rho` is the contemporaneous return correlation itself, not a loading. Giving both legs the same
   // signed loading on one factor made a negative value produce a positive correlation, and any
   // magnitude above one zeroed the idiosyncratic term and pinned the pair at exactly +1.
-  const rho = input.rho ?? 0.7;
+  const rho = input.rho ?? DEFAULT_FACTOR_RHO;
   if (!Number.isFinite(rho) || rho < -1 || rho > 1) throw new Error("factor null rho must be between -1 and 1");
   const stepMs = input.timeframeMinutes * 60_000;
   const startTimeMs = input.startTimeMs ?? defaultStartTimeMs(stepMs);

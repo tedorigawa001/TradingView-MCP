@@ -61,13 +61,15 @@ test("synthetic null bars satisfy the OHLC relations every study tool validates"
   }
 });
 
-test("white noise returns carry no drift and no first-order autocorrelation", () => {
-  const returns = logReturns(generateSyntheticNullSeries({ ...base, model: "white_noise" }));
-  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
-  const sd = Math.sqrt(returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / returns.length);
-  // The whole point of the null: no edge to find, so the drift that contaminated every real result
-  // must be absent here to within sampling error.
-  assert.ok(Math.abs(mean) < 3 * sd / Math.sqrt(returns.length), `mean ${mean} is not within noise of zero`);
+test("white noise leaves simple returns at zero and creates no autocorrelation", () => {
+  const bars = generateSyntheticNullSeries({ ...base, model: "white_noise" });
+  // The price is the martingale, so it is the SIMPLE return that has mean zero. Log returns sit at
+  // minus half the step variance by construction, and asserting they are centred on zero would be
+  // asserting the wrong contract.
+  const simple = bars.slice(1).map((bar, index) => bar.close / bars[index].close - 1);
+  const mean = simple.reduce((sum, value) => sum + value, 0) / simple.length;
+  const sd = Math.sqrt(simple.reduce((sum, value) => sum + (value - mean) ** 2, 0) / simple.length);
+  assert.ok(Math.abs(mean) < 3 * sd / Math.sqrt(simple.length), `simple return mean ${mean} is not within noise of zero`);
   const directional = meanAutocorrelationAcrossSeeds("white_noise");
   assert.ok(Math.abs(directional) < NOISE_BOUND,
     `white noise lag-1 autocorrelation ${directional.toFixed(5)} exceeds the ${NOISE_BOUND.toFixed(5)} noise bound`);
@@ -84,9 +86,10 @@ test("regime switching clusters variance without adding drift", () => {
     `clustered |return| autocorrelation ${magnitudeMemory(clustered)} is too weak to strain a fold`);
   assert.ok(magnitudeMemory(flat) < 0.05,
     `white noise should carry no magnitude memory, got ${magnitudeMemory(flat)}`);
-  // An Ito correction here would tie the conditional mean to the volatility state, and since that
-  // state is autocorrelated the null would gain a predictable direction. This is the assertion that
-  // catches it, averaged over seeds so it measures the model rather than one draw.
+  // Clustered variance must not turn into a directional edge. The Ito term is what keeps that true
+  // for the simple returns the studies measure, and this assertion guards the log-return side:
+  // whatever the volatility state does, one return must not predict the sign of the next. Averaged
+  // over seeds so it measures the model rather than one draw.
   const directional = meanAutocorrelationAcrossSeeds("regime_switching_volatility");
   assert.ok(Math.abs(directional) < NOISE_BOUND,
     `clustered variance created a directional edge: lag-1 autocorrelation ${directional.toFixed(5)} exceeds ${NOISE_BOUND.toFixed(5)}`);
