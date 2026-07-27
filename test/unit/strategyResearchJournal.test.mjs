@@ -317,3 +317,32 @@ test("strategy research journal records lag correlations without coercing them i
       medianDirectionalReturn: 0.001, positiveRate: 0.5, targetHitRate: 0.4, correlation: 0.2 }],
   }), /metrics do not match the condition type/);
 });
+
+test("strategy research journal accepts a ratio spread symbol but not a malformed one", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "spread-research-"));
+  const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));
+  const contract = {
+    population: "in_sample",
+    primaryMetric: "meanForwardReturn",
+    primaryHorizonBars: 5,
+    minimumEvents: 100,
+    timeframes: ["1D"],
+  };
+  // A relative-strength study runs on the spread chart, so the spread is what it must be filed under.
+  const registered = await store.registerEventHypothesis({
+    hypothesisId: "gold-silver-ratio-features",
+    title: "Gold to silver ratio features",
+    thesis: "A drift shared by both legs cancels in the ratio, so a feature effect is not the metal drift.",
+    evaluationContract: { ...contract, symbols: ["OANDA:XAUUSD/OANDA:XAGUSD"] },
+  });
+  assert.deepEqual(registered.entry.payload.evaluationContract.symbols, ["OANDA:XAUUSD/OANDA:XAGUSD"]);
+
+  for (const symbol of ["OANDA:XAUUSD/", "/OANDA:XAGUSD", "A/B/C"]) {
+    await assert.rejects(() => store.registerEventHypothesis({
+      hypothesisId: `bad-${symbol.replace(/[^\w]/g, "")}`,
+      title: "Malformed spread",
+      thesis: "Only one ratio of two non-empty legs is a symbol this journal can bind to.",
+      evaluationContract: { ...contract, symbols: [symbol] },
+    }), /invalid event hypothesis symbols/);
+  }
+});

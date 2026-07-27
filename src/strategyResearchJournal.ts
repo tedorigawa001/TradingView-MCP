@@ -10,7 +10,9 @@ const LOCK_WAIT_MS = 2_000;
 const STALE_LOCK_MS = 60_000;
 const ID_PATTERN = /^[\w.:-]{1,80}$/;
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
-const SYMBOL_PATTERN = /^[\w!.:&-]{1,48}$/;
+// Matches SYMBOL_SCHEMA in server.ts: a plain symbol, or a TradingView ratio spread whose shared
+// drift cancels between the legs. A study run on a spread must be recordable under that spread.
+const SYMBOL_PATTERN = /^[\w!.:&-]{1,48}(?:\/[\w!.:&-]{1,48})?$/;
 const TIMEFRAME_PATTERN = /^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i;
 const METRICS = new Set([
   "netProfit", "netProfitPercent", "profitFactor", "maxDrawdown", "maxDrawdownPercent",

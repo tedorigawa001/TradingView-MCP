@@ -133,7 +133,11 @@ export interface ServerDeps {
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
-const SYMBOL_SCHEMA = z.string().regex(/^[\w!.:&-]{1,48}$/);
+// The slash admits a TradingView ratio spread such as OANDA:XAUUSD/OANDA:XAGUSD. A spread chart is
+// the only way to measure a relative-strength outcome with the existing study tools, and it matters
+// because a drift shared by both legs cancels in the ratio. Binding is unaffected: every tool still
+// requires the loaded chart symbol to equal this string exactly, so a wrong spread fails closed.
+const SYMBOL_SCHEMA = z.string().regex(/^[\w!.:&-]{1,48}(?:\/[\w!.:&-]{1,48})?$/);
 const STRATEGY_SESSION_SCHEMA = z.object({
   session_id: z.string().regex(/^[\w.:-]{1,80}$/),
   timezone: z.string().min(1).max(64),
@@ -1061,6 +1065,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8),
         target_return_bps: z.number().finite().gt(0).max(10_000),
         minimum_events: z.number().int().min(1).max(5000),
+        signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+          .describe("Inclusive signal-bar timestamp for a fixed forward collection window"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
@@ -1078,7 +1084,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       expected_target_timeframe, expected_driver_timeframe, count, relationship, driver_lookback,
       driver_change_threshold, price_breakout_lookback, nonconfirmation_bars, trigger_lookback,
       trigger_within_bars, max_driver_age_bars, horizons, target_return_bps, minimum_events, folds,
-      event_limit, driver_lag_bars, configuration_trials }) => chartOperations.run(async () => {
+      event_limit, driver_lag_bars, configuration_trials, signal_from }) => chartOperations.run(async () => {
       try {
         if (context_regime && context_indicator) throw new Error("context_regime and context_indicator are mutually exclusive");
         if (target_chart_index === driver_chart_index || (context_regime && [target_chart_index, driver_chart_index].includes(context_regime.chart_index))) {
@@ -1163,6 +1169,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           horizons,
           targetReturnBps: target_return_bps,
           minimumEvents: minimum_events,
+          signalFrom: signal_from ?? null,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           eventLimit: event_limit ?? 50,
           contextRegime: context_regime === undefined ? null : { bars: contextHistory!.bars, symbol: contextHistory!.symbol, timeframe: contextHistory!.resolution, lookback: context_regime.lookback, minimumReturn: context_regime.minimum_return, maxAgeBars: context_regime.max_age_bars },

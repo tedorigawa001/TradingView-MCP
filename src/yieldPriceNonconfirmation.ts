@@ -25,6 +25,7 @@ export interface YieldPriceNonconfirmationInput {
   horizons: number[];
   targetReturnBps: number;
   minimumEvents: number;
+  signalFrom?: string | null;
   folds: YieldPriceNonconfirmationFold[];
   eventLimit: number;
   configurationTrials?: number;
@@ -162,6 +163,8 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   }
   const driverLagBars = input.driverLagBars ?? 0;
   const configurationTrials = input.configurationTrials ?? 1;
+  const signalFromMs = input.signalFrom === null || input.signalFrom === undefined
+    ? null : canonicalTime(input.signalFrom, "signal_from");
   if (!Number.isInteger(driverLagBars) || driverLagBars < 0 || driverLagBars > 20) {
     throw new Error("driver lag bars must be an integer between 0 and 20");
   }
@@ -225,6 +228,7 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     contextRegimeRejected: 0,
     contextIndicatorUnavailable: 0,
     contextIndicatorRejected: 0,
+    signalBeforeWindowExcluded: 0,
   };
   const detected: Array<{
     eventId: string;
@@ -282,6 +286,10 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       if (oppositeBreak) { signalIndex = candidate; break; }
     }
     if (signalIndex < 0) { quality.triggerNotConfirmed += 1; continue; }
+    if (signalFromMs !== null && target[signalIndex].time * 1_000 < signalFromMs) {
+      quality.signalBeforeWindowExcluded += 1;
+      continue;
+    }
     if (usedSignals.has(signalIndex)) { quality.overlappingSignalsExcluded += 1; continue; }
     if (context !== null && contextRegime !== null && contextResolutionMs !== null) {
       const signalStart = target[signalIndex].time * 1000;
@@ -383,6 +391,7 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       maxDriverAgeBars: input.maxDriverAgeBars,
       contextRegime: contextRegime === null ? null : { symbol: contextRegime.symbol, timeframe: contextRegime.timeframe, lookback: contextRegime.lookback, minimumReturn: contextRegime.minimumReturn, maxAgeBars: contextRegime.maxAgeBars },
       contextIndicator: contextIndicator === null ? null : { studyId: contextIndicator.studyId, plotId: contextIndicator.plotId, timeframe: contextIndicator.timeframe, maxAgeBars: contextIndicator.maxAgeBars, acceptedGateValue: contextIndicator.acceptedGateValue ?? 1 },
+      signalFrom: input.signalFrom ?? null,
     },
     inferenceContract: {
       configurationTrials,

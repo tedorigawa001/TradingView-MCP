@@ -43,6 +43,18 @@ test("yield-price study detects a direct yield-up price failure without exact ti
   assert.equal(result.outcomeContract.forwardFill, false);
 });
 
+test("yield-price study excludes signals before a fixed prospective collection window", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16, 4.16, 4.16]);
+  const target = bars(start, [100, 100.1, 100, 100.2, 100.1, 100, 99.9, 98, 97, 96, 95], 22 * 3_600_000);
+  const initial = runYieldPriceNonconfirmationStudy(input(target, driver));
+  const afterSignal = new Date(Date.parse(initial.events[0].signalTime) + 1).toISOString();
+  const filtered = runYieldPriceNonconfirmationStudy(input(target, driver, { signalFrom: afterSignal }));
+  assert.equal(filtered.sample.events, 0);
+  assert.equal(filtered.quality.signalBeforeWindowExcluded, 1);
+  assert.equal(filtered.definition.signalFrom, afterSignal);
+});
+
 test("yield-price study never uses a target bar that started before driver availability", () => {
   const start = Date.UTC(2026, 0, 1);
   const driver = bars(start, [4, 4, 4, 4, 4, 4.15, 4.16, 4.16, 4.16]);

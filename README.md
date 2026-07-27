@@ -209,6 +209,8 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 
 集計だけを `~/.tradingview-mcp/research-collection.jsonl` へ保存し、primary horizonで確定済みeventが1件以上のときだけ追記します。起動時に3つの仮説IDが研究ジャーナルへ事前登録済みであることを確認し、存在しないIDへ記録しません。MCPサーバとCLIは同じowner-only chart-operation lockを使うため、片方が一時切替中はもう片方が待機します。macOSの定期実行は [launchd例](docs/launchd/com.tradingview-mcp.research-hypotheses.plist.example) をコピーして `launchctl` で読み込んでください。TradingViewはCDP/debugモードで起動しておく必要があります。例は画面への干渉を抑えるため1時間間隔です。
 
+各ジョブは必要履歴を固定し、FVGは5,000本、日足金利非追随は各系列1,000本、50分特徴量は500本を要求します。不足時は同じ一時チャート上で不足本数だけを追加ロードし、`coverage`へ初期・追加・最終本数、providerの追加可否、充足判定を記録します。取得できなければ`insufficient_loaded_history`として分析・証拠追記を止め、短い履歴を完全な研究証拠として扱いません。
+
 `get_execution_snapshot`は開いているTradingViewチャートの`bid`、`ask`、`lp_time`、session状態、realtime-load状態、価格刻みを最優先で読み取ります。`lp_time`は同じquote snapshot内のlast-price時刻でありbid/ask個別のexchange timestampではありませんが、その時刻が既定5秒以内、streaming、active session、realtime loadedをすべて満たす場合だけ`ready`です。対象銘柄がチャートにない場合はscannerへフォールバックしますが、scannerはbid/askの市場側timestampとsession calendarを返さないため、受信時刻を市場時刻へ置き換えません。フォールバックでは既定最大1.2秒間にbid/ask変化を観測できた場合だけreadyとし、価格が動かなければ`wait`です。これは約定可能性や流動性を保証せず、口座・注文・チャートを変更しません。
 
 `compute_position_size`は数量をブローカー固有のlotではなくinstrument unitとして返します。`quantity_step`、`minimum_quantity`、必要なら`maximum_quantity`と`contract_multiplier`を利用する取引環境の仕様に合わせて明示してください。損失はEntryからStopまでの値幅に`compute_round_trip_cost.total_price_per_unit`等の往復コストを加え、口座通貨へ換算して計算します。quote通貨と口座通貨が異なる場合は、口座通貨/quote通貨のレート、symbol、観測時刻がすべて新鮮な場合だけ数量を返します。口座接続、残高取得、発注、永続化は行いません。
