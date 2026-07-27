@@ -32,7 +32,7 @@ export interface FuturesFlowContextInput {
   minimumObservations: number;
   observationLimit: number;
   openInterestData?: OpenInterestPoint[];
-  openInterestSource?: "tradingview_chart_indicator" | "caller_supplied_open_interest_data";
+  openInterestSource?: "tradingview_chart_indicator" | "caller_supplied_open_interest_data" | "cme_daily_bulletin";
   rollAnomalyThreshold?: number;
 }
 

@@ -57,6 +57,7 @@ import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRe
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { computeLeadLagRelationships } from "./leadLagRelationships.js";
 import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
+import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
@@ -1213,6 +1214,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
         ])).min(1).max(6).optional()
           .describe("Point-in-time features to classify. Default: all six"),
+        feature_selection: z.object({
+          feature: z.enum([
+            "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+          ]),
+          bucket: z.string().regex(/^[a-z_]{1,80}$/),
+        }).optional().describe("One preregistered feature bucket. Cannot be combined with features."),
+        signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+          .describe("Inclusive signal-bar timestamp for a fixed forward collection window"),
+        signal_to: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+          .describe("Exclusive signal-bar timestamp for a fixed forward collection window"),
         atr_lookback: z.number().int().min(2).max(250).optional(),
         atr_baseline_lookback: z.number().int().min(5).max(1000).optional(),
         range_lookback: z.number().int().min(2).max(500).optional(),
@@ -1255,12 +1266,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Maximum labelled observations to return. Aggregates always use all rows. Default: 100"),
       },
     },
-    async ({ expected_symbol, expected_timeframe, count, features, atr_lookback, atr_baseline_lookback,
+    async ({ expected_symbol, expected_timeframe, count, features, feature_selection, signal_from, signal_to, atr_lookback, atr_baseline_lookback,
       range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
       atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
       gap_atr_threshold, horizons, minimum_observations, folds, regime, configuration_trials, journal,
       observation_limit }) => chartOperations.run(async () => {
       try {
+        if (feature_selection && features !== undefined) {
+          throw new Error("feature_selection cannot be combined with features");
+        }
         const context = await tv.getChartContext();
         const activeIndex = context.activeChartIndex ?? 0;
         const chart = context.charts.find((item) => item.index === activeIndex);
@@ -1283,9 +1297,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           bars: history.bars,
           symbol: history.symbol,
           timeframe: history.resolution,
-          features: features ?? [
+          features: feature_selection ? [feature_selection.feature] : features ?? [
             "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
           ],
+          selection: feature_selection ?? null,
+          signalFrom: signal_from ?? null,
+          signalTo: signal_to ?? null,
           atrLookback: atr_lookback ?? 14,
           atrBaselineLookback: atr_baseline_lookback ?? 50,
           rangeLookback: range_lookback ?? 20,
@@ -6353,14 +6370,26 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Read daily OI from this on-chart study instead of the official Open Interest study, e.g. an aggregated all-months OI indicator"),
         open_interest_plot_title: z.string().min(1).max(120).optional()
           .describe("Plot title or id carrying open interest on open_interest_study_id"),
+        open_interest_provider: z.enum(["chart", "cme_daily_bulletin"]).optional()
+          .describe("Daily OI source. Default chart reads a bound TradingView study; cme_daily_bulletin uses only locally first-seen official GC totals and is supported for XAUUSD."),
+        as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+          .describe("Point-in-time cutoff for locally first-seen CME Daily Bulletin OI. Supported only with open_interest_provider: cme_daily_bulletin; omit for the latest locally observed CME version."),
       },
     },
     async ({ target_symbol, futures_chart_index, expected_futures_symbol, count, volume_lookback,
       elevated_volume_z_score, minimum_observations, observation_limit, cot_weeks, roll_anomaly_threshold,
-      open_interest_data, open_interest_scope, open_interest_study_id, open_interest_plot_title }) => chartOperations.run(async () => {
+      open_interest_data, open_interest_scope, open_interest_study_id, open_interest_plot_title, open_interest_provider, as_of }) => chartOperations.run(async () => {
       try {
+        const openInterestProvider = open_interest_provider ?? "chart";
+        if (as_of !== undefined && openInterestProvider !== "cme_daily_bulletin") {
+          throw new Error("as_of is supported only with open_interest_provider cme_daily_bulletin");
+        }
         if (open_interest_plot_title !== undefined && open_interest_study_id === undefined) {
           throw new Error("open_interest_plot_title requires open_interest_study_id");
+        }
+        if (openInterestProvider === "cme_daily_bulletin" &&
+            (open_interest_data !== undefined || open_interest_study_id !== undefined || open_interest_scope !== undefined)) {
+          throw new Error("cme_daily_bulletin OI provider cannot be combined with caller or chart OI inputs");
         }
         if ((open_interest_data !== undefined || open_interest_study_id !== undefined) && open_interest_scope === undefined) {
           throw new Error("open_interest_scope is required with caller-supplied OI or an explicitly named OI study");
@@ -6396,10 +6425,36 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           throw new Error("futures OHLCV evidence does not match the bound chart");
         }
 
-        // Automatically inspect on-chart Open Interest indicator if available and no caller data supplied
+        // The official total must be selected explicitly. It is sparse until first-seen collection has
+        // run for multiple sessions, and silently falling back to a front-month chart indicator would
+        // turn an all-month exchange aggregate into a different measurement without telling the caller.
         let autoOiData: Array<{ time: string | number; openInterest: number }> | undefined = open_interest_data;
-        let openInterestSource: "tradingview_chart_indicator" | "caller_supplied_open_interest_data" | undefined =
+        let openInterestSource: "tradingview_chart_indicator" | "caller_supplied_open_interest_data" | "cme_daily_bulletin" | undefined =
           open_interest_data ? "caller_supplied_open_interest_data" : undefined;
+        let resolvedOpenInterestScope = open_interest_scope ?? "front_month";
+        if (openInterestProvider === "cme_daily_bulletin") {
+          if (mapping.targetSymbol !== "OANDA:XAUUSD") {
+            throw new Error("cme_daily_bulletin OI provider is currently supported only for OANDA:XAUUSD");
+          }
+          if (!futuresOpenInterestHistory) throw new Error("futures open interest first-seen history is not configured");
+          const dates = history.bars.map((bar) => futuresSessionObservationDate(bar.timeIso));
+          const official = await futuresOpenInterestHistory.getSeriesAsOf({
+            futuresSymbol: "COMEX_DL:GC1!",
+            scope: "all_months_aggregated",
+            source: "cme_daily_bulletin",
+            sourceDetail: "GC_FUT",
+            asOf: as_of === undefined ? new Date() : new Date(as_of),
+            from: dates.reduce((a, b) => a < b ? a : b),
+            to: dates.reduce((a, b) => a > b ? a : b),
+          });
+          const officialByDate = new Map(official.map((item) => [item.observation_date, item.open_interest]));
+          autoOiData = history.bars.flatMap((bar) => {
+            const openInterest = officialByDate.get(futuresSessionObservationDate(bar.timeIso));
+            return openInterest === undefined ? [] : [{ time: bar.timeIso, openInterest }];
+          });
+          openInterestSource = "cme_daily_bulletin";
+          resolvedOpenInterestScope = "all_months_aggregated";
+        }
 
         // An explicitly named study bypasses the strict official-name match, so an aggregated
         // all-months OI indicator can be used. Failures surface instead of degrading to
@@ -6440,7 +6495,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           openInterestSource = "tradingview_chart_indicator";
         }
 
-        if (!autoOiData && chart.studies?.length > 0) {
+        if (openInterestProvider === "chart" && !autoOiData && chart.studies?.length > 0) {
           // Strictly match official TradingView Open Interest study names
           const oiStudy = chart.studies.find((s) => /^open\s*interest(\s*\(oi\))?$/i.test(s.name.trim()));
           if (oiStudy) {
@@ -6502,11 +6557,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         // when, is the only way a future study can ask what was known on a past date. Collection
         // can only ever run forward, and a read that fails must not fail the whole context call.
         let openInterestFirstSeen: unknown = null;
-        if (futuresOpenInterestHistory && futures.openInterest.status !== "unavailable") {
+        if (openInterestSource === "cme_daily_bulletin") {
+          openInterestFirstSeen = { recorded: 0, unchanged: 0, revisions: 0, skipped: 0, source: "already_first_seen_official_cme_series" };
+        } else if (futuresOpenInterestHistory && futures.openInterest.status !== "unavailable") {
           try {
             const observations = allOpenInterestObservations.map((item) => ({
                   futures_symbol: expected_futures_symbol.toUpperCase(),
-                  scope: open_interest_scope ?? "front_month",
+                  scope: resolvedOpenInterestScope,
                   observation_date: futuresSessionObservationDate(item.time),
                   open_interest: item.openInterest,
                   source: openInterestSource ?? "tradingview_chart_indicator",
@@ -6560,6 +6617,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           ...futuresResponse,
           status: qualityIssues.length === 0 ? "complete" : "partial",
           observedAt,
+          openInterestAsOf: openInterestProvider === "cme_daily_bulletin"
+            ? { asOf: as_of ?? null, selection: as_of === undefined ? "latest_local_first_seen" : "local_first_seen_as_of" }
+            : null,
           openInterestFirstSeen,
           cot: cotEvidence,
           source: {
@@ -6577,6 +6637,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             // would contradict the same payload, so the wording follows the actual status.
             ...(futures.openInterest.status === "unavailable"
               ? ["Daily open interest is unavailable; price/OI quadrant labels are not inferred from COT weekly open interest."]
+              : openInterestSource === "cme_daily_bulletin"
+                ? [
+                  "Daily open interest is the locally first-seen official CME Daily Bulletin GC aggregate; missing collection dates are not filled from chart data.",
+                  ...(as_of === undefined
+                    ? []
+                    : ["as_of limits only CME Daily Bulletin OI vintage; COT remains the latest delayed response and must not be treated as the same point-in-time cutoff."]),
+                ]
               : [
                 "Daily open interest is read as-is from the bound source and is not independently verified against the final CME Daily Bulletin.",
                 "Continuous-contract open interest declines as the front month approaches expiry, so unwinding and covering labels absorb roll mechanics that are not position liquidation.",
@@ -6618,6 +6685,53 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             typeof latest.available_at === "string"
               ? "available_at is the local first-seen timestamp, not an inferred CFTC publication time; coverage starts when collection begins."
               : "available_at is unavailable from this API response and must not be inferred from report_date.",
+          ],
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "reconcile_gold_open_interest",
+    {
+      description:
+        "Reconcile CFTC Gold COT open interest with locally first-seen official CME Daily Bulletin TOTAL GC FUT open interest. " +
+        "Only identical report/observation calendar dates are compared; missing dates are returned as quality evidence and are never nearest-date matched or filled.",
+      inputSchema: {
+        weeks: z.number().int().min(1).max(52).optional().describe("COT report weeks to inspect. Default: 12"),
+        as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
+          .describe("Point-in-time cutoff for the local CME first-seen history. Omit for the latest locally observed official values."),
+      },
+    },
+    async ({ weeks, as_of }) => {
+      try {
+        if (!futuresOpenInterestHistory) throw new Error("futures open interest first-seen history is not configured");
+        const cotHistory = await cot.getHistory("OANDA:XAUUSD", weeks ?? 12);
+        const cotDates = cotHistory.observations
+          .map((observation) => observation.report_date?.slice(0, 10))
+          .filter((date): date is string => date !== undefined && date !== null);
+        const official = await futuresOpenInterestHistory.getSeriesAsOf({
+          futuresSymbol: "COMEX_DL:GC1!",
+          scope: "all_months_aggregated",
+          source: "cme_daily_bulletin",
+          sourceDetail: "GC_FUT",
+          asOf: as_of === undefined ? new Date() : new Date(as_of),
+          ...(cotDates.length > 0 ? { from: cotDates.reduce((a, b) => a < b ? a : b), to: cotDates.reduce((a, b) => a > b ? a : b) } : {}),
+        });
+        const result = reconcileGoldOpenInterest(cotHistory.observations, official);
+        return jsonResult({
+          schema_version: "1.0",
+          symbol: "OANDA:XAUUSD",
+          cot_requested_weeks: weeks ?? 12,
+          cme_series: { futures_symbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", source: "cme_daily_bulletin", source_detail: "GC_FUT" },
+          as_of: as_of ?? null,
+          ...result,
+          limitations: [
+            "COT is a delayed weekly futures report; CME Daily Bulletin OI is a daily exchange total.",
+            "Only exact same-date observations are compared. Missing dates are not forward-filled, backfilled, or nearest-date matched.",
+            "CME values are local first-seen records and may be preliminary or later revised after collection.",
           ],
         });
       } catch (err) {

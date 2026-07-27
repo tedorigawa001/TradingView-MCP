@@ -183,7 +183,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
 | `run_external_label_study` | 呼出側が供給した点時系列ラベル(日次建玉、清算統計、調査データ等)の将来結果を、既存のfold・信頼区間・ジャーナル機構で測定。ラベルは必ず**自バーより後**のバーへ結合し(`observation_lag_bars` 最小1)、ゼロラグは拒否する。外部ラベルは自バー確定時点では通常未公表のため。horizonは後続の観測足を数えるので日足が週末で無効化されない。`run_market_event_study` と異なり日足・週足を受け付ける。ラベルの正しさと改訂は供給側の責任で、point-in-timeを保証するのは結合のみ |
 | `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない |
-| `compute_feature_outcome_relationships` | 確定OHLCからATR圧縮、実体方向、ヒゲ不均衡、連続方向、レンジ内位置、gapをその時点までの証拠だけで分類し、各bucketの将来return・upside/downside・fold別分布を返す。閾値の最適化や売買推奨は行わない |
+| `compute_feature_outcome_relationships` | 確定OHLCからATR圧縮、実体方向、ヒゲ不均衡、連続方向、レンジ内位置、gapをその時点までの証拠だけで分類し、各bucketの将来return・upside/downside・fold別分布を返す。`feature_selection`では、同じ時刻窓・レジーム内の全足との差分も返す。`signal_from`/`signal_to`で前向きのsignal時刻窓を固定できる。閾値の最適化や売買推奨は行わない |
 | `compute_session_profile` | IANA timezoneとDST・日跨ぎに対応して、セッション別の値幅、return、opening range拡張、高安時刻、VWAP・VWAP離脱率、前セッション高安テスト・反応（PDH/PDL/PDC）、休日/短縮営業日品質シグナル、直前確定セッションとのgap・重なり、volume coverageを集計。TradingView volumeは未検証のtick/取引所volumeとして明示 |
 | `compute_round_trip_cost` | spread・slippage・commissionを明示した往復コスト計算 |
 | `compute_position_size` | 許容損失、Entry/Stop、コスト、数量制約、通貨換算証拠から、リスク上限を超えない数量を切り下げ計算 |
@@ -192,8 +192,9 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `validate_trade_plan` | 反映前の分析案を方向・期限・現在価格・証拠鮮度・イベント停止時間・コスト控除後RRで検証(チャート非干渉) |
 | `get_futures_flow_context`(first-seen収集) | 日次建玉を読むたびに、値と**初回観測時刻**を追記専用ログへ記録する。建玉は当該取引日の終了後に速報が出て確報へ改訂されるため、後からダウンロードした系列は当時見えていたものではない。値が変わった時だけ追記し、期近と全限月合算は別系列として分離。`observation_date > first_seen_at` と初回観測時刻の逆行は拒否。**vintageは前向きにしか蓄積できず、収集開始前の日付は復元できない**。収集失敗はcontext取得を巻き込まない |
 | `get_cme_gold_open_interest` | CME Daily Bulletinの`TOTAL GC FUT`からGC全限月OIを取得し、速報/確報状態とともに公式系列へfirst-seen記録。チャート内の限月バスケットとは混在させない |
+| `reconcile_gold_open_interest` | COT金OIとローカルfirst-seen済みCME公式`TOTAL GC FUT`を**同一日付だけ**で照合。近接日への補間や代用をせず、不足日は品質情報として返す |
 | `get_positioning_context` | CFTC COTの履歴・OI正規化・前回差・3年パーセンタイル。ローカルfirst-seen蓄積が有効なら、推定せず実際の初回観測時刻を`available_at`として返す |
-| `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。日次OIと価格×OI四象限は認証済みfirst-seenデータ源がない限りunavailableとして返す |
+| `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。既定はチャートOI、`open_interest_provider: "cme_daily_bulletin"`はXAUUSDだけでローカルfirst-seen済みのCME全限月OIを使用し、欠損日はチャート値で補完しない。CME OIは`as_of`で当時のfirst-seen版へ固定できる |
 | `get_real_yield_context` | 米財務省の10年Par Real CMT。`as_of`指定時はローカルでfirst-seen済みの版だけを返す |
 | `audit_pine_indicator` | 自作Pineのリペイント要因を静的監査 |
 | `compare_indicator_observations` | 再読込前後の同一バー値を比較し、変化を検出 |

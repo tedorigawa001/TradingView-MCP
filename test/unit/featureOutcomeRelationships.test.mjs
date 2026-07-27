@@ -105,3 +105,57 @@ test("feature-outcome relationships condition only on a predeclared same-bar reg
   assert.ok(excluded.quality.regimeExcluded > 0);
   assert.ok(excluded.qualityIssues.includes("no_observations_match_regime"));
 });
+
+test("feature-outcome relationships fix one feature bucket and an inclusive-exclusive signal window", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 103, 104, 105, 104, 103, 102, 101]);
+  const signalFrom = series[8].timeIso;
+  const signalTo = series[12].timeIso;
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1], signalFrom, signalTo,
+    selection: { feature: "body_direction", bucket: "bullish_body" },
+  }));
+  assert.deepEqual(result.features, ["body_direction"]);
+  assert.deepEqual(result.definition.selection, { feature: "body_direction", bucket: "bullish_body" });
+  assert.equal(result.definition.signalFrom, signalFrom);
+  assert.equal(result.definition.signalTo, signalTo);
+  assert.ok(result.quality.signalBeforeWindowExcluded > 0);
+  assert.ok(result.quality.signalAfterWindowExcluded > 0);
+  assert.ok(result.quality.featureSelectionExcluded > 0);
+  assert.ok(result.sample.observations > 0);
+  assert.deepEqual(Object.keys(result.byFeature.body_direction), ["bullish_body"]);
+  assert.ok(result.observations.every((row) => row.signalTime >= signalFrom && row.signalTime < signalTo));
+  assert.ok(result.observations.every((row) => row.labels.body_direction === "bullish_body"));
+  assert.equal(result.selectionContrast.referencePopulation, "same_signal_window_and_regime_before_feature_selection");
+  assert.equal(result.selectionContrast.populationsOverlap, true);
+  assert.ok(result.selectionContrast.referenceObservations > result.selectionContrast.selectedObservations);
+  assert.equal(typeof result.selectionContrast.horizons["1"].meanForwardReturnDifference, "number");
+  assert.equal(result.folds.length, 0);
+});
+
+test("feature-outcome relationships reject invalid fixed feature buckets and signal windows", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103]);
+  assert.throws(() => computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], selection: { feature: "body_direction", bucket: "gap_up" },
+  })), /feature selection bucket is invalid/);
+  assert.throws(() => computeFeatureOutcomeRelationships(input(series, {
+    signalFrom: series[6].timeIso, signalTo: series[6].timeIso,
+  })), /signal_to must be after signal_from/);
+});
+
+test("feature-outcome relationships report only an empty signal window before later filters", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103]);
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], selection: { feature: "body_direction", bucket: "bullish_body" },
+    signalFrom: new Date(series.at(-1).time * 1_000 + HOUR).toISOString(),
+    regime: {
+      directionalRegime: "trend_down", volatilityRegime: null,
+      trendLookback: 2, atrLookback: 2, volatilityBaselineLookback: 5,
+      trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25,
+      directionalMoveAtrThreshold: 0.5, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75,
+    },
+  }));
+  assert.equal(result.quality.signalWindowEligible, 0);
+  assert.ok(result.qualityIssues.includes("no_observations_match_signal_window"));
+  assert.equal(result.qualityIssues.includes("no_observations_match_regime"), false);
+  assert.equal(result.qualityIssues.includes("no_observations_match_feature_selection"), false);
+});

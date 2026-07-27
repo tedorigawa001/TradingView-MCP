@@ -702,7 +702,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-five expected tools", async () => {
+test("exposes exactly the seventy-six expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -759,6 +759,7 @@ test("exposes exactly the seventy-five expected tools", async () => {
       "list_alerts",
       "list_pine_scripts",
       "load_more_history",
+      "reconcile_gold_open_interest",
       "record_strategy_experiment",
       "register_event_study_hypothesis",
       "register_strategy_hypothesis",
@@ -785,6 +786,36 @@ test("exposes exactly the seventy-five expected tools", async () => {
       "validate_trade_plan",
     ],
   );
+});
+
+test("reconcile_gold_open_interest only returns same-day official CME evidence", async () => {
+  const client = await connectedClient(makeDeps({
+    cot: {
+      getHistory: async () => ({
+        symbol: "OANDA:XAUUSD",
+        requested_weeks: 2,
+        observations: [
+          { report_date: "2026-07-21T00:00:00.000Z", open_interest: 383368 },
+          { report_date: "2026-07-14T00:00:00.000Z", open_interest: 383689 },
+        ],
+        positioning_features: {},
+      }),
+    },
+    futuresOpenInterestHistory: {
+      getSeriesAsOf: async (input) => {
+        assert.equal(input.source, "cme_daily_bulletin");
+        assert.equal(input.sourceDetail, "GC_FUT");
+        assert.equal(input.from, "2026-07-14");
+        assert.equal(input.to, "2026-07-21");
+        return [{ observation_date: "2026-07-21", open_interest: 379963, first_seen_at: "2026-07-22T15:00:00.000Z" }];
+      },
+    },
+  }));
+  const response = await client.callTool({ name: "reconcile_gold_open_interest", arguments: { weeks: 2 } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "partial");
+  assert.deepEqual(parsed.comparisons.map((item) => item.observation_date), ["2026-07-21"]);
+  assert.deepEqual(parsed.unmatched_cot_dates, ["2026-07-14"]);
 });
 
 test("get_cme_gold_open_interest records the official aggregate in its own source series", async () => {
@@ -4503,6 +4534,61 @@ test("get_futures_flow_context forwards open_interest_data and returns 4-quadran
   assert.match(unsupportedScope.content[0].text, /open_interest_scope must not be set without/);
 });
 
+test("get_futures_flow_context maps official CME GC OI by CME session date without chart fallback", async () => {
+  const start = Date.UTC(2026, 0, 1, 22);
+  const bars = Array.from({ length: 100 }, (_, index) => {
+    const open = 3700 + index;
+    const close = open + 1;
+    const time = start + index * 86_400_000;
+    return { time: time / 1000, timeIso: new Date(time).toISOString(), open,
+      high: close + 0.2, low: open - 0.2, close, volume: 100 };
+  });
+  const sessionDates = bars.map((bar) => new Date(new Date(bar.timeIso).getTime() + 86_400_000).toISOString().slice(0, 10));
+  const asOf = "2026-07-25T15:00:00.000Z";
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ charts: [{ index: 0, symbol: "COMEX_DL:GC1!", resolution: "1D", studies: [] }] }),
+      getOhlcv: async () => ({ symbol: "COMEX_DL:GC1!", resolution: "1D", bars }),
+    },
+    futuresOpenInterestHistory: {
+      getSeriesAsOf: async (input) => {
+        assert.equal(input.source, "cme_daily_bulletin");
+        assert.equal(input.sourceDetail, "GC_FUT");
+        assert.equal(input.scope, "all_months_aggregated");
+        assert.equal(input.asOf.toISOString(), asOf);
+        return bars.map((_, index) => ({ observation_date: sessionDates[index], open_interest: 370000 + index, first_seen_at: "2026-07-25T15:00:00.000Z" }));
+      },
+    },
+  }));
+  const response = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:XAUUSD", futures_chart_index: 0, expected_futures_symbol: "COMEX_DL:GC1!",
+    count: 100, volume_lookback: 5, open_interest_provider: "cme_daily_bulletin", as_of: asOf,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.openInterest.status, "available");
+  assert.equal(parsed.openInterest.source, "cme_daily_bulletin");
+  assert.equal(parsed.openInterest.value, 370099);
+  assert.deepEqual(parsed.openInterestAsOf, { asOf, selection: "local_first_seen_as_of" });
+  assert.equal(parsed.openInterestFirstSeen.source, "already_first_seen_official_cme_series");
+});
+
+test("get_futures_flow_context rejects mixing the official CME provider with chart OI inputs", async () => {
+  const client = await connectedClient(makeDeps());
+  const response = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:XAUUSD", futures_chart_index: 0, expected_futures_symbol: "COMEX_DL:GC1!",
+    open_interest_provider: "cme_daily_bulletin", open_interest_scope: "all_months_aggregated",
+  } });
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /cannot be combined/);
+
+  const invalidAsOf = await client.callTool({ name: "get_futures_flow_context", arguments: {
+    target_symbol: "OANDA:XAUUSD", futures_chart_index: 0, expected_futures_symbol: "COMEX_DL:GC1!",
+    as_of: "2026-07-25T15:00:00.000Z",
+  } });
+  assert.equal(invalidAsOf.isError, true);
+  assert.match(invalidAsOf.content[0].text, /as_of is supported only with open_interest_provider/);
+});
+
 test("get_futures_flow_context automatically detects official on-chart Open Interest study when open_interest_data is omitted", async () => {
   const start = Date.UTC(2026, 0, 1);
   const bars = Array.from({ length: 10 }, (_, index) => {
@@ -5961,6 +6047,34 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
   assert.equal(regimeFiltered.regimeEvidence.filter.directionalRegime, "trend_up");
   assert.ok(regimeFiltered.sample.observations < parsed.sample.observations);
   assert.ok(regimeFiltered.quality.regimeExcluded > 0);
+
+  const forwardSelected = JSON.parse((await client.callTool({
+    name: "compute_feature_outcome_relationships",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
+      feature_selection: { feature: "body_direction", bucket: "bullish_body" },
+      signal_from: bars[15].timeIso, signal_to: bars[25].timeIso,
+      atr_lookback: 2, atr_baseline_lookback: 5, range_lookback: 3, streak_minimum_bars: 2,
+      horizons: [1], minimum_observations: 1, observation_limit: 20,
+    },
+  })).content[0].text);
+  assert.deepEqual(forwardSelected.features, ["body_direction"]);
+  assert.deepEqual(forwardSelected.definition.selection, { feature: "body_direction", bucket: "bullish_body" });
+  assert.equal(forwardSelected.definition.signalFrom, bars[15].timeIso);
+  assert.equal(forwardSelected.definition.signalTo, bars[25].timeIso);
+  assert.deepEqual(Object.keys(forwardSelected.byFeature.body_direction), ["bullish_body"]);
+  assert.ok(forwardSelected.observations.every((row) => row.signalTime >= bars[15].timeIso && row.signalTime < bars[25].timeIso));
+  assert.ok(forwardSelected.quality.signalBeforeWindowExcluded > 0);
+
+  const incompatibleSelection = await client.callTool({
+    name: "compute_feature_outcome_relationships",
+    arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", features: ["body_direction"],
+      feature_selection: { feature: "body_direction", bucket: "bullish_body" }, horizons: [1],
+    },
+  });
+  assert.equal(incompatibleSelection.isError, true);
+  assert.match(incompatibleSelection.content[0].text, /feature_selection cannot be combined with features/);
 });
 
 test("compute_session_profile binds minute OHLC to the active chart", async () => {

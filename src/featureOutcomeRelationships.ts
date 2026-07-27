@@ -33,11 +33,19 @@ export interface FeatureOutcomeRegimeFilter {
   volatilityRegime: VolatilityRegime | null;
 }
 
+export interface FeatureOutcomeSelection {
+  feature: FeatureOutcomeFeature;
+  bucket: string;
+}
+
 export interface FeatureOutcomeRelationshipsInput {
   bars: OhlcvBar[];
   symbol: string;
   timeframe: string;
   features: FeatureOutcomeFeature[];
+  selection: FeatureOutcomeSelection | null;
+  signalFrom: string | null;
+  signalTo: string | null;
   atrLookback: number;
   atrBaselineLookback: number;
   rangeLookback: number;
@@ -55,6 +63,15 @@ export interface FeatureOutcomeRelationshipsInput {
   regime: FeatureOutcomeRegimeFilter | null;
   observationLimit: number;
 }
+
+const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
+  atr_compression: ["compressed", "normal", "expanded"],
+  body_direction: ["bullish_body", "bearish_body", "indecision"],
+  wick_imbalance: ["upper_wick_dominant", "lower_wick_dominant", "balanced_wicks"],
+  directional_streak: ["up_streak", "down_streak", "mixed"],
+  range_position: ["lower_range", "middle_range", "upper_range"],
+  gap_direction: ["gap_up", "gap_down", "no_material_gap"],
+};
 
 type Outcome = {
   forwardReturn: number;
@@ -170,13 +187,56 @@ function classify<T extends Observation>(
   }));
 }
 
+function selectionContrast(selected: Observation[], reference: Observation[], horizons: number[]) {
+  const selectedSummary = summarize(selected, horizons);
+  const referenceSummary = summarize(reference, horizons);
+  return {
+    referencePopulation: "same_signal_window_and_regime_before_feature_selection" as const,
+    populationsOverlap: true,
+    selectedObservations: selected.length,
+    referenceObservations: reference.length,
+    horizons: Object.fromEntries(horizons.map((horizon) => {
+      const key = String(horizon);
+      const selectedHorizon = selectedSummary[key];
+      const referenceHorizon = referenceSummary[key];
+      const selectedMean = selectedHorizon.forwardReturn.mean;
+      const referenceMean = referenceHorizon.forwardReturn.mean;
+      const selectedPositiveRate = selectedHorizon.positiveRate;
+      const referencePositiveRate = referenceHorizon.positiveRate;
+      return [key, {
+        selected: selectedHorizon,
+        reference: referenceHorizon,
+        meanForwardReturnDifference: selectedMean === null || referenceMean === null ? null : selectedMean - referenceMean,
+        positiveRateDifference: selectedPositiveRate === null || referencePositiveRate === null
+          ? null : selectedPositiveRate - referencePositiveRate,
+      }];
+    })),
+  };
+}
+
 export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelationshipsInput) {
+  const selection = input.selection ?? null;
+  const signalFrom = input.signalFrom ?? null;
+  const signalTo = input.signalTo ?? null;
   const timeframeMs = marketRegimeResolutionMilliseconds(input.timeframe);
   if (!timeframeMs || /M$/i.test(input.timeframe)) {
     throw new Error("feature-outcome relationships require a fixed-duration timeframe");
   }
   if (input.features.length < 1 || input.features.length > 6 || new Set(input.features).size !== input.features.length) {
     throw new Error("features must contain one to six unique feature names");
+  }
+  if (selection !== null) {
+    if (!input.features.includes(selection.feature)) {
+      throw new Error("feature selection must be included in features");
+    }
+    if (!FEATURE_BUCKETS[selection.feature].includes(selection.bucket)) {
+      throw new Error("feature selection bucket is invalid for the selected feature");
+    }
+  }
+  const signalFromMs = signalFrom === null ? null : canonicalTime(signalFrom, "signal_from");
+  const signalToMs = signalTo === null ? null : canonicalTime(signalTo, "signal_to");
+  if (signalFromMs !== null && signalToMs !== null && signalFromMs >= signalToMs) {
+    throw new Error("signal_to must be after signal_from");
   }
   assertInteger(input.atrLookback, 2, 250, "atr lookback");
   assertInteger(input.atrBaselineLookback, 5, 1_000, "atr baseline lookback");
@@ -221,6 +281,12 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
   const regimesByTime = new Map(regimeEvidence?.observations.map((item) => [item.time, item]) ?? []);
   let regimeUnclassified = 0;
   let regimeExcluded = 0;
+  let signalBeforeWindowExcluded = 0;
+  let signalAfterWindowExcluded = 0;
+  let featureSelectionExcluded = 0;
+  let signalWindowEligible = 0;
+  let regimeMatched = 0;
+  let featureSelectionMatched = 0;
   const trueRanges: Array<number | null> = bars.map((bar, index) => index === 0 ? null : Math.max(
     bar.high - bar.low,
     Math.abs(bar.high - bars[index - 1].close),
@@ -234,6 +300,7 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
   });
   const warmupBars = Math.max(input.atrLookback + input.atrBaselineLookback, input.rangeLookback, input.streakMinimumBars);
   const observations: Observation[] = [];
+  const referenceObservations: Observation[] = [];
   const irregularIntervals = bars.slice(1).filter((bar, index) => bar.time * 1_000 - bars[index].time * 1_000 > timeframeMs * 1.5).length;
 
   for (let index = warmupBars; index < bars.length; index += 1) {
@@ -289,6 +356,16 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       labels.gap_direction = gapAtr > input.gapAtrThreshold ? "gap_up"
         : gapAtr < -input.gapAtrThreshold ? "gap_down" : "no_material_gap";
     }
+    const signalTimeMs = bar.time * 1_000;
+    if (signalFromMs !== null && signalTimeMs < signalFromMs) {
+      signalBeforeWindowExcluded += 1;
+      continue;
+    }
+    if (signalToMs !== null && signalTimeMs >= signalToMs) {
+      signalAfterWindowExcluded += 1;
+      continue;
+    }
+    signalWindowEligible += 1;
     if (input.regime !== null) {
       const regime = regimesByTime.get(bar.time);
       if (!regime) { regimeUnclassified += 1; continue; }
@@ -298,7 +375,15 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
         continue;
       }
     }
-    observations.push({ signalIndex: index, signalTime: bar.timeIso, labels, outcomes: outcomeFor(bars, index, input.horizons) });
+    regimeMatched += 1;
+    const observation = { signalIndex: index, signalTime: bar.timeIso, labels, outcomes: outcomeFor(bars, index, input.horizons) };
+    referenceObservations.push(observation);
+    if (selection !== null && labels[selection.feature] !== selection.bucket) {
+      featureSelectionExcluded += 1;
+      continue;
+    }
+    featureSelectionMatched += 1;
+    observations.push(observation);
   }
 
   const folds = input.folds.map((fold) => ({ ...fold,
@@ -312,7 +397,9 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     ...(observations.length < input.minimumObservations ? ["minimum_observation_count_not_met"] : []),
     ...(folds.length < 2 ? ["fewer_than_two_time_folds"] : []),
     ...(irregularIntervals > 0 ? ["irregular_timestamps_not_forward_filled"] : []),
-    ...(input.regime !== null && observations.length === 0 ? ["no_observations_match_regime"] : []),
+    ...(input.regime !== null && signalWindowEligible > 0 && regimeMatched === 0 ? ["no_observations_match_regime"] : []),
+    ...(selection !== null && regimeMatched > 0 && featureSelectionMatched === 0 ? ["no_observations_match_feature_selection"] : []),
+    ...((signalFromMs !== null || signalToMs !== null) && signalWindowEligible === 0 ? ["no_observations_match_signal_window"] : []),
     ...(regimeEvidence?.qualityIssues ?? []).map((issue) => `regime_${issue}`),
   ];
   const returnedObservations = input.observationLimit === 0 ? [] : observations.slice(-input.observationLimit);
@@ -336,6 +423,9 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       rangePositionUpper: input.rangePositionUpper,
       gapAtrThreshold: input.gapAtrThreshold,
       regime: input.regime,
+      selection,
+      signalFrom,
+      signalTo,
     },
     outcomeContract: {
       reference: "signal_bar_close_event_study_only_not_assumed_fill" as const,
@@ -353,7 +443,11 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       observations: observations.length,
       minimumObservations: input.minimumObservations,
     },
-    quality: { formingBarsExcluded, irregularIntervals, warmupBars, regimeUnclassified, regimeExcluded },
+    quality: {
+      formingBarsExcluded, irregularIntervals, warmupBars, regimeUnclassified, regimeExcluded,
+      signalBeforeWindowExcluded, signalAfterWindowExcluded, featureSelectionExcluded,
+      signalWindowEligible, regimeMatched, featureSelectionMatched,
+    },
     qualityIssues,
     ...(regimeEvidence === null ? {} : { regimeEvidence: {
       methodologyVersion: regimeEvidence.methodologyVersion,
@@ -364,13 +458,19 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       filter: input.regime,
     } }),
     byFeature: classify(observations, input.features, input.horizons),
+    ...(selection === null ? {} : { selectionContrast: selectionContrast(observations, referenceObservations, input.horizons) }),
     folds: folds.map((fold) => {
       const selected = observations.filter((row) => {
         const time = Date.parse(row.signalTime);
         return time >= fold.fromMs && time < fold.toMs;
       });
+      const reference = referenceObservations.filter((row) => {
+        const time = Date.parse(row.signalTime);
+        return time >= fold.fromMs && time < fold.toMs;
+      });
       return { foldId: fold.foldId, from: fold.from, to: fold.to, observations: selected.length,
-        byFeature: classify(selected, input.features, input.horizons) };
+        byFeature: classify(selected, input.features, input.horizons),
+        ...(selection === null ? {} : { selectionContrast: selectionContrast(selected, reference, input.horizons) }) };
     }),
     observations: returnedObservations.map((row) => ({
       signalTime: row.signalTime,
@@ -379,5 +479,9 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     })),
     observationsReturned: returnedObservations.length,
     observationsTruncated: observations.length > input.observationLimit,
+    ...(selection === null ? {} : { contrastLimitations: [
+      "The selected population is contained in the reference population, so this descriptive difference is not an independent-sample test.",
+      "The contrast does not adjust for serial dependence, multiple testing, costs, or execution assumptions.",
+    ] }),
   };
 }
