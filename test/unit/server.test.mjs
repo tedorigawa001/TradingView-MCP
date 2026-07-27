@@ -7019,6 +7019,49 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   assert.equal(parsed.reference.symbol, "TVC:US10Y");
   // Raw OHLC must never leak back through the response.
   assert.equal(JSON.stringify(parsed).includes("\"open\""), false);
+
+  const journalRecords = [];
+  const journalling = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+        { index: 0, symbol: "OANDA:USDJPY", resolution: "60", studies: [] },
+        { index: 1, symbol: "TVC:US10Y", resolution: "60", studies: [] },
+      ] }),
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getOhlcv: async (_count, chartIndex) => ({
+        symbol: chartIndex === 0 ? "OANDA:USDJPY" : "TVC:US10Y",
+        resolution: "60",
+        count: primaryCloses.length,
+        bars: barsFor(chartIndex === 0 ? primaryCloses : referenceCloses),
+      }),
+    },
+    researchJournal: {
+      recordEventStudy: async (payload) => (journalRecords.push(payload), { recorded: true, entry: { sequence: 1 } }),
+    },
+  }));
+  const args = {
+    primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
+    expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
+    max_lag_bars: 3, minimum_observations: 10,
+  };
+  const recorded = JSON.parse((await journalling.callTool({ name: "compute_lead_lag_relationships", arguments: {
+    ...args, journal: { hypothesis_id: "usdjpy-us10y-lead-lag", population: "in_sample", decision: "inconclusive" },
+  } })).content[0].text);
+  assert.equal(recorded.journal.recorded, true);
+  assert.equal(journalRecords[0].conditionType, "lead_lag_return_correlation");
+  // Only a positive lag describes the reference leading the primary, so only those are evidence
+  // about something actionable; the contemporaneous and negative lags must not be stored beside them.
+  assert.deepEqual(journalRecords[0].outcomes.map((outcome) => outcome.horizonBars), [1, 2, 3]);
+  assert.ok(journalRecords[0].outcomes.every((outcome) => typeof outcome.correlation === "number"));
+  assert.ok(journalRecords[0].outcomes.every((outcome) => !("meanDirectionalReturn" in outcome)));
+
+  // A scan inspects every lag at once, so its strongest lag is never an out-of-sample result.
+  const adopted = JSON.parse((await journalling.callTool({ name: "compute_lead_lag_relationships", arguments: {
+    ...args, journal: { hypothesis_id: "usdjpy-us10y-lead-lag", population: "in_sample", decision: "adopted" },
+  } })).content[0].text);
+  assert.equal(adopted.journal.recorded, false);
+  assert.match(adopted.journal.error, /cannot be adopted/);
+  assert.equal(journalRecords.length, 1, "a refused decision must not reach the journal");
 });
 
 test("compute_lead_lag_relationships rejects a mismatched binding, an identical pane and Bar Replay", async () => {

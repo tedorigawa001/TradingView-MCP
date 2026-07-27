@@ -182,7 +182,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。Session handoffは設定窓全体の確定後を評価起点とし、窓内の未来情報をsignal時点へ混入させない。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す。FVG条件は`signal_from`/`signal_to`、単一`direction`、単一`regime_filter`で事前登録後の一次母集団を固定できる |
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
 | `run_external_label_study` | 呼出側が供給した点時系列ラベル(日次建玉、清算統計、調査データ等)の将来結果を、既存のfold・信頼区間・ジャーナル機構で測定。ラベルは必ず**自バーより後**のバーへ結合し(`observation_lag_bars` 最小1)、ゼロラグは拒否する。外部ラベルは自バー確定時点では通常未公表のため。horizonは後続の観測足を数えるので日足が週末で無効化されない。`run_market_event_study` と異なり日足・週足を受け付ける。ラベルの正しさと改訂は供給側の責任で、point-in-timeを保証するのは結合のみ |
-| `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない |
+| `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない。任意`journal`で証拠を記録できるが、保存するのは行動可能な正のラグだけで、スキャンは`adopted`にできない(最強ラグの事後選択はout-of-sample結果ではないため) |
 | `compute_feature_outcome_relationships` | 確定OHLCからATR圧縮、実体方向、ヒゲ不均衡、連続方向、レンジ内位置、gapをその時点までの証拠だけで分類し、各bucketの将来return・upside/downside・fold別分布を返す。`feature_selection`では、同じ時刻窓・レジーム内の全足との差分も返す。`signal_from`/`signal_to`で前向きのsignal時刻窓を固定できる。閾値の最適化や売買推奨は行わない |
 | `compute_session_profile` | IANA timezoneとDST・日跨ぎに対応して、セッション別の値幅、return、opening range拡張、高安時刻、VWAP・VWAP離脱率、前セッション高安テスト・反応（PDH/PDL/PDC）、休日/短縮営業日品質シグナル、直前確定セッションとのgap・重なり、volume coverageを集計。TradingView volumeは未検証のtick/取引所volumeとして明示 |
 | `compute_round_trip_cost` | spread・slippage・commissionを明示した往復コスト計算 |
@@ -202,6 +202,12 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 ### First-seen collection CLI
 
 `npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OIの収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
+
+### Periodic research-hypothesis collection
+
+`npm run collect:research-hypotheses` は、前向き仮説の XAUUSD 15分 bearish FVG x `trend_down`、EURUSD/米10年の日足非追随、EURUSD 50分 lower-wick x `trend_down` を直列収集します。Bar Replay中は拒否し、既存2ペインを一時切替した後、成功・失敗を問わず元の銘柄と時間足へ復元します。注文、alert、Pine、Studyは変更しません。
+
+集計だけを `~/.tradingview-mcp/research-collection.jsonl` へ保存し、primary horizonで確定済みeventが1件以上のときだけ追記します。起動時に3つの仮説IDが研究ジャーナルへ事前登録済みであることを確認し、存在しないIDへ記録しません。MCPサーバとCLIは同じowner-only chart-operation lockを使うため、片方が一時切替中はもう片方が待機します。macOSの定期実行は [launchd例](docs/launchd/com.tradingview-mcp.research-hypotheses.plist.example) をコピーして `launchctl` で読み込んでください。TradingViewはCDP/debugモードで起動しておく必要があります。例は画面への干渉を抑えるため1時間間隔です。
 
 `get_execution_snapshot`は開いているTradingViewチャートの`bid`、`ask`、`lp_time`、session状態、realtime-load状態、価格刻みを最優先で読み取ります。`lp_time`は同じquote snapshot内のlast-price時刻でありbid/ask個別のexchange timestampではありませんが、その時刻が既定5秒以内、streaming、active session、realtime loadedをすべて満たす場合だけ`ready`です。対象銘柄がチャートにない場合はscannerへフォールバックしますが、scannerはbid/askの市場側timestampとsession calendarを返さないため、受信時刻を市場時刻へ置き換えません。フォールバックでは既定最大1.2秒間にbid/ask変化を観測できた場合だけreadyとし、価格が動かなければ`wait`です。これは約定可能性や流動性を保証せず、口座・注文・チャートを変更しません。
 

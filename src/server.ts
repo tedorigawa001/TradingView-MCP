@@ -61,6 +61,7 @@ import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
+import { ChartOperationLock } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
   ANALYSIS_OVERLAY_LEGACY_INPUTS,
@@ -205,9 +206,13 @@ type SnapshotStatus = "ok" | "partial" | "blocked";
 
 class SerialOperationQueue {
   private tail: Promise<void> = Promise.resolve();
+  constructor(private readonly lock: Pick<ChartOperationLock, "acquire">) {}
 
   run<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(operation);
+    const result = this.tail.then(async () => {
+      const release = await this.lock.acquire();
+      try { return await operation(); } finally { await release(); }
+    });
     this.tail = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -312,7 +317,7 @@ function correlation(left: number[], right: number[]): number | null {
 }
 
 export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
-  const chartOperations = new SerialOperationQueue();
+  const chartOperations = new SerialOperationQueue(new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
     primaryChart: { index: number; symbol: string; timeframe: string },
@@ -5505,6 +5510,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           primary_metric: z.enum([
             "meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate",
             "meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside",
+            "correlation",
           ]),
           primary_horizon_bars: z.number().int().min(1).max(250),
           minimum_events: z.number().int().min(1).max(100_000),
@@ -6950,11 +6956,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
           to: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
         })).max(12).optional(),
+        journal: z.object({
+          hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          population: RESEARCH_POPULATION_SCHEMA,
+          decision: z.enum(["adopted", "rejected", "inconclusive"]),
+          note: z.string().max(500).optional(),
+        }).optional()
+          .describe("Record this scan as evidence. Only tradable positive lags are stored; a scan can never be adopted, so decision must be rejected or inconclusive."),
       },
     },
     async ({ primary_chart_index, reference_chart_index, expected_primary_symbol, expected_reference_symbol,
       expected_timeframe, count, max_lag_bars, minimum_observations, confidence_level, configuration_trials,
-      folds }) => chartOperations.run(async () => {
+      folds, journal }) => chartOperations.run(async () => {
       try {
         if (primary_chart_index === reference_chart_index) throw new Error("primary and reference chart indexes must differ");
         const replay = await tv.getReplayStatus();
@@ -6992,11 +7005,78 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           configurationTrials: configuration_trials ?? 1,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
         });
+        const closedPrimary = primary.bars.filter((bar) => bar.forming !== true);
+        const source = {
+          chartIndex: primary_chart_index,
+          requestedBars: count ?? 1000,
+          returnedBars: primary.bars.length,
+          from: closedPrimary[0]?.timeIso ?? null,
+          to: closedPrimary.at(-1)?.timeIso ?? null,
+        };
+        const definition = {
+          primarySymbol: result.primarySymbol, referenceSymbol: result.referenceSymbol,
+          timeframe: result.timeframe, ...result.definition,
+          confidenceLevel: result.inferenceContract.confidenceLevel,
+          configurationTrials: configuration_trials ?? 1,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+        };
+        const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
+        const studyId = `sha256:${createHash("sha256").update(JSON.stringify({
+          methodologyVersion: result.methodologyVersion, symbol: result.primarySymbol,
+          timeframe: result.timeframe, definitionHash, source,
+        }), "utf8").digest("hex")}`;
+        let journalResult: unknown = null;
+        if (journal) {
+          try {
+            // Only a positive lag describes the reference leading the primary, so only those can be
+            // evidence about something actionable. Storing the contemporaneous and negative lags
+            // would put numbers nobody can act on next to ones they can.
+            const tradable = result.byLag.filter((lag) =>
+              lag.tradableOnPrimary && lag.status === "evaluable" && lag.correlation !== null);
+            if (tradable.length === 0) throw new Error("no evaluable tradable lag to record");
+            if (journal.decision === "adopted") {
+              throw new Error("a lag scan cannot be adopted: re-register the chosen lag as a forward hypothesis and collect it out of sample");
+            }
+            const record: EventStudyRecord = {
+              studyId,
+              hypothesisId: journal.hypothesis_id,
+              population: journal.population,
+              methodologyVersion: result.methodologyVersion,
+              symbol: result.primarySymbol,
+              timeframe: result.timeframe,
+              conditionType: "lead_lag_return_correlation",
+              definitionHash,
+              source,
+              sampleEvents: result.sample.returnObservations,
+              minimumEvents: minimum_observations ?? 30,
+              configurationTrials: configuration_trials ?? 1,
+              outcomes: tradable.map((lag) => ({
+                branch: "reference_leads_primary",
+                horizonBars: lag.lagBars,
+                events: lag.observations,
+                correlation: lag.correlation,
+                correlationIntervalLower: lag.confidenceInterval.status === "available" ? lag.confidenceInterval.lower : null,
+                correlationIntervalUpper: lag.confidenceInterval.status === "available" ? lag.confidenceInterval.upper : null,
+              })),
+              qualityIssues: result.qualityIssues,
+              minimumEventsMet: result.sample.returnObservations >= (minimum_observations ?? 30),
+              decision: journal.decision,
+              note: journal.note ?? "",
+            };
+            journalResult = await researchJournal.recordEventStudy(record);
+          } catch (err) {
+            journalResult = { recorded: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
         return jsonResult({
           primary: { chartIndex: primary_chart_index, symbol: primary.symbol },
           reference: { chartIndex: reference_chart_index, symbol: reference.symbol },
-          source: { requestedBars: count ?? 1000, returnedBars: primary.bars.length },
+          source,
+          conditionType: "lead_lag_return_correlation",
+          studyId,
+          definitionHash,
           ...result,
+          ...(journal ? { journal: journalResult } : {}),
         });
       } catch (err) { return errorResult(err); }
     }),

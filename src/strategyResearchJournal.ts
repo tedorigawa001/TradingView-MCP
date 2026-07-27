@@ -20,6 +20,7 @@ const METRICS = new Set([
 const EVENT_METRICS = new Set([
   "meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate",
   "meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside",
+  "correlation",
 ]);
 
 export const resolveStrategyResearchJournalPath = (
@@ -84,7 +85,8 @@ export type EventStudyHypothesis = {
       | "meanForwardReturn"
       | "medianForwardReturn"
       | "meanMaxUpside"
-      | "meanMaxDownside";
+      | "meanMaxDownside"
+      | "correlation";
     primaryHorizonBars: number;
     minimumEvents: number;
     symbols: string[];
@@ -107,7 +109,8 @@ export type EventStudyRecord = {
     | "fair_value_gap_retest"
     | "composite_condition"
     | "external_label_event"
-    | "feature_outcome_relationships";
+    | "feature_outcome_relationships"
+    | "lead_lag_return_correlation";
   definitionHash: string;
   source: { chartIndex: number; requestedBars: number; returnedBars: number; from: string | null; to: string | null };
   sampleEvents: number;
@@ -117,7 +120,9 @@ export type EventStudyRecord = {
     branch: string;
     horizonBars: number;
     events: number;
-    positiveRate: number | null;
+    // Required for every condition type except lead_lag_return_correlation, where a lag carries a
+    // correlation rather than an outcome rate. validateEventStudy enforces the per-type metric set.
+    positiveRate?: number | null;
     meanDirectionalReturn?: number | null;
     medianDirectionalReturn?: number | null;
     targetHitRate?: number | null;
@@ -125,6 +130,9 @@ export type EventStudyRecord = {
     medianForwardReturn?: number | null;
     meanMaxUpside?: number | null;
     meanMaxDownside?: number | null;
+    correlation?: number | null;
+    correlationIntervalLower?: number | null;
+    correlationIntervalUpper?: number | null;
   }>;
   qualityIssues: string[];
   minimumEventsMet: boolean;
@@ -208,7 +216,7 @@ function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
   if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(value.population)) throw new Error("invalid event research population");
   if (typeof value.methodologyVersion !== "string" || value.methodologyVersion.length < 1 || value.methodologyVersion.length > 80) throw new Error("invalid event methodology version");
   if (!SYMBOL_PATTERN.test(value.symbol) || !TIMEFRAME_PATTERN.test(value.timeframe)) throw new Error("invalid event study market");
-  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout", "fair_value_gap_retest", "composite_condition", "external_label_event", "feature_outcome_relationships"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
+  if (!(["session_auction", "session_exhaustion_handoff", "event_aftershock_retest", "failed_breakout", "fair_value_gap_retest", "composite_condition", "external_label_event", "feature_outcome_relationships", "lead_lag_return_correlation"] as unknown[]).includes(value.conditionType)) throw new Error("invalid event condition type");
   if (!Number.isInteger(value.source.chartIndex) || value.source.chartIndex < 0 || !Number.isInteger(value.source.requestedBars) || !Number.isInteger(value.source.returnedBars) || value.source.requestedBars < 1 || value.source.returnedBars < 0) throw new Error("invalid event study source");
   for (const time of [value.source.from, value.source.to]) if (time !== null && new Date(time).toISOString() !== time) throw new Error("invalid event study source time");
   if (!Number.isInteger(value.sampleEvents) || !Number.isInteger(value.minimumEvents) || value.sampleEvents < 0 || value.minimumEvents < 1) throw new Error("invalid event study sample");
@@ -221,15 +229,25 @@ function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
     if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(outcome.branch) || !Number.isInteger(outcome.horizonBars) || outcome.horizonBars < 1 || outcome.horizonBars > 250 || !Number.isInteger(outcome.events) || outcome.events < 0) throw new Error("invalid event outcome identity");
     const metricKeys = value.conditionType === "feature_outcome_relationships"
       ? ["meanForwardReturn", "medianForwardReturn", "positiveRate", "meanMaxUpside", "meanMaxDownside"] as const
+      : value.conditionType === "lead_lag_return_correlation"
+      ? ["correlation", "correlationIntervalLower", "correlationIntervalUpper"] as const
       : ["meanDirectionalReturn", "medianDirectionalReturn", "positiveRate", "targetHitRate"] as const;
     for (const key of metricKeys) {
       if (!(key in outcome)) throw new Error(`missing event outcome metric: ${key}`);
       const metric = outcome[key];
       if (metric !== null && (typeof metric !== "number" || !Number.isFinite(metric))) throw new Error("invalid event outcome metric");
     }
+    // A correlation is bounded, and a stored value outside it would mean the record was not produced
+    // by the scan it claims to come from.
+    for (const key of ["correlation", "correlationIntervalLower", "correlationIntervalUpper"] as const) {
+      const metric = outcome[key];
+      if (typeof metric === "number" && (metric < -1 || metric > 1)) throw new Error("event outcome correlation is out of range");
+    }
     const incompatibleKeys = value.conditionType === "feature_outcome_relationships"
-      ? ["meanDirectionalReturn", "medianDirectionalReturn", "targetHitRate"] as const
-      : ["meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside"] as const;
+      ? ["meanDirectionalReturn", "medianDirectionalReturn", "targetHitRate", "correlation", "correlationIntervalLower", "correlationIntervalUpper"] as const
+      : value.conditionType === "lead_lag_return_correlation"
+      ? ["meanDirectionalReturn", "medianDirectionalReturn", "targetHitRate", "meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside", "positiveRate"] as const
+      : ["meanForwardReturn", "medianForwardReturn", "meanMaxUpside", "meanMaxDownside", "correlation", "correlationIntervalLower", "correlationIntervalUpper"] as const;
     if (incompatibleKeys.some((key) => key in outcome)) throw new Error("event outcome metrics do not match the condition type");
   }
   if (!Array.isArray(value.qualityIssues) || value.qualityIssues.length > 100 || value.qualityIssues.some((item) => typeof item !== "string" || !/^[a-z0-9_]{1,120}$/.test(item))) throw new Error("invalid event quality issues");
@@ -531,6 +549,19 @@ export class StrategyResearchJournalStore {
       if (existing) { if (existing.definition_hash !== hash) throw new Error(`event hypothesis_id ${payload.hypothesisId} is already bound to a different definition`); return { recorded: false, idempotent: true, entry: existing }; }
       const entry: ResearchJournalEntry = { schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1, recorded_at: new Date().toISOString(), kind: "event_hypothesis_registered", entity_id: payload.hypothesisId, definition_hash: hash, evidence_hash: null, payload };
       await this.appendUnlocked(entry); return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async assertEventHypothesesRegistered(hypothesisIds: string[]): Promise<void> {
+    if (hypothesisIds.length < 1 || hypothesisIds.some((id) => !ID_PATTERN.test(id)) ||
+        new Set(hypothesisIds).size !== hypothesisIds.length) {
+      throw new Error("invalid event hypothesis ids");
+    }
+    await this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      const registered = new Set(entries.filter((entry) => entry.kind === "event_hypothesis_registered").map((entry) => entry.entity_id));
+      const missing = hypothesisIds.filter((id) => !registered.has(id));
+      if (missing.length > 0) throw new Error(`event hypothesis ids are not registered: ${missing.join(", ")}`);
     });
   }
 

@@ -18,6 +18,7 @@
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
+    "collect:research-hypotheses": "node build/researchCollectionCli.js --confirm-chart-switch",
     "migrate:futures-oi-dates": "node build/migrateFuturesOiDatesCli.js",
     "migrate:futures-oi-cme-cleanup": "node build/migrateFuturesOiCmeCleanupCli.js",
     "pretest": "npm run build",

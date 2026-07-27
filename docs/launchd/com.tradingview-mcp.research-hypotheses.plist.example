@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tradingview-mcp.research-hypotheses</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
+    <string>build/researchCollectionCli.js</string>
+    <string>--confirm-chart-switch</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/research-collection.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/research-collection.stderr.log</string>
+</dict>
+</plist>

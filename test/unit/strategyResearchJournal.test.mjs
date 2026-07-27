@@ -247,3 +247,73 @@ test("strategy research journal records feature-outcome evidence without directi
     /metrics do not match the condition type/,
   );
 });
+
+test("strategy research journal records lag correlations without coercing them into return metrics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "leadlag-research-"));
+  const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));
+  const hypothesisId = "copper-gold-lead-lag";
+  await store.registerEventHypothesis({
+    hypothesisId,
+    title: "Copper may lead gold",
+    thesis: "Industrial demand may move copper before gold on a daily clock.",
+    evaluationContract: {
+      population: "in_sample",
+      primaryMetric: "correlation",
+      primaryHorizonBars: 1,
+      minimumEvents: 100,
+      symbols: ["COMEX_DL:GC1!"],
+      timeframes: ["1D"],
+    },
+  });
+  const record = {
+    studyId: hash("a"),
+    hypothesisId,
+    population: "in_sample",
+    methodologyVersion: "exact_timestamp_lead_lag_return_correlation_v1",
+    symbol: "COMEX_DL:GC1!",
+    timeframe: "1D",
+    conditionType: "lead_lag_return_correlation",
+    definitionHash: hash("b"),
+    source: { chartIndex: 1, requestedBars: 5000, returnedBars: 5000,
+      from: "2005-07-14T00:00:00.000Z", to: "2026-07-24T00:00:00.000Z" },
+    sampleEvents: 4996,
+    minimumEvents: 100,
+    configurationTrials: 1,
+    outcomes: [
+      { branch: "reference_leads_primary", horizonBars: 1, events: 4995,
+        correlation: -0.0257, correlationIntervalLower: -0.0534, correlationIntervalUpper: 0.002 },
+      { branch: "reference_leads_primary", horizonBars: 6, events: 4990,
+        correlation: -0.0281, correlationIntervalLower: -0.0558, correlationIntervalUpper: -0.0004 },
+    ],
+    qualityIssues: ["one_or_more_non_contiguous_bar_intervals"],
+    minimumEventsMet: true,
+    decision: "inconclusive",
+    note: "Only lag 6 excluded zero, and it fails the Bonferroni reference for 21 scanned lags.",
+  };
+  const recorded = await store.recordEventStudy(record);
+  assert.equal(recorded.entry.payload.conditionType, "lead_lag_return_correlation");
+  assert.equal(recorded.entry.payload.outcomes[1].correlation, -0.0281);
+
+  // A correlation is not a return, and the two must never be stored in the same field.
+  await assert.rejects(() => store.recordEventStudy({
+    ...record, studyId: hash("c"),
+    outcomes: [{ ...record.outcomes[0], meanDirectionalReturn: 0.001 }],
+  }), /metrics do not match the condition type/);
+  await assert.rejects(() => store.recordEventStudy({
+    ...record, studyId: hash("d"),
+    outcomes: [{ ...record.outcomes[0], positiveRate: 0.5 }],
+  }), /metrics do not match the condition type/);
+
+  // A value outside [-1, 1] cannot have come from the scan the record claims.
+  await assert.rejects(() => store.recordEventStudy({
+    ...record, studyId: hash("e"),
+    outcomes: [{ ...record.outcomes[0], correlation: 1.4 }],
+  }), /correlation is out of range/);
+
+  // A return-metric study must still refuse correlation fields.
+  await assert.rejects(() => store.recordEventStudy({
+    ...record, studyId: hash("f"), conditionType: "session_auction",
+    outcomes: [{ branch: "accepted", horizonBars: 1, events: 10, meanDirectionalReturn: 0.001,
+      medianDirectionalReturn: 0.001, positiveRate: 0.5, targetHitRate: 0.4, correlation: 0.2 }],
+  }), /metrics do not match the condition type/);
+});
