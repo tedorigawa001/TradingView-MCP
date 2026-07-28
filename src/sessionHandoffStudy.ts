@@ -122,6 +122,15 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
       bar.close < bar.low || bar.close > bar.high)) throw new Error("invalid OHLC bar");
   const closed = bars.filter((bar) => bar.forming !== true);
   const localized = localize(closed, input.timezone);
+  // Every prior window is anchored at most one local day before its handoff. Looking through all
+  // loaded bars for every candidate day made synthetic calibration quadratic in history length.
+  const barsByLocalDate = new Map<string, ReturnType<typeof localize>>();
+  for (const bar of localized) {
+    const day = barsByLocalDate.get(bar.localDate) ?? [];
+    day.push(bar);
+    barsByLocalDate.set(bar.localDate, day);
+  }
+  const localDateForIndex = (index: number) => new Date(index * 86_400_000).toISOString().slice(0, 10);
   const expectedPriorBars = sessions.reduce((sum, session) => sum + Math.ceil((session.end - session.start) / timeframe), 0);
   const minimumPriorBars = Math.ceil(expectedPriorBars * input.minimumPriorCoverage);
   const handoffDays = [...new Set(localized.filter((bar) => bar.localMinute >= handoffStart && bar.localMinute < handoffEnd)
@@ -144,13 +153,17 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
   }> = [];
   for (const localDate of handoffDays) {
     const anchor = localDayIndex(localDate);
+    const candidateBars = [
+      ...(barsByLocalDate.get(localDateForIndex(anchor - 1)) ?? []),
+      ...(barsByLocalDate.get(localDate) ?? []),
+    ];
     const relativeMinute = (bar: ReturnType<typeof localize>[number]) =>
       (localDayIndex(bar.localDate) - anchor) * 1440 + bar.localMinute;
-    const prior = localized.filter((bar) => sessions.some((session) => {
+    const prior = candidateBars.filter((bar) => sessions.some((session) => {
       const minute = relativeMinute(bar);
       return minute >= session.start && minute < session.end;
     }));
-    const handoff = localized.filter((bar) => {
+    const handoff = candidateBars.filter((bar) => {
       const minute = relativeMinute(bar);
       return minute >= handoffStart && minute < handoffEnd;
     });

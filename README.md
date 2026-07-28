@@ -180,6 +180,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `run_strategy_regime_analysis` | 正確な保存済みStrategyを一時実行して完全台帳を取得し、Entry時点までにclose済みのregime labelと結合。方向・volatility・複合regimeに加え、任意のDST対応session窓別のPF、期待値、勝率、DD、coverageを返す。session重複は全一致または入力順の先頭一致を明示選択でき、Strategy削除とchart復元を検証 |
 | `run_strategy_regime_matrix` | 最大12件のsymbol/timeframe/Strategyを直列実行し、共通regime・session契約で台帳を一括分解。sessionは非排他または入力順優先の排他分類を固定できる。任意でjobごとに最大20,000本を5,000本単位で追加ロードし、soft deadline、個別失敗隔離、各job後のchart復元、復元失敗時の後続停止を行う。ランキングや異通貨合算はしない |
 | `run_market_event_study` | アクティブチャートの確定OHLCでsession auctionを受容/失敗へ排他分類。Session handoffは設定窓全体の確定後を評価起点とし、窓内の未来情報をsignal時点へ混入させない。同時刻イベント代表化(`same_timestamp_policy`)、試行数に応じたBonferroni多重比較補正、return・MFE/MAE・fold・信頼区間・申告試行数に加え、任意でsignal足より前に確定した価格/volatility regime別の主要結果を返す。FVG条件は`signal_from`/`signal_to`、単一`direction`、単一`regime_filter`で事前登録後の一次母集団を固定できる |
+| `run_event_study_falsification_audit` | 凍結済みのFVG retest、session auction、event aftershock retest候補規約を、white noise・レジーム切替ボラ・bid-ask bounceの合成OHLCへ個別に流して校正する。global平均信頼区間の下限が0超え、かつ全foldが正方向の場合だけ候補と数える。チャート・外部通信・ジャーナルには触れず、模型間の候補率を合算しない |
 | `run_yield_price_nonconfirmation_study` | 2つの正確なチャートを使い、driver(金利等)の確定後もtarget価格が期待方向へ追随せず逆方向の構造breakを確定したeventを検出。時刻の完全一致やforward fillを使わず、複数horizon・fold別のreturn/MFE/MAEを返す |
 | `run_external_label_study` | 呼出側が供給した点時系列ラベル(日次建玉、清算統計、調査データ等)の将来結果を、既存のfold・信頼区間・ジャーナル機構で測定。ラベルは必ず**自バーより後**のバーへ結合し(`observation_lag_bars` 最小1)、ゼロラグは拒否する。外部ラベルは自バー確定時点では通常未公表のため。horizonは後続の観測足を数えるので日足が週末で無効化されない。`run_market_event_study` と異なり日足・週足を受け付ける。ラベルの正しさと改訂は供給側の責任で、point-in-timeを保証するのは結合のみ |
 | `compute_lead_lag_relationships` | 2つの正確なチャートの確定足returnを厳密なUTC時刻一致で結合し、-N〜+Nの全ラグについて相関、Fisher z信頼区間、fold別の符号安定性を返す。正のラグだけがreference先行(primary側で行動可能)であることを明示し、最良ラグの自動選択やランキングは一切行わない。走査ラグ数と申告試行数からBonferroni参考αを算出するが区間には適用しない。任意`journal`で証拠を記録できるが、保存するのは行動可能な正のラグだけで、スキャンは`adopted`にできない(最強ラグの事後選択はout-of-sample結果ではないため) |
@@ -202,6 +203,47 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 ### First-seen collection CLI
 
 `npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OIの収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
+
+### Event-study falsification audit CLI
+
+`npm run audit:event-studies -- --config fvg-audit.json` は、凍結済みのイベント研究定義を合成ヌルで校正します。既定は各模型400複製・5,000本・名目α 5%・3foldで、white noise、レジーム切替ボラティリティ、bid-ask bounceを**別々の結果**として返します。TradingView、ネットワーク、ローカルジャーナルにはアクセスしません。短い動作確認だけなら `--model white_noise --replications 20 --bars 1200` で上書きできます。
+
+設定ファイルは研究定義と候補規約だけを持たせます。例えばFVGなら次の形です。
+
+```json
+{
+  "study": {
+    "type": "fvg_retest",
+    "definition": {
+      "symbol": "SYNTH:FVG_RETEST",
+      "timeframe": "15",
+      "minimumGapBps": 10,
+      "retestWithinBars": 24,
+      "minImpulseBodyRatio": 0.5,
+      "requireBoundaryHold": true,
+      "horizons": [1, 4, 8],
+      "targetReturnBps": 20,
+      "minimumEvents": 30,
+      "eventLimit": 0,
+      "confidenceLevel": 0.95,
+      "configurationTrials": 1,
+      "regime": null,
+      "branchFilter": "bearish"
+    }
+  },
+  "candidate": {
+    "branch": "fvg_retest_bearish",
+    "horizon": 4,
+    "minimumEvents": 30,
+    "minimumFoldEvents": 5,
+    "folds": 3
+  }
+}
+```
+
+候補率が名目αを上回るかは各模型のWilson区間で判定します。これは採算性や将来の優位性の証明ではなく、指定した採用規約が「何もない系列」にどの頻度で発火するかの監査です。
+
+event aftershock retest をCLI設定へ指定する場合は、実際の経済イベント日時の代わりに `eventSchedule` を明示します。`firstBar`、`everyBars`、`maximumEvents` は各合成系列における外生イベントの相対スケジュールであり、実イベントの予測・代用・再現を主張するものではありません。
 
 ### Periodic research-hypothesis collection
 

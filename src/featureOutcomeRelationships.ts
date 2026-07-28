@@ -62,6 +62,7 @@ export interface FeatureOutcomeRelationshipsInput {
   folds: FeatureOutcomeFold[];
   regime: FeatureOutcomeRegimeFilter | null;
   observationLimit: number;
+  confidenceLevel?: 0.9 | 0.95 | 0.99;
 }
 
 const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
@@ -72,6 +73,8 @@ const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
   range_position: ["lower_range", "middle_range", "upper_range"],
   gap_direction: ["gap_up", "gap_down", "no_material_gap"],
 };
+
+const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 
 type Outcome = {
   forwardReturn: number;
@@ -104,7 +107,34 @@ function percentile(values: number[], probability: number): number | null {
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
 }
 
-function stats(values: number[]) {
+function meanConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (values.length < 2) {
+    return { status: "insufficient_sample" as const, method: "normal_approximation" as const,
+      confidenceLevel, observations: values.length, lower: null, upper: null };
+  }
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const margin = NORMAL_Z[confidenceLevel] * Math.sqrt(variance / values.length);
+  return { status: "available" as const, method: "normal_approximation" as const,
+    confidenceLevel, observations: values.length, lower: mean - margin, upper: mean + margin };
+}
+
+function wilsonConfidenceInterval(successes: number, observations: number, confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (observations === 0) {
+    return { status: "insufficient_sample" as const, method: "wilson_score" as const,
+      confidenceLevel, observations, successes, lower: null, upper: null };
+  }
+  const z = NORMAL_Z[confidenceLevel];
+  const rate = successes / observations;
+  const denominator = 1 + z ** 2 / observations;
+  const center = (rate + z ** 2 / (2 * observations)) / denominator;
+  const margin = z * Math.sqrt(rate * (1 - rate) / observations + z ** 2 / (4 * observations ** 2)) /
+    denominator;
+  return { status: "available" as const, method: "wilson_score" as const,
+    confidenceLevel, observations, successes, lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+function stats(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99, includeMeanConfidenceInterval = false) {
   return {
     count: values.length,
     mean: values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length,
@@ -113,6 +143,7 @@ function stats(values: number[]) {
     p75: percentile(values, 0.75),
     minimum: values.length === 0 ? null : Math.min(...values),
     maximum: values.length === 0 ? null : Math.max(...values),
+    ...(includeMeanConfidenceInterval ? { meanConfidenceInterval: meanConfidenceInterval(values, confidenceLevel) } : {}),
   };
 }
 
@@ -157,17 +188,19 @@ function outcomeFor(bars: OhlcvBar[], signalIndex: number, horizons: number[]): 
   }));
 }
 
-function summarize(observations: Observation[], horizons: number[]) {
+function summarize(observations: Observation[], horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
   return Object.fromEntries(horizons.map((horizon) => {
     const outcomes = observations.map((row) => row.outcomes[String(horizon)]).filter((value) => value !== null);
     const returns = outcomes.map((outcome) => outcome!.forwardReturn);
     return [String(horizon), {
       availableObservations: outcomes.length,
       unavailableObservations: observations.length - outcomes.length,
-      forwardReturn: stats(returns),
+      forwardReturn: stats(returns, confidenceLevel, true),
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
-      maxUpside: stats(outcomes.map((outcome) => outcome!.maxUpside)),
-      maxDownside: stats(outcomes.map((outcome) => outcome!.maxDownside)),
+      positiveRateConfidenceInterval: wilsonConfidenceInterval(
+        returns.filter((value) => value > 0).length, returns.length, confidenceLevel),
+      maxUpside: stats(outcomes.map((outcome) => outcome!.maxUpside), confidenceLevel),
+      maxDownside: stats(outcomes.map((outcome) => outcome!.maxDownside), confidenceLevel),
     }];
   }));
 }
@@ -176,20 +209,23 @@ function classify<T extends Observation>(
   rows: T[],
   features: FeatureOutcomeFeature[],
   horizons: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
 ) {
   return Object.fromEntries(features.map((feature) => {
     const buckets = [...new Set(rows.map((row) => row.labels[feature]).filter((value): value is string => value !== undefined))]
       .sort();
     return [feature, Object.fromEntries(buckets.map((bucket) => {
       const selected = rows.filter((row) => row.labels[feature] === bucket);
-      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons) }];
+      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons, confidenceLevel) }];
     }))];
   }));
 }
 
-function selectionContrast(selected: Observation[], reference: Observation[], horizons: number[]) {
-  const selectedSummary = summarize(selected, horizons);
-  const referenceSummary = summarize(reference, horizons);
+function selectionContrast(
+  selected: Observation[], reference: Observation[], horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99,
+) {
+  const selectedSummary = summarize(selected, horizons, confidenceLevel);
+  const referenceSummary = summarize(reference, horizons, confidenceLevel);
   return {
     referencePopulation: "same_signal_window_and_regime_before_feature_selection" as const,
     populationsOverlap: true,
@@ -222,6 +258,8 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
   if (!timeframeMs || /M$/i.test(input.timeframe)) {
     throw new Error("feature-outcome relationships require a fixed-duration timeframe");
   }
+  const confidenceLevel = input.confidenceLevel ?? 0.95;
+  if (![0.9, 0.95, 0.99].includes(confidenceLevel)) throw new Error("unsupported confidence level");
   if (input.features.length < 1 || input.features.length > 6 || new Set(input.features).size !== input.features.length) {
     throw new Error("features must contain one to six unique feature names");
   }
@@ -457,8 +495,19 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       qualityIssues: regimeEvidence.qualityIssues,
       filter: input.regime,
     } }),
-    byFeature: classify(observations, input.features, input.horizons),
-    ...(selection === null ? {} : { selectionContrast: selectionContrast(observations, referenceObservations, input.horizons) }),
+    inferenceContract: {
+      confidenceLevel,
+      meanIntervalMethod: "normal_approximation" as const,
+      rateIntervalMethod: "wilson_score" as const,
+      serialDependenceAdjustment: "none" as const,
+      multipleTestingAdjustment: "none" as const,
+    },
+    inferenceWarnings: [
+      "confidence_intervals_do_not_adjust_for_serial_dependence",
+      "no_multiple_testing_adjustment_applied",
+    ],
+    byFeature: classify(observations, input.features, input.horizons, confidenceLevel),
+    ...(selection === null ? {} : { selectionContrast: selectionContrast(observations, referenceObservations, input.horizons, confidenceLevel) }),
     folds: folds.map((fold) => {
       const selected = observations.filter((row) => {
         const time = Date.parse(row.signalTime);
@@ -469,8 +518,8 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
         return time >= fold.fromMs && time < fold.toMs;
       });
       return { foldId: fold.foldId, from: fold.from, to: fold.to, observations: selected.length,
-        byFeature: classify(selected, input.features, input.horizons),
-        ...(selection === null ? {} : { selectionContrast: selectionContrast(selected, reference, input.horizons) }) };
+        byFeature: classify(selected, input.features, input.horizons, confidenceLevel),
+        ...(selection === null ? {} : { selectionContrast: selectionContrast(selected, reference, input.horizons, confidenceLevel) }) };
     }),
     observations: returnedObservations.map((row) => ({
       signalTime: row.signalTime,

@@ -38,6 +38,12 @@ test("feature-outcome relationships classify only closed-bar evidence and return
   assert.equal(result.outcomeContract.contiguousBarsRequired, false);
   assert.equal(result.outcomeContract.calendarGapsIncluded, true);
   assert.ok(result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.count > 0);
+  const interval = result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.meanConfidenceInterval;
+  assert.equal(interval.status, "available");
+  assert.ok(interval.lower <= result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.mean);
+  assert.ok(interval.upper >= result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.mean);
+  assert.equal(result.inferenceContract.confidenceLevel, 0.95);
+  assert.ok(result.inferenceWarnings.includes("no_multiple_testing_adjustment_applied"));
 });
 
 test("feature labels at an existing bar are unchanged when later bars are appended", () => {
@@ -158,4 +164,18 @@ test("feature-outcome relationships report only an empty signal window before la
   assert.ok(result.qualityIssues.includes("no_observations_match_signal_window"));
   assert.equal(result.qualityIssues.includes("no_observations_match_regime"), false);
   assert.equal(result.qualityIssues.includes("no_observations_match_feature_selection"), false);
+});
+
+test("feature-outcome relationships expose an insufficient interval instead of inventing precision", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103]);
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1], minimumObservations: 1, confidenceLevel: 0.99,
+  }));
+  const single = Object.values(result.byFeature.body_direction)
+    .find((bucket) => bucket.horizons["1"].forwardReturn.count === 1);
+  assert.ok(single);
+  assert.deepEqual(single.horizons["1"].forwardReturn.meanConfidenceInterval, {
+    status: "insufficient_sample", method: "normal_approximation", confidenceLevel: 0.99,
+    observations: 1, lower: null, upper: null,
+  });
 });

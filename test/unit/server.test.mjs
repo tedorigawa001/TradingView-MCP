@@ -702,7 +702,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-six expected tools", async () => {
+test("exposes exactly the seventy-seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -766,6 +766,7 @@ test("exposes exactly the seventy-six expected tools", async () => {
       "remove_owned_study",
       "run_backtest",
       "run_backtest_matrix",
+      "run_event_study_falsification_audit",
       "run_external_label_study",
       "run_market_event_study",
       "run_strategy_experiment",
@@ -5291,6 +5292,44 @@ test("get_ohlcv defaults count to 100 and forwards chart_index", async () => {
   assert.equal(parsed.chartIndex, 1);
 });
 
+test("run_event_study_falsification_audit calibrates a frozen FVG rule without chart access", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_event_study_falsification_audit", arguments: {
+    study: {
+      type: "fvg_retest", timeframe: "60", minimum_gap_bps: 10, retest_within_bars: 12,
+      min_impulse_body_ratio: 0.5, require_boundary_hold: true, direction: "bearish",
+      horizons: [1, 2], candidate_horizon: 2, target_return_bps: 20, minimum_events: 2,
+      minimum_fold_events: 1, folds: 2, configuration_trials: 1,
+    },
+    models: ["white_noise"], replications: 2, bars: 800,
+  } });
+  assert.equal(res.isError, undefined);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.methodologyVersion, "event_study_falsification_audit_standard_v1");
+  assert.deepEqual(parsed.standard.models, ["white_noise"]);
+  assert.equal(parsed.runs[0].candidateRule.branch, "fvg_retest_bearish");
+  assert.equal(parsed.runs[0].audit.completed, 2);
+});
+
+test("run_event_study_falsification_audit accepts a declared synthetic aftershock event schedule", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_event_study_falsification_audit", arguments: {
+    study: {
+      type: "event_aftershock_retest", timeframe: "15", initial_range_bars: 4,
+      breakout_within_bars: 8, retest_within_bars: 8, require_retest_close_outside: true,
+      minimum_initial_range_coverage: 1, candidate_branch: "retest_up", horizons: [1, 4],
+      candidate_horizon: 4, target_return_bps: 10, minimum_events: 2, minimum_fold_events: 1,
+      folds: 2, event_first_bar: 16, event_every_bars: 96, maximum_synthetic_events: 10,
+      configuration_trials: 1,
+    },
+    models: ["white_noise"], replications: 2, bars: 800,
+  } });
+  assert.equal(res.isError, undefined);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.study, "event_aftershock_retest");
+  assert.deepEqual(parsed.runs[0].syntheticEventSchedule, { firstBar: 16, everyBars: 96, maximumEvents: 10 });
+});
+
 test("run_market_event_study binds the chart and returns session auction evidence", async () => {
   const start = Date.UTC(2026, 0, 5);
   const bars = [];
@@ -5994,6 +6033,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
     features: ["body_direction", "range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
     range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5,
+    confidence_level: 0.99,
     configuration_trials: 18,
     journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
     observation_limit: 2,
@@ -6005,6 +6045,8 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
   assert.match(parsed.definitionHash, /^sha256:/);
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.outcomeContract.forwardFill, false);
+  assert.equal(parsed.inferenceContract.confidenceLevel, 0.99);
+  assert.equal(parsed.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.meanConfidenceInterval.confidenceLevel, 0.99);
   assert.ok(parsed.byFeature.body_direction.bullish_body.observations > 0);
   assert.equal(parsed.observations.length, 2);
   assert.equal(parsed.journal.recorded, true);
@@ -7049,9 +7091,8 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   } })).content[0].text);
   assert.equal(recorded.journal.recorded, true);
   assert.equal(journalRecords[0].conditionType, "lead_lag_return_correlation");
-  // Only a positive lag describes the reference leading the primary, so only those are evidence
-  // about something actionable; the contemporaneous and negative lags must not be stored beside them.
-  assert.deepEqual(journalRecords[0].outcomes.map((outcome) => outcome.horizonBars), [1, 2, 3]);
+  // A lag is recordable only when it is both tradable and survives the declared Bonferroni family.
+  assert.deepEqual(journalRecords[0].outcomes.map((outcome) => outcome.horizonBars), [1]);
   assert.ok(journalRecords[0].outcomes.every((outcome) => typeof outcome.correlation === "number"));
   assert.ok(journalRecords[0].outcomes.every((outcome) => !("meanDirectionalReturn" in outcome)));
 

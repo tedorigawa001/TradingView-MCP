@@ -29,6 +29,7 @@ export interface YieldPriceNonconfirmationInput {
   folds: YieldPriceNonconfirmationFold[];
   eventLimit: number;
   configurationTrials?: number;
+  confidenceLevel?: 0.9 | 0.95 | 0.99;
   driverLagBars?: number;
   contextRegime: null | { bars: OhlcvBar[]; symbol: string; timeframe: string; lookback: number; minimumReturn: number; maxAgeBars: number };
   contextIndicator?: null | {
@@ -99,7 +100,17 @@ function validateGateObservations(
   return ordered;
 }
 
-function summarize(events: Array<ReturnType<typeof outcome>>, horizons: number[]) {
+const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+
+function meanConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (values.length < 2) return { status: "insufficient_sample" as const, lower: null, upper: null };
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const margin = NORMAL_Z[confidenceLevel] * Math.sqrt(variance / values.length);
+  return { status: "available" as const, lower: mean - margin, upper: mean + margin };
+}
+
+function summarize(events: Array<ReturnType<typeof outcome>>, horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
   return Object.fromEntries(horizons.map((horizon) => {
     const available = events.map((event) => event.outcomes[String(horizon)]).filter((item) => item !== null);
     const returns = available.map((item) => item!.directionalReturn);
@@ -107,7 +118,7 @@ function summarize(events: Array<ReturnType<typeof outcome>>, horizons: number[]
     return [String(horizon), {
       availableEvents: available.length,
       unavailableEvents: events.length - available.length,
-      directionalReturn: stats(returns),
+      directionalReturn: { ...stats(returns), meanConfidenceInterval: meanConfidenceInterval(returns, confidenceLevel) },
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
       mfe: stats(available.map((item) => item!.mfe)),
       mae: stats(available.map((item) => item!.mae)),
@@ -170,6 +181,9 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   }
   if (!Number.isInteger(configurationTrials) || configurationTrials < 1 || configurationTrials > 1000) {
     throw new Error("configuration trials must be an integer between 1 and 1000");
+  }
+  if (input.confidenceLevel !== undefined && ![0.9, 0.95, 0.99].includes(input.confidenceLevel)) {
+    throw new Error("unsupported confidence level");
   }
   if (!Number.isInteger(input.driverLookback) || input.driverLookback < 1 || input.driverLookback > 250 ||
       !(input.driverChangeThreshold > 0)) throw new Error("invalid driver impulse definition");
@@ -353,7 +367,7 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
   const branches: Branch[] = ["driver_up_target_failure", "driver_down_target_failure"];
   const byBranch = Object.fromEntries(branches.map((branch) => {
     const selected = events.filter((event) => event.branch === branch);
-    return [branch, { events: selected.length, horizons: summarize(selected, input.horizons) }];
+    return [branch, { events: selected.length, horizons: summarize(selected, input.horizons, input.confidenceLevel ?? 0.95) }];
   }));
   const foldResults = folds.map((fold) => {
     const selected = events.filter((event) => {
@@ -363,7 +377,7 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
     return { foldId: fold.foldId, from: fold.from, to: fold.to, events: selected.length,
       byBranch: Object.fromEntries(branches.map((branch) => {
         const branchEvents = selected.filter((event) => event.branch === branch);
-        return [branch, { events: branchEvents.length, horizons: summarize(branchEvents, input.horizons) }];
+        return [branch, { events: branchEvents.length, horizons: summarize(branchEvents, input.horizons, input.confidenceLevel ?? 0.95) }];
       })) };
   });
   const qualityIssues = [
@@ -384,6 +398,7 @@ export function runYieldPriceNonconfirmationStudy(input: YieldPriceNonconfirmati
       driverChangeThreshold: input.driverChangeThreshold,
       driverLagBars,
       configurationTrials,
+      confidenceLevel: input.confidenceLevel ?? 0.95,
       priceBreakoutLookback: input.priceBreakoutLookback,
       nonconfirmationBars: input.nonconfirmationBars,
       triggerLookback: input.triggerLookback,

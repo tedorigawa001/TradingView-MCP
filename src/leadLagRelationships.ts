@@ -22,6 +22,17 @@ export interface LeadLagInput {
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 
+function normalCdf(value: number): number {
+  // Abramowitz-Stegun 7.1.26. This is sufficient for a transparent Fisher-z screening threshold;
+  // the returned p-value is descriptive, while the adjusted alpha is the actual decision boundary.
+  const x = Math.abs(value);
+  const t = 1 / (1 + 0.2316419 * x);
+  const density = Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  const tail = density * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const cdf = 1 - tail;
+  return value < 0 ? 1 - cdf : cdf;
+}
+
 function canonicalTime(value: string, label: string): number {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
     throw new Error(`${label} must be a canonical UTC timestamp`);
@@ -73,6 +84,12 @@ function fisherConfidenceInterval(
     lower: Math.tanh(z - margin),
     upper: Math.tanh(z + margin),
   };
+}
+
+function fisherTwoSidedPValue(correlation: number | null, observations: number): number | null {
+  if (correlation === null || observations <= 3 || Math.abs(correlation) >= 1) return null;
+  const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(observations - 3);
+  return Math.max(0, Math.min(1, 2 * (1 - normalCdf(statistic))));
 }
 
 function leadDirection(lagBars: number) {
@@ -143,6 +160,9 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     folds.find((fold) => timeMs >= fold.fromMs && timeMs < fold.toMs)?.foldId ?? null;
 
   const lags = Array.from({ length: input.maxLagBars * 2 + 1 }, (_, index) => index - input.maxLagBars);
+  const familyTests = lags.length * input.configurationTrials;
+  const nominalAlpha = 1 - input.confidenceLevel;
+  const bonferroniAdjustedAlpha = nominalAlpha / familyTests;
   const byLag = lags.map((lagBars) => {
     const pairedPrimary: number[] = [];
     const pairedReference: number[] = [];
@@ -182,6 +202,8 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     const sameSignFolds = correlation === null ? 0
       : evaluableFolds.filter((fold) => Math.sign(fold.correlation as number) === Math.sign(correlation)).length;
 
+    const pValue = evaluable ? fisherTwoSidedPValue(correlation, observations) : null;
+    const passesBonferroni = lagBars > 0 && pValue !== null && pValue <= bonferroniAdjustedAlpha;
     return {
       lagBars,
       leadDirection: leadDirection(lagBars),
@@ -192,6 +214,14 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
         : "insufficient_sample" as const,
       correlation,
       confidenceInterval: fisherConfidenceInterval(correlation, observations, input.confidenceLevel),
+      inference: {
+        fisherTwoSidedPValue: pValue,
+        bonferroniAdjustedPValue: pValue === null ? null : Math.min(1, pValue * familyTests),
+        familyTests,
+        nominalAlpha,
+        bonferroniAdjustedAlpha,
+        passesBonferroni,
+      },
       folds: foldResults,
       foldStability: {
         evaluableFolds: evaluableFolds.length,
@@ -239,15 +269,16 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       evaluableLags,
       configurationTrials: input.configurationTrials,
       serialDependenceAdjustment: "none" as const,
-      multipleTestingAdjustment: "none" as const,
-      // Reference only. It is never applied to the intervals above.
-      bonferroniAdjustedAlphaReference: (1 - input.confidenceLevel) / (lagsInspected * input.configurationTrials),
+      multipleTestingAdjustment: "bonferroni_family_wise_error_rate" as const,
+      familyTests,
+      nominalAlpha,
+      bonferroniAdjustedAlpha,
       automaticLagSelection: false,
       ranking: false,
     },
     inferenceWarnings: [
       "confidence_intervals_do_not_adjust_for_serial_dependence",
-      "no_multiple_testing_adjustment_applied",
+      "bonferroni_adjustment_is_applied_to_lag_eligibility",
       "every_scanned_lag_is_reported_and_no_best_lag_is_selected",
       ...(input.maxLagBars > 1 ? ["scanning_many_lags_inflates_the_chance_of_one_interval_excluding_zero"] : []),
     ],
@@ -257,7 +288,7 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       "Correlation between contemporaneous or lagged returns does not establish a causal lead.",
       "Only positive lags describe the reference leading the primary; negative lags are not tradable on the primary.",
       "Single-bar returns do not overlap, but financial returns are still autocorrelated and volatility-clustered, and the Fisher interval assumes independent pairs, so it is narrower than the effective sample supports.",
-      "Selecting the strongest lag from this scan and quoting its interval as an out-of-sample result is invalid.",
+      "Passing Bonferroni marks a lag as statistically eligible for a preregistered forward hypothesis; it is not out-of-sample evidence or a trading signal.",
     ],
   };
 }

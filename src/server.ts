@@ -46,6 +46,7 @@ import { runSessionExhaustionHandoffStudy } from "./sessionHandoffStudy.js";
 import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { runFailedBreakoutStudy } from "./failedBreakoutStudy.js";
 import { runFvgRetestStudy } from "./fvgRetestStudy.js";
+import { runStandardEventStudyFalsificationAudit } from "./eventStudyFalsificationAudit.js";
 import { runExternalLabelStudy } from "./externalLabelStudy.js";
 import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
@@ -781,6 +782,155 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   ]);
 
   server.registerTool(
+    "run_event_study_falsification_audit",
+    {
+      description:
+        "Calibrate one frozen FVG-retest or session-auction event-study decision rule against deterministic, " +
+        "predictability-free synthetic OHLC. It runs each selected null model separately and returns the " +
+        "candidate rate, Wilson interval, seed range, and failures. A candidate requires a global mean " +
+        "confidence interval wholly above zero plus positive evidence in every synthetic fold. It does not " +
+        "read or change TradingView, record a journal entry, rank variants, or establish profitability.",
+      inputSchema: {
+        study: z.discriminatedUnion("type", [
+          z.object({
+            type: z.literal("fvg_retest"),
+            timeframe: z.string().regex(/^[1-9]\d*$/),
+            minimum_gap_bps: z.number().finite().gt(0).max(1000),
+            retest_within_bars: z.number().int().min(1).max(96),
+            min_impulse_body_ratio: z.number().finite().min(0).max(1),
+            require_boundary_hold: z.boolean(),
+            direction: z.enum(["bullish", "bearish"]),
+            horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
+            candidate_horizon: z.number().int().min(1).max(96),
+            target_return_bps: z.number().finite().gt(0).max(1000),
+            minimum_events: z.number().int().min(2).max(5000),
+            minimum_fold_events: z.number().int().min(1).max(5000).optional(),
+            folds: z.number().int().min(2).max(12).optional(),
+            confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+            configuration_trials: z.number().int().min(1).max(100_000),
+          }),
+          z.object({
+            type: z.literal("session_auction"),
+            timeframe: z.string().regex(/^[1-9]\d*$/),
+            timezone: z.string().min(1).max(100),
+            range_start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+            range_end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+            auction_end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+            acceptance_closes: z.number().int().min(1).max(4),
+            failure_within_bars: z.number().int().min(0).max(4),
+            minimum_range_coverage: z.number().finite().gt(0).max(1),
+            candidate_branch: z.enum(["accepted_up", "accepted_down", "failed_up", "failed_down"]),
+            horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
+            candidate_horizon: z.number().int().min(1).max(96),
+            target_return_bps: z.number().finite().gt(0).max(1000),
+            minimum_events: z.number().int().min(2).max(5000),
+            minimum_fold_events: z.number().int().min(1).max(5000).optional(),
+            folds: z.number().int().min(2).max(12).optional(),
+            confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+            configuration_trials: z.number().int().min(1).max(100_000),
+          }),
+          z.object({
+            type: z.literal("event_aftershock_retest"),
+            timeframe: z.string().regex(/^[1-9]\d*$/),
+            initial_range_bars: z.number().int().min(1).max(24),
+            breakout_within_bars: z.number().int().min(1).max(96),
+            retest_within_bars: z.number().int().min(1).max(96),
+            require_retest_close_outside: z.boolean(),
+            minimum_initial_range_coverage: z.number().finite().gt(0).max(1),
+            candidate_branch: z.enum(["retest_up", "retest_down"]),
+            horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
+            candidate_horizon: z.number().int().min(1).max(96),
+            target_return_bps: z.number().finite().gt(0).max(1000),
+            minimum_events: z.number().int().min(2).max(5000),
+            minimum_fold_events: z.number().int().min(1).max(5000).optional(),
+            folds: z.number().int().min(2).max(12).optional(),
+            event_first_bar: z.number().int().min(0).max(50_000),
+            event_every_bars: z.number().int().min(1).max(50_000),
+            maximum_synthetic_events: z.number().int().min(1).max(200),
+            confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+            configuration_trials: z.number().int().min(1).max(100_000),
+          }),
+        ]),
+        models: z.array(z.enum(["white_noise", "regime_switching_volatility", "bid_ask_bounce"])).min(1).max(3).optional()
+          .describe("Separate null-model runs. Default: all three; model rates are never pooled"),
+        replications: z.number().int().min(1).max(2000).optional().describe("Per-model independent replicas. Default: 400"),
+        first_seed: z.number().int().min(0).max(0xffffffff).optional(),
+        bars: z.number().int().min(100).max(50_000).optional().describe("Synthetic closed bars per replica. Default: 5000"),
+        volatility: z.number().finite().gt(0).max(0.5).optional(),
+        nominal_alpha: z.number().finite().gt(0).lt(1).optional().describe("Reference candidate rate. Default: 0.05"),
+      },
+    },
+    async ({ study, models, replications, first_seed, bars, volatility, nominal_alpha }) => {
+      try {
+        const common = {
+          models,
+          replications,
+          firstSeed: first_seed,
+          bars,
+          volatility,
+          nominalAlpha: nominal_alpha,
+        };
+        const result = study.type === "fvg_retest"
+          ? runStandardEventStudyFalsificationAudit({
+            ...common,
+            study: { type: "fvg_retest", definition: {
+              symbol: "SYNTH:FVG_RETEST", timeframe: study.timeframe,
+              minimumGapBps: study.minimum_gap_bps, retestWithinBars: study.retest_within_bars,
+              minImpulseBodyRatio: study.min_impulse_body_ratio, requireBoundaryHold: study.require_boundary_hold,
+              horizons: study.horizons, targetReturnBps: study.target_return_bps,
+              minimumEvents: study.minimum_events, eventLimit: 0,
+              confidenceLevel: study.confidence_level ?? 0.95, configurationTrials: study.configuration_trials,
+              regime: null, branchFilter: study.direction,
+            } },
+            candidate: {
+              branch: `fvg_retest_${study.direction}`, horizon: study.candidate_horizon,
+              minimumEvents: study.minimum_events, minimumFoldEvents: study.minimum_fold_events ?? 1, folds: study.folds,
+            },
+          })
+          : study.type === "session_auction"
+          ? runStandardEventStudyFalsificationAudit({
+            ...common,
+            study: { type: "session_auction", definition: {
+              symbol: "SYNTH:SESSION_AUCTION", timeframe: study.timeframe, timezone: study.timezone,
+              rangeStart: study.range_start, rangeEnd: study.range_end, auctionEnd: study.auction_end,
+              acceptanceCloses: study.acceptance_closes, failureWithinBars: study.failure_within_bars,
+              minimumRangeCoverage: study.minimum_range_coverage, horizons: study.horizons,
+              targetReturnBps: study.target_return_bps, minimumEvents: study.minimum_events,
+              eventLimit: 0, confidenceLevel: study.confidence_level ?? 0.95,
+              configurationTrials: study.configuration_trials, regime: null,
+            } },
+            candidate: {
+              branch: study.candidate_branch, horizon: study.candidate_horizon,
+              minimumEvents: study.minimum_events, minimumFoldEvents: study.minimum_fold_events ?? 1, folds: study.folds,
+            },
+          })
+          : runStandardEventStudyFalsificationAudit({
+            ...common,
+            study: { type: "event_aftershock_retest", definition: {
+              symbol: "SYNTH:EVENT_AFTERSHOCK", timeframe: study.timeframe,
+              initialRangeBars: study.initial_range_bars, breakoutWithinBars: study.breakout_within_bars,
+              retestWithinBars: study.retest_within_bars, overlapPolicy: "exclude_later_event",
+              requireRetestCloseOutside: study.require_retest_close_outside,
+              minimumInitialRangeCoverage: study.minimum_initial_range_coverage,
+              horizons: study.horizons, targetReturnBps: study.target_return_bps,
+              minimumEvents: study.minimum_events, eventLimit: 0,
+              confidenceLevel: study.confidence_level ?? 0.95, configurationTrials: study.configuration_trials,
+              regime: null, sameTimestampPolicy: "represent_first",
+            }, eventSchedule: {
+              firstBar: study.event_first_bar, everyBars: study.event_every_bars,
+              maximumEvents: study.maximum_synthetic_events,
+            } },
+            candidate: {
+              branch: study.candidate_branch, horizon: study.candidate_horizon,
+              minimumEvents: study.minimum_events, minimumFoldEvents: study.minimum_fold_events ?? 1, folds: study.folds,
+            },
+          });
+        return jsonResult(result);
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
     "run_market_event_study",
     {
       description:
@@ -1249,6 +1399,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         gap_atr_threshold: z.number().finite().min(0).optional(),
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8),
         minimum_observations: z.number().int().min(1).max(5000).optional(),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional()
+          .describe("Confidence level for normal-approximation mean and Wilson rate intervals. Default: 0.95"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
@@ -1281,7 +1433,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ expected_symbol, expected_timeframe, count, features, feature_selection, signal_from, signal_to, atr_lookback, atr_baseline_lookback,
       range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
       atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
-      gap_atr_threshold, horizons, minimum_observations, folds, regime, configuration_trials, journal,
+      gap_atr_threshold, horizons, minimum_observations, confidence_level, folds, regime, configuration_trials, journal,
       observation_limit }) => chartOperations.run(async () => {
       try {
         if (feature_selection && features !== undefined) {
@@ -1328,6 +1480,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           gapAtrThreshold: gap_atr_threshold ?? 0.25,
           horizons,
           minimumObservations: minimum_observations ?? 100,
+          confidenceLevel: confidence_level ?? 0.95,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           regime: regime === undefined ? null : {
             directionalRegime: regime.directional_regime,
@@ -6957,7 +7110,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Lags with fewer paired returns are reported as insufficient. Default: 30"),
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         configuration_trials: z.number().int().min(1).max(100000).optional()
-          .describe("Total related scans inspected so far, including this one. Default: 1"),
+          .describe("Total related scans inspected so far, including this one. Applied with all scanned lags as the Bonferroni family. Default: 1"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
@@ -7039,8 +7192,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             // evidence about something actionable. Storing the contemporaneous and negative lags
             // would put numbers nobody can act on next to ones they can.
             const tradable = result.byLag.filter((lag) =>
-              lag.tradableOnPrimary && lag.status === "evaluable" && lag.correlation !== null);
-            if (tradable.length === 0) throw new Error("no evaluable tradable lag to record");
+              lag.tradableOnPrimary && lag.status === "evaluable" && lag.correlation !== null && lag.inference.passesBonferroni);
+            if (tradable.length === 0) throw new Error("no tradable lag passes the Bonferroni eligibility gate to record");
             if (journal.decision === "adopted") {
               throw new Error("a lag scan cannot be adopted: re-register the chosen lag as a forward hypothesis and collect it out of sample");
             }

@@ -64,8 +64,26 @@ test("falsification audit reports a failed replication instead of scoring it as 
   assert.equal(result.completed, 15);
   assert.equal(result.candidates, 15);
   assert.equal(result.observedRate, 1);
+  assert.equal(result.status, "incomplete");
+  assert.equal(result.exceedsNominalAlpha, false, "a surviving subset cannot establish miscalibration");
   assert.match(result.failed[0].error, /study exploded/);
   assert.ok(result.failed.every((item) => Number.isInteger(item.seed)));
+});
+
+test("falsification audit excludes valid but non-evaluable draws from the candidate-rate denominator", () => {
+  let call = 0;
+  const result = runFalsificationAudit({
+    ...base, replications: 10, model: "white_noise",
+    runStudy: () => ++call,
+    isCandidate: () => false,
+    evaluate: (value) => value <= 4 ? "not_evaluable" : value <= 7 ? "candidate" : "non_candidate",
+  });
+  assert.equal(result.failed.length, 0);
+  assert.equal(result.completed, 10);
+  assert.equal(result.evaluated, 6);
+  assert.deepEqual(result.notEvaluableSeeds, [1, 2, 3, 4]);
+  assert.equal(result.candidates, 3);
+  assert.equal(result.observedRate, 0.5, "three candidates in six evaluable draws, not ten generated draws");
 });
 
 test("falsification audit calls an exceedance only when noise cannot explain it", () => {
@@ -128,6 +146,11 @@ test("falsification audit refuses inputs that would make its rate meaningless", 
   assert.throws(() => runFalsificationAudit({ ...base, ...rule, nominalAlpha: 0 }), /nominal alpha must be between zero and one/);
   assert.throws(() => runFalsificationAudit({ ...base, ...rule, nominalAlpha: 1 }), /nominal alpha must be between zero and one/);
   assert.throws(() => runFalsificationAudit({ ...base, ...rule, firstSeed: -1 }), /first seed must be a non-negative/);
+  assert.throws(() => runFalsificationAudit({ ...base, ...rule, volatility: 0 }), /volatility must be greater than zero/);
+  assert.throws(() => runFalsificationAudit({ ...base, ...rule, volatility: 0.6 }), /volatility must be greater than zero/);
+  assert.throws(() => runPairedFalsificationAudit({
+    ...base, rho: 1.1, isCandidate: () => false, runStudy: (primary) => primary,
+  }), /rho must be between -1 and 1/);
 });
 
 test("falsification audit refuses a seed range it cannot fill with independent draws", () => {

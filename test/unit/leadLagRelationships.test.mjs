@@ -77,24 +77,29 @@ test("lead/lag scan reports every scanned lag and never selects a best lag", () 
   assert.equal(result.inferenceContract.automaticLagSelection, false);
   assert.equal(result.inferenceContract.ranking, false);
   assert.equal(result.inferenceContract.lagsInspected, 11);
-  assert.equal(result.inferenceContract.multipleTestingAdjustment, "none");
+  assert.equal(result.inferenceContract.multipleTestingAdjustment, "bonferroni_family_wise_error_rate");
   assert.ok(result.inferenceWarnings.includes("every_scanned_lag_is_reported_and_no_best_lag_is_selected"));
-  assert.ok(result.inferenceWarnings.includes(
-    "scanning_many_lags_inflates_the_chance_of_one_interval_excluding_zero"));
+  assert.ok(result.inferenceWarnings.includes("bonferroni_adjustment_is_applied_to_lag_eligibility"));
   // No field may hand the caller a pre-picked winner.
   assert.equal(Object.keys(result).some((key) => /best|selected|optimal/i.test(key)), false);
 });
 
-test("lead/lag Bonferroni reference alpha divides by lags and declared trials without touching intervals", () => {
+test("lead/lag Bonferroni gates lag eligibility across lags and declared trials", () => {
   const { primaryBars, referenceBars } = laggedPair(DRIVER, 2);
   const result = computeLeadLagRelationships({
     ...BASE, primaryBars, referenceBars, maxLagBars: 2, configurationTrials: 5,
   });
   // 5 lags inspected here, times 5 declared trials.
-  assert.equal(result.inferenceContract.bonferroniAdjustedAlphaReference, (1 - 0.95) / 25);
+  assert.equal(result.inferenceContract.familyTests, 25);
+  assert.equal(result.inferenceContract.bonferroniAdjustedAlpha, (1 - 0.95) / 25);
   assert.equal(result.inferenceContract.confidenceLevel, 0.95);
   const lagTwo = result.byLag.find((entry) => entry.lagBars === 2);
   assert.equal(lagTwo.confidenceInterval.confidenceLevel, 0.95);
+  assert.ok(lagTwo.inference.fisherTwoSidedPValue < 0.002);
+  assert.equal(lagTwo.inference.passesBonferroni, true);
+  assert.ok(lagTwo.inference.bonferroniAdjustedPValue <= 0.05);
+  const nonTradable = result.byLag.find((entry) => entry.lagBars === -2);
+  assert.equal(nonTradable.inference.passesBonferroni, false, "negative lags cannot become a primary-market candidate");
 });
 
 test("lead/lag scan joins on exact timestamps and never forward fills a missing reference bar", () => {
