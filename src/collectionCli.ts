@@ -53,6 +53,7 @@ async function main(): Promise<void> {
       cot: new CotClient(undefined, undefined, cotStore),
       realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldStore),
       cmeGoldOpenInterest: new CmeDailyBulletinClient(),
+      futuresOpenInterest: futuresOiStore,
       cotSymbols: args.cotSymbols,
       cotWeeks: args.cotWeeks,
       coverage,

@@ -43,6 +43,7 @@ export async function collectFirstSeenSources(input: {
   cot: CotCollector;
   realYield: RealYieldCollector;
   cmeGoldOpenInterest: CmeGoldOpenInterestCollector;
+  futuresOpenInterest: Pick<FuturesOpenInterestFirstSeenStore, "observeMany">;
   cotSymbols: string[];
   cotWeeks: number;
   coverage: () => Promise<UnifiedFirstSeenCoverage>;
@@ -51,7 +52,14 @@ export async function collectFirstSeenSources(input: {
   status: "complete" | "partial";
   cot: Array<{ symbol: string; status: "complete" | "error"; observations?: number; error?: string }>;
   real_yield: { status: "complete" | "error"; observation_date?: string; available_at?: string | null; error?: string };
-  cme_gold_open_interest: { status: "complete" | "error"; observation_date?: string; open_interest?: number; report_status?: string; error?: string };
+  cme_gold_open_interest: {
+    status: "complete" | "error";
+    observation_date?: string;
+    open_interest?: number;
+    report_status?: string;
+    first_seen?: { recorded: number; unchanged: number; revisions: number };
+    error?: string;
+  };
   coverage: UnifiedFirstSeenCoverage;
 }> {
   const cot = await Promise.all(input.cotSymbols.map(async (symbol) => {
@@ -73,14 +81,31 @@ export async function collectFirstSeenSources(input: {
   } catch (error) {
     realYield = { status: "error", error: errorMessage(error) };
   }
-  let cmeGoldOpenInterest: { status: "complete" | "error"; observation_date?: string; open_interest?: number; report_status?: string; error?: string };
+  let cmeGoldOpenInterest: {
+    status: "complete" | "error";
+    observation_date?: string;
+    open_interest?: number;
+    report_status?: string;
+    first_seen?: { recorded: number; unchanged: number; revisions: number };
+    error?: string;
+  };
   try {
     const latest = await input.cmeGoldOpenInterest.getLatestGoldOpenInterest();
+    const firstSeen = await input.futuresOpenInterest.observeMany([{
+      futures_symbol: "COMEX_DL:GC1!",
+      scope: "all_months_aggregated",
+      observation_date: latest.observation_date,
+      open_interest: latest.open_interest,
+      source: latest.source,
+      source_detail: latest.source_detail,
+      observed_at: latest.observed_at,
+    }]);
     cmeGoldOpenInterest = {
       status: "complete",
       observation_date: latest.observation_date,
       open_interest: latest.open_interest,
       report_status: latest.report_status,
+      first_seen: { recorded: firstSeen.recorded.length, unchanged: firstSeen.unchanged, revisions: firstSeen.revisions },
     };
   } catch (error) {
     cmeGoldOpenInterest = { status: "error", error: errorMessage(error) };
