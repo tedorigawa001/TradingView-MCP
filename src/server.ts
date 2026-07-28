@@ -52,6 +52,7 @@ import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
+import { runFeatureOutcomeFalsificationAudit } from "./featureOutcomeFalsificationAudit.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
@@ -1212,7 +1213,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         trigger_lookback: z.number().int().min(1).max(100),
         trigger_within_bars: z.number().int().min(1).max(20),
         max_driver_age_bars: z.number().int().min(0).max(20),
-        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8),
+        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
+          .describe("Observed-bar return horizons. Only horizon 1 can be statistically candidate-eligible."),
         target_return_bps: z.number().finite().gt(0).max(10_000),
         minimum_events: z.number().int().min(1).max(5000),
         signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
@@ -1359,6 +1361,99 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "run_feature_outcome_falsification_audit",
+    {
+      description:
+        "Calibrate the frozen feature-outcome candidate gate against deterministic synthetic null OHLC. " +
+        "A candidate must pass the horizon-one, non-overlapping Newey-West and Bonferroni rule. " +
+        "It does not read or change TradingView, record a journal entry, rank variants, or establish profitability.",
+      inputSchema: {
+        timeframe: z.string().regex(/^[1-9]\d*$/),
+        features: z.array(z.enum([
+          "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+        ])).min(1).max(6),
+        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
+          .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
+        minimum_observations: z.number().int().min(2).max(5000),
+        configuration_trials: z.number().int().min(1).max(100_000),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+        atr_lookback: z.number().int().min(2).max(250).optional(),
+        atr_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+        range_lookback: z.number().int().min(2).max(500).optional(),
+        streak_minimum_bars: z.number().int().min(1).max(100).optional(),
+        body_ratio_threshold: z.number().finite().min(0).lt(1).optional(),
+        wick_imbalance_threshold: z.number().finite().min(0).max(1).optional(),
+        atr_compression_low_ratio: z.number().finite().gt(0).lt(1).optional(),
+        atr_compression_high_ratio: z.number().finite().gt(1).optional(),
+        range_position_lower: z.number().finite().gt(0).lt(0.5).optional(),
+        range_position_upper: z.number().finite().gt(0.5).lt(1).optional(),
+        gap_atr_threshold: z.number().finite().min(0).optional(),
+        models: z.array(z.enum(["white_noise", "regime_switching_volatility", "bid_ask_bounce"])).min(1).max(3).optional(),
+        replications: z.number().int().min(1).max(2000).optional(),
+        first_seed: z.number().int().min(0).max(0xffffffff).optional(),
+        bars: z.number().int().min(100).max(50_000).optional(),
+        volatility: z.number().finite().gt(0).max(0.5).optional(),
+        nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
+      },
+    },
+    async ({ timeframe, features, horizons, minimum_observations, configuration_trials, confidence_level,
+      atr_lookback, atr_baseline_lookback, range_lookback, streak_minimum_bars, body_ratio_threshold,
+      wick_imbalance_threshold, atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower,
+      range_position_upper, gap_atr_threshold, models, replications, first_seed, bars, volatility, nominal_alpha }) => {
+      try {
+        const common = {
+          replications: replications ?? 400,
+          firstSeed: first_seed,
+          bars: bars ?? 5_000,
+          timeframeMinutes: Number(timeframe),
+          volatility,
+          nominalAlpha: nominal_alpha ?? 0.05,
+        };
+        const study = {
+          timeframe,
+          features,
+          selection: null,
+          signalFrom: null,
+          signalTo: null,
+          atrLookback: atr_lookback ?? 14,
+          atrBaselineLookback: atr_baseline_lookback ?? 50,
+          rangeLookback: range_lookback ?? 20,
+          streakMinimumBars: streak_minimum_bars ?? 3,
+          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
+          rangePositionLower: range_position_lower ?? 0.33,
+          rangePositionUpper: range_position_upper ?? 0.67,
+          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          horizons,
+          minimumObservations: minimum_observations,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials,
+          folds: [],
+          regime: null,
+          observationLimit: 0,
+        };
+        const selectedModels = models ?? ["white_noise", "regime_switching_volatility", "bid_ask_bounce"] as const;
+        const runs = selectedModels.map((model) => runFeatureOutcomeFalsificationAudit({
+          audit: { ...common, model },
+          study,
+        }));
+        return jsonResult({
+          schemaVersion: "1.0",
+          methodologyVersion: "feature_outcome_falsification_audit_standard_v1",
+          candidateRule: runs[0].candidateRule,
+          runs,
+          limitations: [
+            "Rates are separate by null model and are never pooled.",
+            "The audit calibrates the frozen candidate rule, not an unrecorded search outside configuration_trials.",
+          ],
+        });
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
     "compute_feature_outcome_relationships",
     {
       description:
@@ -1481,6 +1576,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           horizons,
           minimumObservations: minimum_observations ?? 100,
           confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials ?? 1,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           regime: regime === undefined ? null : {
             directionalRegime: regime.directional_regime,
@@ -1568,7 +1664,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Associations do not establish causality or imply a trade direction.",
             "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "Upside and downside use bar extremes; intrabar ordering is unknown.",
-            "Reported statistics do not adjust for serial dependence or multiple testing; configurationTrials is descriptive evidence only.",
+            "Newey-West and Bonferroni can mark an exploratory result only. Candidate eligibility requires a matching reviewed empirical-null calibration as well as prospective out-of-sample evidence.",
           ],
         });
       } catch (err) {

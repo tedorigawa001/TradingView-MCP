@@ -63,6 +63,7 @@ export interface FeatureOutcomeRelationshipsInput {
   regime: FeatureOutcomeRegimeFilter | null;
   observationLimit: number;
   confidenceLevel?: 0.9 | 0.95 | 0.99;
+  configurationTrials?: number;
 }
 
 const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
@@ -75,6 +76,15 @@ const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
 };
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+
+function normalCdf(value: number): number {
+  const x = Math.abs(value);
+  const t = 1 / (1 + 0.2316419 * x);
+  const density = Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  const tail = density * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const cdf = 1 - tail;
+  return value < 0 ? 1 - cdf : cdf;
+}
 
 type Outcome = {
   forwardReturn: number;
@@ -114,9 +124,31 @@ function meanConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 
   }
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
   const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
-  const margin = NORMAL_Z[confidenceLevel] * Math.sqrt(variance / values.length);
+  const standardError = Math.sqrt(variance / values.length);
+  const margin = NORMAL_Z[confidenceLevel] * standardError;
   return { status: "available" as const, method: "normal_approximation" as const,
-    confidenceLevel, observations: values.length, lower: mean - margin, upper: mean + margin };
+    confidenceLevel, observations: values.length, lower: mean - margin, upper: mean + margin,
+    twoSidedPValue: standardError === 0 ? (mean === 0 ? 1 : 0) : Math.max(0, Math.min(1, 2 * (1 - normalCdf(Math.abs(mean / standardError)))))};
+}
+
+function neweyWestConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
+  if (values.length < 2) {
+    return { status: "insufficient_sample" as const, method: "newey_west_bartlett" as const,
+      confidenceLevel, observations: values.length, lags: 0, lower: null, upper: null };
+  }
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const deviations = values.map((value) => value - mean);
+  const lags = Math.min(values.length - 1, Math.floor(4 * (values.length / 100) ** (2 / 9)));
+  let longRunVariance = deviations.reduce((sum, value) => sum + value * value, 0) / values.length;
+  for (let lag = 1; lag <= lags; lag += 1) {
+    const covariance = deviations.slice(lag).reduce((sum, value, index) => sum + value * deviations[index], 0) / values.length;
+    longRunVariance += 2 * (1 - lag / (lags + 1)) * covariance;
+  }
+  const standardError = Math.sqrt(Math.max(0, longRunVariance) / values.length);
+  const margin = NORMAL_Z[confidenceLevel] * standardError;
+  return { status: "available" as const, method: "newey_west_bartlett" as const,
+    confidenceLevel, observations: values.length, lags, lower: mean - margin, upper: mean + margin,
+    twoSidedPValue: standardError === 0 ? (mean === 0 ? 1 : 0) : Math.max(0, Math.min(1, 2 * (1 - normalCdf(Math.abs(mean / standardError)))))};
 }
 
 function wilsonConfidenceInterval(successes: number, observations: number, confidenceLevel: 0.9 | 0.95 | 0.99) {
@@ -188,14 +220,85 @@ function outcomeFor(bars: OhlcvBar[], signalIndex: number, horizons: number[]): 
   }));
 }
 
-function summarize(observations: Observation[], horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
+type BonferroniInference = {
+  familyTests: number;
+  nominalAlpha: number;
+  adjustedAlpha: number;
+  candidateHorizon: 1;
+  minimumObservations: number;
+};
+
+function inferenceFor(
+  interval: { status: string; twoSidedPValue?: number } | undefined,
+  observations: number,
+  bonferroni: BonferroniInference,
+  horizon: number,
+  exploratoryGateEnabled: boolean,
+  missingExploratoryPrerequisite: string,
+) {
+  const pValue: number | null = interval?.status === "available" && typeof interval.twoSidedPValue === "number"
+    ? interval.twoSidedPValue : null;
+  const passesBonferroni = pValue !== null && pValue <= bonferroni.adjustedAlpha;
+  const minimumObservationsMet = observations >= bonferroni.minimumObservations;
+  const exploratoryEligible = exploratoryGateEnabled && horizon === bonferroni.candidateHorizon &&
+    minimumObservationsMet && passesBonferroni;
+  return {
+    twoSidedPValue: pValue,
+    bonferroniAdjustedPValue: pValue === null ? null : Math.min(1, pValue * bonferroni.familyTests),
+    ...bonferroni,
+    minimumObservationsMet,
+    passesBonferroni,
+    exploratoryEligible,
+    candidateEligible: false,
+    candidateBlockers: [
+      "empirical_null_calibration_required",
+      ...(exploratoryEligible ? [] : [
+      ...(exploratoryGateEnabled ? [] : [missingExploratoryPrerequisite]),
+      ...(horizon === bonferroni.candidateHorizon ? [] : ["candidate_horizon_must_be_1"]),
+      ...(minimumObservationsMet ? [] : ["minimum_observation_count_not_met"]),
+      ...(passesBonferroni ? [] : ["bonferroni_threshold_not_met"]),
+      ]),
+    ],
+  };
+}
+
+function nonOverlappingObservations(observations: Observation[], horizon: number): Observation[] {
+  const selected: Observation[] = [];
+  let nextEligibleSignalIndex = -Infinity;
+  for (const observation of observations) {
+    if (observation.outcomes[String(horizon)] === null || observation.signalIndex < nextEligibleSignalIndex) continue;
+    selected.push(observation);
+    // A later signal may use this outcome's final bar as its signal bar, but not as a future return bar.
+    nextEligibleSignalIndex = observation.signalIndex + horizon;
+  }
+  return selected;
+}
+
+function summarize(observations: Observation[], horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99, bonferroni?: BonferroniInference) {
   return Object.fromEntries(horizons.map((horizon) => {
     const outcomes = observations.map((row) => row.outcomes[String(horizon)]).filter((value) => value !== null);
     const returns = outcomes.map((outcome) => outcome!.forwardReturn);
+    const forwardReturn = stats(returns, confidenceLevel, true);
+    const nonOverlapping = nonOverlappingObservations(observations, horizon);
+    const nonOverlappingReturns = nonOverlapping.map((row) => row.outcomes[String(horizon)]!.forwardReturn);
+    const nonOverlappingForwardReturn = stats(nonOverlappingReturns, confidenceLevel, true);
+    const neweyWestInterval = neweyWestConfidenceInterval(nonOverlappingReturns, confidenceLevel);
     return [String(horizon), {
       availableObservations: outcomes.length,
       unavailableObservations: observations.length - outcomes.length,
-      forwardReturn: stats(returns, confidenceLevel, true),
+      forwardReturn: { ...forwardReturn, ...(bonferroni === undefined ? {} : { inference:
+        inferenceFor(forwardReturn.meanConfidenceInterval, forwardReturn.count, bonferroni, horizon, false,
+          "candidate_requires_non_overlapping_series") }) },
+      nonOverlappingForwardReturn: {
+        sampling: "greedy_non_overlapping_future_return_windows" as const,
+        ...nonOverlappingForwardReturn,
+        neweyWestConfidenceInterval: neweyWestInterval,
+        ...(bonferroni === undefined ? {} : { inference:
+          inferenceFor(nonOverlappingForwardReturn.meanConfidenceInterval, nonOverlappingForwardReturn.count,
+            bonferroni, horizon, false, "candidate_requires_newey_west_inference"),
+          candidateInference: inferenceFor(neweyWestInterval, nonOverlappingForwardReturn.count,
+            bonferroni, horizon, true, "") }),
+      },
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
       positiveRateConfidenceInterval: wilsonConfidenceInterval(
         returns.filter((value) => value > 0).length, returns.length, confidenceLevel),
@@ -210,13 +313,14 @@ function classify<T extends Observation>(
   features: FeatureOutcomeFeature[],
   horizons: number[],
   confidenceLevel: 0.9 | 0.95 | 0.99,
+  bonferroni?: BonferroniInference,
 ) {
   return Object.fromEntries(features.map((feature) => {
     const buckets = [...new Set(rows.map((row) => row.labels[feature]).filter((value): value is string => value !== undefined))]
       .sort();
     return [feature, Object.fromEntries(buckets.map((bucket) => {
       const selected = rows.filter((row) => row.labels[feature] === bucket);
-      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons, confidenceLevel) }];
+      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons, confidenceLevel, bonferroni) }];
     }))];
   }));
 }
@@ -259,7 +363,11 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     throw new Error("feature-outcome relationships require a fixed-duration timeframe");
   }
   const confidenceLevel = input.confidenceLevel ?? 0.95;
+  const configurationTrials = input.configurationTrials ?? 1;
   if (![0.9, 0.95, 0.99].includes(confidenceLevel)) throw new Error("unsupported confidence level");
+  if (!Number.isInteger(configurationTrials) || configurationTrials < 1 || configurationTrials > 100_000) {
+    throw new Error("configuration trials must be an integer from 1 to 100000");
+  }
   if (input.features.length < 1 || input.features.length > 6 || new Set(input.features).size !== input.features.length) {
     throw new Error("features must contain one to six unique feature names");
   }
@@ -441,6 +549,16 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     ...(regimeEvidence?.qualityIssues ?? []).map((issue) => `regime_${issue}`),
   ];
   const returnedObservations = input.observationLimit === 0 ? [] : observations.slice(-input.observationLimit);
+  const familyTests = (selection === null
+    ? input.features.reduce((sum, feature) => sum + FEATURE_BUCKETS[feature].length, 0)
+    : 1) * input.horizons.length * configurationTrials;
+  const bonferroni = {
+    familyTests,
+    nominalAlpha: 1 - confidenceLevel,
+    adjustedAlpha: (1 - confidenceLevel) / familyTests,
+    candidateHorizon: 1 as const,
+    minimumObservations: input.minimumObservations,
+  };
   return {
     schemaVersion: "1.0" as const,
     methodologyVersion: "feature_outcome_relationships_v1" as const,
@@ -500,13 +618,18 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       meanIntervalMethod: "normal_approximation" as const,
       rateIntervalMethod: "wilson_score" as const,
       serialDependenceAdjustment: "none" as const,
-      multipleTestingAdjustment: "none" as const,
+      multipleTestingAdjustment: "bonferroni_family_wise_error_rate" as const,
+      configurationTrials,
+      familyTests,
+      bonferroniAdjustedAlpha: bonferroni.adjustedAlpha,
+      candidateEligibility: "requires_empirical_null_calibration_after_horizon_1_newey_west_and_bonferroni" as const,
     },
     inferenceWarnings: [
-      "confidence_intervals_do_not_adjust_for_serial_dependence",
-      "no_multiple_testing_adjustment_applied",
+        "confidence_intervals_do_not_adjust_for_serial_dependence",
+        "bonferroni_adjustment_is_applied_to_feature_bucket_horizon_eligibility",
+        "candidate_eligibility_is_limited_to_horizon_1_non_overlapping_forward_returns_with_newey_west_inference",
     ],
-    byFeature: classify(observations, input.features, input.horizons, confidenceLevel),
+    byFeature: classify(observations, input.features, input.horizons, confidenceLevel, bonferroni),
     ...(selection === null ? {} : { selectionContrast: selectionContrast(observations, referenceObservations, input.horizons, confidenceLevel) }),
     folds: folds.map((fold) => {
       const selected = observations.filter((row) => {

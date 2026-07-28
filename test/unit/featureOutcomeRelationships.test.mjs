@@ -43,7 +43,10 @@ test("feature-outcome relationships classify only closed-bar evidence and return
   assert.ok(interval.lower <= result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.mean);
   assert.ok(interval.upper >= result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.mean);
   assert.equal(result.inferenceContract.confidenceLevel, 0.95);
-  assert.ok(result.inferenceWarnings.includes("no_multiple_testing_adjustment_applied"));
+  assert.equal(result.inferenceContract.multipleTestingAdjustment, "bonferroni_family_wise_error_rate");
+  assert.ok(result.inferenceContract.familyTests > 1);
+  assert.ok(result.inferenceWarnings.includes("bonferroni_adjustment_is_applied_to_feature_bucket_horizon_eligibility"));
+  assert.equal(typeof result.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.inference.passesBonferroni, "boolean");
 });
 
 test("feature labels at an existing bar are unchanged when later bars are appended", () => {
@@ -54,6 +57,32 @@ test("feature labels at an existing bar are unchanged when later bars are append
   const extendedResult = computeFeatureOutcomeRelationships(input(extended, { observationLimit: 50 }));
   const time = baseResult.observations[2].signalTime;
   assert.deepEqual(extendedResult.observations.find((row) => row.signalTime === time).labels, baseResult.observations[2].labels);
+});
+
+test("feature-outcome candidate eligibility uses horizon one and non-overlapping return windows", () => {
+  const series = bars(Date.UTC(2026, 0, 1), [
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+  ]);
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1, 3], minimumObservations: 2,
+  }));
+  const bullish = result.byFeature.body_direction.bullish_body;
+  const horizonOne = bullish.horizons["1"];
+  const horizonThree = bullish.horizons["3"];
+  assert.equal(horizonOne.nonOverlappingForwardReturn.sampling, "greedy_non_overlapping_future_return_windows");
+  assert.equal(horizonOne.nonOverlappingForwardReturn.count, horizonOne.forwardReturn.count);
+  assert.ok(horizonThree.nonOverlappingForwardReturn.count < horizonThree.forwardReturn.count);
+  assert.equal(horizonOne.nonOverlappingForwardReturn.neweyWestConfidenceInterval.method, "newey_west_bartlett");
+  assert.ok(horizonOne.nonOverlappingForwardReturn.neweyWestConfidenceInterval.lags >= 1);
+  assert.equal(horizonOne.nonOverlappingForwardReturn.candidateInference.twoSidedPValue,
+    horizonOne.nonOverlappingForwardReturn.neweyWestConfidenceInterval.twoSidedPValue);
+  assert.equal(horizonOne.nonOverlappingForwardReturn.candidateInference.exploratoryEligible, true);
+  assert.equal(horizonOne.nonOverlappingForwardReturn.candidateInference.candidateEligible, false);
+  assert.ok(horizonOne.nonOverlappingForwardReturn.candidateInference.candidateBlockers.includes("empirical_null_calibration_required"));
+  assert.equal(horizonThree.nonOverlappingForwardReturn.candidateInference.exploratoryEligible, false);
+  assert.ok(horizonThree.nonOverlappingForwardReturn.candidateInference.candidateBlockers.includes("candidate_horizon_must_be_1"));
+  assert.ok(horizonOne.nonOverlappingForwardReturn.inference.candidateBlockers.includes("candidate_requires_newey_west_inference"));
+  assert.ok(horizonOne.forwardReturn.inference.candidateBlockers.includes("candidate_requires_non_overlapping_series"));
 });
 
 test("feature-outcome relationships exclude forming bars and preserve irregular intervals as quality evidence", () => {
