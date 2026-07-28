@@ -62,6 +62,7 @@ import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore }
 import { getPolicyRateContext } from "./policyRateContext.js";
 import { carryPanelPreflight } from "./carryPanelPreflight.js";
 import { estimateCarryPanelEffectiveSample } from "./carryPanelBootstrap.js";
+import { measureCarryPanelDependence } from "./carryPanelDependence.js";
 import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
@@ -6670,6 +6671,57 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           priceEvidence,
           regime: fixed_regime === undefined ? undefined : { directional: fixed_regime.directional, volatility: fixed_regime.volatility },
         }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "measure_carry_panel_dependence",
+    {
+      description:
+        "Measure actual pairwise return correlation and block-bootstrap design effect for a fixed daily FX panel before a carry primary test. " +
+        "It temporarily switches the requested chart for each pair, loads only the requested history, and restores it after every pair. " +
+        "This measures price-panel dependence only; it does not invent policy-rate vintages or run a carry-return study.",
+      inputSchema: {
+        pairs: z.array(z.object({
+          pair_id: z.string().regex(/^[A-Z0-9:_./-]{3,48}$/),
+          chart_index: z.number().int().min(0),
+          expected_symbol: SYMBOL_SCHEMA,
+          return_sign: z.union([z.literal(1), z.literal(-1)]).default(1),
+        })).min(2).max(28),
+        count: z.number().int().min(200).max(5_000).default(2_000),
+        horizon_business_days: z.number().int().min(1).max(260).default(20),
+        block_length_anchors: z.number().int().min(1).max(52).default(3),
+        iterations: z.number().int().min(100).max(10_000).default(2_000),
+        seed: z.string().min(1).max(128),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ pairs, count, horizon_business_days, block_length_anchors, iterations, seed, confirm }) => chartOperations.run(async () => {
+      try {
+        if (new Set(pairs.map((pair) => pair.pair_id)).size !== pairs.length) throw new Error("pair_id values must be unique");
+        if (!confirm) return jsonResult({ dry_run: true, changed: false, required_timeframe: "1D", requested_pairs: pairs.map((pair) => ({ pair_id: pair.pair_id, chart_index: pair.chart_index, expected_symbol: pair.expected_symbol, return_sign: pair.return_sign })), count, horizon_business_days, block_length_anchors, iterations });
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("carry panel dependence is blocked while Bar Replay is active");
+        const series = [] as Array<{ pair_id: string; return_sign: 1 | -1; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
+        for (const pair of pairs) {
+          const transaction = await withTemporaryChartState(tv, pair.chart_index, { symbol: pair.expected_symbol, resolution: "1D" }, async () => {
+            let history = await tv.getOhlcv(count, pair.chart_index);
+            if (history.bars.length < count) {
+              await tv.loadMoreHistory({ count: count - history.bars.length, chartIndex: pair.chart_index });
+              history = await tv.getOhlcv(count, pair.chart_index);
+            }
+            if (history.symbol.toUpperCase() !== pair.expected_symbol.toUpperCase() || normalizeResolution(history.resolution) !== "1D") throw new Error(`price history does not match ${pair.pair_id}`);
+            return history;
+          });
+          if (!transaction.restored) throw new Error(`chart ${pair.chart_index} could not be restored after ${pair.pair_id}: ${transaction.restoreError instanceof Error ? transaction.restoreError.message : String(transaction.restoreError)}`);
+          if (transaction.operationError !== null) throw transaction.operationError;
+          if (transaction.value === null) throw new Error(`price history collection returned no value for ${pair.pair_id}`);
+          series.push({ pair_id: pair.pair_id, return_sign: pair.return_sign, bars: transaction.value.bars });
+        }
+        return jsonResult({ dry_run: false, changed: true, result: measureCarryPanelDependence({ series, horizonBusinessDays: horizon_business_days, blockLengthAnchors: block_length_anchors, iterations, seed }) });
       } catch (err) {
         return errorResult(err);
       }

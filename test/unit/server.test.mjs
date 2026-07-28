@@ -772,6 +772,7 @@ test("exposes exactly the seventy-nine expected tools", async () => {
       "list_alerts",
       "list_pine_scripts",
       "load_more_history",
+      "measure_carry_panel_dependence",
       "reconcile_gold_open_interest",
       "record_strategy_experiment",
       "register_event_study_hypothesis",

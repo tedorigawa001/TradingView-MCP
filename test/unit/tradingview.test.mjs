@@ -97,6 +97,7 @@ test("setSymbol/setResolution wait for a transient empty series, then reject if 
   for (const expr of cdp.calls) {
     assert.ok(expr.includes("no data loaded (0 bars)"), "zero bars must reject");
     assert.ok(expr.includes("setTimeout(() => { retry = null; settle(viaCallback); }, 100)"), "zero bars must be retried before rejection");
+    assert.ok(expr.indexOf("const deadline = Date.now() + 8000") < expr.indexOf("const settle = (viaCallback)"), "retry state must share the settle closure");
     assert.ok(expr.includes("bars"), "result must report the bar count");
   }
 });

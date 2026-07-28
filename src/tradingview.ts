@@ -1170,8 +1170,6 @@ export class TradingView {
         let lastChangeAt = Date.now();
         let sawChange = false;
         let settled = false;
-        const deadline = Date.now() + 8000;
-        let retry = null;
         while (Date.now() - t0 < 20000) {
           const curReport = bt ? bt.activeStrategyReportData.value() : null;
           const curLoading = studyApi.isLoading();
@@ -2598,6 +2596,8 @@ export class TradingView {
           try { chart.setSymbol(before, finish); } catch (e) { finish(); }
         };
         let settled = false;
+        const deadline = Date.now() + 8000;
+        let retry = null;
         // Used on BOTH paths: even a fired callback is only trusted if the
         // chart shows the requested symbol AND actually has data.
         const settle = (viaCallback) => {

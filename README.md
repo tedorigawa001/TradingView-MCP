@@ -200,6 +200,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `get_policy_rate_context` | 8通貨のローカルfirst-seen済み政策金利を`as_of`で返す。決定日00:00 UTCを公表時刻とはみなさず、`available_at`と`first_seen_at`の両方を満たす版だけを返す |
 | `carry_panel_preflight` | 固定した通貨ペア・期間・horizonについて、政策金利の共通利用開始日、非重複アンカー数、OOS残数、欠損を確認する。未蓄積の過去を補完せず、必要件数未満は`not_evaluable`を返す |
 | `estimate_carry_panel_effective_sample` | 固定済みのcarry方向リターン・アンカー日・pairを受け、日付単位の循環移動ブロックbootstrapで相関込みの実効標本を見積もる。採否や最適化には使わない |
+| `measure_carry_panel_dependence` | 日足FXパネルを一時取得し、同一日付・非重複horizonの実測ペア間ρとブロックbootstrapのdesign effectを返す。政策金利の過去vintageや主検定は作らない |
 | `audit_pine_indicator` | 自作Pineのリペイント要因を静的監査 |
 | `compare_indicator_observations` | 再読込前後の同一バー値を比較し、変化を検出 |
 
