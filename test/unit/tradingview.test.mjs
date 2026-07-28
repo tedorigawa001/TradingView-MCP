@@ -89,13 +89,14 @@ test("setSymbol/setResolution never report a non-matching state as success", asy
   assert.ok(cdp.calls[1].includes('/^[SDWM]$/.test(u) ? "1" + u : u'));
 });
 
-test("setSymbol/setResolution reject when the chart has zero bars after the change", async () => {
+test("setSymbol/setResolution wait for a transient empty series, then reject if it remains empty", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
   await tv.setSymbol("BTCUSD");
   await tv.setResolution("240");
   for (const expr of cdp.calls) {
     assert.ok(expr.includes("no data loaded (0 bars)"), "zero bars must reject");
+    assert.ok(expr.includes("setTimeout(() => { retry = null; settle(viaCallback); }, 100)"), "zero bars must be retried before rejection");
     assert.ok(expr.includes("bars"), "result must report the bar count");
   }
 });

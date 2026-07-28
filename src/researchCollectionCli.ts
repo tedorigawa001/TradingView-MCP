@@ -39,6 +39,9 @@ export function parseResearchCollectionCliArguments(argv: string[], env = proces
 type ChartTarget = { chartIndex: number; symbol: string; resolution: string };
 type HistoryCoverage = { chartIndex: number; requiredBars: number; initialBars: number; loadedBars: number; finalBars: number; sufficient: boolean; moreAvailable: boolean | null };
 type CollectionResult = { id: string; source: unknown; coverage: { charts: HistoryCoverage[]; sufficient: boolean }; sample: unknown; qualityIssues: string[]; primaryAvailableEvents: number; result: unknown };
+type ResearchCollectionRunRecord =
+  | { status: "complete"; value: { status: string } }
+  | { status: "error"; hypothesisId: string; error: string };
 
 const REGIME = { trendLookback: 20, atrLookback: 14, volatilityBaselineLookback: 50, trendEfficiencyThreshold: 0.55, rangeEfficiencyThreshold: 0.25, directionalMoveAtrThreshold: 1.5, highVolatilityRatio: 1.25, lowVolatilityRatio: 0.8, minimumClassifiedBars: 100, minimumGroupEvents: 10, minimumCoverageRatio: 0.8, maxRegimeAgeBars: 1 };
 
@@ -125,6 +128,23 @@ function compact(value: CollectionResult) {
   return { schema_version: "1.0", event_id: randomUUID(), recorded_at: new Date().toISOString(), hypothesis_id: value.id, methodology_version: result.methodologyVersion, status: result.status, source: value.source, coverage: value.coverage, sample: value.sample, primary_available_events: value.primaryAvailableEvents, quality_issues: value.qualityIssues, evidence_hash: `sha256:${createHash("sha256").update(JSON.stringify(evidence)).digest("hex")}` };
 }
 
+export function summarizeResearchCollection(
+  records: ResearchCollectionRunRecord[],
+  outputPath: string,
+  written: number,
+) {
+  const collectionStatus = records.some((item) => item.status === "error") ? "partial" as const : "complete" as const;
+  const researchStatus = records.every((item) => item.status === "complete" && item.value.status === "complete") ? "complete" as const : "partial" as const;
+  return {
+    status: collectionStatus === "complete" && researchStatus === "complete" ? "complete" as const : "partial" as const,
+    collection_status: collectionStatus,
+    research_status: researchStatus,
+    output_path: outputPath,
+    records,
+    written,
+  };
+}
+
 async function appendOwnerOnly(path: string, row: { hypothesis_id: string; primary_available_events: number }): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const directory = await lstat(dirname(path));
@@ -190,7 +210,7 @@ async function main(): Promise<void> {
     for (const record of records) if (record.status === "complete" && record.value.coverage.sufficient && record.value.primary_available_events > 0) {
       if (await appendOwnerOnly(args.outputPath, record.value)) written += 1;
     }
-    process.stdout.write(`${JSON.stringify({ status: records.some((item) => item.status === "error") ? "partial" : "complete", output_path: args.outputPath, records, written })}\n`);
+    process.stdout.write(`${JSON.stringify(summarizeResearchCollection(records, args.outputPath, written))}\n`);
     if (records.some((item) => item.status === "error")) process.exitCode = 1;
   } finally {
     cdp.close();

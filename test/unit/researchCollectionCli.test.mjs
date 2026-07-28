@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadRequiredHistory, parseResearchCollectionCliArguments } from "../../build/researchCollectionCli.js";
+import { loadRequiredHistory, parseResearchCollectionCliArguments, summarizeResearchCollection } from "../../build/researchCollectionCli.js";
 
 test("research collection CLI requires an explicit chart-switch confirmation", () => {
   assert.throws(() => parseResearchCollectionCliArguments([], {}), /chart switching is disabled/);
@@ -30,4 +30,14 @@ test("research collection reports an already sufficient chart without loading mo
   const result = await loadRequiredHistory(tv, 0, 500);
   assert.equal(result.coverage.sufficient, true);
   assert.equal(result.coverage.loadedBars, 0);
+});
+
+test("research collection distinguishes successful transport from partial research evidence", () => {
+  const summary = summarizeResearchCollection([
+    { status: "complete", value: { status: "partial" } },
+    { status: "complete", value: { status: "complete" } },
+  ], "/tmp/research.jsonl", 1);
+  assert.equal(summary.collection_status, "complete");
+  assert.equal(summary.research_status, "partial");
+  assert.equal(summary.status, "partial");
 });

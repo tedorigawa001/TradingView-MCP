@@ -487,6 +487,16 @@ function makeDeps(overrides = {}) {
       }),
       ...overrides.realYield,
     },
+    policyRateHistory: {
+      getAsOf: async (currency) => ({
+        schema_version: "1.0", sequence: 1, series: "policy_rate", currency,
+        source_symbol: `ECONOMICS:${currency === "USD" ? "US" : currency === "EUR" ? "EU" : currency.slice(0, 2)}INTR`,
+        observation_date: "2026-06-17", value: currency === "USD" ? 3.75 : 2.4,
+        source_observed_at: "2026-06-17T00:00:00.000Z", available_at: "2026-06-18T00:00:00.000Z",
+        available_at_basis: "next_utc_business_day_start", first_seen_at: "2026-07-28T13:00:00.000Z",
+      }),
+      ...overrides.policyRateHistory,
+    },
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -702,7 +712,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-eight expected tools", async () => {
+test("exposes exactly the seventy-nine expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -711,6 +721,7 @@ test("exposes exactly the seventy-eight expected tools", async () => {
       "add_pine_to_chart",
       "apply_analysis_overlay",
       "audit_pine_indicator",
+      "carry_panel_preflight",
       "compare_indicator_observations",
       "compare_strategy_experiments",
       "compute_correlation_regimes",
@@ -723,6 +734,7 @@ test("exposes exactly the seventy-eight expected tools", async () => {
       "compute_session_profile",
       "create_analysis_alerts",
       "ensure_analysis_overlay",
+      "estimate_carry_panel_effective_sample",
       "evaluate_analysis_overlay_outcome",
       "evaluate_due_analyses",
       "get_aligned_history",
@@ -748,6 +760,7 @@ test("exposes exactly the seventy-eight expected tools", async () => {
       "get_mtf_overview",
       "get_ohlcv",
       "get_pine_source",
+      "get_policy_rate_context",
       "get_positioning_context",
       "get_quotes",
       "get_real_yield_context",
@@ -5010,6 +5023,64 @@ test("get_real_yield_context fails closed when Treasury is unavailable", async (
   assert.equal(parsed.freshness_weekdays, null);
   assert.equal(parsed.freshness_status, "unavailable");
   assert.equal(parsed.quality_issues[0], "source_request_failed");
+});
+
+test("get_policy_rate_context returns only persisted policy-rate versions at the requested cutoff", async () => {
+  let received = null;
+  const client = await connectedClient(makeDeps({
+    policyRateHistory: { getAsOf: async (currency, asOf) => {
+      received = asOf;
+      if (currency === "EUR") return null;
+      return {
+        schema_version: "1.0", sequence: 3, series: "policy_rate", currency, source_symbol: "ECONOMICS:USINTR",
+        observation_date: "2026-06-17", value: 3.75, source_observed_at: "2026-06-17T00:00:00.000Z",
+        available_at: "2026-06-18T00:00:00.000Z", available_at_basis: "next_utc_business_day_start", first_seen_at: "2026-07-28T13:00:00.000Z",
+      };
+    } },
+  }));
+  const res = await client.callTool({ name: "get_policy_rate_context", arguments: { currencies: ["USD", "EUR"], as_of: "2026-07-28T13:00:00.000Z" } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(received.toISOString(), "2026-07-28T13:00:00.000Z");
+  assert.equal(parsed.status, "partial");
+  assert.equal(parsed.rates[0].value, 3.75);
+  assert.equal(parsed.rates[1].status, "unavailable");
+});
+
+test("carry_panel_preflight reports no historical sample before first-seen collection", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "carry_panel_preflight", arguments: {
+    pairs: [{ pair_id: "EURUSD", base_currency: "EUR", quote_currency: "USD" }],
+    from: "2006-07-20", to: "2026-07-28", oos_from: "2021-07-28", as_of: "2026-07-28T13:00:00.000Z",
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.status, "not_evaluable");
+  assert.equal(parsed.pairs[0].non_overlapping_anchors, 0);
+  assert.ok(parsed.pairs[0].quality_issues.includes("insufficient_first_seen_history"));
+});
+
+test("estimate_carry_panel_effective_sample preserves same-date cross-section clusters", async () => {
+  const observations = Array.from({ length: 12 }, (_, index) => {
+    const anchor_date = new Date(Date.UTC(2026, 0, 1 + index * 7)).toISOString().slice(0, 10);
+    const carry_return = Math.sin(index * 0.7);
+    return [
+      { anchor_date, pair_id: "EURUSD", carry_return },
+      { anchor_date, pair_id: "GBPUSD", carry_return },
+    ];
+  }).flat();
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "estimate_carry_panel_effective_sample", arguments: {
+    observations, block_length_anchors: 1, iterations: 500, seed: "server-fixed",
+  } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.methodology, "circular_moving_block_bootstrap_of_anchor_date_clusters");
+  assert.equal(parsed.nominal_observations, 24);
+  assert.equal(parsed.anchor_clusters, 12);
+  assert.equal(parsed.pair_count, 2);
+  assert.ok(parsed.design_effect > 1);
+  assert.ok(parsed.effective_observations < parsed.nominal_observations);
 });
 
 test("get_positioning_context exposes requested COT history", async () => {

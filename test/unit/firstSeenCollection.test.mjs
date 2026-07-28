@@ -24,6 +24,7 @@ test("collection continues after an individual source failure and returns covera
     cot: { records: 1, series: [] },
     real_yield: { records: 1, dates: 1, revisions: 0, earliest_date: "2026-07-25", latest_date: "2026-07-25", first_collected_at: "2026-07-26T00:00:00.000Z" },
     futures_open_interest: { records: 1, series: [] },
+    policy_rates: { records: 0, currencies: {} },
   };
   const result = await collectFirstSeenSources({
     cot: { getHistory: async (symbol) => {
@@ -63,9 +64,11 @@ test("unified coverage remains inspectable when one local log is unavailable", a
     cot: { coverage: async () => ({ records: 1, series: [] }) },
     realYield: { coverage: async () => { throw new Error("unsafe permissions"); } },
     futuresOpenInterest: { coverage: async () => ({ records: 0, series: [] }) },
+    policyRates: { coverage: async () => ({ records: 0, currencies: {} }) },
     now: new Date("2026-07-26T00:00:00.000Z"),
   });
   assert.equal(coverage.status, "partial");
   assert.deepEqual(coverage.real_yield, { error: "unsafe permissions" });
   assert.equal(coverage.cot.records, 1);
+  assert.equal(coverage.policy_rates.records, 0);
 });

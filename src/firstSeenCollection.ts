@@ -4,6 +4,7 @@ import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
 import type { FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import type { RealYieldFirstSeenStore } from "./realYieldHistory.js";
+import type { PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 
 type CotCollector = Pick<CotClient, "getHistory">;
 type RealYieldCollector = Pick<TreasuryRealYieldClient, "getLatest">;
@@ -17,25 +18,29 @@ export type UnifiedFirstSeenCoverage = {
   cot: Awaited<ReturnType<CotFirstSeenStore["coverage"]>> | { error: string };
   real_yield: Awaited<ReturnType<RealYieldFirstSeenStore["coverage"]>> | { error: string };
   futures_open_interest: Awaited<ReturnType<FuturesOpenInterestFirstSeenStore["coverage"]>> | { error: string };
+  policy_rates: Awaited<ReturnType<PolicyRateFirstSeenStore["coverage"]>> | { error: string };
 };
 
 export async function getUnifiedFirstSeenCoverage(input: {
   cot: Pick<CotFirstSeenStore, "coverage">;
   realYield: Pick<RealYieldFirstSeenStore, "coverage">;
   futuresOpenInterest: Pick<FuturesOpenInterestFirstSeenStore, "coverage">;
+  policyRates: Pick<PolicyRateFirstSeenStore, "coverage">;
   now?: Date;
 }): Promise<UnifiedFirstSeenCoverage> {
-  const [cot, realYield, futuresOpenInterest] = await Promise.all([
+  const [cot, realYield, futuresOpenInterest, policyRates] = await Promise.all([
     input.cot.coverage().catch((error) => ({ error: errorMessage(error) })),
     input.realYield.coverage().catch((error) => ({ error: errorMessage(error) })),
     input.futuresOpenInterest.coverage().catch((error) => ({ error: errorMessage(error) })),
+    input.policyRates.coverage().catch((error) => ({ error: errorMessage(error) })),
   ]);
   return {
     observed_at: (input.now ?? new Date()).toISOString(),
-    status: "error" in cot || "error" in realYield || "error" in futuresOpenInterest ? "partial" : "complete",
+    status: "error" in cot || "error" in realYield || "error" in futuresOpenInterest || "error" in policyRates ? "partial" : "complete",
     cot,
     real_yield: realYield,
     futures_open_interest: futuresOpenInterest,
+    policy_rates: policyRates,
   };
 }
 

@@ -12,6 +12,7 @@ import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYiel
 import { AnalysisJournalStore, resolveAnalysisJournalPath } from "./analysisJournal.js";
 import { StrategyResearchJournalStore, resolveStrategyResearchJournalPath } from "./strategyResearchJournal.js";
 import { FuturesOpenInterestFirstSeenStore, resolveFuturesOpenInterestHistoryPath } from "./futuresOpenInterestHistory.js";
+import { PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath } from "./policyRateHistory.js";
 import { createServer } from "./server.js";
 
 const cdp = new CdpClient();
@@ -29,6 +30,7 @@ const server = createServer({
   journal: analysisJournal,
   researchJournal: strategyResearchJournal,
   futuresOpenInterestHistory: new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath()),
+  policyRateHistory: new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()),
   cmeGoldOpenInterest: new CmeDailyBulletinClient(),
 });
 

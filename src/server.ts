@@ -59,6 +59,10 @@ import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRe
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { computeLeadLagRelationships } from "./leadLagRelationships.js";
 import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
+import { getPolicyRateContext } from "./policyRateContext.js";
+import { carryPanelPreflight } from "./carryPanelPreflight.js";
+import { estimateCarryPanelEffectiveSample } from "./carryPanelBootstrap.js";
+import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -131,6 +135,7 @@ export interface ServerDeps {
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
+  policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf">;
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 }
 
@@ -322,7 +327,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -6558,6 +6563,147 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           cache_status: as_of === undefined ? "miss" : "not_applicable",
           source_error: redactSecrets(err instanceof Error ? err.message : String(err)),
         });
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_policy_rate_context",
+    {
+      description:
+        "Read only locally first-seen policy-rate versions that were available by the requested time. " +
+        "TradingView decision-date bars are never treated as intraday publication timestamps; this is macro context, not a trading trigger.",
+      inputSchema: {
+        currencies: z.array(z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]).optional()).min(1).max(8).optional(),
+        as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional().describe("Point-in-time cutoff. Omit for the current time."),
+      },
+    },
+    async ({ currencies, as_of }) => {
+      try {
+        if (!policyRateHistory) throw new Error("policy-rate first-seen history is not configured");
+        return jsonResult(await getPolicyRateContext({
+          provider: policyRateHistory,
+          currencies: (currencies ?? ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]) as PolicyRateCurrency[],
+          asOf: as_of === undefined ? new Date() : new Date(as_of),
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "carry_panel_preflight",
+    {
+      description:
+        "Check whether locally first-seen policy-rate evidence can support a fixed carry panel before any return study runs. " +
+        "It uses only first-seen, available-at policy rates, counts non-overlapping business-day anchors, and returns not_evaluable instead of inventing history.",
+      inputSchema: {
+        pairs: z.array(z.object({
+          pair_id: z.string().regex(/^[A-Z0-9:_./-]{3,48}$/),
+          base_currency: z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]),
+          quote_currency: z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]),
+        })).min(1).max(28),
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        horizon_business_days: z.number().int().min(1).max(260).default(20),
+        oos_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        minimum_observations: z.number().int().min(1).max(10_000).default(60),
+        as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        price_evidence: z.array(z.object({
+          pair_id: z.string().regex(/^[A-Z0-9:_./-]{3,48}$/),
+          chart_index: z.number().int().min(0),
+          expected_symbol: SYMBOL_SCHEMA,
+          count: z.number().int().min(100).max(5_000).default(1_000),
+        })).min(1).max(28).optional(),
+        fixed_regime: z.object({
+          directional: z.enum(["trend_up", "trend_down", "range", "transition"]),
+          volatility: z.enum(["low", "normal", "high"]).nullable().default(null),
+          trend_lookback: z.number().int().min(2).max(500).default(20),
+          atr_lookback: z.number().int().min(2).max(250).default(14),
+          volatility_baseline_lookback: z.number().int().min(5).max(1000).default(50),
+          trend_efficiency_threshold: z.number().min(0).max(1).default(0.6),
+          range_efficiency_threshold: z.number().min(0).max(1).default(0.25),
+          directional_move_atr_threshold: z.number().gt(0).max(100).default(2),
+          high_volatility_ratio: z.number().gt(1).max(100).default(1.5),
+          low_volatility_ratio: z.number().gt(0).lt(1).default(0.75),
+        }).optional(),
+      },
+    },
+    async ({ pairs, from, to, horizon_business_days, oos_from, minimum_observations, as_of, price_evidence, fixed_regime }) => chartOperations.run(async () => {
+      try {
+        if (!policyRateHistory) throw new Error("policy-rate first-seen history is not configured");
+        const cutoff = as_of === undefined ? new Date() : new Date(as_of);
+        const currencies = [...new Set(pairs.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
+        const context = await getPolicyRateContext({ provider: policyRateHistory, currencies, asOf: cutoff });
+        if (to > cutoff.toISOString().slice(0, 10)) throw new Error("to must not be after as_of");
+        if ((price_evidence === undefined) !== (fixed_regime === undefined)) throw new Error("price_evidence and fixed_regime must be supplied together");
+        let priceEvidence;
+        if (price_evidence !== undefined && fixed_regime !== undefined) {
+          if (new Set(price_evidence.map((item) => item.pair_id)).size !== price_evidence.length) throw new Error("price_evidence pair_id values must be unique");
+          if (price_evidence.length !== pairs.length || price_evidence.some((item) => !pairs.some((pair) => pair.pair_id === item.pair_id))) throw new Error("price_evidence must bind every requested pair exactly once");
+          const replay = await tv.getReplayStatus();
+          if (replay.started || replay.toolbarVisible) throw new Error("carry preflight is blocked while Bar Replay is active");
+          const charts = await tv.getChartContext();
+          priceEvidence = await Promise.all(price_evidence.map(async (item) => {
+            const chart = charts.charts.find((candidate) => candidate.index === item.chart_index);
+            if (!chart || chart.symbol.toUpperCase() !== item.expected_symbol.toUpperCase() || normalizeResolution(chart.resolution) !== "1D") throw new Error(`price evidence chart ${item.chart_index} must be bound to ${item.expected_symbol} on 1D`);
+            const history = await tv.getOhlcv(item.count, item.chart_index);
+            if (history.symbol.toUpperCase() !== item.expected_symbol.toUpperCase() || normalizeResolution(history.resolution) !== "1D") throw new Error(`price OHLC evidence does not match ${item.pair_id}`);
+            const regimes = computeMarketRegimes({ bars: history.bars, symbol: history.symbol, timeframe: history.resolution,
+              trendLookback: fixed_regime.trend_lookback, atrLookback: fixed_regime.atr_lookback, volatilityBaselineLookback: fixed_regime.volatility_baseline_lookback,
+              trendEfficiencyThreshold: fixed_regime.trend_efficiency_threshold, rangeEfficiencyThreshold: fixed_regime.range_efficiency_threshold,
+              directionalMoveAtrThreshold: fixed_regime.directional_move_atr_threshold, highVolatilityRatio: fixed_regime.high_volatility_ratio, lowVolatilityRatio: fixed_regime.low_volatility_ratio,
+              minimumClassifiedBars: 1, observationLimit: MAX_MARKET_REGIME_OBSERVATIONS });
+            return { pair_id: item.pair_id, symbol: history.symbol, timeframe: history.resolution, closed_bars: history.bars.filter((bar) => bar.forming !== true).length, classified_bars: regimes.sample.classifiedBars, from: history.bars.find((bar) => bar.forming !== true)?.timeIso.slice(0, 10) ?? null, to: [...history.bars].reverse().find((bar) => bar.forming !== true)?.timeIso.slice(0, 10) ?? null, regime_dates: regimes.observations.map((row) => ({ date: row.timeIso.slice(0, 10), directional: row.directionalRegime, volatility: row.volatilityRegime })) };
+          }));
+        }
+        return jsonResult(carryPanelPreflight({
+          asOf: context.as_of,
+          rates: context.rates,
+          pairs,
+          from,
+          to,
+          horizonBusinessDays: horizon_business_days,
+          oosFrom: oos_from ?? null,
+          minimumObservations: minimum_observations,
+          priceEvidence,
+          regime: fixed_regime === undefined ? undefined : { directional: fixed_regime.directional, volatility: fixed_regime.volatility },
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "estimate_carry_panel_effective_sample",
+    {
+      description:
+        "Estimate the precision-equivalent sample size of an already fixed carry panel before its primary test. " +
+        "It resamples whole anchor-date cross-sections in circular moving blocks, preserving same-date pair dependence and serial dependence. " +
+        "It is a planning diagnostic only, never an adoption rule or a return-study runner.",
+      inputSchema: {
+        observations: z.array(z.object({
+          anchor_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          pair_id: z.string().regex(/^[A-Z0-9:_./-]{3,48}$/),
+          carry_return: z.number().finite(),
+        })).min(12).max(10_000),
+        block_length_anchors: z.number().int().min(1).max(52).default(3),
+        iterations: z.number().int().min(100).max(10_000).default(2_000),
+        seed: z.string().min(1).max(128),
+      },
+    },
+    async ({ observations, block_length_anchors, iterations, seed }) => {
+      try {
+        return jsonResult(estimateCarryPanelEffectiveSample({
+          observations,
+          blockLengthAnchors: block_length_anchors,
+          iterations,
+          seed,
+        }));
+      } catch (err) {
+        return errorResult(err);
       }
     },
   );

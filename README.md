@@ -197,12 +197,19 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `get_positioning_context` | CFTC COTの履歴・OI正規化・前回差・3年パーセンタイル。ローカルfirst-seen蓄積が有効なら、推定せず実際の初回観測時刻を`available_at`として返す |
 | `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。既定はチャートOI、`open_interest_provider: "cme_daily_bulletin"`はXAUUSDだけでローカルfirst-seen済みのCME全限月OIを使用し、欠損日はチャート値で補完しない。CME OIは`as_of`で当時のfirst-seen版へ固定できる |
 | `get_real_yield_context` | 米財務省の10年Par Real CMT。`as_of`指定時はローカルでfirst-seen済みの版だけを返す |
+| `get_policy_rate_context` | 8通貨のローカルfirst-seen済み政策金利を`as_of`で返す。決定日00:00 UTCを公表時刻とはみなさず、`available_at`と`first_seen_at`の両方を満たす版だけを返す |
+| `carry_panel_preflight` | 固定した通貨ペア・期間・horizonについて、政策金利の共通利用開始日、非重複アンカー数、OOS残数、欠損を確認する。未蓄積の過去を補完せず、必要件数未満は`not_evaluable`を返す |
+| `estimate_carry_panel_effective_sample` | 固定済みのcarry方向リターン・アンカー日・pairを受け、日付単位の循環移動ブロックbootstrapで相関込みの実効標本を見積もる。採否や最適化には使わない |
 | `audit_pine_indicator` | 自作Pineのリペイント要因を静的監査 |
 | `compare_indicator_observations` | 再読込前後の同一バー値を比較し、変化を検出 |
 
 ### First-seen collection CLI
 
-`npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OIの収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
+`npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OI・政策金利の収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
+
+`npm run collect:policy-rates` は、TradingView上でUSD/EUR/JPY/GBP/AUD/NZD/CAD/CHFの`ECONOMICS:*INTR`を順番に読み、`~/.tradingview-mcp/policy-rate-first-seen.jsonl`へ追記します。チャート切替を伴うため、既定スクリプトは明示承認済みの`--confirm-chart-switch`を渡します。MCPサーバー・他CLIと同じプロセス横断ロックを取得し、各通貨の取得後に元のチャート状態を読み戻して復元します。TradingViewの00:00 UTCバーは公表時刻ではないため、保存値の`available_at`は決定日の翌UTC営業日00:00です。これは会合当日への先読みを避けるための再現可能な保守的境界であり、実際の公表時刻を表すものではありません。
+
+macOSでは`com.tradingview-mcp.policy-rate-collection`を平日10:45 JSTに実行するlaunchdジョブとして登録する。`RunAtLoad`は設定せず、ログインやMCP再起動の直後に画面を切り替えない。既存の外部first-seen収集(10:30)と時間を分け、両方が同じchart-operation lockを使うため、MCP操作中は待機または失敗し、別の銘柄状態を復元先として取り違えない。
 
 ### Event-study falsification audit CLI
 
@@ -249,7 +256,7 @@ event aftershock retest をCLI設定へ指定する場合は、実際の経済�
 
 `npm run collect:research-hypotheses` は、前向き仮説の XAUUSD 15分 bearish FVG x `trend_down`、EURUSD/米10年の日足非追随、EURUSD 50分 lower-wick x `trend_down` を直列収集します。Bar Replay中は拒否し、既存2ペインを一時切替した後、成功・失敗を問わず元の銘柄と時間足へ復元します。注文、alert、Pine、Studyは変更しません。
 
-集計だけを `~/.tradingview-mcp/research-collection.jsonl` へ保存し、primary horizonで確定済みeventが1件以上のときだけ追記します。起動時に3つの仮説IDが研究ジャーナルへ事前登録済みであることを確認し、存在しないIDへ記録しません。MCPサーバとCLIは同じowner-only chart-operation lockを使うため、片方が一時切替中はもう片方が待機します。macOSの定期実行は [launchd例](docs/launchd/com.tradingview-mcp.research-hypotheses.plist.example) をコピーして `launchctl` で読み込んでください。TradingViewはCDP/debugモードで起動しておく必要があります。例は画面への干渉を抑えるため1時間間隔です。
+集計だけを `~/.tradingview-mcp/research-collection.jsonl` へ保存し、primary horizonで確定済みeventが1件以上のときだけ追記します。起動時に3つの仮説IDが研究ジャーナルへ事前登録済みであることを確認し、存在しないIDへ記録しません。MCPサーバとCLIは同じowner-only chart-operation lockを使うため、片方が一時切替中はもう片方が待機します。stdoutの`collection_status`はCLI実行の成否、`research_status`は各研究結果の充足度であり、どちらかが`partial`なら最上位`status`も`partial`です。macOSの定期実行は [研究仮説](docs/launchd/com.tradingview-mcp.research-hypotheses.plist.example)、[外部first-seen](docs/launchd/com.tradingview-mcp.first-seen-collection.plist.example)、[政策金利](docs/launchd/com.tradingview-mcp.policy-rate-collection.plist.example) のlaunchd例をコピーして `launchctl` で読み込んでください。TradingViewはCDP/debugモードで起動しておく必要があります。研究仮説の例は画面への干渉を抑えるため1時間間隔です。
 
 各ジョブは必要履歴を固定し、FVGは5,000本、日足金利非追随は各系列1,000本、50分特徴量は500本を要求します。不足時は同じ一時チャート上で不足本数だけを追加ロードし、`coverage`へ初期・追加・最終本数、providerの追加可否、充足判定を記録します。取得できなければ`insufficient_loaded_history`として分析・証拠追記を止め、短い履歴を完全な研究証拠として扱いません。
 

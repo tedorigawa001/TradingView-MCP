@@ -36,19 +36,29 @@ export async function assertChartState(
   return chart;
 }
 
-async function applyChartTarget(api: ChartStateApi, chartIndex: number, target: { symbol: string; resolution: string }) {
+async function applyChartTarget(
+  api: ChartStateApi,
+  chartIndex: number,
+  target: { symbol: string; resolution: string },
+  options: { resolutionFirst?: boolean } = {},
+) {
   const operations: Array<{ kind: "symbol" | "timeframe"; result: unknown }> = [];
   let current = await readChartState(api, chartIndex);
-  if (!sameSymbol(current.symbol, target.symbol)) {
-    operations.push({ kind: "symbol", result: await api.setSymbol(target.symbol, chartIndex) });
-    current = await readChartState(api, chartIndex);
-    if (!sameSymbol(current.symbol, target.symbol)) {
-      throw new Error(`chart ${chartIndex} symbol change did not verify`);
+  const setResolution = async () => {
+    if (!sameResolution(current.resolution, target.resolution)) {
+      operations.push({ kind: "timeframe", result: await api.setResolution(target.resolution, chartIndex) });
+      current = await readChartState(api, chartIndex);
     }
-  }
-  if (!sameResolution(current.resolution, target.resolution)) {
-    operations.push({ kind: "timeframe", result: await api.setResolution(target.resolution, chartIndex) });
-  }
+  };
+  const setSymbol = async () => {
+    if (!sameSymbol(current.symbol, target.symbol)) {
+      operations.push({ kind: "symbol", result: await api.setSymbol(target.symbol, chartIndex) });
+      current = await readChartState(api, chartIndex);
+      if (!sameSymbol(current.symbol, target.symbol)) throw new Error(`chart ${chartIndex} symbol change did not verify`);
+    }
+  };
+  if (options.resolutionFirst) { await setResolution(); await setSymbol(); }
+  else { await setSymbol(); await setResolution(); }
   const verified = await assertChartState(api, chartIndex, target);
   return { operations, verified };
 }
@@ -61,14 +71,19 @@ export async function restoreChartState(
   return applyChartTarget(api, chartIndex, original);
 }
 
-export async function changeChartState(api: ChartStateApi, chartIndex: number, target: ChartTarget) {
+export async function changeChartState(
+  api: ChartStateApi,
+  chartIndex: number,
+  target: ChartTarget,
+  options: { resolutionFirst?: boolean } = {},
+) {
   const original = await readChartState(api, chartIndex);
   const requested = {
     symbol: target.symbol ?? original.symbol,
     resolution: target.resolution ?? original.resolution,
   };
   try {
-    const applied = await applyChartTarget(api, chartIndex, requested);
+    const applied = await applyChartTarget(api, chartIndex, requested, options);
     const lastResult = applied.operations.at(-1)?.result;
     const bars = lastResult && typeof lastResult === "object" && !Array.isArray(lastResult) &&
       typeof (lastResult as { bars?: unknown }).bars === "number"
@@ -98,6 +113,7 @@ export async function withTemporaryChartState<T>(
   chartIndex: number,
   target: ChartTarget,
   operation: () => Promise<T>,
+  options: { resolutionFirst?: boolean } = {},
 ) {
   const original = await readChartState(api, chartIndex);
   let change: Awaited<ReturnType<typeof changeChartState>> | null = null;
@@ -105,7 +121,7 @@ export async function withTemporaryChartState<T>(
   let operationError: unknown = null;
   let restoreError: unknown = null;
   try {
-    change = await changeChartState(api, chartIndex, target);
+    change = await changeChartState(api, chartIndex, target, options);
     value = await operation();
   } catch (err) {
     operationError = err;

@@ -1170,6 +1170,8 @@ export class TradingView {
         let lastChangeAt = Date.now();
         let sawChange = false;
         let settled = false;
+        const deadline = Date.now() + 8000;
+        let retry = null;
         while (Date.now() - t0 < 20000) {
           const curReport = bt ? bt.activeStrategyReportData.value() : null;
           const curLoading = studyApi.isLoading();
@@ -2600,10 +2602,11 @@ export class TradingView {
         // chart shows the requested symbol AND actually has data.
         const settle = (viaCallback) => {
           if (settled) return;
-          settled = true;
-          clearTimeout(timer);
           const s = state();
           if (!matches(s.symbol)) {
+            settled = true;
+            clearTimeout(timer);
+            if (retry !== null) clearTimeout(retry);
             fail("symbol change to " + requested + " did not take effect" +
               (viaCallback ? " (callback fired but chart shows " + s.symbol + ")" : " within 8s (chart still shows " + s.symbol + ")") +
               " — the symbol may be invalid");
@@ -2611,9 +2614,18 @@ export class TradingView {
           }
           const bars = barCount();
           if (bars === 0) {
+            if (Date.now() < deadline) {
+              if (retry === null) retry = setTimeout(() => { retry = null; settle(viaCallback); }, 100);
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
             fail("symbol was set to " + s.symbol + " but no data loaded (0 bars) — likely an invalid symbol");
             return;
           }
+          settled = true;
+          clearTimeout(timer);
+          if (retry !== null) clearTimeout(retry);
           const result = { ...s, changed: s.symbol !== before, bars };
           if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
           resolve(result);
@@ -2684,21 +2696,33 @@ export class TradingView {
           try { chart.setResolution(before, finish); } catch (e) { finish(); }
         };
         let settled = false;
+        const deadline = Date.now() + 8000;
+        let retry = null;
         const settle = (viaCallback) => {
           if (settled) return;
-          settled = true;
-          clearTimeout(timer);
           const s = state();
           if (!matches(s.resolution)) {
+            settled = true;
+            clearTimeout(timer);
+            if (retry !== null) clearTimeout(retry);
             fail("timeframe change to " + requested + " did not take effect" +
               (viaCallback ? " (callback fired but chart shows " + s.resolution + ")" : " within 8s (chart still shows " + s.resolution + ")"));
             return;
           }
           const bars = barCount();
           if (bars === 0) {
+            if (Date.now() < deadline) {
+              if (retry === null) retry = setTimeout(() => { retry = null; settle(viaCallback); }, 100);
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
             fail("timeframe was set to " + s.resolution + " but no data loaded (0 bars)");
             return;
           }
+          settled = true;
+          clearTimeout(timer);
+          if (retry !== null) clearTimeout(retry);
           const result = { ...s, changed: s.resolution !== before, bars };
           if (!viaCallback) result.note = "data-ready callback did not fire within 8s";
           resolve(result);
