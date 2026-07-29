@@ -68,6 +68,7 @@ import { buildExploratoryCarrySigns } from "./exploratoryCarrySigns.js";
 import { CARRY_CORE_PRIMARY_PAIRS, CARRY_CORE_PRIMARY_TEST_V1, runCarryPanelPrimaryTest } from "./carryPanelPrimaryTest.js";
 import { getCarryCorePrimaryReadiness } from "./carryPanelPrimaryReadiness.js";
 import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
+import type { PolicyRateCollectionHeartbeatStore } from "./policyRateCollectionHeartbeat.js";
 import type { OfficialPolicyRateHistoryStore } from "./policyRateOfficialHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
@@ -142,6 +143,7 @@ export interface ServerDeps {
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
   policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf" | "getVersionsAsOf">;
+  policyRateHeartbeats?: Pick<PolicyRateCollectionHeartbeatStore, "getRunsAsOf">;
   policyRateOfficialHistory?: Pick<OfficialPolicyRateHistoryStore, "getLatest" | "getRevisedSeries" | "coverage">;
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 }
@@ -334,7 +336,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateOfficialHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -6780,16 +6782,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Read the frozen carry_core_primary_v1 collection readiness without switching a chart. " +
-        "It distinguishes the first usable policy-rate date and an earliest 60-anchor calendar estimate from proof of uninterrupted collection, which change-only policy-rate versions cannot provide.",
+        "It combines first-seen policy rates with complete collection heartbeats, rounds the evidence start onto the frozen 20-business-day anchor grid, and reports current heartbeat-gap status.",
       inputSchema: { as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional() },
     },
     async ({ as_of }) => {
       try {
-        if (!policyRateHistory) throw new Error("policy-rate first-seen history is not configured");
+        if (!policyRateHistory || !policyRateHeartbeats) throw new Error("policy-rate first-seen history or collection heartbeats are not configured");
         const cutoff = as_of === undefined ? new Date() : new Date(as_of);
         const currencies = [...new Set(CARRY_CORE_PRIMARY_PAIRS.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
         const policyRateVersions = Object.fromEntries(await Promise.all(currencies.map(async (currency) => [currency, await policyRateHistory.getVersionsAsOf(currency, cutoff)]))) as Partial<Record<PolicyRateCurrency, Awaited<ReturnType<PolicyRateFirstSeenStore["getVersionsAsOf"]>>>>;
-        return jsonResult(getCarryCorePrimaryReadiness({ asOf: cutoff.toISOString(), policyRateVersions }));
+        return jsonResult(getCarryCorePrimaryReadiness({
+          asOf: cutoff.toISOString(),
+          policyRateVersions,
+          collectionHeartbeats: await policyRateHeartbeats.getRunsAsOf(cutoff),
+        }));
       } catch (err) {
         return errorResult(err);
       }
@@ -6823,6 +6829,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           pairs: CARRY_CORE_PRIMARY_PAIRS,
           required_timeframe: "1D",
         });
+        if (!policyRateHeartbeats) throw new Error("policy-rate collection heartbeats are not configured");
         const replay = await tv.getReplayStatus();
         if (replay.started || replay.toolbarVisible) throw new Error("carry primary test is blocked while Bar Replay is active");
         const pairs = [] as Array<{ pair_id: string; base_currency: PolicyRateCurrency; quote_currency: PolicyRateCurrency; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
@@ -6846,6 +6853,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return jsonResult(runCarryPanelPrimaryTest({
           pairs,
           policyRateVersions,
+          collectionHeartbeats: await policyRateHeartbeats.getRunsAsOf(cutoff),
           from: CARRY_CORE_PRIMARY_TEST_V1.sample_start,
           to: cutoff.toISOString().slice(0, 10),
           seed: `${CARRY_CORE_PRIMARY_TEST_V1.id}:${cutoff.toISOString()}`,

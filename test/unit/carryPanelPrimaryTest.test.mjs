@@ -34,6 +34,7 @@ test("carry primary test fits pair fixed effects and refits them in anchor-date 
       AUD: [record("AUD", "2025-12-31", 2, "2025-12-31T00:00:00.000Z", 3), record("AUD", "2026-02-15", 3, "2026-02-15T00:00:00.000Z", 4)],
       USD: [record("USD", "2025-12-31", 0, "2025-12-31T00:00:00.000Z", 5)],
     },
+    collectionHeartbeats: pairs[0].bars.map((bar) => ({ first_seen_at: bar.timeIso })),
     from: "2026-01-01",
     to: "2026-04-30",
     horizonBusinessDays: 5,
@@ -60,6 +61,7 @@ test("carry primary test excludes anchors whose rates were first seen only later
       AUD: [record("AUD", "2026-01-01", 3, "2026-04-15T00:00:00.000Z", 2)],
       USD: [record("USD", "2026-01-01", 1, "2026-04-15T00:00:00.000Z", 3)],
     },
+    collectionHeartbeats: pairs[0].bars.map((bar) => ({ first_seen_at: bar.timeIso })),
     from: "2026-01-01",
     to: "2026-04-30",
     horizonBusinessDays: 5,
@@ -71,4 +73,26 @@ test("carry primary test excludes anchors whose rates were first seen only later
   assert.equal(result.status, "not_evaluable");
   assert.ok(result.anchors_excluded_for_unavailable_or_zero_policy_difference > 0);
   assert.equal(result.model, null);
+});
+
+test("carry primary test excludes an entire anchor cluster after the fixed heartbeat gap", () => {
+  const result = runCarryPanelPrimaryTest({
+    pairs,
+    policyRateVersions: {
+      EUR: [record("EUR", "2025-12-31", 2, "2025-12-31T00:00:00.000Z", 1)],
+      AUD: [record("AUD", "2025-12-31", 3, "2025-12-31T00:00:00.000Z", 2)],
+      USD: [record("USD", "2025-12-31", 1, "2025-12-31T00:00:00.000Z", 3)],
+    },
+    collectionHeartbeats: [{ first_seen_at: "2026-01-01T12:00:00.000Z" }],
+    from: "2026-01-01",
+    to: "2026-04-30",
+    horizonBusinessDays: 5,
+    minimumAnchorClusters: 6,
+    blockLengthAnchors: 2,
+    iterations: 100,
+    seed: "carry-primary-heartbeat-gap",
+  });
+  assert.equal(result.anchor_clusters, 2);
+  assert.equal(result.anchors_excluded_for_collection_gap, 21);
+  assert.equal(result.status, "not_evaluable");
 });

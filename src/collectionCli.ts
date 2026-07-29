@@ -7,6 +7,7 @@ import { FuturesOpenInterestFirstSeenStore, resolveFuturesOpenInterestHistoryPat
 import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
 import { PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath } from "./policyRateHistory.js";
+import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 
 const DEFAULT_COT_SYMBOLS = ["OANDA:EURUSD", "OANDA:XAUUSD"];
 const MAX_COT_COLLECTION_WEEKS = 52;
@@ -48,7 +49,8 @@ async function main(): Promise<void> {
   const realYieldStore = new RealYieldFirstSeenStore(resolveRealYieldHistoryPath());
   const futuresOiStore = new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath());
   const policyRateStore = new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath());
-  const coverage = () => getUnifiedFirstSeenCoverage({ cot: cotStore, realYield: realYieldStore, futuresOpenInterest: futuresOiStore, policyRates: policyRateStore });
+  const policyRateHeartbeats = new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath());
+  const coverage = () => getUnifiedFirstSeenCoverage({ cot: cotStore, realYield: realYieldStore, futuresOpenInterest: futuresOiStore, policyRates: policyRateStore, policyRateHeartbeats });
   const result = args.command === "coverage"
     ? await coverage()
     : await collectFirstSeenSources({

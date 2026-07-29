@@ -4,6 +4,7 @@ import { ChartOperationLock } from "./chartOperationLock.js";
 import { assertChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { latestPolicyRateDecision } from "./policyRateCollection.js";
 import { POLICY_RATE_SYMBOLS, PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath, type PolicyRateCurrency } from "./policyRateHistory.js";
+import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 import { TradingView } from "./tradingview.js";
 
 const CURRENCIES = Object.keys(POLICY_RATE_SYMBOLS) as PolicyRateCurrency[];
@@ -27,6 +28,7 @@ export function parsePolicyRateCollectionCliArguments(argv: string[], env = proc
 export async function collectPolicyRates(
   tv: Pick<TradingView, "getOhlcv" | "setSymbol" | "setResolution" | "getChartContext">,
   store: Pick<PolicyRateFirstSeenStore, "observeMany">,
+  heartbeat: Pick<PolicyRateCollectionHeartbeatStore, "recordRun">,
   chartIndex: number,
   now = new Date(),
   chartLock: Pick<ChartOperationLock, "acquire"> = new ChartOperationLock(),
@@ -46,7 +48,12 @@ export async function collectPolicyRates(
       observations.push({ currency, bars: transaction.value.bars, observation: transaction.value.observation });
     }
     const persisted = await store.observeMany(observations.map((item) => item.observation));
-    return { observed_at: now.toISOString(), status: "complete" as const, observations: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, observation_date: observation.observation_date, value: observation.value, available_at: observation.available_at, bars })), first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
+    const heartbeatRecord = await heartbeat.recordRun({
+      observed_at: now.toISOString(),
+      chart_index: chartIndex,
+      currencies: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, decision_observation_date: observation.observation_date, bars })),
+    });
+    return { observed_at: now.toISOString(), status: "complete" as const, observations: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, observation_date: observation.observation_date, value: observation.value, available_at: observation.available_at, bars })), first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions }, heartbeat: { sequence: heartbeatRecord.sequence, recorded_at: heartbeatRecord.first_seen_at } };
   } finally {
     await release();
   }
@@ -56,7 +63,7 @@ async function main(): Promise<void> {
   const args = parsePolicyRateCollectionCliArguments(process.argv.slice(2));
   const cdp = new CdpClient();
   try {
-    const result = await collectPolicyRates(new TradingView(cdp), new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()), args.chartIndex);
+    const result = await collectPolicyRates(new TradingView(cdp), new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()), new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath()), args.chartIndex);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
     cdp.close();

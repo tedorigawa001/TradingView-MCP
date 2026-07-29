@@ -10,6 +10,7 @@ test("policy-rate collection requires explicit chart switching consent", () => {
 test("policy-rate collection serializes chart changes, persists all currencies, and restores the chart", async () => {
   const state = { symbol: "OANDA:EURUSD", resolution: "15" };
   const saved = [];
+  const heartbeats = [];
   const tv = {
     getChartContext: async () => ({ charts: [{ index: 0, ...state, studies: [] }] }),
     setSymbol: async (symbol) => {
@@ -27,9 +28,12 @@ test("policy-rate collection serializes chart changes, persists all currencies, 
       ] });
     },
   };
-  const result = await collectPolicyRates(tv, { observeMany: async (items) => (saved.push(...items), { recorded: items, unchanged: 0, revisions: 0 }) }, 0, new Date("2026-07-01T12:00:00.000Z"), { acquire: async () => async () => {} });
+  const result = await collectPolicyRates(tv, { observeMany: async (items) => (saved.push(...items), { recorded: items, unchanged: 0, revisions: 0 }) }, { recordRun: async (run) => (heartbeats.push(run), { sequence: 1, first_seen_at: run.observed_at }) }, 0, new Date("2026-07-01T12:00:00.000Z"), { acquire: async () => async () => {} });
   assert.equal(result.status, "complete");
   assert.equal(saved.length, 8);
   assert.deepEqual(saved.map((item) => item.currency), ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]);
+  assert.equal(heartbeats.length, 1);
+  assert.equal(heartbeats[0].currencies.length, 8);
+  assert.deepEqual(result.heartbeat, { sequence: 1, recorded_at: "2026-07-01T12:00:00.000Z" });
   assert.deepEqual(state, { symbol: "OANDA:EURUSD", resolution: "15" });
 });

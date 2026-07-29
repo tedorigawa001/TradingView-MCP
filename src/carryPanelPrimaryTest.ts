@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { PolicyRateCurrency, PolicyRateFirstSeenRecord } from "./policyRateHistory.js";
+import { businessDaysSince } from "./businessDays.js";
 
 export const CARRY_CORE_PRIMARY_TEST_V1 = {
   id: "carry_core_primary_v1",
@@ -9,6 +10,7 @@ export const CARRY_CORE_PRIMARY_TEST_V1 = {
   minimum_anchor_clusters: 60,
   block_length_anchors: 3,
   bootstrap_iterations: 2_000,
+  max_heartbeat_gap_business_days: 5,
   minimum_annualized_effect: 0.027,
 } as const;
 
@@ -169,6 +171,7 @@ function bootstrapPairFixedEffects(input: {
 export function runCarryPanelPrimaryTest(input: {
   pairs: CarryPrimaryPair[];
   policyRateVersions: Partial<Record<PolicyRateCurrency, PolicyRateFirstSeenRecord[]>>;
+  collectionHeartbeats: Array<{ first_seen_at: string }>;
   from: string;
   to: string;
   horizonBusinessDays?: number;
@@ -203,10 +206,20 @@ export function runCarryPanelPrimaryTest(input: {
   });
   const commonDates = [...closesByPair[0].keys()].filter((date) => date >= from && date <= to && closesByPair.every((closes) => closes.has(date))).sort();
   const candidates = commonDates.filter((_, index) => index + horizonBusinessDays < commonDates.length).filter((_, index) => index % horizonBusinessDays === 0);
+  const heartbeats = input.collectionHeartbeats.map((heartbeat) => {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(heartbeat.first_seen_at) || new Date(heartbeat.first_seen_at).toISOString() !== heartbeat.first_seen_at) throw new Error("heartbeat first_seen_at must be a canonical ISO timestamp");
+    return heartbeat;
+  }).sort((left, right) => left.first_seen_at.localeCompare(right.first_seen_at));
   const observations: RegressionObservation[] = [];
   let unavailablePolicyAnchors = 0;
+  let collectionGapAnchors = 0;
   for (const anchorDate of candidates) {
     const endDate = commonDates[commonDates.indexOf(anchorDate) + horizonBusinessDays];
+    const heartbeat = heartbeats.filter((item) => item.first_seen_at <= `${anchorDate}T23:59:59.999Z`).at(-1);
+    if (heartbeat === undefined || businessDaysSince(heartbeat.first_seen_at.slice(0, 10), anchorDate) > CARRY_CORE_PRIMARY_TEST_V1.max_heartbeat_gap_business_days) {
+      collectionGapAnchors += 1;
+      continue;
+    }
     const rows = input.pairs.map((pair, index) => {
       const base = latestRateAt(input.policyRateVersions[pair.base_currency] ?? [], anchorDate);
       const quote = latestRateAt(input.policyRateVersions[pair.quote_currency] ?? [], anchorDate);
@@ -227,6 +240,7 @@ export function runCarryPanelPrimaryTest(input: {
       model: "forward_pair_return = pair_fixed_effect + beta * policy_rate_differential + residual",
       regime_condition: "none; the unconditional fixed-pair panel is the pre-registered baseline",
       policy_rate_timing: "latest first-seen version with available_at and first_seen_at no later than the anchor-date close",
+      collection_continuity: "a complete policy-rate collection heartbeat must be no more than five business days before the anchor-date close; this deliberately permits up to five business days of stale policy-rate evidence, while any rate change first seen after the anchor remains unavailable to that anchor",
     },
     status: anchorClusters >= minimumAnchorClusters ? "complete" as const : "not_evaluable" as const,
     from,
@@ -236,6 +250,7 @@ export function runCarryPanelPrimaryTest(input: {
     anchor_clusters: anchorClusters,
     observations: observations.length,
     anchors_excluded_for_unavailable_or_zero_policy_difference: unavailablePolicyAnchors,
+    anchors_excluded_for_collection_gap: collectionGapAnchors,
     pair_ids: input.pairs.map((pair) => pair.pair_id),
     evidence_tier: "prospective_first_seen" as const,
     point_in_time_status: "available" as const,

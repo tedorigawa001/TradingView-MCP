@@ -509,6 +509,7 @@ function makeDeps(overrides = {}) {
       coverage: async () => ({ evidence_tier: "exploratory_revised_history", records: 1, raw_snapshots: 1, source_coverage: { ecb_deposit_facility: { coverage_status: "complete" } } }),
       ...overrides.policyRateOfficialHistory,
     },
+    policyRateHeartbeats: overrides.policyRateHeartbeats,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -5098,7 +5099,36 @@ test("run_carry_core_primary_test exposes one frozen first-seen-only contract be
   assert.equal(parsed.contract.id, "carry_core_primary_v1");
   assert.equal(parsed.contract.horizon_business_days, 20);
   assert.equal(parsed.contract.minimum_anchor_clusters, 60);
+  assert.equal(parsed.contract.max_heartbeat_gap_business_days, 5);
   assert.equal(parsed.pairs.length, 5);
+});
+
+test("get_carry_core_primary_readiness rounds the first heartbeat onto the frozen anchor grid", async () => {
+  const policyRecord = (currency) => ({
+    schema_version: "1.0", sequence: 1, series: "policy_rate", currency,
+    source_symbol: `ECONOMICS:${currency}INTR`, observation_date: "2026-07-28", value: 1,
+    source_observed_at: "2026-07-28T00:00:00.000Z", available_at: "2026-07-28T00:00:00.000Z",
+    available_at_basis: "next_utc_business_day_start", first_seen_at: "2026-07-28T00:00:00.000Z",
+  });
+  const client = await connectedClient(makeDeps({
+    policyRateHistory: { getVersionsAsOf: async (currency) => [policyRecord(currency)] },
+    policyRateHeartbeats: { getRunsAsOf: async () => [{ first_seen_at: "2026-07-30T01:45:00.000Z" }] },
+  }));
+  const res = await client.callTool({ name: "get_carry_core_primary_readiness", arguments: { as_of: "2026-07-30T12:00:00.000Z" } });
+  assert.equal(res.isError, undefined, res.content[0].text);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.contract.max_heartbeat_gap_business_days, 5);
+  assert.equal(parsed.first_collection_heartbeat_date, "2026-07-30");
+  assert.equal(parsed.first_eligible_anchor_date, "2026-08-25");
+  assert.equal(parsed.estimated_earliest_complete_window_date, "2031-04-01");
+  assert.equal(parsed.collection_continuity_status, "collecting_within_gap_limit");
+});
+
+test("run_carry_core_primary_test refuses execution without collection heartbeat evidence", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_carry_core_primary_test", arguments: { chart_index: 0, confirm: true } });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /collection heartbeats are not configured/);
 });
 
 test("estimate_carry_panel_effective_sample preserves same-date cross-section clusters", async () => {

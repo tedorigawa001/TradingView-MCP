@@ -13,6 +13,7 @@ import { AnalysisJournalStore, resolveAnalysisJournalPath } from "./analysisJour
 import { StrategyResearchJournalStore, resolveStrategyResearchJournalPath } from "./strategyResearchJournal.js";
 import { FuturesOpenInterestFirstSeenStore, resolveFuturesOpenInterestHistoryPath } from "./futuresOpenInterestHistory.js";
 import { PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath } from "./policyRateHistory.js";
+import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 import { OfficialPolicyRateHistoryStore, resolvePolicyRateOfficialHistoryPath } from "./policyRateOfficialHistory.js";
 import { createServer } from "./server.js";
 
@@ -32,6 +33,7 @@ const server = createServer({
   researchJournal: strategyResearchJournal,
   futuresOpenInterestHistory: new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath()),
   policyRateHistory: new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()),
+  policyRateHeartbeats: new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath()),
   policyRateOfficialHistory: new OfficialPolicyRateHistoryStore(resolvePolicyRateOfficialHistoryPath()),
   cmeGoldOpenInterest: new CmeDailyBulletinClient(),
 });
