@@ -1,4 +1,5 @@
 import type { OhlcvBar } from "./tradingview.js";
+import { createHash } from "node:crypto";
 import {
   computeMarketRegimes,
   marketRegimeResolutionMilliseconds,
@@ -64,6 +65,7 @@ export interface FeatureOutcomeRelationshipsInput {
   observationLimit: number;
   confidenceLevel?: 0.9 | 0.95 | 0.99;
   configurationTrials?: number;
+  empiricalNullCalibration?: boolean;
 }
 
 const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
@@ -76,6 +78,45 @@ const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
 };
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+const EMPIRICAL_NULL_ITERATIONS = 1_000;
+const EMPIRICAL_NULL_SEED = 20_260_729;
+const EMPIRICAL_NULL_METHODOLOGY = "feature_outcome_empirical_null_circular_moving_block_v2" as const;
+
+type EmpiricalBucketCalibration = {
+  status: "available" | "insufficient_sample";
+  observedStatistic: number | null;
+  familyWisePValue: number | null;
+  nominalAlpha: number;
+  passes: boolean;
+};
+
+type EmpiricalNullCalibration = {
+  schemaVersion: "1.0";
+  methodologyVersion: typeof EMPIRICAL_NULL_METHODOLOGY;
+  status: "complete" | "not_evaluable";
+  iterations: number;
+  seed: number;
+  blockLengthRule: "floor_cube_root_of_eligible_observations_minimum_2";
+  blockLength: number | null;
+  horizon: 1;
+  familyStatistic: "maximum_absolute_studentized_mean_across_candidate_evaluable_observed_feature_buckets";
+  familyEligibleBuckets: number;
+  familyExcludedInsufficientSampleBuckets: number;
+  nominalAlpha: number;
+  evidenceHash: string;
+  calibrationId: string;
+  source: {
+    symbol: string;
+    timeframe: string;
+    closedBars: number;
+    selectedEligibleObservations: number;
+    referenceEligibleObservations: number;
+    from: string | null;
+    to: string | null;
+  };
+  byFeature: Partial<Record<FeatureOutcomeFeature, Record<string, EmpiricalBucketCalibration>>>;
+  limitations: string[];
+};
 
 function normalCdf(value: number): number {
   const x = Math.abs(value);
@@ -235,6 +276,7 @@ function inferenceFor(
   horizon: number,
   exploratoryGateEnabled: boolean,
   missingExploratoryPrerequisite: string,
+  empiricalNullCalibration?: EmpiricalBucketCalibration,
 ) {
   const pValue: number | null = interval?.status === "available" && typeof interval.twoSidedPValue === "number"
     ? interval.twoSidedPValue : null;
@@ -242,6 +284,8 @@ function inferenceFor(
   const minimumObservationsMet = observations >= bonferroni.minimumObservations;
   const exploratoryEligible = exploratoryGateEnabled && horizon === bonferroni.candidateHorizon &&
     minimumObservationsMet && passesBonferroni;
+  const empiricalAvailable = empiricalNullCalibration?.status === "available";
+  const empiricalPasses = empiricalAvailable && empiricalNullCalibration.passes;
   return {
     twoSidedPValue: pValue,
     bonferroniAdjustedPValue: pValue === null ? null : Math.min(1, pValue * bonferroni.familyTests),
@@ -249,9 +293,14 @@ function inferenceFor(
     minimumObservationsMet,
     passesBonferroni,
     exploratoryEligible,
-    candidateEligible: false,
+    ...(empiricalNullCalibration === undefined ? {} : { empiricalNullCalibration }),
+    candidateEligible: exploratoryEligible && empiricalPasses,
     candidateBlockers: [
-      "empirical_null_calibration_required",
+      ...(empiricalNullCalibration === undefined
+        ? ["empirical_null_calibration_required"]
+        : !empiricalAvailable
+          ? ["empirical_null_calibration_not_evaluable"]
+          : empiricalPasses ? [] : ["empirical_null_family_wise_threshold_not_met"]),
       ...(exploratoryEligible ? [] : [
       ...(exploratoryGateEnabled ? [] : [missingExploratoryPrerequisite]),
       ...(horizon === bonferroni.candidateHorizon ? [] : ["candidate_horizon_must_be_1"]),
@@ -274,7 +323,13 @@ function nonOverlappingObservations(observations: Observation[], horizon: number
   return selected;
 }
 
-function summarize(observations: Observation[], horizons: number[], confidenceLevel: 0.9 | 0.95 | 0.99, bonferroni?: BonferroniInference) {
+function summarize(
+  observations: Observation[],
+  horizons: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
+  bonferroni?: BonferroniInference,
+  empiricalNullCalibration?: EmpiricalBucketCalibration,
+) {
   return Object.fromEntries(horizons.map((horizon) => {
     const outcomes = observations.map((row) => row.outcomes[String(horizon)]).filter((value) => value !== null);
     const returns = outcomes.map((outcome) => outcome!.forwardReturn);
@@ -297,7 +352,7 @@ function summarize(observations: Observation[], horizons: number[], confidenceLe
           inferenceFor(nonOverlappingForwardReturn.meanConfidenceInterval, nonOverlappingForwardReturn.count,
             bonferroni, horizon, false, "candidate_requires_newey_west_inference"),
           candidateInference: inferenceFor(neweyWestInterval, nonOverlappingForwardReturn.count,
-            bonferroni, horizon, true, "") }),
+            bonferroni, horizon, true, "", horizon === 1 ? empiricalNullCalibration : undefined) }),
       },
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
       positiveRateConfidenceInterval: wilsonConfidenceInterval(
@@ -314,15 +369,174 @@ function classify<T extends Observation>(
   horizons: number[],
   confidenceLevel: 0.9 | 0.95 | 0.99,
   bonferroni?: BonferroniInference,
+  empiricalNullCalibration?: EmpiricalNullCalibration,
 ) {
   return Object.fromEntries(features.map((feature) => {
     const buckets = [...new Set(rows.map((row) => row.labels[feature]).filter((value): value is string => value !== undefined))]
       .sort();
     return [feature, Object.fromEntries(buckets.map((bucket) => {
       const selected = rows.filter((row) => row.labels[feature] === bucket);
-      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons, confidenceLevel, bonferroni) }];
+      return [bucket, { observations: selected.length, horizons: summarize(selected, horizons, confidenceLevel,
+        bonferroni, empiricalNullCalibration?.byFeature[feature]?.[bucket]) }];
     }))];
   }));
+}
+
+function createRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+function absoluteStudentizedMean(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const standardError = Math.sqrt(variance / values.length);
+  if (standardError === 0) return null;
+  const statistic = Math.abs(mean / standardError);
+  return Number.isFinite(statistic) ? statistic : null;
+}
+
+function sha256(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
+}
+
+function buildEmpiricalNullCalibration(input: {
+  observations: Observation[];
+  referenceObservations: Observation[];
+  bars: OhlcvBar[];
+  symbol: string;
+  timeframe: string;
+  features: FeatureOutcomeFeature[];
+  horizons: number[];
+  confidenceLevel: 0.9 | 0.95 | 0.99;
+  definition: unknown;
+  configurationTrials: number;
+  minimumObservations: number;
+}): EmpiricalNullCalibration {
+  const eligible = input.observations.filter((row) => row.outcomes["1"] !== null);
+  const referenceEligible = input.referenceObservations.filter((row) => row.outcomes["1"] !== null);
+  const returns = referenceEligible.map((row) => row.outcomes["1"]!.forwardReturn);
+  const evidenceHash = sha256(input.bars.map((bar) => ({
+    time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close,
+  })));
+  const blockLength = referenceEligible.length < 2 ? null : Math.min(referenceEligible.length,
+    Math.max(2, Math.floor(Math.cbrt(referenceEligible.length))));
+  const nominalAlpha = 1 - input.confidenceLevel;
+  const buckets = input.features.flatMap((feature) =>
+    [...new Set(input.observations.map((row) => row.labels[feature]).filter((value): value is string => value !== undefined))]
+      .sort()
+      .map((bucket) => ({
+        feature,
+        bucket,
+        indexes: eligible.flatMap((row, index) => row.labels[feature] === bucket ? [index] : []),
+      })));
+  const observed = new Map<string, number | null>(buckets.map((bucket) => {
+    const statistic = absoluteStudentizedMean(bucket.indexes.map((index) =>
+      eligible[index].outcomes["1"]!.forwardReturn));
+    return [`${bucket.feature}:${bucket.bucket}`, statistic] as const;
+  }));
+  const familyBuckets = buckets.filter((bucket) =>
+    bucket.indexes.length >= input.minimumObservations &&
+    observed.get(`${bucket.feature}:${bucket.bucket}`) !== null);
+  const familyExcludedInsufficientSampleBuckets = buckets.length - familyBuckets.length;
+  const exceedances = new Map<string, number>(buckets.map((bucket) => [`${bucket.feature}:${bucket.bucket}`, 0]));
+  if (blockLength !== null) {
+    const random = createRandom(EMPIRICAL_NULL_SEED);
+    for (let iteration = 0; iteration < EMPIRICAL_NULL_ITERATIONS; iteration += 1) {
+      const sampled: number[] = [];
+      while (sampled.length < eligible.length) {
+        const start = Math.floor(random() * returns.length);
+        for (let offset = 0; offset < blockLength && sampled.length < eligible.length; offset += 1) {
+          sampled.push(returns[(start + offset) % returns.length]);
+        }
+      }
+      const familyMaximum = familyBuckets.reduce((maximum, bucket) => {
+        const statistic = absoluteStudentizedMean(bucket.indexes.map((index) => sampled[index]));
+        return statistic === null ? maximum : Math.max(maximum, statistic);
+      }, 0);
+      for (const bucket of familyBuckets) {
+        const key = `${bucket.feature}:${bucket.bucket}`;
+        const statistic = observed.get(key);
+        if (statistic !== null && statistic !== undefined && familyMaximum >= statistic) {
+          exceedances.set(key, (exceedances.get(key) ?? 0) + 1);
+        }
+      }
+    }
+  }
+  const byFeature: EmpiricalNullCalibration["byFeature"] = {};
+  for (const bucket of buckets) {
+    const key = `${bucket.feature}:${bucket.bucket}`;
+    const observedStatistic = observed.get(key) ?? null;
+    const enough = bucket.indexes.length >= input.minimumObservations && observedStatistic !== null && blockLength !== null;
+    const familyWisePValue = enough ? (1 + (exceedances.get(key) ?? 0)) / (EMPIRICAL_NULL_ITERATIONS + 1) : null;
+    (byFeature[bucket.feature] ??= {})[bucket.bucket] = {
+      status: enough ? "available" : "insufficient_sample",
+      observedStatistic,
+      familyWisePValue,
+      nominalAlpha,
+      passes: familyWisePValue !== null && familyWisePValue <= nominalAlpha,
+    };
+  }
+  const contract = {
+    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    iterations: EMPIRICAL_NULL_ITERATIONS,
+    seed: EMPIRICAL_NULL_SEED,
+    blockLengthRule: "floor_cube_root_of_eligible_observations_minimum_2",
+    blockLength,
+    horizon: 1,
+    familyStatistic: "maximum_absolute_studentized_mean_across_candidate_evaluable_observed_feature_buckets",
+    familyEligibleBuckets: familyBuckets.length,
+    familyExcludedInsufficientSampleBuckets,
+    nominalAlpha,
+    symbol: input.symbol,
+    timeframe: input.timeframe,
+    features: input.features,
+    horizons: input.horizons,
+    definition: input.definition,
+    configurationTrials: input.configurationTrials,
+    minimumObservations: input.minimumObservations,
+    evidenceHash,
+  };
+  return {
+    schemaVersion: "1.0",
+    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    status: blockLength !== null && familyBuckets.length > 0 ? "complete" : "not_evaluable",
+    iterations: EMPIRICAL_NULL_ITERATIONS,
+    seed: EMPIRICAL_NULL_SEED,
+    blockLengthRule: "floor_cube_root_of_eligible_observations_minimum_2",
+    blockLength,
+    horizon: 1,
+    familyStatistic: "maximum_absolute_studentized_mean_across_candidate_evaluable_observed_feature_buckets",
+    familyEligibleBuckets: familyBuckets.length,
+    familyExcludedInsufficientSampleBuckets,
+    nominalAlpha,
+    evidenceHash,
+    calibrationId: sha256(contract),
+    source: {
+      symbol: input.symbol,
+      timeframe: input.timeframe,
+      closedBars: input.bars.length,
+      selectedEligibleObservations: eligible.length,
+      referenceEligibleObservations: referenceEligible.length,
+      from: input.bars[0]?.timeIso ?? null,
+      to: input.bars.at(-1)?.timeIso ?? null,
+    },
+    byFeature,
+    limitations: [
+      "Feature labels and original bar timestamps stay fixed; circular moving blocks resample horizon-one outcomes only.",
+      "When one feature bucket is preselected, null outcomes come from the same signal-window and regime population before feature selection.",
+      "The family-wise p-value compares each observed bucket statistic with the maximum across observed feature buckets that meet the frozen candidate minimum-observation floor and have a finite studentized statistic.",
+      "Observed buckets below that floor or with zero standard error are reported as insufficient_sample and excluded from the family maximum because they cannot become candidates.",
+      "This calibration does not establish causality, profitability, execution quality, or out-of-sample validity.",
+    ],
+  };
 }
 
 function selectionContrast(
@@ -559,6 +773,41 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     candidateHorizon: 1 as const,
     minimumObservations: input.minimumObservations,
   };
+  const definition = {
+    atrLookback: input.atrLookback,
+    atrBaselineLookback: input.atrBaselineLookback,
+    rangeLookback: input.rangeLookback,
+    streakMinimumBars: input.streakMinimumBars,
+    bodyRatioThreshold: input.bodyRatioThreshold,
+    wickImbalanceThreshold: input.wickImbalanceThreshold,
+    atrCompressionLowRatio: input.atrCompressionLowRatio,
+    atrCompressionHighRatio: input.atrCompressionHighRatio,
+    rangePositionLower: input.rangePositionLower,
+    rangePositionUpper: input.rangePositionUpper,
+    gapAtrThreshold: input.gapAtrThreshold,
+    regime: input.regime,
+    selection,
+    signalFrom,
+    signalTo,
+  };
+  if (input.empiricalNullCalibration === true && !input.horizons.includes(1)) {
+    throw new Error("empirical null calibration requires horizon 1");
+  }
+  const empiricalNullCalibration = input.empiricalNullCalibration === true
+    ? buildEmpiricalNullCalibration({
+      observations,
+      referenceObservations,
+      bars,
+      symbol: input.symbol,
+      timeframe: input.timeframe,
+      features: input.features,
+      horizons: input.horizons,
+      confidenceLevel,
+      definition,
+      configurationTrials,
+      minimumObservations: input.minimumObservations,
+    })
+    : undefined;
   return {
     schemaVersion: "1.0" as const,
     methodologyVersion: "feature_outcome_relationships_v1" as const,
@@ -566,23 +815,7 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     symbol: input.symbol,
     timeframe: input.timeframe,
     features: input.features,
-    definition: {
-      atrLookback: input.atrLookback,
-      atrBaselineLookback: input.atrBaselineLookback,
-      rangeLookback: input.rangeLookback,
-      streakMinimumBars: input.streakMinimumBars,
-      bodyRatioThreshold: input.bodyRatioThreshold,
-      wickImbalanceThreshold: input.wickImbalanceThreshold,
-      atrCompressionLowRatio: input.atrCompressionLowRatio,
-      atrCompressionHighRatio: input.atrCompressionHighRatio,
-      rangePositionLower: input.rangePositionLower,
-      rangePositionUpper: input.rangePositionUpper,
-      gapAtrThreshold: input.gapAtrThreshold,
-      regime: input.regime,
-      selection,
-      signalFrom,
-      signalTo,
-    },
+    definition,
     outcomeContract: {
       reference: "signal_bar_close_event_study_only_not_assumed_fill" as const,
       horizons: input.horizons,
@@ -629,7 +862,9 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
         "bonferroni_adjustment_is_applied_to_feature_bucket_horizon_eligibility",
         "candidate_eligibility_is_limited_to_horizon_1_non_overlapping_forward_returns_with_newey_west_inference",
     ],
-    byFeature: classify(observations, input.features, input.horizons, confidenceLevel, bonferroni),
+    ...(empiricalNullCalibration === undefined ? {} : { empiricalNullCalibration }),
+    byFeature: classify(observations, input.features, input.horizons, confidenceLevel, bonferroni,
+      empiricalNullCalibration),
     ...(selection === null ? {} : { selectionContrast: selectionContrast(observations, referenceObservations, input.horizons, confidenceLevel) }),
     folds: folds.map((fold) => {
       const selected = observations.filter((row) => {

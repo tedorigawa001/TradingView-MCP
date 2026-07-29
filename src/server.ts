@@ -53,6 +53,7 @@ import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.j
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { runFeatureOutcomeFalsificationAudit } from "./featureOutcomeFalsificationAudit.js";
+import { runFeatureOutcomePowerAudit } from "./featureOutcomePowerAudit.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
@@ -1379,7 +1380,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Calibrate the frozen feature-outcome candidate gate against deterministic synthetic null OHLC. " +
-        "A candidate must pass the horizon-one, non-overlapping Newey-West and Bonferroni rule. " +
+        "A candidate must pass the horizon-one, non-overlapping Newey-West, Bonferroni, and fixed 1,000-replication empirical-null rule. " +
         "It does not read or change TradingView, record a journal entry, rank variants, or establish profitability.",
       inputSchema: {
         timeframe: z.string().regex(/^[1-9]\d*$/),
@@ -1455,12 +1456,115 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }));
         return jsonResult({
           schemaVersion: "1.0",
-          methodologyVersion: "feature_outcome_falsification_audit_standard_v1",
+          methodologyVersion: "feature_outcome_falsification_audit_standard_v2",
           candidateRule: runs[0].candidateRule,
           runs,
           limitations: [
             "Rates are separate by null model and are never pooled.",
             "The audit calibrates the frozen candidate rule, not an unrecorded search outside configuration_trials.",
+            "Each synthetic replication runs the candidate rule's fixed 1,000-replication empirical-null calibration; large audit runs are intentionally compute-intensive.",
+          ],
+        });
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "run_feature_outcome_power_audit",
+    {
+      description:
+        "Measure how often the frozen feature-outcome candidate gate detects a predeclared signed next-bar " +
+        "effect injected after one body-direction bucket. It is synthetic sensitivity evidence, not market alpha.",
+      inputSchema: {
+        timeframe: z.string().regex(/^[1-9]\d*$/),
+        features: z.array(z.enum([
+          "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+        ])).min(1).max(6).refine((values) => values.includes("body_direction"),
+          "features must include body_direction"),
+        target_bucket: z.enum(["bullish_body", "bearish_body", "indecision"]),
+        effect_bps: z.array(z.number().finite().min(-500).max(500).refine((value) => value !== 0,
+          "effect bps must be non-zero")).min(1).max(6),
+        horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
+          .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
+        minimum_observations: z.number().int().min(2).max(5000),
+        configuration_trials: z.number().int().min(1).max(100_000),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+        atr_lookback: z.number().int().min(2).max(250).optional(),
+        atr_baseline_lookback: z.number().int().min(5).max(1000).optional(),
+        range_lookback: z.number().int().min(2).max(500).optional(),
+        streak_minimum_bars: z.number().int().min(1).max(100).optional(),
+        body_ratio_threshold: z.number().finite().min(0).lt(1).optional(),
+        wick_imbalance_threshold: z.number().finite().min(0).max(1).optional(),
+        atr_compression_low_ratio: z.number().finite().gt(0).lt(1).optional(),
+        atr_compression_high_ratio: z.number().finite().gt(1).optional(),
+        range_position_lower: z.number().finite().gt(0).lt(0.5).optional(),
+        range_position_upper: z.number().finite().gt(0.5).lt(1).optional(),
+        gap_atr_threshold: z.number().finite().min(0).optional(),
+        models: z.array(z.enum(["white_noise", "regime_switching_volatility", "bid_ask_bounce"])).min(1).max(3).optional(),
+        replications: z.number().int().min(1).max(2000).optional(),
+        first_seed: z.number().int().min(0).max(0xffffffff).optional(),
+        bars: z.number().int().min(100).max(50_000).optional(),
+        volatility: z.number().finite().gt(0).max(0.5).optional(),
+        nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
+      },
+    },
+    async ({ timeframe, features, target_bucket, effect_bps, horizons, minimum_observations,
+      configuration_trials, confidence_level, atr_lookback, atr_baseline_lookback, range_lookback,
+      streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold, atr_compression_low_ratio,
+      atr_compression_high_ratio, range_position_lower, range_position_upper, gap_atr_threshold,
+      models, replications, first_seed, bars, volatility, nominal_alpha }) => {
+      try {
+        const common = {
+          replications: replications ?? 50,
+          firstSeed: first_seed,
+          bars: bars ?? 4_000,
+          timeframeMinutes: Number(timeframe),
+          volatility,
+          nominalAlpha: nominal_alpha ?? 0.05,
+        };
+        const study = {
+          timeframe,
+          features,
+          selection: null,
+          signalFrom: null,
+          signalTo: null,
+          atrLookback: atr_lookback ?? 14,
+          atrBaselineLookback: atr_baseline_lookback ?? 50,
+          rangeLookback: range_lookback ?? 20,
+          streakMinimumBars: streak_minimum_bars ?? 3,
+          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
+          rangePositionLower: range_position_lower ?? 0.33,
+          rangePositionUpper: range_position_upper ?? 0.67,
+          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          horizons,
+          minimumObservations: minimum_observations,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials,
+          folds: [],
+          regime: null,
+          observationLimit: 0,
+        };
+        const selectedModels = models ?? ["white_noise", "regime_switching_volatility", "bid_ask_bounce"] as const;
+        const runs = selectedModels.flatMap((model) => effect_bps.map((effectBps) =>
+          runFeatureOutcomePowerAudit({
+            audit: { ...common, model },
+            study,
+            injection: { feature: "body_direction", bucket: target_bucket, effectBps },
+          })));
+        return jsonResult({
+          schemaVersion: "1.0",
+          methodologyVersion: "feature_outcome_power_audit_standard_v1",
+          target: { feature: "body_direction", bucket: target_bucket },
+          effectBps: effect_bps,
+          models: selectedModels,
+          runs,
+          limitations: [
+            "Detection rates and Wilson intervals remain separate by null model and injected effect size.",
+            "The default is 50 replications because every draw runs a fixed 1,000-replication empirical-null calibration; use 200 explicitly for a final curve.",
+            "This measures synthetic sensitivity for a frozen target, not real-market alpha or profitability.",
           ],
         });
       } catch (err) { return errorResult(err); }
@@ -1529,6 +1633,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }).optional().describe("Optional predeclared point-in-time market-regime filter for a limited feature hypothesis"),
         configuration_trials: z.number().int().min(1).max(100_000).optional()
           .describe("Total related feature/threshold configurations inspected so far, including this one"),
+        empirical_null_calibration: z.boolean().optional()
+          .describe("Run the fixed 1,000-replication circular moving-block empirical-null calibration on the same closed bars. Default: false"),
         journal: z.object({
           hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
           population: RESEARCH_POPULATION_SCHEMA,
@@ -1542,8 +1648,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ expected_symbol, expected_timeframe, count, features, feature_selection, signal_from, signal_to, atr_lookback, atr_baseline_lookback,
       range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
       atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
-      gap_atr_threshold, horizons, minimum_observations, confidence_level, folds, regime, configuration_trials, journal,
-      observation_limit }) => chartOperations.run(async () => {
+      gap_atr_threshold, horizons, minimum_observations, confidence_level, folds, regime, configuration_trials,
+      empirical_null_calibration, journal, observation_limit }) => chartOperations.run(async () => {
       try {
         if (feature_selection && features !== undefined) {
           throw new Error("feature_selection cannot be combined with features");
@@ -1591,6 +1697,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumObservations: minimum_observations ?? 100,
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials ?? 1,
+          empiricalNullCalibration: empirical_null_calibration ?? false,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
           regime: regime === undefined ? null : {
             directionalRegime: regime.directional_regime,
@@ -1619,11 +1726,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           outcomeContract: result.outcomeContract,
           minimumObservations: result.sample.minimumObservations,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          empiricalNullContract: result.empiricalNullCalibration === undefined ? null : {
+            methodologyVersion: result.empiricalNullCalibration.methodologyVersion,
+            iterations: result.empiricalNullCalibration.iterations,
+            seed: result.empiricalNullCalibration.seed,
+            blockLengthRule: result.empiricalNullCalibration.blockLengthRule,
+            familyStatistic: result.empiricalNullCalibration.familyStatistic,
+          },
         };
         const definitionHash = `sha256:${createHash("sha256").update(JSON.stringify(definition), "utf8").digest("hex")}`;
         const studyId = `sha256:${createHash("sha256").update(JSON.stringify({
           methodologyVersion: result.methodologyVersion, symbol: result.symbol,
           timeframe: result.timeframe, definitionHash, source,
+          empiricalNullCalibrationId: result.empiricalNullCalibration?.calibrationId ?? null,
         }), "utf8").digest("hex")}`;
         const outcomes: EventStudyRecord["outcomes"] = Object.entries(result.byFeature).flatMap(([feature, buckets]) =>
           Object.entries(buckets).flatMap(([bucket, summary]) =>
@@ -1678,7 +1793,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Associations do not establish causality or imply a trade direction.",
             "Loaded chart history can be shorter than requested and differs by TradingView plan.",
             "Upside and downside use bar extremes; intrabar ordering is unknown.",
-            "Newey-West and Bonferroni can mark an exploratory result only. Candidate eligibility requires a matching reviewed empirical-null calibration as well as prospective out-of-sample evidence.",
+            "Newey-West and Bonferroni can mark an exploratory result only. Candidate eligibility additionally requires the same-call empirical-null family-wise threshold; prospective out-of-sample evidence remains separate.",
           ],
         });
       } catch (err) {

@@ -725,7 +725,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the eighty expected tools", async () => {
+test("exposes exactly the eighty-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -799,6 +799,7 @@ test("exposes exactly the eighty expected tools", async () => {
       "run_event_study_falsification_audit",
       "run_external_label_study",
       "run_feature_outcome_falsification_audit",
+      "run_feature_outcome_power_audit",
       "run_market_event_study",
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
@@ -5507,7 +5508,7 @@ test("run_event_study_falsification_audit accepts a declared synthetic aftershoc
   assert.deepEqual(parsed.runs[0].syntheticEventSchedule, { firstBar: 16, everyBars: 96, maximumEvents: 10 });
 });
 
-test("run_feature_outcome_falsification_audit calibrates the HAC candidate gate without chart access", async () => {
+test("run_feature_outcome_falsification_audit calibrates the empirical-null candidate gate without chart access", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "run_feature_outcome_falsification_audit", arguments: {
     timeframe: "60", features: ["body_direction"], horizons: [1, 3], minimum_observations: 10,
@@ -5515,9 +5516,28 @@ test("run_feature_outcome_falsification_audit calibrates the HAC candidate gate 
   } });
   assert.equal(res.isError, undefined);
   const parsed = JSON.parse(res.content[0].text);
-  assert.equal(parsed.methodologyVersion, "feature_outcome_falsification_audit_standard_v1");
-  assert.equal(parsed.runs[0].candidateRule.evidence, "non_overlapping_newey_west_bonferroni_exploratory_eligibility");
+  assert.equal(parsed.methodologyVersion, "feature_outcome_falsification_audit_standard_v2");
+  assert.equal(parsed.runs[0].candidateRule.evidence,
+    "non_overlapping_newey_west_bonferroni_and_empirical_null_candidate_eligibility");
   assert.equal(parsed.runs[0].audit.evaluated, 2);
+});
+
+test("run_feature_outcome_power_audit returns separate effect-size detection runs without chart access", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_feature_outcome_power_audit", arguments: {
+    timeframe: "60", features: ["body_direction"], target_bucket: "bullish_body",
+    effect_bps: [25, 100], horizons: [1, 3], minimum_observations: 10,
+    configuration_trials: 1, models: ["white_noise"], replications: 1, bars: 500,
+  } });
+  assert.equal(res.isError, undefined, res.content[0].text);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.methodologyVersion, "feature_outcome_power_audit_standard_v1");
+  assert.deepEqual(parsed.effectBps, [25, 100]);
+  assert.equal(parsed.runs.length, 2);
+  assert.deepEqual(parsed.runs.map((run) => run.injection.effectBps), [25, 100]);
+  assert.ok(parsed.runs.every((run) => run.audit.evaluated === 1));
+  assert.ok(parsed.runs.every((run) =>
+    run.candidateRule.evidence === "target_bucket_candidate_eligible_with_injected_direction_mean"));
 });
 
 test("run_market_event_study binds the chart and returns session auction evidence", async () => {
@@ -6225,13 +6245,19 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5,
     confidence_level: 0.99,
     configuration_trials: 18,
+    empirical_null_calibration: true,
     journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
     observation_limit: 2,
   } });
+  assert.equal(res.isError, undefined, res.content[0].text);
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.inferenceContract.configurationTrials, 18);
   assert.equal(parsed.inferenceContract.multipleTestingAdjustment, "bonferroni_family_wise_error_rate");
   assert.equal(parsed.inferenceContract.candidateEligibility, "requires_empirical_null_calibration_after_horizon_1_newey_west_and_bonferroni");
+  assert.equal(parsed.empiricalNullCalibration.methodologyVersion,
+    "feature_outcome_empirical_null_circular_moving_block_v2");
+  assert.equal(parsed.empiricalNullCalibration.iterations, 1000);
+  assert.match(parsed.empiricalNullCalibration.evidenceHash, /^sha256:/);
   assert.equal(parsed.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.inference.familyTests, 216);
   assert.equal(parsed.symbol, "OANDA:EURUSD");
   assert.equal(parsed.conditionType, "feature_outcome_relationships");

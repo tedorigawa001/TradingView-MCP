@@ -13,7 +13,7 @@ const study = {
   observationLimit: 0, confidenceLevel: 0.95, configurationTrials: 1,
 };
 
-test("feature-outcome falsification audit uses the HAC candidate gate reproducibly", () => {
+test("feature-outcome falsification audit uses the empirical-null candidate gate reproducibly", () => {
   const input = {
     audit: { model: "white_noise", replications: 4, firstSeed: 30, bars: 500,
       timeframeMinutes: 60, nominalAlpha: 0.05 },
@@ -21,11 +21,24 @@ test("feature-outcome falsification audit uses the HAC candidate gate reproducib
   };
   const first = runFeatureOutcomeFalsificationAudit(input);
   const again = runFeatureOutcomeFalsificationAudit(input);
-  assert.equal(first.methodologyVersion, "feature_outcome_falsification_audit_v1");
+  assert.equal(first.methodologyVersion, "feature_outcome_falsification_audit_v2");
   assert.equal(first.candidateRule.horizon, 1);
-  assert.equal(first.candidateRule.evidence, "non_overlapping_newey_west_bonferroni_exploratory_eligibility");
+  assert.equal(first.candidateRule.evidence,
+    "non_overlapping_newey_west_bonferroni_and_empirical_null_candidate_eligibility");
+  assert.equal(first.candidateRule.empiricalNullIterations, 1000);
   assert.equal(first.audit.evaluated, 4);
   assert.deepEqual(first.audit.candidateSeeds, again.audit.candidateSeeds);
+});
+
+test("feature-outcome falsification audit does not count an exploratory-only seed as a candidate", () => {
+  const result = runFeatureOutcomeFalsificationAudit({
+    audit: { model: "white_noise", replications: 1, firstSeed: 39, bars: 500,
+      timeframeMinutes: 60, nominalAlpha: 0.05 },
+    study,
+  });
+  assert.equal(result.audit.evaluated, 1);
+  assert.equal(result.audit.candidates, 0);
+  assert.deepEqual(result.audit.candidateSeeds, []);
 });
 
 test("feature-outcome falsification audit refuses a candidate rule without horizon one", () => {
@@ -33,4 +46,11 @@ test("feature-outcome falsification audit refuses a candidate rule without horiz
     audit: { model: "white_noise", replications: 1, bars: 500, timeframeMinutes: 60, nominalAlpha: 0.05 },
     study: { ...study, horizons: [3] },
   }), /requires horizon 1/);
+});
+
+test("feature-outcome falsification audit binds nominal alpha to the candidate confidence level", () => {
+  assert.throws(() => runFeatureOutcomeFalsificationAudit({
+    audit: { model: "white_noise", replications: 1, bars: 500, timeframeMinutes: 60, nominalAlpha: 0.1 },
+    study,
+  }), /nominal alpha must equal 1 - confidence level/);
 });

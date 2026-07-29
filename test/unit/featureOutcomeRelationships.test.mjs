@@ -85,6 +85,127 @@ test("feature-outcome candidate eligibility uses horizon one and non-overlapping
   assert.ok(horizonOne.forwardReturn.inference.candidateBlockers.includes("candidate_requires_non_overlapping_series"));
 });
 
+test("feature-outcome empirical null block bootstrap is deterministic and bound to the supplied bars", () => {
+  let price = 100;
+  let state = 0x12345678;
+  let priorDirection = 1;
+  let priorMagnitude = 0.004;
+  const start = Date.UTC(2026, 0, 1);
+  const series = Array.from({ length: 400 }, (_, index) => {
+    const open = price;
+    price *= 1 + priorDirection * priorMagnitude;
+    const close = price;
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const direction = (state & 1) === 0 ? -1 : 1;
+    priorDirection = direction;
+    priorMagnitude = 0.003 + ((state >>> 1) % 3) * 0.001;
+    const time = start + index * HOUR;
+    const bodyHigh = Math.max(open, close);
+    const bodyLow = Math.min(open, close);
+    return {
+      time: time / 1000, timeIso: new Date(time).toISOString(), open, close,
+      high: bodyHigh + (direction < 0 ? 1.2 : 0.1),
+      low: bodyLow - (direction > 0 ? 1.2 : 0.1),
+      volume: 1,
+    };
+  });
+  const definition = input(series, {
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50,
+    observationLimit: 0, empiricalNullCalibration: true,
+  });
+  const first = computeFeatureOutcomeRelationships(definition);
+  const again = computeFeatureOutcomeRelationships(definition);
+  assert.equal(first.empiricalNullCalibration.methodologyVersion,
+    "feature_outcome_empirical_null_circular_moving_block_v2");
+  assert.equal(first.empiricalNullCalibration.iterations, 1000);
+  assert.equal(first.empiricalNullCalibration.seed, 20260729);
+  assert.ok(first.empiricalNullCalibration.blockLength >= 2);
+  assert.match(first.empiricalNullCalibration.evidenceHash, /^sha256:[a-f0-9]{64}$/);
+  assert.match(first.empiricalNullCalibration.calibrationId, /^sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(first.empiricalNullCalibration, again.empiricalNullCalibration);
+
+  const lowerWick = first.byFeature.wick_imbalance.lower_wick_dominant.horizons["1"]
+    .nonOverlappingForwardReturn.candidateInference;
+  assert.equal(lowerWick.empiricalNullCalibration.status, "available");
+  assert.ok(lowerWick.empiricalNullCalibration.familyWisePValue <= 0.05);
+  assert.equal(lowerWick.empiricalNullCalibration.passes, true);
+  assert.equal(lowerWick.candidateEligible, true);
+  assert.deepEqual(lowerWick.candidateBlockers, []);
+
+  const changed = structuredClone(series);
+  changed[100].high += 0.01;
+  const changedResult = computeFeatureOutcomeRelationships(input(changed, {
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50,
+    observationLimit: 0, empiricalNullCalibration: true,
+  }));
+  assert.notEqual(changedResult.empiricalNullCalibration.evidenceHash,
+    first.empiricalNullCalibration.evidenceHash);
+  assert.notEqual(changedResult.empiricalNullCalibration.calibrationId,
+    first.empiricalNullCalibration.calibrationId);
+});
+
+test("feature-outcome empirical null does not promote an unconditional drift", () => {
+  const series = bars(Date.UTC(2026, 0, 1),
+    Array.from({ length: 300 }, (_, index) => 100 + index));
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1], minimumObservations: 50,
+    observationLimit: 0, empiricalNullCalibration: true,
+  }));
+  const inference = result.byFeature.body_direction.bullish_body.horizons["1"]
+    .nonOverlappingForwardReturn.candidateInference;
+  assert.equal(inference.exploratoryEligible, true);
+  assert.equal(inference.empiricalNullCalibration.status, "available");
+  assert.equal(inference.empiricalNullCalibration.passes, false);
+  assert.equal(inference.candidateEligible, false);
+  assert.ok(inference.candidateBlockers.includes("empirical_null_family_wise_threshold_not_met"));
+});
+
+test("feature-outcome empirical null treats a nonzero constant-return bucket as non-studentizable", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const series = Array.from({ length: 60 }, (_, index) => {
+    const open = 2 ** index;
+    const close = 2 ** (index + 1);
+    const time = start + index * HOUR;
+    return {
+      time: time / 1000, timeIso: new Date(time).toISOString(),
+      open, high: close, low: open, close, volume: 1,
+    };
+  });
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1], minimumObservations: 20,
+    observationLimit: 0, empiricalNullCalibration: true,
+  }));
+  const calibration = result.byFeature.body_direction.bullish_body.horizons["1"]
+    .nonOverlappingForwardReturn.candidateInference.empiricalNullCalibration;
+  assert.equal(calibration.status, "insufficient_sample");
+  assert.equal(calibration.observedStatistic, null);
+  assert.equal(result.empiricalNullCalibration.status, "not_evaluable");
+});
+
+test("feature-outcome empirical null excludes buckets below the candidate sample floor from its family maximum", () => {
+  const start = Date.UTC(2026, 0, 1);
+  let price = 100;
+  const series = Array.from({ length: 300 }, (_, index) => {
+    const open = price;
+    const direction = index > 0 && index % 20 === 0 ? -1 : 1;
+    const close = open * (1 + direction * 0.005);
+    price = close;
+    const time = start + index * HOUR;
+    return {
+      time: time / 1000, timeIso: new Date(time).toISOString(),
+      open, high: Math.max(open, close) + 0.01, low: Math.min(open, close) - 0.01, close, volume: 1,
+    };
+  });
+  const result = computeFeatureOutcomeRelationships(input(series, {
+    features: ["body_direction"], horizons: [1], minimumObservations: 50,
+    observationLimit: 0, empiricalNullCalibration: true,
+  }));
+  assert.equal(result.empiricalNullCalibration.familyEligibleBuckets, 1);
+  assert.equal(result.empiricalNullCalibration.familyExcludedInsufficientSampleBuckets, 1);
+  assert.equal(result.byFeature.body_direction.bearish_body.horizons["1"]
+    .nonOverlappingForwardReturn.candidateInference.empiricalNullCalibration.status, "insufficient_sample");
+});
+
 test("feature-outcome relationships exclude forming bars and preserve irregular intervals as quality evidence", () => {
   const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 101, 102, 103, 104, 103, 102, 101]);
   series.at(-1).forming = true;
@@ -148,6 +269,7 @@ test("feature-outcome relationships fix one feature bucket and an inclusive-excl
   const result = computeFeatureOutcomeRelationships(input(series, {
     features: ["body_direction"], horizons: [1], signalFrom, signalTo,
     selection: { feature: "body_direction", bucket: "bullish_body" },
+    empiricalNullCalibration: true,
   }));
   assert.deepEqual(result.features, ["body_direction"]);
   assert.deepEqual(result.definition.selection, { feature: "body_direction", bucket: "bullish_body" });
@@ -163,6 +285,8 @@ test("feature-outcome relationships fix one feature bucket and an inclusive-excl
   assert.equal(result.selectionContrast.referencePopulation, "same_signal_window_and_regime_before_feature_selection");
   assert.equal(result.selectionContrast.populationsOverlap, true);
   assert.ok(result.selectionContrast.referenceObservations > result.selectionContrast.selectedObservations);
+  assert.ok(result.empiricalNullCalibration.source.referenceEligibleObservations >
+    result.empiricalNullCalibration.source.selectedEligibleObservations);
   assert.equal(typeof result.selectionContrast.horizons["1"].meanForwardReturnDifference, "number");
   assert.equal(result.folds.length, 0);
 });
@@ -175,6 +299,9 @@ test("feature-outcome relationships reject invalid fixed feature buckets and sig
   assert.throws(() => computeFeatureOutcomeRelationships(input(series, {
     signalFrom: series[6].timeIso, signalTo: series[6].timeIso,
   })), /signal_to must be after signal_from/);
+  assert.throws(() => computeFeatureOutcomeRelationships(input(series, {
+    horizons: [3], empiricalNullCalibration: true,
+  })), /empirical null calibration requires horizon 1/);
 });
 
 test("feature-outcome relationships report only an empty signal window before later filters", () => {
