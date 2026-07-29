@@ -497,6 +497,18 @@ function makeDeps(overrides = {}) {
       }),
       ...overrides.policyRateHistory,
     },
+    policyRateOfficialHistory: {
+      getLatest: async (currency) => ({
+        schema_version: "1.0", sequence: 1, series: "policy_rate_official_history", evidence_tier: "exploratory_revised_history", currency,
+        source_symbol: `ECONOMICS:${currency === "USD" ? "US" : currency === "EUR" ? "EU" : currency.slice(0, 2)}INTR`,
+        observation_date: "2026-06-17", value: currency === "USD" ? 3.75 : 2.4,
+        source_url: "https://example.test/policy-rate", source_vintage_at: null,
+        raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        retrieved_at: "2026-07-29T13:00:00.000Z", first_seen_at: "2026-07-29T13:00:00.000Z",
+      }),
+      coverage: async () => ({ evidence_tier: "exploratory_revised_history", records: 1, raw_snapshots: 1, source_coverage: { ecb_deposit_facility: { coverage_status: "complete" } } }),
+      ...overrides.policyRateOfficialHistory,
+    },
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -712,7 +724,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the seventy-nine expected tools", async () => {
+test("exposes exactly the eighty expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -750,6 +762,7 @@ test("exposes exactly the seventy-nine expected tools", async () => {
       "get_economic_events",
       "get_event_study_journal",
       "get_execution_snapshot",
+      "get_exploratory_policy_rate_history",
       "get_futures_flow_context",
       "get_indicator_graphics",
       "get_indicator_inputs",
@@ -5046,6 +5059,18 @@ test("get_policy_rate_context returns only persisted policy-rate versions at the
   assert.equal(parsed.status, "partial");
   assert.equal(parsed.rates[0].value, 3.75);
   assert.equal(parsed.rates[1].status, "unavailable");
+});
+
+test("get_exploratory_policy_rate_history labels revised history as ineligible for OOS evidence", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_exploratory_policy_rate_history", arguments: { currencies: ["USD", "EUR"] } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.evidence_tier, "exploratory_revised_history");
+  assert.equal(parsed.eligibility, "exploratory_only");
+  assert.equal(parsed.point_in_time_status, "not_available");
+  assert.equal(parsed.rates[0].value, 3.75);
+  assert.equal(parsed.source_coverage.source_coverage.ecb_deposit_facility.coverage_status, "complete");
 });
 
 test("carry_panel_preflight reports no historical sample before first-seen collection", async () => {

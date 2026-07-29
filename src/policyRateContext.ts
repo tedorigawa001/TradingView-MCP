@@ -17,10 +17,13 @@ export async function getPolicyRateContext(input: {
   const rates = rows.map(({ currency, record }) => record === null ? {
     currency, status: "unavailable" as const, observation_date: null, value: null, source_symbol: null,
     source_observed_at: null, available_at: null, first_seen_at: null, history_sequence: null,
+    evidence_tier: "prospective_first_seen" as const,
     quality_issues: ["no_first_seen_policy_rate_as_of"],
   } : toContextRate(currency, record));
   return {
     schema_version: "1.0",
+    evidence_tier: "prospective_first_seen" as const,
+    eligibility: "prospective_oos_eligible" as const,
     as_of: input.asOf.toISOString(),
     status: rates.every((rate) => rate.status === "available") ? "complete" as const : "partial" as const,
     rates,
@@ -33,6 +36,7 @@ function toContextRate(currency: PolicyRateCurrency, record: PolicyRateFirstSeen
     currency, status: "available" as const, observation_date: record.observation_date, value: record.value,
     source_symbol: record.source_symbol, source_observed_at: record.source_observed_at,
     available_at: record.available_at, first_seen_at: record.first_seen_at, history_sequence: record.sequence,
+    evidence_tier: "prospective_first_seen" as const,
     quality_issues: [],
   };
 }

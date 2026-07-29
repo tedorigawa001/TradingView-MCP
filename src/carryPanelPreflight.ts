@@ -3,7 +3,7 @@ import type { DirectionalRegime, VolatilityRegime } from "./marketRegimes.js";
 
 export type CarryPanelPair = { pair_id: string; base_currency: PolicyRateCurrency; quote_currency: PolicyRateCurrency };
 
-type ContextRate = { currency: PolicyRateCurrency; status: "available" | "unavailable"; value: number | null; available_at: string | null; first_seen_at: string | null };
+type ContextRate = { currency: PolicyRateCurrency; status: "available" | "unavailable"; value: number | null; available_at: string | null; first_seen_at: string | null; evidence_tier: "prospective_first_seen" };
 export type CarryPriceEvidence = { pair_id: string; symbol: string; timeframe: string; closed_bars: number; classified_bars: number; from: string | null; to: string | null; regime_dates: Array<{ date: string; directional: DirectionalRegime; volatility: VolatilityRegime }> };
 
 const calendarDate = (value: string, label: string) => {
@@ -41,6 +41,7 @@ export function carryPanelPreflight(input: {
   if (input.pairs.length < 1 || input.pairs.length > 28) throw new Error("pairs must contain 1 to 28 entries");
   if (new Set(input.pairs.map((pair) => pair.pair_id)).size !== input.pairs.length) throw new Error("pair_id values must be unique");
   const rateByCurrency = new Map(input.rates.map((rate) => [rate.currency, rate]));
+  if (input.rates.some((rate) => rate.evidence_tier !== "prospective_first_seen")) throw new Error("carry preflight accepts prospective first-seen policy-rate evidence only");
   const priceByPair = new Map((input.priceEvidence ?? []).map((item) => [item.pair_id, item]));
   const oosFrom = input.oosFrom === null ? null : calendarDate(input.oosFrom, "oos_from");
   if (oosFrom !== null && (oosFrom <= from || oosFrom >= to)) throw new Error("oos_from must lie within from and to");

@@ -19,6 +19,7 @@
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
     "collect:policy-rates": "node build/policyRateCollectionCli.js --confirm-chart-switch",
+    "collect:official-policy-rates": "node build/officialPolicyRateCollectionCli.js --confirm-exploratory-import",
     "collect:research-hypotheses": "node build/researchCollectionCli.js --confirm-chart-switch",
     "audit:event-studies": "node build/eventStudyFalsificationCli.js",
     "migrate:futures-oi-dates": "node build/migrateFuturesOiDatesCli.js",

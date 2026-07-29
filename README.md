@@ -198,6 +198,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 | `get_futures_flow_context` | 明示したCME/COMEX連続先物日足の価格変化・volume Z-scoreを対象方向へ変換し、週次COTと統合。既定はチャートOI、`open_interest_provider: "cme_daily_bulletin"`はXAUUSDだけでローカルfirst-seen済みのCME全限月OIを使用し、欠損日はチャート値で補完しない。CME OIは`as_of`で当時のfirst-seen版へ固定できる |
 | `get_real_yield_context` | 米財務省の10年Par Real CMT。`as_of`指定時はローカルでfirst-seen済みの版だけを返す |
 | `get_policy_rate_context` | 8通貨のローカルfirst-seen済み政策金利を`as_of`で返す。決定日00:00 UTCを公表時刻とはみなさず、`available_at`と`first_seen_at`の両方を満たす版だけを返す |
+| `get_exploratory_policy_rate_history` | 別ストアへ隔離した公式の改訂済み政策金利履歴を探索専用として返す。過去時点での利用可能性は主張せず、前向き/OOS証拠には使えない |
 | `carry_panel_preflight` | 固定した通貨ペア・期間・horizonについて、政策金利の共通利用開始日、非重複アンカー数、OOS残数、欠損を確認する。未蓄積の過去を補完せず、必要件数未満は`not_evaluable`を返す |
 | `estimate_carry_panel_effective_sample` | 固定済みのcarry方向リターン・アンカー日・pairを受け、日付単位の循環移動ブロックbootstrapで相関込みの実効標本を見積もる。採否や最適化には使わない |
 | `measure_carry_panel_dependence` | 日足FXパネルを一時取得し、同一日付・非重複horizonの実測ペア間ρとブロックbootstrapのdesign effectを返す。政策金利の過去vintageや主検定は作らない |
@@ -209,6 +210,8 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 `npm run collect:first-seen -- --cot-symbol OANDA:EURUSD --cot-symbol OANDA:XAUUSD` はCOT、米10年実質金利、CME Daily BulletinのGC全限月OIを収集し、追記専用first-seenログへ記録します。`npm run coverage:first-seen` はCOT・実質金利・先物OI・政策金利の収集日数、改訂数、最初と最後の観測日をJSONで返します。定期実行時のCOT対象は `TRADINGVIEW_MCP_COLLECTION_COT_SYMBOLS=OANDA:EURUSD,OANDA:XAUUSD` で指定できます。
 
 `npm run collect:policy-rates` は、TradingView上でUSD/EUR/JPY/GBP/AUD/NZD/CAD/CHFの`ECONOMICS:*INTR`を順番に読み、`~/.tradingview-mcp/policy-rate-first-seen.jsonl`へ追記します。チャート切替を伴うため、既定スクリプトは明示承認済みの`--confirm-chart-switch`を渡します。MCPサーバー・他CLIと同じプロセス横断ロックを取得し、各通貨の取得後に元のチャート状態を読み戻して復元します。TradingViewの00:00 UTCバーは公表時刻ではないため、保存値の`available_at`は決定日の翌UTC営業日00:00です。これは会合当日への先読みを避けるための再現可能な保守的境界であり、実際の公表時刻を表すものではありません。
+
+`npm run collect:official-policy-rates` は探索専用の公式履歴ストアへ保存します。`--source ecb_deposit_facility`(既定)はECB Deposit Facilityの公式SDMX CSV、`--source boc_target_overnight_rate`はBoC Valet APIの`V39079`、`--source fred_fed_target_range_midpoint`はFRED配布の旧Fed単一目標`DFEDTAR`と、2008-12-16以降のtarget range上下限(`DFEDTARL`/`DFEDTARU`)の中央値を日付で排他的に接続します。`--source rba_cash_rate_target`はRBA F1の`FIRMMCRTD`で、旧公式XLSの1990-08-02〜2010-12-31と現行日次CSVの2011-01-04以降を検証済み境界で接続します。`--source snb_policy_rate_or_libor_target_midpoint`はSNB policy rateと旧Libor目標レンジ中央値(月末)、`--source boj_mpm_policy_decisions`はBoJ会合決定の固定マニフェストを取得します。BoJは量的緩和期に単一短期金利を目標としないため、その境界を`value: null`として保存し、古い金利を右連続で使いません。実効FF金利・実勢のovernight cash rateは政策目標と異なるため使いません。いずれも据え置き値を変更日だけへ縮約しますが、raw snapshotには元データの全観測行数・最初/最後の日付も保存し、欠測と据え置きを混同しません。HTTP本文の`raw_sha256`・取得時刻・Last-Modified由来のvintageを残し、本文は`~/.tradingview-mcp/policy-rate-official-raw/<sha256>.raw`にもowner-onlyでcontent-addressed保存され、同じハッシュの再取得時は内容を再検証してから再利用します。これは改訂済み履歴であり、前向き/OOS・主検定・採用根拠へ使えません。
 
 macOSでは`com.tradingview-mcp.policy-rate-collection`を平日10:45 JSTに実行するlaunchdジョブとして登録する。`RunAtLoad`は設定せず、ログインやMCP再起動の直後に画面を切り替えない。既存の外部first-seen収集(10:30)と時間を分け、両方が同じchart-operation lockを使うため、MCP操作中は待機または失敗し、別の銘柄状態を復元先として取り違えない。
 

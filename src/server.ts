@@ -60,10 +60,12 @@ import { computeCorrelationRegimes } from "./correlationRegimes.js";
 import { computeLeadLagRelationships } from "./leadLagRelationships.js";
 import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import { getPolicyRateContext } from "./policyRateContext.js";
+import { getOfficialPolicyRateHistoryContext } from "./policyRateOfficialHistoryContext.js";
 import { carryPanelPreflight } from "./carryPanelPreflight.js";
 import { estimateCarryPanelEffectiveSample } from "./carryPanelBootstrap.js";
 import { measureCarryPanelDependence } from "./carryPanelDependence.js";
 import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
+import type { OfficialPolicyRateHistoryStore } from "./policyRateOfficialHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -137,6 +139,7 @@ export interface ServerDeps {
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
   policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf">;
+  policyRateOfficialHistory?: Pick<OfficialPolicyRateHistoryStore, "getLatest" | "coverage">;
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 }
 
@@ -328,7 +331,7 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateOfficialHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -6586,6 +6589,30 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           provider: policyRateHistory,
           currencies: (currencies ?? ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]) as PolicyRateCurrency[],
           asOf: as_of === undefined ? new Date() : new Date(as_of),
+        }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_exploratory_policy_rate_history",
+    {
+      description:
+        "Read separately stored official revised policy-rate history for exploratory research only. " +
+        "It never asserts historical availability and must not be used as prospective or out-of-sample carry evidence.",
+      inputSchema: {
+        currencies: z.array(z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]).optional()).min(1).max(8).optional(),
+      },
+    },
+    async ({ currencies }) => {
+      try {
+        if (!policyRateOfficialHistory) throw new Error("official policy-rate revised history is not configured");
+        return jsonResult(await getOfficialPolicyRateHistoryContext({
+          provider: policyRateOfficialHistory,
+          currencies: (currencies ?? ["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]) as PolicyRateCurrency[],
+          sourceCoverage: await policyRateOfficialHistory.coverage(),
         }));
       } catch (err) {
         return errorResult(err);
