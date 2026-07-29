@@ -103,6 +103,14 @@ export class PolicyRateFirstSeenStore {
       .sort((a, b) => b.observation_date.localeCompare(a.observation_date) || b.first_seen_at.localeCompare(a.first_seen_at) || b.sequence - a.sequence)[0] ?? null);
   }
 
+  async getVersionsAsOf(currency: PolicyRateCurrency, asOf: Date): Promise<PolicyRateFirstSeenRecord[]> {
+    if (!Number.isFinite(asOf.getTime())) throw new Error("as_of must be a valid timestamp");
+    const cutoff = asOf.toISOString();
+    return this.log.serialize(async () => (await this.log.readAllUnlocked())
+      .filter((record) => record.currency === currency && record.first_seen_at <= cutoff && record.available_at <= cutoff)
+      .sort((left, right) => left.observation_date.localeCompare(right.observation_date) || left.first_seen_at.localeCompare(right.first_seen_at) || left.sequence - right.sequence));
+  }
+
   async coverage() {
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();

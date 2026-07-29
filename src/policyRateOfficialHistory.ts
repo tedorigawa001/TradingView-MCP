@@ -178,6 +178,19 @@ export class OfficialPolicyRateHistoryStore {
       .sort((a, b) => b.observation_date.localeCompare(a.observation_date) || b.first_seen_at.localeCompare(a.first_seen_at) || b.sequence - a.sequence)[0] ?? null);
   }
 
+  /** Latest downloaded version per historical observation date; exploratory use only. */
+  async getRevisedSeries(currency: PolicyRateCurrency): Promise<OfficialPolicyRateHistoryRecord[]> {
+    return this.log.serialize(async () => {
+      const latestByDate = new Map<string, OfficialPolicyRateHistoryRecord>();
+      for (const record of await this.log.readAllUnlocked()) {
+        if (record.currency !== currency) continue;
+        const current = latestByDate.get(record.observation_date);
+        if (current === undefined || record.sequence > current.sequence) latestByDate.set(record.observation_date, record);
+      }
+      return [...latestByDate.values()].sort((left, right) => left.observation_date.localeCompare(right.observation_date));
+    });
+  }
+
   async coverage() {
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();

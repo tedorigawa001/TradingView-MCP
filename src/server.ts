@@ -64,6 +64,8 @@ import { getOfficialPolicyRateHistoryContext } from "./policyRateOfficialHistory
 import { carryPanelPreflight } from "./carryPanelPreflight.js";
 import { estimateCarryPanelEffectiveSample } from "./carryPanelBootstrap.js";
 import { measureCarryPanelDependence } from "./carryPanelDependence.js";
+import { buildExploratoryCarrySigns } from "./exploratoryCarrySigns.js";
+import { CARRY_CORE_PRIMARY_PAIRS, CARRY_CORE_PRIMARY_TEST_V1, runCarryPanelPrimaryTest } from "./carryPanelPrimaryTest.js";
 import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 import type { OfficialPolicyRateHistoryStore } from "./policyRateOfficialHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
@@ -138,8 +140,8 @@ export interface ServerDeps {
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
-  policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf">;
-  policyRateOfficialHistory?: Pick<OfficialPolicyRateHistoryStore, "getLatest" | "coverage">;
+  policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf" | "getVersionsAsOf">;
+  policyRateOfficialHistory?: Pick<OfficialPolicyRateHistoryStore, "getLatest" | "getRevisedSeries" | "coverage">;
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 }
 
@@ -6717,22 +6719,26 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           chart_index: z.number().int().min(0),
           expected_symbol: SYMBOL_SCHEMA,
           return_sign: z.union([z.literal(1), z.literal(-1)]).default(1),
+          base_currency: z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]).optional(),
+          quote_currency: z.enum(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]).optional(),
         })).min(2).max(28),
         count: z.number().int().min(200).max(5_000).default(2_000),
         horizon_business_days: z.number().int().min(1).max(260).default(20),
         block_length_anchors: z.number().int().min(1).max(52).default(3),
         iterations: z.number().int().min(100).max(10_000).default(2_000),
         seed: z.string().min(1).max(128),
+        use_exploratory_official_rate_signs: z.boolean().default(false),
         confirm: z.boolean().default(false),
       },
     },
-    async ({ pairs, count, horizon_business_days, block_length_anchors, iterations, seed, confirm }) => chartOperations.run(async () => {
+    async ({ pairs, count, horizon_business_days, block_length_anchors, iterations, seed, use_exploratory_official_rate_signs, confirm }) => chartOperations.run(async () => {
       try {
         if (new Set(pairs.map((pair) => pair.pair_id)).size !== pairs.length) throw new Error("pair_id values must be unique");
-        if (!confirm) return jsonResult({ dry_run: true, changed: false, required_timeframe: "1D", requested_pairs: pairs.map((pair) => ({ pair_id: pair.pair_id, chart_index: pair.chart_index, expected_symbol: pair.expected_symbol, return_sign: pair.return_sign })), count, horizon_business_days, block_length_anchors, iterations });
+        if (use_exploratory_official_rate_signs && pairs.some((pair) => pair.base_currency === undefined || pair.quote_currency === undefined || pair.base_currency === pair.quote_currency)) throw new Error("exploratory official rate signs require distinct base_currency and quote_currency for every pair");
+        if (!confirm) return jsonResult({ dry_run: true, changed: false, required_timeframe: "1D", sign_source: use_exploratory_official_rate_signs ? "exploratory_official_revised_history" : "fixed_input", requested_pairs: pairs.map((pair) => ({ pair_id: pair.pair_id, chart_index: pair.chart_index, expected_symbol: pair.expected_symbol, return_sign: pair.return_sign, base_currency: pair.base_currency ?? null, quote_currency: pair.quote_currency ?? null })), count, horizon_business_days, block_length_anchors, iterations });
         const replay = await tv.getReplayStatus();
         if (replay.started || replay.toolbarVisible) throw new Error("carry panel dependence is blocked while Bar Replay is active");
-        const series = [] as Array<{ pair_id: string; return_sign: 1 | -1; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
+        const series = [] as Array<{ pair_id: string; return_sign: 1 | -1; return_sign_by_date?: Record<string, 1 | -1>; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
         for (const pair of pairs) {
           const transaction = await withTemporaryChartState(tv, pair.chart_index, { symbol: pair.expected_symbol, resolution: "1D" }, async () => {
             let history = await tv.getOhlcv(count, pair.chart_index);
@@ -6748,7 +6754,80 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           if (transaction.value === null) throw new Error(`price history collection returned no value for ${pair.pair_id}`);
           series.push({ pair_id: pair.pair_id, return_sign: pair.return_sign, bars: transaction.value.bars });
         }
-        return jsonResult({ dry_run: false, changed: true, result: measureCarryPanelDependence({ series, horizonBusinessDays: horizon_business_days, blockLengthAnchors: block_length_anchors, iterations, seed }) });
+        let exploratorySigns: ReturnType<typeof buildExploratoryCarrySigns> | null = null;
+        if (use_exploratory_official_rate_signs) {
+          if (!policyRateOfficialHistory) throw new Error("official policy-rate revised history is not configured");
+          const pairsWithCurrencies = pairs.map((pair) => ({ pair_id: pair.pair_id, base_currency: pair.base_currency!, quote_currency: pair.quote_currency! }));
+          const currencies = [...new Set(pairsWithCurrencies.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
+          const histories = Object.fromEntries(await Promise.all(currencies.map(async (currency) => [currency, await policyRateOfficialHistory.getRevisedSeries(currency)]))) as Record<PolicyRateCurrency, Awaited<ReturnType<OfficialPolicyRateHistoryStore["getRevisedSeries"]>>>;
+          const dates = [...new Set(
+            series.flatMap((item) => item.bars.filter((bar) => bar.forming !== true).map((bar) => bar.timeIso.slice(0, 10))),
+          )].sort();
+          exploratorySigns = buildExploratoryCarrySigns({ pairs: pairsWithCurrencies, dates, histories });
+          for (const item of series) item.return_sign_by_date = exploratorySigns.signs[item.pair_id];
+        }
+        const result = measureCarryPanelDependence({ series, horizonBusinessDays: horizon_business_days, blockLengthAnchors: block_length_anchors, iterations, seed });
+        return jsonResult({ dry_run: false, changed: true, sign_source: exploratorySigns === null ? "fixed_input" : exploratorySigns.evidence_tier, exploratory_signs: exploratorySigns === null ? null : { point_in_time_status: exploratorySigns.point_in_time_status, unavailable_dates_by_pair: exploratorySigns.unavailable_dates_by_pair }, result });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "run_carry_core_primary_test",
+    {
+      description:
+        "Run the frozen carry_core_primary_v1 specification on the five-pair core FX panel. " +
+        "It uses only locally first-seen policy-rate versions that were available by each anchor-date close, fits pair fixed effects, and refits the regression in anchor-date moving-block bootstrap samples. " +
+        "It returns not_evaluable until the pre-registered first-seen history has at least 60 complete anchor-date clusters.",
+      inputSchema: {
+        chart_index: z.number().int().min(0),
+        count: z.number().int().min(500).max(5_000).default(5_000),
+        as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ chart_index, count, as_of, confirm }) => chartOperations.run(async () => {
+      try {
+        if (!policyRateHistory) throw new Error("policy-rate first-seen history is not configured");
+        const cutoff = as_of === undefined ? new Date() : new Date(as_of);
+        if (!confirm) return jsonResult({
+          dry_run: true,
+          changed: false,
+          contract: CARRY_CORE_PRIMARY_TEST_V1,
+          chart_index,
+          count,
+          pairs: CARRY_CORE_PRIMARY_PAIRS,
+          required_timeframe: "1D",
+        });
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("carry primary test is blocked while Bar Replay is active");
+        const pairs = [] as Array<{ pair_id: string; base_currency: PolicyRateCurrency; quote_currency: PolicyRateCurrency; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
+        for (const definition of CARRY_CORE_PRIMARY_PAIRS) {
+          const transaction = await withTemporaryChartState(tv, chart_index, { symbol: definition.expected_symbol, resolution: "1D" }, async () => {
+            let history = await tv.getOhlcv(count, chart_index);
+            if (history.bars.length < count) {
+              await tv.loadMoreHistory({ count: count - history.bars.length, chartIndex: chart_index });
+              history = await tv.getOhlcv(count, chart_index);
+            }
+            if (history.symbol.toUpperCase() !== definition.expected_symbol || normalizeResolution(history.resolution) !== "1D") throw new Error(`price history does not match ${definition.pair_id}`);
+            return history.bars;
+          });
+          if (!transaction.restored) throw new Error(`chart ${chart_index} could not be restored after ${definition.pair_id}: ${transaction.restoreError instanceof Error ? transaction.restoreError.message : String(transaction.restoreError)}`);
+          if (transaction.operationError !== null) throw transaction.operationError;
+          if (transaction.value === null) throw new Error(`price history collection returned no value for ${definition.pair_id}`);
+          pairs.push({ pair_id: definition.pair_id, base_currency: definition.base_currency, quote_currency: definition.quote_currency, bars: transaction.value });
+        }
+        const currencies = [...new Set(CARRY_CORE_PRIMARY_PAIRS.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
+        const policyRateVersions = Object.fromEntries(await Promise.all(currencies.map(async (currency) => [currency, await policyRateHistory.getVersionsAsOf(currency, cutoff)]))) as Partial<Record<PolicyRateCurrency, Awaited<ReturnType<PolicyRateFirstSeenStore["getVersionsAsOf"]>>>>;
+        return jsonResult(runCarryPanelPrimaryTest({
+          pairs,
+          policyRateVersions,
+          from: CARRY_CORE_PRIMARY_TEST_V1.sample_start,
+          to: cutoff.toISOString().slice(0, 10),
+          seed: `${CARRY_CORE_PRIMARY_TEST_V1.id}:${cutoff.toISOString()}`,
+        }));
       } catch (err) {
         return errorResult(err);
       }

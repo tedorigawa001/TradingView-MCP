@@ -20,7 +20,7 @@ const correlation = (left: number[], right: number[]) => {
 };
 
 export function measureCarryPanelDependence(input: {
-  series: Array<{ pair_id: string; return_sign: 1 | -1; bars: CarryPanelPriceBar[] }>;
+  series: Array<{ pair_id: string; return_sign: 1 | -1; return_sign_by_date?: Record<string, 1 | -1>; bars: CarryPanelPriceBar[] }>;
   horizonBusinessDays: number;
   blockLengthAnchors: number;
   iterations: number;
@@ -44,13 +44,14 @@ export function measureCarryPanelDependence(input: {
   });
   const commonDates = [...datesByPair[0].keys()].filter((date) => datesByPair.every((dates) => dates.has(date))).sort();
   const eligible = commonDates.filter((_, index) => index + input.horizonBusinessDays < commonDates.length);
-  const anchors = eligible.filter((_, index) => index % input.horizonBusinessDays === 0);
+  const anchorCandidates = eligible.filter((_, index) => index % input.horizonBusinessDays === 0);
+  const anchors = anchorCandidates.filter((date) => input.series.every((series) => series.return_sign_by_date === undefined || series.return_sign_by_date[date] !== undefined));
   if (anchors.length < 6) throw new Error("common price history must produce at least 6 non-overlapping anchors");
 
   const returnsByPair = input.series.map((series, seriesIndex) => anchors.map((date) => {
     const start = datesByPair[seriesIndex].get(date)!;
     const end = datesByPair[seriesIndex].get(commonDates[commonDates.indexOf(date) + input.horizonBusinessDays])!;
-    return series.return_sign * (end / start - 1);
+    return (series.return_sign_by_date?.[date] ?? series.return_sign) * (end / start - 1);
   }));
   const observations = anchors.flatMap((anchor_date, anchorIndex) => input.series.map((series, seriesIndex) => ({
     anchor_date,
@@ -73,6 +74,7 @@ export function measureCarryPanelDependence(input: {
     last_common_date: commonDates.at(-1),
     horizon_business_days: input.horizonBusinessDays,
     non_overlapping_anchors: anchors.length,
+    anchors_excluded_for_missing_dynamic_sign: anchorCandidates.length - anchors.length,
     pairwise_correlations: pairwise,
     average_pairwise_correlation: averagePairwiseCorrelation,
     raw_cross_sectional_design_effect: rawCrossSectionalDesignEffect,

@@ -793,6 +793,7 @@ test("exposes exactly the eighty expected tools", async () => {
       "remove_owned_study",
       "run_backtest",
       "run_backtest_matrix",
+      "run_carry_core_primary_test",
       "run_event_study_falsification_audit",
       "run_external_label_study",
       "run_feature_outcome_falsification_audit",
@@ -4950,8 +4951,8 @@ test("get_futures_flow_context handles roll_anomaly_threshold and new symbol map
     open_interest_scope: "front_month",
   } });
 
+  assert.equal(res.isError, undefined, res.content[0].text);
   const parsed = JSON.parse(res.content[0].text);
-  assert.equal(res.isError, undefined);
   assert.equal(parsed.mapping.targetSymbol, "OANDA:SPX500USD");
   assert.equal(parsed.mapping.futuresSymbol, "CME:ES1!");
   assert.equal(parsed.quality.rollAnomalyBars, 1);
@@ -5086,6 +5087,19 @@ test("carry_panel_preflight reports no historical sample before first-seen colle
   assert.ok(parsed.pairs[0].quality_issues.includes("insufficient_first_seen_history"));
 });
 
+test("run_carry_core_primary_test exposes one frozen first-seen-only contract before switching charts", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "run_carry_core_primary_test", arguments: { chart_index: 0 } });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(res.isError, undefined);
+  assert.equal(parsed.dry_run, true);
+  assert.equal(parsed.changed, false);
+  assert.equal(parsed.contract.id, "carry_core_primary_v1");
+  assert.equal(parsed.contract.horizon_business_days, 20);
+  assert.equal(parsed.contract.minimum_anchor_clusters, 60);
+  assert.equal(parsed.pairs.length, 5);
+});
+
 test("estimate_carry_panel_effective_sample preserves same-date cross-section clusters", async () => {
   const observations = Array.from({ length: 12 }, (_, index) => {
     const anchor_date = new Date(Date.UTC(2026, 0, 1 + index * 7)).toISOString().slice(0, 10);
@@ -5107,6 +5121,40 @@ test("estimate_carry_panel_effective_sample preserves same-date cross-section cl
   assert.equal(parsed.pair_count, 2);
   assert.ok(parsed.design_effect > 1);
   assert.ok(parsed.effective_observations < parsed.nominal_observations);
+});
+
+test("measure_carry_panel_dependence can use explicitly exploratory time-varying official-rate signs", async () => {
+  const chart = { symbol: "EURUSD", resolution: "1D" };
+  const bars = Array.from({ length: 240 }, (_, index) => ({
+    time: Date.UTC(2020, 0, 1 + index) / 1000,
+    timeIso: new Date(Date.UTC(2020, 0, 1 + index)).toISOString(), open: 1, high: 1, low: 1, close: 1 + index * 0.001, volume: 1,
+  }));
+  const official = (currency, value) => [{
+    schema_version: "1.0", sequence: 1, series: "policy_rate_official_history", evidence_tier: "exploratory_revised_history", currency,
+    source_symbol: `ECONOMICS:${currency === "USD" ? "US" : currency}INTR`, observation_date: "2019-01-01", value,
+    source_url: "https://example.test/rates", source_vintage_at: null, raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    retrieved_at: "2026-07-29T00:00:00.000Z", first_seen_at: "2026-07-29T00:00:00.000Z",
+  }];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: chart.symbol, resolution: chart.resolution, studies: [] }] }),
+      setSymbol: async (symbol) => { chart.symbol = symbol; return { symbol, resolution: chart.resolution, changed: true, bars: bars.length }; },
+      setResolution: async (resolution) => { chart.resolution = resolution; return { symbol: chart.symbol, resolution, changed: true, bars: bars.length }; },
+      getOhlcv: async (count, chartIndex) => ({ symbol: chart.symbol, resolution: chart.resolution, count, chartIndex: chartIndex ?? null, bars }),
+    },
+    policyRateOfficialHistory: { getRevisedSeries: async (currency) => official(currency, currency === "USD" ? 3 : currency === "EUR" ? 1 : 4) },
+  }));
+  const res = await client.callTool({ name: "measure_carry_panel_dependence", arguments: {
+    pairs: [
+      { pair_id: "EURUSD", chart_index: 0, expected_symbol: "OANDA:EURUSD", base_currency: "EUR", quote_currency: "USD" },
+      { pair_id: "AUDUSD", chart_index: 0, expected_symbol: "OANDA:AUDUSD", base_currency: "AUD", quote_currency: "USD" },
+    ], count: 200, horizon_business_days: 20, block_length_anchors: 1, iterations: 100, seed: "exploratory-time-varying-signs", use_exploratory_official_rate_signs: true, confirm: true,
+  } });
+  assert.equal(res.isError, undefined, res.content[0].text);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.sign_source, "exploratory_revised_history");
+  assert.equal(parsed.exploratory_signs.point_in_time_status, "not_available");
+  assert.equal(parsed.result.anchors_excluded_for_missing_dynamic_sign, 0);
 });
 
 test("get_positioning_context exposes requested COT history", async () => {

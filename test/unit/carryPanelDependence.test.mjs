@@ -21,3 +21,13 @@ test("carry panel dependence measures aligned price-return correlation and boots
   assert.ok(result.cross_sectional_design_effect > 1.9);
   assert.ok(result.bootstrap.effective_observations < result.bootstrap.nominal_observations);
 });
+
+test("carry panel dependence excludes only pre-spaced anchors without an exploratory dynamic sign", () => {
+  const result = measureCarryPanelDependence({
+    series: [
+      { pair_id: "EURUSD", return_sign: 1, return_sign_by_date: Object.fromEntries(bars(0.001).map((bar, index) => [bar.timeIso.slice(0, 10), index === 0 ? 1 : -1])), bars: bars(0.001) },
+      { pair_id: "USDJPY", return_sign: 1, return_sign_by_date: Object.fromEntries(bars(0.0011).map((bar, index) => [bar.timeIso.slice(0, 10), index === 0 ? 1 : -1])), bars: bars(0.0011) },
+    ], horizonBusinessDays: 5, blockLengthAnchors: 1, iterations: 100, seed: "dynamic-signs",
+  });
+  assert.equal(result.anchors_excluded_for_missing_dynamic_sign, 0);
+});
