@@ -755,6 +755,7 @@ test("exposes exactly the eighty expected tools", async () => {
       "get_analysis_overlay_status",
       "get_analysis_overlay_template",
       "get_analysis_performance",
+      "get_carry_core_primary_readiness",
       "get_chart_context",
       "get_chart_screenshot",
       "get_cme_gold_open_interest",

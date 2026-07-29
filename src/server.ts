@@ -66,6 +66,7 @@ import { estimateCarryPanelEffectiveSample } from "./carryPanelBootstrap.js";
 import { measureCarryPanelDependence } from "./carryPanelDependence.js";
 import { buildExploratoryCarrySigns } from "./exploratoryCarrySigns.js";
 import { CARRY_CORE_PRIMARY_PAIRS, CARRY_CORE_PRIMARY_TEST_V1, runCarryPanelPrimaryTest } from "./carryPanelPrimaryTest.js";
+import { getCarryCorePrimaryReadiness } from "./carryPanelPrimaryReadiness.js";
 import type { PolicyRateCurrency, PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 import type { OfficialPolicyRateHistoryStore } from "./policyRateOfficialHistory.js";
 import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
@@ -6772,6 +6773,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     }),
+  );
+
+  server.registerTool(
+    "get_carry_core_primary_readiness",
+    {
+      description:
+        "Read the frozen carry_core_primary_v1 collection readiness without switching a chart. " +
+        "It distinguishes the first usable policy-rate date and an earliest 60-anchor calendar estimate from proof of uninterrupted collection, which change-only policy-rate versions cannot provide.",
+      inputSchema: { as_of: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional() },
+    },
+    async ({ as_of }) => {
+      try {
+        if (!policyRateHistory) throw new Error("policy-rate first-seen history is not configured");
+        const cutoff = as_of === undefined ? new Date() : new Date(as_of);
+        const currencies = [...new Set(CARRY_CORE_PRIMARY_PAIRS.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
+        const policyRateVersions = Object.fromEntries(await Promise.all(currencies.map(async (currency) => [currency, await policyRateHistory.getVersionsAsOf(currency, cutoff)]))) as Partial<Record<PolicyRateCurrency, Awaited<ReturnType<PolicyRateFirstSeenStore["getVersionsAsOf"]>>>>;
+        return jsonResult(getCarryCorePrimaryReadiness({ asOf: cutoff.toISOString(), policyRateVersions }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
   );
 
   server.registerTool(
