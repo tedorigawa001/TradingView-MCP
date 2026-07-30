@@ -3819,6 +3819,9 @@ test("strategy research journal tools map immutable records without chart access
 
   const eventHypothesis = await client.callTool({ name: "register_event_study_hypothesis", arguments: {
     hypothesis_id: "feature-eurusd", title: "Feature relationship", thesis: "A predeclared feature may separate later returns.",
+    audit_definition: { runner: "event_study_falsification_audit_standard_v1", input: {
+      candidate: { branch: "feature_high", horizon: 4 }, study: { type: "feature_outcome_relationships" },
+    } },
     evaluation_contract: { population: "out_of_sample", primary_metric: "meanForwardReturn", primary_horizon_bars: 4, minimum_events: 20, symbols: ["OANDA:EURUSD"], timeframes: ["60"] },
   } });
   assert.equal(JSON.parse(eventHypothesis.content[0].text).recorded, true);

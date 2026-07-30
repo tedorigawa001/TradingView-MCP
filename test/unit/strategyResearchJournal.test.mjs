@@ -169,6 +169,26 @@ test("strategy research journal keeps event-study hypotheses and computed eviden
   assert.ok(mismatch.incompatibilities.includes("condition_definition"));
 });
 
+test("strategy research journal canonicalizes a replayable event-audit definition", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "event-audit-definition-"));
+  const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));
+  const registered = await store.registerEventHypothesis({
+    hypothesisId: "replayable-event-audit", title: "Replayable audit", thesis: "The complete audit input is immutable evidence.",
+    auditDefinition: {
+      runner: "event_study_falsification_audit_standard_v1",
+      input: { study: { type: "fvg_retest", minimumGapBps: 3 }, candidate: { horizon: 16, branch: "fvg_retest_bearish" } },
+    },
+    evaluationContract: { population: "out_of_sample", primaryMetric: "meanDirectionalReturn", primaryHorizonBars: 16, minimumEvents: 30, symbols: ["OANDA:XAUUSD"], timeframes: ["15"] },
+  });
+  const definition = registered.entry.payload.auditDefinition;
+  assert.match(definition.inputHash, /^sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(definition.input), ["candidate", "study"]);
+  await assert.rejects(() => store.registerEventHypothesis({
+    ...registered.entry.payload,
+    auditDefinition: { ...definition, inputHash: hash("a") },
+  }), /audit definition hash mismatch/);
+});
+
 test("strategy research journal records feature-outcome evidence without directional-return coercion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "feature-research-"));
   const store = new StrategyResearchJournalStore(join(directory, "journal.jsonl"));

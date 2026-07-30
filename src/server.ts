@@ -5934,6 +5934,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
         title: z.string().min(1).max(120),
         thesis: z.string().min(1).max(2000),
+        audit_definition: z.object({
+          runner: z.literal("event_study_falsification_audit_standard_v1"),
+          input: z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length > 0, "audit_definition.input must not be empty"),
+        }).describe("Exact standard falsification-audit CLI input. It is canonicalized and hash-bound in the immutable journal entry."),
         evaluation_contract: z.object({
           population: RESEARCH_POPULATION_SCHEMA,
           primary_metric: z.enum([
@@ -5948,10 +5952,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }),
       },
     },
-    async ({ hypothesis_id, title, thesis, evaluation_contract }) => {
+    async ({ hypothesis_id, title, thesis, audit_definition, evaluation_contract }) => {
       try {
         return jsonResult(await researchJournal.registerEventHypothesis({
           hypothesisId: hypothesis_id, title, thesis,
+          auditDefinition: {
+            runner: audit_definition.runner,
+            input: audit_definition.input,
+          },
           evaluationContract: { population: evaluation_contract.population, primaryMetric: evaluation_contract.primary_metric,
             primaryHorizonBars: evaluation_contract.primary_horizon_bars, minimumEvents: evaluation_contract.minimum_events,
             symbols: evaluation_contract.symbols, timeframes: evaluation_contract.timeframes },

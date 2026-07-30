@@ -77,6 +77,13 @@ export type EventStudyHypothesis = {
   hypothesisId: string;
   title: string;
   thesis: string;
+  // Older records predate replayable falsification-audit definitions. New registrations receive
+  // this through the MCP schema; keeping it optional preserves the append-only journal reader.
+  auditDefinition?: {
+    runner: "event_study_falsification_audit_standard_v1";
+    input: Record<string, unknown>;
+    inputHash?: string;
+  };
   evaluationContract: {
     population: ResearchPopulation;
     primaryMetric:
@@ -95,6 +102,8 @@ export type EventStudyHypothesis = {
     timeframes: string[];
   };
 };
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export type EventStudyRecord = {
   studyId: string;
@@ -157,6 +166,23 @@ export type ResearchJournalEntry = {
 const canonicalHash = (value: unknown): string =>
   `sha256:${createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
 
+function canonicalJson(value: unknown): JsonValue {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("audit definition must contain only finite JSON numbers");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== "object") throw new Error("audit definition must be JSON data");
+  const result: { [key: string]: JsonValue } = {};
+  for (const key of Object.keys(value).sort()) result[key] = canonicalJson((value as Record<string, unknown>)[key]);
+  return result;
+}
+
+function canonicalJsonHash(value: JsonValue): string {
+  return canonicalHash(value);
+}
+
 function validateMetrics(value: unknown): Record<string, number | null> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("metrics must be an object");
   const result: Record<string, number | null> = {};
@@ -209,7 +235,20 @@ function validateEventHypothesis(value: EventStudyHypothesis): EventStudyHypothe
   if (!Number.isInteger(contract.minimumEvents) || contract.minimumEvents < 1 || contract.minimumEvents > 100_000) throw new Error("invalid event minimum events");
   if (!Array.isArray(contract.symbols) || contract.symbols.length < 1 || contract.symbols.length > 20 || contract.symbols.some((item) => !SYMBOL_PATTERN.test(item))) throw new Error("invalid event hypothesis symbols");
   if (!Array.isArray(contract.timeframes) || contract.timeframes.length < 1 || contract.timeframes.length > 20 || contract.timeframes.some((item) => !TIMEFRAME_PATTERN.test(item))) throw new Error("invalid event hypothesis timeframes");
-  return { ...value, evaluationContract: { ...contract, symbols: [...new Set(contract.symbols.map((item) => item.toUpperCase()))].sort(), timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort() } };
+  let auditDefinition: EventStudyHypothesis["auditDefinition"];
+  if (value.auditDefinition !== undefined) {
+    if (!value.auditDefinition || value.auditDefinition.runner !== "event_study_falsification_audit_standard_v1" ||
+        !value.auditDefinition.input || typeof value.auditDefinition.input !== "object" || Array.isArray(value.auditDefinition.input)) {
+      throw new Error("invalid event falsification audit definition");
+    }
+    const input = canonicalJson(value.auditDefinition.input) as Record<string, JsonValue>;
+    const inputHash = canonicalJsonHash(input);
+    if (value.auditDefinition.inputHash !== undefined && value.auditDefinition.inputHash !== inputHash) {
+      throw new Error("event falsification audit definition hash mismatch");
+    }
+    auditDefinition = { runner: value.auditDefinition.runner, input, inputHash };
+  }
+  return { ...value, ...(auditDefinition === undefined ? {} : { auditDefinition }), evaluationContract: { ...contract, symbols: [...new Set(contract.symbols.map((item) => item.toUpperCase()))].sort(), timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort() } };
 }
 
 function validateEventStudy(value: EventStudyRecord): EventStudyRecord {
