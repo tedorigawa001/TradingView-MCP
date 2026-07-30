@@ -609,6 +609,14 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **解釈**: 順列p値は帰無仮説の下でサイズが厳密にαになる検定なので、同じ帰無分布に対して偽陽性率を測れば α が出るのは当然で円環である。監査の役割は**未校正の規則を校正すること**(v1の52%)にあり、規則を順列検定にした時点でその役割は果たされて不要になった。経験的にサイズを測るには入れ子ヌル(計算量 N²)が要るが、厳密性が証明できる以上やる価値は薄い
 - **対応済み(2026-07-31)**: walk-forward falsification auditを`v3`へ上げ、`observedRate`・Wilson区間・`exceedsNominalAlpha`を出力から削除した。代わりに`leaveOneOutTailCalibration.status: not_measurable_structural_rank_uniformity`と、構成上の`nominalTailSlots`だけを返す。候補数自体は診断用に残すが、偽陽性率または校正の測定値として解釈しない。
 
+### #52 #45の他系統への伝播と再校正(優先度: 高、2026-07-31)
+
+- **問題**: feature scanの非重複+Newey-West+Bonferroniだけの候補規則は、white noiseで名目5%に対して14.0%を出した。経験的ヌルを追加したv2で初めて候補率が0.0〜1.0%へ収まった。このため、重複する将来リターン・複数horizon・複数lag・時系列依存を持つ他の探索結果を、CI/Fisher interval/Bonferroniだけで校正済みと扱えない。
+- **対象A: event study群**: FVG、session auction、aftershock、failed breakout、session exhaustion handoff、composite、yield-priceには既存の合成ヌル監査がある。しかし候補規則のglobal mean CIはevent windowの重なりから生じる系列相関を補正しない。各採用候補について、branch・horizon・最小event数・fold・overlap policyを固定して、white noise / regime-switching volatility / bid-ask bounceの標準400複製へ再投入する。`partial`のイベント不足は非候補と合算せず別に報告する。候補率だけでなく、重複を除いた評価windowまたはevent-time block bootstrapのどちらを候補規則へ採るかを、結果を見る前に決める。
+- **対象B: lead-lag**: 現行のFisher-z+Bonferroniは時系列自己相関と隣接lag間の依存を扱わない。primary/referenceの同時相関・exact timestamp欠損・各系列の自己相関を保存しつつ、片方をcircular block shiftして時差予測性だけを壊すpair empirical-null auditを追加する。候補は正lag、事前固定したlag family、fold符号、Bonferroniに加え、同一データ・同一lag gridから計算したfamily-maximum empirical p値が名目α以下の場合だけにする。既存のFisher値は説明用に残し、採用判定には使わない。
+- **対象C: session handoff**: 対象Aのsession exhaustion handoff runとして扱い、直前session return・handoff窓・range re-entry・opposite body・forward update閾値を凍結する。London DSTとcross-midnight sessionを含むため、合成時刻列が実際のsession clockに適合することを事前テストし、UTC等間隔の合成系列を無条件に「同等の市場日」と主張しない。
+- **判定順序**: (1) 現行の固定候補契約を監査して数値を記録、(2) 偽陽性率が名目を超えるか、重複windowの推論不整合が確認された場合だけ経験的ヌル候補ゲートを実装、(3) 新ゲートを同一3模型で再校正、(4) 実データの候補を再評価する。候補規則と探索対象を同時に変えない。再校正完了までは各結果を`exploratory_only_not_calibrated`として扱う。
+
 ### #46 実効多重度 K_eff の併記(優先度: 中)
 
 - **課題**: `configuration_trials` は名目カウントで、Bonferroni参考αをそこから直接作っている。候補同士が相関している場合、名目Kは多重度を過大評価する。銅/金のラグスキャンは隣接ラグ同士が強く相関する典型で、21ラグを独立21試行として扱うのは保守的すぎる。逆に閾値を少しずつ変えた探索も同様
