@@ -22,6 +22,39 @@ test("research collection loads only the missing history and reports its coverag
   assert.deepEqual(result.coverage, { chartIndex: 1, requiredBars: 500, initialBars: 300, loadedBars: 200, finalBars: 500, sufficient: true, moreAvailable: true });
 });
 
+test("research collection retries a transient empty history request before declaring coverage insufficient", async () => {
+  let available = 300;
+  let calls = 0;
+  const tv = {
+    getOhlcv: async (count, chartIndex) => ({ symbol: "OANDA:EURUSD", resolution: "50", chartIndex,
+      bars: Array.from({ length: Math.min(count, available) }, (_, index) => ({ timeIso: `2026-01-01T00:${String(index % 60).padStart(2, "0")}:00.000Z` })) }),
+    loadMoreHistory: async ({ count }) => {
+      calls += 1;
+      if (calls === 1) return { added: 0, moreAvailable: false };
+      available += count;
+      return { added: count, moreAvailable: true };
+    },
+  };
+  const result = await loadRequiredHistory(tv, 0, 500);
+  assert.equal(calls, 2);
+  assert.deepEqual(result.coverage, { chartIndex: 0, requiredBars: 500, initialBars: 300, loadedBars: 200, finalBars: 500, sufficient: true, moreAvailable: true });
+});
+
+test("research collection accumulates partial history loads until the requested coverage is reached", async () => {
+  let available = 300;
+  const tv = {
+    getOhlcv: async (count, chartIndex) => ({ symbol: "OANDA:EURUSD", resolution: "15", chartIndex,
+      bars: Array.from({ length: Math.min(count, available) }, (_, index) => ({ timeIso: `2026-01-01T00:${String(index % 60).padStart(2, "0")}:00.000Z` })) }),
+    loadMoreHistory: async ({ count }) => {
+      const added = Math.min(count, 100);
+      available += added;
+      return { added, moreAvailable: available < 500 };
+    },
+  };
+  const result = await loadRequiredHistory(tv, 0, 500);
+  assert.deepEqual(result.coverage, { chartIndex: 0, requiredBars: 500, initialBars: 300, loadedBars: 200, finalBars: 500, sufficient: true, moreAvailable: false });
+});
+
 test("research collection reports an already sufficient chart without loading more history", async () => {
   const tv = {
     getOhlcv: async (count, chartIndex) => ({ symbol: "OANDA:EURUSD", resolution: "50", chartIndex, bars: Array.from({ length: count }, (_, index) => ({ timeIso: `2026-01-01T00:${String(index % 60).padStart(2, "0")}:00.000Z` })) }),

@@ -81,6 +81,26 @@ function percentile(values: number[], probability: number): number | null {
 }
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+const DESCRIPTIVE_CONTRAST_BOOTSTRAP_ITERATIONS = 2_000;
+
+function mean(values: number[]): number | null {
+  return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function seededRandom(seed: string): () => number {
+  let state = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    state ^= seed.charCodeAt(index);
+    state = Math.imul(state, 16777619);
+  }
+  return () => {
+    state += 0x6D2B79F5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 function meanConfidenceInterval(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99) {
   if (values.length < 2) {
@@ -126,6 +146,82 @@ function stats(
       ? { meanConfidenceInterval: meanConfidenceInterval(values, confidenceLevel) }
       : {}),
   };
+}
+
+function bootstrapMeanDifference(
+  selected: number[],
+  complement: number[],
+  seed: string,
+) {
+  const observed = mean(selected) === null || mean(complement) === null
+    ? null : mean(selected)! - mean(complement)!;
+  if (selected.length < 2 || complement.length < 2) {
+    return { status: "insufficient_sample" as const, method: "stratified_nonparametric_bootstrap" as const,
+      iterations: 0, seed, selectedObservations: selected.length, complementObservations: complement.length,
+      difference: observed, lower: null, upper: null };
+  }
+  const random = seededRandom(seed);
+  const samples: number[] = [];
+  for (let iteration = 0; iteration < DESCRIPTIVE_CONTRAST_BOOTSTRAP_ITERATIONS; iteration += 1) {
+    let selectedSum = 0;
+    let complementSum = 0;
+    for (let index = 0; index < selected.length; index += 1) selectedSum += selected[Math.floor(random() * selected.length)];
+    for (let index = 0; index < complement.length; index += 1) complementSum += complement[Math.floor(random() * complement.length)];
+    samples.push(selectedSum / selected.length - complementSum / complement.length);
+  }
+  return { status: "available" as const, method: "stratified_nonparametric_bootstrap" as const,
+    iterations: DESCRIPTIVE_CONTRAST_BOOTSTRAP_ITERATIONS, seed,
+    selectedObservations: selected.length, complementObservations: complement.length,
+    difference: observed, lower: percentile(samples, 0.025), upper: percentile(samples, 0.975) };
+}
+
+function descriptiveRegimeContrasts(
+  joined: Array<{ event: ReturnType<typeof outcomeForEvent>; observation: ClassifiedMarketRegimeObservation }>,
+  values: readonly string[],
+  keyOf: (item: typeof joined[number]) => string,
+  horizons: number[],
+  confidenceLevel: 0.9 | 0.95 | 0.99,
+  dimension: string,
+) {
+  const population = joined.map((item) => item.event);
+  const outcomeValues = (events: typeof population, horizon: number, metric: "directionalReturn" | "mfe" | "mae") =>
+    events.map((event) => event.outcomes[String(horizon)])
+      .filter((outcome): outcome is NonNullable<typeof outcome> => outcome !== null)
+      .map((outcome) => outcome[metric]);
+  const binaryValues = (events: typeof population, horizon: number, kind: "positive" | "target") =>
+    events.map((event) => event.outcomes[String(horizon)])
+      .filter((outcome): outcome is NonNullable<typeof outcome> => outcome !== null)
+      .map((outcome) => kind === "positive" ? Number(outcome.directionalReturn > 0) : Number(outcome.targetHitBars !== null));
+  const summary = (events: typeof population, horizon: number) =>
+    summarizeOutcomes(events, [horizon], confidenceLevel, "global")[String(horizon)];
+  const difference = (selected: typeof population, complement: typeof population, horizon: number, metric: "directionalReturn" | "mfe" | "mae" | "positiveRate" | "targetHitRate", key: string) => {
+    const values = metric === "positiveRate"
+      ? [binaryValues(selected, horizon, "positive"), binaryValues(complement, horizon, "positive")]
+      : metric === "targetHitRate"
+      ? [binaryValues(selected, horizon, "target"), binaryValues(complement, horizon, "target")]
+      : [outcomeValues(selected, horizon, metric), outcomeValues(complement, horizon, metric)];
+    return bootstrapMeanDifference(values[0], values[1], `event-regime-contrast-v1:${dimension}:${key}:${horizon}:${metric}`);
+  };
+  return Object.fromEntries(values.map((value) => {
+    const selected = joined.filter((item) => keyOf(item) === value).map((item) => item.event);
+    const selectedSet = new Set(selected);
+    const complement = population.filter((event) => !selectedSet.has(event));
+    return [value, {
+      population: { joinedEvents: population.length, selectedEvents: selected.length, complementEvents: complement.length },
+      horizons: Object.fromEntries(horizons.map((horizon) => [String(horizon), {
+        all: summary(population, horizon),
+        selected: summary(selected, horizon),
+        complement: summary(complement, horizon),
+        differences: { selectedMinusComplement: {
+          directionalReturn: difference(selected, complement, horizon, "directionalReturn", value),
+          mfe: difference(selected, complement, horizon, "mfe", value),
+          mae: difference(selected, complement, horizon, "mae", value),
+          positiveRate: difference(selected, complement, horizon, "positiveRate", value),
+          targetHitRate: difference(selected, complement, horizon, "targetHitRate", value),
+        } },
+      }])),
+    }];
+  }));
 }
 
 function formatter(timezone: string) {
@@ -379,6 +475,22 @@ export function buildEventRegimeAnalysis(
     (item) => item.observation.volatilityRegime);
   const byCombinedRegime = groupEvidence(combined,
     (item) => `${item.observation.directionalRegime}:${item.observation.volatilityRegime}`);
+  const descriptiveDirectionalContrasts = descriptiveRegimeContrasts(
+    joined, directional, (item) => item.observation.directionalRegime, horizons, confidenceLevel, "directional");
+  const branchValues = [...new Set(events.map((event) => {
+    const branch = (event as { branch?: unknown }).branch;
+    return typeof branch === "string" ? branch : null;
+  }).filter((branch): branch is string => branch !== null))];
+  const descriptiveDirectionalContrastsByBranch = Object.fromEntries(branchValues.map((branch) => [branch,
+    descriptiveRegimeContrasts(
+      joined.filter((item) => (item.event as { branch?: unknown }).branch === branch),
+      directional,
+      (item) => item.observation.directionalRegime,
+      horizons,
+      confidenceLevel,
+      `directional:${branch}`,
+    ),
+  ]));
   const evaluableGroups = [...Object.values(byDirectionalRegime), ...Object.values(byVolatilityRegime),
     ...Object.values(byCombinedRegime)].filter((group) => group.status === "evaluable").length;
   const qualityIssues = [
@@ -400,6 +512,15 @@ export function buildEventRegimeAnalysis(
       minimumCoverageRatio,
       minimumGroupEvents,
     },
+    contrastContract: {
+      methodologyVersion: "event_regime_descriptive_contrast_v1",
+      population: "events_with_a_prior_closed_regime_label_only",
+      comparison: "selected_regime_minus_all_other_joined_regimes",
+      branchScope: "descriptiveDirectionalContrastsByBranch compares within one event branch when branch evidence exists",
+      summaryFields: ["availableEvents", "unavailableEvents", "directionalReturn", "mfe", "mae", "positiveRate", "targetHitRate"],
+      bootstrap: { method: "stratified_nonparametric_bootstrap", iterations: DESCRIPTIVE_CONTRAST_BOOTSTRAP_ITERATIONS, interval: "percentile_95" },
+      warnings: ["bootstrap_intervals_do_not_adjust_for_serial_dependence_or_selection", "contrasts_are_descriptive_and_not_an_automatic_adoption_rule"],
+    },
     coverage: {
       events: events.length,
       joinedEvents: joined.length,
@@ -420,6 +541,8 @@ export function buildEventRegimeAnalysis(
     byDirectionalRegime,
     byVolatilityRegime,
     byCombinedRegime,
+    descriptiveDirectionalContrasts,
+    descriptiveDirectionalContrastsByBranch,
   };
 }
 

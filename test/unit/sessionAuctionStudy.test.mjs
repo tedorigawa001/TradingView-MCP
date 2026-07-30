@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { outcomeForEvent, runSessionAuctionStudy } from "../../build/sessionAuctionStudy.js";
+import { buildEventRegimeAnalysis, outcomeForEvent, runSessionAuctionStudy } from "../../build/sessionAuctionStudy.js";
 
 function bar(timeMs, open, high, low, close, forming = false) {
   return { time: timeMs / 1000, timeIso: new Date(timeMs).toISOString(), open, high, low, close,
@@ -187,6 +187,55 @@ test("session auction study keeps sparse regime groups not evaluable", () => {
     .every((group) => group.status === "not_evaluable" && group.horizons === null));
 });
 
+test("event regime contrasts keep one joined population and disclose a bootstrap difference", () => {
+  const base = Date.UTC(2026, 0, 5);
+  const event = (seconds, branch, mfe, mae, directionalReturn) => ({
+    signalIndex: 0,
+    direction: 1,
+    branch,
+    signalTime: new Date(base + seconds * 1_000).toISOString(),
+    outcomes: {
+      "1": { mfe, mae, directionalReturn, targetHitBars: mfe >= 0.002 ? 1 : null },
+    },
+  });
+  const events = [
+    event(10, "failed_down", 0.002, 0.0004, 0.001),
+    event(20, "failed_down", 0.003, 0.0005, 0.002),
+    event(30, "failed_down", 0.001, 0.0012, -0.0005),
+    event(40, "failed_down", 0.0005, 0.0015, -0.001),
+  ];
+  const observation = (seconds, directionalRegime) => ({
+    time: (base + seconds * 1_000) / 1_000,
+    timeIso: new Date(base + seconds * 1_000).toISOString(),
+    close: 1,
+    directionalRegime,
+    volatilityRegime: "normal",
+    efficiencyRatio: 0,
+    directionalMoveAtr: 0,
+    atrPercent: 0.01,
+    volatilityRatio: 1,
+  });
+  const result = buildEventRegimeAnalysis(events, [
+    observation(9, "range"), observation(19, "range"), observation(29, "trend_up"), observation(39, "trend_up"),
+  ], 1_000, [1], 0.95, 1, 0.8, 1);
+  const contrast = result.descriptiveDirectionalContrasts.range;
+  const horizon = contrast.horizons["1"];
+  assert.deepEqual(contrast.population, { joinedEvents: 4, selectedEvents: 2, complementEvents: 2 });
+  assert.equal(horizon.all.availableEvents, 4);
+  assert.equal(horizon.selected.availableEvents, 2);
+  assert.equal(horizon.complement.availableEvents, 2);
+  assert.ok(Math.abs(horizon.all.mfe.mean - 0.001625) < 1e-12);
+  assert.equal(horizon.selected.mfe.mean, 0.0025);
+  assert.equal(horizon.complement.mfe.mean, 0.00075);
+  assert.equal(horizon.differences.selectedMinusComplement.mfe.difference, 0.00175);
+  assert.equal(horizon.differences.selectedMinusComplement.mfe.status, "available");
+  assert.equal(horizon.differences.selectedMinusComplement.mfe.iterations, 2000);
+  assert.deepEqual(result.descriptiveDirectionalContrastsByBranch.failed_down.range.population,
+    { joinedEvents: 4, selectedEvents: 2, complementEvents: 2 });
+  assert.equal(result.contrastContract.population, "events_with_a_prior_closed_regime_label_only");
+  assert.ok(result.contrastContract.warnings.includes("bootstrap_intervals_do_not_adjust_for_serial_dependence_or_selection"));
+});
+
 test("session auction study never joins the signal bar's contemporaneous regime", () => {
   const result = runSessionAuctionStudy(input(utcDay(5, "accepted_up"), {
     folds: [], minimumEvents: 1, horizons: [1],
@@ -250,4 +299,3 @@ test("session auction study handles cross-day session windows (22:00 -> 06:00 ->
   assert.equal(result.events[0].branch, "accepted_up");
   assert.equal(result.events[0].localDate, "2026-01-05");
 });
-

@@ -4501,6 +4501,7 @@ test("get_futures_flow_context binds a daily futures chart and keeps daily OI un
     count: 100, volume_lookback: 5, elevated_volume_z_score: 1, minimum_observations: 1,
     observation_limit: 2, cot_weeks: 2,
   } });
+  assert.equal(res.isError, undefined, res.content[0].text);
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.status, "partial");
   assert.equal(parsed.mapping.targetDirectionMultiplier, -1);
@@ -5556,14 +5557,18 @@ test("run_market_event_study binds the chart and returns session auction evidenc
     bars.push({ time: (start + index * 900_000) / 1000, timeIso: new Date(start + index * 900_000).toISOString(),
       open: 1.12, high: 1.13, low: 1.11, close: 1.12, volume: 1 });
   }
+  let requestedCount = null;
   const client = await connectedClient(makeDeps({ tv: {
     getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
       charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "15", studies: [] }] }),
     getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
-    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars }),
+    getOhlcv: async (count) => {
+      requestedCount = count;
+      return { symbol: "OANDA:EURUSD", resolution: "15", count: bars.length, bars };
+    },
   } }));
   const res = await client.callTool({ name: "run_market_event_study", arguments: {
-    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 100,
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "15", count: 10_000,
     condition: { type: "session_auction", timezone: "UTC", range_start: "00:00",
       range_end: "08:00", auction_end: "10:00", minimum_range_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
@@ -5577,7 +5582,9 @@ test("run_market_event_study binds the chart and returns session auction evidenc
     },
     folds: [{ fold_id: "all", from: "2026-01-05T00:00:00.000Z", to: "2026-01-06T00:00:00.000Z" }],
   } });
+  assert.equal(res.isError, undefined, res.content[0].text);
   const parsed = JSON.parse(res.content[0].text);
+  assert.equal(requestedCount, 10_000);
   assert.equal(parsed.byBranch.accepted_up.events, 1);
   assert.equal(parsed.conditionType, "session_auction");
   assert.equal(parsed.source.chartIndex, 0);
@@ -5626,21 +5633,22 @@ test("run_market_event_study binds the chart and returns session handoff evidenc
     condition: { type: "session_exhaustion_handoff", timezone: "UTC",
       prior_sessions: [{ session_id: "Tokyo", start: "00:00", end: "08:00" }],
       handoff_start: "13:00", handoff_end: "16:00", prior_direction: "session_return",
-      direction_minimum_return_bps: 1, handoff_window_bars: 3, minimum_prior_coverage: 1 },
+      direction_minimum_return_bps: 1, handoff_window_bars: 3, signal_timing: "first_reversal", minimum_prior_coverage: 1 },
     horizons: [1, 4], target_return_bps: 10, minimum_events: 1, event_limit: 10,
     journal: { hypothesis_id: "handoff-eurusd", population: "out_of_sample", decision: "inconclusive" },
   };
   const res = await client.callTool({ name: "run_market_event_study", arguments: handoffArguments });
   const parsed = JSON.parse(res.content[0].text);
   assert.equal(parsed.conditionType, "session_exhaustion_handoff");
-  assert.equal(parsed.methodologyVersion, "session_exhaustion_handoff_event_study_v2");
+  assert.equal(parsed.methodologyVersion, "session_exhaustion_handoff_event_study_v3");
   assert.equal(parsed.source.chartIndex, 0);
   assert.equal(parsed.byBranch.exhaustion_up.events, 1);
   assert.equal(parsed.events[0].direction, "short");
-  assert.equal(parsed.events[0].signalTime, bars[54].timeIso);
-  assert.equal(parsed.conditionContract.decisionTiming, "after_complete_handoff_window");
+  assert.equal(parsed.events[0].signalTime, bars[52].timeIso);
+  assert.equal(parsed.session.signalTiming, "first_reversal");
+  assert.equal(parsed.conditionContract.decisionTiming, "at_first_reversal_bar_close");
   assert.equal(parsed.outcomeContract.reference,
-    "handoff_window_final_bar_close_event_study_only_not_assumed_fill");
+    "first_reversal_bar_close_event_study_only_not_assumed_fill");
   assert.match(parsed.studyId, /^sha256:/);
   assert.match(parsed.definitionHash, /^sha256:/);
   assert.equal(parsed.journal.recorded, true);
@@ -6804,6 +6812,11 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       condition: { type: "session_auction", timezone: "UTC", range_start: "08:00", range_end: "09:00",
         auction_end: "10:00" }, horizons: [1], target_return_bps: 10, minimum_events: 1,
       folds: [{ fold_id: "offset", from: "2026-01-01T09:00:00.000+09:00", to: "2026-01-02T09:00:00.000+09:00" }],
+    } },
+    { name: "run_market_event_study", arguments: {
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 20_001,
+      condition: { type: "session_auction", timezone: "UTC", range_start: "08:00", range_end: "09:00",
+        auction_end: "10:00" }, horizons: [1], target_return_bps: 10, minimum_events: 1,
     } },
     { name: "get_indicator_graphics", arguments: { study_id: "has space" } },
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },

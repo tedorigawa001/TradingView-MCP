@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertExpectedResponseHost, readLimitedResponseBytes, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
 import type { OfficialPolicyRateObservation, OfficialPolicyRateHistoryStore } from "./policyRateOfficialHistory.js";
 import type { PolicyRateCurrency } from "./policyRateHistory.js";
 import { OfficialPolicyRateRawArchive, resolvePolicyRateOfficialRawArchivePath } from "./policyRateOfficialRawArchive.js";
@@ -61,7 +62,9 @@ export const OFFICIAL_POLICY_RATE_SOURCES: Record<OfficialSource["id"], Official
   },
 };
 
-export type OfficialPolicyRateFetch = (url: string) => Promise<{ ok: boolean; status: number; text: () => Promise<string>; arrayBuffer?: () => Promise<ArrayBuffer>; headers: { get(name: string): string | null } }>;
+export type OfficialPolicyRateFetch = (url: string, init?: RequestInit) => Promise<BoundedResponse & { ok: boolean; status: number }>;
+
+const MAX_OFFICIAL_POLICY_RATE_BYTES = 32 * 1024 * 1024;
 
 /** Download current official history as exploratory evidence; never use this output for an as-of claim. */
 export async function collectOfficialPolicyRateHistory(input: {
@@ -78,10 +81,11 @@ export async function collectOfficialPolicyRateHistory(input: {
   if (!Number.isFinite(now.getTime())) throw new Error("official policy-rate retrieval time must be valid");
   if (source.id === "fred_fed_target_range_midpoint") return collectFredFedTargetHistory({ ...input, source, fetcher, retrievedNow: now });
   if (source.id === "rba_cash_rate_target") return collectRbaCashRateTargetHistory({ ...input, source, fetcher, retrievedNow: now });
-  const response = await fetcher(source.sourceUrl);
+  const response = await fetcher(source.sourceUrl, { redirect: "manual" });
   if (!response.ok) throw new Error(`official policy-rate source ${source.id} returned HTTP ${response.status}`);
-  const raw = await response.text();
-  if (raw.length < 32 || raw.length > 32 * 1024 * 1024) throw new Error(`official policy-rate source ${source.id} returned an unsafe payload size`);
+  assertExpectedResponseHost(response, source.sourceUrl, `official policy-rate source ${source.id}`);
+  const raw = await readLimitedResponseText(response, MAX_OFFICIAL_POLICY_RATE_BYTES, `official policy-rate source ${source.id}`);
+  if (raw.length < 32) throw new Error(`official policy-rate source ${source.id} returned an unsafe payload size`);
   const parsed = source.parse(raw);
   if (parsed.changes.length < 1) throw new Error(`official policy-rate source ${source.id} returned no observations`);
   const retrievedAt = now.toISOString();
@@ -114,16 +118,17 @@ async function collectRbaCashRateTargetHistory(input: {
   fetcher: OfficialPolicyRateFetch;
   retrievedNow: Date;
 }) {
-  const historicalResponse = await input.fetcher(RBA_CASH_RATE_TARGET_HISTORICAL_URL);
+  const historicalResponse = await input.fetcher(RBA_CASH_RATE_TARGET_HISTORICAL_URL, { redirect: "manual" });
   if (!historicalResponse.ok) throw new Error(`official policy-rate source ${input.source.id} historical F1 returned HTTP ${historicalResponse.status}`);
-  if (historicalResponse.arrayBuffer === undefined) throw new Error("official policy-rate source rba_cash_rate_target requires binary response support");
-  const historicalRaw = Buffer.from(await historicalResponse.arrayBuffer());
-  if (historicalRaw.length < 4_096 || historicalRaw.length > 32 * 1024 * 1024) throw new Error("official policy-rate source rba_cash_rate_target historical F1 returned an unsafe payload size");
+  assertExpectedResponseHost(historicalResponse, RBA_CASH_RATE_TARGET_HISTORICAL_URL, "official policy-rate source rba_cash_rate_target historical F1");
+  const historicalRaw = Buffer.from(await readLimitedResponseBytes(historicalResponse, MAX_OFFICIAL_POLICY_RATE_BYTES, "official policy-rate source rba_cash_rate_target historical F1"));
+  if (historicalRaw.length < 4_096) throw new Error("official policy-rate source rba_cash_rate_target historical F1 returned an unsafe payload size");
   const historical = (input.historicalRbaParser ?? parseRbaHistoricalF1Xls)(historicalRaw);
-  const currentResponse = await input.fetcher(input.source.sourceUrl);
+  const currentResponse = await input.fetcher(input.source.sourceUrl, { redirect: "manual" });
   if (!currentResponse.ok) throw new Error(`official policy-rate source ${input.source.id} returned HTTP ${currentResponse.status}`);
-  const currentRaw = await currentResponse.text();
-  if (currentRaw.length < 32 || currentRaw.length > 32 * 1024 * 1024) throw new Error(`official policy-rate source ${input.source.id} returned an unsafe payload size`);
+  assertExpectedResponseHost(currentResponse, input.source.sourceUrl, `official policy-rate source ${input.source.id}`);
+  const currentRaw = await readLimitedResponseText(currentResponse, MAX_OFFICIAL_POLICY_RATE_BYTES, `official policy-rate source ${input.source.id}`);
+  if (currentRaw.length < 32) throw new Error(`official policy-rate source ${input.source.id} returned an unsafe payload size`);
   const current = parseRbaCashRateTargetCsv(currentRaw);
   if (historical.source_last_observation_date !== "2010-12-31" || current.source_first_observation_date !== "2011-01-04") throw new Error("RBA F1 historical and current coverage no longer meet the reviewed handoff boundary");
   const retrievedAt = input.retrievedNow.toISOString();
@@ -174,10 +179,11 @@ async function collectFredFedTargetHistory(input: {
   fetcher: OfficialPolicyRateFetch;
   retrievedNow: Date;
 }) {
-  const response = await input.fetcher(FRED_FED_TARGET_HISTORY_URL);
+  const response = await input.fetcher(FRED_FED_TARGET_HISTORY_URL, { redirect: "manual" });
   if (!response.ok) throw new Error(`official policy-rate source ${input.source.id} returned HTTP ${response.status}`);
-  const raw = await response.text();
-  if (raw.length < 32 || raw.length > 32 * 1024 * 1024) throw new Error(`official policy-rate source ${input.source.id} returned an unsafe payload size`);
+  assertExpectedResponseHost(response, FRED_FED_TARGET_HISTORY_URL, `official policy-rate source ${input.source.id}`);
+  const raw = await readLimitedResponseText(response, MAX_OFFICIAL_POLICY_RATE_BYTES, `official policy-rate source ${input.source.id}`);
+  if (raw.length < 32) throw new Error(`official policy-rate source ${input.source.id} returned an unsafe payload size`);
   const parsed = parseFredFedTargetHistoryCsv(raw);
   const retrievedAt = input.retrievedNow.toISOString();
   const rawSha256 = `sha256:${createHash("sha256").update(raw, "utf8").digest("hex")}`;

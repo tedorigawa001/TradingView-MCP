@@ -1526,24 +1526,31 @@ export class TradingView {
         const available = typeof series.requestMoreDataAvailable === "function"
           ? series.requestMoreDataAvailable()
           : null;
-        if (available === false) {
-          return {
-            requested, barsBefore, barsAfter: barsBefore, added: 0,
-            earliestTime: barsBefore ? bars()[0].value[0] : null,
-            moreAvailable: false,
-          };
-        }
-
-        series.requestMoreData(requested);
+        // This flag is sometimes stale immediately after setSymbol/setResolution.
+        // Request once regardless, then retry if it becomes available while polling.
+        const requestMore = () => {
+          try { series.requestMoreData(requested); return true; }
+          catch (_) { return false; }
+        };
+        requestMore();
         const t0 = Date.now();
         let lastCount = barsBefore;
         let lastGrowth = Date.now();
+        let retriedAfterAvailabilityChange = false;
         while (Date.now() - t0 < 15000) {
           await new Promise((r) => setTimeout(r, 250));
           const cur = bars().length;
+          const currentAvailable = typeof series.requestMoreDataAvailable === "function"
+            ? series.requestMoreDataAvailable()
+            : null;
+          if (currentAvailable !== false && currentAvailable !== available) {
+            requestMore();
+            retriedAfterAvailabilityChange = true;
+          }
           if (cur > lastCount) { lastCount = cur; lastGrowth = Date.now(); }
           if (cur - barsBefore >= requested) break;
           if (cur > barsBefore && Date.now() - lastGrowth > 1500) break; // loading went quiet
+          if (cur === barsBefore && currentAvailable === false && Date.now() - t0 > 3000 && retriedAfterAvailabilityChange === false) break;
         }
         const barsAfter = bars().length;
         return {

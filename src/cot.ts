@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
+import { assertExpectedResponseHost, readLimitedResponseText } from "./boundedResponse.js";
 
 const rowsSchema = z.array(z.record(z.string(), z.unknown()));
 type CotSpec = {
@@ -26,6 +27,7 @@ export type CotObservation = {
 const COT_HISTORY_OUTPUT_MAX = 52;
 const COT_FETCH_LIMIT = 250;
 const COT_PERCENTILE_MIN_REFERENCES = 150;
+const MAX_COT_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 const GROUP_FIELDS: Record<CotSpec["dataset"], Array<{ group: string; long: string; short: string }>> = {
   tff: [
@@ -203,7 +205,7 @@ export class CotClient {
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          response = await fetch(url, { signal: controller.signal });
+          response = await fetch(url, { signal: controller.signal, redirect: "manual" });
           if (response.status < 500 || attempt === 2) break;
         } catch (err) {
           lastError = err;
@@ -213,7 +215,8 @@ export class CotClient {
       }
       if (!response) throw lastError ?? new Error("CFTC request failed");
       if (!response.ok) throw new Error(`CFTC returned HTTP ${response.status}`);
-      const parsed = rowsSchema.safeParse(await response.json());
+      assertExpectedResponseHost(response, url.toString(), "CFTC");
+      const parsed = rowsSchema.safeParse(JSON.parse(await readLimitedResponseText(response, MAX_COT_RESPONSE_BYTES, "CFTC")));
       if (!parsed.success) throw new Error("unexpected CFTC response shape");
       this.cache.set(cacheKey, { rows: parsed.data, expiresAt: Date.now() + 15 * 60_000 });
       return { rows: parsed.data, cacheStatus: "miss" };

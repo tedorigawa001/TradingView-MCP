@@ -1,5 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import type { RealYieldFirstSeenStore } from "./realYieldHistory.js";
+import { assertExpectedResponseHost } from "./boundedResponse.js";
 
 const MAX_XML_BYTES = 2_000_000;
 const CACHE_TTL_MS = 15 * 60_000;
@@ -167,13 +168,14 @@ export class TreasuryRealYieldClient {
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       let shouldRetry = false;
       try {
-        const response = await fetch(url, { signal: controller.signal, headers: { accept: "application/xml" } });
+        const response = await fetch(url, { signal: controller.signal, headers: { accept: "application/xml" }, redirect: "manual" });
         if (response.status >= 500) {
           lastError = new Error(`Treasury returned HTTP ${response.status}`);
           shouldRetry = attempt < 2;
           if (!shouldRetry) throw lastError;
         } else {
           if (!response.ok) throw new Error(`Treasury returned HTTP ${response.status}`);
+          assertExpectedResponseHost(response, url.toString(), "Treasury");
           const xml = await this.readLimitedXml(response);
           return parseTreasuryRealYieldXml(xml);
         }

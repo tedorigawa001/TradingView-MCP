@@ -1,6 +1,9 @@
+import { assertExpectedResponseHost, readLimitedResponseBytes } from "./boundedResponse.js";
+
 const CURRENT_METALS_BULLETIN_URL =
   "https://www.cmegroup.com/daily_bulletin/current/Section62_Metals_Futures_Products.pdf";
 const MINIMUM_GC_TOTAL_OPEN_INTEREST = 100_000;
+const MAX_BULLETIN_PDF_BYTES = 16 * 1024 * 1024;
 
 const MONTHS: Record<string, number> = {
   Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
@@ -107,11 +110,12 @@ export class CmeDailyBulletinClient {
   ) {}
 
   async getLatestGoldOpenInterest(): Promise<CmeGoldOpenInterest> {
-    const response = await this.fetchImpl(this.sourceUrl, { signal: AbortSignal.timeout(20_000) });
+    const response = await this.fetchImpl(this.sourceUrl, { signal: AbortSignal.timeout(20_000), redirect: "manual" });
     if (!response.ok) throw new Error(`CME metals bulletin request failed with HTTP ${response.status}`);
+    assertExpectedResponseHost(response, this.sourceUrl, "CME metals bulletin");
     const contentType = response.headers.get("content-type") ?? "";
     if (!/application\/pdf/i.test(contentType)) throw new Error("CME metals bulletin response was not a PDF");
-    const text = await this.extractPdfText(new Uint8Array(await response.arrayBuffer()));
+    const text = await this.extractPdfText(await readLimitedResponseBytes(response, MAX_BULLETIN_PDF_BYTES, "CME metals bulletin"));
     return parseCmeGoldOpenInterestBulletin({ text, sourceUrl: this.sourceUrl, observedAt: this.now().toISOString() });
   }
 }

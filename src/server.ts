@@ -747,6 +747,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       direction_minimum_return_bps: z.number().finite().min(0).max(10_000).optional(),
       close_location_threshold: z.number().finite().min(0.5).lt(1).optional(),
       handoff_window_bars: z.number().int().min(1).max(24).optional(),
+      signal_timing: z.enum(["window_close", "first_reversal"]).optional()
+        .describe("Reference timing after a no-extension handoff window: window_close (default) or first_reversal"),
       forward_update_threshold_bps: z.number().finite().min(0).max(10_000).optional(),
       require_range_reentry: z.boolean().optional(),
       require_opposite_body: z.boolean().optional(),
@@ -969,8 +971,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       inputSchema: {
         expected_symbol: SYMBOL_SCHEMA,
         expected_timeframe: z.string().regex(/^[1-9]\d*$/),
-        count: z.number().int().min(100).max(5000).optional()
-          .describe("Most recent loaded bars to inspect. Default: 5000"),
+        count: z.number().int().min(100).max(20_000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 5000; up to 20,000 after explicit history loading"),
         condition: z.discriminatedUnion("type", [
           ...PRIMITIVE_EVENT_CONDITION_SCHEMA.options,
           z.object({
@@ -1092,6 +1094,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             directionMinimumReturnBps: condition.direction_minimum_return_bps ?? 0,
             closeLocationThreshold: condition.close_location_threshold ?? 0.75,
             handoffWindowBars: condition.handoff_window_bars ?? 3,
+            signalTiming: condition.signal_timing ?? "window_close",
             forwardUpdateThresholdBps: condition.forward_update_threshold_bps ?? 0,
             requireRangeReentry: condition.require_range_reentry ?? true,
             requireOppositeBody: condition.require_opposite_body ?? true,

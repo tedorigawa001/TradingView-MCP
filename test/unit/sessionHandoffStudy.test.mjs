@@ -36,6 +36,7 @@ function input(bars, overrides = {}) {
     priorSessions: [{ sessionId: "Tokyo", start: "00:00", end: "08:00" }],
     handoffStart: "13:00", handoffEnd: "16:00", priorDirection: "session_return",
     directionMinimumReturnBps: 1, closeLocationThreshold: 0.75, handoffWindowBars: 3,
+    signalTiming: "window_close",
     forwardUpdateThresholdBps: 0, requireRangeReentry: true, requireOppositeBody: true,
     minimumPriorCoverage: 1, horizons: [1, 4], targetReturnBps: 10, minimumEvents: 2,
     folds: [
@@ -67,6 +68,35 @@ test("session handoff study waits for the complete no-extension window before me
   }));
   assert.equal(result.events[0].signalTime, bars[54].timeIso);
   assert.equal(result.events[0].signalPrice, bars[54].close);
+});
+
+test("session handoff study can reference the first reversal after the same complete no-extension window", () => {
+  const bars = handoffDay(5);
+  const result = runSessionExhaustionHandoffStudy(input(bars, {
+    signalTiming: "first_reversal", minimumEvents: 1, folds: [],
+  }));
+  assert.equal(result.methodologyVersion, "session_exhaustion_handoff_event_study_v3");
+  assert.equal(result.events[0].signalTime, bars[52].timeIso);
+  assert.equal(result.events[0].signalPrice, bars[52].close);
+  assert.equal(result.session.signalTiming, "first_reversal");
+  assert.equal(result.conditionContract.decisionTiming, "at_first_reversal_bar_close");
+  assert.equal(result.outcomeContract.reference,
+    "first_reversal_bar_close_event_study_only_not_assumed_fill");
+});
+
+test("first-reversal timing retains a later handoff extension as a tradable outcome", () => {
+  const bars = handoffDay(5);
+  bars[53] = { ...bars[53], high: bars[31].high + 0.01 };
+  const firstReversal = runSessionExhaustionHandoffStudy(input(bars, {
+    signalTiming: "first_reversal", minimumEvents: 1, folds: [],
+  }));
+  const windowClose = runSessionExhaustionHandoffStudy(input(bars, {
+    signalTiming: "window_close", minimumEvents: 1, folds: [],
+  }));
+  assert.equal(firstReversal.sample.events, 1);
+  assert.equal(firstReversal.quality.forwardAfterFirstReversal, 1);
+  assert.equal(windowClose.sample.events, 0);
+  assert.equal(windowClose.quality.ambiguousForwardAndReversal, 1);
 });
 
 test("session handoff study excludes an early window that both extends and reverses", () => {

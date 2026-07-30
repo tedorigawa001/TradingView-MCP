@@ -562,7 +562,7 @@ test("getIndicatorTables reads both table stores and reconstructs grids safely",
   assert.ok(cdp.calls[1].includes("api.activeChart()"), "default is active chart");
 });
 
-test("loadMoreHistory validates count and builds a requestMoreData call", async () => {
+test("loadMoreHistory validates count and retries a transient unavailable pagination state", async () => {
   const cdp = fakeCdp({ requested: 1, barsBefore: 0, barsAfter: 0, added: 0, earliestTime: null, moreAvailable: null });
   const tv = new TradingView(cdp);
   assert.throws(() => tv.loadMoreHistory({ count: 0 }), /count must be/);
@@ -575,6 +575,10 @@ test("loadMoreHistory validates count and builds a requestMoreData call", async 
   assert.ok(expr.includes("requestMoreData(requested)"));
   assert.ok(expr.includes("const requested = 250"));
   assert.ok(expr.includes("api.chart(1)"));
+  assert.ok(!expr.includes("if (available === false) {\n          return"),
+    "a transient unavailable flag must not bypass the retry path");
+  assert.ok(expr.includes("if (currentAvailable !== false && currentAvailable !== available)"),
+    "pagination must retry after availability changes");
 });
 
 test("listAlerts fetches the alerts API read-only with the app session", async () => {

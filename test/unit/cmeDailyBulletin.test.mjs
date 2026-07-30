@@ -73,3 +73,13 @@ test("CME Bulletin client rejects a non-PDF response before parsing", async () =
   );
   await assert.rejects(() => client.getLatestGoldOpenInterest(), /not a PDF/);
 });
+
+test("CME Bulletin client rejects an oversized PDF before parsing", async () => {
+  let extracted = false;
+  const client = new CmeDailyBulletinClient(
+    async () => new Response("small", { status: 200, headers: { "content-type": "application/pdf", "content-length": String(16 * 1024 * 1024 + 1) } }),
+    async () => (extracted = true, bulletin),
+  );
+  await assert.rejects(() => client.getLatestGoldOpenInterest(), /CME metals bulletin response is too large/);
+  assert.equal(extracted, false);
+});

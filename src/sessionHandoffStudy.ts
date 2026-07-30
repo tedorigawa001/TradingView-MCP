@@ -22,6 +22,7 @@ export interface SessionHandoffStudyInput {
   directionMinimumReturnBps: number;
   closeLocationThreshold: number;
   handoffWindowBars: number;
+  signalTiming?: "window_close" | "first_reversal";
   forwardUpdateThresholdBps: number;
   requireRangeReentry: boolean;
   requireOppositeBody: boolean;
@@ -102,6 +103,7 @@ function anchorPriorSessionBeforeHandoff(start: number, end: number, handoffStar
 
 export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput) {
   validate(input);
+  const signalTiming = input.signalTiming ?? "window_close";
   const timeframe = timeframeMinutes(input.timeframe);
   const timeframeMs = timeframe * 60_000;
   const handoffStart = clockMinute(input.handoffStart, "handoff_start");
@@ -145,6 +147,7 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
     forwardUpdate: 0,
     noReversalSignal: 0,
     ambiguousForwardAndReversal: 0,
+    forwardAfterFirstReversal: 0,
     formingBarsExcluded: bars.length - closed.length,
   };
   const detected: Array<{
@@ -207,10 +210,20 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
     };
     const forwardAt = window.findIndex(forward);
     const reversalAt = window.findIndex(reverse);
-    if (forwardAt >= 0 && reversalAt >= 0) { quality.ambiguousForwardAndReversal += 1; continue; }
-    if (forwardAt >= 0) { quality.forwardUpdate += 1; continue; }
-    if (reversalAt < 0) { quality.noReversalSignal += 1; continue; }
-    const signal = window.at(-1)!;
+    if (signalTiming === "window_close") {
+      if (forwardAt >= 0 && reversalAt >= 0) { quality.ambiguousForwardAndReversal += 1; continue; }
+      if (forwardAt >= 0) { quality.forwardUpdate += 1; continue; }
+      if (reversalAt < 0) { quality.noReversalSignal += 1; continue; }
+    } else {
+      if (reversalAt < 0) { quality.noReversalSignal += 1; continue; }
+      if (forwardAt >= 0 && forwardAt <= reversalAt) {
+        if (forwardAt === reversalAt) quality.ambiguousForwardAndReversal += 1;
+        else quality.forwardUpdate += 1;
+        continue;
+      }
+      if (forwardAt > reversalAt) quality.forwardAfterFirstReversal += 1;
+    }
+    const signal = signalTiming === "first_reversal" ? window[reversalAt]! : window.at(-1)!;
     const branch: Branch = priorDirection === 1 ? "exhaustion_up" : "exhaustion_down";
     detected.push({ eventId: `${localDate}:${branch}`, localDate, branch, direction: priorDirection === 1 ? -1 : 1,
       priorDirection, priorHigh, priorLow, priorBars: prior.length, signalIndex: signal.globalIndex });
@@ -257,17 +270,29 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
   ];
   return {
     schemaVersion: "1.0" as const, methodologyVersion: input.regime === null
-      ? "session_exhaustion_handoff_event_study_v2" as const : "session_exhaustion_handoff_event_regime_study_v2" as const,
+      ? (signalTiming === "window_close"
+        ? "session_exhaustion_handoff_event_study_v2" as const
+        : "session_exhaustion_handoff_event_study_v3" as const)
+      : (signalTiming === "window_close"
+        ? "session_exhaustion_handoff_event_regime_study_v2" as const
+        : "session_exhaustion_handoff_event_regime_study_v3" as const),
     status: issues.length === 0 ? "complete" as const : "partial" as const, symbol: input.symbol, timeframe: input.timeframe,
     session: { timezone: input.timezone, priorSessions: input.priorSessions, handoffStart: input.handoffStart, handoffEnd: input.handoffEnd,
       priorDirection: input.priorDirection, directionMinimumReturnBps: input.directionMinimumReturnBps,
       closeLocationThreshold: input.closeLocationThreshold, handoffWindowBars: input.handoffWindowBars,
+      signalTiming,
       forwardUpdateThresholdBps: input.forwardUpdateThresholdBps, requireRangeReentry: input.requireRangeReentry,
       requireOppositeBody: input.requireOppositeBody, minimumPriorCoverage: input.minimumPriorCoverage },
     conditionContract: { priorEvidence: "closed_bars_before_handoff_start_only", rangeBreakReference: "first_prior_session_range",
-      forwardUpdate: "any_handoff_window_bar_extends_prior_direction", reversal: "configured_range_reentry_and_opposite_body",
-      ambiguousForwardAndReversalExcluded: true, decisionTiming: "after_complete_handoff_window" },
-    outcomeContract: { reference: "handoff_window_final_bar_close_event_study_only_not_assumed_fill", horizons: input.horizons,
+      forwardUpdate: signalTiming === "window_close"
+        ? "any_handoff_window_bar_extends_prior_direction"
+        : "a_bar_at_or_before_first_reversal_extends_prior_direction",
+      reversal: "configured_range_reentry_and_opposite_body",
+      ambiguousForwardAndReversalExcluded: true,
+      decisionTiming: signalTiming === "window_close" ? "after_complete_handoff_window" : "at_first_reversal_bar_close" },
+    outcomeContract: { reference: signalTiming === "window_close"
+      ? "handoff_window_final_bar_close_event_study_only_not_assumed_fill"
+      : "first_reversal_bar_close_event_study_only_not_assumed_fill", horizons: input.horizons,
       targetReturnBps: input.targetReturnBps, contiguousBarsRequired: true },
     inferenceContract: { confidenceLevel: input.confidenceLevel, meanIntervalMethod: "normal_approximation", rateIntervalMethod: "wilson_score",
       serialDependenceAdjustment: "none", multipleTestingAdjustment: "none", configurationTrials: input.configurationTrials,
