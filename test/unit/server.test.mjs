@@ -3604,7 +3604,8 @@ test("run_strategy_walk_forward selects on train, exposes selected OOS only, and
   assert.equal(dry.execution.nonSelectedOosMetricsExposed, false);
 
   const result = JSON.parse((await client.callTool({ name: "run_strategy_walk_forward",
-    arguments: { ...args, confirm: true } })).content[0].text);
+    arguments: { ...args, falsification_audit: { replications: 20, first_seed: 41, nominal_alpha: 0.05 },
+      confirm: true } })).content[0].text);
   assert.equal(result.status, "complete");
   assert.equal(result.candidates.length, 2);
   assert.equal(result.evaluation.folds[0].selection.status, "selected");
@@ -3612,6 +3613,10 @@ test("run_strategy_walk_forward selects on train, exposes selected OOS only, and
   assert.equal(result.evaluation.folds[0].test.candidateId,
     result.evaluation.folds[0].selection.candidateId);
   assert.equal(result.evaluation.oosAggregate.evaluableFolds, 2);
+  assert.equal(result.falsificationAudit.methodologyVersion, "strategy_walk_forward_falsification_audit_v2");
+  assert.equal(result.falsificationAudit.replications, 20);
+  assert.equal(result.falsificationAudit.completed, 20);
+  assert.equal(result.falsificationAudit.failed.length, 0);
   assert.equal(result.chartState.restored, true);
   assert.equal(runCount, 2);
   assert.equal(removed.length, 2);
@@ -6814,7 +6819,7 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
       folds: [{ fold_id: "offset", from: "2026-01-01T09:00:00.000+09:00", to: "2026-01-02T09:00:00.000+09:00" }],
     } },
     { name: "run_market_event_study", arguments: {
-      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 20_001,
+      expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 30_001,
       condition: { type: "session_auction", timezone: "UTC", range_start: "08:00", range_end: "09:00",
         auction_end: "10:00" }, horizons: [1], target_return_bps: 10, minimum_events: 1,
     } },

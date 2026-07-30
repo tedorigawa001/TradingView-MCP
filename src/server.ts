@@ -36,6 +36,7 @@ import {
   validateStrategyWalkForwardFolds,
   type StrategyWalkForwardFold,
 } from "./strategyWalkForward.js";
+import { runStrategyWalkForwardFalsificationAudit } from "./strategyWalkForwardFalsificationAudit.js";
 import {
   evaluateStrategyRerunStress,
   evaluateStrategyStress,
@@ -971,8 +972,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       inputSchema: {
         expected_symbol: SYMBOL_SCHEMA,
         expected_timeframe: z.string().regex(/^[1-9]\d*$/),
-        count: z.number().int().min(100).max(20_000).optional()
-          .describe("Most recent loaded bars to inspect. Default: 5000; up to 20,000 after explicit history loading"),
+        count: z.number().int().min(100).max(30_000).optional()
+          .describe("Most recent loaded bars to inspect. Default: 5000; up to 30,000 after explicit history loading"),
         condition: z.discriminatedUnion("type", [
           ...PRIMITIVE_EVENT_CONDITION_SCHEMA.options,
           z.object({
@@ -5344,13 +5345,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Trades required for each selected OOS fold. Default: 10"),
         selection_metric: z.enum(["expectancy", "netProfit", "profitFactor"]).optional()
           .describe("Train-only metric to maximize. Default: expectancy"),
+        falsification_audit: z.object({
+          replications: z.number().int().min(1).max(2_000),
+          first_seed: z.number().int().min(0).max(2_147_483_647).optional(),
+          block_length_calendar_days: z.number().int().min(1).max(60).optional()
+            .describe("Shared UTC calendar block length for the empirical null. Default: 5"),
+          nominal_alpha: z.number().gt(0).lt(1),
+        }).optional().describe(
+          "Optional #45 ledger-level falsification audit. It replays the same candidate selection and OOS " +
+          "rule over centered, shared-calendar-block sign-flipped trade profits after full ledgers are collected. " +
+          "Candidate status requires a one-sided empirical post-selection OOS net-profit p-value at nominal alpha.",
+        ),
         max_runtime_seconds: z.number().int().min(30).max(1800).optional()
           .describe("Do not start another candidate after this soft deadline. Default: 600"),
         confirm: z.boolean().optional(),
       },
     },
     async ({ expected_symbol, expected_timeframe, candidates, folds, mode, embargo_bars,
-      minimum_train_trades, minimum_test_trades, selection_metric, max_runtime_seconds, confirm }) =>
+      minimum_train_trades, minimum_test_trades, selection_metric, falsification_audit, max_runtime_seconds, confirm }) =>
       chartOperations.run(async () => {
         try {
           const embargoBars = embargo_bars ?? 1;
@@ -5416,6 +5428,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             minimumTrainTrades,
             minimumTestTrades,
             selectionMetric,
+            ...(falsification_audit === undefined ? {} : { falsificationAudit: {
+              replications: falsification_audit.replications,
+              firstSeed: falsification_audit.first_seed ?? 1,
+              blockLengthCalendarDays: falsification_audit.block_length_calendar_days ?? 5,
+              nominalAlpha: falsification_audit.nominal_alpha,
+            } }),
             maxRuntimeSeconds,
             candidates: resolvedCandidates,
             folds: resolvedFolds,
@@ -5513,6 +5531,25 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 minimumTestTrades,
                 selectionMetric,
               });
+          const falsificationAudit = falsification_audit === undefined || !allEvidenceAvailable || !conditionsMatched
+            ? null
+            : runStrategyWalkForwardFalsificationAudit({
+              candidates: runs.map((run) => ({
+                candidateId: run.candidate.candidateId,
+                ledger: run.evidence!.ledger,
+              })),
+              folds: resolvedFolds,
+              mode,
+              timeframe: initialChart.timeframe,
+              embargoBars,
+              minimumTrainTrades,
+              minimumTestTrades,
+              selectionMetric,
+              replications: falsification_audit.replications,
+              firstSeed: falsification_audit.first_seed,
+              blockLengthCalendarDays: falsification_audit.block_length_calendar_days,
+              nominalAlpha: falsification_audit.nominal_alpha,
+            });
           let finalChart: ReturnType<typeof chartFingerprint> | null = null;
           try {
             finalChart = chartFingerprint(await tv.getChartContext());
@@ -5545,12 +5582,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               comparisons: conditionChecks,
             },
             evaluation,
+            falsificationAudit,
             qualityIssues: [
               ...(!allEvidenceAvailable ? ["candidate_collection_incomplete"] : []),
               ...(allEvidenceAvailable && !conditionsMatched ? ["candidate_conditions_differ"] : []),
               ...(!chartRestored ? ["chart_state_restore_failed"] : []),
               ...((evaluation?.blockers.length ?? 0) > 0 ? ["walk_forward_not_evaluable"] : []),
               ...(evaluation?.status === "partial" ? ["one_or_more_folds_not_evaluable"] : []),
+              ...(falsification_audit !== undefined && falsificationAudit === null
+                ? ["walk_forward_falsification_not_evaluable"] : []),
+              ...(falsificationAudit?.status === "incomplete" ? ["walk_forward_falsification_incomplete"] : []),
             ],
             elapsedMilliseconds: Date.now() - startedAt,
             chartState: { before: initialChart, after: finalChart, restored: chartRestored },
@@ -7399,6 +7440,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             typeof latest.available_at === "string"
               ? "available_at is the local first-seen timestamp, not an inferred CFTC publication time; coverage starts when collection begins."
               : "available_at is unavailable from this API response and must not be inferred from report_date.",
+            latest.scheduled_available_at_basis === "cftc_standard_friday_1530_et_unverified"
+              ? "scheduled_available_at is normal CFTC calendar metadata, not evidence that a historical report was public then; only available_at can support point-in-time research."
+              : "scheduled_available_at is unavailable or based on a preserved official CFTC exception; it does not replace local first-seen evidence.",
           ],
         });
       } catch (err) {
