@@ -35,7 +35,7 @@ type Decision = {
 };
 
 export interface StrategyWalkForwardFalsificationAuditResult {
-  methodologyVersion: "strategy_walk_forward_falsification_audit_v2";
+  methodologyVersion: "strategy_walk_forward_falsification_audit_v3";
   nullModel: "shared_calendar_block_sign_flip_centered_trade_profit";
   replications: number;
   firstSeed: number;
@@ -49,9 +49,11 @@ export interface StrategyWalkForwardFalsificationAuditResult {
   failed: Array<{ seed: number; error: string }>;
   candidates: number;
   candidateSeeds: number[];
-  observedRate: number | null;
-  observedRateInterval: { lower: number; upper: number } | null;
-  exceedsNominalAlpha: boolean;
+  leaveOneOutTailCalibration: {
+    status: "not_measurable_structural_rank_uniformity";
+    nominalTailSlots: number | null;
+    reason: "leave_one_out_rank_p_values_make_p_at_most_nominal_alpha_a_fixed_tail_count";
+  };
   candidateRule: {
     allFoldsEvaluable: true;
     aggregateNetProfit: "positive";
@@ -69,18 +71,6 @@ function mulberry32(seed: number): () => number {
     value = Math.imul(value ^ (value >>> 15), value | 1);
     value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
     return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
-  };
-}
-
-function wilsonInterval(successes: number, observations: number): { lower: number; upper: number } {
-  const z = 1.959963984540054;
-  const rate = successes / observations;
-  const denominator = 1 + (z * z) / observations;
-  const centre = rate + (z * z) / (2 * observations);
-  const spread = z * Math.sqrt((rate * (1 - rate)) / observations + (z * z) / (4 * observations * observations));
-  return {
-    lower: successes === 0 ? 0 : Math.max(0, (centre - spread) / denominator),
-    upper: successes === observations ? 1 : Math.min(1, (centre + spread) / denominator),
   };
 }
 
@@ -278,10 +268,8 @@ export function runStrategyWalkForwardFalsificationAudit(
     const decision = assessAggregateEvidence(run.evidence, pValue, input.nominalAlpha);
     return decision.outcome === "candidate";
   }).map((run) => run.seed);
-  const observedRate = evaluated === 0 ? null : candidateSeeds.length / evaluated;
-  const observedRateInterval = evaluated === 0 ? null : wilsonInterval(candidateSeeds.length, evaluated);
   return {
-    methodologyVersion: "strategy_walk_forward_falsification_audit_v2",
+    methodologyVersion: "strategy_walk_forward_falsification_audit_v3",
     nullModel: "shared_calendar_block_sign_flip_centered_trade_profit",
     replications: input.replications,
     firstSeed,
@@ -295,9 +283,11 @@ export function runStrategyWalkForwardFalsificationAudit(
     failed,
     candidates: candidateSeeds.length,
     candidateSeeds,
-    observedRate,
-    observedRateInterval,
-    exceedsNominalAlpha: failed.length === 0 && observedRateInterval !== null && input.nominalAlpha < observedRateInterval.lower,
+    leaveOneOutTailCalibration: {
+      status: "not_measurable_structural_rank_uniformity",
+      nominalTailSlots: evaluated === 0 ? null : Math.floor(input.nominalAlpha * evaluated),
+      reason: "leave_one_out_rank_p_values_make_p_at_most_nominal_alpha_a_fixed_tail_count",
+    },
     candidateRule: {
       allFoldsEvaluable: true,
       aggregateNetProfit: "positive",
@@ -309,6 +299,7 @@ export function runStrategyWalkForwardFalsificationAudit(
       "Centered trade profit is multiplied by a shared random sign per UTC calendar block. This retains timestamps, trade counts, magnitudes, and contemporaneous candidate shocks, but not every form of serial dependence.",
       "Failed and not-evaluable replications are reported separately and never counted as non-candidates.",
       "The observed empirical p-value compares selected OOS net profit to the full null distribution; null calibration uses leave-one-out p-values.",
+      "A leave-one-out null p-value is a rank divided by the number of evaluable null runs. Its nominal-alpha tail has a structurally fixed size, so no observed candidate rate, confidence interval, or alpha-exceedance result is reported as calibration evidence.",
       "The rate only calibrates the explicit aggregate OOS rule recorded here; it is not an adoption recommendation.",
     ],
   };

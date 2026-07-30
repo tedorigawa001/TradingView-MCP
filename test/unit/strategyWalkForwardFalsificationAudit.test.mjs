@@ -51,12 +51,18 @@ test("strategy walk-forward falsification audit is deterministic and preserves f
   const first = runStrategyWalkForwardFalsificationAudit(input());
   const second = runStrategyWalkForwardFalsificationAudit(input());
   assert.deepEqual(first, second);
-  assert.equal(first.methodologyVersion, "strategy_walk_forward_falsification_audit_v2");
+  assert.equal(first.methodologyVersion, "strategy_walk_forward_falsification_audit_v3");
   assert.equal(first.status, "complete");
   assert.equal(first.completed, 40);
   assert.equal(first.evaluated + first.notEvaluableSeeds.length, 40);
   assert.equal(first.failed.length, 0);
-  assert.ok(first.observedRate === null || (first.observedRate >= 0 && first.observedRate <= 1));
+  assert.equal("observedRate" in first, false);
+  assert.equal("exceedsNominalAlpha" in first, false);
+  assert.deepEqual(first.leaveOneOutTailCalibration, {
+    status: "not_measurable_structural_rank_uniformity",
+    nominalTailSlots: Math.floor(first.nominalAlpha * first.evaluated),
+    reason: "leave_one_out_rank_p_values_make_p_at_most_nominal_alpha_a_fixed_tail_count",
+  });
   assert.ok(first.candidates <= Math.floor(first.nominalAlpha * first.evaluated),
     "leave-one-out empirical p-values must not admit more than the nominal upper tail");
   assert.match(first.nullModel, /shared_calendar_block/);
@@ -66,7 +72,7 @@ test("strategy walk-forward falsification audit excludes partial draws instead o
   const result = runStrategyWalkForwardFalsificationAudit(input({ minimumTestTrades: 3 }));
   assert.equal(result.evaluated, 0);
   assert.equal(result.notEvaluableSeeds.length, 40);
-  assert.equal(result.observedRate, null);
+  assert.equal(result.leaveOneOutTailCalibration.nominalTailSlots, null);
   assert.equal(result.candidates, 0);
 });
 
