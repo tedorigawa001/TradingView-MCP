@@ -108,6 +108,7 @@ export async function collectFirstSeenSources(input: {
       open_interest: latest.open_interest,
       source: latest.source,
       source_detail: latest.source_detail,
+      report_status: latest.report_status,
       observed_at: latest.observed_at,
     }]);
     cmeGoldOpenInterest = {

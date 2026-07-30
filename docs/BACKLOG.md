@@ -447,6 +447,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **定期収集CLI・統合coverage(2026-07-26)**: `npm run collect:first-seen` は指定COT銘柄(既定EURUSD/XAUUSD、環境変数または反復`--cot-symbol`で明示)の直近52週と米10年実質金利を収集し、各first-seenログへ追記する。片方の外部取得が失敗しても他系列とcoverageを返し、終了状態を`partial`として監視側へ伝える。`npm run coverage:first-seen` はCOT・実質金利・先物OIを一つのJSONで集計し、日付数、改訂数、最初/最後の観測日を可視化する。OIはTradingViewチャートの明示したインジケーターだけから安全に取得できるため、CLIは蓄積済みOIのcoverage確認に限定する。初回実機ではCOT EURUSD/XAUUSD各250日、実質金利141日、GC合算OI249日で`complete`を確認した。
 - **E2Eが収集の欠陥を検出(2026-07-25)**: 記録処理が `futures.observations` を読んでいたが、これは `observation_limit` で切り詰められた表示用配列だった。既定値では**直近20日しか永久に記録されず**、`observation_limit: 0` では**何も記録されないのに成功として報告**されていた。ユニットテストでは検出不能で(モックが返した件数だけ記録されれば通る)、実機E2Eで `observation_limit: 0` を渡して初めて `{recorded:0, unchanged:0, skipped:0}` の矛盾が表面化した。完全な観測列を収集側だけへ渡し応答へ混ぜる前に除去するよう是正。E2Eは収集先を一時ファイルへ切り替えて実運用ログを汚染せず、**建玉を取得できない設定は明示的に失敗**させる(静かにスキップする作りだったことが見逃しの原因だったため)。実機では `observation_limit: 0` でも230件記録、再実行で `unchanged: 230` かつ追記ゼロ、全件で `observation_date <= first_seen_at`・連番連続性・0600 を確認
 - **蓄積の限界(明示)**: vintageは**前向きにしか貯まらず、収集開始前の日付は永久に復元できない**。また `get_futures_flow_context` を実行した日しか記録されないため系列に穴が空く。速報→確報の改訂を捉えるには同じ日付を複数回読む必要があり、1日1回の実行では確報しか見えない
+- **速報→確報の観測窓(2026-07-31)**: 外部first-seen収集のlaunchd例を平日10:30/22:30 JSTの二回へ変更する。CMEの確報公開時刻を推測して保証するものではなく、同一取引日の値を少なくとも二つの時点で観測し、値が変われば既存の追記専用OIストアへ版として残すための運用上の対処である。heartbeat台帳も次回ジョブからrun間隔を記録する。
 - **残タスク**: 認証済みCME日次統計provider (DataMine API / FTP Bulletin 自動取得。DataMineは認証が必要で、認証情報の投入と接続確認は利用者側の作業)、限月・expiry・roll calendar判定、先物現物スプレッド(Basis)追跡、CME確報Volumeとの独立検証、2022-12以前へ遡れる集計OI系列の入手、速報/確報を版として区別する取り込み(現在の記録は「観測した値」であって版の区別を持たない)、実機における複数銘柄（6E, 6J, 6B, 6A, 6C, 6S, 6N, ES, NQ, YM, GC, SI, CL）の継続実地検証。
 
 ### #40 セッションプロファイル(`compute_session_profile`) ✅ VWAP・PDH/PDL反動・品質拡張完了
@@ -606,7 +607,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **v2で片側経験的p値を条件に追加(2026-07-31)**: 選択後OOS純益の片側経験的p値が名目α以下であることを要求するようにした。observed側は `p = (1 + #{null >= observed}) / (N + 1)` で、片側順列p値の標準形かつゼロを返さない不偏形。**これは正しい構成で、今回いちばん価値のある出力**である
 - **ただし偽陽性率の測定は恒等式になる**: null run側のp値は leave-one-out で `p = (1 + #{other >= self}) / N`。netProfit降順の順位を r とすると自分以上の他者は r−1 個なので **p = r/N** となり、pは {1/N, …, 1} を一様に取る。よって `p <= α` を満たすのは常に floor(αN) 本で、**候補率は構成上ぴったり α になる**。実測でも N=500・α=0.05 で `candidates: 25`、`observedRate: 0.05` ちょうど、区間 [3.4, 7.3] が α を跨ぎ `exceedsNominalAlpha: false` だった
 - **解釈**: 順列p値は帰無仮説の下でサイズが厳密にαになる検定なので、同じ帰無分布に対して偽陽性率を測れば α が出るのは当然で円環である。監査の役割は**未校正の規則を校正すること**(v1の52%)にあり、規則を順列検定にした時点でその役割は果たされて不要になった。経験的にサイズを測るには入れ子ヌル(計算量 N²)が要るが、厳密性が証明できる以上やる価値は薄い
-- **残作業**: `observedRate` と `exceedsNominalAlpha` をこの規則では出さないようにするか、**「構成上αであり測定値ではない」と出力に明記する**。5.0%を測定結果として並べると、読み手は校正が確認されたと誤読する
+- **対応済み(2026-07-31)**: walk-forward falsification auditを`v3`へ上げ、`observedRate`・Wilson区間・`exceedsNominalAlpha`を出力から削除した。代わりに`leaveOneOutTailCalibration.status: not_measurable_structural_rank_uniformity`と、構成上の`nominalTailSlots`だけを返す。候補数自体は診断用に残すが、偽陽性率または校正の測定値として解釈しない。
 
 ### #46 実効多重度 K_eff の併記(優先度: 中)
 

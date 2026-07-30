@@ -872,6 +872,7 @@ test("get_cme_gold_open_interest records the official aggregate in its own sourc
     open_interest: 376079,
     source: "cme_daily_bulletin",
     source_detail: "GC_FUT",
+    report_status: "final",
     observed_at: "2026-07-25T15:00:00.000Z",
   }]);
 });
@@ -3613,7 +3614,10 @@ test("run_strategy_walk_forward selects on train, exposes selected OOS only, and
   assert.equal(result.evaluation.folds[0].test.candidateId,
     result.evaluation.folds[0].selection.candidateId);
   assert.equal(result.evaluation.oosAggregate.evaluableFolds, 2);
-  assert.equal(result.falsificationAudit.methodologyVersion, "strategy_walk_forward_falsification_audit_v2");
+  assert.equal(result.falsificationAudit.methodologyVersion, "strategy_walk_forward_falsification_audit_v3");
+  assert.equal("observedRate" in result.falsificationAudit, false);
+  assert.equal(result.falsificationAudit.leaveOneOutTailCalibration.status,
+    "not_measurable_structural_rank_uniformity");
   assert.equal(result.falsificationAudit.replications, 20);
   assert.equal(result.falsificationAudit.completed, 20);
   assert.equal(result.falsificationAudit.failed.length, 0);

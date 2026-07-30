@@ -51,6 +51,22 @@ test("futures open interest store writes owner-only and keeps only changed value
   assert.equal(revised.recorded[0].sequence, 2);
 });
 
+test("futures open interest retains preliminary and final status even when the value is unchanged", async () => {
+  const { store } = await newStore();
+  await store.observeMany([observation({ report_status: "preliminary" })]);
+  const final = await store.observeMany([observation({ report_status: "final", observed_at: "2026-07-24T12:00:00.000Z" })]);
+  assert.equal(final.recorded.length, 1);
+  assert.equal(final.revisions, 1);
+  const preliminary = await store.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", asOf: new Date("2026-07-23T12:00:00.000Z"),
+  });
+  const settled = await store.getSeriesAsOf({
+    futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", asOf: new Date("2026-07-25T00:00:00.000Z"),
+  });
+  assert.equal(preliminary[0].report_status, "preliminary");
+  assert.equal(settled[0].report_status, "final");
+});
+
 test("futures open interest as-of read never returns a value observed later", async () => {
   const { store } = await newStore();
   await store.observeMany([
@@ -184,7 +200,7 @@ test("futures OI date migration preserves first-seen history while shifting sess
   });
   assert.deepEqual(await destination.getSeriesAsOf({
     futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", asOf: new Date("2026-07-23T00:00:00.000Z"),
-  }), [{ observation_date: "2026-07-20", open_interest: 110, first_seen_at: "2026-07-22T00:00:00.000Z" }]);
+  }), [{ observation_date: "2026-07-20", open_interest: 110, report_status: null, first_seen_at: "2026-07-22T00:00:00.000Z" }]);
   assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination }), {
     source_records: 2, migrated: 0, unchanged: 2, revisions: 0,
   });
@@ -210,7 +226,7 @@ test("futures OI CME cleanup migration removes only the known malformed parser r
     futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", source: "cme_daily_bulletin", sourceDetail: "GC_FUT",
     asOf: new Date("2026-07-27T00:00:00.000Z"),
   });
-  assert.deepEqual(official, [{ observation_date: "2026-07-24", open_interest: 376079, first_seen_at: "2026-07-26T22:50:20.177Z" }]);
+  assert.deepEqual(official, [{ observation_date: "2026-07-24", open_interest: 376079, report_status: null, first_seen_at: "2026-07-26T22:50:20.177Z" }]);
 });
 
 test("futures open interest history path falls back to the per-user directory", () => {

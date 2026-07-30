@@ -7078,6 +7078,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             open_interest: latest.open_interest,
             source: latest.source,
             source_detail: latest.source_detail,
+            report_status: latest.report_status,
             observed_at: latest.observed_at,
           }]);
           firstSeen = { recorded: result.recorded.length, unchanged: result.unchanged, revisions: result.revisions };

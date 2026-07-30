@@ -55,7 +55,7 @@ test("collection continues after an individual source failure and returns covera
   });
   assert.deepEqual(observed, [{
     futures_symbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", observation_date: "2026-07-24",
-    open_interest: 376079, source: "cme_daily_bulletin", source_detail: "GC_FUT", observed_at: "2026-07-26T00:00:00.000Z",
+    open_interest: 376079, source: "cme_daily_bulletin", source_detail: "GC_FUT", report_status: "final", observed_at: "2026-07-26T00:00:00.000Z",
   }]);
   assert.equal(result.coverage, coverage);
 });

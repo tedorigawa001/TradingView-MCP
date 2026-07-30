@@ -59,6 +59,8 @@ export type FuturesOpenInterestRecord = FirstSeenRecordBase & {
   open_interest: number;
   source: string;
   source_detail: string | null;
+  /** CME Daily Bulletin's publication state; null for sources that do not publish one. */
+  report_status: "preliminary" | "final" | null;
 };
 
 export type FuturesOpenInterestObservation = {
@@ -68,6 +70,7 @@ export type FuturesOpenInterestObservation = {
   open_interest: number;
   source: string;
   source_detail?: string | null;
+  report_status?: "preliminary" | "final" | null;
   observed_at: string;
 };
 
@@ -106,13 +109,16 @@ const validateRecord = (value: unknown, line?: number): FuturesOpenInterestRecor
   if (typeof record.source_detail === "string" && record.source_detail.length > 256) {
     throw new Error(`futures open interest source_detail is too long${suffix}`);
   }
+  if (record.report_status !== undefined && record.report_status !== null && record.report_status !== "preliminary" && record.report_status !== "final") {
+    throw new Error(`invalid futures open interest report_status${suffix}`);
+  }
   if (typeof record.first_seen_at !== "string" || !isCanonicalTimestamp(record.first_seen_at)) {
     throw new Error(`invalid futures open interest first_seen_at${suffix}`);
   }
   if (record.observation_date > record.first_seen_at.slice(0, 10)) {
     throw new Error(`futures open interest observation_date is after first_seen_at${suffix}`);
   }
-  return record as FuturesOpenInterestRecord;
+  return { ...record, report_status: record.report_status ?? null } as FuturesOpenInterestRecord;
 };
 
 /**
@@ -133,11 +139,12 @@ export class FuturesOpenInterestFirstSeenStore {
   }
 
   /**
-   * Appends only the observations whose value differs from the newest one already held for the same
-   * symbol, scope, source definition and date. Re-reading an unchanged series is the normal case and
-   * must not grow the log, while a preliminary value later corrected to a final one is exactly what
-   * has to be kept. A chart-built basket and an exchange aggregate are different definitions, even
-   * when both call themselves all-month OI, so they must never become revisions of one another.
+   * Appends only observations whose value or publication status differs from the newest one already
+   * held for the same symbol, scope, source definition and date. Re-reading an unchanged series is
+   * the normal case and must not grow the log, while a preliminary value later corrected to a final
+   * one is exactly what has to be kept. A chart-built basket and an exchange aggregate are different
+   * definitions, even when both call themselves all-month OI, so they must never become revisions of
+   * one another.
    */
   async observeMany(observations: FuturesOpenInterestObservation[]): Promise<{
     recorded: FuturesOpenInterestRecord[];
@@ -164,6 +171,7 @@ export class FuturesOpenInterestFirstSeenStore {
           open_interest: observation.open_interest,
           source: observation.source,
           source_detail: observation.source_detail ?? null,
+          report_status: observation.report_status ?? null,
           first_seen_at: new Date(observation.observed_at).toISOString(),
         });
       });
@@ -192,7 +200,7 @@ export class FuturesOpenInterestFirstSeenStore {
       let nextSequence = records.reduce((maximum, record) => Math.max(maximum, record.sequence), 0);
       for (const candidate of candidates) {
         const current = latestFor(candidate);
-        if (current?.open_interest === candidate.open_interest) { unchanged += 1; continue; }
+        if (current?.open_interest === candidate.open_interest && current.report_status === candidate.report_status) { unchanged += 1; continue; }
         if (current !== undefined) revisions += 1;
         const version = { ...candidate, sequence: ++nextSequence };
         await this.log.appendUnlocked(version);
@@ -216,7 +224,7 @@ export class FuturesOpenInterestFirstSeenStore {
     asOf: Date;
     from?: string;
     to?: string;
-  }): Promise<Array<{ observation_date: string; open_interest: number; first_seen_at: string }>> {
+  }): Promise<Array<{ observation_date: string; open_interest: number; report_status: "preliminary" | "final" | null; first_seen_at: string }>> {
     if (!Number.isFinite(input.asOf.getTime())) throw new Error("as_of must be a valid timestamp");
     for (const bound of [input.from, input.to]) {
       if (bound !== undefined && !isCalendarDate(bound)) throw new Error("from and to must be calendar dates");
@@ -243,6 +251,7 @@ export class FuturesOpenInterestFirstSeenStore {
         .map((record) => ({
           observation_date: record.observation_date,
           open_interest: record.open_interest,
+          report_status: record.report_status,
           first_seen_at: record.first_seen_at,
         }));
     });

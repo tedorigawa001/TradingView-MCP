@@ -217,7 +217,7 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 
 `npm run collect:fx-history -- --from 2022-01-01T00:00:00.000Z --to 2026-01-01T00:00:00.000Z` は、`OANDA_FX_HISTORY_ACCOUNT_ID`と`OANDA_FX_HISTORY_ACCESS_TOKEN`を環境変数からのみ読み、OANDA v20の`EUR_USD`・mid・確定済み`M15`足を取得します。`--environment practice`(既定)または`live`を明示でき、認証情報・account IDはstdout・台帳・raw証跡へ書き込みません。取得は4,000本以下のページへ分割し、タイムアウト・429・5xxはページ単位で最大3回再試行します。各成功ページはraw保存後に`~/.tradingview-mcp/fx-history-m15-manifest.jsonl.checkpoints`へ追記されるため、同一範囲を再実行すると保全済みrawを検証・復元し、未完了ページから再開します。各成功レスポンスを`~/.tradingview-mcp/fx-history-raw/<sha256>.raw`へowner-onlyで内容アドレス保存します。`~/.tradingview-mcp/fx-history-m15-manifest.jsonl`には、取得範囲、取得時刻、各raw hash、正規化バーhash、件数、最初/最後の足、境界重複数、平日中の非連続区間数を追記します。同一時刻の重複は同値だけを境界重複として除外し、値が異なれば停止します。これは公式の改訂済み履歴であり、保存済みfirst-seen系列ではありません。現段階では長期CPI/NFP/FOMC研究の探索用入力を保全するだけで、既存のOOS採用判定へ自動接続しません。
 
-macOSでは`com.tradingview-mcp.policy-rate-collection`を平日10:45 JSTに実行するlaunchdジョブとして登録する。`RunAtLoad`は設定せず、ログインやMCP再起動の直後に画面を切り替えない。既存の外部first-seen収集(10:30)と時間を分け、両方が同じchart-operation lockを使うため、MCP操作中は待機または失敗し、別の銘柄状態を復元先として取り違えない。
+macOSでは`com.tradingview-mcp.policy-rate-collection`を平日10:45 JSTに実行するlaunchdジョブとして登録する。`RunAtLoad`は設定せず、ログインやMCP再起動の直後に画面を切り替えない。既存の外部first-seen収集は平日10:30と22:30 JSTの二回で、CME OIの速報から確報への改訂を異なる観測時点として残す。これは確報取得を保証する時刻表ではなく、二つのfirst-seen窓を作る運用である。両方が同じchart-operation lockを使うため、MCP操作中は待機または失敗し、別の銘柄状態を復元先として取り違えない。
 
 ### Event-study falsification audit CLI
 
