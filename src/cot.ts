@@ -17,7 +17,13 @@ export type CotObservation = {
   report_type: string;
   market: unknown;
   report_date: string | null;
+  /** Locally observed arrival. This is the only availability evidence usable as historical fact. */
   available_at: string | null;
+  /** CFTC's normal publication schedule or an explicitly recorded official exception; never a fetched timestamp. */
+  scheduled_available_at: string | null;
+  scheduled_available_at_basis: "cftc_standard_friday_1530_et_unverified" | "cftc_official_exception" | "unavailable";
+  /** Present only when a preserved official exception records that no publication happened. */
+  scheduled_unavailability_reason?: string;
   open_interest: number | null;
   positions: CotPosition[];
   target_direction_multiplier?: 1 | -1;
@@ -72,6 +78,56 @@ const reportDateMs = (value: string | null): number | null => {
     ? timestamp
     : null;
 };
+
+type CotPublicationException = { availableAt: string | null; source: string };
+
+// This is intentionally empty until a dated exception is preserved from an official CFTC notice.
+// A regular Friday timestamp is useful schedule metadata, but is not evidence that a historical
+// report was actually public then: holidays, shutdowns, and CFTC postponements are real exceptions.
+const COT_PUBLICATION_EXCEPTIONS: ReadonlyMap<string, CotPublicationException> = new Map();
+
+function newYorkCivilTimeToIso(year: number, month: number, day: number, hour: number, minute: number): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  const desiredWallTime = Date.UTC(year, month - 1, day, hour, minute);
+  let utc = desiredWallTime;
+  // 15:30 ET is never in the DST transition hour. Two passes are sufficient to converge the
+  // timezone offset while keeping an explicit IANA-zone rather than hard-coding EST/EDT offsets.
+  for (let index = 0; index < 2; index += 1) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(utc))
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]));
+    const renderedWallTime = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+      Number(parts.hour), Number(parts.minute));
+    utc += desiredWallTime - renderedWallTime;
+  }
+  return new Date(utc).toISOString();
+}
+
+export function scheduledCotAvailability(reportDate: string | null, exceptions = COT_PUBLICATION_EXCEPTIONS) {
+  const dateMs = reportDateMs(reportDate);
+  if (dateMs === null || new Date(dateMs).getUTCDay() !== 2 || reportDate === null) {
+    return { scheduled_available_at: null, scheduled_available_at_basis: "unavailable" as const };
+  }
+  const key = reportDate.slice(0, 10);
+  const exception = exceptions.get(key);
+  if (exception !== undefined) {
+    return {
+      scheduled_available_at: exception.availableAt,
+      scheduled_available_at_basis: "cftc_official_exception" as const,
+      ...(exception.availableAt === null ? { scheduled_unavailability_reason: exception.source } : {}),
+    };
+  }
+  const friday = new Date(dateMs + 3 * 86_400_000);
+  return {
+    scheduled_available_at: newYorkCivilTimeToIso(
+      friday.getUTCFullYear(), friday.getUTCMonth() + 1, friday.getUTCDate(), 15, 30,
+    ),
+    scheduled_available_at_basis: "cftc_standard_friday_1530_et_unverified" as const,
+  };
+}
 
 const subtractUtcYearsClamped = (timestamp: number, years: number): number => {
   const date = new Date(timestamp);
@@ -237,6 +293,7 @@ export class CotClient {
       market: row.market_and_exchange_names ?? null,
       report_date: typeof row.report_date_as_yyyy_mm_dd === "string" ? row.report_date_as_yyyy_mm_dd : null,
       available_at: null,
+      ...scheduledCotAvailability(typeof row.report_date_as_yyyy_mm_dd === "string" ? row.report_date_as_yyyy_mm_dd : null),
       open_interest: n(row.open_interest_all),
       positions,
       target_direction_multiplier: spec.targetDirectionMultiplier,

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { CotClient, computeCotPositioningFeatures, cotFreshness } from "../../build/cot.js";
+import { CotClient, computeCotPositioningFeatures, cotFreshness, scheduledCotAvailability } from "../../build/cot.js";
 import { CotFirstSeenStore } from "../../build/cotFirstSeenHistory.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +15,30 @@ test("CotClient maps TFF positions and rejects unsupported symbols", async (t) =
   const result = await client.getLatest("OANDA:EURUSD");
   assert.equal(result.open_interest, 100);
   assert.deepEqual(result.positions[0], { group: "dealer", long: 20, short: 30, net: -10 });
+  assert.equal(result.scheduled_available_at, "2026-07-10T19:30:00.000Z");
+  assert.equal(result.scheduled_available_at_basis, "cftc_standard_friday_1530_et_unverified");
   await assert.rejects(() => client.getLatest("OANDA:BTCUSD"), /mapping/);
+});
+
+test("scheduledCotAvailability keeps CFTC schedule metadata separate from local availability evidence", () => {
+  assert.deepEqual(scheduledCotAvailability("2026-07-07"), {
+    scheduled_available_at: "2026-07-10T19:30:00.000Z",
+    scheduled_available_at_basis: "cftc_standard_friday_1530_et_unverified",
+  });
+  assert.deepEqual(scheduledCotAvailability("2026-01-06"), {
+    scheduled_available_at: "2026-01-09T20:30:00.000Z",
+    scheduled_available_at_basis: "cftc_standard_friday_1530_et_unverified",
+  });
+  assert.deepEqual(scheduledCotAvailability("2026-07-08"), {
+    scheduled_available_at: null,
+    scheduled_available_at_basis: "unavailable",
+  });
+  assert.deepEqual(scheduledCotAvailability("2026-07-07", new Map([[
+    "2026-07-07", { availableAt: "2026-07-13T19:30:00.000Z", source: "official CFTC delay notice" },
+  ]])), {
+    scheduled_available_at: "2026-07-13T19:30:00.000Z",
+    scheduled_available_at_basis: "cftc_official_exception",
+  });
 });
 
 test("CotClient filters by contract code and returns descending history", async (t) => {
