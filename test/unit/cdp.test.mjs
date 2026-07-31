@@ -239,3 +239,42 @@ test("reconnects after the connection drops", async (t) => {
   await cdp.evaluate("second");
   assert.equal(mock.state.connections, 2);
 });
+
+test("a port answered by something else names what replied instead of blaming the app", async (t) => {
+  // What actually happened: the desktop app was running on 127.0.0.1 while another process held
+  // [::1] on the same port, macOS resolved localhost to IPv6, and the error kept advising a
+  // relaunch that could never help.
+  const mock = await startMockCdp({
+    targets: [
+      { type: "page", url: "https://samurai-dash.web.app/daily-threads.html?token=secret", title: "", webSocketDebuggerUrl: "" },
+      { type: "page", url: "https://samurai-dash.web.app/other.html", title: "", webSocketDebuggerUrl: "" },
+    ],
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  const error = await cdp.evaluate("1").then(() => null, (err) => err);
+  assert.ok(error instanceof TradingViewNotAvailableError);
+  assert.match(error.message, /2 CDP targets/);
+  assert.match(error.message, /https:\/\/samurai-dash\.web\.app/);
+  assert.match(error.message, /Something other than the desktop app is answering/);
+  // The advice must name the port actually in use, not a hard-coded default.
+  const port = new URL(mock.baseUrl).port;
+  assert.match(error.message, new RegExp(`lsof -nP -iTCP:${port} `));
+  // This endpoint is already IPv4, so the IPv6 explanation does not apply and is withheld.
+  assert.doesNotMatch(error.message, /IPv6/);
+  // Origins only: a query string from whatever the other process has open must not travel.
+  assert.doesNotMatch(error.message, /token=secret/);
+  assert.doesNotMatch(error.message, /daily-threads/);
+  // The relaunch advice is wrong here and must not be offered.
+  assert.doesNotMatch(error.message, /open -a TradingView/);
+});
+
+test("an endpoint with no pages at all still advises launching the app", async (t) => {
+  const mock = await startMockCdp({ targets: [] });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  const error = await cdp.evaluate("1").then(() => null, (err) => err);
+  assert.ok(error instanceof TradingViewNotAvailableError);
+  assert.match(error.message, /returned no page targets/);
+  assert.match(error.message, /open -a TradingView/);
+});

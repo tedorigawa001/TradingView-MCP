@@ -30,11 +30,12 @@ interface Connection {
 }
 
 export class TradingViewNotAvailableError extends Error {
-  constructor(detail: string) {
-    super(
-      `TradingView desktop app is not reachable via CDP (${detail}). ` +
-        `Launch it with: open -a TradingView --args --remote-debugging-port=9222`,
-    );
+  /**
+   * `remedy` replaces the launch instruction. Telling someone to start the app is wrong, and
+   * costs real time, when the app is already running and something else answered on its port.
+   */
+  constructor(detail: string, remedy = "Launch it with: open -a TradingView --args --remote-debugging-port=9222") {
+    super(`TradingView desktop app is not reachable via CDP (${detail}). ${remedy}`);
     this.name = "TradingViewNotAvailableError";
   }
 }
@@ -86,8 +87,32 @@ export class CdpClient {
       }
     });
     if (!chart) {
+      // Origins only. A target URL carries whatever the answering browser has open, including
+      // query strings, and this message reaches the client.
+      const origins = [...new Set(targets
+        .filter((t) => t.type === "page")
+        .map((t) => { try { return new URL(t.url).origin; } catch { return null; } })
+        .filter((origin): origin is string => origin !== null))].sort();
+      const answered = origins.length === 0
+        ? "it returned no page targets"
+        : `its open page origins are ${origins.slice(0, 5).join(", ")}`;
+      // The endpoint answering with unrelated pages means something other than the desktop app is
+      // listening. On macOS localhost resolves to IPv6 first, so a second process bound to [::1]
+      // on the same port answers while the app sits on 127.0.0.1 and is never consulted.
+      const collided = origins.length > 0;
+      const localhost = /^https?:\/\/localhost(:|\/|$)/i.test(this.baseUrl);
+      const port = (() => { try { return new URL(this.baseUrl).port || "9222"; } catch { return "9222"; } })();
+      // Naming the port is useful either way. The IPv6 explanation only applies to a localhost
+      // endpoint, where the name resolves to [::1] first and can reach a different listener.
+      const remedy = collided
+        ? `Something other than the desktop app is answering; check with lsof -nP -iTCP:${port} -sTCP:LISTEN before restarting the app.`
+          + (localhost
+            ? ` macOS resolves localhost to IPv6 first, so another process bound to [::1]:${port} answers while the app sits on 127.0.0.1; set TV_CDP_URL=http://127.0.0.1:${port} to reach it.`
+            : "")
+        : undefined;
       throw new TradingViewNotAvailableError(
-        "no tradingview.com/chart page found among CDP targets",
+        `no tradingview.com/chart page found among ${targets.length} CDP targets at ${redactSecrets(this.baseUrl)}; ${answered}`,
+        remedy,
       );
     }
     return chart;
