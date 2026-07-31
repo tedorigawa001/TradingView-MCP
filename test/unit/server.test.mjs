@@ -725,7 +725,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the eighty-one expected tools", async () => {
+test("exposes exactly the eighty-seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -800,6 +800,7 @@ test("exposes exactly the eighty-one expected tools", async () => {
       "run_external_label_study",
       "run_feature_outcome_falsification_audit",
       "run_feature_outcome_power_audit",
+      "run_lead_lag_falsification_audit",
       "run_market_event_study",
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
@@ -5533,6 +5534,28 @@ test("run_feature_outcome_falsification_audit calibrates the empirical-null cand
   assert.equal(parsed.runs[0].candidateRule.evidence,
     "non_overlapping_newey_west_bonferroni_and_empirical_null_candidate_eligibility");
   assert.equal(parsed.runs[0].audit.evaluated, 2);
+});
+
+test("run_lead_lag_falsification_audit returns a bound configuration hash without chart access", async () => {
+  const client = await connectedClient(makeDeps());
+  const response = await client.callTool({ name: "run_lead_lag_falsification_audit", arguments: {
+    timeframe: "60",
+    max_lag_bars: 2,
+    minimum_observations: 30,
+    configuration_trials: 1,
+    folds: [
+      { fold_id: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
+      { fold_id: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" },
+    ],
+    replications: 2,
+    bars: 300,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.methodologyVersion, "lead_lag_falsification_audit_standard_v1");
+  assert.equal(parsed.audit.auditDefinition.runner, "lead_lag_falsification_audit_v1");
+  assert.match(parsed.audit.auditDefinition.inputHash, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(parsed.audit.auditDefinition.input.study.folds.length, 2);
+  assert.equal(parsed.audit.status, "complete");
 });
 
 test("run_feature_outcome_power_audit returns separate effect-size detection runs without chart access", async () => {

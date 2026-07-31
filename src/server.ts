@@ -54,6 +54,7 @@ import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.j
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
 import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { runFeatureOutcomeFalsificationAudit } from "./featureOutcomeFalsificationAudit.js";
+import { runLeadLagFalsificationAudit } from "./leadLagFalsificationAudit.js";
 import { runFeatureOutcomePowerAudit } from "./featureOutcomePowerAudit.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
@@ -1472,6 +1473,64 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "Rates are separate by null model and are never pooled.",
             "The audit calibrates the frozen candidate rule, not an unrecorded search outside configuration_trials.",
             "Each synthetic replication runs the candidate rule's fixed 1,000-replication empirical-null calibration; large audit runs are intentionally compute-intensive.",
+          ],
+        });
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "run_lead_lag_falsification_audit",
+    {
+      description:
+        "Calibrate the frozen lead-lag candidate rule against factor-null pairs, which carry contemporaneous " +
+        "dependence but no lagged predictability. Every replication runs the rule's own circular-shift empirical " +
+        "null. The result carries its fully resolved configuration and a hash of it, so a quoted rate can be " +
+        "reproduced. It does not read or change TradingView and does not establish profitability.",
+      inputSchema: {
+        timeframe: z.string().regex(/^[1-9]\d*$/),
+        max_lag_bars: z.number().int().min(1).max(50),
+        minimum_observations: z.number().int().min(4).max(5000),
+        configuration_trials: z.number().int().min(1).max(100_000),
+        // The candidate rule requires stable fold signs, so it cannot be evaluated without folds.
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+        })).min(2).max(12),
+        confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
+        replications: z.number().int().min(1).max(2000).optional(),
+        first_seed: z.number().int().min(0).max(0xffffffff).optional(),
+        bars: z.number().int().min(100).max(50_000).optional(),
+        rho: z.number().finite().gt(-1).lt(1).optional(),
+        nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
+      },
+    },
+    async ({ timeframe, max_lag_bars, minimum_observations, configuration_trials, folds, confidence_level,
+      replications, first_seed, bars, rho, nominal_alpha }) => {
+      try {
+        const audit = runLeadLagFalsificationAudit({
+          replications: replications ?? 400,
+          firstSeed: first_seed,
+          bars: bars ?? 5_000,
+          timeframeMinutes: Number(timeframe),
+          nominalAlpha: nominal_alpha ?? 0.05,
+          maxLagBars: max_lag_bars,
+          minimumObservations: minimum_observations,
+          confidenceLevel: confidence_level ?? 0.95,
+          configurationTrials: configuration_trials,
+          rho,
+          folds: folds.map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+        });
+        return jsonResult({
+          schemaVersion: "1.0",
+          methodologyVersion: "lead_lag_falsification_audit_standard_v1",
+          audit,
+          limitations: [
+            "This is one null model. Paired nulls carrying clustered volatility or bid-ask bounce are not measured here.",
+            "A uniform circular shift removes contemporaneous correlation along with the lagged relationship, which is why the factor-null pair is the model that probes it.",
+            "Quote a rate only together with auditDefinition.inputHash; fold boundaries alone move an otherwise identical run.",
+            "Each replication runs the candidate rule's own fixed circular-shift calibration, so large audits are intentionally compute-intensive.",
           ],
         });
       } catch (err) { return errorResult(err); }
