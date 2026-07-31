@@ -786,6 +786,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       retest_within_bars: z.number().int().min(1).max(96).optional(),
       min_impulse_body_ratio: z.number().finite().min(0).max(1).optional(),
       require_boundary_hold: z.boolean().optional(),
+      overlap_policy: z.enum(["exclude_later_event", "allow_overlapping_windows"]).optional()
+        .describe("Whether later FVG signals whose maximum outcome window overlaps an earlier selected signal are excluded. Default: allow_overlapping_windows"),
       direction: z.enum(["bullish", "bearish"]).optional()
         .describe("Optional single FVG direction included in primary aggregates"),
       signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional()
@@ -818,6 +820,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             retest_within_bars: z.number().int().min(1).max(96),
             min_impulse_body_ratio: z.number().finite().min(0).max(1),
             require_boundary_hold: z.boolean(),
+            overlap_policy: z.enum(["exclude_later_event", "allow_overlapping_windows"]).optional(),
             direction: z.enum(["bullish", "bearish"]),
             horizons: z.array(z.number().int().min(1).max(96)).min(1).max(8),
             candidate_horizon: z.number().int().min(1).max(96),
@@ -896,6 +899,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               symbol: "SYNTH:FVG_RETEST", timeframe: study.timeframe,
               minimumGapBps: study.minimum_gap_bps, retestWithinBars: study.retest_within_bars,
               minImpulseBodyRatio: study.min_impulse_body_ratio, requireBoundaryHold: study.require_boundary_hold,
+              overlapPolicy: study.overlap_policy ?? "allow_overlapping_windows",
               horizons: study.horizons, targetReturnBps: study.target_return_bps,
               minimumEvents: study.minimum_events, eventLimit: 0,
               confidenceLevel: study.confidence_level ?? 0.95, configurationTrials: study.configuration_trials,
@@ -1114,6 +1118,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             retestWithinBars: condition.retest_within_bars ?? 24,
             minImpulseBodyRatio: condition.min_impulse_body_ratio ?? 0.5,
             requireBoundaryHold: condition.require_boundary_hold ?? true,
+            overlapPolicy: condition.overlap_policy ?? "allow_overlapping_windows",
             signalFrom: condition.signal_from ?? null,
             signalTo: condition.signal_to ?? null,
             branchFilter: condition.direction ?? null,

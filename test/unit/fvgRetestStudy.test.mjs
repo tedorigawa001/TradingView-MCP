@@ -97,6 +97,22 @@ test("fvgRetestStudy detects a bearish Fair Value Gap retest and computes short 
   assert.ok(result.byBranch.fvg_retest_bearish.horizons["1"].directionalReturn.mean > 0);
 });
 
+test("fvgRetestStudy can exclude later signals with overlapping outcome windows", () => {
+  const start = Date.UTC(2026, 0, 1, 0, 0);
+  const ohlc = [
+    [100, 100.2, 99.8, 100], [100.3, 101.8, 100.2, 101.6], [101.7, 103, 101.4, 102.8],
+    [101, 102.2, 100.8, 102], [103.4, 105, 103.2, 104.8], [104.6, 105, 103.1, 104],
+    [104, 105, 103.8, 104.7], [104.7, 105.5, 104.2, 105.1],
+  ];
+  const result = runFvgRetestStudy(baseInput(bars(start, ohlc), {
+    horizons: [2], overlapPolicy: "exclude_later_event",
+  }));
+  assert.equal(result.methodologyVersion, "fvg_retest_event_study_v3");
+  assert.equal(result.quality.overlappingEvaluationWindowsExcluded, 1);
+  assert.equal(result.sample.events, 1);
+  assert.equal(result.selectionContract.overlapPolicy, "exclude_later_event");
+});
+
 test("fvgRetestStudy rejects gaps smaller than minimumGapBps and weak impulse body ratios on middle bar", () => {
   const start = Date.UTC(2026, 0, 1, 0, 0);
   const smallGapOhlc = [

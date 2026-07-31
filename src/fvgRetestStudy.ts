@@ -45,6 +45,7 @@ export interface FvgRetestStudyInput {
   signalFrom?: string | null;
   signalTo?: string | null;
   branchFilter?: "bullish" | "bearish" | null;
+  overlapPolicy?: "exclude_later_event" | "allow_overlapping_windows";
   regimeFilter?: {
     directional: DirectionalRegime;
     volatility?: VolatilityRegime | null;
@@ -83,6 +84,9 @@ function validate(input: FvgRetestStudyInput) {
       !["bullish", "bearish"].includes(input.branchFilter)) {
     throw new Error("branch filter must be bullish or bearish");
   }
+  if (input.overlapPolicy !== undefined && !["exclude_later_event", "allow_overlapping_windows"].includes(input.overlapPolicy)) {
+    throw new Error("invalid FVG outcome overlap policy");
+  }
   if (input.regimeFilter !== null && input.regimeFilter !== undefined &&
       (input.regime === null || input.regime === undefined)) {
     throw new Error("regime_filter requires regime configuration");
@@ -106,6 +110,7 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     boundaryHoldFailed: 0,
     overlappingSignalsExcluded: 0,
     overlappingSignalsExcludedByBranch: { fvg_retest_bullish: 0, fvg_retest_bearish: 0 },
+    overlappingEvaluationWindowsExcluded: 0,
     signalBeforeWindowExcluded: 0,
     signalAtOrAfterWindowExcluded: 0,
     branchExcluded: 0,
@@ -310,6 +315,22 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
     events = matched.map(({ event }) => event);
   }
 
+  const overlapPolicy = input.overlapPolicy ?? "allow_overlapping_windows";
+  if (overlapPolicy === "exclude_later_event") {
+    const maximumHorizon = Math.max(...input.horizons);
+    const selected: typeof events = [];
+    let lastSelectedSignalIndex = -Infinity;
+    for (const event of [...events].sort((left, right) => left.signalIndex - right.signalIndex || left.eventId.localeCompare(right.eventId))) {
+      if (event.signalIndex <= lastSelectedSignalIndex + maximumHorizon) {
+        quality.overlappingEvaluationWindowsExcluded += 1;
+        continue;
+      }
+      selected.push(event);
+      lastSelectedSignalIndex = event.signalIndex;
+    }
+    events = selected;
+  }
+
   const branches: Branch[] = selectedBranch === null
     ? ["fvg_retest_bullish", "fvg_retest_bearish"] : [selectedBranch];
   const byBranch = Object.fromEntries(branches.map((branch) => {
@@ -351,7 +372,9 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
 
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "fvg_retest_event_study_v2" as const,
+    methodologyVersion: overlapPolicy === "exclude_later_event"
+      ? "fvg_retest_event_study_v3" as const
+      : "fvg_retest_event_study_v2" as const,
     status: qualityIssues.length === 0 ? ("complete" as const) : ("partial" as const),
     conditionType: "fair_value_gap_retest" as const,
     symbol: input.symbol,
@@ -368,6 +391,8 @@ export function runFvgRetestStudy(input: FvgRetestStudyInput) {
       signalTo: input.signalTo ?? null,
       signalToExclusive: true,
       branch: input.branchFilter ?? null,
+      overlapPolicy,
+      overlapWindow: overlapPolicy === "exclude_later_event" ? "maximum_horizon_subsequent_observed_bars" as const : null,
       regime: input.regimeFilter === null || input.regimeFilter === undefined ? null : {
         directional: input.regimeFilter.directional,
         volatility: input.regimeFilter.volatility ?? null,
