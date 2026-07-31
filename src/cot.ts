@@ -86,7 +86,7 @@ type CotPublicationException = { availableAt: string | null; source: string };
 // report was actually public then: holidays, shutdowns, and CFTC postponements are real exceptions.
 const COT_PUBLICATION_EXCEPTIONS: ReadonlyMap<string, CotPublicationException> = new Map();
 
-function newYorkCivilTimeToIso(year: number, month: number, day: number, hour: number, minute: number): string {
+export function newYorkCivilTimeToIso(year: number, month: number, day: number, hour: number, minute: number): string {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hourCycle: "h23",
