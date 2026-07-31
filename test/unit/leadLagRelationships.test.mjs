@@ -102,6 +102,48 @@ test("lead/lag Bonferroni gates lag eligibility across lags and declared trials"
   assert.equal(nonTradable.inference.passesBonferroni, false, "negative lags cannot become a primary-market candidate");
 });
 
+test("lead/lag empirical null is deterministic, family-wise, and required for candidate eligibility", () => {
+  const driver = Array.from({ length: 140 }, (_, index) =>
+    (((index * 47) % 101) - 50) / 10_000 + ((index % 5) - 2) / 100_000);
+  const { primaryBars, referenceBars } = laggedPair(driver, 2);
+  const args = {
+    ...BASE,
+    primaryBars,
+    referenceBars,
+    maxLagBars: 4,
+    minimumObservations: 30,
+    empiricalNullCalibration: true,
+    folds: [
+      { foldId: "first", from: new Date(0).toISOString(), to: new Date(70 * 3_600_000).toISOString() },
+      { foldId: "second", from: new Date(70 * 3_600_000).toISOString(), to: new Date(140 * 3_600_000).toISOString() },
+    ],
+  };
+  const result = computeLeadLagRelationships(args);
+  const again = computeLeadLagRelationships(args);
+  assert.equal(result.empiricalNullCalibration.status, "complete");
+  assert.equal(result.empiricalNullCalibration.iterations, 1000);
+  assert.equal(result.empiricalNullCalibration.methodologyVersion, "lead_lag_empirical_null_circular_shift_v1");
+  assert.deepEqual(result.empiricalNullCalibration, again.empiricalNullCalibration);
+  assert.equal(result.byLag.find((entry) => entry.lagBars === 2).inference.candidateEligible, true);
+  assert.ok(result.byLag.find((entry) => entry.lagBars === 2).inference.empiricalNull.familyWisePValue <= 0.05);
+  assert.equal(result.byLag.find((entry) => entry.lagBars === -2).inference.candidateEligible, false);
+  assert.ok(result.byLag.find((entry) => entry.lagBars === -2).inference.candidateBlockers.includes("not_a_positive_reference_lead"));
+});
+
+test("lead/lag scan cannot claim candidate eligibility without the empirical-null calibration", () => {
+  const { primaryBars, referenceBars } = laggedPair(DRIVER, 2);
+  const result = computeLeadLagRelationships({
+    ...BASE, primaryBars, referenceBars, maxLagBars: 2,
+    folds: [
+      { foldId: "first", from: new Date(0).toISOString(), to: new Date(10 * 3_600_000).toISOString() },
+      { foldId: "second", from: new Date(10 * 3_600_000).toISOString(), to: new Date(20 * 3_600_000).toISOString() },
+    ],
+  });
+  const lagTwo = result.byLag.find((entry) => entry.lagBars === 2);
+  assert.equal(lagTwo.inference.candidateEligible, false);
+  assert.ok(lagTwo.inference.candidateBlockers.includes("empirical_null_calibration_required"));
+});
+
 test("lead/lag scan joins on exact timestamps and never forward fills a missing reference bar", () => {
   const times = [0, 3600, 7200, 10800, 14400];
   const primaryBars = times.map((time, index) => bar(time, 100 + index));

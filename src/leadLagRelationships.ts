@@ -1,4 +1,5 @@
 import type { OhlcvBar } from "./tradingview.js";
+import { createHash } from "node:crypto";
 import { marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
 
 export interface LeadLagFold {
@@ -18,9 +19,13 @@ export interface LeadLagInput {
   confidenceLevel: 0.9 | 0.95 | 0.99;
   folds: LeadLagFold[];
   configurationTrials: number;
+  empiricalNullCalibration?: boolean;
 }
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
+const EMPIRICAL_NULL_ITERATIONS = 1_000;
+const EMPIRICAL_NULL_SEED = 20_260_731;
+const EMPIRICAL_NULL_METHODOLOGY = "lead_lag_empirical_null_circular_shift_v1" as const;
 
 function normalCdf(value: number): number {
   // Abramowitz-Stegun 7.1.26. This is sufficient for a transparent Fisher-z screening threshold;
@@ -90,6 +95,265 @@ function fisherTwoSidedPValue(correlation: number | null, observations: number):
   if (correlation === null || observations <= 3 || Math.abs(correlation) >= 1) return null;
   const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(observations - 3);
   return Math.max(0, Math.min(1, 2 * (1 - normalCdf(statistic))));
+}
+
+function createRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+function lagStatistic(primary: number[], reference: number[], lagBars: number): number | null {
+  const pairedPrimary: number[] = [];
+  const pairedReference: number[] = [];
+  for (let index = 0; index < primary.length; index += 1) {
+    const referenceIndex = index - lagBars;
+    if (referenceIndex < 0 || referenceIndex >= reference.length) continue;
+    pairedPrimary.push(primary[index]);
+    pairedReference.push(reference[referenceIndex]);
+  }
+  const correlation = pearson(pairedPrimary, pairedReference);
+  if (correlation === null || pairedPrimary.length <= 3 || Math.abs(correlation) >= 1) return null;
+  const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(pairedPrimary.length - 3);
+  return Number.isFinite(statistic) ? statistic : null;
+}
+
+function fft(real: number[], imaginary: number[], inverse: boolean): void {
+  const length = real.length;
+  for (let index = 1, j = 0; index < length; index += 1) {
+    let bit = length >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (index < j) {
+      [real[index], real[j]] = [real[j], real[index]];
+      [imaginary[index], imaginary[j]] = [imaginary[j], imaginary[index]];
+    }
+  }
+  for (let size = 2; size <= length; size <<= 1) {
+    const angle = (inverse ? 2 : -2) * Math.PI / size;
+    const phaseReal = Math.cos(angle);
+    const phaseImaginary = Math.sin(angle);
+    for (let start = 0; start < length; start += size) {
+      let currentReal = 1;
+      let currentImaginary = 0;
+      const half = size >> 1;
+      for (let offset = 0; offset < half; offset += 1) {
+        const even = start + offset;
+        const odd = even + half;
+        const productReal = real[odd] * currentReal - imaginary[odd] * currentImaginary;
+        const productImaginary = real[odd] * currentImaginary + imaginary[odd] * currentReal;
+        const evenReal = real[even];
+        const evenImaginary = imaginary[even];
+        real[even] = evenReal + productReal;
+        imaginary[even] = evenImaginary + productImaginary;
+        real[odd] = evenReal - productReal;
+        imaginary[odd] = evenImaginary - productImaginary;
+        const nextReal = currentReal * phaseReal - currentImaginary * phaseImaginary;
+        currentImaginary = currentReal * phaseImaginary + currentImaginary * phaseReal;
+        currentReal = nextReal;
+      }
+    }
+  }
+  if (inverse) {
+    for (let index = 0; index < length; index += 1) {
+      real[index] /= length;
+      imaginary[index] /= length;
+    }
+  }
+}
+
+/** Cross sums for every circular offset: sum(primary[i] * reference[(i + offset) % n]). */
+function circularCrossSums(primary: number[], reference: number[]): number[] {
+  const length = primary.length;
+  let fftLength = 1;
+  while (fftLength < length * 3 - 1) fftLength <<= 1;
+  const leftReal = new Array<number>(fftLength).fill(0);
+  const leftImaginary = new Array<number>(fftLength).fill(0);
+  const rightReal = new Array<number>(fftLength).fill(0);
+  const rightImaginary = new Array<number>(fftLength).fill(0);
+  for (let index = 0; index < length; index += 1) {
+    leftReal[length - 1 - index] = primary[index];
+    rightReal[index] = reference[index];
+    rightReal[length + index] = reference[index];
+  }
+  fft(leftReal, leftImaginary, false);
+  fft(rightReal, rightImaginary, false);
+  for (let index = 0; index < fftLength; index += 1) {
+    const real = leftReal[index] * rightReal[index] - leftImaginary[index] * rightImaginary[index];
+    const imaginary = leftReal[index] * rightImaginary[index] + leftImaginary[index] * rightReal[index];
+    leftReal[index] = real;
+    leftImaginary[index] = imaginary;
+  }
+  fft(leftReal, leftImaginary, true);
+  return Array.from({ length }, (_, offset) => leftReal[length - 1 + offset]);
+}
+
+function shiftedLagStatistic(input: {
+  primary: number[];
+  reference: number[];
+  primaryPrefix: number[];
+  primarySquaresPrefix: number[];
+  referenceDoubledPrefix: number[];
+  referenceDoubledSquaresPrefix: number[];
+  crossSums: number[];
+  lag: number;
+  shift: number;
+}): number | null {
+  const { primary, reference, primaryPrefix, primarySquaresPrefix, referenceDoubledPrefix,
+    referenceDoubledSquaresPrefix, crossSums, lag, shift } = input;
+  const count = primary.length;
+  const observations = count - lag;
+  if (observations <= 3) return null;
+  const sumPrimary = primaryPrefix[count] - primaryPrefix[lag];
+  const sumPrimarySquares = primarySquaresPrefix[count] - primarySquaresPrefix[lag];
+  const referenceStart = shift;
+  const referenceEnd = referenceStart + observations;
+  const sumReference = referenceDoubledPrefix[referenceEnd] - referenceDoubledPrefix[referenceStart];
+  const sumReferenceSquares = referenceDoubledSquaresPrefix[referenceEnd] - referenceDoubledSquaresPrefix[referenceStart];
+  const offset = (shift - lag + count) % count;
+  let cross = crossSums[offset];
+  for (let index = 0; index < lag; index += 1) {
+    cross -= primary[index] * reference[(index + offset) % count];
+  }
+  const covariance = cross - (sumPrimary * sumReference) / observations;
+  const primaryVariance = sumPrimarySquares - (sumPrimary * sumPrimary) / observations;
+  const referenceVariance = sumReferenceSquares - (sumReference * sumReference) / observations;
+  const correlation = covariance / Math.sqrt(primaryVariance * referenceVariance);
+  if (!Number.isFinite(correlation) || Math.abs(correlation) >= 1) return null;
+  const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(observations - 3);
+  return Number.isFinite(statistic) ? statistic : null;
+}
+
+type EmpiricalNullCalibration = {
+  schemaVersion: "1.0";
+  methodologyVersion: typeof EMPIRICAL_NULL_METHODOLOGY;
+  status: "complete" | "not_evaluable";
+  iterations: number;
+  seed: number;
+  shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family";
+  excludedShiftRadiusBars: number;
+  eligibleCircularShifts: number;
+  familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags";
+  familyEligibleLags: number;
+  nominalAlpha: number;
+  evidenceHash: string;
+  calibrationId: string;
+  byLag: Record<string, {
+    status: "available" | "insufficient_sample";
+    observedStatistic: number | null;
+    familyWisePValue: number | null;
+    passes: boolean;
+  }>;
+  limitations: string[];
+};
+
+function sha256(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
+}
+
+function buildEmpiricalNullCalibration(input: {
+  primaryReturns: number[];
+  referenceReturns: number[];
+  lags: number[];
+  minimumObservations: number;
+  confidenceLevel: 0.9 | 0.95 | 0.99;
+  evidence: unknown;
+  definition: unknown;
+}): EmpiricalNullCalibration {
+  const positiveLags = input.lags.filter((lag) => lag > 0);
+  const observed = new Map(positiveLags.map((lag) => [lag, lagStatistic(input.primaryReturns, input.referenceReturns, lag)]));
+  const familyLags = positiveLags.filter((lag) => {
+    const observations = input.primaryReturns.length - lag;
+    return observations >= input.minimumObservations && observed.get(lag) !== null;
+  });
+  // A shift inside the inspected lag family could preserve exactly the relation being tested. It is
+  // excluded so every null draw breaks every tested reference-leads-primary alignment.
+  const count = input.referenceReturns.length;
+  const shifts = Array.from({ length: Math.max(0, count - 1) }, (_, index) => index + 1)
+    .filter((shift) => Math.min(shift, count - shift) > Math.max(...positiveLags));
+  const primaryPrefix = [0];
+  const primarySquaresPrefix = [0];
+  const referenceDoubled = [...input.referenceReturns, ...input.referenceReturns];
+  const referenceDoubledPrefix = [0];
+  const referenceDoubledSquaresPrefix = [0];
+  for (const value of input.primaryReturns) {
+    primaryPrefix.push(primaryPrefix.at(-1)! + value);
+    primarySquaresPrefix.push(primarySquaresPrefix.at(-1)! + value * value);
+  }
+  for (const value of referenceDoubled) {
+    referenceDoubledPrefix.push(referenceDoubledPrefix.at(-1)! + value);
+    referenceDoubledSquaresPrefix.push(referenceDoubledSquaresPrefix.at(-1)! + value * value);
+  }
+  const crossSums = circularCrossSums(input.primaryReturns, input.referenceReturns);
+  const exceedances = new Map(positiveLags.map((lag) => [lag, 0]));
+  if (familyLags.length > 0 && shifts.length > 0) {
+    const random = createRandom(EMPIRICAL_NULL_SEED);
+    for (let iteration = 0; iteration < EMPIRICAL_NULL_ITERATIONS; iteration += 1) {
+      const shift = shifts[Math.floor(random() * shifts.length)];
+      const maximum = familyLags.reduce((value, lag) => Math.max(value,
+        shiftedLagStatistic({ primary: input.primaryReturns, reference: input.referenceReturns,
+          primaryPrefix, primarySquaresPrefix, referenceDoubledPrefix, referenceDoubledSquaresPrefix,
+          crossSums, lag, shift }) ?? 0), 0);
+      for (const lag of familyLags) {
+        const statistic = observed.get(lag);
+        if (statistic !== null && statistic !== undefined && maximum >= statistic) {
+          exceedances.set(lag, (exceedances.get(lag) ?? 0) + 1);
+        }
+      }
+    }
+  }
+  const nominalAlpha = 1 - input.confidenceLevel;
+  const byLag = Object.fromEntries(positiveLags.map((lag) => {
+    const observedStatistic = observed.get(lag) ?? null;
+    const available = familyLags.includes(lag) && shifts.length > 0;
+    const familyWisePValue = available ? (1 + (exceedances.get(lag) ?? 0)) / (EMPIRICAL_NULL_ITERATIONS + 1) : null;
+    return [String(lag), {
+      status: available ? "available" as const : "insufficient_sample" as const,
+      observedStatistic,
+      familyWisePValue,
+      passes: familyWisePValue !== null && familyWisePValue <= nominalAlpha,
+    }];
+  }));
+  const evidenceHash = sha256(input.evidence);
+  const contract = {
+    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    iterations: EMPIRICAL_NULL_ITERATIONS,
+    seed: EMPIRICAL_NULL_SEED,
+    shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family",
+    excludedShiftRadiusBars: Math.max(...positiveLags),
+    eligibleCircularShifts: shifts.length,
+    familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
+    familyEligibleLags: familyLags,
+    nominalAlpha,
+    evidenceHash,
+    definition: input.definition,
+  };
+  return {
+    schemaVersion: "1.0",
+    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    status: familyLags.length > 0 && shifts.length > 0 ? "complete" : "not_evaluable",
+    iterations: EMPIRICAL_NULL_ITERATIONS,
+    seed: EMPIRICAL_NULL_SEED,
+    shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family",
+    excludedShiftRadiusBars: Math.max(...positiveLags),
+    eligibleCircularShifts: shifts.length,
+    familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
+    familyEligibleLags: familyLags.length,
+    nominalAlpha,
+    evidenceHash,
+    calibrationId: sha256(contract),
+    byLag,
+    limitations: [
+      "The reference return sequence is circularly shifted as a whole, preserving each series' return order, autocorrelation, exact timestamp gaps, and the original contemporaneous dependence only before the shift.",
+      "Shifts inside the scanned lag family are excluded so a null draw cannot retain a tested lead alignment by construction.",
+      "This calibrates the scanned correlation family on this evidence window; it does not establish causality, execution quality, profitability, or out-of-sample validity.",
+    ],
+  };
 }
 
 function leadDirection(lagBars: number) {
@@ -163,6 +427,16 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
   const familyTests = lags.length * input.configurationTrials;
   const nominalAlpha = 1 - input.confidenceLevel;
   const bonferroniAdjustedAlpha = nominalAlpha / familyTests;
+  const empiricalNullCalibration = input.empiricalNullCalibration === true ? buildEmpiricalNullCalibration({
+    primaryReturns,
+    referenceReturns,
+    lags,
+    minimumObservations: input.minimumObservations,
+    confidenceLevel: input.confidenceLevel,
+    evidence: aligned.map((item) => ({ time: item.primary.time, primaryClose: item.primary.close, referenceClose: item.reference.close })),
+    definition: { maxLagBars: input.maxLagBars, minimumObservations: input.minimumObservations,
+      confidenceLevel: input.confidenceLevel, configurationTrials: input.configurationTrials, folds: input.folds },
+  }) : undefined;
   const byLag = lags.map((lagBars) => {
     const pairedPrimary: number[] = [];
     const pairedReference: number[] = [];
@@ -204,6 +478,19 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
 
     const pValue = evaluable ? fisherTwoSidedPValue(correlation, observations) : null;
     const passesBonferroni = lagBars > 0 && pValue !== null && pValue <= bonferroniAdjustedAlpha;
+    const empirical = lagBars > 0 ? empiricalNullCalibration?.byLag[String(lagBars)] : undefined;
+    const candidateBlockers = [
+      ...(lagBars <= 0 ? ["not_a_positive_reference_lead"] : []),
+      ...(!passesBonferroni ? ["bonferroni_threshold_not_met"] : []),
+      ...(folds.length < 2 ? ["at_least_two_preregistered_folds_required"] : []),
+      ...(folds.length >= 2 && !(evaluableFolds.length >= 2 && sameSignFolds === evaluableFolds.length)
+        ? ["fold_sign_stability_not_met"] : []),
+      ...(empiricalNullCalibration === undefined ? ["empirical_null_calibration_required"] : []),
+      ...(empiricalNullCalibration !== undefined && empiricalNullCalibration.status !== "complete"
+        ? ["empirical_null_calibration_not_evaluable"] : []),
+      ...(empiricalNullCalibration?.status === "complete" && empirical?.passes !== true
+        ? ["empirical_null_family_wise_threshold_not_met"] : []),
+    ];
     return {
       lagBars,
       leadDirection: leadDirection(lagBars),
@@ -221,6 +508,9 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
         nominalAlpha,
         bonferroniAdjustedAlpha,
         passesBonferroni,
+        ...(empirical === undefined ? {} : { empiricalNull: empirical }),
+        candidateEligible: candidateBlockers.length === 0,
+        candidateBlockers,
       },
       folds: foldResults,
       foldStability: {
@@ -253,6 +543,7 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       minimumObservations: input.minimumObservations,
       returnBasis: "log_close_to_close_on_consecutive_aligned_bars" as const,
       lagConvention: "positive_lag_pairs_an_earlier_reference_return_with_a_later_primary_return" as const,
+      empiricalNullCalibration: input.empiricalNullCalibration === true,
     },
     sample: {
       primaryClosedBars: primary.length,
@@ -270,6 +561,8 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       configurationTrials: input.configurationTrials,
       serialDependenceAdjustment: "none" as const,
       multipleTestingAdjustment: "bonferroni_family_wise_error_rate" as const,
+      empiricalNullMethodology: EMPIRICAL_NULL_METHODOLOGY,
+      candidateEligibility: "requires_positive_lag_bonferroni_fold_sign_stability_and_empirical_null_family_wise_p_value" as const,
       familyTests,
       nominalAlpha,
       bonferroniAdjustedAlpha,
@@ -279,9 +572,11 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     inferenceWarnings: [
       "confidence_intervals_do_not_adjust_for_serial_dependence",
       "bonferroni_adjustment_is_applied_to_lag_eligibility",
+      "candidate_eligibility_requires_a_same-evidence empirical-null family-wise calibration",
       "every_scanned_lag_is_reported_and_no_best_lag_is_selected",
       ...(input.maxLagBars > 1 ? ["scanning_many_lags_inflates_the_chance_of_one_interval_excluding_zero"] : []),
     ],
+    ...(empiricalNullCalibration === undefined ? {} : { empiricalNullCalibration }),
     byLag,
     limitations: [
       "This is a descriptive correlation scan, not an event study, a forecast, or a tradable signal.",

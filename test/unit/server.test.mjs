@@ -7330,24 +7330,27 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
     primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
     expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
     max_lag_bars: 3, minimum_observations: 10,
+    empirical_null_calibration: true,
+    folds: [
+      { fold_id: "f1", from: "1970-01-01T00:00:00.000Z", to: "1970-01-01T08:00:00.000Z" },
+      { fold_id: "f2", from: "1970-01-01T08:00:00.000Z", to: "1970-01-01T20:00:00.000Z" },
+    ],
   };
   const recorded = JSON.parse((await journalling.callTool({ name: "compute_lead_lag_relationships", arguments: {
     ...args, journal: { hypothesis_id: "usdjpy-us10y-lead-lag", population: "in_sample", decision: "inconclusive" },
   } })).content[0].text);
-  assert.equal(recorded.journal.recorded, true);
-  assert.equal(journalRecords[0].conditionType, "lead_lag_return_correlation");
-  // A lag is recordable only when it is both tradable and survives the declared Bonferroni family.
-  assert.deepEqual(journalRecords[0].outcomes.map((outcome) => outcome.horizonBars), [1]);
-  assert.ok(journalRecords[0].outcomes.every((outcome) => typeof outcome.correlation === "number"));
-  assert.ok(journalRecords[0].outcomes.every((outcome) => !("meanDirectionalReturn" in outcome)));
+  assert.equal(recorded.empiricalNullCalibration.status, "complete");
+  assert.equal(recorded.journal.recorded, false);
+  assert.match(recorded.journal.error, /empirical-null candidate eligibility/);
+  assert.equal(journalRecords.length, 0, "a scan without evaluable, sign-stable folds must not reach the journal");
 
   // A scan inspects every lag at once, so its strongest lag is never an out-of-sample result.
   const adopted = JSON.parse((await journalling.callTool({ name: "compute_lead_lag_relationships", arguments: {
     ...args, journal: { hypothesis_id: "usdjpy-us10y-lead-lag", population: "in_sample", decision: "adopted" },
   } })).content[0].text);
   assert.equal(adopted.journal.recorded, false);
-  assert.match(adopted.journal.error, /cannot be adopted/);
-  assert.equal(journalRecords.length, 1, "a refused decision must not reach the journal");
+  assert.match(adopted.journal.error, /empirical-null candidate eligibility/);
+  assert.equal(journalRecords.length, 0, "a refused decision must not reach the journal");
 });
 
 test("compute_lead_lag_relationships rejects a mismatched binding, an identical pane and Bar Replay", async () => {

@@ -7717,6 +7717,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         configuration_trials: z.number().int().min(1).max(100000).optional()
           .describe("Total related scans inspected so far, including this one. Applied with all scanned lags as the Bonferroni family. Default: 1"),
+        empirical_null_calibration: z.boolean().optional()
+          .describe("Run the fixed 1,000-replication circular-shift empirical-null calibration on this exact pair. Required for candidate eligibility; default: false"),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
@@ -7733,7 +7735,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     },
     async ({ primary_chart_index, reference_chart_index, expected_primary_symbol, expected_reference_symbol,
       expected_timeframe, count, max_lag_bars, minimum_observations, confidence_level, configuration_trials,
-      folds, journal }) => chartOperations.run(async () => {
+      empirical_null_calibration, folds, journal }) => chartOperations.run(async () => {
       try {
         if (primary_chart_index === reference_chart_index) throw new Error("primary and reference chart indexes must differ");
         const replay = await tv.getReplayStatus();
@@ -7769,6 +7771,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           minimumObservations: minimum_observations ?? 30,
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials ?? 1,
+          empiricalNullCalibration: empirical_null_calibration ?? false,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
         });
         const closedPrimary = primary.bars.filter((bar) => bar.forming !== true);
@@ -7798,8 +7801,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             // evidence about something actionable. Storing the contemporaneous and negative lags
             // would put numbers nobody can act on next to ones they can.
             const tradable = result.byLag.filter((lag) =>
-              lag.tradableOnPrimary && lag.status === "evaluable" && lag.correlation !== null && lag.inference.passesBonferroni);
-            if (tradable.length === 0) throw new Error("no tradable lag passes the Bonferroni eligibility gate to record");
+              lag.tradableOnPrimary && lag.status === "evaluable" && lag.correlation !== null && lag.inference.candidateEligible);
+            if (tradable.length === 0) throw new Error("no tradable lag passes the empirical-null candidate eligibility gate to record");
             if (journal.decision === "adopted") {
               throw new Error("a lag scan cannot be adopted: re-register the chosen lag as a forward hypothesis and collect it out of sample");
             }
