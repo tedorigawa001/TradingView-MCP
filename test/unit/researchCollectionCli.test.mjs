@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadRequiredHistory, parseResearchCollectionCliArguments, summarizeResearchCollection } from "../../build/researchCollectionCli.js";
+import { loadRequiredHistory, parseResearchCollectionCliArguments, sourceFor, summarizeResearchCollection } from "../../build/researchCollectionCli.js";
 
 test("research collection CLI requires an explicit chart-switch confirmation", () => {
   assert.throws(() => parseResearchCollectionCliArguments([], {}), /chart switching is disabled/);
@@ -63,6 +63,18 @@ test("research collection reports an already sufficient chart without loading mo
   const result = await loadRequiredHistory(tv, 0, 500);
   assert.equal(result.coverage.sufficient, true);
   assert.equal(result.coverage.loadedBars, 0);
+});
+
+test("research collection source evidence retains each collector's requested bar count", () => {
+  const history = { bars: [
+    { timeIso: "2026-01-01T00:00:00.000Z" },
+    { timeIso: "2026-01-01T01:00:00.000Z", forming: true },
+    { timeIso: "2026-01-01T02:00:00.000Z" },
+  ] };
+  assert.deepEqual(sourceFor(history, 1, 1000), {
+    chartIndex: 1, requestedBars: 1000, returnedBars: 3, closedBars: 2,
+    from: "2026-01-01T00:00:00.000Z", to: "2026-01-01T02:00:00.000Z",
+  });
 });
 
 test("research collection distinguishes successful transport from partial research evidence", () => {

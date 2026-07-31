@@ -98,9 +98,9 @@ export async function loadRequiredHistory(
   return { history, coverage: { chartIndex, requiredBars, initialBars: initial.bars.length, loadedBars: Math.max(0, history.bars.length - initial.bars.length), finalBars: history.bars.length, sufficient: history.bars.length >= requiredBars, moreAvailable } satisfies HistoryCoverage };
 }
 
-function sourceFor(history: { bars: Array<{ timeIso: string; forming?: boolean }> }, chartIndex: number) {
+export function sourceFor(history: { bars: Array<{ timeIso: string; forming?: boolean }> }, chartIndex: number, requestedBars: number) {
   const closed = history.bars.filter((bar) => bar.forming !== true);
-  return { chartIndex, requestedBars: 5000, returnedBars: history.bars.length, closedBars: closed.length, from: closed[0]?.timeIso ?? null, to: closed.at(-1)?.timeIso ?? null };
+  return { chartIndex, requestedBars, returnedBars: history.bars.length, closedBars: closed.length, from: closed[0]?.timeIso ?? null, to: closed.at(-1)?.timeIso ?? null };
 }
 
 function insufficientHistory(id: string, methodologyVersion: string, source: unknown, coverage: HistoryCoverage[], sample: unknown): CollectionResult {
@@ -111,9 +111,9 @@ function insufficientHistory(id: string, methodologyVersion: string, source: unk
 async function collectFvg(tv: TradingView): Promise<CollectionResult> {
   return withChartTargets(tv, [{ chartIndex: 0, symbol: "OANDA:XAUUSD", resolution: "15" }], async () => {
     const { history, coverage } = await loadRequiredHistory(tv, 0, 5000);
-    if (!coverage.sufficient) return insufficientHistory("xauusd-15m-bearish-fvg-trend-down-forward-20260726", "fvg_retest_event_study_v2", sourceFor(history, 0), [coverage], { barsReceived: history.bars.length });
-    const result = runFvgRetestStudy({ bars: history.bars, symbol: history.symbol, timeframe: history.resolution, minimumGapBps: 3, retestWithinBars: 48, minImpulseBodyRatio: 0.6, requireBoundaryHold: true, horizons: [4, 16, 48], targetReturnBps: 10, minimumEvents: 50, folds: [], eventLimit: 0, confidenceLevel: 0.95, configurationTrials: 1, regime: REGIME, signalFrom: "2026-07-26T02:30:00.000Z", signalTo: null, branchFilter: "bearish", regimeFilter: { directional: "trend_down", volatility: null } });
-    return { id: "xauusd-15m-bearish-fvg-trend-down-forward-20260726", source: sourceFor(history, 0), coverage: { charts: [coverage], sufficient: true }, sample: result.sample, qualityIssues: result.qualityIssues, primaryAvailableEvents: result.byBranch.fvg_retest_bearish.horizons["16"].availableEvents, result };
+    if (!coverage.sufficient) return insufficientHistory("xauusd-15m-bearish-fvg-trend-down-forward-20260726", "fvg_retest_event_study_v3", sourceFor(history, 0, 5000), [coverage], { barsReceived: history.bars.length });
+    const result = runFvgRetestStudy({ bars: history.bars, symbol: history.symbol, timeframe: history.resolution, minimumGapBps: 3, retestWithinBars: 48, minImpulseBodyRatio: 0.6, requireBoundaryHold: true, overlapPolicy: "exclude_later_event", horizons: [4, 16, 48], targetReturnBps: 10, minimumEvents: 50, folds: [], eventLimit: 0, confidenceLevel: 0.95, configurationTrials: 1, regime: REGIME, signalFrom: "2026-07-26T02:30:00.000Z", signalTo: null, branchFilter: "bearish", regimeFilter: { directional: "trend_down", volatility: null } });
+    return { id: "xauusd-15m-bearish-fvg-trend-down-forward-20260726", source: sourceFor(history, 0, 5000), coverage: { charts: [coverage], sufficient: true }, sample: result.sample, qualityIssues: result.qualityIssues, primaryAvailableEvents: result.byBranch.fvg_retest_bearish.horizons["16"].availableEvents, result };
   });
 }
 
@@ -122,7 +122,7 @@ async function collectYieldPrice(tv: TradingView): Promise<CollectionResult> {
     const [targetEvidence, driverEvidence] = await Promise.all([loadRequiredHistory(tv, 0, 1000), loadRequiredHistory(tv, 1, 1000)]);
     const { history: target, coverage: targetCoverage } = targetEvidence;
     const { history: driver, coverage: driverCoverage } = driverEvidence;
-    const source = { target: sourceFor(target, 0), driver: sourceFor(driver, 1) };
+    const source = { target: sourceFor(target, 0, 1000), driver: sourceFor(driver, 1, 1000) };
     if (!targetCoverage.sufficient || !driverCoverage.sufficient) return insufficientHistory("eurusd-us10y-nonconfirmation-daily-20260726", "yield_price_nonconfirmation_event_study_v2", source, [targetCoverage, driverCoverage], { targetBarsReceived: target.bars.length, driverBarsReceived: driver.bars.length });
     const result = runYieldPriceNonconfirmationStudy({ targetBars: target.bars, driverBars: driver.bars, targetSymbol: target.symbol, driverSymbol: driver.symbol, targetTimeframe: target.resolution, driverTimeframe: driver.resolution, relationship: "inverse", driverLookback: 5, driverChangeThreshold: 0.001, priceBreakoutLookback: 2, nonconfirmationBars: 2, triggerLookback: 2, triggerWithinBars: 5, maxDriverAgeBars: 1, horizons: [1, 5, 10, 20], targetReturnBps: 10, minimumEvents: 30, signalFrom: "2026-07-26T03:23:15.913Z", folds: [], eventLimit: 0, driverLagBars: 0, configurationTrials: 1, contextRegime: null, contextIndicator: null });
     const primary = Object.values(result.byBranch).reduce((sum, branch) => sum + branch.horizons["5"].availableEvents, 0);
@@ -133,9 +133,9 @@ async function collectYieldPrice(tv: TradingView): Promise<CollectionResult> {
 async function collectFeature(tv: TradingView): Promise<CollectionResult> {
   return withChartTargets(tv, [{ chartIndex: 0, symbol: "OANDA:EURUSD", resolution: "50" }], async () => {
     const { history, coverage } = await loadRequiredHistory(tv, 0, 500);
-    if (!coverage.sufficient) return insufficientHistory("eurusd-50m-lower-wick-trend-down-forward-20260727", "feature_outcome_relationships_v1", sourceFor(history, 0), [coverage], { barsReceived: history.bars.length });
+    if (!coverage.sufficient) return insufficientHistory("eurusd-50m-lower-wick-trend-down-forward-20260727", "feature_outcome_relationships_v1", sourceFor(history, 0, 500), [coverage], { barsReceived: history.bars.length });
     const result = computeFeatureOutcomeRelationships({ bars: history.bars, symbol: history.symbol, timeframe: history.resolution, features: ["wick_imbalance"], selection: { feature: "wick_imbalance", bucket: "lower_wick_dominant" }, signalFrom: "2026-07-27T08:39:13.383Z", signalTo: null, atrLookback: 14, atrBaselineLookback: 50, rangeLookback: 20, streakMinimumBars: 3, bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.2, atrCompressionLowRatio: 0.75, atrCompressionHighRatio: 1.5, rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.25, horizons: [1, 5, 10], minimumObservations: 50, folds: [], regime: { directionalRegime: "trend_down", volatilityRegime: null, trendLookback: 20, atrLookback: 14, volatilityBaselineLookback: 50, trendEfficiencyThreshold: 0.6, rangeEfficiencyThreshold: 0.25, directionalMoveAtrThreshold: 2, highVolatilityRatio: 1.5, lowVolatilityRatio: 0.75 }, observationLimit: 0 });
-    return { id: "eurusd-50m-lower-wick-trend-down-forward-20260727", source: sourceFor(history, 0), coverage: { charts: [coverage], sufficient: true }, sample: result.sample, qualityIssues: result.qualityIssues, primaryAvailableEvents: result.selectionContrast?.horizons["5"].selected.availableObservations ?? 0, result };
+    return { id: "eurusd-50m-lower-wick-trend-down-forward-20260727", source: sourceFor(history, 0, 500), coverage: { charts: [coverage], sufficient: true }, sample: result.sample, qualityIssues: result.qualityIssues, primaryAvailableEvents: result.selectionContrast?.horizons["5"].selected.availableObservations ?? 0, result };
   });
 }
 
