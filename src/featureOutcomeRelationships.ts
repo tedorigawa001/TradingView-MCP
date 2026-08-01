@@ -66,6 +66,12 @@ export interface FeatureOutcomeRelationshipsInput {
   confidenceLevel?: 0.9 | 0.95 | 0.99;
   configurationTrials?: number;
   empiricalNullCalibration?: boolean;
+  /**
+   * Absolute mean forward return, in basis points, that a bucket must reach to be a candidate.
+   * Required with no default: silence must not mean "any effect will do". Recorded at 10 bps for
+   * FX after every candidate the first real run produced came in under a fifth of the spread.
+   */
+  minimumEffectBps: number;
 }
 
 const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
@@ -281,10 +287,17 @@ type BonferroniInference = {
   adjustedAlpha: number;
   candidateHorizon: 1;
   minimumObservations: number;
+  /**
+   * Significance reports whether an effect exists, never how large it is, and a large enough
+   * sample makes a fraction of a basis point extreme. The first real candidates this project
+   * produced were all smaller than a fifth of the spread they would have to cross.
+   */
+  minimumEffectBps: number;
 };
 
 function inferenceFor(
   interval: { status: string; twoSidedPValue?: number } | undefined,
+  mean: number | null,
   observations: number,
   bonferroni: BonferroniInference,
   horizon: number,
@@ -300,7 +313,11 @@ function inferenceFor(
     minimumObservationsMet && passesBonferroni;
   const empiricalAvailable = empiricalNullCalibration?.status === "available";
   const empiricalPasses = empiricalAvailable && empiricalNullCalibration.passes;
+  const effectBps = mean === null ? null : Math.abs(mean) * 10_000;
+  const meetsMinimumEffect = effectBps !== null && effectBps >= bonferroni.minimumEffectBps;
   return {
+    effectBps,
+    meetsMinimumEffect,
     twoSidedPValue: pValue,
     bonferroniAdjustedPValue: pValue === null ? null : Math.min(1, pValue * bonferroni.familyTests),
     ...bonferroni,
@@ -308,8 +325,9 @@ function inferenceFor(
     passesBonferroni,
     exploratoryEligible,
     ...(empiricalNullCalibration === undefined ? {} : { empiricalNullCalibration }),
-    candidateEligible: exploratoryEligible && empiricalPasses,
+    candidateEligible: exploratoryEligible && empiricalPasses && meetsMinimumEffect,
     candidateBlockers: [
+      ...(meetsMinimumEffect ? [] : ["minimum_effect_size_not_met"]),
       ...(empiricalNullCalibration === undefined
         ? ["empirical_null_calibration_required"]
         : !empiricalAvailable
@@ -356,16 +374,16 @@ function summarize(
       availableObservations: outcomes.length,
       unavailableObservations: observations.length - outcomes.length,
       forwardReturn: { ...forwardReturn, ...(bonferroni === undefined ? {} : { inference:
-        inferenceFor(forwardReturn.meanConfidenceInterval, forwardReturn.count, bonferroni, horizon, false,
+        inferenceFor(forwardReturn.meanConfidenceInterval, forwardReturn.mean, forwardReturn.count, bonferroni, horizon, false,
           "candidate_requires_non_overlapping_series") }) },
       nonOverlappingForwardReturn: {
         sampling: "greedy_non_overlapping_future_return_windows" as const,
         ...nonOverlappingForwardReturn,
         neweyWestConfidenceInterval: neweyWestInterval,
         ...(bonferroni === undefined ? {} : { inference:
-          inferenceFor(nonOverlappingForwardReturn.meanConfidenceInterval, nonOverlappingForwardReturn.count,
+          inferenceFor(nonOverlappingForwardReturn.meanConfidenceInterval, nonOverlappingForwardReturn.mean, nonOverlappingForwardReturn.count,
             bonferroni, horizon, false, "candidate_requires_newey_west_inference"),
-          candidateInference: inferenceFor(neweyWestInterval, nonOverlappingForwardReturn.count,
+          candidateInference: inferenceFor(neweyWestInterval, nonOverlappingForwardReturn.mean, nonOverlappingForwardReturn.count,
             bonferroni, horizon, true, "", horizon === 1 ? empiricalNullCalibration : undefined) }),
       },
       positiveRate: returns.length === 0 ? null : returns.filter((value) => value > 0).length / returns.length,
@@ -632,6 +650,12 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     throw new Error("invalid feature-outcome horizons");
   }
   assertInteger(input.minimumObservations, 1, 5_000, "minimum observations");
+  // Runtime-checked as well as typed: the JavaScript callers would otherwise pass undefined and
+  // silently restore a rule with no floor on effect size.
+  if (typeof input.minimumEffectBps !== "number" || !Number.isFinite(input.minimumEffectBps) ||
+      input.minimumEffectBps < 0 || input.minimumEffectBps > 10_000) {
+    throw new Error("minimum effect bps must be a finite number from 0 to 10000");
+  }
   assertInteger(input.observationLimit, 0, 500, "observation limit");
 
   const allBars = validateBars(input.bars);
@@ -786,8 +810,10 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
     adjustedAlpha: (1 - confidenceLevel) / familyTests,
     candidateHorizon: 1 as const,
     minimumObservations: input.minimumObservations,
+    minimumEffectBps: input.minimumEffectBps,
   };
   const definition = {
+    minimumEffectBps: input.minimumEffectBps,
     atrLookback: input.atrLookback,
     atrBaselineLookback: input.atrBaselineLookback,
     rangeLookback: input.rangeLookback,

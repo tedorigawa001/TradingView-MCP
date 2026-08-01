@@ -14,7 +14,7 @@ const study = {
   bodyRatioThreshold: 0.2, wickImbalanceThreshold: 0.2,
   atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
   rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.2,
-  horizons: [1, 3], minimumObservations: 10, folds: [], regime: null,
+  horizons: [1, 3], minimumObservations: 10, minimumEffectBps: 0, folds: [], regime: null,
   observationLimit: 500, confidenceLevel: 0.95, configurationTrials: 1,
 };
 

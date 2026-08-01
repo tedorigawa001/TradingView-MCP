@@ -1400,6 +1400,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
           .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
         minimum_observations: z.number().int().min(2).max(5000),
+        minimum_effect_bps: z.number().finite().min(0).max(10_000),
         configuration_trials: z.number().int().min(1).max(100_000),
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         atr_lookback: z.number().int().min(2).max(250).optional(),
@@ -1421,7 +1422,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
       },
     },
-    async ({ timeframe, features, horizons, minimum_observations, configuration_trials, confidence_level,
+    async ({ timeframe, features, horizons, minimum_observations, minimum_effect_bps, configuration_trials, confidence_level,
       atr_lookback, atr_baseline_lookback, range_lookback, streak_minimum_bars, body_ratio_threshold,
       wick_imbalance_threshold, atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower,
       range_position_upper, gap_atr_threshold, models, replications, first_seed, bars, volatility, nominal_alpha }) => {
@@ -1453,6 +1454,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           gapAtrThreshold: gap_atr_threshold ?? 0.25,
           horizons,
           minimumObservations: minimum_observations,
+          minimumEffectBps: minimum_effect_bps,
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials,
           folds: [],
@@ -1555,6 +1557,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
           .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
         minimum_observations: z.number().int().min(2).max(5000),
+        minimum_effect_bps: z.number().finite().min(0).max(10_000),
         configuration_trials: z.number().int().min(1).max(100_000),
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         atr_lookback: z.number().int().min(2).max(250).optional(),
@@ -1577,7 +1580,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ timeframe, features, target_bucket, effect_bps, horizons, minimum_observations,
-      configuration_trials, confidence_level, atr_lookback, atr_baseline_lookback, range_lookback,
+      minimum_effect_bps, configuration_trials, confidence_level, atr_lookback, atr_baseline_lookback, range_lookback,
       streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold, atr_compression_low_ratio,
       atr_compression_high_ratio, range_position_lower, range_position_upper, gap_atr_threshold,
       models, replications, first_seed, bars, volatility, nominal_alpha }) => {
@@ -1609,6 +1612,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           gapAtrThreshold: gap_atr_threshold ?? 0.25,
           horizons,
           minimumObservations: minimum_observations,
+          minimumEffectBps: minimum_effect_bps,
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials,
           folds: [],
@@ -1701,6 +1705,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }).optional().describe("Optional predeclared point-in-time market-regime filter for a limited feature hypothesis"),
         configuration_trials: z.number().int().min(1).max(100_000).optional()
           .describe("Total related feature/threshold configurations inspected so far, including this one"),
+        minimum_effect_bps: z.number().finite().min(0).max(10_000)
+          .describe("Absolute mean forward return in basis points a bucket must reach to be a candidate. Significance alone reports existence, not size."),
         empirical_null_calibration: z.boolean().optional()
           .describe("Run the fixed 1,000-replication circular moving-block empirical-null calibration on the same closed bars. Default: false"),
         journal: z.object({
@@ -1716,7 +1722,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ expected_symbol, expected_timeframe, count, features, feature_selection, signal_from, signal_to, atr_lookback, atr_baseline_lookback,
       range_lookback, streak_minimum_bars, body_ratio_threshold, wick_imbalance_threshold,
       atr_compression_low_ratio, atr_compression_high_ratio, range_position_lower, range_position_upper,
-      gap_atr_threshold, horizons, minimum_observations, confidence_level, folds, regime, configuration_trials,
+      gap_atr_threshold, horizons, minimum_observations, minimum_effect_bps, confidence_level, folds, regime, configuration_trials,
       empirical_null_calibration, journal, observation_limit }) => chartOperations.run(async () => {
       try {
         if (feature_selection && features !== undefined) {
@@ -1744,6 +1750,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           bars: history.bars,
           symbol: history.symbol,
           timeframe: history.resolution,
+          minimumEffectBps: minimum_effect_bps,
           features: feature_selection ? [feature_selection.feature] : features ?? [
             "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
           ],

@@ -22,7 +22,7 @@ function input(series, overrides = {}) {
     bodyRatioThreshold: 0.2, wickImbalanceThreshold: 0.2,
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
     rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.2,
-    horizons: [1, 3], minimumObservations: 2, folds: [], regime: null, observationLimit: 50,
+    horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 0, folds: [], regime: null, observationLimit: 50,
     ...overrides,
   };
 }
@@ -64,7 +64,7 @@ test("feature-outcome candidate eligibility uses horizon one and non-overlapping
     100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
   ]);
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1, 3], minimumObservations: 2,
+    features: ["body_direction"], horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 0,
   }));
   const bullish = result.byFeature.body_direction.bullish_body;
   const horizonOne = bullish.horizons["1"];
@@ -110,7 +110,7 @@ test("feature-outcome empirical null block bootstrap is deterministic and bound 
     };
   });
   const definition = input(series, {
-    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50,
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
     observationLimit: 0, empiricalNullCalibration: true,
   });
   const first = computeFeatureOutcomeRelationships(definition);
@@ -135,7 +135,7 @@ test("feature-outcome empirical null block bootstrap is deterministic and bound 
   const changed = structuredClone(series);
   changed[100].high += 0.01;
   const changedResult = computeFeatureOutcomeRelationships(input(changed, {
-    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50,
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   assert.notEqual(changedResult.empiricalNullCalibration.evidenceHash,
@@ -148,7 +148,7 @@ test("feature-outcome empirical null does not promote an unconditional drift", (
   const series = bars(Date.UTC(2026, 0, 1),
     Array.from({ length: 300 }, (_, index) => 100 + index));
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 50,
+    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   const inference = result.byFeature.body_direction.bullish_body.horizons["1"]
@@ -172,7 +172,7 @@ test("feature-outcome empirical null treats a nonzero constant-return bucket as 
     };
   });
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 20,
+    features: ["body_direction"], horizons: [1], minimumObservations: 20, minimumEffectBps: 0,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   const calibration = result.byFeature.body_direction.bullish_body.horizons["1"]
@@ -197,7 +197,7 @@ test("feature-outcome empirical null excludes buckets below the candidate sample
     };
   });
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 50,
+    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   assert.equal(result.empiricalNullCalibration.familyEligibleBuckets, 1);
@@ -325,7 +325,7 @@ test("feature-outcome relationships report only an empty signal window before la
 test("feature-outcome relationships expose an insufficient interval instead of inventing precision", () => {
   const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103]);
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 1, confidenceLevel: 0.99,
+    features: ["body_direction"], horizons: [1], minimumObservations: 1, minimumEffectBps: 0, confidenceLevel: 0.99,
   }));
   const single = Object.values(result.byFeature.body_direction)
     .find((bucket) => bucket.horizons["1"].forwardReturn.count === 1);
@@ -358,7 +358,7 @@ test("a bucket large enough to overflow a spread still reports its extremes", ()
     bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.6,
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
     rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.5,
-    horizons: [1], minimumObservations: 30, folds: [], regime: null,
+    horizons: [1], minimumObservations: 30, minimumEffectBps: 0, folds: [], regime: null,
     observationLimit: 0, confidenceLevel: 0.95, configurationTrials: 1,
   });
   const bucket = Object.values(result.byFeature.body_direction)
@@ -368,4 +368,59 @@ test("a bucket large enough to overflow a spread still reports its extremes", ()
   assert.equal(typeof summary.minimum, "number");
   assert.equal(typeof summary.maximum, "number");
   assert.ok(summary.minimum <= summary.maximum);
+});
+
+test("a bucket below the minimum effect size is refused however significant it is", () => {
+  // The first real candidates were all under a fifth of the spread they would have to cross, and
+  // a large enough sample drives an extreme p-value for an effect that small. Significance
+  // reports that an effect exists and never how large it is, so the floor is separate.
+  const bars = [];
+  let price = 1.1;
+  for (let index = 0; index < 4000; index += 1) {
+    const open = price;
+    // A tiny, highly consistent alternation: significant on this many bars, far under 10 bps.
+    price = price * (1 + (index % 2 === 0 ? 0.00002 : -0.000015));
+    const close = price;
+    bars.push({
+      time: 1_600_000_000 + index * 900,
+      timeIso: new Date((1_600_000_000 + index * 900) * 1000).toISOString(),
+      open, high: Math.max(open, close) * 1.00005, low: Math.min(open, close) * 0.99995, close, volume: 5,
+    });
+  }
+  const run = (minimumEffectBps) => computeFeatureOutcomeRelationships({
+    bars, symbol: "SYNTH:FLOOR", timeframe: "15", features: ["body_direction"],
+    selection: null, signalFrom: null, signalTo: null,
+    atrLookback: 14, atrBaselineLookback: 50, rangeLookback: 20, streakMinimumBars: 3,
+    bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.6,
+    atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
+    rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.5,
+    horizons: [1], minimumObservations: 30, minimumEffectBps, folds: [], regime: null,
+    observationLimit: 0, confidenceLevel: 0.95, configurationTrials: 1,
+    empiricalNullCalibration: true,
+  });
+  const pick = (result) => Object.values(result.byFeature.body_direction)
+    .map((entry) => entry.horizons["1"].nonOverlappingForwardReturn.candidateInference)
+    .filter((inference) => inference !== undefined);
+  const floored = pick(run(10));
+  assert.ok(floored.length > 0);
+  for (const inference of floored) {
+    assert.equal(inference.candidateEligible, false);
+    if (Math.abs(inference.effectBps) < 10) {
+      assert.ok(inference.candidateBlockers.includes("minimum_effect_size_not_met"));
+    }
+  }
+  // The floor is the only thing withheld: effectBps is reported either way.
+  for (const inference of pick(run(0))) assert.equal(typeof inference.effectBps, "number");
+});
+
+test("the minimum effect size cannot be omitted into a rule without a floor", () => {
+  const bars = [{ time: 1, timeIso: "2024-01-01T00:00:00.000Z", open: 1, high: 1, low: 1, close: 1, volume: 1 }];
+  assert.throws(() => computeFeatureOutcomeRelationships({
+    bars, symbol: "S", timeframe: "15", features: ["body_direction"], selection: null,
+    signalFrom: null, signalTo: null, atrLookback: 14, atrBaselineLookback: 50, rangeLookback: 20,
+    streakMinimumBars: 3, bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.6,
+    atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2, rangePositionLower: 0.33,
+    rangePositionUpper: 0.67, gapAtrThreshold: 0.5, horizons: [1], minimumObservations: 30,
+    folds: [], regime: null, observationLimit: 0,
+  }), /minimum effect bps/);
 });

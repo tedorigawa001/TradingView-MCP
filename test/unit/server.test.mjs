@@ -4511,7 +4511,7 @@ test("get_futures_flow_context binds a daily futures chart and keeps daily OI un
   }));
   const res = await client.callTool({ name: "get_futures_flow_context", arguments: {
     target_symbol: "OANDA:USDJPY", futures_chart_index: 1, expected_futures_symbol: "CME:6J1!",
-    count: 100, volume_lookback: 5, elevated_volume_z_score: 1, minimum_observations: 1,
+    count: 100, volume_lookback: 5, elevated_volume_z_score: 1, minimum_observations: 1, minimum_effect_bps: 0,
     observation_limit: 2, cot_weeks: 2,
   } });
   assert.equal(res.isError, undefined, res.content[0].text);
@@ -5525,7 +5525,7 @@ test("run_event_study_falsification_audit accepts a declared synthetic aftershoc
 test("run_feature_outcome_falsification_audit calibrates the empirical-null candidate gate without chart access", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "run_feature_outcome_falsification_audit", arguments: {
-    timeframe: "60", features: ["body_direction"], horizons: [1, 3], minimum_observations: 10,
+    timeframe: "60", features: ["body_direction"], horizons: [1, 3], minimum_observations: 10, minimum_effect_bps: 0,
     configuration_trials: 1, models: ["white_noise"], replications: 2, bars: 500,
   } });
   assert.equal(res.isError, undefined);
@@ -5541,7 +5541,7 @@ test("run_lead_lag_falsification_audit returns a bound configuration hash withou
   const response = await client.callTool({ name: "run_lead_lag_falsification_audit", arguments: {
     timeframe: "60",
     max_lag_bars: 2,
-    minimum_observations: 30,
+    minimum_observations: 30, minimum_effect_bps: 0,
     configuration_trials: 1,
     folds: [
       { fold_id: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
@@ -5562,7 +5562,7 @@ test("run_feature_outcome_power_audit returns separate effect-size detection run
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "run_feature_outcome_power_audit", arguments: {
     timeframe: "60", features: ["body_direction"], target_bucket: "bullish_body",
-    effect_bps: [25, 100], horizons: [1, 3], minimum_observations: 10,
+    effect_bps: [25, 100], horizons: [1, 3], minimum_observations: 10, minimum_effect_bps: 0,
     configuration_trials: 1, models: ["white_noise"], replications: 1, bars: 500,
   } });
   assert.equal(res.isError, undefined, res.content[0].text);
@@ -6285,7 +6285,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
   const res = await client.callTool({ name: "compute_feature_outcome_relationships", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
     features: ["body_direction", "range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
-    range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5,
+    range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5, minimum_effect_bps: 0,
     confidence_level: 0.99,
     configuration_trials: 18,
     empirical_null_calibration: true,
@@ -6327,7 +6327,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     arguments: {
       expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
       features: ["body_direction"], atr_lookback: 2, atr_baseline_lookback: 5,
-      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 5,
+      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 5, minimum_effect_bps: 0,
       journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
       observation_limit: 0,
     },
@@ -6341,7 +6341,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     arguments: {
       expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 100,
       features: ["range_position"], atr_lookback: 2, atr_baseline_lookback: 5,
-      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 1,
+      range_lookback: 3, streak_minimum_bars: 2, horizons: [1], minimum_observations: 1, minimum_effect_bps: 0,
       regime: {
         directional_regime: "trend_up", trend_lookback: 2, atr_lookback: 2,
         volatility_baseline_lookback: 5, directional_move_atr_threshold: 0.1,
@@ -6360,7 +6360,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
       feature_selection: { feature: "body_direction", bucket: "bullish_body" },
       signal_from: bars[15].timeIso, signal_to: bars[25].timeIso,
       atr_lookback: 2, atr_baseline_lookback: 5, range_lookback: 3, streak_minimum_bars: 2,
-      horizons: [1], minimum_observations: 1, observation_limit: 20,
+      horizons: [1], minimum_observations: 1, minimum_effect_bps: 0, observation_limit: 20,
     },
   })).content[0].text);
   assert.deepEqual(forwardSelected.features, ["body_direction"]);
@@ -6376,6 +6376,7 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     arguments: {
       expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", features: ["body_direction"],
       feature_selection: { feature: "body_direction", bucket: "bullish_body" }, horizons: [1],
+      minimum_observations: 30, minimum_effect_bps: 0, configuration_trials: 1,
     },
   });
   assert.equal(incompatibleSelection.isError, true);
@@ -7314,7 +7315,7 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   const response = await client.callTool({ name: "compute_lead_lag_relationships", arguments: {
     primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
     expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
-    max_lag_bars: 3, minimum_observations: 10,
+    max_lag_bars: 3, minimum_observations: 10, minimum_effect_bps: 0,
   } });
   const parsed = JSON.parse(response.content[0].text);
   assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
@@ -7352,7 +7353,7 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   const args = {
     primary_chart_index: 0, reference_chart_index: 1, expected_primary_symbol: "OANDA:USDJPY",
     expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
-    max_lag_bars: 3, minimum_observations: 10,
+    max_lag_bars: 3, minimum_observations: 10, minimum_effect_bps: 0,
     empirical_null_calibration: true,
     folds: [
       { fold_id: "f1", from: "1970-01-01T00:00:00.000Z", to: "1970-01-01T08:00:00.000Z" },
