@@ -30,6 +30,7 @@
     "test:integration": "node test/smoke.mjs",
     "pretest:e2e": "npm run build",
     "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.mjs",
+    "scan:fx-csv": "node --max-old-space-size=8192 build/fxCsvFeatureScanCli.js --confirm-local-import",
     "aggregate:fx-csv": "node --max-old-space-size=8192 build/fxCsvM1AggregationCli.js --confirm-local-import"
   },
   "engines": {

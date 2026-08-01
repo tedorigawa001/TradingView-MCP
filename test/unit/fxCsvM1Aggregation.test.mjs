@@ -56,7 +56,7 @@ test("a weekend leaves its buckets empty instead of joining Friday to Monday", (
   assert.notEqual(result.bars[0].timeIso, result.bars[1].timeIso);
 });
 
-test("identical repeats are dropped and disagreeing repeats are counted rather than resolved", () => {
+test("identical repeats are dropped and a disagreeing repeat discards the bucket it landed in", () => {
   const same = run([
     row("2024.01.12 09:00", 1.1, 1.1, 1.1, 1.1, 4),
     row("2024.01.12 09:00", 1.1, 1.1, 1.1, 1.1, 4),
@@ -65,12 +65,60 @@ test("identical repeats are dropped and disagreeing repeats are counted rather t
   assert.equal(same.quality.conflictingDuplicateTimestamps, 0);
   assert.equal(same.bars[0].tickVolume, 4);
 
+  // Keeping the copy that arrived first would settle a source disagreement by file order, so the
+  // bucket goes. The neighbouring bucket is untouched: the refusal is local to the conflict.
   const conflicting = run([
     row("2024.01.12 09:00", 1.1, 1.1, 1.1, 1.1, 4),
     row("2024.01.12 09:00", 1.2, 1.2, 1.2, 1.2, 9),
+    row("2024.01.12 09:15", 1.3, 1.3, 1.3, 1.3, 2),
   ]);
   assert.equal(conflicting.quality.conflictingDuplicateTimestamps, 1);
+  assert.equal(conflicting.quality.bucketsDroppedForConflictingDuplicates, 1);
   assert.ok(conflicting.qualityIssues.includes("one_or_more_duplicate_timestamps_disagreed"));
+  assert.ok(conflicting.qualityIssues.includes("one_or_more_buckets_dropped_for_conflicting_duplicates"));
+  assert.deepEqual(conflicting.bars.map((bar) => bar.timeIso), ["2024-01-12T07:15:00.000Z"]);
+});
+
+test("a row rejected as a candle does not make the correction that follows it look like a repeat", () => {
+  // Advancing the read position on a rejected row was enough to lose the good row behind it: the
+  // two share a minute, so the second arrived at the duplicate branch and was dropped there.
+  const result = run([
+    row("2024.01.12 09:00", 1.1, 1.05, 1.09, 1.11),
+    row("2024.01.12 09:00", 1.1, 1.12, 1.09, 1.11, 6),
+  ]);
+  assert.equal(result.quality.rowsMalformed, 1);
+  assert.equal(result.quality.duplicateTimestampsDropped, 0);
+  assert.equal(result.bars.length, 1);
+  assert.equal(result.bars[0].tickVolume, 6);
+});
+
+test("prices and volumes that parse to infinity are refused rather than serialized as null", () => {
+  // A long enough run of digits is still a match for the row pattern, and Infinity satisfies every
+  // ordering comparison a candle check makes, so it passed and left the file as a null price.
+  const huge = "9".repeat(400);
+  const price = run([row("2024.01.12 09:00", 1.1, huge, 1.09, 1.11)]);
+  assert.equal(price.quality.rowsMalformed, 1);
+  assert.equal(price.bars.length, 0);
+
+  const volume = run([row("2024.01.12 09:00", 1.1, 1.12, 1.09, 1.11, huge)]);
+  assert.equal(volume.quality.rowsMalformed, 1);
+  assert.equal(volume.bars.length, 0);
+});
+
+test("a timestamp the calendar does not have is refused instead of rolled forward", () => {
+  // Date.UTC would move February 30th into March and stamp a bar at a time the source never named.
+  const result = run([
+    row("2024.02.30 09:00", 1.1, 1.1, 1.1, 1.1),
+    row("2024.13.01 09:00", 1.1, 1.1, 1.1, 1.1),
+    row("2024.01.12 25:00", 1.1, 1.1, 1.1, 1.1),
+    row("2024.01.12 09:60", 1.1, 1.1, 1.1, 1.1),
+    row("2024.01.12 09:00", 1.1, 1.1, 1.1, 1.1),
+  ]);
+  assert.equal(result.quality.rowsMalformed, 4);
+  assert.deepEqual(result.bars.map((bar) => bar.timeIso), ["2024-01-12T07:00:00.000Z"]);
+  // A leap day the year actually has still passes.
+  assert.equal(run([row("2024.02.29 09:00", 1.1, 1.1, 1.1, 1.1)]).bars.length, 1);
+  assert.equal(run([row("2023.02.29 09:00", 1.1, 1.1, 1.1, 1.1)]).quality.rowsMalformed, 1);
 });
 
 test("a month repeated later in the stream is refused and its span is reported", () => {
@@ -109,5 +157,7 @@ test("an OHLC row that cannot be a candle is refused", () => {
 test("aggregation refuses a bucket length that does not divide a day", () => {
   assert.throws(() => run([], { bucketMinutes: 7 }), /divide a day evenly/);
   assert.throws(() => run([], { startFromBrokerDate: "2016-01-01" }), /broker calendar date/);
+  assert.throws(() => run([], { startFromBrokerDate: "2016.02.30" }), /broker calendar date/);
+  assert.throws(() => run([], { startFromBrokerDate: "2016.13.01" }), /broker calendar date/);
   assert.throws(() => run([], { minimumMinuteCoverage: 16 }), /minimum minute coverage/);
 });

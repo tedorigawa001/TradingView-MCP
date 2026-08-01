@@ -28,11 +28,17 @@ export type FxCsvM1AggregationQuality = {
   outOfOrderRows: number;
   outOfOrderRange: { from: string; to: string } | null;
   bucketsBelowMinimumCoverage: number;
+  /**
+   * Buckets discarded because a repeated minute disagreed with the one already folded in. Counting a
+   * conflict while keeping whichever copy arrived first would decide a source disagreement by file
+   * order, so the whole bucket goes: a gap is handled downstream, an arbitrated price is not.
+   */
+  bucketsDroppedForConflictingDuplicates: number;
 };
 
 export type FxCsvM1AggregationResult = {
   schemaVersion: "1.0";
-  methodologyVersion: "fx_csv_m1_aggregation_v1";
+  methodologyVersion: "fx_csv_m1_aggregation_v2";
   evidenceTier: "official_revised_history";
   brokerClockRule: "new_york_wall_time_plus_seven_hours";
   bucketMinutes: number;
@@ -48,9 +54,12 @@ export interface FxCsvM1AggregationInput {
   lines: Iterable<string>;
   bucketMinutes: number;
   /**
-   * Broker calendar date before which rows are refused. This file switched its clock convention
-   * during 2015 - 2012-2014 runs on Tokyo time and 2016 onward on New York plus seven - so a start
-   * boundary is required rather than defaulted, and cannot be forgotten into a silent 7-hour shift.
+   * Broker calendar date before which rows are refused. Every file in this vendor family switched
+   * its clock convention mid-history, and not on the same date or from the same one: the five FX
+   * pairs ran on fixed Tokyo time until the weekend of 2015-06-27 and on New York plus seven after,
+   * while gold ran on a fixed UTC+2 until late 2018. A start boundary is therefore required rather
+   * than defaulted, and cannot be forgotten into a silent multi-hour shift. Verify each new file
+   * before choosing one; the rule below is asserted, not detected.
    */
   startFromBrokerDate: string;
   /** Minutes that must be present in a bucket for it to be emitted. */
@@ -58,6 +67,17 @@ export interface FxCsvM1AggregationInput {
 }
 
 const ROW = /^(\d{4})\.(\d{2})\.(\d{2}) (\d{2}):(\d{2}),([\d.]+),([\d.]+),([\d.]+),([\d.]+),(\d+)$/;
+
+/**
+ * The row pattern accepts any two digits per field, and Date.UTC would roll 2024.02.30 forward to
+ * March rather than reject it, placing a bar at a time the source never named. Existence is checked
+ * against the calendar instead of left to that normalization.
+ */
+function isRealBrokerMinute(year: number, month: number, day: number, hour: number, minute: number): boolean {
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= daysInMonth;
+}
 
 /**
  * Broker wall clock to UTC. The clock tracks New York, not Europe: Friday's last traded minute
@@ -81,7 +101,8 @@ function validate(input: FxCsvM1AggregationInput) {
       input.minimumMinuteCoverage > input.bucketMinutes) {
     throw new Error("minimum minute coverage must be an integer from one to the bucket length");
   }
-  if (!/^\d{4}\.\d{2}\.\d{2}$/.test(input.startFromBrokerDate)) {
+  const start = /^(\d{4})\.(\d{2})\.(\d{2})$/.exec(input.startFromBrokerDate);
+  if (start === null || !isRealBrokerMinute(Number(start[1]), Number(start[2]), Number(start[3]), 0, 0)) {
     throw new Error("start_from_broker_date must be a YYYY.MM.DD broker calendar date");
   }
 }
@@ -92,17 +113,19 @@ export function aggregateFxCsvM1(input: FxCsvM1AggregationInput): FxCsvM1Aggrega
   const quality: FxCsvM1AggregationQuality = {
     rowsRead: 0, rowsBeforeStart: 0, rowsMalformed: 0, duplicateTimestampsDropped: 0,
     conflictingDuplicateTimestamps: 0, outOfOrderRows: 0, outOfOrderRange: null, bucketsBelowMinimumCoverage: 0,
+    bucketsDroppedForConflictingDuplicates: 0,
   };
   const bars: AggregatedBar[] = [];
-  let current: (AggregatedBar & { bucketStartMs: number }) | null = null;
+  let current: (AggregatedBar & { bucketStartMs: number; conflicted: boolean }) | null = null;
   let previousMinuteMs = -Infinity;
   let previousRow: string | null = null;
 
   const flush = () => {
     if (current === null) return;
-    const { bucketStartMs, ...bar } = current;
+    const { bucketStartMs, conflicted, ...bar } = current;
     void bucketStartMs;
-    if (bar.minutesPresent < input.minimumMinuteCoverage) quality.bucketsBelowMinimumCoverage += 1;
+    if (conflicted) quality.bucketsDroppedForConflictingDuplicates += 1;
+    else if (bar.minutesPresent < input.minimumMinuteCoverage) quality.bucketsBelowMinimumCoverage += 1;
     else bars.push(bar);
     current = null;
   };
@@ -115,11 +138,19 @@ export function aggregateFxCsvM1(input: FxCsvM1AggregationInput): FxCsvM1Aggrega
     if (match === null) { quality.rowsMalformed += 1; continue; }
     const [, y, mo, d, h, mi, o, hi, lo, c, v] = match;
     if (`${y}.${mo}.${d}` < input.startFromBrokerDate) { quality.rowsBeforeStart += 1; continue; }
+    if (!isRealBrokerMinute(Number(y), Number(mo), Number(d), Number(h), Number(mi))) {
+      quality.rowsMalformed += 1;
+      continue;
+    }
     const minuteMs = brokerWallTimeToUtcMs(Number(y), Number(mo), Number(d), Number(h), Number(mi));
     if (minuteMs === previousMinuteMs) {
-      // The supplied file duplicates two whole months byte for byte. Identical repeats are dropped;
-      // a repeat that disagrees is a source conflict and is counted rather than silently resolved.
-      if (previousRow !== row) quality.conflictingDuplicateTimestamps += 1;
+      // These files repeat whole months. An identical repeat is dropped; a repeat that disagrees is
+      // a source conflict, and the bucket already holding the first copy is discarded at flush so
+      // that file order never decides which price wins.
+      if (previousRow !== row) {
+        quality.conflictingDuplicateTimestamps += 1;
+        if (current !== null) current.conflicted = true;
+      }
       quality.duplicateTimestampsDropped += 1;
       continue;
     }
@@ -132,13 +163,18 @@ export function aggregateFxCsvM1(input: FxCsvM1AggregationInput): FxCsvM1Aggrega
             to: iso > quality.outOfOrderRange.to ? iso : quality.outOfOrderRange.to };
       continue;
     }
-    previousMinuteMs = minuteMs;
-    previousRow = row;
-    const open = Number(o), high = Number(hi), low = Number(lo), close = Number(c);
-    if (!(low <= Math.min(open, close) && high >= Math.max(open, close) && high >= low && high > 0)) {
+    const open = Number(o), high = Number(hi), low = Number(lo), close = Number(c), volume = Number(v);
+    // A long enough run of digits parses to Infinity, which satisfies every ordering comparison below
+    // and would reach the output as a null price, so finiteness is checked before consistency.
+    if (![open, high, low, close, volume].every(Number.isFinite) ||
+        !(low <= Math.min(open, close) && high >= Math.max(open, close) && high >= low && high > 0)) {
       quality.rowsMalformed += 1;
       continue;
     }
+    // Only an accepted row advances the position. Advancing on a rejected one would make the next
+    // row at the same minute - the correction for it - look like a duplicate and be dropped too.
+    previousMinuteMs = minuteMs;
+    previousRow = row;
     // Absolute UTC bucketing. A weekend leaves its buckets empty rather than joining Friday to
     // Monday, because a bucket is a fixed wall-clock slot and never a run of consecutive rows.
     const bucketStartMs = Math.floor(minuteMs / bucketMs) * bucketMs;
@@ -146,14 +182,14 @@ export function aggregateFxCsvM1(input: FxCsvM1AggregationInput): FxCsvM1Aggrega
       flush();
       current = {
         bucketStartMs, timeIso: new Date(bucketStartMs).toISOString(),
-        open, high, low, close, tickVolume: Number(v), minutesPresent: 1,
+        open, high, low, close, tickVolume: volume, minutesPresent: 1, conflicted: false,
       };
       continue;
     }
     current.high = Math.max(current.high, high);
     current.low = Math.min(current.low, low);
     current.close = close;
-    current.tickVolume += Number(v);
+    current.tickVolume += volume;
     current.minutesPresent += 1;
   }
   flush();
@@ -161,12 +197,13 @@ export function aggregateFxCsvM1(input: FxCsvM1AggregationInput): FxCsvM1Aggrega
   const qualityIssues = [
     ...(quality.rowsMalformed > 0 ? ["one_or_more_source_rows_were_unusable"] : []),
     ...(quality.conflictingDuplicateTimestamps > 0 ? ["one_or_more_duplicate_timestamps_disagreed"] : []),
+    ...(quality.bucketsDroppedForConflictingDuplicates > 0 ? ["one_or_more_buckets_dropped_for_conflicting_duplicates"] : []),
     ...(quality.outOfOrderRows > 0 ? ["one_or_more_source_rows_were_out_of_order"] : []),
     ...(bars.length === 0 ? ["no_bars_met_minimum_minute_coverage"] : []),
   ];
   return {
     schemaVersion: "1.0",
-    methodologyVersion: "fx_csv_m1_aggregation_v1",
+    methodologyVersion: "fx_csv_m1_aggregation_v2",
     evidenceTier: "official_revised_history",
     brokerClockRule: "new_york_wall_time_plus_seven_hours",
     bucketMinutes: input.bucketMinutes,

@@ -25,7 +25,7 @@ export function parseFxCsvM1AggregationCliArguments(argv: string[]): FxCsvM1Aggr
   let symbol: string | undefined;
   let bucketMinutes = 15;
   let startFromBrokerDate: string | undefined;
-  let minimumMinuteCoverage = 1;
+  let minimumMinuteCoverage: number | undefined;
   let outputPath: string | undefined;
   let confirmed = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -42,8 +42,15 @@ export function parseFxCsvM1AggregationCliArguments(argv: string[]): FxCsvM1Aggr
   if (!confirmed) throw new Error("FX CSV aggregation requires --confirm-local-import");
   if (!csvPath || !symbol) throw new Error("FX CSV aggregation requires --csv and --symbol");
   if (!/^[\w:.-]{1,48}$/.test(symbol)) throw new Error("symbol must be a short canonical identifier");
-  // The supplied file changed its clock convention mid-history, so the boundary is never defaulted.
+  // Every supplied file changed its clock convention mid-history, on differing dates, so the
+  // boundary is never defaulted.
   if (!startFromBrokerDate) throw new Error("FX CSV aggregation requires --start-from-broker-date");
+  // Nor is coverage. Defaulting it to one minute emitted gold's daily maintenance break as ordinary
+  // hourly bars built from a handful of stray prints, and the resulting phantom gaps passed every
+  // stage of the candidate rule. What a bar is allowed to be made of is stated, not inherited.
+  if (minimumMinuteCoverage === undefined) {
+    throw new Error("FX CSV aggregation requires --minimum-minute-coverage");
+  }
   return {
     csvPath, symbol, bucketMinutes, startFromBrokerDate, minimumMinuteCoverage,
     outputPath: outputPath ?? join(resolveFxCsvAggregateDirectory(), `${symbol.replace(/[^\w.-]/g, "_")}_M${bucketMinutes}.json`),
@@ -122,7 +129,7 @@ export async function aggregateFxCsvFile(input: FxCsvM1AggregationCliArguments, 
     quality_issues: result.qualityIssues,
     limitations: [
       "Third-party revised history. It cannot support prospective, out-of-sample, or primary-test evidence.",
-      "The broker clock was verified as New York plus seven from this file's own Friday close times, and the aggregate was checked bar for bar against TradingView over an overlapping span.",
+      "The broker clock was verified as New York plus seven from this file's own weekly close times across the weeks when US and European daylight saving disagree, and for gold from where its daily session break falls.",
       "Rows before start_from_broker_date are refused because this file ran on a different clock earlier in its history.",
       "Volume is upstream tick count, not traded size.",
       "Bars stamped at the New York close carry the widest disagreement with other sources, where liquidity is thinnest.",

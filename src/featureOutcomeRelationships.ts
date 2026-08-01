@@ -91,6 +91,91 @@ const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
  */
 export const FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS = 10 as const;
 
+/**
+ * The one classification the candidate rule was calibrated at. Its false-positive rates against the
+ * three null models, and its power across the minimum effect size, were measured with these exact
+ * thresholds and this exact family, so a candidate verdict issued at any other setting carries an
+ * error rate nobody has measured. The thresholds define what a bucket is, and minimumObservations
+ * decides which buckets enter the empirical-null family - a larger one shrinks that family and
+ * loosens the very test it looks like it is tightening.
+ *
+ * Only the candidate path is bound by this. Exploration passes empiricalNullCalibration false and
+ * may use any classification it likes.
+ */
+export const FEATURE_OUTCOME_CALIBRATED_STUDY = {
+  features: [
+    "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+  ] as readonly FeatureOutcomeFeature[],
+  atrLookback: 14,
+  atrBaselineLookback: 50,
+  rangeLookback: 20,
+  streakMinimumBars: 3,
+  bodyRatioThreshold: 0.5,
+  wickImbalanceThreshold: 0.6,
+  atrCompressionLowRatio: 0.8,
+  atrCompressionHighRatio: 1.2,
+  rangePositionLower: 0.33,
+  rangePositionUpper: 0.67,
+  gapAtrThreshold: 0.5,
+  horizons: [1, 5, 21] as readonly number[],
+  minimumObservations: 30,
+  confidenceLevel: 0.95,
+} as const;
+
+/**
+ * Names every way a study departs from the calibrated one, empty when it does not.
+ *
+ * This reports rather than refuses, and the distinction matters: the falsification and power audits
+ * exist to measure the error rate of whatever configuration they are handed, so a pure function that
+ * rejected uncalibrated studies would make calibrating a new one impossible. Enforcement belongs at
+ * the boundaries that issue verdicts about a real market - the MCP tool and the CSV scan - not here.
+ *
+ * configurationTrials is deliberately not checked: stating more trials only shrinks the Bonferroni
+ * threshold, so a larger count is conservative, and a smaller one is impossible - the floor is one.
+ */
+export function calibratedStudyDepartures(input: FeatureOutcomeRelationshipsInput): string[] {
+  const study = FEATURE_OUTCOME_CALIBRATED_STUDY;
+  const mismatched: string[] = [];
+  const numbers = [
+    "atrLookback", "atrBaselineLookback", "rangeLookback", "streakMinimumBars", "bodyRatioThreshold",
+    "wickImbalanceThreshold", "atrCompressionLowRatio", "atrCompressionHighRatio", "rangePositionLower",
+    "rangePositionUpper", "gapAtrThreshold", "minimumObservations",
+  ] as const;
+  for (const key of numbers) {
+    if (input[key] !== study[key]) mismatched.push(`${key} must be ${study[key]}, received ${input[key]}`);
+  }
+  if ((input.confidenceLevel ?? study.confidenceLevel) !== study.confidenceLevel) {
+    mismatched.push(`confidenceLevel must be ${study.confidenceLevel}`);
+  }
+  if (input.selection !== null) {
+    mismatched.push("a single pre-registered feature bucket is a different study that was never calibrated");
+  }
+  const sorted = [...input.features].sort().join(",");
+  if (sorted !== [...study.features].sort().join(",")) {
+    mismatched.push(`features must be the calibrated six, received ${sorted || "none"}`);
+  }
+  const horizons = [...input.horizons].join(",");
+  if (horizons !== [...study.horizons].join(",")) {
+    mismatched.push(`horizons must be ${[...study.horizons].join(",")}, received ${horizons}`);
+  }
+  return mismatched;
+}
+
+/**
+ * For the boundaries that do issue verdicts about a real market. Exploration is untouched: a run
+ * without empirical-null calibration cannot reach candidateEligible in the first place.
+ */
+export function assertCalibratedStudy(input: FeatureOutcomeRelationshipsInput): void {
+  const departures = calibratedStudyDepartures(input);
+  if (departures.length > 0) {
+    throw new Error(
+      "empirical-null calibration issues candidate verdicts and is bound to the study those verdicts " +
+      `were calibrated at: ${departures.join("; ")}. Run without empirical_null_calibration to explore ` +
+      "at other settings, or use the falsification audit to calibrate this one first.",
+    );
+  }
+}
+
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 const EMPIRICAL_NULL_ITERATIONS = 1_000;
 const EMPIRICAL_NULL_SEED = 20_260_729;
@@ -665,6 +750,7 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       `minimum effect bps is a frozen pre-registered rule and must be ${FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS}`,
     );
   }
+  const calibratedStudyDeparturesFound = calibratedStudyDepartures(input);
   assertInteger(input.observationLimit, 0, 500, "observation limit");
 
   const allBars = validateBars(input.bars);
@@ -905,6 +991,10 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
       familyTests,
       bonferroniAdjustedAlpha: bonferroni.adjustedAlpha,
       candidateEligibility: "requires_empirical_null_calibration_after_horizon_1_newey_west_and_bonferroni" as const,
+      // False means candidateEligible here has an error rate nobody has measured. Audits set this
+      // deliberately while calibrating a new study; a real-market run should not.
+      matchesCalibratedStudy: calibratedStudyDeparturesFound.length === 0,
+      calibratedStudyDepartures: calibratedStudyDeparturesFound,
     },
     inferenceWarnings: [
         "confidence_intervals_do_not_adjust_for_serial_dependence",

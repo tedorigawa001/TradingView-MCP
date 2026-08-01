@@ -6288,7 +6288,6 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
     range_lookback: 3, streak_minimum_bars: 2, horizons: [1, 3], minimum_observations: 5, minimum_effect_bps: 10,
     confidence_level: 0.99,
     configuration_trials: 18,
-    empirical_null_calibration: true,
     journal: { hypothesis_id: "feature-eurusd", population: "out_of_sample", decision: "inconclusive" },
     observation_limit: 2,
   } });
@@ -6297,10 +6296,11 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
   assert.equal(parsed.inferenceContract.configurationTrials, 18);
   assert.equal(parsed.inferenceContract.multipleTestingAdjustment, "bonferroni_family_wise_error_rate");
   assert.equal(parsed.inferenceContract.candidateEligibility, "requires_empirical_null_calibration_after_horizon_1_newey_west_and_bonferroni");
-  assert.equal(parsed.empiricalNullCalibration.methodologyVersion,
-    "feature_outcome_empirical_null_circular_moving_block_v2");
-  assert.equal(parsed.empiricalNullCalibration.iterations, 1000);
-  assert.match(parsed.empiricalNullCalibration.evidenceHash, /^sha256:/);
+  // A fixture this small cannot be the calibrated study, and the result says so rather than leaving
+  // the reader to work it out. Without empirical-null calibration no candidate verdict is issued.
+  assert.equal(parsed.inferenceContract.matchesCalibratedStudy, false);
+  assert.ok(parsed.inferenceContract.calibratedStudyDepartures.length > 0);
+  assert.equal("empiricalNullCalibration" in parsed, false);
   assert.equal(parsed.byFeature.body_direction.bullish_body.horizons["1"].forwardReturn.inference.familyTests, 216);
   assert.equal(parsed.symbol, "OANDA:EURUSD");
   assert.equal(parsed.conditionType, "feature_outcome_relationships");
@@ -6382,6 +6382,48 @@ test("compute_feature_outcome_relationships binds closed OHLC to the active char
   assert.equal(incompatibleSelection.isError, true);
   assert.match(incompatibleSelection.content[0].text, /feature_selection cannot be combined with features/);
 });
+
+test("a candidate verdict from the chart is refused unless the study is the calibrated one", async () => {
+  // The tool judges a real market. The falsification and power audits deliberately run uncalibrated
+  // studies - that is how a new one gets calibrated - so the refusal belongs here, at the boundary
+  // that issues verdicts, and not in the computation both share.
+  const start = Date.UTC(2026, 0, 1);
+  const bars = Array.from({ length: 400 }, (_, index) => {
+    const open = 100 + Math.sin(index / 7) * 2;
+    const close = open + (index % 5 === 0 ? 0.4 : -0.1);
+    return { time: (start + index * 3_600_000) / 1000,
+      timeIso: new Date(start + index * 3_600_000).toISOString(),
+      open, high: Math.max(open, close) + 0.3, low: Math.min(open, close) - 0.3, close, volume: 1 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", count: bars.length, bars }),
+  } }));
+  const calibrated = {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 400,
+    horizons: [1, 5, 21], minimum_effect_bps: 10, empirical_null_calibration: true, observation_limit: 0,
+  };
+  const refused = await client.callTool({ name: "compute_feature_outcome_relationships", arguments: {
+    ...calibrated, wick_imbalance_threshold: 0.2,
+  } });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /bound to the study those verdicts were calibrated at/);
+  assert.match(refused.content[0].text, /wickImbalanceThreshold must be 0.6/);
+
+  // Omitting the thresholds has to land on the calibrated study rather than on a set of defaults
+  // that merely look reasonable - that mismatch is what let an unmeasured rule issue verdicts.
+  const accepted = await client.callTool({ name: "compute_feature_outcome_relationships", arguments: calibrated });
+  assert.equal(accepted.isError, undefined, accepted.content[0].text);
+  const parsed = JSON.parse(accepted.content[0].text);
+  assert.equal(parsed.inferenceContract.matchesCalibratedStudy, true);
+  assert.deepEqual(parsed.inferenceContract.calibratedStudyDepartures, []);
+  assert.equal(parsed.definition.wickImbalanceThreshold, 0.6);
+  assert.equal(parsed.definition.gapAtrThreshold, 0.5);
+  assert.equal(parsed.sample.minimumObservations, 30);
+});
+
 
 test("compute_session_profile binds minute OHLC to the active chart", async () => {
   const start = Date.UTC(2026, 0, 5, 8);

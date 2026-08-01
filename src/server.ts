@@ -52,7 +52,7 @@ import { runExternalLabelStudy } from "./externalLabelStudy.js";
 import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
-import { FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS, computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
+import { FEATURE_OUTCOME_CALIBRATED_STUDY, FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS, assertCalibratedStudy, computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { runFeatureOutcomeFalsificationAudit } from "./featureOutcomeFalsificationAudit.js";
 import { runLeadLagFalsificationAudit } from "./leadLagFalsificationAudit.js";
 import { runFeatureOutcomePowerAudit } from "./featureOutcomePowerAudit.js";
@@ -1441,21 +1441,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           selection: null,
           signalFrom: null,
           signalTo: null,
-          atrLookback: atr_lookback ?? 14,
-          atrBaselineLookback: atr_baseline_lookback ?? 50,
-          rangeLookback: range_lookback ?? 20,
-          streakMinimumBars: streak_minimum_bars ?? 3,
-          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
-          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
-          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
-          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
-          rangePositionLower: range_position_lower ?? 0.33,
-          rangePositionUpper: range_position_upper ?? 0.67,
-          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          atrLookback: atr_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrLookback,
+          atrBaselineLookback: atr_baseline_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrBaselineLookback,
+          rangeLookback: range_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangeLookback,
+          streakMinimumBars: streak_minimum_bars ?? FEATURE_OUTCOME_CALIBRATED_STUDY.streakMinimumBars,
+          bodyRatioThreshold: body_ratio_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.bodyRatioThreshold,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.wickImbalanceThreshold,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionLowRatio,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionHighRatio,
+          rangePositionLower: range_position_lower ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionLower,
+          rangePositionUpper: range_position_upper ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionUpper,
+          gapAtrThreshold: gap_atr_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.gapAtrThreshold,
           horizons,
           minimumObservations: minimum_observations,
           minimumEffectBps: minimum_effect_bps,
-          confidenceLevel: confidence_level ?? 0.95,
+          confidenceLevel: confidence_level ?? FEATURE_OUTCOME_CALIBRATED_STUDY.confidenceLevel,
           configurationTrials: configuration_trials,
           folds: [],
           regime: null,
@@ -1599,21 +1599,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           selection: null,
           signalFrom: null,
           signalTo: null,
-          atrLookback: atr_lookback ?? 14,
-          atrBaselineLookback: atr_baseline_lookback ?? 50,
-          rangeLookback: range_lookback ?? 20,
-          streakMinimumBars: streak_minimum_bars ?? 3,
-          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
-          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
-          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
-          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
-          rangePositionLower: range_position_lower ?? 0.33,
-          rangePositionUpper: range_position_upper ?? 0.67,
-          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          atrLookback: atr_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrLookback,
+          atrBaselineLookback: atr_baseline_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrBaselineLookback,
+          rangeLookback: range_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangeLookback,
+          streakMinimumBars: streak_minimum_bars ?? FEATURE_OUTCOME_CALIBRATED_STUDY.streakMinimumBars,
+          bodyRatioThreshold: body_ratio_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.bodyRatioThreshold,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.wickImbalanceThreshold,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionLowRatio,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionHighRatio,
+          rangePositionLower: range_position_lower ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionLower,
+          rangePositionUpper: range_position_upper ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionUpper,
+          gapAtrThreshold: gap_atr_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.gapAtrThreshold,
           horizons,
           minimumObservations: minimum_observations,
           minimumEffectBps: minimum_effect_bps,
-          confidenceLevel: confidence_level ?? 0.95,
+          confidenceLevel: confidence_level ?? FEATURE_OUTCOME_CALIBRATED_STUDY.confidenceLevel,
           configurationTrials: configuration_trials,
           folds: [],
           regime: null,
@@ -1746,31 +1746,31 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
           throw new Error("OHLC evidence does not match the bound chart");
         }
-        const result = computeFeatureOutcomeRelationships({
+        const study = {
           bars: history.bars,
           symbol: history.symbol,
           timeframe: history.resolution,
           minimumEffectBps: minimum_effect_bps,
           features: feature_selection ? [feature_selection.feature] : features ?? [
-            "atr_compression", "body_direction", "wick_imbalance", "directional_streak", "range_position", "gap_direction",
+            ...FEATURE_OUTCOME_CALIBRATED_STUDY.features,
           ],
           selection: feature_selection ?? null,
           signalFrom: signal_from ?? null,
           signalTo: signal_to ?? null,
-          atrLookback: atr_lookback ?? 14,
-          atrBaselineLookback: atr_baseline_lookback ?? 50,
-          rangeLookback: range_lookback ?? 20,
-          streakMinimumBars: streak_minimum_bars ?? 3,
-          bodyRatioThreshold: body_ratio_threshold ?? 0.5,
-          wickImbalanceThreshold: wick_imbalance_threshold ?? 0.2,
-          atrCompressionLowRatio: atr_compression_low_ratio ?? 0.75,
-          atrCompressionHighRatio: atr_compression_high_ratio ?? 1.5,
-          rangePositionLower: range_position_lower ?? 0.33,
-          rangePositionUpper: range_position_upper ?? 0.67,
-          gapAtrThreshold: gap_atr_threshold ?? 0.25,
+          atrLookback: atr_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrLookback,
+          atrBaselineLookback: atr_baseline_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrBaselineLookback,
+          rangeLookback: range_lookback ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangeLookback,
+          streakMinimumBars: streak_minimum_bars ?? FEATURE_OUTCOME_CALIBRATED_STUDY.streakMinimumBars,
+          bodyRatioThreshold: body_ratio_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.bodyRatioThreshold,
+          wickImbalanceThreshold: wick_imbalance_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.wickImbalanceThreshold,
+          atrCompressionLowRatio: atr_compression_low_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionLowRatio,
+          atrCompressionHighRatio: atr_compression_high_ratio ?? FEATURE_OUTCOME_CALIBRATED_STUDY.atrCompressionHighRatio,
+          rangePositionLower: range_position_lower ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionLower,
+          rangePositionUpper: range_position_upper ?? FEATURE_OUTCOME_CALIBRATED_STUDY.rangePositionUpper,
+          gapAtrThreshold: gap_atr_threshold ?? FEATURE_OUTCOME_CALIBRATED_STUDY.gapAtrThreshold,
           horizons,
-          minimumObservations: minimum_observations ?? 100,
-          confidenceLevel: confidence_level ?? 0.95,
+          minimumObservations: minimum_observations ?? FEATURE_OUTCOME_CALIBRATED_STUDY.minimumObservations,
+          confidenceLevel: confidence_level ?? FEATURE_OUTCOME_CALIBRATED_STUDY.confidenceLevel,
           configurationTrials: configuration_trials ?? 1,
           empiricalNullCalibration: empirical_null_calibration ?? false,
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
@@ -1787,7 +1787,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             lowVolatilityRatio: regime.low_volatility_ratio ?? 0.75,
           },
           observationLimit: observation_limit ?? 100,
-        });
+        };
+        // This tool judges a real market, so a candidate verdict it issues has to rest on a measured
+        // error rate. The audits deliberately run uncalibrated studies - that is how a new one gets
+        // calibrated - which is why the refusal lives here and not in the shared computation.
+        if (empirical_null_calibration === true) assertCalibratedStudy(study);
+        const result = computeFeatureOutcomeRelationships(study);
         const source = {
           chartIndex: activeIndex,
           requestedBars,
