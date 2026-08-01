@@ -108,7 +108,12 @@ export function estimateCarryPanelEffectiveSample(input: {
     anchor_clusters: anchors.length,
     pair_count: pairIds.length,
     pair_ids: pairIds,
-    pairs_per_anchor: { minimum: Math.min(...pairsPerAnchor), maximum: Math.max(...pairsPerAnchor) },
+    // Reduced rather than spread: this array grows with the anchor count, and a spread of that
+    // size overflows the call stack.
+    pairs_per_anchor: pairsPerAnchor.reduce(
+      (range, count) => ({ minimum: Math.min(range.minimum, count), maximum: Math.max(range.maximum, count) }),
+      { minimum: Infinity, maximum: -Infinity },
+    ),
     block_length_anchors: input.blockLengthAnchors,
     seed: input.seed,
     iterations: input.iterations,

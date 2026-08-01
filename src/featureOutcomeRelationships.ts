@@ -207,6 +207,21 @@ function wilsonConfidenceInterval(successes: number, observations: number, confi
     confidenceLevel, observations, successes, lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
 }
 
+/**
+ * Spreading a bucket into Math.min overflows the call stack once a bucket holds enough
+ * observations, which a large sample reaches long before anything else here strains.
+ */
+function extremes(values: number[]): { minimum: number | null; maximum: number | null } {
+  if (values.length === 0) return { minimum: null, maximum: null };
+  let minimum = values[0];
+  let maximum = values[0];
+  for (const value of values) {
+    if (value < minimum) minimum = value;
+    if (value > maximum) maximum = value;
+  }
+  return { minimum, maximum };
+}
+
 function stats(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99, includeMeanConfidenceInterval = false) {
   return {
     count: values.length,
@@ -214,8 +229,7 @@ function stats(values: number[], confidenceLevel: 0.9 | 0.95 | 0.99, includeMean
     median: percentile(values, 0.5),
     p25: percentile(values, 0.25),
     p75: percentile(values, 0.75),
-    minimum: values.length === 0 ? null : Math.min(...values),
-    maximum: values.length === 0 ? null : Math.max(...values),
+    ...extremes(values),
     ...(includeMeanConfidenceInterval ? { meanConfidenceInterval: meanConfidenceInterval(values, confidenceLevel) } : {}),
   };
 }

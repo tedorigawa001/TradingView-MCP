@@ -335,3 +335,37 @@ test("feature-outcome relationships expose an insufficient interval instead of i
     observations: 1, lower: null, upper: null,
   });
 });
+
+test("a bucket large enough to overflow a spread still reports its extremes", () => {
+  // Spreading a bucket into Math.min throws RangeError past roughly a hundred thousand elements.
+  // A 261,141-bar sample reached that on the first real run, so the size is pinned here.
+  const bars = [];
+  let price = 1.1;
+  for (let index = 0; index < 140_000; index += 1) {
+    const open = price;
+    price = price * (1 + (index % 7 === 0 ? 0.0004 : -0.0002));
+    const close = price;
+    bars.push({
+      time: 1_600_000_000 + index * 900,
+      timeIso: new Date((1_600_000_000 + index * 900) * 1000).toISOString(),
+      open, high: Math.max(open, close) * 1.0002, low: Math.min(open, close) * 0.9998, close, volume: 10,
+    });
+  }
+  const result = computeFeatureOutcomeRelationships({
+    bars, symbol: "SYNTH:LARGE", timeframe: "15", features: ["body_direction"],
+    selection: null, signalFrom: null, signalTo: null,
+    atrLookback: 14, atrBaselineLookback: 50, rangeLookback: 20, streakMinimumBars: 3,
+    bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.6,
+    atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
+    rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.5,
+    horizons: [1], minimumObservations: 30, folds: [], regime: null,
+    observationLimit: 0, confidenceLevel: 0.95, configurationTrials: 1,
+  });
+  const bucket = Object.values(result.byFeature.body_direction)
+    .find((entry) => entry.observations > 100_000);
+  assert.ok(bucket, "expected one bucket past the spread limit");
+  const summary = bucket.horizons["1"].forwardReturn;
+  assert.equal(typeof summary.minimum, "number");
+  assert.equal(typeof summary.maximum, "number");
+  assert.ok(summary.minimum <= summary.maximum);
+});
