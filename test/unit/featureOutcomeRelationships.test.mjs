@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeFeatureOutcomeRelationships } from "../../build/featureOutcomeRelationships.js";
+import {
+  FEATURE_OUTCOME_CALIBRATED_STUDY,
+  FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS,
+  computeFeatureOutcomeRelationships,
+} from "../../build/featureOutcomeRelationships.js";
 
 const HOUR = 3_600_000;
 
@@ -116,7 +120,7 @@ test("feature-outcome empirical null block bootstrap is deterministic and bound 
   const first = computeFeatureOutcomeRelationships(definition);
   const again = computeFeatureOutcomeRelationships(definition);
   assert.equal(first.empiricalNullCalibration.methodologyVersion,
-    "feature_outcome_empirical_null_circular_moving_block_v2");
+    "feature_outcome_empirical_null_circular_moving_block_v3");
   assert.equal(first.empiricalNullCalibration.iterations, 1000);
   assert.equal(first.empiricalNullCalibration.seed, 20260729);
   assert.ok(first.empiricalNullCalibration.blockLength >= 2);
@@ -426,4 +430,80 @@ test("the minimum effect size cannot be omitted into a rule without a floor", ()
     rangePositionUpper: 0.67, gapAtrThreshold: 0.5, horizons: [1], minimumObservations: 30,
     folds: [], regime: null, observationLimit: 0,
   }), /frozen pre-registered rule/);
+});
+
+test("adding effective multiplicity moved no decision the empirical null makes", () => {
+  // Pinned from a run taken before the estimate was wired in. Reporting it must not perturb the draw
+  // sequence or the family maximum, and the only honest way to say so is to name what the numbers
+  // were beforehand. Every family-wise p-value below is the pre-wiring value to the last digit.
+  const next = (() => { let state = 20260801 >>> 0;
+    return () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 4294967296; }; })();
+  const normal = () => {
+    const u = Math.max(next(), 1e-12);
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * next());
+  };
+  const start = Date.UTC(2024, 0, 1);
+  let price = 100;
+  const bars = Array.from({ length: 1_200 }, (_, index) => {
+    price *= 1 + normal() * 0.004;
+    return { time: (start + index * 3_600_000) / 1000,
+      timeIso: new Date(start + index * 3_600_000).toISOString(),
+      open: price, high: price * 1.002, low: price * 0.998, close: price * (1 + normal() * 0.0005), volume: 1 };
+  });
+  const study = FEATURE_OUTCOME_CALIBRATED_STUDY;
+  const result = computeFeatureOutcomeRelationships({
+    bars, symbol: "T", timeframe: "60",
+    features: [...study.features], selection: null, signalFrom: null, signalTo: null,
+    atrLookback: study.atrLookback, atrBaselineLookback: study.atrBaselineLookback,
+    rangeLookback: study.rangeLookback, streakMinimumBars: study.streakMinimumBars,
+    bodyRatioThreshold: study.bodyRatioThreshold, wickImbalanceThreshold: study.wickImbalanceThreshold,
+    atrCompressionLowRatio: study.atrCompressionLowRatio, atrCompressionHighRatio: study.atrCompressionHighRatio,
+    rangePositionLower: study.rangePositionLower, rangePositionUpper: study.rangePositionUpper,
+    gapAtrThreshold: study.gapAtrThreshold, horizons: [...study.horizons],
+    minimumObservations: study.minimumObservations, confidenceLevel: study.confidenceLevel,
+    configurationTrials: 1, minimumEffectBps: FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS,
+    empiricalNullCalibration: true, folds: [], regime: null, observationLimit: 0,
+  });
+  const calibration = result.empiricalNullCalibration;
+  assert.equal(calibration.blockLength, 10);
+  assert.equal(calibration.familyEligibleBuckets, 13);
+
+  const observed = {};
+  let candidates = 0;
+  for (const [feature, buckets] of Object.entries(result.byFeature)) {
+    for (const [bucket, summary] of Object.entries(buckets)) {
+      const inference = summary.horizons["1"]?.nonOverlappingForwardReturn?.candidateInference;
+      if (!inference) continue;
+      if (inference.candidateEligible) candidates += 1;
+      observed[`${feature}/${bucket}`] = inference.empiricalNullCalibration?.familyWisePValue ?? null;
+    }
+  }
+  assert.equal(candidates, 0);
+  assert.deepEqual(observed, {
+    "atr_compression/compressed": null,
+    "atr_compression/expanded": 1,
+    "atr_compression/normal": 0.9330669330669331,
+    "body_direction/indecision": 0.8531468531468531,
+    "directional_streak/down_streak": 1,
+    "directional_streak/mixed": 0.8461538461538461,
+    "directional_streak/up_streak": 0.997002997002997,
+    "gap_direction/gap_down": 0.8411588411588412,
+    "gap_direction/gap_up": 1,
+    "gap_direction/no_material_gap": 0.997002997002997,
+    "range_position/lower_range": 1,
+    "range_position/middle_range": 1,
+    "range_position/upper_range": 0.8931068931068931,
+    "wick_imbalance/balanced_wicks": 0.8531468531468531,
+  });
+
+  // The estimate is present, describes the family it was measured on, and is marked unusable for
+  // any decision. Nothing in the inference contract or the Bonferroni threshold refers to it.
+  const effective = calibration.effectiveMultiplicity;
+  assert.equal(effective.usage, "reported_only_never_used_in_any_eligibility_decision");
+  assert.equal(effective.nominalTests, 13);
+  assert.ok(effective.effectiveTests >= 1 && effective.effectiveTests <= 13);
+  assert.equal(result.inferenceContract.familyTests, 54);
+  assert.equal(result.inferenceContract.bonferroniAdjustedAlpha, (1 - study.confidenceLevel) / 54);
+  assert.equal("effectiveMultiplicity" in result.inferenceContract, false);
+  assert.equal("effectiveTests" in result.inferenceContract, false);
 });

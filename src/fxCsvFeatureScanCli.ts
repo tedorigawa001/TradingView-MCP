@@ -254,6 +254,10 @@ async function main(): Promise<void> {
     symbol: scan.symbol, bucket_minutes: scan.bucket_minutes, bars: scan.source.bar_count,
     candidates: scan.candidate_count, exploratory: scan.exploratory_count, buckets: scan.bucket_count,
     calibration_id: (scan.empirical_null_calibration as { calibrationId?: string } | null)?.calibrationId ?? null,
+    // Reported beside the nominal family, never in place of it: no threshold here reads it.
+    effective_tests: (scan.empirical_null_calibration as
+      { effectiveMultiplicity?: { nominalTests: number; effectiveTests: number | null } } | null)
+      ?.effectiveMultiplicity ?? null,
     elapsed_seconds: Math.round((Date.now() - started) / 1000), output_path: args.outputPath,
   })}\n`);
 }

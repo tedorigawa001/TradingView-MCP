@@ -1,5 +1,6 @@
 import type { OhlcvBar } from "./tradingview.js";
 import { createHash } from "node:crypto";
+import { estimateEffectiveMultiplicity, type EffectiveMultiplicityEstimate } from "./effectiveMultiplicity.js";
 import { marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
 
 export interface LeadLagFold {
@@ -241,6 +242,12 @@ type EmpiricalNullCalibration = {
   familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags";
   familyEligibleLags: number;
   nominalAlpha: number;
+  /**
+   * How many independent lags this family behaves like. Adjacent lags move together, so the
+   * Bonferroni threshold built from the nominal count is stricter than the family warrants. Reported
+   * beside that count and used by nothing.
+   */
+  effectiveMultiplicity: EffectiveMultiplicityEstimate;
   evidenceHash: string;
   calibrationId: string;
   byLag: Record<string, {
@@ -291,14 +298,19 @@ function buildEmpiricalNullCalibration(input: {
   }
   const crossSums = circularCrossSums(input.primaryReturns, input.referenceReturns);
   const exceedances = new Map(positiveLags.map((lag) => [lag, 0]));
+  // Kept, not recomputed. These are the per-lag statistics the maximum below is already taken over,
+  // so retaining them costs one array and adds no draw to the sequence the calibration depends on.
+  const nullStatistics: number[][] = [];
   if (familyLags.length > 0 && shifts.length > 0) {
     const random = createRandom(EMPIRICAL_NULL_SEED);
     for (let iteration = 0; iteration < EMPIRICAL_NULL_ITERATIONS; iteration += 1) {
       const shift = shifts[Math.floor(random() * shifts.length)];
-      const maximum = familyLags.reduce((value, lag) => Math.max(value,
+      const replication = familyLags.map((lag) =>
         shiftedLagStatistic({ primary: input.primaryReturns, reference: input.referenceReturns,
           primaryPrefix, primarySquaresPrefix, referenceDoubledPrefix, referenceDoubledSquaresPrefix,
-          crossSums, lag, shift }) ?? 0), 0);
+          crossSums, lag, shift }) ?? 0);
+      nullStatistics.push(replication);
+      const maximum = replication.reduce((value, statistic) => Math.max(value, statistic), 0);
       for (const lag of familyLags) {
         const statistic = observed.get(lag);
         if (statistic !== null && statistic !== undefined && maximum >= statistic) {
@@ -308,6 +320,9 @@ function buildEmpiricalNullCalibration(input: {
     }
   }
   const nominalAlpha = 1 - input.confidenceLevel;
+  const effectiveMultiplicity = estimateEffectiveMultiplicity({
+    nullStatistics, nominalTests: familyLags.length, nominalAlpha,
+  });
   const byLag = Object.fromEntries(positiveLags.map((lag) => {
     const observedStatistic = observed.get(lag) ?? null;
     const available = familyLags.includes(lag) && shifts.length > 0;
@@ -330,6 +345,11 @@ function buildEmpiricalNullCalibration(input: {
     familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
     familyEligibleLags: familyLags,
     nominalAlpha,
+    // The estimator identity, not its value. Which method produced the number has to be recoverable
+    // from the calibration it travelled with; the number itself is an output and would make the
+    // identity of the calibration depend on the data it was run on.
+    effectiveMultiplicityEstimator: effectiveMultiplicity.preRegisteredEstimator,
+    effectiveMultiplicityMethodology: effectiveMultiplicity.methodologyVersion,
     evidenceHash,
     definition: input.definition,
   };
@@ -345,6 +365,7 @@ function buildEmpiricalNullCalibration(input: {
     familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
     familyEligibleLags: familyLags.length,
     nominalAlpha,
+    effectiveMultiplicity,
     evidenceHash,
     calibrationId: sha256(contract),
     byLag,

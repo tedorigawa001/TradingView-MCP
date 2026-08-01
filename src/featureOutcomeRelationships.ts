@@ -1,5 +1,6 @@
 import type { OhlcvBar } from "./tradingview.js";
 import { createHash } from "node:crypto";
+import { estimateEffectiveMultiplicity, type EffectiveMultiplicityEstimate } from "./effectiveMultiplicity.js";
 import {
   computeMarketRegimes,
   marketRegimeResolutionMilliseconds,
@@ -179,7 +180,7 @@ export function assertCalibratedStudy(input: FeatureOutcomeRelationshipsInput): 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 const EMPIRICAL_NULL_ITERATIONS = 1_000;
 const EMPIRICAL_NULL_SEED = 20_260_729;
-const EMPIRICAL_NULL_METHODOLOGY = "feature_outcome_empirical_null_circular_moving_block_v2" as const;
+const EMPIRICAL_NULL_METHODOLOGY = "feature_outcome_empirical_null_circular_moving_block_v3" as const;
 
 type EmpiricalBucketCalibration = {
   status: "available" | "insufficient_sample";
@@ -202,6 +203,13 @@ type EmpiricalNullCalibration = {
   familyEligibleBuckets: number;
   familyExcludedInsufficientSampleBuckets: number;
   nominalAlpha: number;
+  /**
+   * How many independent tests this family of buckets behaves like. Eighteen buckets are cut from
+   * one series of bars and share it, so the Bonferroni threshold built from the nominal count is
+   * stricter than the family warrants. Reported beside that count and used by nothing: no threshold,
+   * no configurationTrials, no candidateEligible reads it.
+   */
+  effectiveMultiplicity: EffectiveMultiplicityEstimate;
   evidenceHash: string;
   calibrationId: string;
   source: {
@@ -572,6 +580,7 @@ function buildEmpiricalNullCalibration(input: {
     observed.get(`${bucket.feature}:${bucket.bucket}`) !== null);
   const familyExcludedInsufficientSampleBuckets = buckets.length - familyBuckets.length;
   const exceedances = new Map<string, number>(buckets.map((bucket) => [`${bucket.feature}:${bucket.bucket}`, 0]));
+  const nullStatistics: number[][] = [];
   if (blockLength !== null) {
     const random = createRandom(EMPIRICAL_NULL_SEED);
     for (let iteration = 0; iteration < EMPIRICAL_NULL_ITERATIONS; iteration += 1) {
@@ -582,10 +591,12 @@ function buildEmpiricalNullCalibration(input: {
           sampled.push(returns[(start + offset) % returns.length]);
         }
       }
-      const familyMaximum = familyBuckets.reduce((maximum, bucket) => {
-        const statistic = absoluteStudentizedMean(bucket.indexes.map((index) => sampled[index]));
-        return statistic === null ? maximum : Math.max(maximum, statistic);
-      }, 0);
+      // Kept, not recomputed. A bucket with no studentizable statistic contributes zero, which is
+      // what the maximum already made of it, so retaining the row changes neither it nor the draws.
+      const replication = familyBuckets.map((bucket) =>
+        absoluteStudentizedMean(bucket.indexes.map((index) => sampled[index])) ?? 0);
+      nullStatistics.push(replication);
+      const familyMaximum = replication.reduce((maximum, statistic) => Math.max(maximum, statistic), 0);
       for (const bucket of familyBuckets) {
         const key = `${bucket.feature}:${bucket.bucket}`;
         const statistic = observed.get(key);
@@ -595,6 +606,9 @@ function buildEmpiricalNullCalibration(input: {
       }
     }
   }
+  const effectiveMultiplicity = estimateEffectiveMultiplicity({
+    nullStatistics, nominalTests: familyBuckets.length, nominalAlpha,
+  });
   const byFeature: EmpiricalNullCalibration["byFeature"] = {};
   for (const bucket of buckets) {
     const key = `${bucket.feature}:${bucket.bucket}`;
@@ -620,6 +634,11 @@ function buildEmpiricalNullCalibration(input: {
     familyEligibleBuckets: familyBuckets.length,
     familyExcludedInsufficientSampleBuckets,
     nominalAlpha,
+    // The estimator identity, not its value. Which method produced the number has to be recoverable
+    // from the calibration it travelled with; the number is an output and would otherwise make the
+    // identity of a calibration depend on the data it was run on.
+    effectiveMultiplicityEstimator: effectiveMultiplicity.preRegisteredEstimator,
+    effectiveMultiplicityMethodology: effectiveMultiplicity.methodologyVersion,
     symbol: input.symbol,
     timeframe: input.timeframe,
     features: input.features,
@@ -642,6 +661,7 @@ function buildEmpiricalNullCalibration(input: {
     familyEligibleBuckets: familyBuckets.length,
     familyExcludedInsufficientSampleBuckets,
     nominalAlpha,
+    effectiveMultiplicity,
     evidenceHash,
     calibrationId: sha256(contract),
     source: {
