@@ -22,7 +22,7 @@ function input(series, overrides = {}) {
     bodyRatioThreshold: 0.2, wickImbalanceThreshold: 0.2,
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
     rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.2,
-    horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 0, folds: [], regime: null, observationLimit: 50,
+    horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 10, folds: [], regime: null, observationLimit: 50,
     ...overrides,
   };
 }
@@ -64,7 +64,7 @@ test("feature-outcome candidate eligibility uses horizon one and non-overlapping
     100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
   ]);
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 0,
+    features: ["body_direction"], horizons: [1, 3], minimumObservations: 2, minimumEffectBps: 10,
   }));
   const bullish = result.byFeature.body_direction.bullish_body;
   const horizonOne = bullish.horizons["1"];
@@ -110,7 +110,7 @@ test("feature-outcome empirical null block bootstrap is deterministic and bound 
     };
   });
   const definition = input(series, {
-    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 10,
     observationLimit: 0, empiricalNullCalibration: true,
   });
   const first = computeFeatureOutcomeRelationships(definition);
@@ -135,7 +135,7 @@ test("feature-outcome empirical null block bootstrap is deterministic and bound 
   const changed = structuredClone(series);
   changed[100].high += 0.01;
   const changedResult = computeFeatureOutcomeRelationships(input(changed, {
-    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
+    features: ["wick_imbalance"], horizons: [1], minimumObservations: 50, minimumEffectBps: 10,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   assert.notEqual(changedResult.empiricalNullCalibration.evidenceHash,
@@ -148,7 +148,7 @@ test("feature-outcome empirical null does not promote an unconditional drift", (
   const series = bars(Date.UTC(2026, 0, 1),
     Array.from({ length: 300 }, (_, index) => 100 + index));
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
+    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 10,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   const inference = result.byFeature.body_direction.bullish_body.horizons["1"]
@@ -172,7 +172,7 @@ test("feature-outcome empirical null treats a nonzero constant-return bucket as 
     };
   });
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 20, minimumEffectBps: 0,
+    features: ["body_direction"], horizons: [1], minimumObservations: 20, minimumEffectBps: 10,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   const calibration = result.byFeature.body_direction.bullish_body.horizons["1"]
@@ -197,7 +197,7 @@ test("feature-outcome empirical null excludes buckets below the candidate sample
     };
   });
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 0,
+    features: ["body_direction"], horizons: [1], minimumObservations: 50, minimumEffectBps: 10,
     observationLimit: 0, empiricalNullCalibration: true,
   }));
   assert.equal(result.empiricalNullCalibration.familyEligibleBuckets, 1);
@@ -325,7 +325,7 @@ test("feature-outcome relationships report only an empty signal window before la
 test("feature-outcome relationships expose an insufficient interval instead of inventing precision", () => {
   const series = bars(Date.UTC(2026, 0, 1), [100, 101, 102, 103, 104, 103, 102, 101, 102, 103]);
   const result = computeFeatureOutcomeRelationships(input(series, {
-    features: ["body_direction"], horizons: [1], minimumObservations: 1, minimumEffectBps: 0, confidenceLevel: 0.99,
+    features: ["body_direction"], horizons: [1], minimumObservations: 1, minimumEffectBps: 10, confidenceLevel: 0.99,
   }));
   const single = Object.values(result.byFeature.body_direction)
     .find((bucket) => bucket.horizons["1"].forwardReturn.count === 1);
@@ -358,7 +358,7 @@ test("a bucket large enough to overflow a spread still reports its extremes", ()
     bodyRatioThreshold: 0.5, wickImbalanceThreshold: 0.6,
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2,
     rangePositionLower: 0.33, rangePositionUpper: 0.67, gapAtrThreshold: 0.5,
-    horizons: [1], minimumObservations: 30, minimumEffectBps: 0, folds: [], regime: null,
+    horizons: [1], minimumObservations: 30, minimumEffectBps: 10, folds: [], regime: null,
     observationLimit: 0, confidenceLevel: 0.95, configurationTrials: 1,
   });
   const bucket = Object.values(result.byFeature.body_direction)
@@ -405,12 +405,15 @@ test("a bucket below the minimum effect size is refused however significant it i
   assert.ok(floored.length > 0);
   for (const inference of floored) {
     assert.equal(inference.candidateEligible, false);
+    assert.equal(typeof inference.effectBps, "number");
     if (Math.abs(inference.effectBps) < 10) {
       assert.ok(inference.candidateBlockers.includes("minimum_effect_size_not_met"));
     }
   }
-  // The floor is the only thing withheld: effectBps is reported either way.
-  for (const inference of pick(run(0))) assert.equal(typeof inference.effectBps, "number");
+  // The floor is a frozen rule, not a knob: relaxing it per call is refused outright, so a caller
+  // cannot record sub-floor candidates by passing zero.
+  assert.throws(() => run(0), /frozen pre-registered rule/);
+  assert.throws(() => run(5), /frozen pre-registered rule/);
 });
 
 test("the minimum effect size cannot be omitted into a rule without a floor", () => {
@@ -422,5 +425,5 @@ test("the minimum effect size cannot be omitted into a rule without a floor", ()
     atrCompressionLowRatio: 0.8, atrCompressionHighRatio: 1.2, rangePositionLower: 0.33,
     rangePositionUpper: 0.67, gapAtrThreshold: 0.5, horizons: [1], minimumObservations: 30,
     folds: [], regime: null, observationLimit: 0,
-  }), /minimum effect bps/);
+  }), /frozen pre-registered rule/);
 });

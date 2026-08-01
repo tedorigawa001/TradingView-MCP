@@ -52,7 +52,7 @@ import { runExternalLabelStudy } from "./externalLabelStudy.js";
 import { runCompositeConditionStudy } from "./compositeConditionStudy.js";
 import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.js";
 import { DXY_CONTEXT_GATE_NAME, DXY_CONTEXT_GATE_PLOT, DXY_CONTEXT_GATE_RETURN_PLOT, DXY_CONTEXT_GATE_SOURCE, DXY_CONTEXT_GATE_VERSION } from "./dxyContextGate.js";
-import { computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
+import { FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS, computeFeatureOutcomeRelationships } from "./featureOutcomeRelationships.js";
 import { runFeatureOutcomeFalsificationAudit } from "./featureOutcomeFalsificationAudit.js";
 import { runLeadLagFalsificationAudit } from "./leadLagFalsificationAudit.js";
 import { runFeatureOutcomePowerAudit } from "./featureOutcomePowerAudit.js";
@@ -1400,7 +1400,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
           .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
         minimum_observations: z.number().int().min(2).max(5000),
-        minimum_effect_bps: z.number().finite().min(0).max(10_000),
+        minimum_effect_bps: z.literal(FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS),
         configuration_trials: z.number().int().min(1).max(100_000),
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         atr_lookback: z.number().int().min(2).max(250).optional(),
@@ -1557,7 +1557,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         horizons: z.array(z.number().int().min(1).max(250)).min(1).max(8)
           .refine((values) => values.includes(1), "horizons must include 1 for the candidate rule"),
         minimum_observations: z.number().int().min(2).max(5000),
-        minimum_effect_bps: z.number().finite().min(0).max(10_000),
+        minimum_effect_bps: z.literal(FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS),
         configuration_trials: z.number().int().min(1).max(100_000),
         confidence_level: z.union([z.literal(0.9), z.literal(0.95), z.literal(0.99)]).optional(),
         atr_lookback: z.number().int().min(2).max(250).optional(),
@@ -1705,8 +1705,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }).optional().describe("Optional predeclared point-in-time market-regime filter for a limited feature hypothesis"),
         configuration_trials: z.number().int().min(1).max(100_000).optional()
           .describe("Total related feature/threshold configurations inspected so far, including this one"),
-        minimum_effect_bps: z.number().finite().min(0).max(10_000)
-          .describe("Absolute mean forward return in basis points a bucket must reach to be a candidate. Significance alone reports existence, not size."),
+        minimum_effect_bps: z.literal(FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS)
+          .describe("Frozen pre-registered candidacy floor in basis points. It must be stated and cannot be relaxed; significance alone reports existence, not size."),
         empirical_null_calibration: z.boolean().optional()
           .describe("Run the fixed 1,000-replication circular moving-block empirical-null calibration on the same closed bars. Default: false"),
         journal: z.object({

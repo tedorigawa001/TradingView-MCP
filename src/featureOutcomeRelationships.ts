@@ -67,11 +67,11 @@ export interface FeatureOutcomeRelationshipsInput {
   configurationTrials?: number;
   empiricalNullCalibration?: boolean;
   /**
-   * Absolute mean forward return, in basis points, that a bucket must reach to be a candidate.
-   * Required with no default: silence must not mean "any effect will do". Recorded at 10 bps for
-   * FX after every candidate the first real run produced came in under a fifth of the spread.
+   * Must equal FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS. Stated at every call site so it
+   * reaches the definition hash, and rejected otherwise so the frozen rule cannot be relaxed
+   * per call.
    */
-  minimumEffectBps: number;
+  minimumEffectBps: typeof FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS;
 }
 
 const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
@@ -82,6 +82,14 @@ const FEATURE_BUCKETS: Record<FeatureOutcomeFeature, readonly string[]> = {
   range_position: ["lower_range", "middle_range", "upper_range"],
   gap_direction: ["gap_up", "gap_down", "no_material_gap"],
 };
+
+/**
+ * Pre-registered floor for candidacy, common to every symbol. It is a frozen rule and not a knob:
+ * a caller that could pass zero could record sub-floor candidates again, which is the researcher
+ * degree of freedom this project exists to remove. Exploration is unaffected - exploratoryEligible
+ * never applied a floor and effectBps is always reported.
+ */
+export const FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS = 10 as const;
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 const EMPIRICAL_NULL_ITERATIONS = 1_000;
@@ -652,9 +660,10 @@ export function computeFeatureOutcomeRelationships(input: FeatureOutcomeRelation
   assertInteger(input.minimumObservations, 1, 5_000, "minimum observations");
   // Runtime-checked as well as typed: the JavaScript callers would otherwise pass undefined and
   // silently restore a rule with no floor on effect size.
-  if (typeof input.minimumEffectBps !== "number" || !Number.isFinite(input.minimumEffectBps) ||
-      input.minimumEffectBps < 0 || input.minimumEffectBps > 10_000) {
-    throw new Error("minimum effect bps must be a finite number from 0 to 10000");
+  if (input.minimumEffectBps !== FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS) {
+    throw new Error(
+      `minimum effect bps is a frozen pre-registered rule and must be ${FEATURE_OUTCOME_CANDIDATE_MINIMUM_EFFECT_BPS}`,
+    );
   }
   assertInteger(input.observationLimit, 0, 500, "observation limit");
 
