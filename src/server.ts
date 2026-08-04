@@ -11,6 +11,13 @@ import {
 } from "./scanner.js";
 import { IMPORTANCE_LEVELS, type EconomicCalendar } from "./calendar.js";
 import { cotFreshness, type CotClient } from "./cot.js";
+import { computeCotCrowdingUnwindContext } from "./cotCrowdingUnwind.js";
+import {
+  COT_CROWDING_UNWIND_OVERLAY_INPUTS,
+  COT_CROWDING_UNWIND_OVERLAY_NAME,
+  COT_CROWDING_UNWIND_OVERLAY_SOURCE,
+  COT_CROWDING_UNWIND_OVERLAY_VERSION,
+} from "./cotCrowdingUnwindOverlay.js";
 import type { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
@@ -58,9 +65,9 @@ import { runLeadLagFalsificationAudit } from "./leadLagFalsificationAudit.js";
 import { runFeatureOutcomePowerAudit } from "./featureOutcomePowerAudit.js";
 import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowContext.js";
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
-import { computeMarketRegimes, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
+import { computeMarketRegimes, marketRegimeResolutionMilliseconds, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
-import { computeLeadLagRelationships } from "./leadLagRelationships.js";
+import { computeLeadLagRelationships, resampleClosedBarsToUtcGrid } from "./leadLagRelationships.js";
 import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import { getPolicyRateContext } from "./policyRateContext.js";
 import { getOfficialPolicyRateHistoryContext } from "./policyRateOfficialHistoryContext.js";
@@ -97,6 +104,21 @@ import {
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
 import { computeAnalysisPathMetrics, evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
+import {
+  VOLUME_PROFILE_CONTEXT_INPUTS,
+  VOLUME_PROFILE_CONTEXT_NAME,
+  VOLUME_PROFILE_CONTEXT_PLOTS,
+  VOLUME_PROFILE_CONTEXT_SOURCE,
+  VOLUME_PROFILE_CONTEXT_VERSION,
+  assertVolumeProfileContextStudy,
+  parseVolumeProfileContext,
+} from "./volumeProfileContext.js";
+import {
+  runVolumeProfilePocReversionStudy1h,
+  runVolumeProfileReactionStudy,
+  runVolumeProfileReactionStudy1h,
+} from "./volumeProfileReactionStudy.js";
+import { OANDA_FLOW_INSTRUMENTS, oandaFlowTokenConfigured } from "./oandaFlow.js";
 import {
   AnalysisDefinitionConflictError,
   analysisDefinitionHash,
@@ -1485,9 +1507,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "run_lead_lag_falsification_audit",
     {
       description:
-        "Calibrate the frozen lead-lag candidate rule against factor-null pairs, which carry contemporaneous " +
-        "dependence but no lagged predictability. Every replication runs the rule's own circular-shift empirical " +
-        "null. The result carries its fully resolved configuration and a hash of it, so a quoted rate can be " +
+        "Calibrate the frozen lead-lag candidate rule against paired nulls. Factor variants carry contemporaneous " +
+        "dependence but no lagged predictability; independent variants isolate marginal path effects. Every replication runs the rule's own circular-shift empirical " +
+        "null after the v3 default's fixed causal prior-20-return RMS scaling. The result carries its fully resolved configuration and a hash of it, so a quoted rate can be " +
         "reproduced. It does not read or change TradingView and does not establish profitability.",
       inputSchema: {
         timeframe: z.string().regex(/^[1-9]\d*$/),
@@ -1504,17 +1526,25 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         replications: z.number().int().min(1).max(2000).optional(),
         first_seed: z.number().int().min(0).max(0xffffffff).optional(),
         bars: z.number().int().min(100).max(50_000).optional(),
+        model: z.enum([
+          "white_noise", "regime_switching_volatility", "bid_ask_bounce", "factor_null_pair",
+          "factor_regime_switching_volatility_pair", "factor_bid_ask_bounce_pair",
+        ]).optional(),
+        return_standardization: z.enum(["causal_prior_20_rms", "none"]).optional()
+          .describe("Default causal_prior_20_rms is the v3 contract. none is the invalidated legacy v2 contract for reproduction only."),
         rho: z.number().finite().gt(-1).lt(1).optional(),
         nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
       },
     },
     async ({ timeframe, max_lag_bars, minimum_observations, configuration_trials, folds, confidence_level,
-      replications, first_seed, bars, rho, nominal_alpha }) => {
+      replications, first_seed, bars, model, return_standardization, rho, nominal_alpha }) => {
       try {
         const audit = runLeadLagFalsificationAudit({
           replications: replications ?? 400,
           firstSeed: first_seed,
           bars: bars ?? 5_000,
+          model,
+          returnStandardization: return_standardization,
           timeframeMinutes: Number(timeframe),
           nominalAlpha: nominal_alpha ?? 0.05,
           maxLagBars: max_lag_bars,
@@ -1526,11 +1556,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         });
         return jsonResult({
           schemaVersion: "1.0",
-          methodologyVersion: "lead_lag_falsification_audit_standard_v1",
+          methodologyVersion: audit.auditDefinition.runner === "lead_lag_falsification_audit_v3"
+            ? "lead_lag_falsification_audit_standard_v3"
+            : "lead_lag_falsification_audit_standard_v2",
           audit,
           limitations: [
-            "This is one null model. Paired nulls carrying clustered volatility or bid-ask bounce are not measured here.",
-            "A uniform circular shift removes contemporaneous correlation along with the lagged relationship, which is why the factor-null pair is the model that probes it.",
+            "This response reports one explicitly named paired null model; rates from different models must not be pooled.",
+            "Factor variants preserve contemporaneous correlation; the clustered variant also shares the volatility state across legs.",
+            "The v3 statistical gate remains uncalibrated because its shared clustered-volatility rate exceeds nominal alpha; public candidate eligibility stays disabled.",
             "Quote a rate only together with auditDefinition.inputHash; fold boundaries alone move an otherwise identical run.",
             "Each replication runs the candidate rule's own fixed circular-shift calibration, so large audits are intentionally compute-intensive.",
           ],
@@ -3299,6 +3332,293 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           "Use the returned study_id with apply_analysis_overlay.",
         ],
       }),
+  );
+
+  server.registerTool(
+    "get_volume_profile_context_template",
+    {
+      description:
+        "Get the audited Pine template that exposes only a completed exchange-trading-day " +
+        "chart-bar volume-allocation profile's prior POC, VAH and VAL as readable plots. It does not claim " +
+        "Bid/Ask order flow or institutional activity. Save it with save_pine_script, add it " +
+        "once with add_pine_to_chart, then use get_volume_profile_context.",
+      inputSchema: {},
+    },
+    async () =>
+      jsonResult({
+        name: VOLUME_PROFILE_CONTEXT_NAME,
+        version: VOLUME_PROFILE_CONTEXT_VERSION,
+        source: VOLUME_PROFILE_CONTEXT_SOURCE,
+        inputContract: VOLUME_PROFILE_CONTEXT_INPUTS,
+        setup: [
+          "Save this source with save_pine_script (dry-run, then confirm).",
+          "Add the resulting pine_id once with add_pine_to_chart.",
+          "Declare Volume Type from the actual symbol/data provider before using a result.",
+          "Use get_volume_profile_context with the returned study_id; it accepts completed profiles only.",
+        ],
+      }),
+  );
+
+  server.registerTool(
+    "get_volume_profile_context",
+    {
+      description:
+        "Read a completed prior-session POC, VAH and VAL only from the exact audited Bushido " +
+        "Volume Profile Context Pine template. The saved source, study placement, symbol and " +
+        "timeframe are verified fail-closed. Results describe a volume-derived price-level " +
+        "context, not direct large-order, Bid/Ask, or order-flow evidence.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/).describe("Saved audited template id"),
+        study_id: z.string().regex(/^[\w$]{1,64}$/).describe("On-chart instance id"),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        chart_index: z.number().int().min(0).optional(),
+      },
+    },
+    async ({ pine_id, study_id, expected_symbol, expected_timeframe, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          const context = await tv.getChartContext();
+          const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+          const scripts = await tv.listPineScripts();
+          const script = scripts.find((candidate) => candidate.pineId === pine_id);
+          if (!script || script.name !== VOLUME_PROFILE_CONTEXT_NAME || script.kind !== "study") {
+            throw new Error(`${pine_id} is not the ${VOLUME_PROFILE_CONTEXT_NAME} study`);
+          }
+          const usage = script.usedBy.find(
+            (candidate) => candidate.chartIndex === chart.index && candidate.studyId === study_id,
+          );
+          if (!usage) {
+            throw new Error(`study ${study_id} is not an on-chart instance of ${pine_id} on chart ${chart.index}`);
+          }
+          if (!script.version || usage.version !== script.version) {
+            throw new Error(`study ${study_id} is not the latest saved ${VOLUME_PROFILE_CONTEXT_NAME} version`);
+          }
+          const source = await tv.getPineSource(pine_id, "last");
+          if (source.source.replace(/\r\n/g, "\n") !== VOLUME_PROFILE_CONTEXT_SOURCE.replace(/\r\n/g, "\n")) {
+            throw new Error(`${pine_id} latest source does not match the audited volume-profile template`);
+          }
+          const inputs = assertVolumeProfileContextStudy(
+            await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart.index }),
+            study_id,
+          );
+          const values = await tv.getIndicatorValues({
+            studyId: study_id,
+            chartIndex: chart.index,
+            count: 2,
+            plotTitles: [...VOLUME_PROFILE_CONTEXT_PLOTS],
+          });
+          const parsed = parseVolumeProfileContext(inputs, values);
+          return jsonResult({
+            ...parsed,
+            templateVersion: VOLUME_PROFILE_CONTEXT_VERSION,
+            pineId: pine_id,
+            pineVersion: script.version,
+            studyId: study_id,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            semantics: "completed_chart_bar_volume_range_allocation_profile_proxy",
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "run_volume_profile_reaction_study",
+    {
+      description:
+        "Run one frozen descriptive #61b reaction-study variant on CME exchange-volume chart bars and the exact " +
+        "audited Bushido Volume Profile Context proxy. The 240-minute v1 and 60-minute v1 variants are separate " +
+        "methodologies and their evidence must not be combined. Both fix " +
+        "24 rows, 70% value area, four rejection/acceptance branches, horizons 1/2/4/8 and a 20 bps " +
+        "descriptive target. It also compares each branch with non-event bars in the same prior-closed " +
+        "directional-plus-volatility regime, standardized to the event regime mix. It verifies source, " +
+        "placement, inputs, symbol and timeframe and never ranks or adopts a branch. Native VP, order " +
+        "flow and assumed fills are explicitly out of scope.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        study_id: z.string().regex(/^[\w$]{1,64}$/),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.enum(["240", "60"]),
+        chart_index: z.number().int().min(0).optional(),
+        count: z.number().int().min(100).max(15_000).optional()
+          .describe("Most recent closed chart/profile rows. Default: 5000; the 60-minute variant supports up to 15,000 after explicit history loading"),
+        signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        signal_to: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+        })).max(12).optional(),
+        event_limit: z.number().int().min(0).max(500).optional(),
+      },
+    },
+    async ({ pine_id, study_id, expected_symbol, expected_timeframe, chart_index, count,
+      signal_from, signal_to, folds, event_limit }) => chartOperations.run(async () => {
+      try {
+        if (expected_timeframe === "240" && (count ?? 5000) > 5000) {
+          throw new Error("the 240-minute #61b v1 contract allows at most 5000 bars; use the separate 60-minute variant for up to 15000");
+        }
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) {
+          throw new Error("volume-profile reaction study is blocked while Bar Replay is active");
+        }
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script || script.name !== VOLUME_PROFILE_CONTEXT_NAME || script.kind !== "study") {
+          throw new Error(`${pine_id} is not the ${VOLUME_PROFILE_CONTEXT_NAME} study`);
+        }
+        const usage = script.usedBy.find(
+          (candidate) => candidate.chartIndex === chart.index && candidate.studyId === study_id,
+        );
+        if (!usage || !script.version || usage.version !== script.version) {
+          throw new Error(`study ${study_id} is not the latest ${VOLUME_PROFILE_CONTEXT_NAME} instance on chart ${chart.index}`);
+        }
+        const source = await tv.getPineSource(pine_id, "last");
+        if (source.source.replace(/\r\n/g, "\n") !== VOLUME_PROFILE_CONTEXT_SOURCE.replace(/\r\n/g, "\n")) {
+          throw new Error(`${pine_id} latest source does not match the audited volume-profile template`);
+        }
+        const inputRows = assertVolumeProfileContextStudy(
+          await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart.index }),
+          study_id,
+        );
+        const input = new Map(inputRows.inputs.map((item) => [item.id, item.value]));
+        if (input.get("in_0") !== 24 || input.get("in_1") !== 70 ||
+            input.get("in_2") !== "exchange_reported_volume") {
+            throw new Error("#61b requires Rows=24, Value Area %=70 and exchange_reported_volume");
+        }
+        const requested = count ?? 5000;
+        const [history, values] = await Promise.all([
+          tv.getOhlcv(requested, chart.index),
+          tv.getIndicatorValues({
+            studyId: study_id,
+            chartIndex: chart.index,
+            count: requested,
+            plotTitles: [...VOLUME_PROFILE_CONTEXT_PLOTS],
+          }),
+        ]);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() ||
+            normalizeResolution(history.resolution) !== normalizeResolution(expected_timeframe)) {
+          throw new Error("OHLC evidence does not match the bound #61b chart variant");
+        }
+        const studyInput = {
+          bars: history.bars,
+          indicatorValues: values,
+          studyId: study_id,
+          symbol: history.symbol,
+          timeframe: history.resolution,
+          signalFrom: signal_from ?? null,
+          signalTo: signal_to ?? null,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
+          eventLimit: event_limit ?? 50,
+        };
+        const result = expected_timeframe === "60"
+          ? runVolumeProfileReactionStudy1h(studyInput)
+          : runVolumeProfileReactionStudy(studyInput);
+        return jsonResult({
+          ...result,
+          source: {
+            chartIndex: chart.index,
+            requestedBars: requested,
+            returnedBars: history.bars.length,
+            returnedProfileRows: values[0]?.bars.length ?? 0,
+            from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null,
+            pineId: pine_id,
+            pineVersion: script.version,
+            studyId: study_id,
+            studyVariant: expected_timeframe === "60" ? "1h_v1" : "4h_v1",
+          },
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
+    "run_volume_profile_poc_reversion_study",
+    {
+      description:
+        "Run the separately frozen descriptive #61b 60-minute POC-reversion study on CME exchange-volume " +
+        "chart bars and the exact audited Bushido Volume Profile Context proxy. A signal is the first completed " +
+        "close outside VAH or VAL and at least 20 bps from the completed prior POC; it measures return toward " +
+        "that POC, POC-touch frequency, and a same-prior-regime non-event baseline. This is not the VAH/VAL " +
+        "reaction study and its evidence must not be combined with that population. It is descriptive only and " +
+        "never ranks or adopts a branch.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+        study_id: z.string().regex(/^[\w$]{1,64}$/),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.literal("60"),
+        chart_index: z.number().int().min(0).optional(),
+        count: z.number().int().min(100).max(15_000).optional()
+          .describe("Most recent closed chart/profile rows. Default: 5000; up to 15000 after explicit history loading"),
+        signal_from: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        signal_to: CANONICAL_ISO_TIMESTAMP_SCHEMA.optional(),
+        folds: z.array(z.object({
+          fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
+          from: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+          to: CANONICAL_ISO_TIMESTAMP_SCHEMA,
+        })).max(12).optional(),
+        event_limit: z.number().int().min(0).max(500).optional(),
+      },
+    },
+    async ({ pine_id, study_id, expected_symbol, expected_timeframe, chart_index, count,
+      signal_from, signal_to, folds, event_limit }) => chartOperations.run(async () => {
+      try {
+        const context = await tv.getChartContext();
+        const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("volume-profile POC reversion study is blocked while Bar Replay is active");
+        const scripts = await tv.listPineScripts();
+        const script = scripts.find((candidate) => candidate.pineId === pine_id);
+        if (!script || script.name !== VOLUME_PROFILE_CONTEXT_NAME || script.kind !== "study") {
+          throw new Error(`${pine_id} is not the ${VOLUME_PROFILE_CONTEXT_NAME} study`);
+        }
+        const usage = script.usedBy.find((candidate) => candidate.chartIndex === chart.index && candidate.studyId === study_id);
+        if (!usage || !script.version || usage.version !== script.version) {
+          throw new Error(`study ${study_id} is not the latest ${VOLUME_PROFILE_CONTEXT_NAME} instance on chart ${chart.index}`);
+        }
+        const source = await tv.getPineSource(pine_id, "last");
+        if (source.source.replace(/\r\n/g, "\n") !== VOLUME_PROFILE_CONTEXT_SOURCE.replace(/\r\n/g, "\n")) {
+          throw new Error(`${pine_id} latest source does not match the audited volume-profile template`);
+        }
+        const inputRows = assertVolumeProfileContextStudy(
+          await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart.index }), study_id);
+        const input = new Map(inputRows.inputs.map((item) => [item.id, item.value]));
+        if (input.get("in_0") !== 24 || input.get("in_1") !== 70 || input.get("in_2") !== "exchange_reported_volume") {
+          throw new Error("#61b POC reversion requires Rows=24, Value Area %=70 and exchange_reported_volume");
+        }
+        const requested = count ?? 5000;
+        const [history, values] = await Promise.all([
+          tv.getOhlcv(requested, chart.index),
+          tv.getIndicatorValues({ studyId: study_id, chartIndex: chart.index, count: requested,
+            plotTitles: [...VOLUME_PROFILE_CONTEXT_PLOTS] }),
+        ]);
+        if (history.symbol.toUpperCase() !== expected_symbol.toUpperCase() || normalizeResolution(history.resolution) !== "60") {
+          throw new Error("OHLC evidence does not match the bound #61b POC-reversion chart");
+        }
+        const result = runVolumeProfilePocReversionStudy1h({
+          bars: history.bars, indicatorValues: values, studyId: study_id, symbol: history.symbol, timeframe: history.resolution,
+          signalFrom: signal_from ?? null, signalTo: signal_to ?? null,
+          folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })), eventLimit: event_limit ?? 50,
+        });
+        return jsonResult({
+          ...result,
+          source: { chartIndex: chart.index, requestedBars: requested, returnedBars: history.bars.length,
+            returnedProfileRows: values[0]?.bars.length ?? 0, from: history.bars[0]?.timeIso ?? null,
+            to: history.bars.at(-1)?.timeIso ?? null, pineId: pine_id, pineVersion: script.version, studyId: study_id },
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(
@@ -7021,6 +7341,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_oanda_flow_collection_readiness",
+    {
+      description:
+        "Read whether the local OANDA retail-flow collector is configured, without making a network request or exposing credentials. " +
+        "The source is limited to OANDA-client order and position percentages, not market-wide order flow.",
+      inputSchema: {},
+    },
+    async () => jsonResult({
+      status: oandaFlowTokenConfigured() ? "ready" : "blocked",
+      token_configured: oandaFlowTokenConfigured(),
+      supported_instruments: OANDA_FLOW_INSTRUMENTS,
+      evidence_tier: "broker_retail_sentiment_history",
+      history_policy: "returned_history_exploratory_only_until_observed_first_seen",
+      limitations: ["OANDA-client percentage distributions, not market-wide order-book depth or aggressor-side flow."],
+    }),
+  );
+
+  server.registerTool(
     "get_carry_core_primary_readiness",
     {
       description:
@@ -7499,6 +7837,62 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   server.registerTool(
+    "get_cot_crowding_unwind_overlay_template",
+    {
+      description:
+        "Get the audited Pine overlay that renders a supplied COT crowding context and the chart's prior daily structure range. " +
+        "COT values are explicit MCP inputs; the overlay does not fetch or infer CFTC data, orders, stops, or execution flow.",
+      inputSchema: {},
+    },
+    async () => jsonResult({
+      name: COT_CROWDING_UNWIND_OVERLAY_NAME,
+      version: COT_CROWDING_UNWIND_OVERLAY_VERSION,
+      source: COT_CROWDING_UNWIND_OVERLAY_SOURCE,
+      inputContract: COT_CROWDING_UNWIND_OVERLAY_INPUTS,
+      semantics: "crowded_position_unwind_proxy_not_observed_orders_or_stops",
+      setup: [
+        "Save this source with save_pine_script (dry-run, then confirm).",
+        "Add the resulting pine_id once with add_pine_to_chart on a daily EURUSD or USDJPY chart.",
+        "Set the COT inputs only from get_cot_crowding_unwind_context output, including report and local first-seen times.",
+      ],
+    }),
+  );
+
+  server.registerTool(
+    "get_cot_crowding_unwind_context",
+    {
+      description:
+        "Describe an exploratory COT crowded-position unwind proxy on a bound daily FX chart. " +
+        "It combines leveraged-money three-year positioning percentiles with a prior-20-day price break; it never claims to observe orders, stops, institutions, or execution flow.",
+      inputSchema: {
+        chart_index: z.number().int().min(0).default(0),
+        expected_symbol: z.enum(["OANDA:EURUSD", "OANDA:USDJPY"]),
+        expected_timeframe: z.literal("1D"),
+        count: z.number().int().min(21).max(500).default(100),
+      },
+    },
+    async ({ chart_index, expected_symbol, expected_timeframe, count }) => chartOperations.run(async () => {
+      try {
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("COT crowding-unwind context is blocked while Bar Replay is active");
+        const context = await tv.getChartContext();
+        const chart = context.charts.find((candidate) => candidate.index === chart_index);
+        if (!chart || chart.symbol.toUpperCase() !== expected_symbol || normalizeResolution(chart.resolution) !== expected_timeframe) {
+          throw new Error("chart does not match the requested COT crowding-unwind binding");
+        }
+        const history = await tv.getOhlcv(count, chart_index);
+        if (history.symbol.toUpperCase() !== expected_symbol || normalizeResolution(history.resolution) !== expected_timeframe) {
+          throw new Error("COT crowding-unwind OHLC does not match the requested chart binding");
+        }
+        const cotHistory = await cot.getHistory(expected_symbol, 250);
+        return jsonResult(computeCotCrowdingUnwindContext({ symbol: expected_symbol, timeframe: expected_timeframe, bars: history.bars, observations: cotHistory.observations }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
+  );
+
+  server.registerTool(
     "get_positioning_context",
     {
       description: "Get the latest or recent public CFTC COT positioning proxy for a supported FX or gold symbol. COT is weekly, delayed futures data, not a realtime order-flow signal.",
@@ -7773,7 +8167,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   server.registerTool(
     "compute_lead_lag_relationships",
     {
-      description: "Scan return correlation between two explicitly bound layout charts across a symmetric range of lags, so a caller can see whether a reference market leads the primary. Closed bars must share an exact UTC timestamp; missing bars are never forward-filled. Every scanned lag is returned with its own interval and per-fold stability, and no best lag is selected: picking the strongest lag from a scan and quoting its interval is not an out-of-sample result. Descriptive evidence only, never a trading signal.",
+      description: "Scan return correlation between two explicitly bound layout charts across a symmetric range of lags, so a caller can see whether a reference market leads the primary. Closed bars must share an exact UTC timestamp; missing bars are never forward-filled. The v3 default scales each return by its own series' prior-20-return RMS without using the current return. Every scanned lag is returned with its own interval and per-fold stability, and no best lag is selected. Shared clustered-volatility calibration still exceeds nominal alpha, so candidate eligibility and journal promotion remain disabled. Descriptive evidence only, never a trading signal.",
       inputSchema: {
         primary_chart_index: z.number().int().min(0),
         reference_chart_index: z.number().int().min(0),
@@ -7789,7 +8183,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         configuration_trials: z.number().int().min(1).max(100000).optional()
           .describe("Total related scans inspected so far, including this one. Applied with all scanned lags as the Bonferroni family. Default: 1"),
         empirical_null_calibration: z.boolean().optional()
-          .describe("Run the fixed 1,000-replication circular-shift empirical-null calibration on this exact pair. Required for candidate eligibility; default: false"),
+          .describe("Run the fixed 1,000-replication circular-shift empirical-null calibration on this exact pair. Required for the statistical gate; public candidate eligibility remains disabled pending shared-volatility calibration. Default: false"),
+        return_standardization: z.enum(["causal_prior_20_rms", "none"]).optional()
+          .describe("Default causal_prior_20_rms uses only each return's prior 20 returns for scale. none reproduces the invalidated raw-return v2 contract."),
+        alignment_mode: z.enum(["exact_utc", "resample_closed_60m_to_utc_grid"]).optional()
+          .describe("Default exact_utc joins only identical bar timestamps. The resampling mode temporarily reads both charts at closed 60-minute bars and rebuilds a common UTC grid at expected_timeframe; use it only when vendor-anchored higher-timeframe bars cannot align exactly."),
         folds: z.array(z.object({
           fold_id: z.string().regex(/^[\w.:-]{1,80}$/),
           from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
@@ -7806,7 +8204,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     },
     async ({ primary_chart_index, reference_chart_index, expected_primary_symbol, expected_reference_symbol,
       expected_timeframe, count, max_lag_bars, minimum_observations, confidence_level, configuration_trials,
-      empirical_null_calibration, folds, journal }) => chartOperations.run(async () => {
+      empirical_null_calibration, return_standardization, alignment_mode, folds, journal }) => chartOperations.run(async () => {
       try {
         if (primary_chart_index === reference_chart_index) throw new Error("primary and reference chart indexes must differ");
         const replay = await tv.getReplayStatus();
@@ -7823,9 +8221,80 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             normalizeResolution(referenceChart.resolution) !== normalizeResolution(expected_timeframe)) {
           throw new Error("lead/lag chart binding does not match the requested symbols and timeframe");
         }
-        const [primary, reference] = await Promise.all([
-          tv.getOhlcv(count ?? 1000, primary_chart_index), tv.getOhlcv(count ?? 1000, reference_chart_index),
-        ]);
+        const resampleToUtcGrid = alignment_mode === "resample_closed_60m_to_utc_grid";
+        const requestedBars = count ?? 1000;
+        let primary: Awaited<ReturnType<typeof tv.getOhlcv>>;
+        let reference: Awaited<ReturnType<typeof tv.getOhlcv>>;
+        let resampling: Record<string, unknown> | null = null;
+        if (!resampleToUtcGrid) {
+          [primary, reference] = await Promise.all([
+            tv.getOhlcv(requestedBars, primary_chart_index), tv.getOhlcv(requestedBars, reference_chart_index),
+          ]);
+        } else {
+          const targetMs = marketRegimeResolutionMilliseconds(expected_timeframe);
+          const sourceMs = marketRegimeResolutionMilliseconds("60");
+          if (targetMs === null || sourceMs === null || targetMs <= sourceMs || targetMs % sourceMs !== 0) {
+            throw new Error("resample_closed_60m_to_utc_grid requires expected_timeframe to be a whole-number multiple above 60 minutes");
+          }
+          const intervalsPerBucket = targetMs / sourceMs;
+          const sourceRequestedBars = Math.min(5_000, requestedBars * intervalsPerBucket + intervalsPerBucket);
+          const collectSourceHistory = async (chartIndex: number, expectedSymbol: string) => {
+            let history = await tv.getOhlcv(sourceRequestedBars, chartIndex);
+            if (history.bars.length < sourceRequestedBars) {
+              await tv.loadMoreHistory({ count: sourceRequestedBars - history.bars.length, chartIndex });
+              history = await tv.getOhlcv(sourceRequestedBars, chartIndex);
+            }
+            if (history.symbol.toUpperCase() !== expectedSymbol.toUpperCase() || normalizeResolution(history.resolution) !== "60") {
+              throw new Error(`60-minute source history does not match ${expectedSymbol}`);
+            }
+            return history;
+          };
+          const primaryTransaction = await withTemporaryChartState(tv, primary_chart_index, { resolution: "60" }, async () => {
+            const referenceTransaction = await withTemporaryChartState(tv, reference_chart_index, { resolution: "60" }, async () => ({
+              primary: await collectSourceHistory(primary_chart_index, expected_primary_symbol),
+              reference: await collectSourceHistory(reference_chart_index, expected_reference_symbol),
+            }));
+            if (!referenceTransaction.restored) {
+              throw new Error(`reference chart ${reference_chart_index} could not be restored after UTC-grid collection: ${referenceTransaction.restoreError instanceof Error ? referenceTransaction.restoreError.message : String(referenceTransaction.restoreError)}`);
+            }
+            if (referenceTransaction.operationError !== null) throw referenceTransaction.operationError;
+            if (referenceTransaction.value === null) throw new Error("UTC-grid reference collection returned no history");
+            return referenceTransaction.value;
+          });
+          if (!primaryTransaction.restored) {
+            throw new Error(`primary chart ${primary_chart_index} could not be restored after UTC-grid collection: ${primaryTransaction.restoreError instanceof Error ? primaryTransaction.restoreError.message : String(primaryTransaction.restoreError)}`);
+          }
+          if (primaryTransaction.operationError !== null) throw primaryTransaction.operationError;
+          if (primaryTransaction.value === null) throw new Error("UTC-grid primary collection returned no history");
+          const primaryGrid = resampleClosedBarsToUtcGrid({
+            bars: primaryTransaction.value.primary.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
+          });
+          const referenceGrid = resampleClosedBarsToUtcGrid({
+            bars: primaryTransaction.value.reference.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
+          });
+          primary = { ...primaryTransaction.value.primary, resolution: expected_timeframe, count: primaryGrid.bars.length, bars: primaryGrid.bars };
+          reference = { ...primaryTransaction.value.reference, resolution: expected_timeframe, count: referenceGrid.bars.length, bars: referenceGrid.bars };
+          resampling = {
+            mode: "resample_closed_60m_to_utc_grid",
+            sourceTimeframe: "60",
+            targetTimeframe: expected_timeframe,
+            sourceRequestedBars,
+            primary: {
+              sourceClosedBars: primaryGrid.sourceClosedBars,
+              sourceFormingBarsExcluded: primaryGrid.sourceFormingBarsExcluded,
+              outputBars: primaryGrid.bars.length,
+              intervalsPerBucket: primaryGrid.intervalsPerBucket,
+              incompleteBucketsExcluded: primaryGrid.incompleteBucketsExcluded,
+            },
+            reference: {
+              sourceClosedBars: referenceGrid.sourceClosedBars,
+              sourceFormingBarsExcluded: referenceGrid.sourceFormingBarsExcluded,
+              outputBars: referenceGrid.bars.length,
+              intervalsPerBucket: referenceGrid.intervalsPerBucket,
+              incompleteBucketsExcluded: referenceGrid.incompleteBucketsExcluded,
+            },
+          };
+        }
         if (primary.symbol.toUpperCase() !== expected_primary_symbol.toUpperCase() ||
             reference.symbol.toUpperCase() !== expected_reference_symbol.toUpperCase() ||
             normalizeResolution(primary.resolution) !== normalizeResolution(expected_timeframe) ||
@@ -7843,6 +8312,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           confidenceLevel: confidence_level ?? 0.95,
           configurationTrials: configuration_trials ?? 1,
           empiricalNullCalibration: empirical_null_calibration ?? false,
+          returnStandardization: return_standardization ?? "causal_prior_20_rms",
+          alignmentPolicy: resampleToUtcGrid
+            ? "utc_grid_resampled_from_closed_60m_bars"
+            : "exact_utc_timestamp_no_forward_fill",
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
         });
         const closedPrimary = primary.bars.filter((bar) => bar.forming !== true);
@@ -7912,6 +8385,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           primary: { chartIndex: primary_chart_index, symbol: primary.symbol },
           reference: { chartIndex: reference_chart_index, symbol: reference.symbol },
           source,
+          resampling,
           conditionType: "lead_lag_return_correlation",
           studyId,
           definitionHash,

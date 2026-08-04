@@ -2,8 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   generateFactorNullPair,
+  generateIndependentNullPair,
   generateSyntheticNullSeries,
 } from "../../build/syntheticNullSeries.js";
+
+test("independent null pairs share a clock without reusing either leg's random path", () => {
+  const pair = generateIndependentNullPair({ model: "bid_ask_bounce", bars: 300, seed: 7, timeframeMinutes: 60 });
+  assert.deepEqual(pair.primary.map((bar) => bar.time), pair.reference.map((bar) => bar.time));
+  assert.notDeepEqual(pair.primary.map((bar) => bar.close), pair.reference.map((bar) => bar.close));
+});
 
 const base = { bars: 4000, seed: 7, timeframeMinutes: 1440, startTimeMs: Date.UTC(2006, 0, 2) };
 
@@ -34,6 +41,18 @@ function autocorrelation(values, lag) {
     if (index + lag < values.length) covariance += (values[index] - mean) * (values[index + lag] - mean);
   }
   return covariance / variance;
+}
+
+function correlation(a, b) {
+  const meanA = a.reduce((sum, value) => sum + value, 0) / a.length;
+  const meanB = b.reduce((sum, value) => sum + value, 0) / b.length;
+  let covariance = 0, varianceA = 0, varianceB = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    covariance += (a[index] - meanA) * (b[index] - meanB);
+    varianceA += (a[index] - meanA) ** 2;
+    varianceB += (b[index] - meanB) ** 2;
+  }
+  return covariance / Math.sqrt(varianceA * varianceB);
 }
 
 test("synthetic null series is reproducible from its seed and changes with it", () => {
@@ -141,29 +160,18 @@ test("bid-ask bounce reverses returns without making anything tradable", () => {
 });
 
 test("factor null rho is the contemporaneous correlation, sign and all", () => {
-  const correlate = (a, b) => {
-    const meanA = a.reduce((s, v) => s + v, 0) / a.length;
-    const meanB = b.reduce((s, v) => s + v, 0) / b.length;
-    let cov = 0, va = 0, vb = 0;
-    for (let i = 0; i < a.length; i += 1) {
-      cov += (a[i] - meanA) * (b[i] - meanB);
-      va += (a[i] - meanA) ** 2;
-      vb += (b[i] - meanB) ** 2;
-    }
-    return cov / Math.sqrt(va * vb);
-  };
   // A signed loading shared by both legs turned rho = -0.7 into +0.49 and any magnitude above one
   // into exactly +1. rho now means what its name says.
   for (const rho of [-0.7, 0, 0.7]) {
     const { primary, reference } = generateFactorNullPair({ ...base, model: "white_noise", rho });
-    const measured = correlate(logReturns(primary), logReturns(reference));
+    const measured = correlation(logReturns(primary), logReturns(reference));
     assert.ok(Math.abs(measured - rho) < 0.05, `rho ${rho} measured as ${measured.toFixed(3)}`);
   }
   const { primary, reference } = generateFactorNullPair({ ...base, model: "white_noise", rho: 0.7 });
   const p = logReturns(primary);
   const r = logReturns(reference);
   for (const lag of [1, 2, 3]) {
-    const lagged = correlate(p.slice(lag), r.slice(0, r.length - lag));
+    const lagged = correlation(p.slice(lag), r.slice(0, r.length - lag));
     assert.ok(Math.abs(lagged) < 0.06, `lag ${lag} correlation ${lagged} would plant a lead that does not exist`);
   }
 });
@@ -210,16 +218,37 @@ test("an unknown model is refused instead of silently producing white noise", ()
   assert.throws(() => generateSyntheticNullSeries({ ...base, model: undefined }), /model must be one of/);
 });
 
-test("factor null pairs refuse a model they cannot actually generate", () => {
-  // Both legs are white noise at constant volatility. Accepting another name and ignoring it would
-  // let a lead/lag audit claim it ran against clustered variance when it never did.
-  assert.throws(() => generateFactorNullPair({ ...base, model: "regime_switching_volatility" }),
-    /white noise only; the model cannot be selected/);
-  assert.throws(() => generateFactorNullPair({ ...base, model: "bid_ask_bounce" }),
-    /white noise only; the model cannot be selected/);
+test("factor null pairs generate every declared marginal model", () => {
   const explicit = generateFactorNullPair({ ...base, model: "white_noise", bars: 200 });
   const implicit = generateFactorNullPair({ ...base, bars: 200 });
   assert.deepEqual(explicit.primary, implicit.primary);
+  for (const model of ["regime_switching_volatility", "bid_ask_bounce"]) {
+    const pair = generateFactorNullPair({ ...base, model, bars: 1000, rho: 0.7 });
+    assert.equal(pair.primary.length, 1000);
+    assert.equal(pair.reference.length, 1000);
+  }
+});
+
+test("factor clustered-volatility pairs share the volatility state", () => {
+  const pair = generateFactorNullPair({ ...base, model: "regime_switching_volatility", bars: 4000, rho: 0.7 });
+  const primaryMagnitude = logReturns(pair.primary).map(Math.abs);
+  const referenceMagnitude = logReturns(pair.reference).map(Math.abs);
+  const contemporaneousMagnitudeCorrelation = correlation(primaryMagnitude, referenceMagnitude);
+  assert.ok(contemporaneousMagnitudeCorrelation > 0.2,
+    `shared volatility state is too weak: ${contemporaneousMagnitudeCorrelation}`);
+
+  // Shared volatility must not itself plant a directional lead. Averaging fixed seeds separates the
+  // model contract from the deliberately wide sampling noise that makes the old candidate gate fail.
+  for (const lag of [1, 2, 3]) {
+    let total = 0;
+    for (let seed = 1; seed <= 20; seed += 1) {
+      const draw = generateFactorNullPair({ ...base, model: "regime_switching_volatility", bars: 2000, seed, rho: 0.7 });
+      const primary = logReturns(draw.primary);
+      const reference = logReturns(draw.reference);
+      total += correlation(primary.slice(lag), reference.slice(0, reference.length - lag));
+    }
+    assert.ok(Math.abs(total / 20) < 0.02, `shared volatility planted average lag-${lag} correlation ${total / 20}`);
+  }
 });
 
 test("a weekly series generates from defaults alone", () => {

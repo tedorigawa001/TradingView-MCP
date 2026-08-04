@@ -31,7 +31,11 @@
     "pretest:e2e": "npm run build",
     "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "scan:fx-csv": "node --max-old-space-size=8192 build/fxCsvFeatureScanCli.js --confirm-local-import",
-    "aggregate:fx-csv": "node --max-old-space-size=8192 build/fxCsvM1AggregationCli.js --confirm-local-import"
+    "aggregate:fx-csv": "node --max-old-space-size=8192 build/fxCsvM1AggregationCli.js --confirm-local-import",
+    "collect:macro-events": "node build/officialMacroEventCollectionCli.js --confirm-external-fetch",
+    "collect:oanda-flow": "node build/oandaFlowCollectionCli.js",
+    "study:macro-events-m60": "node build/macroEvent60mCli.js --confirm-local-import",
+    "preflight:macro-events-m60": "node build/macroEvent60mPreflightCli.js --confirm-local-import"
   },
   "engines": {
     "node": ">=22"

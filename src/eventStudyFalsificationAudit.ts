@@ -15,7 +15,11 @@ import {
   timeframeMinutes,
   type SessionAuctionStudyInput,
 } from "./sessionAuctionStudy.js";
-import type { SyntheticNullModel } from "./syntheticNullSeries.js";
+import {
+  factorPairModel,
+  type PairedSyntheticNullModel,
+  type SyntheticNullModel,
+} from "./syntheticNullSeries.js";
 import type { OhlcvBar } from "./tradingview.js";
 
 const STANDARD_MODELS: SyntheticNullModel[] = ["white_noise", "regime_switching_volatility", "bid_ask_bounce"];
@@ -143,13 +147,13 @@ export interface StandardEventStudyFalsificationAuditInput {
 
 export interface StandardEventStudyFalsificationAuditResult {
   schemaVersion: "1.0";
-  methodologyVersion: "event_study_falsification_audit_standard_v1";
+  methodologyVersion: "event_study_falsification_audit_standard_v1" | "event_study_falsification_audit_standard_v2";
   standard: {
     replications: number;
     bars: number;
     nominalAlpha: number;
     folds: number;
-    models: Array<SyntheticNullModel | "factor_null_pair">;
+    models: PairedSyntheticNullModel[];
   };
   study: StandardEventStudyDefinition["type"];
   runs: EventStudyFalsificationAuditResult[];
@@ -322,12 +326,16 @@ export function runYieldPriceNonconfirmationFalsificationAudit(
   }
   validateRule(input.candidate, { ...input.study, timeframe: input.study.targetTimeframe }, input.audit);
   const stepMs = input.audit.timeframeMinutes * 60_000;
+  // The standard marginal model is mapped explicitly to its correlated pair counterpart. This makes
+  // the caller's model effective while preserving the no-lag factor dependence required here.
+  const { model, ...auditSettings } = input.audit;
   return {
     schemaVersion: "1.0",
     study: "yield_price_nonconfirmation",
     candidateRule: { ...input.candidate, globalEvidence: "positive_mean_confidence_interval_excludes_zero", foldEvidence: "every_predeclared_fold_has_positive_mean" },
     audit: runPairedFalsificationAudit({
-      ...input.audit,
+      ...auditSettings,
+      model: factorPairModel(model),
       rho: input.rho,
       runStudy: (targetBars, driverBars) => runYieldPriceNonconfirmationStudy({
         ...input.study, targetBars, driverBars, contextRegime: null, contextIndicator: null,
@@ -367,8 +375,8 @@ export function runStandardEventStudyFalsificationAudit(
   let runs: EventStudyFalsificationAuditResult[];
   switch (study.type) {
     case "yield_price_nonconfirmation":
-      runs = [runYieldPriceNonconfirmationFalsificationAudit({ audit: { ...audit, model: "white_noise" }, study: study.definition,
-        candidate, rho: study.rho })];
+      runs = models.map((model) => runYieldPriceNonconfirmationFalsificationAudit({ audit: { ...audit, model },
+        study: study.definition, candidate, rho: study.rho }));
       break;
     case "fvg_retest":
       runs = models.map((model) => runFvgRetestFalsificationAudit({ audit: { ...audit, model }, study: study.definition, candidate }));
@@ -392,16 +400,21 @@ export function runStandardEventStudyFalsificationAudit(
   }
   return {
     schemaVersion: "1.0",
-    methodologyVersion: "event_study_falsification_audit_standard_v1",
+    methodologyVersion: input.study.type === "yield_price_nonconfirmation"
+      ? "event_study_falsification_audit_standard_v2"
+      : "event_study_falsification_audit_standard_v1",
     standard: { replications: audit.replications, bars: audit.bars, nominalAlpha: audit.nominalAlpha,
-      folds: candidate.folds, models: input.study.type === "yield_price_nonconfirmation" ? ["factor_null_pair"] : [...models] },
+      folds: candidate.folds,
+      models: input.study.type === "yield_price_nonconfirmation" ? models.map(factorPairModel) : [...models] },
     study: input.study.type,
     runs,
     limitations: [
       "Each null model is reported separately; rates across models are not pooled.",
       "This calibrates the supplied frozen decision rule, not profitability or an executable trading strategy.",
       "Synthetic folds are equal calendar partitions of each generated series and do not reproduce the real sample dates.",
-      ...(input.study.type === "yield_price_nonconfirmation" ? ["The paired null preserves only contemporaneous correlation; it does not model yield publication timing, revisions, or carry."] : []),
+      ...(input.study.type === "yield_price_nonconfirmation" ? [
+        "The paired null preserves contemporaneous correlation and, for clustered volatility, a shared volatility state; it does not model yield publication timing, revisions, or carry.",
+      ] : []),
     ],
   };
 }

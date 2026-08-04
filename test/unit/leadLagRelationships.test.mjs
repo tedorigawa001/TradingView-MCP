@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeLeadLagRelationships } from "../../build/leadLagRelationships.js";
+import {
+  LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS,
+  causalPriorRmsStandardizePair,
+  computeLeadLagRelationships,
+  resampleClosedBarsToUtcGrid,
+} from "../../build/leadLagRelationships.js";
 
 function bar(time, close, forming = false) {
   return { time, timeIso: new Date(time * 1000).toISOString(), open: close, high: close, low: close, close, volume: 1, forming };
@@ -38,6 +43,72 @@ function laggedPair(driverReturns, lead) {
 
 const DRIVER = [0.004, -0.003, 0.006, -0.002, 0.005, -0.007, 0.003, 0.008, -0.004, 0.002,
   0.007, -0.006, 0.001, 0.009, -0.005, 0.004, -0.008, 0.006, -0.001, 0.003];
+
+test("causal volatility scaling uses only the prior fixed 20 returns", () => {
+  const prior = Array.from({ length: LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS }, (_, index) => index + 1);
+  const result = causalPriorRmsStandardizePair({
+    primaryReturns: [...prior, 1_000],
+    referenceReturns: [...prior.map((value) => value * 2), -2_000],
+  });
+  const rms = Math.sqrt(prior.reduce((sum, value) => sum + value ** 2, 0) / prior.length);
+  assert.equal(result.primaryReturns.length, 1);
+  assert.ok(Math.abs(result.primaryReturns[0] - 1_000 / rms) < 1e-12);
+  assert.ok(Math.abs(result.referenceReturns[0] - (-2_000 / (2 * rms))) < 1e-12);
+  assert.equal(result.warmupReturnsExcluded, 20);
+  assert.throws(() => causalPriorRmsStandardizePair({
+    primaryReturns: [...new Array(20).fill(0), 1], referenceReturns: [...new Array(20).fill(1), 1],
+  }), /causal volatility scale is unavailable/);
+});
+
+test("lead/lag v3 records causal scaling and retains a planted lag", () => {
+  const driver = Array.from({ length: 160 }, (_, index) =>
+    (((index * 47) % 101) - 50) / 10_000 + ((index % 5) - 2) / 100_000);
+  const pair = laggedPair(driver, 2);
+  const result = computeLeadLagRelationships({
+    ...BASE, ...pair, maxLagBars: 4, minimumObservations: 30,
+    returnStandardization: "causal_prior_20_rms",
+  });
+  assert.equal(result.methodologyVersion, "lead_lag_relationships_v3_causal_prior_20_rms");
+  assert.deepEqual(result.definition.returnStandardization, {
+    method: "causal_prior_rms", windowBars: 20, currentReturnExcludedFromScale: true, centering: "none",
+  });
+  assert.equal(result.sample.standardizationWarmupReturnsExcluded, 20);
+  assert.equal(result.sample.returnObservations, result.sample.rawReturnObservations - 20);
+  assert.ok(result.byLag.find((entry) => entry.lagBars === 2).correlation > 0.8);
+});
+
+test("UTC-grid resampling requires every closed source interval in a target bucket", () => {
+  const source = Array.from({ length: 8 }, (_, index) => ({
+    ...bar(index * 3_600, 100 + index), high: 101 + index, low: 99 + index, volume: index + 1,
+  }));
+  const resampled = resampleClosedBarsToUtcGrid({
+    bars: source, sourceTimeframe: "60", targetTimeframe: "240",
+  });
+  assert.equal(resampled.bars.length, 2);
+  assert.equal(resampled.intervalsPerBucket, 4);
+  assert.equal(resampled.bars[0].time, 0);
+  assert.equal(resampled.bars[0].open, 100);
+  assert.equal(resampled.bars[0].close, 103);
+  assert.equal(resampled.bars[0].high, 104);
+  assert.equal(resampled.bars[0].low, 99);
+  assert.equal(resampled.bars[0].volume, 10);
+
+  const missing = resampleClosedBarsToUtcGrid({
+    bars: source.filter((candidate) => candidate.time !== 7_200), sourceTimeframe: "60", targetTimeframe: "240",
+  });
+  assert.equal(missing.bars.length, 1, "a partial bucket must never be forward-filled into a synthetic 4H bar");
+  assert.equal(missing.incompleteBucketsExcluded, 1);
+});
+
+test("lead/lag reports an explicit UTC-grid resampling policy", () => {
+  const { primaryBars, referenceBars } = laggedPair(DRIVER, 1);
+  const result = computeLeadLagRelationships({
+    ...BASE, primaryBars, referenceBars, maxLagBars: 2,
+    alignmentPolicy: "utc_grid_resampled_from_closed_60m_bars",
+  });
+  assert.equal(result.alignmentPolicy, "utc_grid_resampled_from_closed_60m_bars");
+  assert.equal(result.definition.alignmentPolicy, "utc_grid_resampled_from_closed_60m_bars");
+});
 
 test("lead/lag scan finds a planted reference lead at the correct positive lag", () => {
   const { primaryBars, referenceBars } = laggedPair(DRIVER, 2);
@@ -102,7 +173,7 @@ test("lead/lag Bonferroni gates lag eligibility across lags and declared trials"
   assert.equal(nonTradable.inference.passesBonferroni, false, "negative lags cannot become a primary-market candidate");
 });
 
-test("lead/lag empirical null is deterministic, family-wise, and required for candidate eligibility", () => {
+test("lead/lag empirical null is deterministic and exposes the statistical gate while candidacy is disabled", () => {
   const driver = Array.from({ length: 140 }, (_, index) =>
     (((index * 47) % 101) - 50) / 10_000 + ((index % 5) - 2) / 100_000);
   const { primaryBars, referenceBars } = laggedPair(driver, 2);
@@ -124,7 +195,11 @@ test("lead/lag empirical null is deterministic, family-wise, and required for ca
   assert.equal(result.empiricalNullCalibration.iterations, 1000);
   assert.equal(result.empiricalNullCalibration.methodologyVersion, "lead_lag_empirical_null_circular_shift_v1");
   assert.deepEqual(result.empiricalNullCalibration, again.empiricalNullCalibration);
-  assert.equal(result.byLag.find((entry) => entry.lagBars === 2).inference.candidateEligible, true);
+  const lagTwo = result.byLag.find((entry) => entry.lagBars === 2);
+  assert.equal(lagTwo.inference.statisticalGateEligible, true);
+  assert.equal(lagTwo.inference.candidateEligible, false);
+  assert.ok(lagTwo.inference.candidateBlockers.includes(
+    "candidate_rule_not_calibrated_for_shared_clustered_volatility"));
   assert.ok(result.byLag.find((entry) => entry.lagBars === 2).inference.empiricalNull.familyWisePValue <= 0.05);
   assert.equal(result.byLag.find((entry) => entry.lagBars === -2).inference.candidateEligible, false);
   assert.ok(result.byLag.find((entry) => entry.lagBars === -2).inference.candidateBlockers.includes("not_a_positive_reference_lead"));

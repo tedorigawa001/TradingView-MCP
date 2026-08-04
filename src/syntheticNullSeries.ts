@@ -24,6 +24,11 @@ import type { OhlcvBar } from "./tradingview.js";
  *   information in it, which is exactly what a short-horizon reversal study would misread.
  */
 export type SyntheticNullModel = "white_noise" | "regime_switching_volatility" | "bid_ask_bounce";
+export type FactorNullPairModel =
+  | "factor_null_pair"
+  | "factor_regime_switching_volatility_pair"
+  | "factor_bid_ask_bounce_pair";
+export type PairedSyntheticNullModel = SyntheticNullModel | FactorNullPairModel;
 
 export interface SyntheticNullSeriesInput {
   model: SyntheticNullModel;
@@ -203,20 +208,18 @@ export function generateSyntheticNullSeries(input: SyntheticNullSeriesInput): Oh
  * absent, which is the null a lead/lag scan has to survive: it should see the factor at lag zero and
  * nothing at any tradable lag.
  *
- * Both legs are white noise at constant volatility. `model` is therefore not a parameter here: this
- * generator has no clustered-variance or bounce variant to select, and accepting the name while
- * ignoring it would let an audit label a run with a process it never used.
+ * `model` controls both marginal processes. Clustered volatility uses one shared state so dependence
+ * is not weakened during volatile periods; bid-ask bounce uses independent observation signs on the
+ * correlated mid paths. The audit records this choice separately from the model name.
  */
 export function generateFactorNullPair(
-  input: Omit<SyntheticNullSeriesInput, "model"> & { rho?: number; model?: "white_noise" },
+  input: Omit<SyntheticNullSeriesInput, "model"> & { rho?: number; model?: SyntheticNullModel },
 ): {
   primary: OhlcvBar[];
   reference: OhlcvBar[];
 } {
-  if (input.model !== undefined && input.model !== "white_noise") {
-    throw new Error("factor null pairs are white noise only; the model cannot be selected");
-  }
-  const { volatility, startPrice } = validateInput({ ...input, model: "white_noise" });
+  const model = input.model ?? "white_noise";
+  const { volatility, startPrice, halfSpread } = validateInput({ ...input, model });
   // `rho` is the contemporaneous return correlation itself, not a loading. Giving both legs the same
   // signed loading on one factor made a negative value produce a positive correlation, and any
   // magnitude above one zeroed the idiosyncratic term and pinned the pair at exactly +1.
@@ -232,17 +235,52 @@ export function generateFactorNullPair(
   const primaryPath = [startPrice];
   const referencePath = [startPrice];
   const idiosyncraticShare = Math.sqrt(1 - rho * rho);
+  let sharedLogVariance = Math.log(volatility);
   for (let index = 0; index < input.bars; index += 1) {
+    let stepVolatility = volatility;
+    if (model === "regime_switching_volatility") {
+      // The state is deliberately shared. Independent states make the paired null easier than a
+      // real cross-asset comparison by weakening dependence exactly during volatility clusters.
+      sharedLogVariance += (Math.log(volatility) - sharedLogVariance) * 0.02 + normal() * 0.15;
+      stepVolatility = Math.exp(sharedLogVariance);
+    }
     // One shared shock per bar, drawn once and used at the same index in both legs. Carrying it to a
     // neighbouring index would plant exactly the lead the scan is supposed to fail to find.
     const factor = normal();
-    const primaryReturn = factor * volatility;
-    const referenceReturn = (rho * factor + idiosyncraticShare * normal()) * volatility;
-    primaryPath.push(primaryPath[index] * Math.exp(primaryReturn - 0.5 * volatility * volatility));
-    referencePath.push(referencePath[index] * Math.exp(referenceReturn - 0.5 * volatility * volatility));
+    const primaryReturn = factor * stepVolatility;
+    const referenceReturn = (rho * factor + idiosyncraticShare * normal()) * stepVolatility;
+    primaryPath.push(primaryPath[index] * Math.exp(primaryReturn - 0.5 * stepVolatility * stepVolatility));
+    referencePath.push(referencePath[index] * Math.exp(referenceReturn - 0.5 * stepVolatility * stepVolatility));
   }
+  const primaryObserved = model === "bid_ask_bounce"
+    ? primaryPath.map((value) => value * (1 + (random() < 0.5 ? -halfSpread : halfSpread)))
+    : primaryPath;
+  const referenceObserved = model === "bid_ask_bounce"
+    ? referencePath.map((value) => value * (1 + (random() < 0.5 ? -halfSpread : halfSpread)))
+    : referencePath;
   return {
-    primary: barsFromPath(primaryPath, normal, random, volatility, input.timeframeMinutes, startTimeMs),
-    reference: barsFromPath(referencePath, normal, random, volatility, input.timeframeMinutes, startTimeMs),
+    primary: barsFromPath(primaryObserved, normal, random, volatility, input.timeframeMinutes, startTimeMs),
+    reference: barsFromPath(referenceObserved, normal, random, volatility, input.timeframeMinutes, startTimeMs),
   };
+}
+
+/** Independent legs on a shared clock; neither contemporaneous nor lagged dependence is planted. */
+export function generateIndependentNullPair(input: SyntheticNullSeriesInput): { primary: OhlcvBar[]; reference: OhlcvBar[] } {
+  return {
+    primary: generateSyntheticNullSeries(input),
+    reference: generateSyntheticNullSeries({ ...input, seed: (input.seed + 0x9e3779b9) >>> 0 }),
+  };
+}
+
+export function factorPairMarginalModel(model: FactorNullPairModel): SyntheticNullModel {
+  if (model === "factor_null_pair") return "white_noise";
+  if (model === "factor_regime_switching_volatility_pair") return "regime_switching_volatility";
+  if (model === "factor_bid_ask_bounce_pair") return "bid_ask_bounce";
+  throw new Error(`unknown factor null pair model: ${String(model)}`);
+}
+
+export function factorPairModel(model: SyntheticNullModel): FactorNullPairModel {
+  if (model === "white_noise") return "factor_null_pair";
+  if (model === "regime_switching_volatility") return "factor_regime_switching_volatility_pair";
+  return "factor_bid_ask_bounce_pair";
 }

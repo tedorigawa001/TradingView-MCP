@@ -9,6 +9,10 @@ type CotSpec = {
   contractCode: string;
   targetDirectionMultiplier: 1 | -1;
   proxyScope: "direct_base_asset" | "base_currency_single_leg";
+  /** The asset the futures contract is actually written on, which is not always a leg of the pair. */
+  futuresUnderlying: string;
+  /** Gold is a direct COT reading like any currency, but a currency-bias context is not about it. */
+  futuresUnderlyingKind: "currency" | "commodity";
 };
 type CotRow = Record<string, unknown>;
 export type CotPosition = { group: string; long: number | null; short: number | null; net: number | null };
@@ -30,7 +34,9 @@ export type CotObservation = {
   proxy_scope?: CotSpec["proxyScope"];
 };
 
-const COT_HISTORY_OUTPUT_MAX = 52;
+// The CFTC request already retrieves 250 rows. Public context tools may expose a shorter recent
+// window, while research helpers need the full three-year percentile reference set.
+const COT_HISTORY_OUTPUT_MAX = 250;
 const COT_FETCH_LIMIT = 250;
 const COT_PERCENTILE_MIN_REFERENCES = 150;
 const MAX_COT_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -51,11 +57,11 @@ const GROUP_FIELDS: Record<CotSpec["dataset"], Array<{ group: string; long: stri
 };
 
 const SYMBOLS: Record<string, CotSpec> = {
-  "OANDA:EURUSD": { dataset: "tff", market: "EURO FX", contractCode: "099741", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
-  "OANDA:USDJPY": { dataset: "tff", market: "JAPANESE YEN", contractCode: "097741", targetDirectionMultiplier: -1, proxyScope: "direct_base_asset" },
-  "OANDA:GBPJPY": { dataset: "tff", market: "BRITISH POUND", contractCode: "096742", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
-  "OANDA:GBPAUD": { dataset: "tff", market: "BRITISH POUND", contractCode: "096742", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
-  "OANDA:XAUUSD": { dataset: "disaggregated", market: "GOLD", contractCode: "088691", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:EURUSD": { futuresUnderlyingKind: "currency", futuresUnderlying: "EUR", dataset: "tff", market: "EURO FX", contractCode: "099741", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
+  "OANDA:USDJPY": { futuresUnderlyingKind: "currency", futuresUnderlying: "JPY", dataset: "tff", market: "JAPANESE YEN", contractCode: "097741", targetDirectionMultiplier: -1, proxyScope: "direct_base_asset" },
+  "OANDA:GBPJPY": { futuresUnderlyingKind: "currency", futuresUnderlying: "GBP", dataset: "tff", market: "BRITISH POUND", contractCode: "096742", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
+  "OANDA:GBPAUD": { futuresUnderlyingKind: "currency", futuresUnderlying: "GBP", dataset: "tff", market: "BRITISH POUND", contractCode: "096742", targetDirectionMultiplier: 1, proxyScope: "base_currency_single_leg" },
+  "OANDA:XAUUSD": { futuresUnderlyingKind: "commodity", futuresUnderlying: "XAU", dataset: "disaggregated", market: "GOLD", contractCode: "088691", targetDirectionMultiplier: 1, proxyScope: "direct_base_asset" },
 };
 
 const n = (value: unknown): number | null => {
@@ -136,6 +142,28 @@ const subtractUtcYearsClamped = (timestamp: number, years: number): number => {
   const lastDay = new Date(Date.UTC(targetYear, month + 1, 0)).getUTCDate();
   return Date.UTC(targetYear, month, Math.min(date.getUTCDate(), lastDay));
 };
+
+/**
+ * The contract behind a symbol, for callers that must not restate it. A second hand-kept table of
+ * which currency a symbol trades against would drift from this one, and the fields most likely to
+ * drift - proxyScope above all - are the ones that decide how far a reading can be taken.
+ */
+export function cotSymbolContract(symbol: string): {
+  futuresUnderlying: string;
+  futuresUnderlyingKind: CotSpec["futuresUnderlyingKind"];
+  market: string;
+  proxyScope: CotSpec["proxyScope"];
+  targetDirectionMultiplier: 1 | -1;
+} | null {
+  const spec = SYMBOLS[symbol.toUpperCase()];
+  return spec === undefined ? null : {
+    futuresUnderlying: spec.futuresUnderlying,
+    futuresUnderlyingKind: spec.futuresUnderlyingKind,
+    market: spec.market,
+    proxyScope: spec.proxyScope,
+    targetDirectionMultiplier: spec.targetDirectionMultiplier,
+  };
+}
 
 export function computeCotPositioningFeatures(observations: CotObservation[]) {
   const latest = observations[0];

@@ -138,7 +138,30 @@ test("remaining event-study paths run over their matching synthetic null contrac
   assert.equal(composite.study, "composite_condition");
   assert.equal(yieldPrice.study, "yield_price_nonconfirmation");
   assert.equal(yieldPrice.audit.model, "factor_null_pair");
+  assert.equal(yieldPrice.audit.pairStructure.crossSeriesDependence, "contemporaneous_factor");
   assert.ok([failed, handoff, composite, yieldPrice].every((result) => result.audit.completed === 2));
+});
+
+test("standard yield-price audit runs all three correlated marginal models", () => {
+  const result = runStandardEventStudyFalsificationAudit({
+    study: { type: "yield_price_nonconfirmation", definition: {
+      targetSymbol: "SYNTH:TARGET", driverSymbol: "SYNTH:DRIVER", targetTimeframe: "60", driverTimeframe: "60",
+      relationship: "inverse", driverLookback: 3, driverChangeThreshold: 0.001, priceBreakoutLookback: 3,
+      nonconfirmationBars: 2, triggerLookback: 2, triggerWithinBars: 3, maxDriverAgeBars: 1, horizons: [1, 2],
+      targetReturnBps: 20, minimumEvents: 2, eventLimit: 0, configurationTrials: 1, confidenceLevel: 0.95,
+    }, rho: 0.5 },
+    candidate: { branch: "driver_up_target_failure", horizon: 2, minimumEvents: 2, minimumFoldEvents: 1 },
+    replications: 2, bars: 800,
+  });
+  assert.deepEqual(result.standard.models, [
+    "factor_null_pair",
+    "factor_regime_switching_volatility_pair",
+    "factor_bid_ask_bounce_pair",
+  ]);
+  assert.equal(result.methodologyVersion, "event_study_falsification_audit_standard_v2");
+  assert.deepEqual(result.runs.map((run) => run.audit.model), result.standard.models);
+  assert.equal(result.runs[1].audit.pairStructure.volatilityStateDependence, "shared");
+  assert.ok(result.runs.every((run) => run.audit.completed === 2));
 });
 
 test("event-study audit refuses a rule that differs from the frozen study contract", () => {

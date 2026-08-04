@@ -99,8 +99,8 @@ test("CotClient validates history weeks and rejects incomplete history", async (
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const client = new CotClient(`http://127.0.0.1:${server.address().port}`);
-  await assert.rejects(() => client.getHistory("OANDA:EURUSD", 0), /integer from 1 to 52/);
-  await assert.rejects(() => client.getHistory("OANDA:EURUSD", 52.5), /integer from 1 to 52/);
+  await assert.rejects(() => client.getHistory("OANDA:EURUSD", 0), /integer from 1 to 250/);
+  await assert.rejects(() => client.getHistory("OANDA:EURUSD", 250.5), /integer from 1 to 250/);
   assert.equal(calls, 0, "invalid periods must fail before network access");
   await assert.rejects(() => client.getHistory("OANDA:EURUSD", 2), /only 1 are available/);
   assert.equal(calls, 1);

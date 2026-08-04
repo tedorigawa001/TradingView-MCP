@@ -11,6 +11,15 @@ import {
 } from "../../build/analysisOverlay.js";
 import { AnalysisDefinitionConflictError } from "../../build/analysisJournal.js";
 import { analysisAlertOwnershipName } from "../../build/analysisAlerts.js";
+import {
+  COT_CROWDING_UNWIND_OVERLAY_NAME,
+  COT_CROWDING_UNWIND_OVERLAY_SOURCE,
+} from "../../build/cotCrowdingUnwindOverlay.js";
+import {
+  VOLUME_PROFILE_CONTEXT_NAME,
+  VOLUME_PROFILE_CONTEXT_PLOTS,
+  VOLUME_PROFILE_CONTEXT_SOURCE,
+} from "../../build/volumeProfileContext.js";
 
 function makeDeps(overrides = {}) {
   return {
@@ -725,7 +734,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the eighty-seven expected tools", async () => {
+test("exposes exactly the ninety-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -760,6 +769,8 @@ test("exposes exactly the eighty-seven expected tools", async () => {
       "get_chart_context",
       "get_chart_screenshot",
       "get_cme_gold_open_interest",
+      "get_cot_crowding_unwind_context",
+      "get_cot_crowding_unwind_overlay_template",
       "get_dxy_context_gate_template",
       "get_economic_events",
       "get_event_study_journal",
@@ -773,6 +784,7 @@ test("exposes exactly the eighty-seven expected tools", async () => {
       "get_key_levels",
       "get_market_snapshot",
       "get_mtf_overview",
+      "get_oanda_flow_collection_readiness",
       "get_ohlcv",
       "get_pine_source",
       "get_policy_rate_context",
@@ -783,6 +795,8 @@ test("exposes exactly the eighty-seven expected tools", async () => {
       "get_strategy_report",
       "get_strategy_trade_ledger",
       "get_trade_decision_context",
+      "get_volume_profile_context",
+      "get_volume_profile_context_template",
       "get_watchlist",
       "list_alerts",
       "list_pine_scripts",
@@ -806,6 +820,8 @@ test("exposes exactly the eighty-seven expected tools", async () => {
       "run_strategy_regime_analysis",
       "run_strategy_regime_matrix",
       "run_strategy_walk_forward",
+      "run_volume_profile_poc_reversion_study",
+      "run_volume_profile_reaction_study",
       "run_yield_price_nonconfirmation_study",
       "save_pine_script",
       "scan_market",
@@ -1519,6 +1535,264 @@ test("get_analysis_overlay_template returns the fixed Pine source", async () => 
   assert.equal(template.version, "2.0");
   assert.match(template.source, /entryBox := box\.new/);
   assert.equal(template.inputContract.length, 18);
+});
+
+test("get_cot_crowding_unwind_overlay_template returns the fixed explicit-input Pine source", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_cot_crowding_unwind_overlay_template", arguments: {} });
+  const template = JSON.parse(res.content[0].text);
+  assert.equal(template.name, COT_CROWDING_UNWIND_OVERLAY_NAME);
+  assert.equal(template.source, COT_CROWDING_UNWIND_OVERLAY_SOURCE);
+  assert.equal(template.inputContract.length, 13);
+  assert.equal(template.semantics, "crowded_position_unwind_proxy_not_observed_orders_or_stops");
+  assert.match(template.source, /COT values are explicit MCP inputs/);
+});
+
+test("get_volume_profile_context_template returns the fixed audited Pine source", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_volume_profile_context_template", arguments: {} });
+  const template = JSON.parse(res.content[0].text);
+  assert.equal(template.name, VOLUME_PROFILE_CONTEXT_NAME);
+  assert.equal(template.version, "2.0");
+  assert.match(template.source, /bins = array\.new_float\(rows, 0\.0\)/);
+  assert.match(template.source, /"Profile Complete"/);
+  assert.equal(template.inputContract.length, 4);
+});
+
+test("get_volume_profile_context verifies the placed audited template and returns only a completed profile", async () => {
+  const pineId = "USER;9f868f366873411aa46bd30872711544";
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      listPineScripts: async () => [{
+        pineId, name: VOLUME_PROFILE_CONTEXT_NAME, kind: "study", version: "2.0",
+        usedBy: [{ chartIndex: 0, studyId: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, version: "2.0" }],
+      }],
+      getPineSource: async () => ({ pineId, version: "2.0", source: VOLUME_PROFILE_CONTEXT_SOURCE }),
+      getIndicatorInputs: async () => [{
+        id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, title: VOLUME_PROFILE_CONTEXT_NAME,
+        inputs: [
+          { id: "in_0", name: "Rows", type: "integer", value: 24, defval: 24, tooltip: null },
+          { id: "in_1", name: "Value Area %", type: "integer", value: 70, defval: 70, tooltip: null },
+          { id: "in_2", name: "Volume Type", type: "text", value: "provider_tick_volume", defval: "unknown", tooltip: null },
+          { id: "in_3", name: "Maximum Session Bars", type: "integer", value: 500, defval: 500, tooltip: null },
+        ],
+      }],
+      getIndicatorValues: async (options) => {
+        assert.deepEqual(options.plotTitles, [...VOLUME_PROFILE_CONTEXT_PLOTS]);
+        return [{
+          id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, options,
+          plots: [],
+          bars: [{ time: 1, values: {
+            "Prior POC": 1.084, "Prior VAH": 1.09, "Prior VAL": 1.08,
+            "Profile Start": 1_720_000_000_000, "Profile End": 1_720_086_400_000,
+            "Trading Day": 1_720_051_200_000,
+            "Profile Complete": 1, "Bars Included": 96,
+          } }],
+        }];
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "get_volume_profile_context",
+    arguments: {
+      pine_id: pineId, study_id: "vp", expected_symbol: "OANDA:EURUSD", expected_timeframe: "60",
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "ready");
+  assert.equal(parsed.levels.poc, 1.084);
+  assert.deepEqual(parsed.profile, {
+    start: "2024-07-03T09:46:40.000Z",
+    end: "2024-07-04T09:46:40.000Z",
+    tradingDay: "2024-07-04T00:00:00.000Z",
+    rows: 24,
+    valueAreaPercent: 70,
+    barsIncluded: 96,
+  });
+  assert.ok(parsed.qualityIssues.includes("provider_tick_volume_not_consolidated_order_flow"));
+  assert.equal(parsed.semantics, "completed_chart_bar_volume_range_allocation_profile_proxy");
+});
+
+test("get_volume_profile_context refuses a same-named Pine script whose source was changed", async () => {
+  const pineId = "USER;9f868f366873411aa46bd30872711544";
+  let inputsRead = false;
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      listPineScripts: async () => [{
+        pineId, name: VOLUME_PROFILE_CONTEXT_NAME, kind: "study", version: "2.0",
+        usedBy: [{ chartIndex: 0, studyId: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, version: "2.0" }],
+      }],
+      getPineSource: async () => ({ pineId, version: "2.0", source: "//@version=6\nplot(close)" }),
+      getIndicatorInputs: async () => { inputsRead = true; return []; },
+    },
+  }));
+  const res = await client.callTool({
+    name: "get_volume_profile_context",
+    arguments: {
+      pine_id: pineId, study_id: "vp", expected_symbol: "OANDA:EURUSD", expected_timeframe: "60",
+    },
+  });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /does not match the audited volume-profile template/);
+  assert.equal(inputsRead, false);
+});
+
+test("run_volume_profile_reaction_study binds the audited profile and keeps candidacy disabled", async () => {
+  const pineId = "USER;9f868f366873411aa46bd30872711544";
+  const base = Date.parse("2026-01-01T00:00:00.000Z") / 1000;
+  const bars = Array.from({ length: 100 }, (_, index) => ({
+    time: base + index * 14_400,
+    timeIso: new Date((base + index * 14_400) * 1000).toISOString(),
+    open: 100, high: 101, low: 99, close: 100, volume: 1000,
+  }));
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "CME_DL:6E1!", resolution: "240", studies: [] }],
+      }),
+      getOhlcv: async () => ({ symbol: "CME_DL:6E1!", resolution: "240", count: bars.length, bars }),
+      listPineScripts: async () => [{
+        pineId, name: VOLUME_PROFILE_CONTEXT_NAME, kind: "study", version: "3.0",
+        usedBy: [{ chartIndex: 0, studyId: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, version: "3.0" }],
+      }],
+      getPineSource: async () => ({ pineId, version: "3.0", source: VOLUME_PROFILE_CONTEXT_SOURCE }),
+      getIndicatorInputs: async () => [{
+        id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, title: VOLUME_PROFILE_CONTEXT_NAME,
+        inputs: [
+          { id: "in_0", name: "Rows", type: "integer", value: 24, defval: 24, tooltip: null },
+          { id: "in_1", name: "Value Area %", type: "integer", value: 70, defval: 70, tooltip: null },
+          { id: "in_2", name: "Volume Type", type: "text", value: "exchange_reported_volume", defval: "unknown", tooltip: null },
+          { id: "in_3", name: "Maximum Session Bars", type: "integer", value: 500, defval: 500, tooltip: null },
+        ],
+      }],
+      getIndicatorValues: async (options) => {
+        assert.equal(options.count, 100);
+        assert.deepEqual(options.plotTitles, [...VOLUME_PROFILE_CONTEXT_PLOTS]);
+        return [{ id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, plots: [], bars: bars.map((bar) => ({
+          time: bar.time, timeIso: bar.timeIso, values: {
+            "Prior POC": 100, "Prior VAH": 110, "Prior VAL": 90,
+            "Profile Start": (base - 86_400) * 1000, "Profile End": base * 1000,
+            "Trading Day": (base - 43_200) * 1000, "Profile Complete": 1, "Bars Included": 6,
+          },
+        })) }];
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "run_volume_profile_reaction_study",
+    arguments: {
+      pine_id: pineId, study_id: "vp", expected_symbol: "CME_DL:6E1!",
+      expected_timeframe: "240", chart_index: 0, count: 100, event_limit: 0,
+    },
+  });
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.methodologyVersion, "chart_bar_volume_profile_reaction_event_study_v1");
+  assert.equal(parsed.profileContract.nativeLowerTimeframeVolumeProfile, false);
+  assert.equal(parsed.inferenceContract.candidacy, "disabled_descriptive_only_pending_falsification");
+  assert.equal(parsed.sameRegimeBaseline.contract.regimeKey, "directional_regime:volatility_regime");
+  assert.equal(parsed.sameRegimeBaseline.contract.baselineEventExclusion, "all_volume_profile_event_signal_bars");
+  assert.equal(parsed.source.returnedBars, 100);
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+});
+
+test("run_volume_profile_reaction_study routes the 60-minute contract to its separate methodology", async () => {
+  const pineId = "USER;9f868f366873411aa46bd30872711544";
+  const base = Date.parse("2026-01-01T00:00:00.000Z") / 1000;
+  let requestedOhlcv = 0;
+  let requestedIndicatorValues = 0;
+  const bars = Array.from({ length: 100 }, (_, index) => ({
+    time: base + index * 3_600,
+    timeIso: new Date((base + index * 3_600) * 1000).toISOString(),
+    open: 100, high: 101, low: 99, close: 100, volume: 1000,
+  }));
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "CME_DL:6E1!", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async (count) => {
+        requestedOhlcv = count;
+        return { symbol: "CME_DL:6E1!", resolution: "60", count: bars.length, bars };
+      },
+      listPineScripts: async () => [{
+        pineId, name: VOLUME_PROFILE_CONTEXT_NAME, kind: "study", version: "3.0",
+        usedBy: [{ chartIndex: 0, studyId: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, version: "3.0" }],
+      }],
+      getPineSource: async () => ({ pineId, version: "3.0", source: VOLUME_PROFILE_CONTEXT_SOURCE }),
+      getIndicatorInputs: async () => [{
+        id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, title: VOLUME_PROFILE_CONTEXT_NAME,
+        inputs: [
+          { id: "in_0", name: "Rows", type: "integer", value: 24, defval: 24, tooltip: null },
+          { id: "in_1", name: "Value Area %", type: "integer", value: 70, defval: 70, tooltip: null },
+          { id: "in_2", name: "Volume Type", type: "text", value: "exchange_reported_volume", defval: "unknown", tooltip: null },
+          { id: "in_3", name: "Maximum Session Bars", type: "integer", value: 500, defval: 500, tooltip: null },
+        ],
+      }],
+      getIndicatorValues: async (options) => {
+        requestedIndicatorValues = options.count ?? 0;
+        return [{ id: "vp", name: VOLUME_PROFILE_CONTEXT_NAME, plots: [], bars: bars.map((bar) => ({
+          time: bar.time, timeIso: bar.timeIso, values: {
+            "Prior POC": 100, "Prior VAH": 110, "Prior VAL": 90,
+            "Profile Start": (base - 86_400) * 1000, "Profile End": base * 1000,
+            "Trading Day": (base - 43_200) * 1000, "Profile Complete": 1, "Bars Included": 6,
+          },
+        })) }];
+      },
+    },
+  }));
+  const res = await client.callTool({
+    name: "run_volume_profile_reaction_study",
+    arguments: {
+      pine_id: pineId, study_id: "vp", expected_symbol: "CME_DL:6E1!",
+      expected_timeframe: "60", chart_index: 0, count: 15_000, event_limit: 0,
+    },
+  });
+  assert.notEqual(res.isError, true, res.content[0].text);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.methodologyVersion, "chart_bar_volume_profile_reaction_event_study_1h_v1");
+  assert.equal(parsed.sameRegimeBaseline.methodologyVersion,
+    "volume_profile_same_regime_unconditional_baseline_1h_v1");
+  assert.equal(parsed.source.studyVariant, "1h_v1");
+  assert.equal(requestedOhlcv, 15_000);
+  assert.equal(requestedIndicatorValues, 15_000);
+  assert.equal(parsed.inferenceContract.candidacy, "disabled_descriptive_only_pending_falsification");
+  const pocRes = await client.callTool({
+    name: "run_volume_profile_poc_reversion_study",
+    arguments: {
+      pine_id: pineId, study_id: "vp", expected_symbol: "CME_DL:6E1!",
+      expected_timeframe: "60", chart_index: 0, count: 15_000, event_limit: 0,
+    },
+  });
+  assert.notEqual(pocRes.isError, true, pocRes.content[0].text);
+  const poc = JSON.parse(pocRes.content[0].text);
+  assert.equal(poc.methodologyVersion, "chart_bar_volume_profile_poc_reversion_event_study_1h_v1");
+  assert.equal(poc.pocContract.maximumEventsPerProfileAndBranch, 1);
+  assert.equal(poc.sameRegimeBaseline.methodologyVersion,
+    "volume_profile_poc_reversion_same_regime_unconditional_baseline_1h_v1");
+  assert.equal(poc.inferenceContract.candidacy, "disabled_descriptive_only_pending_falsification");
+});
+
+test("run_volume_profile_reaction_study keeps the 240-minute contract at 5000 bars", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({
+    name: "run_volume_profile_reaction_study",
+    arguments: {
+      pine_id: "USER;9f868f366873411aa46bd30872711544", study_id: "vp",
+      expected_symbol: "CME_DL:6E1!", expected_timeframe: "240", count: 15_000,
+    },
+  });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /240-minute #61b v1 contract allows at most 5000 bars/);
 });
 
 test("ensure_analysis_overlay reuses one current instance without writing", async () => {
@@ -5139,6 +5413,17 @@ test("get_carry_core_primary_readiness rounds the first heartbeat onto the froze
   assert.equal(parsed.collection_continuity_status, "collecting_within_gap_limit");
 });
 
+test("get_oanda_flow_collection_readiness exposes no credential and makes its evidence boundary explicit", async () => {
+  const client = await connectedClient(makeDeps());
+  const res = await client.callTool({ name: "get_oanda_flow_collection_readiness", arguments: {} });
+  assert.equal(res.isError, undefined, res.content[0].text);
+  const parsed = JSON.parse(res.content[0].text);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.token_configured, false);
+  assert.deepEqual(parsed.supported_instruments, ["EUR_USD", "USD_JPY"]);
+  assert.equal(parsed.evidence_tier, "broker_retail_sentiment_history");
+});
+
 test("run_carry_core_primary_test refuses execution without collection heartbeat evidence", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({ name: "run_carry_core_primary_test", arguments: { chart_index: 0, confirm: true } });
@@ -5551,11 +5836,25 @@ test("run_lead_lag_falsification_audit returns a bound configuration hash withou
     bars: 300,
   } });
   const parsed = JSON.parse(response.content[0].text);
-  assert.equal(parsed.methodologyVersion, "lead_lag_falsification_audit_standard_v1");
-  assert.equal(parsed.audit.auditDefinition.runner, "lead_lag_falsification_audit_v1");
+  assert.equal(parsed.methodologyVersion, "lead_lag_falsification_audit_standard_v3");
+  assert.equal(parsed.audit.auditDefinition.runner, "lead_lag_falsification_audit_v3");
   assert.match(parsed.audit.auditDefinition.inputHash, /^sha256:[a-f0-9]{64}$/);
   assert.equal(parsed.audit.auditDefinition.input.study.folds.length, 2);
+  assert.equal(parsed.audit.auditDefinition.input.study.returnStandardization, "causal_prior_20_rms");
   assert.equal(parsed.audit.status, "complete");
+  assert.equal(parsed.audit.pairStructure.crossSeriesDependence, "contemporaneous_factor");
+
+  const clustered = await client.callTool({ name: "run_lead_lag_falsification_audit", arguments: {
+    timeframe: "60", max_lag_bars: 2, minimum_observations: 30, configuration_trials: 1,
+    folds: [
+      { fold_id: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
+      { fold_id: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" },
+    ],
+    model: "factor_regime_switching_volatility_pair", rho: 0.7, replications: 2, bars: 300,
+  } });
+  const clusteredParsed = JSON.parse(clustered.content[0].text);
+  assert.equal(clusteredParsed.audit.model, "factor_regime_switching_volatility_pair");
+  assert.equal(clusteredParsed.audit.auditDefinition.input.generation.pairStructure.volatilityStateDependence, "shared");
 });
 
 test("run_feature_outcome_power_audit returns separate effect-size detection runs without chart access", async () => {
@@ -7323,8 +7622,8 @@ test("run_external_label_study binds a daily chart, lags the label and records t
 });
 
 test("compute_lead_lag_relationships binds both charts and returns every scanned lag", async () => {
-  const driver = [0.004, -0.003, 0.006, -0.002, 0.005, -0.007, 0.003, 0.008, -0.004, 0.002,
-    0.007, -0.006, 0.001, 0.009, -0.005, 0.004, -0.008, 0.006, -0.001, 0.003];
+  const driver = Array.from({ length: 160 }, (_, index) =>
+    (((index * 47) % 101) - 50) / 10_000 + ((index % 5) - 2) / 100_000);
   // The primary echoes the reference one bar later, so the planted lead sits at lag +1.
   const primaryReturns = driver.map((_, index) =>
     (index >= 1 ? driver[index - 1] : 0) + ((index % 3) - 1) * 0.0006);
@@ -7361,13 +7660,17 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   } });
   const parsed = JSON.parse(response.content[0].text);
   assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
-  assert.equal(parsed.methodologyVersion, "exact_timestamp_lead_lag_return_correlation_v1");
+  assert.equal(parsed.methodologyVersion, "lead_lag_relationships_v3_causal_prior_20_rms");
+  assert.equal(parsed.definition.returnStandardization.windowBars, 20);
   assert.deepEqual(parsed.byLag.map((entry) => entry.lagBars), [-3, -2, -1, 0, 1, 2, 3]);
   const lagOne = parsed.byLag.find((entry) => entry.lagBars === 1);
   assert.equal(lagOne.leadDirection, "reference_leads_primary");
   assert.equal(lagOne.tradableOnPrimary, true);
   assert.ok(lagOne.correlation > 0.9, `planted lead correlation was ${lagOne.correlation}`);
   assert.equal(parsed.inferenceContract.automaticLagSelection, false);
+  assert.equal(lagOne.inference.candidateEligible, false);
+  assert.ok(lagOne.inference.candidateBlockers.includes(
+    "candidate_rule_not_calibrated_for_shared_clustered_volatility"));
   assert.equal(parsed.primary.chartIndex, 0);
   assert.equal(parsed.reference.symbol, "TVC:US10Y");
   // Raw OHLC must never leak back through the response.
@@ -7397,6 +7700,7 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
     expected_reference_symbol: "TVC:US10Y", expected_timeframe: "60",
     max_lag_bars: 3, minimum_observations: 10,
     empirical_null_calibration: true,
+    return_standardization: "none",
     folds: [
       { fold_id: "f1", from: "1970-01-01T00:00:00.000Z", to: "1970-01-01T08:00:00.000Z" },
       { fold_id: "f2", from: "1970-01-01T08:00:00.000Z", to: "1970-01-01T20:00:00.000Z" },
@@ -7417,6 +7721,49 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   assert.equal(adopted.journal.recorded, false);
   assert.match(adopted.journal.error, /empirical-null candidate eligibility/);
   assert.equal(journalRecords.length, 0, "a refused decision must not reach the journal");
+});
+
+test("compute_lead_lag_relationships rebuilds a shared 4H UTC grid from closed 60-minute bars and restores both charts", async () => {
+  const charts = [
+    { index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] },
+    { index: 1, symbol: "THINKMARKETS:USDINDEX", resolution: "240", studies: [] },
+  ];
+  const barsFor = (chartIndex) => Array.from({ length: 100 }, (_, index) => {
+    const close = (chartIndex === 0 ? 150 : 100) + index * (chartIndex === 0 ? 0.04 : 0.02) + (index % 3) * 0.01;
+    return {
+      time: index * 3_600, timeIso: new Date(index * 3_600_000).toISOString(),
+      open: close - 0.01, high: close + 0.02, low: close - 0.03, close, volume: 1,
+    };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts }),
+    getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+    getOhlcv: async (_count, chartIndex) => {
+      const chart = charts[chartIndex];
+      assert.equal(chart.resolution, "60", "resampling must collect lower-timeframe evidence only after the switch");
+      return { symbol: chart.symbol, resolution: chart.resolution, count: 100, bars: barsFor(chartIndex) };
+    },
+    loadMoreHistory: async ({ count }) => ({ requested: count, barsBefore: 100, barsAfter: 100, added: 0, earliestTime: 0, moreAvailable: false }),
+    setResolution: async (resolution, chartIndex) => {
+      const chart = charts[chartIndex];
+      chart.resolution = resolution;
+      return { symbol: chart.symbol, resolution, changed: true, bars: 100 };
+    },
+  }}));
+  const response = await client.callTool({ name: "compute_lead_lag_relationships", arguments: {
+    primary_chart_index: 0, reference_chart_index: 1,
+    expected_primary_symbol: "OANDA:USDJPY", expected_reference_symbol: "THINKMARKETS:USDINDEX",
+    expected_timeframe: "240", count: 20, max_lag_bars: 2, minimum_observations: 4,
+    alignment_mode: "resample_closed_60m_to_utc_grid",
+  } });
+  assert.notEqual(response.isError, true, response.content[0].text);
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.alignmentPolicy, "utc_grid_resampled_from_closed_60m_bars");
+  assert.equal(parsed.resampling.primary.outputBars, 25);
+  assert.equal(parsed.resampling.reference.incompleteBucketsExcluded, 0);
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false, "raw source bars must not leak through resampling metadata");
+  assert.equal(charts[0].resolution, "240");
+  assert.equal(charts[1].resolution, "240");
 });
 
 test("compute_lead_lag_relationships rejects a mismatched binding, an identical pane and Bar Replay", async () => {
@@ -7455,4 +7802,48 @@ test("compute_lead_lag_relationships rejects a mismatched binding, an identical 
   const blocked = await replaying.callTool({ name: "compute_lead_lag_relationships", arguments: args });
   assert.equal(blocked.isError, true);
   assert.match(blocked.content[0].text, /Bar Replay/);
+});
+
+test("get_cot_crowding_unwind_context holds its declared FX daily binding at the entrance", async () => {
+  const tuesday = (index) => new Date(Date.UTC(2026, 6, 7 - index * 7)).toISOString();
+  const observations = Array.from({ length: 160 }, (_, index) => ({
+    symbol: "OANDA:EURUSD", report_date: tuesday(index), available_at: "2026-08-01T00:00:00.000Z",
+    open_interest: 100, target_direction_multiplier: 1,
+    positions: [{ group: "lev_money", long: index === 0 ? 100 : 10, short: 0, net: index === 0 ? 100 : 10 }],
+  }));
+  const bars = Array.from({ length: 21 }, (_, index) => ({
+    time: Date.UTC(2026, 6, 1 + index) / 1_000, timeIso: new Date(Date.UTC(2026, 6, 1 + index)).toISOString(),
+    open: 1.1, high: 1.11, low: 1.09, close: index === 20 ? 1.08 : 1.1, volume: 1,
+  }));
+  let requestedPeriods = null;
+  const client = await connectedClient(makeDeps({
+    cot: { getHistory: async (symbol, periods) => { requestedPeriods = periods; return { observations }; } },
+    tv: {
+      getReplayStatus: async () => ({ started: false, toolbarVisible: false }),
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "1D", studies: [] }] }),
+      getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "1D", count: bars.length, bars }),
+    },
+  }));
+  const ok = await client.callTool({ name: "get_cot_crowding_unwind_context", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "1D" } });
+  assert.equal(ok.isError, undefined, ok.content[0].text);
+  const parsed = JSON.parse(ok.content[0].text);
+  assert.equal(parsed.crowding.condition, "crowded_long_downside_unwind_proxy");
+  assert.equal(parsed.currencyBias.proxyScope, "direct_base_asset");
+  assert.equal(parsed.priceStructure.latestBarAt, bars.at(-1).timeIso);
+  assert.equal(parsed.researchContract.candidateEligible, false);
+  // The three-year percentile needs the full reference set, not the short public window.
+  assert.equal(requestedPeriods, 250);
+
+  // The declared contract is a daily FX chart. Gold and the cross proxies are refused here, not
+  // only in the pure function, so the entrance and the implementation agree on the same scope.
+  for (const symbol of ["OANDA:XAUUSD", "OANDA:GBPJPY", "OANDA:GBPAUD"]) {
+    const refused = await client.callTool({ name: "get_cot_crowding_unwind_context", arguments: {
+      expected_symbol: symbol, expected_timeframe: "1D" } });
+    assert.equal(refused.isError, true, symbol);
+  }
+  const intraday = await client.callTool({ name: "get_cot_crowding_unwind_context", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "240" } });
+  assert.equal(intraday.isError, true);
 });

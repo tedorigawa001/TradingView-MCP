@@ -3,7 +3,11 @@ import {
   DEFAULT_VOLATILITY,
   MAX_SEED,
   generateFactorNullPair,
+  generateIndependentNullPair,
   generateSyntheticNullSeries,
+  factorPairMarginalModel,
+  type FactorNullPairModel,
+  type PairedSyntheticNullModel,
   type SyntheticNullModel,
   type SyntheticNullSeriesInput,
 } from "./syntheticNullSeries.js";
@@ -35,7 +39,7 @@ export interface FalsificationAuditInput<TResult> {
 }
 
 export interface FalsificationAuditResult {
-  model: SyntheticNullModel | "factor_null_pair";
+  model: PairedSyntheticNullModel;
   replications: number;
   firstSeed: number;
   bars: number;
@@ -43,6 +47,11 @@ export interface FalsificationAuditResult {
   /** Effective values, never the caller shorthand, so the run can be repeated from this record alone. */
   volatility: number;
   rho?: number;
+  pairStructure?: {
+    marginalModel: SyntheticNullModel;
+    crossSeriesDependence: "independent" | "contemporaneous_factor";
+    volatilityStateDependence: "not_applicable_constant" | "independent" | "shared";
+  };
   /** A failed replication can bias the surviving subset, so it cannot support a calibration conclusion. */
   status: "complete" | "incomplete";
   completed: number;
@@ -118,6 +127,17 @@ function summarize(
   failed: Array<{ seed: number; error: string }>,
 ): FalsificationAuditResult {
   const { firstSeed, volatility, rho } = generation;
+  const factorModel = model.startsWith("factor_");
+  const marginalModel = factorModel ? factorPairMarginalModel(model as FactorNullPairModel) : model as SyntheticNullModel;
+  const pairStructure = model === "factor_null_pair" || model === "factor_regime_switching_volatility_pair" ||
+      model === "factor_bid_ask_bounce_pair"
+    ? {
+        marginalModel,
+        crossSeriesDependence: "contemporaneous_factor" as const,
+        volatilityStateDependence: marginalModel === "regime_switching_volatility"
+          ? "shared" as const : "not_applicable_constant" as const,
+      }
+    : undefined;
   const completed = input.replications - failed.length;
   const status = failed.length === 0 ? "complete" as const : "incomplete" as const;
   const evaluated = completed - notEvaluableSeeds.length;
@@ -131,6 +151,7 @@ function summarize(
     timeframeMinutes: input.timeframeMinutes,
     volatility,
     ...(rho === undefined ? {} : { rho }),
+    ...(pairStructure === undefined ? {} : { pairStructure }),
     status,
     completed,
     evaluated,
@@ -182,11 +203,15 @@ export function runFalsificationAudit<TResult>(
 /** Audits a study that reads two series, such as a lead/lag scan. */
 export function runPairedFalsificationAudit<TResult>(
   input: Omit<FalsificationAuditInput<TResult>, "runStudy"> & {
+    model?: PairedSyntheticNullModel;
     rho?: number;
     runStudy: (primary: OhlcvBar[], reference: OhlcvBar[]) => TResult;
   },
 ): FalsificationAuditResult {
   const { firstSeed, volatility } = validate(input);
+  const model = input.model ?? "factor_null_pair";
+  const factorModel = model.startsWith("factor_");
+  if (!factorModel && input.rho !== undefined) throw new Error("rho is supported only by factor pair models");
   const rho = validateRho(input.rho ?? DEFAULT_FACTOR_RHO);
   const candidateSeeds: number[] = [];
   const notEvaluableSeeds: number[] = [];
@@ -194,9 +219,9 @@ export function runPairedFalsificationAudit<TResult>(
   for (let index = 0; index < input.replications; index += 1) {
     const seed = firstSeed + index;
     try {
-      const pair = generateFactorNullPair({
-        bars: input.bars, seed, timeframeMinutes: input.timeframeMinutes, volatility, rho,
-      } satisfies Omit<SyntheticNullSeriesInput, "model"> & { rho?: number });
+      const pair = factorModel
+        ? generateFactorNullPair({ model: factorPairMarginalModel(model as FactorNullPairModel), bars: input.bars, seed, timeframeMinutes: input.timeframeMinutes, volatility, rho } satisfies Omit<SyntheticNullSeriesInput, "model"> & { model: SyntheticNullModel; rho?: number })
+        : generateIndependentNullPair({ model: model as SyntheticNullModel, bars: input.bars, seed, timeframeMinutes: input.timeframeMinutes, volatility });
       const result = input.runStudy(pair.primary, pair.reference);
       const evaluation = input.evaluate?.(result) ?? (input.isCandidate(result) ? "candidate" : "non_candidate");
       if (evaluation === "candidate") candidateSeeds.push(seed);
@@ -205,5 +230,13 @@ export function runPairedFalsificationAudit<TResult>(
       failed.push({ seed, error: error instanceof Error ? error.message : String(error) });
     }
   }
-  return summarize("factor_null_pair", input, { firstSeed, volatility, rho }, candidateSeeds, notEvaluableSeeds, failed);
+  const result = summarize(model, input, { firstSeed, volatility, ...(factorModel ? { rho } : {}) }, candidateSeeds, notEvaluableSeeds, failed);
+  if (!factorModel) {
+    result.pairStructure = {
+      marginalModel: model as SyntheticNullModel,
+      crossSeriesDependence: "independent",
+      volatilityStateDependence: model === "regime_switching_volatility" ? "independent" : "not_applicable_constant",
+    };
+  }
+  return result;
 }

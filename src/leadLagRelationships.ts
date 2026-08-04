@@ -21,12 +21,123 @@ export interface LeadLagInput {
   folds: LeadLagFold[];
   configurationTrials: number;
   empiricalNullCalibration?: boolean;
+  alignmentPolicy?: LeadLagAlignmentPolicy;
+  returnStandardization?: LeadLagReturnStandardization;
 }
+
+export type LeadLagReturnStandardization = "none" | "causal_prior_20_rms";
+
+export type LeadLagAlignmentPolicy =
+  | "exact_utc_timestamp_no_forward_fill"
+  | "utc_grid_resampled_from_closed_60m_bars";
 
 const NORMAL_Z = { 0.9: 1.6448536269514722, 0.95: 1.959963984540054, 0.99: 2.5758293035489004 } as const;
 const EMPIRICAL_NULL_ITERATIONS = 1_000;
 const EMPIRICAL_NULL_SEED = 20_260_731;
-const EMPIRICAL_NULL_METHODOLOGY = "lead_lag_empirical_null_circular_shift_v1" as const;
+const EMPIRICAL_NULL_METHODOLOGY_RAW = "lead_lag_empirical_null_circular_shift_v1" as const;
+const EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED =
+  "lead_lag_empirical_null_circular_shift_causal_prior_20_rms_v2" as const;
+type EmpiricalNullMethodology =
+  | typeof EMPIRICAL_NULL_METHODOLOGY_RAW
+  | typeof EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED;
+export const LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS = 20;
+
+export function causalPriorRmsStandardizePair(input: {
+  primaryReturns: number[];
+  referenceReturns: number[];
+}) {
+  if (input.primaryReturns.length !== input.referenceReturns.length) {
+    throw new Error("lead/lag return series must have equal length before volatility standardization");
+  }
+  const window = LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS;
+  const primary: number[] = [];
+  const reference: number[] = [];
+  for (let index = window; index < input.primaryReturns.length; index += 1) {
+    let primarySquares = 0;
+    let referenceSquares = 0;
+    for (let prior = index - window; prior < index; prior += 1) {
+      primarySquares += input.primaryReturns[prior] ** 2;
+      referenceSquares += input.referenceReturns[prior] ** 2;
+    }
+    const primaryScale = Math.sqrt(primarySquares / window);
+    const referenceScale = Math.sqrt(referenceSquares / window);
+    if (!Number.isFinite(primaryScale) || primaryScale <= 0 ||
+        !Number.isFinite(referenceScale) || referenceScale <= 0) {
+      throw new Error(`lead/lag causal volatility scale is unavailable at return index ${index}`);
+    }
+    primary.push(input.primaryReturns[index] / primaryScale);
+    reference.push(input.referenceReturns[index] / referenceScale);
+  }
+  return {
+    primaryReturns: primary,
+    referenceReturns: reference,
+    warmupReturnsExcluded: Math.min(window, input.primaryReturns.length),
+    windowBars: window,
+  };
+}
+
+/**
+ * Rebuild a shared UTC grid from closed lower-timeframe bars. This is deliberately stricter than
+ * matching nearby pre-aggregated bars: every source interval in a target bucket must exist, or
+ * the bucket is omitted. That prevents two vendors' differently anchored 4H/D bars from being
+ * represented as if they measured the same return window.
+ */
+export function resampleClosedBarsToUtcGrid(input: {
+  bars: OhlcvBar[];
+  sourceTimeframe: string;
+  targetTimeframe: string;
+}) {
+  const sourceMs = marketRegimeResolutionMilliseconds(input.sourceTimeframe);
+  const targetMs = marketRegimeResolutionMilliseconds(input.targetTimeframe);
+  if (sourceMs === null || targetMs === null || targetMs <= sourceMs || targetMs % sourceMs !== 0) {
+    throw new Error("target timeframe must be an integer multiple of the source timeframe");
+  }
+  const intervalsPerBucket = targetMs / sourceMs;
+  const closed = input.bars.filter((bar) => bar.forming !== true);
+  const byTime = new Map<number, OhlcvBar>();
+  for (const bar of closed) {
+    if (!Number.isInteger(bar.time) || (bar.time * 1_000) % sourceMs !== 0) {
+      throw new Error("source bars must be aligned to their declared UTC timeframe grid");
+    }
+    if (!Number.isFinite(bar.open) || !Number.isFinite(bar.high) || !Number.isFinite(bar.low) || !Number.isFinite(bar.close)) {
+      throw new Error("source bars must contain finite OHLC values");
+    }
+    if (byTime.has(bar.time)) throw new Error("source bars contain duplicate UTC timestamps");
+    byTime.set(bar.time, bar);
+  }
+  const starts = [...new Set([...byTime.keys()].map((time) =>
+    Math.floor((time * 1_000) / targetMs) * targetMs / 1_000,
+  ))].sort((left, right) => left - right);
+  const bars: OhlcvBar[] = [];
+  let incompleteBucketsExcluded = 0;
+  for (const start of starts) {
+    const bucket = Array.from({ length: intervalsPerBucket }, (_, index) => byTime.get(start + index * sourceMs / 1_000));
+    if (bucket.some((bar) => bar === undefined)) {
+      incompleteBucketsExcluded += 1;
+      continue;
+    }
+    const complete = bucket as OhlcvBar[];
+    const volumes = complete.map((bar) => bar.volume);
+    bars.push({
+      time: start,
+      timeIso: new Date(start * 1_000).toISOString(),
+      open: complete[0].open,
+      high: Math.max(...complete.map((bar) => bar.high)),
+      low: Math.min(...complete.map((bar) => bar.low)),
+      close: complete.at(-1)!.close,
+      volume: volumes.every((volume) => volume !== null)
+        ? volumes.reduce((sum, volume) => sum + volume!, 0)
+        : null,
+    });
+  }
+  return {
+    bars,
+    sourceClosedBars: closed.length,
+    sourceFormingBarsExcluded: input.bars.length - closed.length,
+    intervalsPerBucket,
+    incompleteBucketsExcluded,
+  };
+}
 
 function normalCdf(value: number): number {
   // Abramowitz-Stegun 7.1.26. This is sufficient for a transparent Fisher-z screening threshold;
@@ -232,7 +343,7 @@ function shiftedLagStatistic(input: {
 
 type EmpiricalNullCalibration = {
   schemaVersion: "1.0";
-  methodologyVersion: typeof EMPIRICAL_NULL_METHODOLOGY;
+  methodologyVersion: EmpiricalNullMethodology;
   status: "complete" | "not_evaluable";
   iterations: number;
   seed: number;
@@ -271,6 +382,7 @@ function buildEmpiricalNullCalibration(input: {
   confidenceLevel: 0.9 | 0.95 | 0.99;
   evidence: unknown;
   definition: unknown;
+  methodology: EmpiricalNullMethodology;
 }): EmpiricalNullCalibration {
   const positiveLags = input.lags.filter((lag) => lag > 0);
   const observed = new Map(positiveLags.map((lag) => [lag, lagStatistic(input.primaryReturns, input.referenceReturns, lag)]));
@@ -336,7 +448,7 @@ function buildEmpiricalNullCalibration(input: {
   }));
   const evidenceHash = sha256(input.evidence);
   const contract = {
-    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    methodologyVersion: input.methodology,
     iterations: EMPIRICAL_NULL_ITERATIONS,
     seed: EMPIRICAL_NULL_SEED,
     shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family",
@@ -355,7 +467,7 @@ function buildEmpiricalNullCalibration(input: {
   };
   return {
     schemaVersion: "1.0",
-    methodologyVersion: EMPIRICAL_NULL_METHODOLOGY,
+    methodologyVersion: input.methodology,
     status: familyLags.length > 0 && shifts.length > 0 ? "complete" : "not_evaluable",
     iterations: EMPIRICAL_NULL_ITERATIONS,
     seed: EMPIRICAL_NULL_SEED,
@@ -418,6 +530,11 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     throw new Error("lead/lag folds must not overlap");
   }
 
+  const alignmentPolicy = input.alignmentPolicy ?? "exact_utc_timestamp_no_forward_fill";
+  if (!(alignmentPolicy === "exact_utc_timestamp_no_forward_fill" ||
+    alignmentPolicy === "utc_grid_resampled_from_closed_60m_bars")) {
+    throw new Error("unsupported lead/lag alignment policy");
+  }
   const primary = input.primaryBars.filter((bar) => !bar.forming).sort((a, b) => a.time - b.time);
   const referenceClosed = input.referenceBars.filter((bar) => !bar.forming);
   const reference = new Map(referenceClosed.map((bar) => [bar.time, bar]));
@@ -435,11 +552,29 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     (item.primary.time - aligned[index].primary.time) * 1000 > nominalIntervalMs * 1.5).length;
 
   // Returns are indexed against the later bar of each consecutive aligned pair.
-  const returnTimes = aligned.slice(1).map((item) => item.primary);
-  const primaryReturns = aligned.slice(1).map((item, index) =>
+  const rawReturnTimes = aligned.slice(1).map((item) => item.primary);
+  const rawPrimaryReturns = aligned.slice(1).map((item, index) =>
     Math.log(item.primary.close / aligned[index].primary.close));
-  const referenceReturns = aligned.slice(1).map((item, index) =>
+  const rawReferenceReturns = aligned.slice(1).map((item, index) =>
     Math.log(item.reference.close / aligned[index].reference.close));
+  const returnStandardization = input.returnStandardization ?? "none";
+  if (!(returnStandardization === "none" || returnStandardization === "causal_prior_20_rms")) {
+    throw new Error("unsupported lead/lag return standardization");
+  }
+  const standardized = returnStandardization === "causal_prior_20_rms"
+    ? causalPriorRmsStandardizePair({ primaryReturns: rawPrimaryReturns, referenceReturns: rawReferenceReturns })
+    : {
+        primaryReturns: rawPrimaryReturns,
+        referenceReturns: rawReferenceReturns,
+        warmupReturnsExcluded: 0,
+        windowBars: null,
+      };
+  const primaryReturns = standardized.primaryReturns;
+  const referenceReturns = standardized.referenceReturns;
+  const returnTimes = rawReturnTimes.slice(standardized.warmupReturnsExcluded);
+  const empiricalNullMethodology = returnStandardization === "causal_prior_20_rms"
+    ? EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED
+    : EMPIRICAL_NULL_METHODOLOGY_RAW;
 
   const foldOf = (timeMs: number) =>
     folds.find((fold) => timeMs >= fold.fromMs && timeMs < fold.toMs)?.foldId ?? null;
@@ -456,7 +591,9 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     confidenceLevel: input.confidenceLevel,
     evidence: aligned.map((item) => ({ time: item.primary.time, primaryClose: item.primary.close, referenceClose: item.reference.close })),
     definition: { maxLagBars: input.maxLagBars, minimumObservations: input.minimumObservations,
-      confidenceLevel: input.confidenceLevel, configurationTrials: input.configurationTrials, folds: input.folds },
+      confidenceLevel: input.confidenceLevel, configurationTrials: input.configurationTrials, folds: input.folds,
+      returnStandardization },
+    methodology: empiricalNullMethodology,
   }) : undefined;
   const byLag = lags.map((lagBars) => {
     const pairedPrimary: number[] = [];
@@ -500,7 +637,7 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     const pValue = evaluable ? fisherTwoSidedPValue(correlation, observations) : null;
     const passesBonferroni = lagBars > 0 && pValue !== null && pValue <= bonferroniAdjustedAlpha;
     const empirical = lagBars > 0 ? empiricalNullCalibration?.byLag[String(lagBars)] : undefined;
-    const candidateBlockers = [
+    const statisticalGateBlockers = [
       ...(lagBars <= 0 ? ["not_a_positive_reference_lead"] : []),
       ...(!passesBonferroni ? ["bonferroni_threshold_not_met"] : []),
       ...(folds.length < 2 ? ["at_least_two_preregistered_folds_required"] : []),
@@ -511,6 +648,11 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
         ? ["empirical_null_calibration_not_evaluable"] : []),
       ...(empiricalNullCalibration?.status === "complete" && empirical?.passes !== true
         ? ["empirical_null_family_wise_threshold_not_met"] : []),
+    ];
+    const statisticalGateEligible = statisticalGateBlockers.length === 0;
+    const candidateBlockers = [
+      ...statisticalGateBlockers,
+      "candidate_rule_not_calibrated_for_shared_clustered_volatility",
     ];
     return {
       lagBars,
@@ -530,7 +672,8 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
         bonferroniAdjustedAlpha,
         passesBonferroni,
         ...(empirical === undefined ? {} : { empiricalNull: empirical }),
-        candidateEligible: candidateBlockers.length === 0,
+        statisticalGateEligible,
+        candidateEligible: false,
         candidateBlockers,
       },
       folds: foldResults,
@@ -546,6 +689,8 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
   const evaluableLags = byLag.filter((lag) => lag.status === "evaluable").length;
   const qualityIssues = [
     ...(aligned.length < 2 ? ["insufficient_exactly_aligned_history"] : []),
+    ...(returnStandardization === "causal_prior_20_rms" && rawPrimaryReturns.length <= LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS
+      ? ["insufficient_history_for_causal_volatility_standardization"] : []),
     ...(irregularIntervals > 0 ? ["one_or_more_non_contiguous_bar_intervals"] : []),
     ...(evaluableLags < lagsInspected ? ["one_or_more_lags_not_evaluable"] : []),
     ...(folds.length < 2 ? ["fewer_than_two_time_folds"] : []),
@@ -553,8 +698,10 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
 
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "exact_timestamp_lead_lag_return_correlation_v1" as const,
-    alignmentPolicy: "exact_utc_timestamp_no_forward_fill" as const,
+    methodologyVersion: returnStandardization === "causal_prior_20_rms"
+      ? "lead_lag_relationships_v3_causal_prior_20_rms" as const
+      : "exact_timestamp_lead_lag_return_correlation_v1" as const,
+    alignmentPolicy,
     status: qualityIssues.length === 0 ? "complete" as const : "partial" as const,
     primarySymbol: input.primarySymbol,
     referenceSymbol: input.referenceSymbol,
@@ -562,7 +709,16 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     definition: {
       maxLagBars: input.maxLagBars,
       minimumObservations: input.minimumObservations,
+      alignmentPolicy,
       returnBasis: "log_close_to_close_on_consecutive_aligned_bars" as const,
+      returnStandardization: returnStandardization === "causal_prior_20_rms"
+        ? {
+            method: "causal_prior_rms" as const,
+            windowBars: LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS,
+            currentReturnExcludedFromScale: true,
+            centering: "none" as const,
+          }
+        : { method: "none" as const },
       lagConvention: "positive_lag_pairs_an_earlier_reference_return_with_a_later_primary_return" as const,
       empiricalNullCalibration: input.empiricalNullCalibration === true,
     },
@@ -570,7 +726,9 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       primaryClosedBars: primary.length,
       referenceClosedBars: reference.size,
       alignedBars: aligned.length,
+      rawReturnObservations: rawPrimaryReturns.length,
       returnObservations: primaryReturns.length,
+      standardizationWarmupReturnsExcluded: standardized.warmupReturnsExcluded,
     },
     quality: { formingBarsExcluded, irregularIntervals },
     qualityIssues,
@@ -580,10 +738,12 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       lagsInspected,
       evaluableLags,
       configurationTrials: input.configurationTrials,
-      serialDependenceAdjustment: "none" as const,
+      serialDependenceAdjustment: returnStandardization === "causal_prior_20_rms"
+        ? "causal_prior_20_rms_volatility_standardization_only" as const
+        : "none" as const,
       multipleTestingAdjustment: "bonferroni_family_wise_error_rate" as const,
-      empiricalNullMethodology: EMPIRICAL_NULL_METHODOLOGY,
-      candidateEligibility: "requires_positive_lag_bonferroni_fold_sign_stability_and_empirical_null_family_wise_p_value" as const,
+      empiricalNullMethodology,
+      candidateEligibility: "disabled_until_shared_clustered_volatility_false_positive_rate_is_calibrated" as const,
       familyTests,
       nominalAlpha,
       bonferroniAdjustedAlpha,
@@ -592,8 +752,11 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     },
     inferenceWarnings: [
       "confidence_intervals_do_not_adjust_for_serial_dependence",
+      ...(returnStandardization === "causal_prior_20_rms"
+        ? ["returns_are_scaled_by_each_series_prior_20_return_rms_without_current_return"] : []),
       "bonferroni_adjustment_is_applied_to_lag_eligibility",
       "candidate_eligibility_requires_a_same-evidence empirical-null family-wise calibration",
+      "candidate_eligibility_is_disabled_after_shared_clustered_volatility_exceeded_nominal_alpha",
       "every_scanned_lag_is_reported_and_no_best_lag_is_selected",
       ...(input.maxLagBars > 1 ? ["scanning_many_lags_inflates_the_chance_of_one_interval_excluding_zero"] : []),
     ],
@@ -603,7 +766,9 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
       "This is a descriptive correlation scan, not an event study, a forecast, or a tradable signal.",
       "Correlation between contemporaneous or lagged returns does not establish a causal lead.",
       "Only positive lags describe the reference leading the primary; negative lags are not tradable on the primary.",
-      "Single-bar returns do not overlap, but financial returns are still autocorrelated and volatility-clustered, and the Fisher interval assumes independent pairs, so it is narrower than the effective sample supports.",
+      returnStandardization === "causal_prior_20_rms"
+        ? "Causal RMS scaling removes local variance level from the statistic but does not correct directional serial dependence; Fisher intervals can still be narrower than the effective sample supports."
+        : "Single-bar returns do not overlap, but financial returns are still autocorrelated and volatility-clustered, and the Fisher interval assumes independent pairs, so it is narrower than the effective sample supports.",
       "Passing Bonferroni marks a lag as statistically eligible for a preregistered forward hypothesis; it is not out-of-sample evidence or a trading signal.",
     ],
   };

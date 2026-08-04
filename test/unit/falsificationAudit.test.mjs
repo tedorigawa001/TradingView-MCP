@@ -135,8 +135,31 @@ test("paired falsification audit hands both legs of one draw to the study", () =
     isCandidate: (difference) => difference > 0,
   });
   assert.equal(result.model, "factor_null_pair");
+  assert.deepEqual(result.pairStructure, {
+    marginalModel: "white_noise",
+    crossSeriesDependence: "contemporaneous_factor",
+    volatilityStateDependence: "not_applicable_constant",
+  });
   assert.equal(result.completed, 10);
   assert.ok(widths.every(([p, r]) => p === base.bars && r === base.bars));
+});
+
+test("paired falsification audit records shared and independent volatility-state contracts", () => {
+  const clusteredFactor = runPairedFalsificationAudit({
+    ...base, replications: 2, model: "factor_regime_switching_volatility_pair", rho: 0.7,
+    runStudy: (primary) => primary.length, isCandidate: () => false,
+  });
+  assert.equal(clusteredFactor.pairStructure.volatilityStateDependence, "shared");
+  assert.equal(clusteredFactor.pairStructure.crossSeriesDependence, "contemporaneous_factor");
+  assert.equal(clusteredFactor.pairStructure.marginalModel, "regime_switching_volatility");
+
+  const clusteredIndependent = runPairedFalsificationAudit({
+    ...base, replications: 2, model: "regime_switching_volatility",
+    runStudy: (primary) => primary.length, isCandidate: () => false,
+  });
+  assert.equal(clusteredIndependent.rho, undefined);
+  assert.equal(clusteredIndependent.pairStructure.volatilityStateDependence, "independent");
+  assert.equal(clusteredIndependent.pairStructure.crossSeriesDependence, "independent");
 });
 
 test("falsification audit refuses inputs that would make its rate meaningless", () => {
