@@ -212,3 +212,26 @@ test("an excused non-publication is credited to the release it would have been, 
   assert.deepEqual(artifact.coverage.coverage_issues, []);
   assert.equal(artifact.coverage.excused_non_publications_by_year["2016"], 1);
 });
+
+test("a release the source has only scheduled is not recorded as one that happened", async () => {
+  // BLS publishes the employment situation schedule a year ahead, archive URL and all, and a link
+  // is a link to a parser. A release that has not occurred has no occurrence time: the schedule
+  // says when it should happen, and a delay would leave that time wrong with nothing to show it.
+  const past = ["01092026", "02062026", "03062026", "04032026", "05082026", "06052026", "07022026"];
+  const scheduled = ["08072026", "09042026", "10022026", "11062026", "12042026"];
+  const filler = Array.from({ length: 12 }, (_, index) => `${String(index + 1).padStart(2, "0")}062025`);
+  const body = [...past, ...scheduled, ...filler]
+    .map((date) => `<a href="/news.release/archives/empsit_${date}.htm">release</a>`).join("");
+  const artifact = await collectOfficialMacroEvents({
+    kind: "us_nfp", fromYear: 2025, toYear: 2026, now: new Date("2026-08-05T00:00:00.000Z"),
+    rawArchivePath: await mkdtemp(join(tmpdir(), "macro-events-")),
+    fetch: async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => body }),
+  });
+  assert.equal(artifact.events.length, past.length + filler.length);
+  assert.ok(artifact.events.every((event) => event.occurred_at <= artifact.retrieved_at));
+  // The schedule is kept rather than dropped: knowing the next release is due is useful, and it is
+  // only the claim that it already occurred that has to go.
+  assert.deepEqual(artifact.scheduled_future_releases.map((event) => event.occurred_at.slice(0, 10)),
+    ["2026-08-07", "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04"]);
+  assert.ok(artifact.scheduled_future_releases.every((event) => event.occurred_at > artifact.retrieved_at));
+});

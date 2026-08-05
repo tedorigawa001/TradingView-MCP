@@ -31,6 +31,14 @@ export type OfficialMacroEventArtifact = {
   event_kind: OfficialMacroEventKind;
   events: OfficialMacroEvent[];
   non_publications: OfficialMacroNonPublication[];
+  /**
+   * Releases the source lists that had not happened when it was read. BLS publishes the employment
+   * situation schedule a year ahead, archive URL and all, and a link is a link to a parser. A
+   * release that has not occurred has no occurrence time to record: the schedule says when it is
+   * meant to happen, and a delay would leave that time wrong with nothing to reveal it. Kept
+   * separately because the schedule is worth having, just not as evidence that something happened.
+   */
+  scheduled_future_releases: OfficialMacroEvent[];
   source_count: number;
   coverage: {
     requested_from_year: number;
@@ -217,10 +225,13 @@ export async function collectOfficialMacroEvents(input: { kind: OfficialMacroEve
   const start = `${input.fromYear}-01-01T00:00:00.000Z`; const end = `${input.toYear + 1}-01-01T00:00:00.000Z`;
   const deduplicated = new Map<string, OfficialMacroEvent>();
   for (const event of sourcePages.flatMap((page) => page.events).filter((event) => event.occurred_at >= start && event.occurred_at < end)) deduplicated.set(event.event_id, event);
-  const events = [...deduplicated.values()].sort((left, right) => left.occurred_at.localeCompare(right.occurred_at));
+  const collected = [...deduplicated.values()].sort((left, right) => left.occurred_at.localeCompare(right.occurred_at));
+  const retrievedAtIso = (input.now ?? new Date()).toISOString();
+  const events = collected.filter((event) => event.occurred_at <= retrievedAtIso);
+  const scheduledFutureReleases = collected.filter((event) => event.occurred_at > retrievedAtIso);
   if (events.length < 1) throw new Error("official macro event collection is empty");
   const retrievedAt = input.now ?? new Date(); const eventCoverage = coverage(input.kind, input.fromYear, input.toYear, events, nonPublications, retrievedAt);
-  return { schema_version: "1.0", series: "official_us_macro_release_events", evidence_tier: "official_revised_history", retrieved_at: retrievedAt.toISOString(), event_kind: input.kind, events, non_publications: nonPublications, source_count: sourcePages.length, coverage: eventCoverage };
+  return { schema_version: "1.0", series: "official_us_macro_release_events", evidence_tier: "official_revised_history", retrieved_at: retrievedAt.toISOString(), event_kind: input.kind, events, non_publications: nonPublications, scheduled_future_releases: scheduledFutureReleases, source_count: sourcePages.length, coverage: eventCoverage };
 }
 
 export async function writeOfficialMacroEventArtifact(path: string, artifact: OfficialMacroEventArtifact): Promise<void> {
