@@ -71,3 +71,29 @@ test("lead-lag audit records each independent null model and refuses factor rho 
   assert.equal(shared.auditDefinition.input.generation.pairStructure.volatilityStateDependence, "shared");
   assert.throws(() => runLeadLagFalsificationAudit({ ...base, model: "white_noise", rho: 0.7 }), /rho is supported only/);
 });
+
+test("the runner version names the null and the statistic, not just the code", () => {
+  // A rate is quoted with its runner before anyone opens the hash. Two different nulls sharing one
+  // name is how a measured rate ends up attributed to a procedure that never produced it.
+  const base = {
+    replications: 2, firstSeed: 10, bars: 300, timeframeMinutes: 60, nominalAlpha: 0.05, maxLagBars: 2,
+    minimumObservations: 30, confidenceLevel: 0.95, configurationTrials: 1,
+    folds: [{ foldId: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
+            { foldId: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" }],
+  };
+  const expected = [
+    ["circular_shift", "none", "lead_lag_falsification_audit_v2"],
+    ["circular_shift", "causal_prior_20_rms", "lead_lag_falsification_audit_v3"],
+    ["block_sign_flip", "none", "lead_lag_falsification_audit_v4"],
+    ["block_sign_flip", "causal_prior_20_rms", "lead_lag_falsification_audit_v5"],
+  ];
+  const hashes = new Set();
+  for (const [nullPolicy, returnStandardization, runner] of expected) {
+    const result = runLeadLagFalsificationAudit({ ...base, nullPolicy, returnStandardization });
+    assert.equal(result.auditDefinition.runner, runner, `${nullPolicy}/${returnStandardization}`);
+    assert.equal(result.auditDefinition.input.study.nullPolicy, nullPolicy);
+    hashes.add(result.auditDefinition.inputHash);
+  }
+  // Four distinct procedures, four distinct hashes; neither field alone stands in for the other.
+  assert.equal(hashes.size, 4);
+});

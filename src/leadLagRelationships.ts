@@ -23,9 +23,16 @@ export interface LeadLagInput {
   empiricalNullCalibration?: boolean;
   alignmentPolicy?: LeadLagAlignmentPolicy;
   returnStandardization?: LeadLagReturnStandardization;
+  nullPolicy?: LeadLagNullPolicy;
 }
 
 export type LeadLagReturnStandardization = "none" | "causal_prior_20_rms";
+
+/**
+ * How the empirical null breaks the reference-to-primary lag relation. Both are reported with their
+ * own methodology version, because they are different nulls rather than two settings of one.
+ */
+export type LeadLagNullPolicy = "circular_shift" | "block_sign_flip";
 
 export type LeadLagAlignmentPolicy =
   | "exact_utc_timestamp_no_forward_fill"
@@ -37,9 +44,16 @@ const EMPIRICAL_NULL_SEED = 20_260_731;
 const EMPIRICAL_NULL_METHODOLOGY_RAW = "lead_lag_empirical_null_circular_shift_v1" as const;
 const EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED =
   "lead_lag_empirical_null_circular_shift_causal_prior_20_rms_v2" as const;
+// The sign flip is a different null, not a setting of the shift, so it carries its own identity in
+// both its raw and standardized forms; a rate can never be read without knowing which produced it.
+const EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_RAW = "lead_lag_empirical_null_block_sign_flip_v1" as const;
+const EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_STANDARDIZED =
+  "lead_lag_empirical_null_block_sign_flip_causal_prior_20_rms_v1" as const;
 type EmpiricalNullMethodology =
   | typeof EMPIRICAL_NULL_METHODOLOGY_RAW
-  | typeof EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED;
+  | typeof EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED
+  | typeof EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_RAW
+  | typeof EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_STANDARDIZED;
 export const LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS = 20;
 
 export function causalPriorRmsStandardizePair(input: {
@@ -341,13 +355,101 @@ function shiftedLagStatistic(input: {
   return Number.isFinite(statistic) ? statistic : null;
 }
 
+/**
+ * Block sign-flip null. The reference return series is cut into fixed blocks and each block is
+ * multiplied by an independent random sign.
+ *
+ * The circular shift this stands beside preserves each leg volatility path but moves them relative
+ * to one another, which destroys the synchronisation between them along with the lag structure. On
+ * a pair that shares a volatility state that made the rule reject at 69.5 percent against a nominal
+ * five. Flipping signs leaves every absolute return exactly where it was, so both paths and their
+ * alignment survive untouched and only the direction of the reference is randomised.
+ *
+ * What it also destroys is contemporaneous dependence, which the factor null was built to preserve.
+ * That is a real difference from the shift rather than a strictly better null, and the point of
+ * implementing it is to measure which one holds its level.
+ *
+ * Blocks are long relative to the scanned lags so that most within-block lag pairs survive intact;
+ * only pairs straddling a boundary lose their sign relation.
+ */
+export const LEAD_LAG_SIGN_FLIP_BLOCK_MULTIPLE = 10;
+export const LEAD_LAG_SIGN_FLIP_MINIMUM_BLOCK_BARS = 50;
+
+export function leadLagSignFlipBlockBars(maxLagBars: number): number {
+  return Math.max(LEAD_LAG_SIGN_FLIP_MINIMUM_BLOCK_BARS, LEAD_LAG_SIGN_FLIP_BLOCK_MULTIPLE * maxLagBars);
+}
+
+/**
+ * Per-lag, per-block partial sums, computed once. A replication is then one pass over the blocks
+ * rather than over the series, which is what keeps this affordable inside an audit that runs the
+ * whole study a thousand times over.
+ */
+function signFlipPartials(primary: number[], reference: number[], lags: number[], blockBars: number) {
+  const count = primary.length;
+  const blockOf = (index: number) => Math.floor(index / blockBars);
+  const blocks = blockOf(count - 1) + 1;
+  const crossByLag = new Map<number, Float64Array>();
+  for (const lag of lags) {
+    const partial = new Float64Array(blocks);
+    for (let index = lag; index < count; index += 1) {
+      const referenceIndex = index - lag;
+      partial[blockOf(referenceIndex)] += primary[index] * reference[referenceIndex];
+    }
+    crossByLag.set(lag, partial);
+  }
+  // The reference sum flips with its block; the sum of squares does not, so it is taken once.
+  const referenceSumByLag = new Map<number, Float64Array>();
+  const referenceSquaresByLag = new Map<number, number>();
+  for (const lag of lags) {
+    const partial = new Float64Array(blocks);
+    let squares = 0;
+    for (let index = lag; index < count; index += 1) {
+      const referenceIndex = index - lag;
+      partial[blockOf(referenceIndex)] += reference[referenceIndex];
+      squares += reference[referenceIndex] * reference[referenceIndex];
+    }
+    referenceSumByLag.set(lag, partial);
+    referenceSquaresByLag.set(lag, squares);
+  }
+  return { blocks, crossByLag, referenceSumByLag, referenceSquaresByLag };
+}
+
+function signFlippedLagStatistic(input: {
+  signs: Int8Array;
+  lag: number;
+  observations: number;
+  sumPrimary: number;
+  sumPrimarySquares: number;
+  cross: Float64Array;
+  referenceSum: Float64Array;
+  referenceSquares: number;
+}): number | null {
+  const { signs, observations, sumPrimary, sumPrimarySquares, cross, referenceSum, referenceSquares } = input;
+  if (observations <= 3) return null;
+  let crossSum = 0;
+  let sumReference = 0;
+  for (let block = 0; block < signs.length; block += 1) {
+    crossSum += signs[block] * cross[block];
+    sumReference += signs[block] * referenceSum[block];
+  }
+  const covariance = crossSum - (sumPrimary * sumReference) / observations;
+  const primaryVariance = sumPrimarySquares - (sumPrimary * sumPrimary) / observations;
+  const referenceVariance = referenceSquares - (sumReference * sumReference) / observations;
+  const correlation = covariance / Math.sqrt(primaryVariance * referenceVariance);
+  if (!Number.isFinite(correlation) || Math.abs(correlation) >= 1) return null;
+  const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(observations - 3);
+  return Number.isFinite(statistic) ? statistic : null;
+}
+
 type EmpiricalNullCalibration = {
   schemaVersion: "1.0";
   methodologyVersion: EmpiricalNullMethodology;
   status: "complete" | "not_evaluable";
   iterations: number;
   seed: number;
+  nullPolicy: LeadLagNullPolicy;
   shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family";
+  signFlipBlockBars: number | null;
   excludedShiftRadiusBars: number;
   eligibleCircularShifts: number;
   familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags";
@@ -383,6 +485,8 @@ function buildEmpiricalNullCalibration(input: {
   evidence: unknown;
   definition: unknown;
   methodology: EmpiricalNullMethodology;
+  nullPolicy: LeadLagNullPolicy;
+  maxLagBars: number;
 }): EmpiricalNullCalibration {
   const positiveLags = input.lags.filter((lag) => lag > 0);
   const observed = new Map(positiveLags.map((lag) => [lag, lagStatistic(input.primaryReturns, input.referenceReturns, lag)]));
@@ -413,14 +517,35 @@ function buildEmpiricalNullCalibration(input: {
   // Kept, not recomputed. These are the per-lag statistics the maximum below is already taken over,
   // so retaining them costs one array and adds no draw to the sequence the calibration depends on.
   const nullStatistics: number[][] = [];
-  if (familyLags.length > 0 && shifts.length > 0) {
+  const signFlipBlockBars = input.nullPolicy === "block_sign_flip" ? leadLagSignFlipBlockBars(input.maxLagBars) : null;
+  const partials = input.nullPolicy === "block_sign_flip" && familyLags.length > 0
+    ? signFlipPartials(input.primaryReturns, input.referenceReturns, familyLags, signFlipBlockBars!)
+    : null;
+  // A sign flip needs no eligible circular offset, so its evaluability rests on the family alone.
+  const nullDrawable = input.nullPolicy === "block_sign_flip" ? familyLags.length > 0 : familyLags.length > 0 && shifts.length > 0;
+  if (nullDrawable) {
     const random = createRandom(EMPIRICAL_NULL_SEED);
     for (let iteration = 0; iteration < EMPIRICAL_NULL_ITERATIONS; iteration += 1) {
-      const shift = shifts[Math.floor(random() * shifts.length)];
-      const replication = familyLags.map((lag) =>
-        shiftedLagStatistic({ primary: input.primaryReturns, reference: input.referenceReturns,
-          primaryPrefix, primarySquaresPrefix, referenceDoubledPrefix, referenceDoubledSquaresPrefix,
-          crossSums, lag, shift }) ?? 0);
+      const replication = input.nullPolicy === "block_sign_flip"
+        ? (() => {
+            const signs = new Int8Array(partials!.blocks);
+            for (let block = 0; block < signs.length; block += 1) signs[block] = random() < 0.5 ? -1 : 1;
+            return familyLags.map((lag) => signFlippedLagStatistic({
+              signs, lag, observations: count - lag,
+              sumPrimary: primaryPrefix[count] - primaryPrefix[lag],
+              sumPrimarySquares: primarySquaresPrefix[count] - primarySquaresPrefix[lag],
+              cross: partials!.crossByLag.get(lag)!,
+              referenceSum: partials!.referenceSumByLag.get(lag)!,
+              referenceSquares: partials!.referenceSquaresByLag.get(lag)!,
+            }) ?? 0);
+          })()
+        : (() => {
+            const shift = shifts[Math.floor(random() * shifts.length)];
+            return familyLags.map((lag) =>
+              shiftedLagStatistic({ primary: input.primaryReturns, reference: input.referenceReturns,
+                primaryPrefix, primarySquaresPrefix, referenceDoubledPrefix, referenceDoubledSquaresPrefix,
+                crossSums, lag, shift }) ?? 0);
+          })();
       nullStatistics.push(replication);
       const maximum = replication.reduce((value, statistic) => Math.max(value, statistic), 0);
       for (const lag of familyLags) {
@@ -451,7 +576,9 @@ function buildEmpiricalNullCalibration(input: {
     methodologyVersion: input.methodology,
     iterations: EMPIRICAL_NULL_ITERATIONS,
     seed: EMPIRICAL_NULL_SEED,
+    nullPolicy: input.nullPolicy,
     shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family",
+    signFlipBlockBars,
     excludedShiftRadiusBars: Math.max(...positiveLags),
     eligibleCircularShifts: shifts.length,
     familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
@@ -468,10 +595,12 @@ function buildEmpiricalNullCalibration(input: {
   return {
     schemaVersion: "1.0",
     methodologyVersion: input.methodology,
-    status: familyLags.length > 0 && shifts.length > 0 ? "complete" : "not_evaluable",
+    status: nullDrawable ? "complete" : "not_evaluable",
     iterations: EMPIRICAL_NULL_ITERATIONS,
     seed: EMPIRICAL_NULL_SEED,
+    nullPolicy: input.nullPolicy,
     shiftPolicy: "uniform_circular_shift_of_reference_returns_outside_scanned_lag_family",
+    signFlipBlockBars,
     excludedShiftRadiusBars: Math.max(...positiveLags),
     eligibleCircularShifts: shifts.length,
     familyStatistic: "maximum_absolute_fisher_z_statistic_across_positive_evaluable_lags",
@@ -572,9 +701,14 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
   const primaryReturns = standardized.primaryReturns;
   const referenceReturns = standardized.referenceReturns;
   const returnTimes = rawReturnTimes.slice(standardized.warmupReturnsExcluded);
-  const empiricalNullMethodology = returnStandardization === "causal_prior_20_rms"
-    ? EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED
-    : EMPIRICAL_NULL_METHODOLOGY_RAW;
+  const nullPolicy: LeadLagNullPolicy = input.nullPolicy ?? "circular_shift";
+  if (nullPolicy !== "circular_shift" && nullPolicy !== "block_sign_flip") {
+    throw new Error("lead/lag null policy must be circular_shift or block_sign_flip");
+  }
+  const usesCausalStandardization = returnStandardization === "causal_prior_20_rms";
+  const empiricalNullMethodology = nullPolicy === "block_sign_flip"
+    ? (usesCausalStandardization ? EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_STANDARDIZED : EMPIRICAL_NULL_METHODOLOGY_SIGN_FLIP_RAW)
+    : (usesCausalStandardization ? EMPIRICAL_NULL_METHODOLOGY_STANDARDIZED : EMPIRICAL_NULL_METHODOLOGY_RAW);
 
   const foldOf = (timeMs: number) =>
     folds.find((fold) => timeMs >= fold.fromMs && timeMs < fold.toMs)?.foldId ?? null;
@@ -589,6 +723,8 @@ export function computeLeadLagRelationships(input: LeadLagInput) {
     lags,
     minimumObservations: input.minimumObservations,
     confidenceLevel: input.confidenceLevel,
+    nullPolicy,
+    maxLagBars: input.maxLagBars,
     evidence: aligned.map((item) => ({ time: item.primary.time, primaryClose: item.primary.close, referenceClose: item.reference.close })),
     definition: { maxLagBars: input.maxLagBars, minimumObservations: input.minimumObservations,
       confidenceLevel: input.confidenceLevel, configurationTrials: input.configurationTrials, folds: input.folds,

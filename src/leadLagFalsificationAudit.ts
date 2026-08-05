@@ -1,6 +1,7 @@
 import {
   computeLeadLagRelationships,
   type LeadLagFold,
+  type LeadLagNullPolicy,
   type LeadLagReturnStandardization,
 } from "./leadLagRelationships.js";
 import { runPairedFalsificationAudit, type FalsificationAuditResult } from "./falsificationAudit.js";
@@ -21,6 +22,7 @@ export interface LeadLagFalsificationAuditInput {
   rho?: number;
   model?: PairedSyntheticNullModel;
   returnStandardization?: LeadLagReturnStandardization;
+  nullPolicy?: LeadLagNullPolicy;
 }
 
 export type LeadLagFalsificationAuditResult = FalsificationAuditResult & {
@@ -31,7 +33,17 @@ export type LeadLagFalsificationAuditResult = FalsificationAuditResult & {
    * rate quoted without it cannot be reproduced or checked.
    */
   auditDefinition: {
-    runner: "lead_lag_falsification_audit_v2" | "lead_lag_falsification_audit_v3";
+    /**
+     * The runner version names what was measured, not which code ran, so it has to move with the
+     * null as well as with the statistic. v2 and v3 are the circular shift on raw and standardized
+     * returns; v4 and v5 are the block sign flip on the same two. A reader quoting a rate sees this
+     * before the hash, and two different nulls sharing one name is how a rate gets misattributed.
+     */
+    runner:
+      | "lead_lag_falsification_audit_v2"
+      | "lead_lag_falsification_audit_v3"
+      | "lead_lag_falsification_audit_v4"
+      | "lead_lag_falsification_audit_v5";
     input: CanonicalJson;
     inputHash: string;
   };
@@ -44,6 +56,7 @@ export type LeadLagFalsificationAuditResult = FalsificationAuditResult & {
  */
 export function runLeadLagFalsificationAudit(input: LeadLagFalsificationAuditInput): LeadLagFalsificationAuditResult {
   const returnStandardization = input.returnStandardization ?? "causal_prior_20_rms";
+  const nullPolicy: LeadLagNullPolicy = input.nullPolicy ?? "circular_shift";
   const study = {
     maxLagBars: input.maxLagBars,
     minimumObservations: input.minimumObservations,
@@ -52,6 +65,7 @@ export function runLeadLagFalsificationAudit(input: LeadLagFalsificationAuditInp
     folds: input.folds.map((fold) => ({ foldId: fold.foldId, from: fold.from, to: fold.to })),
     empiricalNullCalibration: true as const,
     returnStandardization,
+    nullPolicy,
   };
   const audit = runPairedFalsificationAudit({
     ...input,
@@ -88,9 +102,11 @@ export function runLeadLagFalsificationAudit(input: LeadLagFalsificationAuditInp
   return {
     ...audit,
     auditDefinition: {
-      runner: returnStandardization === "causal_prior_20_rms"
-        ? "lead_lag_falsification_audit_v3"
-        : "lead_lag_falsification_audit_v2",
+      runner: nullPolicy === "block_sign_flip"
+        ? (returnStandardization === "causal_prior_20_rms"
+            ? "lead_lag_falsification_audit_v5" : "lead_lag_falsification_audit_v4")
+        : (returnStandardization === "causal_prior_20_rms"
+            ? "lead_lag_falsification_audit_v3" : "lead_lag_falsification_audit_v2"),
       input: definition,
       inputHash: canonicalDefinitionHash(definition),
     },

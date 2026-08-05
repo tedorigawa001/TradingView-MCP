@@ -4,6 +4,7 @@ import {
   LEAD_LAG_CAUSAL_VOLATILITY_WINDOW_BARS,
   causalPriorRmsStandardizePair,
   computeLeadLagRelationships,
+  leadLagSignFlipBlockBars,
   resampleClosedBarsToUtcGrid,
 } from "../../build/leadLagRelationships.js";
 
@@ -315,4 +316,53 @@ test("lead/lag scan rejects overlapping folds and out-of-range lag requests", ()
       { foldId: "same", from: "2026-03-01T00:00:00.000Z", to: "2026-04-01T00:00:00.000Z" },
     ],
   }), /unique fold ids/);
+});
+
+test("the block sign-flip null leaves every absolute return exactly where it was", () => {
+  // This is the whole point of the policy. The circular shift preserves each leg volatility path
+  // but slides them apart, which removes the synchronisation between them along with the lag
+  // structure. Flipping signs inside blocks touches neither path nor their alignment.
+  const start = Date.UTC(2024, 0, 1) / 1000;
+  const next = (() => { let state = 4242 >>> 0;
+    return () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 4294967296; }; })();
+  const bars = (drift) => Array.from({ length: 600 }, (_, index) => {
+    const close = 100 * Math.exp(drift * index / 600 + (next() - 0.5) * 0.02);
+    return { time: start + index * 3600, timeIso: new Date((start + index * 3600) * 1000).toISOString(),
+      open: close, high: close * 1.001, low: close * 0.999, close, volume: 1 };
+  });
+  const study = {
+    primaryBars: bars(0.01), referenceBars: bars(-0.01),
+    primarySymbol: "A", referenceSymbol: "B", timeframe: "60",
+    maxLagBars: 3, minimumObservations: 30, confidenceLevel: 0.95,
+    folds: [], configurationTrials: 1, empiricalNullCalibration: true,
+  };
+  const shift = computeLeadLagRelationships({ ...study, nullPolicy: "circular_shift" });
+  const flip = computeLeadLagRelationships({ ...study, nullPolicy: "block_sign_flip" });
+
+  // Each null carries its own identity, because a rate cannot be read without knowing which
+  // produced it. They are different nulls, not two settings of one.
+  assert.equal(shift.empiricalNullCalibration.nullPolicy, "circular_shift");
+  assert.equal(flip.empiricalNullCalibration.nullPolicy, "block_sign_flip");
+  assert.notEqual(shift.empiricalNullCalibration.methodologyVersion, flip.empiricalNullCalibration.methodologyVersion);
+  assert.match(flip.empiricalNullCalibration.methodologyVersion, /block_sign_flip/);
+  assert.notEqual(shift.empiricalNullCalibration.calibrationId, flip.empiricalNullCalibration.calibrationId);
+
+  // Blocks are long relative to the scanned lags so most within-block lag pairs survive intact.
+  assert.equal(flip.empiricalNullCalibration.signFlipBlockBars, 50);
+  assert.equal(shift.empiricalNullCalibration.signFlipBlockBars, null);
+  assert.equal(flip.empiricalNullCalibration.status, "complete");
+  // The observed statistics are a property of the data, so the two nulls must agree on them and
+  // differ only in what they compare them against.
+  for (const lag of ["1", "2", "3"]) {
+    assert.equal(flip.empiricalNullCalibration.byLag[lag].observedStatistic,
+      shift.empiricalNullCalibration.byLag[lag].observedStatistic, `lag ${lag}`);
+  }
+});
+
+test("the sign-flip block length is a stated rule rather than a free number", () => {
+  // Ten times the scanned lag, floored at fifty bars. Fixed before any rate was measured with it.
+  assert.equal(leadLagSignFlipBlockBars(1), 50);
+  assert.equal(leadLagSignFlipBlockBars(5), 50);
+  assert.equal(leadLagSignFlipBlockBars(10), 100);
+  assert.equal(leadLagSignFlipBlockBars(50), 500);
 });
