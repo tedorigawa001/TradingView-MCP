@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { collectOfficialPolicyRateHistory, parseEcbDepositFacilityCsv } from "../../build/officialPolicyRateSources.js";
+import { collectOfficialPolicyRateHistory, parseBoeBankRateCsv, parseEcbDepositFacilityCsv } from "../../build/officialPolicyRateSources.js";
 
 const csv = [
   "KEY,TIME_PERIOD,OBS_VALUE,TITLE",
@@ -175,4 +175,40 @@ test("SNB parser uses its policy rate and the historical Libor target-range midp
     source_observation_count: 3, source_first_observation_date: "2019-05-31", source_last_observation_date: "2019-07-31",
   });
   assert.throws(() => parseSnbOfficialInterestRatesCsv(raw.replace('"OG0";"-0.25"', '"OG0";""')), /incomplete Libor target range/);
+});
+
+test("BoE Bank Rate parser reduces the daily carry-forward export to its change dates", () => {
+  // The export repeats the standing rate on every calendar day, including days no decision was
+  // taken, so the raw row count is coverage and only the changes belong in an as-of join.
+  const raw = [
+    "DATE,IUDBEDR",
+    "02 Jan 1975,11.5",
+    "03 Jan 1975,11.5",
+    "20 Jan 1975,11.25",
+    "21 Jan 1975,11.25",
+    "18 Dec 2025,3.75",
+  ].join("\n");
+  const parsed = parseBoeBankRateCsv(raw);
+  assert.deepEqual(parsed.changes, [
+    { observation_date: "1975-01-02", value: 11.5 },
+    { observation_date: "1975-01-20", value: 11.25 },
+    { observation_date: "2025-12-18", value: 3.75 },
+  ]);
+  // Coverage counts every supplied row, so a shortened export shows as less history rather than
+  // as fewer decisions.
+  assert.equal(parsed.source_observation_count, 5);
+  assert.equal(parsed.source_first_observation_date, "1975-01-02");
+  assert.equal(parsed.source_last_observation_date, "2025-12-18");
+});
+
+test("BoE Bank Rate parser refuses a substituted series, an unreadable date, and unordered rows", () => {
+  const good = "DATE,IUDBEDR\n02 Jan 1975,11.5";
+  assert.doesNotThrow(() => parseBoeBankRateCsv(good));
+  // A different series code in the same shape would otherwise be read as Bank Rate.
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDSOIA\n02 Jan 1975,11.5"), /expected DATE and IUDBEDR/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR,EXTRA\n02 Jan 1975,11.5,1"), /expected DATE and IUDBEDR/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n1975-01-02,11.5"), /unreadable date/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n30 Feb 1975,11.5"), /the calendar does not have/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n02 Jan 1975,\n03 Jan 1975,11.5"), /non-finite rate/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n03 Jan 1975,11.5\n02 Jan 1975,11.25"), /not strictly ordered/);
 });

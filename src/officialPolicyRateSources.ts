@@ -8,7 +8,7 @@ import { parseRbaHistoricalF1Xls } from "./rbaHistoricalF1Xls.js";
 type ParsedOfficialPolicyRateSeries = { changes: Array<{ observation_date: string; value: number }>; source_observation_count: number; source_first_observation_date: string; source_last_observation_date: string };
 
 type OfficialSource = {
-  id: "ecb_deposit_facility" | "boc_target_overnight_rate" | "fred_fed_target_range_midpoint" | "rba_cash_rate_target" | "snb_policy_rate_or_libor_target_midpoint";
+  id: "ecb_deposit_facility" | "boc_target_overnight_rate" | "fred_fed_target_range_midpoint" | "rba_cash_rate_target" | "snb_policy_rate_or_libor_target_midpoint" | "boe_bank_rate";
   currency: PolicyRateCurrency;
   sourceSymbol: string;
   sourceUrl: string;
@@ -23,6 +23,15 @@ const FRED_FED_TARGET_HISTORY_URL = "https://fred.stlouisfed.org/graph/fredgraph
 const RBA_CASH_RATE_TARGET_URL = "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv";
 const RBA_CASH_RATE_TARGET_HISTORICAL_URL = "https://www.rba.gov.au/statistics/tables/xls-hist/f01dhist.xls";
 const SNB_OFFICIAL_INTEREST_RATES_URL = "https://data.snb.ch/api/cube/snboffzisa/data/csv/en";
+// Bank Rate from the Bank of England Interactive Database. IUDBEDR is the daily official Bank Rate
+// series; the export carries it forward across every calendar day, so only the changes are kept.
+// This is the target of the 302 the documented /boeapps/iadb/ path issues. Following a redirect is
+// refused here by design, so the destination is pinned; both return a byte-identical body.
+const BOE_BANK_RATE_URL = "https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?csv.x=yes&Datefrom=01/Jan/1975&Dateto=now&SeriesCodes=IUDBEDR&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N";
+const BOE_MONTHS: Record<string, string> = {
+  Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
+  Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12",
+};
 
 export const OFFICIAL_POLICY_RATE_SOURCES: Record<OfficialSource["id"], OfficialSource> = {
   ecb_deposit_facility: {
@@ -52,6 +61,13 @@ export const OFFICIAL_POLICY_RATE_SOURCES: Record<OfficialSource["id"], Official
     sourceSymbol: "ECONOMICS:AUINTR",
     sourceUrl: RBA_CASH_RATE_TARGET_URL,
     parse: parseRbaCashRateTargetCsv,
+  },
+  boe_bank_rate: {
+    id: "boe_bank_rate",
+    currency: "GBP",
+    sourceSymbol: "ECONOMICS:GBINTR",
+    sourceUrl: BOE_BANK_RATE_URL,
+    parse: parseBoeBankRateCsv,
   },
   snb_policy_rate_or_libor_target_midpoint: {
     id: "snb_policy_rate_or_libor_target_midpoint",
@@ -260,6 +276,45 @@ export function parseBocTargetOvernightRateJson(raw: string): ParsedOfficialPoli
   }
   if (firstDate === null || lastDate === null) throw new Error("BoC target overnight rate response has no valid observations");
   return { changes, source_observation_count: observations.length, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+}
+
+/**
+ * Bank of England Bank Rate, `DATE,IUDBEDR` with dates as `02 Jan 1975`. The export is a daily
+ * carry-forward series, so the change points are what an as-of join needs; the raw row count is
+ * kept separately so a shortened export is visible as reduced coverage rather than fewer changes.
+ */
+export function parseBoeBankRateCsv(raw: string): ParsedOfficialPolicyRateSeries {
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim() !== "");
+  if (lines.length < 2) throw new Error("BoE Bank Rate response has no observations");
+  const header = lines[0].split(",").map((cell) => cell.trim());
+  if (header[0] !== "DATE" || header[1] !== "IUDBEDR" || header.length !== 2) {
+    throw new Error("BoE Bank Rate response does not carry the expected DATE and IUDBEDR columns");
+  }
+  const changes: Array<{ observation_date: string; value: number }> = [];
+  let firstDate: string | null = null;
+  let lastDate: string | null = null;
+  let prior: number | null = null;
+  for (const line of lines.slice(1)) {
+    const cells = line.split(",").map((cell) => cell.trim());
+    if (cells.length !== 2) throw new Error("BoE Bank Rate response contains a malformed row");
+    const match = /^(\d{2}) ([A-Z][a-z]{2}) (\d{4})$/.exec(cells[0]);
+    const month = match === null ? undefined : BOE_MONTHS[match[2]];
+    if (match === null || month === undefined) throw new Error(`BoE Bank Rate response contains an unreadable date ${cells[0]}`);
+    const date = `${match[3]}-${month}-${match[1]}`;
+    if (new Date(`${date}T12:00:00.000Z`).toISOString().slice(0, 10) !== date) {
+      throw new Error(`BoE Bank Rate response contains a date the calendar does not have: ${cells[0]}`);
+    }
+    const value = Number(cells[1]);
+    if (cells[1] === "" || !Number.isFinite(value)) throw new Error("BoE Bank Rate response contains a non-finite rate");
+    if (lastDate !== null && date <= lastDate) throw new Error("BoE Bank Rate observations are not strictly ordered");
+    firstDate ??= date;
+    lastDate = date;
+    if (prior === value) continue;
+    changes.push({ observation_date: date, value });
+    prior = value;
+  }
+  if (firstDate === null || lastDate === null) throw new Error("BoE Bank Rate response has no valid observations");
+  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
 }
 
 export function parseFredFedTargetRangeCsv(raw: string): ParsedOfficialPolicyRateSeries {
