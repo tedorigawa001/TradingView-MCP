@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { archiveOfficialMacroRaw, collectOfficialMacroEvents, parseBlsArchiveEvents, parseBlsArchiveNonPublications, parseFomcHistoricalPage } from "../../build/officialMacroEventSources.js";
+import { archiveOfficialMacroRaw, collectOfficialMacroEvents, computeOfficialMacroEventCoverage, parseBlsArchiveEvents, parseBlsArchiveNonPublications, parseFomcHistoricalPage } from "../../build/officialMacroEventSources.js";
 import { buildMacroEvent60mStudy, firstFullM60BarAfterRelease, NFP_SHORT_FRIDAY_60M_CONTRACT } from "../../build/macroEvent60mStudy.js";
 import { preflightMacroEvent60mContract } from "../../build/macroEvent60mPreflight.js";
 import { parseMacroEvent60mPreflightCliArguments } from "../../build/macroEvent60mPreflightCli.js";
@@ -234,4 +234,57 @@ test("a release the source has only scheduled is not recorded as one that happen
   assert.deepEqual(artifact.scheduled_future_releases.map((event) => event.occurred_at.slice(0, 10)),
     ["2026-08-07", "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04"]);
   assert.ok(artifact.scheduled_future_releases.every((event) => event.occurred_at > artifact.retrieved_at));
+});
+
+// Coverage is exported so these run against the same function the collector uses, and so a stored
+// artifact can be rechecked from its own events without going back to the network.
+const monthlyEvents = (kind, year, skip = []) => Array.from({ length: 12 }, (_, index) => index + 1)
+  .filter((month) => !skip.includes(month))
+  .map((month) => ({
+    event_id: `${kind}:${year}-${String(month).padStart(2, "0")}-10`,
+    event_kind: kind,
+    occurred_at: `${year}-${String(month).padStart(2, "0")}-10T13:30:00.000Z`,
+    source_url: "https://www.bls.gov/example",
+    raw_sha256: `sha256:${"0".repeat(64)}`,
+  }));
+const lapse = (kind, referenceMonth) => ({
+  event_kind: kind,
+  reference_month: referenceMonth,
+  reason: "not_published_due_to_lapse_in_appropriations",
+  source_url: "https://www.bls.gov/example",
+  raw_sha256: `sha256:${"0".repeat(64)}`,
+});
+const AFTER_2025 = new Date("2026-06-01T00:00:00.000Z");
+
+test("an excused month covers the gap the lapse actually left, on either side of the M+1 rule", () => {
+  // The 2025 lapse produced both shapes from one excused reference month each. CPI published late
+  // but inside October and lost November; the employment situation slipped out of October itself.
+  // Reading M+1 as the answer accepted the first and reported the second as a missing release.
+  const cpiShape = computeOfficialMacroEventCoverage("us_cpi", 2025, 2025, monthlyEvents("us_cpi", 2025, [11]), [lapse("us_cpi", "2025-10")], AFTER_2025);
+  assert.deepEqual(cpiShape.missing_release_months, []);
+  assert.deepEqual(cpiShape.coverage_issues, []);
+
+  const nfpShape = computeOfficialMacroEventCoverage("us_nfp", 2025, 2025, monthlyEvents("us_nfp", 2025, [10]), [lapse("us_nfp", "2025-10")], AFTER_2025);
+  assert.deepEqual(nfpShape.missing_release_months, []);
+  assert.deepEqual(nfpShape.coverage_issues, []);
+
+  // Both still report the excusal itself, so the artifact says why the year holds eleven releases.
+  assert.deepEqual(nfpShape.excused_non_publications_by_year, { 2025: 1 });
+});
+
+test("an excusal covers one gap only, and none that its lapse could not have caused", () => {
+  const twoGaps = computeOfficialMacroEventCoverage("us_nfp", 2025, 2025, monthlyEvents("us_nfp", 2025, [10, 11]), [lapse("us_nfp", "2025-10")], AFTER_2025);
+  assert.equal(twoGaps.missing_release_months.length, 1);
+
+  // A gap nowhere near the excused month stays a gap: an excusal is not a spare credit.
+  const distant = computeOfficialMacroEventCoverage("us_nfp", 2025, 2025, monthlyEvents("us_nfp", 2025, [3]), [lapse("us_nfp", "2025-10")], AFTER_2025);
+  assert.deepEqual(distant.missing_release_months, ["2025-03"]);
+
+  // And with nothing excused, a hole beside a duplicate is still a hole - the reissue case.
+  const reissue = computeOfficialMacroEventCoverage("us_cpi", 2025, 2025, [...monthlyEvents("us_cpi", 2025, [7]), {
+    event_id: "us_cpi:2025-08-28", event_kind: "us_cpi", occurred_at: "2025-08-28T12:30:00.000Z",
+    source_url: "https://www.bls.gov/example", raw_sha256: `sha256:${"0".repeat(64)}`,
+  }], [], AFTER_2025);
+  assert.deepEqual(reissue.missing_release_months, ["2025-07"]);
+  assert.deepEqual(reissue.coverage_issues, ["missing_official_monthly_release:2025-07"]);
 });

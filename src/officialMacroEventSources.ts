@@ -156,7 +156,8 @@ async function fetchOfficialPage(url: string, fetcher: OfficialMacroFetch, allow
   return readLimitedResponseText(response, MAX_SOURCE_BYTES, "official macro event source");
 }
 
-function coverage(kind: OfficialMacroEventKind, fromYear: number, toYear: number, events: OfficialMacroEvent[], nonPublications: OfficialMacroNonPublication[], now: Date) {
+/** Exported so a stored artifact's coverage can be recomputed from its own events, without refetching. */
+export function computeOfficialMacroEventCoverage(kind: OfficialMacroEventKind, fromYear: number, toYear: number, events: OfficialMacroEvent[], nonPublications: OfficialMacroNonPublication[], now: Date) {
   const eventsByYear: Record<string, number> = {};
   for (const event of events) { const year = event.occurred_at.slice(0, 4); eventsByYear[year] = (eventsByYear[year] ?? 0) + 1; }
   const currentYear = now.getUTCFullYear();
@@ -181,15 +182,30 @@ function coverage(kind: OfficialMacroEventKind, fromYear: number, toYear: number
     .map((year) => `insufficient_official_event_coverage:${year}:${eventsByYear[String(year)] ?? 0}_plus_${excusedByYear[String(year)] ?? 0}_excused_of_at_least_${minimumEvents}`);
   // A count cannot see a gap that something else fills. CPI and the employment situation publish
   // once a month, so twelve releases spread over eleven months is a hole with a duplicate beside it,
-  // which is what a reissue under a second date looks like. Months are checked against the same
-  // excused non-publications the count credits, and years the count already refused are left to
-  // that issue rather than enumerated a second time.
+  // which is what a reissue under a second date looks like. Years the count already refused are left
+  // to that issue rather than enumerated a second time.
+  //
+  // Which release an excused month removes cannot be read off the reference month alone. The M+1
+  // rule assumes a release is never delayed past a month boundary, and a lapse in appropriations is
+  // the very thing that delays it, so the assumption fails exactly where it is being leaned on. The
+  // 2025 lapse showed both outcomes from one excused reference month each: CPI published late but
+  // still within October and lost its November release, while the employment situation slipped out
+  // of October altogether and lost that one. An excusal therefore accounts for a gap at its own
+  // reference month or the month after it, whichever is actually empty, and covers at most one.
+  const excusals = nonPublications.map((item) => {
+    const year = Number(item.reference_month.slice(0, 4));
+    const month = Number(item.reference_month.slice(5, 7));
+    const following = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
+    return { months: new Set([item.reference_month, following]), spent: false };
+  });
   const missingReleaseMonths: string[] = [];
   if (kind !== "fomc_statement") {
     for (const year of completeYears) for (let month = 1; month <= 12; month += 1) {
       const prefix = `${year}-${String(month).padStart(2, "0")}`;
-      if (excusedReleaseMonths.has(prefix)) continue;
-      if (!events.some((event) => event.occurred_at.startsWith(prefix))) missingReleaseMonths.push(prefix);
+      if (events.some((event) => event.occurred_at.startsWith(prefix))) continue;
+      const excusal = excusals.find((candidate) => !candidate.spent && candidate.months.has(prefix));
+      if (excusal !== undefined) { excusal.spent = true; continue; }
+      missingReleaseMonths.push(prefix);
     }
   }
   const shortYearPrefixes = new Set(shortYears.map((year) => String(year)));
@@ -230,7 +246,7 @@ export async function collectOfficialMacroEvents(input: { kind: OfficialMacroEve
   const events = collected.filter((event) => event.occurred_at <= retrievedAtIso);
   const scheduledFutureReleases = collected.filter((event) => event.occurred_at > retrievedAtIso);
   if (events.length < 1) throw new Error("official macro event collection is empty");
-  const retrievedAt = input.now ?? new Date(); const eventCoverage = coverage(input.kind, input.fromYear, input.toYear, events, nonPublications, retrievedAt);
+  const retrievedAt = input.now ?? new Date(); const eventCoverage = computeOfficialMacroEventCoverage(input.kind, input.fromYear, input.toYear, events, nonPublications, retrievedAt);
   return { schema_version: "1.0", series: "official_us_macro_release_events", evidence_tier: "official_revised_history", retrieved_at: retrievedAt.toISOString(), event_kind: input.kind, events, non_publications: nonPublications, scheduled_future_releases: scheduledFutureReleases, source_count: sourcePages.length, coverage: eventCoverage };
 }
 
