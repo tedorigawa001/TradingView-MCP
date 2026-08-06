@@ -78,9 +78,11 @@ function makeArtifact(kind, times, overrides = {}) {
     schema_version: "1.0",
     series: "official_us_macro_release_events",
     evidence_tier: "official_revised_history",
-    // Inside the requested year, so no completed year is subject to the annual minimum. The
-    // study recomputes coverage from these events, and five synthetic releases are not twelve.
-    retrieved_at: "2024-12-01T00:00:00.000Z",
+    // Dated inside the span rather than after it, so no completed year comes under the annual
+    // minimum. The study recomputes coverage from these events, and a handful of synthetic
+    // releases is not a year of BLS output; the date is a fixture device, not a claim about when
+    // anything was read. The requested range still has to span every year the bars touch.
+    retrieved_at: "2024-06-01T00:00:00.000Z",
     event_kind: kind,
     events: times.map((occurredAt) => ({
       event_id: `${kind}:${occurredAt.slice(0, 10)}`,
@@ -93,7 +95,7 @@ function makeArtifact(kind, times, overrides = {}) {
     scheduled_future_releases: [],
     coverage: {
       requested_from_year: 2024,
-      requested_to_year: 2024,
+      requested_to_year: 2025,
       events_by_year: {},
       excused_non_publications_by_year: {},
       missing_release_months: [],
@@ -111,10 +113,22 @@ const monthlyFillerEvents = (kind, year) => Array.from({ length: 12 }, (_, index
   raw_sha256: `sha256:${"0".repeat(64)}`,
 }));
 
-function makeStudyInput({ days = 80, eventDays = [55, 56, 57, 58, 59], kind = "us_cpi", tail = 1, otherKindDays = [] } = {}) {
+const seriesCache = new Map();
+function cachedSeries(days, amplifyAfter, tail) {
+  const key = `${days}|${tail}|${amplifyAfter.join(",")}`;
+  let built = seriesCache.get(key);
+  if (built === undefined) {
+    built = FX.map((symbol) => makeSeries(symbol, makeBars(symbol, { days, amplifyAfter, tail })));
+    seriesCache.set(key, built);
+  }
+  // Bars are never mutated, but manifests are, so each caller gets its own wrapper.
+  return built.map((entry) => ({ manifest: { ...entry.manifest }, bars: entry.bars }));
+}
+
+function makeStudyInput({ days = 520, eventDays = [480, 481, 482, 483, 484], kind = "us_cpi", tail = 1, otherKindDays = [] } = {}) {
   const times = eventDays.map(daySlotIso);
   const otherTimes = otherKindDays.map(daySlotIso);
-  const series = FX.map((symbol) => makeSeries(symbol, makeBars(symbol, { days, amplifyAfter: [...times, ...otherTimes], tail })));
+  const series = cachedSeries(days, [...times, ...otherTimes], tail);
   const others = ["us_cpi", "us_nfp", "fomc_statement"].filter((other) => other !== kind);
   return {
     series,
@@ -124,7 +138,9 @@ function makeStudyInput({ days = 80, eventDays = [55, 56, 57, 58, 59], kind = "u
 }
 
 test("the frozen contract hash is pinned so a silent edit to the population definition fails here", () => {
-  assert.equal(MACRO_EVENT_RESPONSE_CONTRACT_HASH, "sha256:0339822a713a9716afbc70c515fb770a403f649599fc3d1c4300f876967bc51f");
+  assert.equal(MACRO_EVENT_RESPONSE_CONTRACT_HASH, "sha256:2a99a8a4a7086d7486e41c52eda23d26673f3e4e8dbd9b2602b9fd397ccb2407");
+  assert.deepEqual([...MACRO_EVENT_RESPONSE_CONTRACT.null_matching_keys], ["utc_clock_slot", "utc_weekday"]);
+  assert.equal(MACRO_EVENT_RESPONSE_CONTRACT.minimum_placebo_anchors_per_cell, 52);
   assert.deepEqual([...MACRO_EVENT_RESPONSE_CONTRACT.guard_event_kinds], ["us_cpi", "us_nfp", "fomc_statement"]);
   assert.deepEqual([...MACRO_EVENT_RESPONSE_CONTRACT.horizons], [1, 2, 4, 8, 16]);
   assert.equal(MACRO_EVENT_RESPONSE_CONTRACT.primary_horizon, 4);
@@ -281,8 +297,8 @@ test("a guard artifact proven only over its own years cannot stand beside a long
 
   // Complete on its own terms, and blind to eight of the years it is supposed to be guarding.
   const late = makeStudyInput();
-  late.artifacts[1].coverage = { ...late.artifacts[1].coverage, requested_from_year: 2025, requested_to_year: 2025 };
-  assert.throws(() => runMacroEventResponseStudy(late), /does not span the 2024-2024 price history it must guard/);
+  late.artifacts[1].coverage = { ...late.artifacts[1].coverage, requested_from_year: 2025 };
+  assert.throws(() => runMacroEventResponseStudy(late), /does not span the 2024-2025 price history it must guard/);
 
   // Spanning the bars is necessary but not sufficient: the kinds must be proven over one range, or
   // the guard is stronger in some years than others with nothing recording where.
@@ -319,7 +335,7 @@ test("the placebo null is reproducible from its recorded seed, and centres on on
   // drawn from a pool of a couple of dozen rows, the median of five takes so few distinct values
   // that 5000 draws pin the empirical quantiles to the same numbers for every seed - convergence,
   // not a seed that goes unused. Widening the panel makes the draw sequence observable again.
-  const input = makeStudyInput({ days: 160, eventDays: Array.from({ length: 20 }, (_, index) => 52 + index) });
+  const input = makeStudyInput({ eventDays: Array.from({ length: 20 }, (_, index) => 460 + index) });
   const first = runMacroEventResponseStudy({ ...input, placeboSeed: 4242 });
   const again = runMacroEventResponseStudy({ ...input, placeboSeed: 4242 });
   const other = runMacroEventResponseStudy({ ...input, placeboSeed: 99 });

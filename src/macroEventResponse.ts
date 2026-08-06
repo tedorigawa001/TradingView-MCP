@@ -40,6 +40,8 @@ export type MacroEventResponseContract = {
   window_continuity: string;
   panel_policy: string;
   null_policy: string;
+  null_matching_keys: readonly string[];
+  minimum_placebo_anchors_per_cell: number;
   placebo_draws: number;
   null_quantile: number;
   minimum_events: number;
@@ -88,7 +90,15 @@ export const MACRO_EVENT_RESPONSE_CONTRACT = {
   // 1.0, and splitting it out put the fault in the within-group aggregation: right-skewed ratios
   // folded by a median over three symbols and by an effective mean over two differ by group size
   // alone. The statistic is left exactly as frozen and the reference distribution absorbs it.
-  null_policy: "placebo_anchors_on_non_event_bars_with_matched_clock_slot_composition",
+  null_policy: "placebo_anchors_on_non_event_bars_with_matched_clock_slot_and_weekday_composition",
+  // Matching the clock slot alone left a second confound standing. Release kinds are pinned to a
+  // weekday - the employment situation is a Friday, the FOMC statement a Wednesday - while the pool
+  // drew every weekday at that slot, and the placebo response is not flat across them: it runs from
+  // about 0.84 on a Monday to about 1.12 on a Thursday, a spread wider than the difference the
+  // entry condition is testing. A cell needs as many anchors as the baseline window before it can
+  // be drawn from, and an event whose cell is thinner is excluded rather than judged against it.
+  null_matching_keys: ["utc_clock_slot", "utc_weekday"],
+  minimum_placebo_anchors_per_cell: 52,
   placebo_draws: 5000,
   null_quantile: 0.95,
   minimum_events: 80,
@@ -144,6 +154,8 @@ export type MacroEventResponseStudy = {
     excluded_missing_anchor: string[];
     excluded_short_baseline: string[];
     excluded_discontinuous_window: string[];
+    /** Events whose clock-slot and weekday cell held too few placebo anchors to be a null. */
+    excluded_thin_placebo_cell: string[];
     /** Non-event bars kept out of the baseline lanes because their own windows crossed a gap. */
     discontinuous_baseline_windows: Record<string, number>;
     /** Coverage was rechecked from each artifact's own events; this reports what it had stored. */
@@ -155,6 +167,7 @@ export type MacroEventResponseStudy = {
   empirical_null: {
     draws: number;
     seed: number;
+    /** Anchors available per matched cell, keyed "HH:MM|utcWeekday". */
     placebo_pool: Record<string, number>;
     level: { observed: number; null_median: number; null_quantile: number; p_value: number };
     difference: { observed: number; null_median: number; null_quantile: number; p_value: number };
@@ -196,6 +209,8 @@ type SymbolState = {
 };
 
 const slotOf = (timeIso: string) => timeIso.slice(11, 16);
+/** The cell a placebo draw has to come from: same clock slot and same weekday as the release. */
+const cellOf = (timeIso: string) => `${slotOf(timeIso)}|${new Date(timeIso).getUTCDay()}`;
 
 /**
  * A horizon is a span of wall-clock time, not a count of rows. FX aggregates skip weekends and
@@ -398,7 +413,7 @@ export function runMacroEventResponseStudy(input: {
   const states = new Map<string, SymbolState>();
   for (const [symbol, entry] of bySymbol) states.set(symbol, buildSymbolState(entry.bars, guardEventTimes, horizons));
 
-  const rows: Array<{ occurredAt: string; slot: string; ratios: Map<string, MeasuredAnchor> }> = [];
+  const rows: Array<{ occurredAt: string; cell: string; ratios: Map<string, MeasuredAnchor> }> = [];
   const excludedMissingAnchor: string[] = [];
   const excludedShortBaseline: string[] = [];
   const excludedDiscontinuousWindow: string[] = [];
@@ -421,7 +436,7 @@ export function runMacroEventResponseStudy(input: {
       bucket.push(event.occurred_at);
       continue;
     }
-    rows.push({ occurredAt: event.occurred_at, slot: slotOf(event.occurred_at), ratios });
+    rows.push({ occurredAt: event.occurred_at, cell: cellOf(event.occurred_at), ratios });
   }
   if (rows.length === 0) throw new Error("no event retained a measurable balanced panel");
 
@@ -448,12 +463,16 @@ export function runMacroEventResponseStudy(input: {
 
   // Placebo pool: non-event bars where all five pairs are measurable, kept per clock slot so a draw
   // can match each event slot for slot.
+  // Only the cells some event is judged against are worth building. Every other clock slot in the
+  // day would be measured across five symbols and then never drawn from.
+  const neededCells = new Set(rows.map((row) => row.cell));
   const pool = new Map<string, Array<Map<string, MeasuredAnchor>>>();
   const reference = states.get(fxSymbols[0])!;
   for (const [slot, lane] of reference.lanes) {
-    const bucket: Array<Map<string, MeasuredAnchor>> = [];
+    if (![...neededCells].some((cell) => cell.startsWith(`${slot}|`))) continue;
     for (const position of lane.indexes) {
       const timeIso = reference.bars[position].timeIso;
+      if (!neededCells.has(cellOf(timeIso))) continue;
       const ratios = new Map<string, MeasuredAnchor>();
       let usable = true;
       for (const symbol of fxSymbols) {
@@ -464,14 +483,24 @@ export function runMacroEventResponseStudy(input: {
         if (!measured.ok) { usable = false; break; }
         ratios.set(symbol, measured.value);
       }
-      if (usable) bucket.push(ratios);
+      if (!usable) continue;
+      const cell = cellOf(timeIso);
+      const bucket = pool.get(cell);
+      if (bucket === undefined) pool.set(cell, [ratios]); else bucket.push(ratios);
     }
-    pool.set(slot, bucket);
   }
-  for (const row of rows) {
-    const bucket = pool.get(row.slot);
-    if (bucket === undefined || bucket.length === 0) throw new Error(`no placebo anchors available at clock slot ${row.slot}`);
-  }
+  // An event drawn against a thin cell is judged against a handful of days repeated, which is not a
+  // distribution. Dropping it keeps the panel honest about what the null could actually cover.
+  const excludedThinPlaceboCell: string[] = [];
+  const matched = rows.filter((row) => {
+    const bucket = pool.get(row.cell);
+    if (bucket !== undefined && bucket.length >= contract.minimum_placebo_anchors_per_cell) return true;
+    excludedThinPlaceboCell.push(row.occurredAt);
+    return false;
+  });
+  if (matched.length === 0) throw new Error("no event had a placebo cell matching its clock slot and weekday");
+  rows.length = 0;
+  rows.push(...matched);
 
   const seed = input.placeboSeed ?? 20260806;
   let rngState = seed >>> 0;
@@ -482,7 +511,7 @@ export function runMacroEventResponseStudy(input: {
     const levels: number[] = [];
     const differences: number[] = [];
     for (const row of rows) {
-      const bucket = pool.get(row.slot)!;
+      const bucket = pool.get(row.cell)!;
       const sampled = bucket[Math.min(bucket.length - 1, Math.floor(nextRandom() * bucket.length))];
       const usd = groupValue(sampled, contract.usd_direct_symbols, primary);
       levels.push(usd);
@@ -552,6 +581,7 @@ export function runMacroEventResponseStudy(input: {
       excluded_missing_anchor: excludedMissingAnchor,
       excluded_short_baseline: excludedShortBaseline,
       excluded_discontinuous_window: excludedDiscontinuousWindow,
+      excluded_thin_placebo_cell: excludedThinPlaceboCell,
       discontinuous_baseline_windows: Object.fromEntries([...states].map(([symbol, state]) => [symbol, state.discontinuousBaselineWindows])),
       coverage_recheck: Object.fromEntries(recheckedCoverage),
     },
