@@ -7850,3 +7850,43 @@ test("get_cot_crowding_unwind_context holds its declared FX daily binding at the
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "240" } });
   assert.equal(intraday.isError, true);
 });
+
+test("the price-action study pages the chart back before measuring, and says so when it cannot", async () => {
+  // A chart hands over a few hundred bars until it is paged. Reading it once would answer a
+  // five-thousand-bar request with a fortnight of history and nothing in the result to reveal it.
+  const bar = (index) => ({
+    time: 1700000000 + index * 3600,
+    timeIso: new Date((1700000000 + index * 3600) * 1000).toISOString(),
+    open: 100, high: 100.5, low: 99.5, close: 100, volume: 10,
+  });
+  let available = 300;
+  const pagingDeps = makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        activeChartIndex: 0,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async (count) => ({
+        symbol: "OANDA:EURUSD",
+        resolution: "60",
+        count,
+        bars: Array.from({ length: Math.min(count, available) }, (_, index) => bar(index)),
+      }),
+      loadMoreHistory: async (options) => {
+        const before = available;
+        available = Math.min(2000, available + options.count);
+        return { requested: options.count, barsBefore: before, barsAfter: available, added: available - before, earliestTime: 1, moreAvailable: available < 2000 };
+      },
+    },
+  });
+  const client = await connectedClient(pagingDeps);
+  const args = { expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", count: 5000 };
+  const parsed = JSON.parse((await client.callTool({ name: "run_price_action_pattern_study", arguments: args })).content[0].text);
+
+  // The source ran dry at 2000, so the request is not met and the shortfall is named rather than
+  // left to be inferred from a bar count nobody checks.
+  assert.equal(parsed.coverage.sufficient, false);
+  assert.ok(parsed.coverage.finalBars > 300, `expected paging beyond the first read, got ${parsed.coverage.finalBars}`);
+  assert.ok(parsed.qualityIssues.includes(`requested_history_not_loaded:${parsed.coverage.finalBars}_of_5000`));
+  assert.equal(parsed.bars.spacingSeconds, 3600);
+});

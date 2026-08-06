@@ -104,6 +104,7 @@ import {
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
 import { computeAnalysisPathMetrics, evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
+import { loadRequiredHistory } from "./chartHistory.js";
 import {
   VOLUME_PROFILE_CONTEXT_INPUTS,
   VOLUME_PROFILE_CONTEXT_NAME,
@@ -3561,13 +3562,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         try {
           const context = await tv.getChartContext();
           const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
-          const history = await tv.getOhlcv(count, chart.index);
+          // A chart holds a few hundred bars until it is paged back, so reading it once would answer
+          // a five-thousand-bar request with a fortnight of history and no sign that it had.
+          const { history, coverage } = await loadRequiredHistory(tv, chart.index, count);
+          const study = runPriceActionPatternStudy({
+            bars: history.bars,
+            symbol: history.symbol,
+            timeframe: history.resolution,
+          });
           return jsonResult({
-            ...runPriceActionPatternStudy({
-              bars: history.bars,
-              symbol: history.symbol,
-              timeframe: history.resolution,
-            }),
+            ...study,
+            qualityIssues: coverage.sufficient
+              ? study.qualityIssues
+              : [...study.qualityIssues, `requested_history_not_loaded:${coverage.finalBars}_of_${count}`],
+            coverage,
             requestedBars: count,
             returnedBars: history.bars.length,
             chartIndex: chart.index,
