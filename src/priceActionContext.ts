@@ -153,6 +153,204 @@ if alertText != ""
     alert(syminfo.ticker + " " + timeframe.period + ": " + alertText + "close " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
 `;
 
+/**
+ * The same three rules as the Pine template, at its default settings, so a measurement and the marks
+ * on the chart cannot describe different things. The horizons and the entry are the whole trading
+ * rule: enter at the signal bar's close in the direction the pattern reads, leave h bars later. No
+ * stop, no target, no filter - each one would be a choice made after seeing the data.
+ */
+export const PRICE_ACTION_PATTERN_STUDY_V1 = {
+  methodologyVersion: "price_action_pattern_forward_return_study_v1",
+  pinWickPercent: 60,
+  pinMaxBodyPercent: 40,
+  pinMaxOppositeWickPercent: 40,
+  engulfingNeedsOppositePriorBody: true,
+  engulfingMinPriorBodyPercent: 0,
+  sweepLookback: 20,
+  horizons: [1, 2, 4, 8, 16],
+  minimumEvents: 30,
+  confidenceLevel: 0.95,
+} as const;
+
+export type PriceActionStudyBar = {
+  time: number;
+  timeIso: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  forming?: boolean;
+};
+
+export type PriceActionPattern = "pin" | "engulfing" | "sweep";
+export const PRICE_ACTION_PATTERNS = ["pin", "engulfing", "sweep"] as const;
+
+export type PriceActionHorizonResult = {
+  horizon: number;
+  events: number;
+  meanBps: number;
+  lowerBps: number;
+  upperBps: number;
+  /** Mean absolute move of any bar in the same clock hours, weighted by where the pattern fires. */
+  hourMatchedBaselineBps: number;
+};
+
+export type PriceActionPatternStudy = {
+  schema_version: "1.0";
+  methodology_version: string;
+  contract: typeof PRICE_ACTION_PATTERN_STUDY_V1;
+  symbol: string;
+  timeframe: string;
+  bars: { closed: number; from: string | null; to: string | null; spacingSeconds: number | null };
+  patterns: Record<PriceActionPattern, {
+    events: number;
+    bullish: number;
+    bearish: number;
+    triggerHourShare: Record<string, number>;
+    horizons: PriceActionHorizonResult[];
+  }>;
+  qualityIssues: string[];
+};
+
+function detectSignals(bars: PriceActionStudyBar[], contract: typeof PRICE_ACTION_PATTERN_STUDY_V1) {
+  const signals: Array<{ index: number; pin: number; engulfing: number; sweep: number }> = [];
+  for (let i = contract.sweepLookback; i < bars.length; i += 1) {
+    const bar = bars[i], prior = bars[i - 1];
+    const range = bar.high - bar.low;
+    if (!(range > 0)) continue;
+    const bodyHigh = Math.max(bar.open, bar.close);
+    const bodyLow = Math.min(bar.open, bar.close);
+    const upper = (bar.high - bodyHigh) / range * 100;
+    const lower = (bodyLow - bar.low) / range * 100;
+    const body = (bodyHigh - bodyLow) / range * 100;
+
+    let pin = 0;
+    if (lower >= contract.pinWickPercent && body <= contract.pinMaxBodyPercent && upper <= contract.pinMaxOppositeWickPercent) pin = 1;
+    else if (upper >= contract.pinWickPercent && body <= contract.pinMaxBodyPercent && lower <= contract.pinMaxOppositeWickPercent) pin = -1;
+
+    const priorBodyHigh = Math.max(prior.open, prior.close);
+    const priorBodyLow = Math.min(prior.open, prior.close);
+    const priorRange = prior.high - prior.low;
+    const priorBody = priorRange > 0 ? (priorBodyHigh - priorBodyLow) / priorRange * 100 : 0;
+    const covers = bodyHigh >= priorBodyHigh && bodyLow <= priorBodyLow && priorBody >= contract.engulfingMinPriorBodyPercent;
+    let engulfing = 0;
+    if (covers && bar.close > bar.open && (!contract.engulfingNeedsOppositePriorBody || prior.close < prior.open)) engulfing = 1;
+    else if (covers && bar.close < bar.open && (!contract.engulfingNeedsOppositePriorBody || prior.close > prior.open)) engulfing = -1;
+
+    let highest = -Infinity, lowest = Infinity;
+    for (let k = i - contract.sweepLookback; k < i; k += 1) {
+      if (bars[k].high > highest) highest = bars[k].high;
+      if (bars[k].low < lowest) lowest = bars[k].low;
+    }
+    let sweep = 0;
+    if (bar.low < lowest && bar.close > lowest) sweep = 1;
+    else if (bar.high > highest && bar.close < highest) sweep = -1;
+
+    if (pin !== 0 || engulfing !== 0 || sweep !== 0) signals.push({ index: i, pin, engulfing, sweep });
+  }
+  return signals;
+}
+
+/** Modal gap between consecutive bars, which is what a horizon has to be a whole number of. */
+function barSpacingSeconds(bars: PriceActionStudyBar[]): number | null {
+  const counts = new Map<number, number>();
+  for (let i = 1; i < bars.length; i += 1) {
+    const gap = bars[i].time - bars[i - 1].time;
+    if (gap > 0) counts.set(gap, (counts.get(gap) ?? 0) + 1);
+  }
+  let best: number | null = null, bestCount = 0;
+  for (const [gap, count] of counts) if (count > bestCount) { best = gap; bestCount = count; }
+  return best;
+}
+
+export function runPriceActionPatternStudy(input: {
+  bars: PriceActionStudyBar[];
+  symbol: string;
+  timeframe: string;
+}): PriceActionPatternStudy {
+  const contract = PRICE_ACTION_PATTERN_STUDY_V1;
+  const closed = input.bars.filter((bar) => bar.forming !== true);
+  const spacing = barSpacingSeconds(closed);
+  const qualityIssues: string[] = [];
+  if (closed.length < contract.sweepLookback + Math.max(...contract.horizons) + 1) {
+    qualityIssues.push("insufficient_bars_for_the_longest_horizon");
+  }
+  if (spacing === null) qualityIssues.push("bar_spacing_could_not_be_determined");
+
+  const signals = detectSignals(closed, contract);
+  // A horizon is a span of time, not a count of rows. Sessions break, so a window whose endpoints
+  // are not exactly h spacings apart is measuring something longer than it claims.
+  const contiguous = (i: number, h: number) =>
+    spacing !== null && i + h < closed.length && closed[i + h].time - closed[i].time === h * spacing;
+
+  // What any bar in a given clock hour does over the primary horizon, so a pattern that only fires
+  // in one part of the day cannot pass its own busiest hour off as an effect.
+  const primary = contract.horizons[Math.floor(contract.horizons.length / 2)];
+  const hourAbsolute = new Map<number, number[]>();
+  for (let i = 0; i < closed.length; i += 1) {
+    if (!contiguous(i, primary)) continue;
+    const hour = Number(closed[i].timeIso.slice(11, 13));
+    if (!hourAbsolute.has(hour)) hourAbsolute.set(hour, []);
+    hourAbsolute.get(hour)!.push(Math.abs(Math.log(closed[i + primary].close / closed[i].close)) * 1e4);
+  }
+  const meanOf = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
+
+  const patterns = {} as PriceActionPatternStudy["patterns"];
+  for (const pattern of PRICE_ACTION_PATTERNS) {
+    const fired = signals.filter((signal) => signal[pattern] !== 0);
+    const hourCounts = new Map<number, number>();
+    for (const signal of fired) {
+      const hour = Number(closed[signal.index].timeIso.slice(11, 13));
+      hourCounts.set(hour, (hourCounts.get(hour) ?? 0) + 1);
+    }
+    const hourMatched = fired.length === 0 ? 0 : [...hourCounts].reduce((total, [hour, count]) => {
+      const sample = hourAbsolute.get(hour);
+      return total + (sample ? meanOf(sample) : 0) * count;
+    }, 0) / fired.length;
+
+    const horizons = contract.horizons.map((horizon) => {
+      const returns: number[] = [];
+      for (const signal of fired) {
+        if (!contiguous(signal.index, horizon)) continue;
+        returns.push(signal[pattern] * Math.log(closed[signal.index + horizon].close / closed[signal.index].close) * 1e4);
+      }
+      if (returns.length < contract.minimumEvents) {
+        return { horizon, events: returns.length, meanBps: Number.NaN, lowerBps: Number.NaN, upperBps: Number.NaN, hourMatchedBaselineBps: hourMatched };
+      }
+      const mean = meanOf(returns);
+      const variance = returns.reduce((acc, value) => acc + (value - mean) ** 2, 0) / (returns.length - 1);
+      const half = 1.96 * Math.sqrt(variance / returns.length);
+      return { horizon, events: returns.length, meanBps: mean, lowerBps: mean - half, upperBps: mean + half, hourMatchedBaselineBps: hourMatched };
+    });
+
+    if (fired.length < contract.minimumEvents) qualityIssues.push(`minimum_event_count_not_met:${pattern}`);
+    patterns[pattern] = {
+      events: fired.length,
+      bullish: fired.filter((signal) => signal[pattern] === 1).length,
+      bearish: fired.filter((signal) => signal[pattern] === -1).length,
+      triggerHourShare: Object.fromEntries([...hourCounts].sort((a, b) => a[0] - b[0])
+        .map(([hour, count]) => [String(hour).padStart(2, "0"), count / Math.max(1, fired.length)])),
+      horizons,
+    };
+  }
+
+  return {
+    schema_version: "1.0",
+    methodology_version: contract.methodologyVersion,
+    contract,
+    symbol: input.symbol,
+    timeframe: input.timeframe,
+    bars: {
+      closed: closed.length,
+      from: closed[0]?.timeIso ?? null,
+      to: closed.at(-1)?.timeIso ?? null,
+      spacingSeconds: spacing,
+    },
+    patterns,
+    qualityIssues,
+  };
+}
+
 export function assertPriceActionContextStudy(
   studies: IndicatorInputs[],
   studyId: string,
@@ -205,7 +403,13 @@ export function parsePriceActionContext(
   if (!row) throw new Error(`study ${study.id} returned no price-action values`);
   const raw = row.values;
 
-  const barConfirmed = raw["Bar Confirmed"] === 1;
+  // Anything other than the two values the plot can emit means the row is not what it claims to be,
+  // and reading it as "unconfirmed" would turn a broken read into an ordinary in-progress bar.
+  const confirmedPlot = raw["Bar Confirmed"];
+  if (confirmedPlot !== 0 && confirmedPlot !== 1) {
+    throw new Error("Bar Confirmed must be 0 or 1");
+  }
+  const barConfirmed = confirmedPlot === 1;
   const qualityIssues = barConfirmed ? [] : ["bar_not_closed"];
 
   // A zero-range bar has no shape to report, and the Pine side emits na rather than dividing by it.

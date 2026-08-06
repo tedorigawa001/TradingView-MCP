@@ -114,6 +114,18 @@ import {
   parseVolumeProfileContext,
 } from "./volumeProfileContext.js";
 import {
+  PRICE_ACTION_CONTEXT_ALERTS,
+  PRICE_ACTION_CONTEXT_INPUTS,
+  PRICE_ACTION_CONTEXT_NAME,
+  PRICE_ACTION_CONTEXT_PLOTS,
+  PRICE_ACTION_CONTEXT_SOURCE,
+  PRICE_ACTION_CONTEXT_VERSION,
+  PRICE_ACTION_PATTERN_STUDY_V1,
+  assertPriceActionContextStudy,
+  parsePriceActionContext,
+  runPriceActionPatternStudy,
+} from "./priceActionContext.js";
+import {
   runVolumeProfilePocReversionStudy1h,
   runVolumeProfileReactionStudy,
   runVolumeProfileReactionStudy1h,
@@ -3419,6 +3431,149 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             symbol: chart.symbol,
             timeframe: chart.resolution,
             semantics: "completed_chart_bar_volume_range_allocation_profile_proxy",
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "get_price_action_context_template",
+    {
+      description:
+        "Get the audited Pine template that marks pin bars, engulfing bars and 20-bar sweeps, and " +
+        "exposes each as a readable plot. Marks and alerts are gated on bar close, so nothing " +
+        "appears intrabar and then disappears. Save it with save_pine_script, add it once with " +
+        "add_pine_to_chart, then use get_price_action_context.",
+      inputSchema: {},
+    },
+    async () =>
+      jsonResult({
+        name: PRICE_ACTION_CONTEXT_NAME,
+        version: PRICE_ACTION_CONTEXT_VERSION,
+        source: PRICE_ACTION_CONTEXT_SOURCE,
+        inputContract: PRICE_ACTION_CONTEXT_INPUTS,
+        alertConditions: PRICE_ACTION_CONTEXT_ALERTS,
+        setup: [
+          "Save this source with save_pine_script (dry-run, then confirm).",
+          "Add the resulting pine_id once with add_pine_to_chart.",
+          "Use get_price_action_context with the returned study_id to read the latest bar.",
+          "Alerts are created in the TradingView alert dialog, not by this server: pick one of the " +
+            "six named conditions, or Any alert() function call to catch all three patterns at once.",
+        ],
+        limitations: [
+          "These are chart patterns, not evidence about order flow or intent.",
+          "Measured over six symbols and ten years of M15 bars, pin bars and engulfing bars both " +
+            "return about -0.2bps at every horizon as naked entries and sweeps straddle zero, " +
+            "before costs. Use run_price_action_pattern_study to reproduce that on any series.",
+        ],
+      }),
+  );
+
+  server.registerTool(
+    "get_price_action_context",
+    {
+      description:
+        "Read the latest bar's pin-bar, engulfing and sweep readings only from the exact audited " +
+        "Bushido Price Action Context Pine template. The saved source, study placement, symbol and " +
+        "timeframe are verified fail-closed. A signal of 0 on an unconfirmed bar means the bar has " +
+        "not closed yet, not that the pattern is absent.",
+      inputSchema: {
+        pine_id: z.string().regex(/^USER;[\w]{8,64}$/).describe("Saved audited template id"),
+        study_id: z.string().regex(/^[\w$]{1,64}$/).describe("On-chart instance id"),
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        chart_index: z.number().int().min(0).optional(),
+      },
+    },
+    async ({ pine_id, study_id, expected_symbol, expected_timeframe, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          const context = await tv.getChartContext();
+          const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+          const scripts = await tv.listPineScripts();
+          const script = scripts.find((candidate) => candidate.pineId === pine_id);
+          if (!script || script.name !== PRICE_ACTION_CONTEXT_NAME || script.kind !== "study") {
+            throw new Error(`${pine_id} is not the ${PRICE_ACTION_CONTEXT_NAME} study`);
+          }
+          const usage = script.usedBy.find(
+            (candidate) => candidate.chartIndex === chart.index && candidate.studyId === study_id,
+          );
+          if (!usage) {
+            throw new Error(`study ${study_id} is not an on-chart instance of ${pine_id} on chart ${chart.index}`);
+          }
+          if (!script.version || usage.version !== script.version) {
+            throw new Error(`study ${study_id} is not the latest saved ${PRICE_ACTION_CONTEXT_NAME} version`);
+          }
+          const source = await tv.getPineSource(pine_id, "last");
+          if (source.source.replace(/\r\n/g, "\n") !== PRICE_ACTION_CONTEXT_SOURCE.replace(/\r\n/g, "\n")) {
+            throw new Error(`${pine_id} latest source does not match the audited price-action template`);
+          }
+          const inputs = assertPriceActionContextStudy(
+            await tv.getIndicatorInputs({ studyId: study_id, chartIndex: chart.index }),
+            study_id,
+          );
+          const values = await tv.getIndicatorValues({
+            studyId: study_id,
+            chartIndex: chart.index,
+            count: 2,
+            plotTitles: [...PRICE_ACTION_CONTEXT_PLOTS],
+          });
+          const parsed = parsePriceActionContext(inputs, values);
+          return jsonResult({
+            ...parsed,
+            templateVersion: PRICE_ACTION_CONTEXT_VERSION,
+            pineId: pine_id,
+            pineVersion: script.version,
+            studyId: study_id,
+            chartIndex: chart.index,
+            symbol: chart.symbol,
+            timeframe: chart.resolution,
+            semantics: "single_bar_shape_patterns_with_a_twenty_bar_sweep_reference",
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
+  );
+
+  server.registerTool(
+    "run_price_action_pattern_study",
+    {
+      description:
+        "Measure what the three price-action patterns are worth as naked entries on the chart's own " +
+        "bars: enter at the signal bar's close in the direction the pattern reads, exit h bars " +
+        "later, with no stop, target or filter. Uses the same rules as the Pine template at its " +
+        "default settings. Reports each pattern's forward return with a 95% interval alongside the " +
+        "clock hours it fires in and what any bar in those hours does anyway, because a pattern " +
+        "that only fires at a session boundary will otherwise report that boundary as an effect.",
+      inputSchema: {
+        expected_symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        count: z.number().int().min(200).max(5000).default(5000)
+          .describe("Bars to read. More bars is a longer sample, never a different rule."),
+        chart_index: z.number().int().min(0).optional(),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, chart_index }) =>
+      chartOperations.run(async () => {
+        try {
+          const context = await tv.getChartContext();
+          const chart = resolveAnalysisChart(context, chart_index, expected_symbol, expected_timeframe);
+          const history = await tv.getOhlcv(count, chart.index);
+          return jsonResult({
+            ...runPriceActionPatternStudy({
+              bars: history.bars,
+              symbol: history.symbol,
+              timeframe: history.resolution,
+            }),
+            requestedBars: count,
+            returnedBars: history.bars.length,
+            chartIndex: chart.index,
+            interpretation:
+              "A mean whose interval spans zero is no edge. A mean that clears zero still has to " +
+              "clear the round-trip cost of trading it, and has to survive its hour-matched baseline.",
           });
         } catch (err) {
           return errorResult(err);

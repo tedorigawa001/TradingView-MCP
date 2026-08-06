@@ -6,8 +6,10 @@ import {
   PRICE_ACTION_CONTEXT_NAME,
   PRICE_ACTION_CONTEXT_PLOTS,
   PRICE_ACTION_CONTEXT_SOURCE,
+  PRICE_ACTION_PATTERN_STUDY_V1,
   assertPriceActionContextStudy,
   parsePriceActionContext,
+  runPriceActionPatternStudy,
 } from "../../build/priceActionContext.js";
 
 const study = {
@@ -115,4 +117,79 @@ test("the study contract refuses another indicator or a renamed input", () => {
   const renamed = { ...study, inputs: study.inputs.map((input) => input.id === "in_5" ? { ...input, name: "Lookback" } : input) };
   assert.throws(() => assertPriceActionContextStudy([renamed], "st1"), /in_5 \(Sweep Lookback\)/);
   assert.throws(() => assertPriceActionContextStudy([study], "st2"), /was not returned by get_indicator_inputs/);
+});
+
+test("Bar Confirmed accepts only the two values the plot can emit", () => {
+  // Treating anything else as "unconfirmed" would let a broken read pass as an in-progress bar.
+  for (const bad of [2, -1, null, undefined, "1", true, Number.NaN]) {
+    assert.throws(() => parsePriceActionContext(study, valuesWith({ "Bar Confirmed": bad })), /Bar Confirmed must be 0 or 1/);
+  }
+  assert.equal(parsePriceActionContext(study, valuesWith({ "Bar Confirmed": 0 })).barConfirmed, false);
+  assert.equal(parsePriceActionContext(study, valuesWith({ "Bar Confirmed": 1 })).barConfirmed, true);
+});
+
+test("the study rules and the Pine defaults are the same numbers", () => {
+  const defaults = Object.fromEntries(
+    [...PRICE_ACTION_CONTEXT_SOURCE.matchAll(/input\.(int|bool)\(([^,]+),\s*"([^"]+)"/g)].map((m) => [m[3], m[2].trim()]),
+  );
+  assert.equal(defaults["Pin Wick %"], String(PRICE_ACTION_PATTERN_STUDY_V1.pinWickPercent));
+  assert.equal(defaults["Pin Max Body %"], String(PRICE_ACTION_PATTERN_STUDY_V1.pinMaxBodyPercent));
+  assert.equal(defaults["Pin Max Opposite Wick %"], String(PRICE_ACTION_PATTERN_STUDY_V1.pinMaxOppositeWickPercent));
+  assert.equal(defaults["Engulfing Needs Opposite Prior Body"], String(PRICE_ACTION_PATTERN_STUDY_V1.engulfingNeedsOppositePriorBody));
+  assert.equal(defaults["Engulfing Min Prior Body %"], String(PRICE_ACTION_PATTERN_STUDY_V1.engulfingMinPriorBodyPercent));
+  assert.equal(defaults["Sweep Lookback"], String(PRICE_ACTION_PATTERN_STUDY_V1.sweepLookback));
+});
+
+const SPACING = 900;
+function seriesFrom(shapes) {
+  return shapes.map((shape, index) => ({
+    time: 1700000000 + index * SPACING,
+    timeIso: new Date((1700000000 + index * SPACING) * 1000).toISOString(),
+    ...shape,
+  }));
+}
+const flat = (n, price) => Array.from({ length: n }, () => ({ open: price, high: price + 0.5, low: price - 0.5, close: price }));
+// Index 30 carries a bullish pin: range 1.0, lower wick 70%, body 20%, upper wick 10%.
+const pinFixture = () => seriesFrom([...flat(30, 100), { open: 99.7, high: 100.0, low: 99.0, close: 99.9 }, ...flat(20, 100)]);
+
+test("the study finds the pattern it is given and reports the direction it reads", () => {
+  const result = runPriceActionPatternStudy({ bars: pinFixture(), symbol: "TEST", timeframe: "15" });
+  assert.equal(result.bars.spacingSeconds, SPACING);
+  // Range 1.0, lower wick 0.7, body 0.2, upper wick 0.1.
+  assert.equal(result.patterns.pin.events, 1);
+  assert.equal(result.patterns.pin.bullish, 1);
+  assert.equal(result.patterns.pin.bearish, 0);
+  // The same bar also takes out the 20-bar low at 99.5 and closes back above it, so it is a sweep
+  // as well - one bar can carry more than one pattern and each is counted on its own terms.
+  assert.equal(result.patterns.sweep.events, 1);
+  assert.equal(result.patterns.sweep.bullish, 1);
+  assert.equal(result.patterns.engulfing.events, 0);
+  assert.equal(Object.keys(result.patterns.pin.triggerHourShare).length, 1);
+  // One event is under the minimum, so no mean is claimed from it.
+  assert.ok(result.qualityIssues.includes("minimum_event_count_not_met:pin"));
+  assert.ok(Number.isNaN(result.patterns.pin.horizons[0].meanBps));
+});
+
+test("a horizon that would step over a gap is left out rather than measured as a longer one", () => {
+  const bars = pinFixture();
+  // Seven bars removed after the signal, so t+1 and t+2 still land where they should and t+4 would
+  // have to step across the hole. The timestamps are the originals, so the gap is a real one.
+  const gapped = [...bars.slice(0, 34), ...bars.slice(41)];
+  const result = runPriceActionPatternStudy({ bars: gapped, symbol: "TEST", timeframe: "15" });
+  const at = (horizon) => result.patterns.pin.horizons.find((h) => h.horizon === horizon).events;
+  assert.equal(at(1), 1);
+  assert.equal(at(2), 1);
+  assert.equal(at(4), 0);
+  assert.equal(at(16), 0);
+});
+
+test("a forming bar is not measured, because its close can still move", () => {
+  const closedOnly = pinFixture();
+  const withForming = [...closedOnly, {
+    ...closedOnly[closedOnly.length - 1],
+    time: closedOnly[closedOnly.length - 1].time + SPACING,
+    timeIso: new Date((closedOnly[closedOnly.length - 1].time + SPACING) * 1000).toISOString(),
+    forming: true,
+  }];
+  assert.equal(runPriceActionPatternStudy({ bars: withForming, symbol: "TEST", timeframe: "15" }).bars.closed, closedOnly.length);
 });

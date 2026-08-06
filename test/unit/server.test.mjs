@@ -734,7 +734,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the ninety-one expected tools", async () => {
+test("exposes exactly the ninety-seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -789,6 +789,8 @@ test("exposes exactly the ninety-one expected tools", async () => {
       "get_pine_source",
       "get_policy_rate_context",
       "get_positioning_context",
+      "get_price_action_context",
+      "get_price_action_context_template",
       "get_quotes",
       "get_real_yield_context",
       "get_replay_status",
@@ -816,6 +818,7 @@ test("exposes exactly the ninety-one expected tools", async () => {
       "run_feature_outcome_power_audit",
       "run_lead_lag_falsification_audit",
       "run_market_event_study",
+      "run_price_action_pattern_study",
       "run_strategy_experiment",
       "run_strategy_regime_analysis",
       "run_strategy_regime_matrix",
