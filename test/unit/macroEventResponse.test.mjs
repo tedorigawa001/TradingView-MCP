@@ -347,3 +347,29 @@ test("the placebo null is reproducible from its recorded seed, and centres on on
   // the calibration that matters: a placebo anchor is an ordinary bar and must measure as one.
   assert.ok(Math.abs(first.empirical_null.level.null_median - 1) < 0.05, `null median ${first.empirical_null.level.null_median}`);
 });
+
+test("the statistic and the null describe one set of events, not two", () => {
+  // 420 days puts the placebo cells across the 52-anchor minimum - some land at 50 or 51 and some at
+  // 52 - so the thin-cell filter actually removes events here instead of being a no-op the way it is
+  // in every other fixture. Eight of the ten go, and the two that remain are what everything
+  // downstream has to be computed over.
+  const input = makeStudyInput({ days: 420, eventDays: Array.from({ length: 10 }, (_, index) => 380 + index) });
+  const study = runMacroEventResponseStudy(input);
+
+  assert.ok(study.source.excluded_thin_placebo_cell.length > 0, "this fixture must exercise the filter");
+  assert.equal(study.source.valid_events + study.source.excluded_thin_placebo_cell.length, 10);
+
+  // Recomputing the primary statistic from the surviving events alone must reproduce what the study
+  // reports. Taking it over the excluded events too would leave the observed median describing a
+  // population the null never covers, and nothing in the output would say which one was measured.
+  const surviving = study.source.valid_events;
+  assert.equal(study.entry_conditions.find((c) => c.condition === "minimum_valid_events").observed, surviving);
+  assert.equal(study.empirical_null.level.observed, study.response_curve.find((p) => p.horizon === 4).usd_direct);
+  // placebo_pool reports every cell that was built, including the thin ones whose events were then
+  // dropped - it is a record of what was available, not of what was drawn from. This fixture is only
+  // a boundary case if some of those cells are in fact below the minimum.
+  const built = Object.values(study.empirical_null.placebo_pool);
+  const minimum = MACRO_EVENT_RESPONSE_CONTRACT.minimum_placebo_anchors_per_cell;
+  assert.ok(built.some((cell) => cell < minimum), `no cell sits below ${minimum}, so nothing is being excluded for thinness`);
+  assert.ok(built.some((cell) => cell >= minimum), "and some cell must clear it, or every event would be gone");
+});

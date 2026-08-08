@@ -288,3 +288,42 @@ test("an excusal covers one gap only, and none that its lapse could not have cau
   assert.deepEqual(reissue.missing_release_months, ["2025-07"]);
   assert.deepEqual(reissue.coverage_issues, ["missing_official_monthly_release:2025-07"]);
 });
+
+test("the year an excusal credits is the year of the gap it actually filled", () => {
+  // A December lapse losing the December release. The month loop spends the excusal at 2025-12; if
+  // the year credit were still computed as M+1 it would land on 2026, leaving 2025 at eleven events
+  // plus nothing excused and refusing an artifact that is complete.
+  const december = computeOfficialMacroEventCoverage(
+    "us_cpi", 2025, 2025, monthlyEvents("us_cpi", 2025, [12]), [lapse("us_cpi", "2025-12")], AFTER_2025,
+  );
+  assert.deepEqual(december.missing_release_months, []);
+  assert.deepEqual(december.excused_non_publications_by_year, { 2025: 1 });
+  assert.deepEqual(december.coverage_issues, []);
+
+  // And the credit must not be double counted into the following year.
+  assert.equal(december.excused_non_publications_by_year["2026"], undefined);
+});
+
+test("an excusal with no gap to fill still credits a year, since the count runs where months are not enumerated", () => {
+  // FOMC never enumerates months, so nothing can be observed to point at and M+1 is the only
+  // estimate left. Eight statements plus the estimate keeps a complete year complete.
+  const statements = Array.from({ length: 8 }, (_, index) => ({
+    event_id: `fomc_statement:2025-${String(index + 1).padStart(2, "0")}`,
+    event_kind: "fomc_statement",
+    occurred_at: `2025-${String(index + 1).padStart(2, "0")}-15T19:00:00.000Z`,
+    source_url: "https://www.federalreserve.gov/example",
+    raw_sha256: `sha256:${"0".repeat(64)}`,
+  }));
+  const result = computeOfficialMacroEventCoverage("fomc_statement", 2025, 2025, statements, [], AFTER_2025);
+  assert.deepEqual(result.coverage_issues, []);
+  assert.deepEqual(result.missing_release_months, []);
+});
+
+test("one excusal fills one gap and credits one year, never two of either", () => {
+  // Two adjacent gaps, one excusal: the earlier gap is filled and credited, the later one stands.
+  const result = computeOfficialMacroEventCoverage(
+    "us_cpi", 2025, 2025, monthlyEvents("us_cpi", 2025, [10, 11]), [lapse("us_cpi", "2025-10")], AFTER_2025,
+  );
+  assert.deepEqual(result.missing_release_months, ["2025-11"]);
+  assert.deepEqual(result.excused_non_publications_by_year, { 2025: 1 });
+});

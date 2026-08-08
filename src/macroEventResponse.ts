@@ -440,27 +440,9 @@ export function runMacroEventResponseStudy(input: {
   }
   if (rows.length === 0) throw new Error("no event retained a measurable balanced panel");
 
-  const responseCurve = horizons.map((horizon) => {
-    const usd = rows.map((row) => groupValue(row.ratios, contract.usd_direct_symbols, horizon));
-    const cross = rows.map((row) => groupValue(row.ratios, contract.non_usd_cross_symbols, horizon));
-    return {
-      horizon,
-      usd_direct: median(usd),
-      non_usd_cross: median(cross),
-      difference: median(usd.map((value, position) => value - cross[position])),
-      usd_direct_signed_bps: median(rows.map((row) => groupSigned(row.ratios, contract.usd_direct_symbols, horizon, "signedBps"))),
-      non_usd_cross_signed_bps: median(rows.map((row) => groupSigned(row.ratios, contract.non_usd_cross_symbols, horizon, "signedBps"))),
-      usd_direct_signed_ratio: median(rows.map((row) => groupSigned(row.ratios, contract.usd_direct_symbols, horizon, "signedRatio"))),
-      non_usd_cross_signed_ratio: median(rows.map((row) => groupSigned(row.ratios, contract.non_usd_cross_symbols, horizon, "signedRatio"))),
-    };
-  });
-
-  const primary = contract.primary_horizon;
-  const observedUsd = rows.map((row) => groupValue(row.ratios, contract.usd_direct_symbols, primary));
-  const observedCross = rows.map((row) => groupValue(row.ratios, contract.non_usd_cross_symbols, primary));
-  const observedLevel = median(observedUsd);
-  const observedDifference = median(observedUsd.map((value, position) => value - observedCross[position]));
-
+  // Built before any statistic is computed. The thin-cell filter below removes events, and an
+  // observed median taken over the events the null does not cover is a comparison between two
+  // different studies - one of which nothing reports.
   // Placebo pool: non-event bars where all five pairs are measurable, kept per clock slot so a draw
   // can match each event slot for slot.
   // Only the cells some event is judged against are worth building. Every other clock slot in the
@@ -501,6 +483,27 @@ export function runMacroEventResponseStudy(input: {
   if (matched.length === 0) throw new Error("no event had a placebo cell matching its clock slot and weekday");
   rows.length = 0;
   rows.push(...matched);
+
+  const responseCurve = horizons.map((horizon) => {
+    const usd = rows.map((row) => groupValue(row.ratios, contract.usd_direct_symbols, horizon));
+    const cross = rows.map((row) => groupValue(row.ratios, contract.non_usd_cross_symbols, horizon));
+    return {
+      horizon,
+      usd_direct: median(usd),
+      non_usd_cross: median(cross),
+      difference: median(usd.map((value, position) => value - cross[position])),
+      usd_direct_signed_bps: median(rows.map((row) => groupSigned(row.ratios, contract.usd_direct_symbols, horizon, "signedBps"))),
+      non_usd_cross_signed_bps: median(rows.map((row) => groupSigned(row.ratios, contract.non_usd_cross_symbols, horizon, "signedBps"))),
+      usd_direct_signed_ratio: median(rows.map((row) => groupSigned(row.ratios, contract.usd_direct_symbols, horizon, "signedRatio"))),
+      non_usd_cross_signed_ratio: median(rows.map((row) => groupSigned(row.ratios, contract.non_usd_cross_symbols, horizon, "signedRatio"))),
+    };
+  });
+
+  const primary = contract.primary_horizon;
+  const observedUsd = rows.map((row) => groupValue(row.ratios, contract.usd_direct_symbols, primary));
+  const observedCross = rows.map((row) => groupValue(row.ratios, contract.non_usd_cross_symbols, primary));
+  const observedLevel = median(observedUsd);
+  const observedDifference = median(observedUsd.map((value, position) => value - observedCross[position]));
 
   const seed = input.placeboSeed ?? 20260806;
   let rngState = seed >>> 0;

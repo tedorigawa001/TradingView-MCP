@@ -163,51 +163,55 @@ export function computeOfficialMacroEventCoverage(kind: OfficialMacroEventKind, 
   const currentYear = now.getUTCFullYear();
   const completeYears = Array.from({ length: toYear - fromYear + 1 }, (_, index) => fromYear + index).filter((year) => year < currentYear);
   const minimumEvents = kind === "fomc_statement" ? 8 : 12;
-  // A non-publication names the month of the data, not of the release. Both series publish month M
-  // in month M+1, so December data is a January release - counting the excused month as it stands
-  // would credit the wrong year outright, and the wrong month every time.
-  const excusedReleaseMonths = new Set(nonPublications.map((item) => {
+  // A non-publication names the month of the data, not of the release, and which release it removed
+  // cannot be read off that alone. The M+1 rule assumes a release is never delayed past a month
+  // boundary, and a lapse in appropriations is the very thing that delays it, so the assumption
+  // fails exactly where it is being leaned on. The 2025 lapse showed both outcomes from one excused
+  // reference month each: CPI published late but still within October and lost its November
+  // release, while the employment situation slipped out of October altogether and lost that one.
+  //
+  // So the month an excusal covers is found rather than computed - it is whichever of the reference
+  // month and the month after is actually empty - and the year credited is the year of that month.
+  // Deriving the credit from the same match that fills the gap is what keeps one excusal from being
+  // spent on a month in one year and counted against another.
+  const excusals = nonPublications.map((item) => {
     const year = Number(item.reference_month.slice(0, 4));
     const month = Number(item.reference_month.slice(5, 7));
-    return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
-  }));
+    const following = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
+    return { reference: item.reference_month, following, spent: null as string | null };
+  });
+
+  // A count cannot see a gap that something else fills. CPI and the employment situation publish
+  // once a month, so twelve releases spread over eleven months is a hole with a duplicate beside it,
+  // which is what a reissue under a second date looks like.
+  const monthGaps: string[] = [];
+  if (kind !== "fomc_statement") {
+    for (const year of completeYears) for (let month = 1; month <= 12; month += 1) {
+      const prefix = `${year}-${String(month).padStart(2, "0")}`;
+      if (events.some((event) => event.occurred_at.startsWith(prefix))) continue;
+      monthGaps.push(prefix);
+    }
+  }
+  const missingReleaseMonths: string[] = [];
+  for (const gap of monthGaps) {
+    const excusal = excusals.find((candidate) => candidate.spent === null && (candidate.reference === gap || candidate.following === gap));
+    if (excusal !== undefined) { excusal.spent = gap; continue; }
+    missingReleaseMonths.push(gap);
+  }
+
+  // An excusal that found no gap to fill still credits a year, because the count check runs for
+  // FOMC too, where months are never enumerated. With nothing observed to point at, M+1 is the only
+  // estimate available and it is used as such.
   const excusedByYear: Record<string, number> = {};
-  for (const releaseMonth of excusedReleaseMonths) {
-    const year = releaseMonth.slice(0, 4);
+  for (const excusal of excusals) {
+    const year = (excusal.spent ?? excusal.following).slice(0, 4);
     excusedByYear[year] = (excusedByYear[year] ?? 0) + 1;
   }
   const shortYears = completeYears.filter((year) =>
     (eventsByYear[String(year)] ?? 0) + (excusedByYear[String(year)] ?? 0) < minimumEvents);
   const coverageIssues = shortYears
     .map((year) => `insufficient_official_event_coverage:${year}:${eventsByYear[String(year)] ?? 0}_plus_${excusedByYear[String(year)] ?? 0}_excused_of_at_least_${minimumEvents}`);
-  // A count cannot see a gap that something else fills. CPI and the employment situation publish
-  // once a month, so twelve releases spread over eleven months is a hole with a duplicate beside it,
-  // which is what a reissue under a second date looks like. Years the count already refused are left
-  // to that issue rather than enumerated a second time.
-  //
-  // Which release an excused month removes cannot be read off the reference month alone. The M+1
-  // rule assumes a release is never delayed past a month boundary, and a lapse in appropriations is
-  // the very thing that delays it, so the assumption fails exactly where it is being leaned on. The
-  // 2025 lapse showed both outcomes from one excused reference month each: CPI published late but
-  // still within October and lost its November release, while the employment situation slipped out
-  // of October altogether and lost that one. An excusal therefore accounts for a gap at its own
-  // reference month or the month after it, whichever is actually empty, and covers at most one.
-  const excusals = nonPublications.map((item) => {
-    const year = Number(item.reference_month.slice(0, 4));
-    const month = Number(item.reference_month.slice(5, 7));
-    const following = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
-    return { months: new Set([item.reference_month, following]), spent: false };
-  });
-  const missingReleaseMonths: string[] = [];
-  if (kind !== "fomc_statement") {
-    for (const year of completeYears) for (let month = 1; month <= 12; month += 1) {
-      const prefix = `${year}-${String(month).padStart(2, "0")}`;
-      if (events.some((event) => event.occurred_at.startsWith(prefix))) continue;
-      const excusal = excusals.find((candidate) => !candidate.spent && candidate.months.has(prefix));
-      if (excusal !== undefined) { excusal.spent = true; continue; }
-      missingReleaseMonths.push(prefix);
-    }
-  }
+  // Years the count already refused are left to that issue rather than enumerated a second time.
   const shortYearPrefixes = new Set(shortYears.map((year) => String(year)));
   coverageIssues.push(...missingReleaseMonths
     .filter((month) => !shortYearPrefixes.has(month.slice(0, 4)))
