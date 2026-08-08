@@ -1602,6 +1602,16 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **point-in-time**: `available_at`がlocal first-seenとして観測された最新COTだけをライブ文脈に使う。既存250週は2026年7月に一括first-seenされたため、過去時点の利用可能性を証明せず、歴史バックテスト・候補採用・OOS根拠には使わない。週次の前向き収集から新規signalを記録し、十分なsignal数が貯まるまで評価値を出さない
 - **初期実装(2026-08-02)**: COT内部読み出し上限を250週へ拡張し、`get_cot_crowding_unwind_context`を追加した。active chartのexact `EURUSD`/`USDJPY`・`1D`を拘束し、3年percentileと20日support/resistance、終値breakを構造化して返す。candidateは常にfalseで、Bar Replayを拒否する。前向きhorizon、同一regime対照、empirical null、OOSは未実装であり、現段階のcontextを売買判断や成績主張へ昇格させない
 
+### #79 外生情報・週次フローによる新規手法探索(優先度: 高, 2026-08-08)
+
+- **背景**: #77/#78を含む短期Price Action、追加のセッション条件、VP proxyの価格反応は、固定契約・同一regime対照・経験的ヌルの下で候補へ進める根拠を残していない。価格足だけから派生する条件を増やして再開せず、価格形成の外側にある、時刻が固定された情報と低頻度ポジショニングへ探索空間を移す
+- **優先1: マクロ・サプライズ後の方向性ドリフト**: 既存のM15 macro event studyでNFP/FOMCは反応**量**の評価を次段階へ進めたが、方向シグナルはまだ存在しない。発表時点で利用可能だった市場予想値、actual、revision、release timestamp、取得時刻・raw hashをfirst-seen契約で保存し、`surprise = actual - consensus`の符号を事前固定して、CPI/NFP/FOMCを混合せず別母集団として検証する。USD直結のEURUSD/USDJPY/GBPUSD、金(XAUUSD)、非USD対照のEURGBP/AUDNZDを同じ発表時刻・同じ手続きで比較し、対照まで同方向へ反応するなら指標固有の根拠と扱わない。M15のアンカーは発表時刻ちょうどに開始する確定バー、horizonは15分/30分/60分/120分/240分を事前固定する。市場予想のpoint-in-time証跡が整うまでは、既存の反応量結果を方向性・売買候補へ昇格させない
+- **優先2: COT crowding change × price nonconfirmation**: #63の単発のabsolute percentile breakout contextをそのまま逆張り候補にしない。TFF Leveraged Moneyの対象通貨方向net OI ratioが極値にあること、直近4週の偏り変化が同方向へ加速していること、spotが同方向の20日breakoutを終値で確認できない、または反対方向へ戻ることを、週次で1つの新規仮説として固定する。COTのreport dateではなくlocal first-seenで記録した`available_at`以後だけを使い、週次の前向きsignal台帳、固定horizon、無条件かつ同一regime対照、経験的ヌル、OOSを必要条件にする。COTは公開先物ポジショニングであって注文板・stop-loss・大口個別注文の観測ではないため、名称と解釈は`crowding_unwind_proxy`に留める
+- **優先3: 金融政策乖離の転換イベント**: #47の静的carry主検定はfirst-seen収集を継続し、最初の報告可能時点まで待機する。これとは別契約で、政策金利差または短期金利差の**変化**と、政策決定の利用可能時点以後のFX反応を研究する。予想済みの利上げ・利下げを後知恵でシグナル化しないため、開始前に市場予想または短期金利の高頻度変化をsurprise proxyとして保存できるかを調査する。実現できなければ記述研究に留め、carry主検定と混ぜない
+- **優先4: XAUUSD price × futures open-interest phase**: CME Daily Bulletinのfirst-seen OIを用い、価格上昇/下落とOI増加/減少の4局面を日足または4時間足で固定して研究する。これはFX短期形状の代替ではなく、金先物の参加増減を表す低頻度proxyである。限月ロール、速報/確報vintage、OI公表時刻、spotと先物のbasis差を出力へ残し、単独の説明的相関を候補化しない
+- **明示的に優先しないもの**: 裸のM15/M60ローソク足形状、閾値やセッションの追加探索、未校正のlead-lag、VP/CVDを真のorder flowとみなす手法。#77/#78の再現性監査は研究の再開理由ではなく、既存結論の監査証跡として完結させる
+- **着手順**: (1) macro consensus/surpriseの長期・point-in-timeデータ契約とcoverage preflight、(2) NFP/FOMCを別々に方向別・対照付きで事前登録、(3) COT週次変化×非追随の前向きsignal台帳と候補契約、(4) CME OI 4局面のデータ契約。この順序では、各段階で候補が出なくても次の閾値を探索して救済しない
+
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
