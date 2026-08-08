@@ -20,6 +20,12 @@ import {
   VOLUME_PROFILE_CONTEXT_PLOTS,
   VOLUME_PROFILE_CONTEXT_SOURCE,
 } from "../../build/volumeProfileContext.js";
+import {
+  PRICE_ACTION_CONTEXT_INPUTS,
+  PRICE_ACTION_CONTEXT_NAME,
+  PRICE_ACTION_CONTEXT_PLOTS,
+  PRICE_ACTION_CONTEXT_SOURCE,
+} from "../../build/priceActionContext.js";
 
 function makeDeps(overrides = {}) {
   return {
@@ -7889,4 +7895,125 @@ test("the price-action study pages the chart back before measuring, and says so 
   assert.ok(parsed.coverage.finalBars > 300, `expected paging beyond the first read, got ${parsed.coverage.finalBars}`);
   assert.ok(parsed.qualityIssues.includes(`requested_history_not_loaded:${parsed.coverage.finalBars}_of_5000`));
   assert.equal(parsed.bars.spacingSeconds, 3600);
+});
+
+const PA_PINE_ID = "USER;321b4d4f2fca44a0beba0b1e4271d811";
+const PA_AUDITED = { "Pin Wick %": 60, "Pin Max Body %": 40, "Pin Max Opposite Wick %": 40,
+  "Engulfing Needs Opposite Prior Body": true, "Engulfing Min Prior Body %": 0, "Sweep Lookback": 20,
+  "Confirm On Bar Close": true, "Alert On Pin Bar": true, "Alert On Engulfing": true, "Alert On Sweep": true };
+function priceActionDeps({ source = PRICE_ACTION_CONTEXT_SOURCE, version = "1.0", usedVersion = "1.0",
+  name = PRICE_ACTION_CONTEXT_NAME, chartIndex = 0, settings = {}, onInputs = () => {} } = {}) {
+  return makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      listPineScripts: async () => [{
+        pineId: PA_PINE_ID, name, kind: "study", version,
+        usedBy: [{ chartIndex, studyId: "pa", name, version: usedVersion }],
+      }],
+      getPineSource: async () => ({ pineId: PA_PINE_ID, version, source }),
+      getIndicatorInputs: async () => {
+        onInputs();
+        return [{
+          id: "pa", name: PRICE_ACTION_CONTEXT_NAME, title: PRICE_ACTION_CONTEXT_NAME,
+          inputs: PRICE_ACTION_CONTEXT_INPUTS.map((input) => ({
+            ...input, type: "integer", defval: null, tooltip: null,
+            value: { ...PA_AUDITED, ...settings }[input.name],
+          })),
+        }];
+      },
+      getIndicatorValues: async (options) => {
+        assert.deepEqual(options.plotTitles, [...PRICE_ACTION_CONTEXT_PLOTS]);
+        return [{
+          id: "pa", name: PRICE_ACTION_CONTEXT_NAME, options, plots: [],
+          bars: [{ time: 1, values: {
+            "Pin Bar": 1, "Engulfing": 0, "Sweep": 0,
+            "Sweep High Level": 1.16, "Sweep Low Level": 1.15,
+            "Upper Wick %": 10, "Lower Wick %": 70, "Body %": 20, "Bar Confirmed": 1,
+          } }],
+        }];
+      },
+    },
+  });
+}
+const readPriceAction = (client, args = {}) => client.callTool({
+  name: "get_price_action_context",
+  arguments: { pine_id: PA_PINE_ID, study_id: "pa", expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", ...args },
+});
+
+test("get_price_action_context_template returns the fixed audited Pine source", async () => {
+  const client = await connectedClient(makeDeps());
+  const template = JSON.parse((await client.callTool({ name: "get_price_action_context_template", arguments: {} })).content[0].text);
+  // Byte-identical, because get_price_action_context refuses any study whose source differs from
+  // this constant - a template that drifts by one character rejects every study saved from it.
+  assert.equal(template.source, PRICE_ACTION_CONTEXT_SOURCE);
+  assert.equal(template.name, PRICE_ACTION_CONTEXT_NAME);
+  assert.deepEqual(template.alertConditions.length, 6);
+});
+
+test("get_price_action_context reads the placed audited template and reports the settings in force", async () => {
+  const client = await connectedClient(priceActionDeps());
+  const context = JSON.parse((await readPriceAction(client)).content[0].text);
+  assert.equal(context.status, "ready");
+  assert.equal(context.pinBar, 1);
+  assert.equal(context.barConfirmed, true);
+  assert.equal(context.settings["Pin Wick %"], 60);
+  assert.deepEqual(context.qualityIssues, []);
+  assert.equal(context.symbol, "OANDA:EURUSD");
+  assert.equal(context.timeframe, "60");
+});
+
+test("get_price_action_context refuses a same-named Pine script whose source was changed", async () => {
+  let inputsRead = false;
+  const client = await connectedClient(priceActionDeps({
+    source: "//@version=6\nplot(close)", onInputs: () => { inputsRead = true; },
+  }));
+  const res = await readPriceAction(client);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /does not match the audited price-action template/);
+  // The refusal has to come before anything is read off the chart.
+  assert.equal(inputsRead, false);
+});
+
+test("get_price_action_context refuses another script, a stale version and a study on another chart", async () => {
+  const wrongName = await readPriceAction(await connectedClient(priceActionDeps({ name: "Something Else" })));
+  assert.equal(wrongName.isError, true);
+  assert.match(wrongName.content[0].text, /is not the Bushido Price Action Context study/);
+
+  const stale = await readPriceAction(await connectedClient(priceActionDeps({ version: "2.0", usedVersion: "1.0" })));
+  assert.equal(stale.isError, true);
+  assert.match(stale.content[0].text, /is not the latest saved/);
+
+  const otherChart = await readPriceAction(await connectedClient(priceActionDeps({ chartIndex: 3 })));
+  assert.equal(otherChart.isError, true);
+  assert.match(otherChart.content[0].text, /is not an on-chart instance/);
+});
+
+test("get_price_action_context refuses a study whose settings change what a signal means", async () => {
+  const off = await readPriceAction(await connectedClient(priceActionDeps({ settings: { "Confirm On Bar Close": false } })));
+  assert.equal(off.isError, true);
+  assert.match(off.content[0].text, /Confirm On Bar Close switched off/);
+
+  const loosened = JSON.parse((await readPriceAction(await connectedClient(priceActionDeps({ settings: { "Pin Wick %": 35 } })))).content[0].text);
+  assert.equal(loosened.settings["Pin Wick %"], 35);
+  assert.ok(loosened.qualityIssues.some((issue) => issue.startsWith("settings_differ_from_audited_defaults:")));
+});
+
+test("get_price_action_context and the pattern study refuse a chart that is not the one asked for", async () => {
+  const wrongSymbol = await readPriceAction(await connectedClient(priceActionDeps()), { expected_symbol: "OANDA:USDJPY" });
+  assert.equal(wrongSymbol.isError, true);
+  assert.match(wrongSymbol.content[0].text, /symbol/i);
+
+  const wrongTimeframe = await readPriceAction(await connectedClient(priceActionDeps()), { expected_timeframe: "15" });
+  assert.equal(wrongTimeframe.isError, true);
+  assert.match(wrongTimeframe.content[0].text, /timeframe/i);
+
+  const study = await (await connectedClient(priceActionDeps())).callTool({
+    name: "run_price_action_pattern_study",
+    arguments: { expected_symbol: "OANDA:USDJPY", expected_timeframe: "60", count: 500 },
+  });
+  assert.equal(study.isError, true);
+  assert.match(study.content[0].text, /symbol/i);
 });

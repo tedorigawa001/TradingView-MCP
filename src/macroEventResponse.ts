@@ -264,7 +264,16 @@ function buildSymbolState(bars: readonly AggregatedBar[], guardEventTimes: reado
   return state;
 }
 
-/** Lane entries strictly before `position`; identical for an event anchor and a placebo anchor. */
+/**
+ * Lane entries strictly before `position`; identical for an event anchor and a placebo anchor.
+ *
+ * An event anchor is guarded out of its own lane so the strictness is moot for it, but a placebo
+ * anchor is a lane entry and the comparison is what keeps it out of its own baseline. Measured, the
+ * inclusive form moves the real null median by 0.0001 - because a lane holds one entry per clock
+ * slot, consecutive entries are 96 buckets apart and the longest horizon is 16, so an anchor cannot
+ * reach its own forward window either way. The strictness is correct rather than load-bearing, and
+ * saying so here is more honest than a test that pretends to pin something it cannot detect.
+ */
 function laneOffsetBefore(lane: Lane, position: number): number {
   let low = 0;
   let high = lane.indexes.length;

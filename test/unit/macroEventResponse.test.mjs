@@ -17,7 +17,9 @@ const SLOT_OFFSET = 50;
 
 const daySlotIso = (day) => new Date(SERIES_START + (day * BARS_PER_DAY + SLOT_OFFSET) * BUCKET_MS).toISOString();
 
-function makeBars(symbol, { days, amplifyAfter = [], amplification = 40, tail = 1 }) {
+const USD_DIRECT = ["EURUSD", "USDJPY", "GBPUSD"];
+function makeBars(symbol, { days, amplifyAfter = [], amplification = 40, tail = 1, usdOnly = false }) {
+  if (usdOnly && !USD_DIRECT.includes(symbol)) amplification = 1;
   let state = [...symbol].reduce((total, character) => total + character.charCodeAt(0), 7) >>> 0;
   const random = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 4294967296; };
   const loud = new Set();
@@ -73,7 +75,7 @@ function makeSeries(symbol, bars, bucketMinutes = 15) {
   };
 }
 
-function makeArtifact(kind, times, overrides = {}) {
+function makeArtifact(kind, times, overrides = {}, toYear = 2025) {
   return {
     schema_version: "1.0",
     series: "official_us_macro_release_events",
@@ -95,7 +97,7 @@ function makeArtifact(kind, times, overrides = {}) {
     scheduled_future_releases: [],
     coverage: {
       requested_from_year: 2024,
-      requested_to_year: 2025,
+      requested_to_year: toYear,
       events_by_year: {},
       excused_non_publications_by_year: {},
       missing_release_months: [],
@@ -114,25 +116,31 @@ const monthlyFillerEvents = (kind, year) => Array.from({ length: 12 }, (_, index
 }));
 
 const seriesCache = new Map();
-function cachedSeries(days, amplifyAfter, tail) {
-  const key = `${days}|${tail}|${amplifyAfter.join(",")}`;
+function cachedSeries(days, amplifyAfter, tail, usdOnly = false) {
+  const key = `${days}|${tail}|${usdOnly}|${amplifyAfter.join(",")}`;
   let built = seriesCache.get(key);
   if (built === undefined) {
-    built = FX.map((symbol) => makeSeries(symbol, makeBars(symbol, { days, amplifyAfter, tail })));
+    built = FX.map((symbol) => makeSeries(symbol, makeBars(symbol, { days, amplifyAfter, tail, usdOnly })));
     seriesCache.set(key, built);
   }
   // Bars are never mutated, but manifests are, so each caller gets its own wrapper.
   return built.map((entry) => ({ manifest: { ...entry.manifest }, bars: entry.bars }));
 }
 
-function makeStudyInput({ days = 520, eventDays = [480, 481, 482, 483, 484], kind = "us_cpi", tail = 1, otherKindDays = [] } = {}) {
+function makeStudyInput({ days = 520, eventDays = [480, 481, 482, 483, 484], kind = "us_cpi", tail = 1, otherKindDays = [], usdOnly = false } = {}) {
+  const artifactToYear = new Date(SERIES_START + days * BARS_PER_DAY * BUCKET_MS).getUTCFullYear();
   const times = eventDays.map(daySlotIso);
   const otherTimes = otherKindDays.map(daySlotIso);
-  const series = cachedSeries(days, [...times, ...otherTimes], tail);
+  const series = cachedSeries(days, [...times, ...otherTimes], tail, usdOnly);
   const others = ["us_cpi", "us_nfp", "fomc_statement"].filter((other) => other !== kind);
   return {
     series,
-    artifacts: [makeArtifact(kind, times), makeArtifact(others[0], otherTimes), makeArtifact(others[1], [])],
+    // The requested range has to span every year the bars touch, and a longer fixture reaches 2026.
+    artifacts: [
+      makeArtifact(kind, times, {}, artifactToYear),
+      makeArtifact(others[0], otherTimes, {}, artifactToYear),
+      makeArtifact(others[1], [], {}, artifactToYear),
+    ],
     eventKind: kind,
   };
 }
@@ -372,4 +380,99 @@ test("the statistic and the null describe one set of events, not two", () => {
   const minimum = MACRO_EVENT_RESPONSE_CONTRACT.minimum_placebo_anchors_per_cell;
   assert.ok(built.some((cell) => cell < minimum), `no cell sits below ${minimum}, so nothing is being excluded for thinness`);
   assert.ok(built.some((cell) => cell >= minimum), "and some cell must clear it, or every event would be gone");
+});
+
+test("a response confined to the USD-legged pairs clears every entry condition and advances", () => {
+  // The go branch. Nothing else in this file ever produces it, so until now the decision this whole
+  // module exists to make had only ever been observed refusing.
+  //
+  // Amplifying only the three USD pairs after each release is what the contract's comparison is
+  // looking for: a level above the placebo null and a USD-minus-cross difference above it too.
+  const input = makeStudyInput({
+    days: 900,
+    eventDays: Array.from({ length: 90 }, (_, index) => 700 + index),
+    usdOnly: true,
+  });
+  const study = runMacroEventResponseStudy(input);
+
+  assert.ok(study.source.valid_events >= MACRO_EVENT_RESPONSE_CONTRACT.minimum_events,
+    `need the frozen minimum met, got ${study.source.valid_events}`);
+  for (const condition of study.entry_conditions) {
+    assert.equal(condition.met, true, `${condition.condition} did not pass: ${condition.observed} vs ${condition.reference}`);
+  }
+  assert.equal(study.status, "advance");
+  // And the difference has to be the thing that carried it, not the level alone.
+  const difference = study.entry_conditions.find((c) => c.condition.startsWith("usd_direct_minus"));
+  assert.ok(difference.observed > difference.reference, "the cross pairs must respond less than the USD ones");
+});
+
+test("the gate refuses what sits just under it, which is what makes passing mean anything", () => {
+  // Every other test here either fails on the event minimum or clears everything comfortably, so a
+  // mutation that loosens a threshold goes unnoticed. These are the near misses.
+  const events = Array.from({ length: 90 }, (_, index) => 700 + index);
+
+  // A response present in the crosses as well: the level clears the null, the difference does not.
+  const symmetric = runMacroEventResponseStudy(makeStudyInput({ days: 900, eventDays: events }));
+  const level = symmetric.entry_conditions.find((c) => c.condition.startsWith("usd_direct_primary_ratio"));
+  const difference = symmetric.entry_conditions.find((c) => c.condition.startsWith("usd_direct_minus"));
+  assert.equal(level.met, true, "an amplified response must still clear the level condition");
+  assert.equal(difference.met, false, "with both groups amplified there is no difference to find");
+  assert.ok(difference.observed <= difference.reference);
+  assert.equal(symmetric.status, "discontinue", "one failed condition must stop the study");
+
+  // Exactly one event short of the frozen minimum, with a real response present.
+  const shortOfMinimum = runMacroEventResponseStudy(makeStudyInput({
+    days: 900, usdOnly: true,
+    eventDays: Array.from({ length: MACRO_EVENT_RESPONSE_CONTRACT.minimum_events - 1 }, (_, index) => 700 + index),
+  }));
+  assert.equal(shortOfMinimum.source.valid_events, MACRO_EVENT_RESPONSE_CONTRACT.minimum_events - 1);
+  const minimum = shortOfMinimum.entry_conditions.find((c) => c.condition === "minimum_valid_events");
+  assert.equal(minimum.met, false, "one short of the minimum must not pass");
+  assert.equal(shortOfMinimum.status, "discontinue");
+
+  // And the minimum itself passes. Without this the comparison could be > instead of >= and the
+  // near-miss above would still read the same.
+  const atMinimum = runMacroEventResponseStudy(makeStudyInput({
+    days: 900, usdOnly: true,
+    eventDays: Array.from({ length: MACRO_EVENT_RESPONSE_CONTRACT.minimum_events }, (_, index) => 700 + index),
+  }));
+  assert.equal(atMinimum.source.valid_events, MACRO_EVENT_RESPONSE_CONTRACT.minimum_events);
+  assert.equal(atMinimum.entry_conditions.find((c) => c.condition === "minimum_valid_events").met, true,
+    "the minimum itself must be enough");
+});
+
+test("a placebo anchor is never part of its own baseline", () => {
+  // The event path and the placebo path share laneOffsetBefore precisely so this cannot differ. An
+  // event anchor is guarded out of its lane and would not notice; a placebo anchor is a lane entry,
+  // so folding its own forward return into its own baseline would push its ratio toward 1 and drag
+  // the whole null with it. A null built that way sits lower than it should and passes more.
+  const input = makeStudyInput({ days: 900, usdOnly: true, eventDays: Array.from({ length: 90 }, (_, i) => 700 + i) });
+  const first = runMacroEventResponseStudy({ ...input, placeboSeed: 11 });
+  const second = runMacroEventResponseStudy({ ...input, placeboSeed: 11 });
+  assert.deepEqual(second.empirical_null, first.empirical_null);
+  // A placebo anchor measures as an ordinary bar, so its null centres on one. This does not pin the
+  // strictness of laneOffsetBefore - measured against real data, the inclusive form moves the null
+  // median by 0.0001, because a lane holds one entry per clock slot and consecutive entries are 96
+  // buckets apart while the longest horizon is 16. What it pins is that the centre is where the
+  // calibration says it is.
+  assert.ok(Math.abs(first.empirical_null.level.null_median - 1) < 0.08,
+    `the null must centre near one, got ${first.empirical_null.level.null_median}`);
+});
+
+test("the null quantile is the 95th percentile, not whatever the code happens to index", () => {
+  const study = runMacroEventResponseStudy(makeStudyInput({
+    days: 900, usdOnly: true, eventDays: Array.from({ length: 90 }, (_, index) => 700 + index),
+  }));
+  // The reference each condition is judged against must be the quantile the contract names. A draw
+  // ordered ascending puts the 95th percentile above the median by construction, so reading the
+  // wrong index shows up as a reference that no longer sits where the contract puts it.
+  for (const side of [study.empirical_null.level, study.empirical_null.difference]) {
+    assert.ok(side.null_quantile > side.null_median,
+      `the ${MACRO_EVENT_RESPONSE_CONTRACT.null_quantile} quantile must exceed the median, got ${side.null_quantile} vs ${side.null_median}`);
+    assert.ok(side.p_value > 0 && side.p_value <= 1);
+  }
+  const level = study.entry_conditions.find((c) => c.condition.startsWith("usd_direct_primary_ratio"));
+  assert.equal(level.reference, study.empirical_null.level.null_quantile);
+  const difference = study.entry_conditions.find((c) => c.condition.startsWith("usd_direct_minus"));
+  assert.equal(difference.reference, study.empirical_null.difference.null_quantile);
 });
