@@ -3478,8 +3478,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Read the latest bar's pin-bar, engulfing and sweep readings only from the exact audited " +
         "Bushido Price Action Context Pine template. The saved source, study placement, symbol and " +
-        "timeframe are verified fail-closed. A signal of 0 on an unconfirmed bar means the bar has " +
-        "not closed yet, not that the pattern is absent.",
+        "timeframe are verified fail-closed, and so are the study inputs: a study with Confirm On " +
+        "Bar Close switched off is refused, because its signals can change after being read. Any " +
+        "other departure from the audited defaults is reported in settings and flagged in " +
+        "qualityIssues. A signal of 0 on an unconfirmed bar means the bar has not closed yet, not " +
+        "that the pattern is absent.",
       inputSchema: {
         pine_id: z.string().regex(/^USER;[\w]{8,64}$/).describe("Saved audited template id"),
         study_id: z.string().regex(/^[\w$]{1,64}$/).describe("On-chart instance id"),
@@ -3581,7 +3584,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             chartIndex: chart.index,
             interpretation:
               "A mean whose interval spans zero is no edge. A mean that clears zero still has to " +
-              "clear the round-trip cost of trading it, and has to survive its hour-matched baseline.",
+              "clear the round-trip cost of trading it. hourMatchedAbsoluteMoveBps is a scale, not " +
+              "a threshold: it is how far any bar in the same hours travels over the same horizon, " +
+              "so it says whether the mean is large next to the movement already there. It is an " +
+              "absolute move against a signed mean, so nothing can ever exceed it and no result " +
+              "should be judged by trying.",
           });
         } catch (err) {
           return errorResult(err);

@@ -44,8 +44,24 @@ export const PRICE_ACTION_CONTEXT_PLOTS = [
 /** +1 reads bullish, -1 bearish, 0 no pattern on this bar. */
 export type PriceActionSignal = 1 | 0 | -1;
 
+/** Every input the template exposes, with the domain the Pine declaration enforces. */
+export const PRICE_ACTION_CONTEXT_INPUT_DOMAINS = {
+  in_0: { kind: "int", min: 30, max: 95, auditedDefault: 60 },
+  in_1: { kind: "int", min: 1, max: 70, auditedDefault: 40 },
+  in_2: { kind: "int", min: 1, max: 70, auditedDefault: 40 },
+  in_3: { kind: "bool", auditedDefault: true },
+  in_4: { kind: "int", min: 0, max: 90, auditedDefault: 0 },
+  in_5: { kind: "int", min: 2, max: 200, auditedDefault: 20 },
+  in_6: { kind: "bool", auditedDefault: true },
+  in_7: { kind: "bool", auditedDefault: true },
+  in_8: { kind: "bool", auditedDefault: true },
+  in_9: { kind: "bool", auditedDefault: true },
+} as const;
+
 export interface PriceActionContext {
   status: "ready" | "unavailable";
+  /** The settings actually in force on the chart, not the ones the template ships with. */
+  settings: Record<string, number | boolean>;
   pinBar: PriceActionSignal;
   engulfing: PriceActionSignal;
   sweep: PriceActionSignal;
@@ -191,8 +207,12 @@ export type PriceActionHorizonResult = {
   meanBps: number;
   lowerBps: number;
   upperBps: number;
-  /** Mean absolute move of any bar in the same clock hours, weighted by where the pattern fires. */
-  hourMatchedBaselineBps: number;
+  /**
+   * Mean absolute move of any bar in the same clock hours at this same horizon, weighted by where
+   * the pattern fires. A scale to read meanBps against, never a threshold it has to clear: this is
+   * an absolute move and meanBps is a signed one.
+   */
+  hourMatchedAbsoluteMoveBps: number;
 };
 
 export type PriceActionPatternStudy = {
@@ -283,17 +303,43 @@ export function runPriceActionPatternStudy(input: {
   const contiguous = (i: number, h: number) =>
     spacing !== null && i + h < closed.length && closed[i + h].time - closed[i].time === h * spacing;
 
-  // What any bar in a given clock hour does over the primary horizon, so a pattern that only fires
-  // in one part of the day cannot pass its own busiest hour off as an effect.
-  const primary = contract.horizons[Math.floor(contract.horizons.length / 2)];
-  const hourAbsolute = new Map<number, number[]>();
-  for (let i = 0; i < closed.length; i += 1) {
-    if (!contiguous(i, primary)) continue;
-    const hour = Number(closed[i].timeIso.slice(11, 13));
-    if (!hourAbsolute.has(hour)) hourAbsolute.set(hour, []);
-    hourAbsolute.get(hour)!.push(Math.abs(Math.log(closed[i + primary].close / closed[i].close)) * 1e4);
-  }
+  // How far any bar in a given clock hour travels over each horizon. A pattern that only fires in
+  // one part of the day would otherwise report that part of the day's ordinary movement as its own.
+  //
+  // This is a scale, not a threshold. It is a mean absolute move and the pattern statistic is a mean
+  // signed move, and mean(|X|) is never below |mean(X)| - so "beat the baseline" is a test nothing
+  // can pass, and asking a caller to apply it would have them reject a real edge. What it answers is
+  // how big the pattern's mean is next to the movement already present in the hours it fires in.
   const meanOf = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
+  const hourAbsolute = new Map<number, Map<number, number[]>>();
+  for (const horizon of contract.horizons) {
+    const byHour = new Map<number, number[]>();
+    for (let i = 0; i < closed.length; i += 1) {
+      if (!contiguous(i, horizon)) continue;
+      const hour = Number(closed[i].timeIso.slice(11, 13));
+      if (!byHour.has(hour)) byHour.set(hour, []);
+      byHour.get(hour)!.push(Math.abs(Math.log(closed[i + horizon].close / closed[i].close)) * 1e4);
+    }
+    hourAbsolute.set(horizon, byHour);
+  }
+  /**
+   * Weighted by where the pattern fires. An hour with no sample of its own is dropped from both
+   * sides of the average rather than contributing zero to the numerator - counting it as zero would
+   * push the scale down hardest for a pattern confined to the hours the series covers worst, which
+   * is the case this number exists to expose.
+   */
+  const hourWeightedAbsolute = (hourCounts: Map<number, number>, horizon: number) => {
+    const byHour = hourAbsolute.get(horizon)!;
+    let total = 0;
+    let weight = 0;
+    for (const [hour, count] of hourCounts) {
+      const sample = byHour.get(hour);
+      if (sample === undefined || sample.length === 0) continue;
+      total += meanOf(sample) * count;
+      weight += count;
+    }
+    return weight === 0 ? Number.NaN : total / weight;
+  };
 
   const patterns = {} as PriceActionPatternStudy["patterns"];
   for (const pattern of PRICE_ACTION_PATTERNS) {
@@ -303,11 +349,6 @@ export function runPriceActionPatternStudy(input: {
       const hour = Number(closed[signal.index].timeIso.slice(11, 13));
       hourCounts.set(hour, (hourCounts.get(hour) ?? 0) + 1);
     }
-    const hourMatched = fired.length === 0 ? 0 : [...hourCounts].reduce((total, [hour, count]) => {
-      const sample = hourAbsolute.get(hour);
-      return total + (sample ? meanOf(sample) : 0) * count;
-    }, 0) / fired.length;
-
     const horizons = contract.horizons.map((horizon) => {
       const returns: number[] = [];
       for (const signal of fired) {
@@ -315,12 +356,12 @@ export function runPriceActionPatternStudy(input: {
         returns.push(signal[pattern] * Math.log(closed[signal.index + horizon].close / closed[signal.index].close) * 1e4);
       }
       if (returns.length < contract.minimumEvents) {
-        return { horizon, events: returns.length, meanBps: Number.NaN, lowerBps: Number.NaN, upperBps: Number.NaN, hourMatchedBaselineBps: hourMatched };
+        return { horizon, events: returns.length, meanBps: Number.NaN, lowerBps: Number.NaN, upperBps: Number.NaN, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
       }
       const mean = meanOf(returns);
       const variance = returns.reduce((acc, value) => acc + (value - mean) ** 2, 0) / (returns.length - 1);
       const half = 1.96 * Math.sqrt(variance / returns.length);
-      return { horizon, events: returns.length, meanBps: mean, lowerBps: mean - half, upperBps: mean + half, hourMatchedBaselineBps: hourMatched };
+      return { horizon, events: returns.length, meanBps: mean, lowerBps: mean - half, upperBps: mean + half, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
     });
 
     if (fired.length < contract.minimumEvents) qualityIssues.push(`minimum_event_count_not_met:${pattern}`);
@@ -371,6 +412,26 @@ export function assertPriceActionContextStudy(
   return study;
 }
 
+/**
+ * Names alone are not the contract. A study can carry every expected label and still be running a
+ * 35% pin wick with confirmation switched off, at which point the returned signals mean something
+ * other than what this module says they mean.
+ */
+export function readPriceActionSettings(study: IndicatorInputs): Record<string, number | boolean> {
+  const settings: Record<string, number | boolean> = {};
+  for (const expected of PRICE_ACTION_CONTEXT_INPUTS) {
+    const domain = PRICE_ACTION_CONTEXT_INPUT_DOMAINS[expected.id];
+    const value = study.inputs.find((input) => input.id === expected.id)?.value;
+    if (domain.kind === "bool") {
+      if (typeof value !== "boolean") throw new Error(`${expected.name} must be a boolean`);
+    } else if (typeof value !== "number" || !Number.isInteger(value) || value < domain.min || value > domain.max) {
+      throw new Error(`${expected.name} must be an integer in [${domain.min}, ${domain.max}]`);
+    }
+    settings[expected.name] = value as number | boolean;
+  }
+  return settings;
+}
+
 function signal(value: unknown, label: string): PriceActionSignal {
   if (value === 1 || value === -1 || value === 0) return value;
   throw new Error(`${label} must be -1, 0 or 1`);
@@ -403,6 +464,17 @@ export function parsePriceActionContext(
   if (!row) throw new Error(`study ${study.id} returned no price-action values`);
   const raw = row.values;
 
+  const settings = readPriceActionSettings(study);
+  // Confirmation is not a threshold, it decides what a signal means: with it off a non-zero reading
+  // can appear on a bar that has not closed and be gone by the time it does. Every statement this
+  // module makes about an unconfirmed bar assumes it is on, so it is refused rather than reported.
+  if (settings["Confirm On Bar Close"] !== true) {
+    throw new Error(`study ${study.id} has Confirm On Bar Close switched off, so its signals can change after they are read`);
+  }
+  const changed = PRICE_ACTION_CONTEXT_INPUTS
+    .filter((input) => settings[input.name] !== PRICE_ACTION_CONTEXT_INPUT_DOMAINS[input.id].auditedDefault)
+    .map((input) => `${input.name}=${settings[input.name]}`);
+
   // Anything other than the two values the plot can emit means the row is not what it claims to be,
   // and reading it as "unconfirmed" would turn a broken read into an ordinary in-progress bar.
   const confirmedPlot = raw["Bar Confirmed"];
@@ -410,7 +482,11 @@ export function parsePriceActionContext(
     throw new Error("Bar Confirmed must be 0 or 1");
   }
   const barConfirmed = confirmedPlot === 1;
-  const qualityIssues = barConfirmed ? [] : ["bar_not_closed"];
+  const qualityIssues = [
+    ...(barConfirmed ? [] : ["bar_not_closed"]),
+    // The rules still hold, but they are not the audited defaults the study contract measures with.
+    ...(changed.length === 0 ? [] : [`settings_differ_from_audited_defaults:${changed.join(",")}`]),
+  ];
 
   // A zero-range bar has no shape to report, and the Pine side emits na rather than dividing by it.
   const shapePlots = ["Upper Wick %", "Lower Wick %", "Body %"] as const;
@@ -418,6 +494,7 @@ export function parsePriceActionContext(
   if (shapeMissing) {
     return {
       status: "unavailable",
+      settings,
       pinBar: 0,
       engulfing: 0,
       sweep: 0,
@@ -430,6 +507,7 @@ export function parsePriceActionContext(
 
   return {
     status: "ready",
+    settings,
     pinBar: signal(raw["Pin Bar"], "Pin Bar"),
     engulfing: signal(raw["Engulfing"], "Engulfing"),
     sweep: signal(raw["Sweep"], "Sweep"),
