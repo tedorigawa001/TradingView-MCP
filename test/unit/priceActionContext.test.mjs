@@ -90,6 +90,20 @@ test("a ready bar reports its three signals and its shape", () => {
   assert.deepEqual(context.qualityIssues, []);
 });
 
+test("pattern-study intervals are labelled descriptive because forward windows overlap", () => {
+  const bars = Array.from({ length: 80 }, (_, index) => {
+    const time = 1_700_000_000 + index * 900;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open: 1, high: 1.01, low: 0.99, close: index % 2 === 0 ? 1.001 : 0.999 };
+  });
+  const result = runPriceActionPatternStudy({ bars, symbol: "EURUSD", timeframe: "15" });
+  assert.ok(result.limitations.some((item) => item.includes("serially_correlated")));
+  for (const pattern of Object.values(result.patterns)) {
+    for (const horizon of pattern.horizons) {
+      assert.equal(horizon.intervalMethod, "iid_normal_approximation_descriptive_only");
+    }
+  }
+});
+
 test("a bar with no range has no shape to report and says so instead of dividing by it", () => {
   const context = parsePriceActionContext(study, valuesWith({ "Upper Wick %": null, "Lower Wick %": null, "Body %": null }));
   assert.equal(context.status, "unavailable");

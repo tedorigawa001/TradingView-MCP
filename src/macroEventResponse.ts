@@ -163,7 +163,12 @@ export type MacroEventResponseStudy = {
   };
   response_curve: MacroEventGroupCurvePoint[];
   per_symbol_primary: Record<string, number>;
-  independent_series: Record<string, { events: number; primary_ratio: number }>;
+  independent_series: Record<string, {
+    status: "available" | "unavailable";
+    events: number;
+    primary_ratio: number | null;
+    exclusions: { missing_anchor: number; short_baseline: number; discontinuous_window: number };
+  }>;
   empirical_null: {
     draws: number;
     seed: number;
@@ -336,6 +341,7 @@ export function runMacroEventResponseStudy(input: {
   const contract = MACRO_EVENT_RESPONSE_CONTRACT;
   const horizons = contract.horizons;
   const fxSymbols = [...contract.usd_direct_symbols, ...contract.non_usd_cross_symbols];
+  const requiredSymbols = [...fxSymbols, ...contract.independent_symbols];
 
   const bySymbol = new Map<string, MacroEventResponseSeries>();
   for (const entry of input.series) {
@@ -346,7 +352,7 @@ export function runMacroEventResponseStudy(input: {
     if (bySymbol.has(entry.manifest.symbol)) throw new Error(`duplicate aggregate for ${entry.manifest.symbol}`);
     bySymbol.set(entry.manifest.symbol, entry);
   }
-  for (const symbol of fxSymbols) {
+  for (const symbol of requiredSymbols) {
     if (!bySymbol.has(symbol)) throw new Error(`macro event response study requires an aggregate for ${symbol}`);
   }
 
@@ -563,19 +569,21 @@ export function runMacroEventResponseStudy(input: {
     },
   ];
 
-  const independent: Record<string, { events: number; primary_ratio: number }> = {};
+  const independent: MacroEventResponseStudy["independent_series"] = {};
   for (const symbol of contract.independent_symbols) {
-    const state = states.get(symbol);
-    if (state === undefined) continue;
+    const state = states.get(symbol)!;
     const measured: number[] = [];
+    const exclusions = { missing_anchor: 0, short_baseline: 0, discontinuous_window: 0 };
     for (const event of events) {
       const position = state.index.get(event.occurred_at);
-      if (position === undefined) continue;
+      if (position === undefined) { exclusions.missing_anchor += 1; continue; }
       const ratios = ratiosAt(state, position, horizons);
-      if (!ratios.ok) continue;
+      if (!ratios.ok) { exclusions[ratios.reason] += 1; continue; }
       measured.push(ratios.value.magnitude.get(primary)!);
     }
-    if (measured.length > 0) independent[symbol] = { events: measured.length, primary_ratio: median(measured) };
+    independent[symbol] = measured.length === 0
+      ? { status: "unavailable", events: 0, primary_ratio: null, exclusions }
+      : { status: "available", events: measured.length, primary_ratio: median(measured), exclusions };
   }
 
   return {

@@ -3549,7 +3549,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Measure what the three price-action patterns are worth as naked entries on the chart's own " +
         "bars: enter at the signal bar's close in the direction the pattern reads, exit h bars " +
         "later, with no stop, target or filter. Uses the same rules as the Pine template at its " +
-        "default settings. Reports each pattern's forward return with a 95% interval alongside the " +
+        "default settings. Reports each pattern's forward return with an IID normal-approximation " +
+        "interval for description only alongside the " +
         "clock hours it fires in and what any bar in those hours does anyway, because a pattern " +
         "that only fires at a session boundary will otherwise report that boundary as an effect.",
       inputSchema: {
@@ -3583,8 +3584,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             returnedBars: history.bars.length,
             chartIndex: chart.index,
             interpretation:
-              "A mean whose interval spans zero is no edge. A mean that clears zero still has to " +
-              "clear the round-trip cost of trading it. hourMatchedAbsoluteMoveBps is a scale, not " +
+              "The reported interval assumes independent returns, while pattern events and their " +
+              "forward windows overlap. It is descriptive only and cannot establish an edge or a " +
+              "candidate; use a separately frozen non-overlapping, autocorrelation-robust study " +
+              "before considering adoption. hourMatchedAbsoluteMoveBps is a scale, not " +
               "a threshold: it is how far any bar in the same hours travels over the same horizon, " +
               "so it says whether the mean is large next to the movement already there. It is an " +
               "absolute move against a signed mean, so nothing can ever exceed it and no result " +

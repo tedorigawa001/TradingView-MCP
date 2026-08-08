@@ -208,6 +208,11 @@ export type PriceActionHorizonResult = {
   lowerBps: number;
   upperBps: number;
   /**
+   * These bounds use an IID normal approximation only. Pattern signals and their forward windows
+   * overlap in time, so the interval is descriptive and cannot make a candidate eligible.
+   */
+  intervalMethod: "iid_normal_approximation_descriptive_only";
+  /**
    * Mean absolute move of any bar in the same clock hours at this same horizon, weighted by where
    * the pattern fires. A scale to read meanBps against, never a threshold it has to clear: this is
    * an absolute move and meanBps is a signed one.
@@ -229,6 +234,7 @@ export type PriceActionPatternStudy = {
     triggerHourShare: Record<string, number>;
     horizons: PriceActionHorizonResult[];
   }>;
+  limitations: string[];
   qualityIssues: string[];
 };
 
@@ -356,12 +362,12 @@ export function runPriceActionPatternStudy(input: {
         returns.push(signal[pattern] * Math.log(closed[signal.index + horizon].close / closed[signal.index].close) * 1e4);
       }
       if (returns.length < contract.minimumEvents) {
-        return { horizon, events: returns.length, meanBps: Number.NaN, lowerBps: Number.NaN, upperBps: Number.NaN, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
+        return { horizon, events: returns.length, meanBps: Number.NaN, lowerBps: Number.NaN, upperBps: Number.NaN, intervalMethod: "iid_normal_approximation_descriptive_only" as const, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
       }
       const mean = meanOf(returns);
       const variance = returns.reduce((acc, value) => acc + (value - mean) ** 2, 0) / (returns.length - 1);
       const half = 1.96 * Math.sqrt(variance / returns.length);
-      return { horizon, events: returns.length, meanBps: mean, lowerBps: mean - half, upperBps: mean + half, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
+      return { horizon, events: returns.length, meanBps: mean, lowerBps: mean - half, upperBps: mean + half, intervalMethod: "iid_normal_approximation_descriptive_only" as const, hourMatchedAbsoluteMoveBps: hourWeightedAbsolute(hourCounts, horizon) };
     });
 
     if (fired.length < contract.minimumEvents) qualityIssues.push(`minimum_event_count_not_met:${pattern}`);
@@ -388,6 +394,10 @@ export function runPriceActionPatternStudy(input: {
       spacingSeconds: spacing,
     },
     patterns,
+    limitations: [
+      "forward_returns_overlap_and_are_serially_correlated;_iid_normal_intervals_are_descriptive_only",
+      "no_candidate_eligibility_or_trade_adoption_claim_is_produced_by_this_study",
+    ],
     qualityIssues,
   };
 }

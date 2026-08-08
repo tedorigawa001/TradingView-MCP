@@ -35,7 +35,8 @@
     "collect:macro-events": "node build/officialMacroEventCollectionCli.js --confirm-external-fetch",
     "collect:oanda-flow": "node build/oandaFlowCollectionCli.js",
     "study:macro-events-m60": "node build/macroEvent60mCli.js --confirm-local-import",
-    "preflight:macro-events-m60": "node build/macroEvent60mPreflightCli.js --confirm-local-import"
+    "preflight:macro-events-m60": "node build/macroEvent60mPreflightCli.js --confirm-local-import",
+    "study:macro-events-m15": "node build/macroEventResponseCli.js --confirm-local-import"
   },
   "engines": {
     "node": ">=22"

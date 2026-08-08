@@ -11,7 +11,7 @@ import {
 const BUCKET_MS = 15 * 60_000;
 const BARS_PER_DAY = 1440 / 15;
 const SERIES_START = Date.parse("2024-01-01T00:00:00.000Z");
-const FX = ["EURUSD", "USDJPY", "GBPUSD", "EURGBP", "AUDNZD"];
+const FX = ["EURUSD", "USDJPY", "GBPUSD", "EURGBP", "AUDNZD", "XAUUSD"];
 /** 12:30 UTC, the real CPI and NFP release slot on US standard time. */
 const SLOT_OFFSET = 50;
 
@@ -178,6 +178,20 @@ test("the study reports every frozen horizon and judges the primary one only", (
   assert.equal(minimum.met, false);
   assert.equal(minimum.observed, 5);
   assert.equal(study.status, "discontinue");
+  assert.equal(study.independent_series.XAUUSD.status, "available");
+});
+
+test("a required independent series is reported as unavailable rather than silently omitted", () => {
+  const input = makeStudyInput();
+  const xau = input.series.find((entry) => entry.manifest.symbol === "XAUUSD");
+  const study = runMacroEventResponseStudy({
+    ...input,
+    series: input.series.map((entry) => entry.manifest.symbol === "XAUUSD" ? makeSeries("XAUUSD", [xau.bars[0]]) : entry),
+  });
+  assert.deepEqual(study.independent_series.XAUUSD, {
+    status: "unavailable", events: 0, primary_ratio: null,
+    exclusions: { missing_anchor: 5, short_baseline: 0, discontinuous_window: 0 },
+  });
 });
 
 test("an amplified post-release window lifts the measured response above the placebo null", () => {
@@ -251,6 +265,10 @@ test("the study refuses inputs that would quietly change the frozen population",
   assert.throws(
     () => runMacroEventResponseStudy({ ...base, series: base.series.filter((entry) => entry.manifest.symbol !== "AUDNZD") }),
     /requires an aggregate for AUDNZD/,
+  );
+  assert.throws(
+    () => runMacroEventResponseStudy({ ...base, series: base.series.filter((entry) => entry.manifest.symbol !== "XAUUSD") }),
+    /requires an aggregate for XAUUSD/,
   );
 });
 
