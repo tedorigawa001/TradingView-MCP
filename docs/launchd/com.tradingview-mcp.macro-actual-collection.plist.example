@@ -8,9 +8,9 @@
   <array>
     <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
     <string>build/officialMacroActualCollectionCli.js</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_cpi_2026_2026.json</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_nfp_2026_2026.json</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/fomc_statement_2026_2026.json</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_cpi_2016_2026.json</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_nfp_2016_2026.json</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/fomc_statement_2016_2026.json</string>
     <string>--confirm-external-fetch</string>
   </array>
   <key>WorkingDirectory</key>
