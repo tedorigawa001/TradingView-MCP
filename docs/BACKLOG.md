@@ -1624,6 +1624,24 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **forward coverage・定期収集例(実装, 2026-08-09)**: `coverage:macro-surprise`は3種のofficial artifactとfirst-seen記録を照合し、収集開始前のreleaseを欠損と混同せず、開始後のconsensus/actual取り逃しだけをblockerとして数える。artifactが更新されずpastになった`scheduled_future_releases`も同じ母集団へ残すため、更新遅延がcapture欠損を隠さない。actualは15分windowのため5分間隔、consensusとcoverageは日次のlaunchd例を分離して示す。calendar mapping/API key/年次artifact集合を実測・設定するまでは、方向性studyを開始しない
 - **凍結: Trading Economics consensus前提のforward macro surprise (2026-08-09)**: 利用可能時点を証明できるconsensus snapshotには有償APIが必要であり、現時点では費用を負担しない。`TRADINGVIEW_MCP_TRADING_ECONOMICS_API_KEY`、private mapping、macro consensus/actual/coverageのlaunchdジョブは設定しない。したがって本系統は`not_collecting_no_forward_evidence`のまま、方向性study・候補化・OOS根拠へ進めない。公式release artifact、first-seen契約、parser、coverage実装は保全する。将来コスト・ライセンス条件が変わる場合だけ、CalendarId・UTC時刻・単位を実測してから**新しい収集開始日以後だけ**再開する
 
+### #81 4本足トラップの再現検証(結論: 再現せず, 2026-08-09)
+
+`src/priceActionTrapReproduction.ts` に凍結契約として実装。M15・8銘柄(EURUSD, USDJPY, GBPUSD,
+EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレイク→即時包み足の4本構造。
+
+**結果: 11,105イベント、観測 -0.161bps、経験的ヌル中央値 -0.004bps、p = 0.9068。再現しない。**
+主horizon t+4 での符号付き平均がヌルのほぼ中央に乗っており、方向性の優位は検出されなかった。
+
+限界として成果物に記録済み:
+
+- iid正規区間は記述のみ。前向き窓は重複しており区間は実際より狭い
+- プラセボセルは時刻スロットと曜日で一致させるが**銘柄では一致させない**。XAUUSD は最も静かな
+  クロスの約2.4倍動く(8.91 対 3.67 bps)。ただし実測ではイベント構成比とバー構成比が全銘柄で
+  1ポイント以内に一致しており、このパネルでは効いていない
+- プールは pin/engulfing/sweep を全て除外するため、比較対象は「無形の足」であって「トラップを
+  完成させない包み足」ではない。トラップの4本目は構造上つねに包み足なので、この帰無仮説は
+  構造と包み足を分離できない(両者まとめて保守的に扱うのみ)
+
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
