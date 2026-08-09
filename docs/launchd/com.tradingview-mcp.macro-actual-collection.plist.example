@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tradingview-mcp.macro-actual-collection</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
+    <string>build/officialMacroActualCollectionCli.js</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_cpi_2026_2026.json</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_nfp_2026_2026.json</string>
+    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/fomc_statement_2026_2026.json</string>
+    <string>--confirm-external-fetch</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/macro-actual.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/macro-actual.stderr.log</string>
+</dict>
+</plist>

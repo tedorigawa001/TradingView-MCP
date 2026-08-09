@@ -1122,6 +1122,12 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - 通算: 単一足(#76 相当の無条件測定)、水準フィルタ(#77)、4本構造(#78)の3構成、8銘柄、延べ約29万イベントで一貫して効果が無い
 - #59 の律速は、**場所を変えても、構造を複雑にしても回避できなかった**
 
+**再現性監査(2026-08-08) — 元の数値は未検証、結論を再開の根拠にしない**
+- #77/#78の結果コミットは本書への結果追記だけであり、当時の実行器、入力集約の内容ハッシュ、イベント台帳、プラセボ5,000本の分布をGitに残していなかった。従って元の `n=12,547`、`t+4=-0.103bps`、`p=0.8702` を**独立に再現・検証することはできない**
+- `priceActionTrapReproduction.ts` とCLIを新設した。固定契約、8入力の正規化SHA-256、全イベント台帳、時刻・曜日一致の5,000本プラセボ分布、成果物ハッシュを単一JSONへ保存する。元の結果を上書きするものではない
+- 現在残る8本のM15集約での独立再計算は、行隣接の4本構造・シグナル終値からの厳密な将来窓として `n=11,105`、t+4 `-0.161bps`、ヌル95%点 `+0.185bps`、`p=0.9068` となった。方向は元記録と同じ棄却側だが、イベント数が一致しないため**#78の再現確認とは呼ばない**
+- 差の原因は、当時の入力データ版または未保存の検出実装に限られる。将来この系統を再評価する場合でも、元の結論を救済するための探索ではなく、この成果物契約を先に凍結した別研究として扱う
+
 ### #77 主要水準に接触した price action パターン — 事前登録(測定前に記録, 2026-08-07)
 
 **本項は測定を実行する前に記録・コミットした。** 無条件のパターン測定(#76 の直後、`9f9f068`)は既に見ており、**組み合わせ探索はこの会話で3回失敗した道**であるため、収益率を1つも見ないうちに条件を凍結する。
@@ -1611,6 +1617,11 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **優先4: XAUUSD price × futures open-interest phase**: CME Daily Bulletinのfirst-seen OIを用い、価格上昇/下落とOI増加/減少の4局面を日足または4時間足で固定して研究する。これはFX短期形状の代替ではなく、金先物の参加増減を表す低頻度proxyである。限月ロール、速報/確報vintage、OI公表時刻、spotと先物のbasis差を出力へ残し、単独の説明的相関を候補化しない
 - **明示的に優先しないもの**: 裸のM15/M60ローソク足形状、閾値やセッションの追加探索、未校正のlead-lag、VP/CVDを真のorder flowとみなす手法。#77/#78の再現性監査は研究の再開理由ではなく、既存結論の監査証跡として完結させる
 - **着手順**: (1) macro consensus/surpriseの長期・point-in-timeデータ契約とcoverage preflight、(2) NFP/FOMCを別々に方向別・対照付きで事前登録、(3) COT週次変化×非追随の前向きsignal台帳と候補契約、(4) CME OI 4局面のデータ契約。この順序では、各段階で候補が出なくても次の閾値を探索して救済しない
+- **macro surprise evidence契約の実装(2026-08-09)**: `macroSurpriseEvidence.ts`はCPI=all-items前年比、NFP=total nonfarm payroll change(千人)、FOMC=FF target range midpointという**各種別1指標**だけを受理する。consensusはrelease instantより厳密に前、actualはreleaseから15分以内に、ストア自身が刻むlocal `first_seen_at`で観測されなければならない。呼出側が過去の`observed_at`を渡せないため、後から得たconsensus履歴を前向き証拠へ偽装できない。値はsource ID/HTTPS URL/raw SHA-256と不可分で、raw bytesをowner-only archiveへ保存できた場合だけ正規化値を追記する。実績−予想は同一固定単位でだけ計算する。**予想ベンダー取得器・定期収集・coverage preflightは未実装**であり、保存済みの歴史的イベントや手入力値をこのストアへbackfillしない。次段階は利用規約を満たす予想sourceを選定し、発表前snapshotと公式release document parserをこの契約へ接続すること
+- **Trading Economics consensus snapshot取得器(実装, 2026-08-09)**: `collect:macro-consensus`はTrading Economics calendarの`Forecast`だけを、公式artifactに保存された将来release時刻と、設定で固定した`CalendarId`・単位の三重一致で収集する。応答に`Actual`が既にある行、時刻不一致・重複・単位不一致は保存しない。keyは`TRADINGVIEW_MCP_TRADING_ECONOMICS_API_KEY`だけから読み、mapping JSONはkeyを持たず、成果物へはqueryを除いたcanonical source URLだけを保存する。**calendar IDは推測しない**ため、利用開始前にライセンス済みAPIでCPI/NFP/FOMC各ID・UTC時刻・単位を一度実測し、private mapping JSONへ固定する必要がある。現時点でactualの公式document parser、定期起動、coverage preflightは未実装であり、方向別studyはまだ開始しない
+- **公式actual取得器(実装, 2026-08-09)**: `collect:macro-actual`は、3つの公式event artifact内で発表時刻から15分以内のeventだけを対象に、BLS/Fedのsource documentをmanual redirect・host照合・8MiB上限付きで取得する。CPIはall-items前年比、NFPはtotal nonfarm payroll changeを**千人へ換算**、FOMCは明示target rangeのmidpointだけを抽出する。本文が曖昧・単位不明・range逆転なら推測せず失敗する。成功時もsource document rawのowner-only archive保存後にだけactualを追記する。過去のofficial documentを後から取り込む経路はなく、定期起動とcoverage preflightまでは前向き方向studyを開始しない
+- **actual source・ロック回復の境界強化(2026-08-09)**: actualはevent種別ごとに固定したsource IDとBLS/Fedの**完全な公式document URL**だけを受理し、artifactが別host/pathを指す場合は外部fetch前に拒否する。first-seen storeのlockは、所有者専用のregular fileであり、inode/mtime照合後も60秒超のものだけを回収する。クラッシュ後にactual capture windowが恒久停止することを避けつつ、別プロセスのlockを削除しない。任意source、偽artifact、stale lockをそれぞれ回帰テストで固定した
+- **forward coverage・定期収集例(実装, 2026-08-09)**: `coverage:macro-surprise`は3種のofficial artifactとfirst-seen記録を照合し、収集開始前のreleaseを欠損と混同せず、開始後のconsensus/actual取り逃しだけをblockerとして数える。artifactが更新されずpastになった`scheduled_future_releases`も同じ母集団へ残すため、更新遅延がcapture欠損を隠さない。actualは15分windowのため5分間隔、consensusとcoverageは日次のlaunchd例を分離して示す。calendar mapping/API key/年次artifact集合を実測・設定するまでは、方向性studyを開始しない
 
 ## 運用メモ
 

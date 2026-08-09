@@ -33,10 +33,14 @@
     "scan:fx-csv": "node --max-old-space-size=8192 build/fxCsvFeatureScanCli.js --confirm-local-import",
     "aggregate:fx-csv": "node --max-old-space-size=8192 build/fxCsvM1AggregationCli.js --confirm-local-import",
     "collect:macro-events": "node build/officialMacroEventCollectionCli.js --confirm-external-fetch",
+    "collect:macro-consensus": "node build/tradingEconomicsMacroConsensusCli.js --confirm-external-fetch",
+    "collect:macro-actual": "node build/officialMacroActualCollectionCli.js --confirm-external-fetch",
+    "coverage:macro-surprise": "node build/macroSurpriseCoverageCli.js --confirm-local-import",
     "collect:oanda-flow": "node build/oandaFlowCollectionCli.js",
     "study:macro-events-m60": "node build/macroEvent60mCli.js --confirm-local-import",
     "preflight:macro-events-m60": "node build/macroEvent60mPreflightCli.js --confirm-local-import",
-    "study:macro-events-m15": "node build/macroEventResponseCli.js --confirm-local-import"
+    "study:macro-events-m15": "node build/macroEventResponseCli.js --confirm-local-import",
+    "reproduce:price-action-trap": "node build/priceActionTrapReproductionCli.js --confirm-local-import"
   },
   "engines": {
     "node": ">=22"

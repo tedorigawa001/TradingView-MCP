@@ -219,6 +219,12 @@ AI が状況に応じて自動で使い分けます。手動で覚える必要�
 
 macOSでは`com.tradingview-mcp.policy-rate-collection`を平日10:45 JSTに実行するlaunchdジョブとして登録する。`RunAtLoad`は設定せず、ログインやMCP再起動の直後に画面を切り替えない。既存の外部first-seen収集は平日10:30と22:30 JSTの二回で、CME OIの速報から確報への改訂を異なる観測時点として残す。これは確報取得を保証する時刻表ではなく、二つのfirst-seen窓を作る運用である。両方が同じchart-operation lockを使うため、MCP操作中は待機または失敗し、別の銘柄状態を復元先として取り違えない。
 
+### Macro surprise forward collection
+
+`npm run coverage:macro-surprise -- --events CPI_ARTIFACT --events NFP_ARTIFACT --events FOMC_ARTIFACT --confirm-local-import` は、公式release artifactとlocal first-seen証跡を突合し、収集開始前の履歴、収集開始後のconsensus/actual取り逃し、15分actual捕捉窓内で待機中のrelease、評価可能なsurprise件数を分けて返します。公式の改訂履歴があることは、過去のconsensusを知っていたことを意味しないため、`events_before_collection`は欠損に数えません。一方で`missing_forward_consensus`または`missing_forward_actual`が非ゼロなら、方向性studyを開始しません。
+
+macOS用に[consensus日次収集](docs/launchd/com.tradingview-mcp.macro-consensus-collection.plist.example)、[actual 5分収集](docs/launchd/com.tradingview-mcp.macro-actual-collection.plist.example)、[coverage日次確認](docs/launchd/com.tradingview-mcp.macro-surprise-coverage.plist.example)の例を用意しています。actualは発表時刻から15分以内だけ公式documentを取得するため、5分間隔であっても対象外の時刻には外部本文を取得しません。consensusジョブはlaunchd環境に`TRADINGVIEW_MCP_TRADING_ECONOMICS_API_KEY`を設定してから読み込んでください。例のevent artifactパスは2026年用なので、年次の公式artifact更新時には3ジョブのパスを同じ新しい集合へ揃えて更新します。mapping JSONはprivate pathのままGit管理しません。
+
 ### Event-study falsification audit CLI
 
 `npm run audit:event-studies -- --config fvg-audit.json` は、凍結済みのイベント研究定義を合成ヌルで校正します。既定は各模型400複製・5,000本・名目α 5%・3foldで、white noise、レジーム切替ボラティリティ、bid-ask bounceを**別々の結果**として返します。TradingView、ネットワーク、ローカルジャーナルにはアクセスしません。短い動作確認だけなら `--model white_noise --replications 20 --bars 1200` で上書きできます。
