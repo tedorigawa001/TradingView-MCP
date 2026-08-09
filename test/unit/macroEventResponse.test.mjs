@@ -12,6 +12,13 @@ const BUCKET_MS = 15 * 60_000;
 const BARS_PER_DAY = 1440 / 15;
 const SERIES_START = Date.parse("2024-01-01T00:00:00.000Z");
 const FX = ["EURUSD", "USDJPY", "GBPUSD", "EURGBP", "AUDNZD", "XAUUSD"];
+/**
+ * The five pairs the comparison is made over. XAUUSD is supplied as an aggregate and required as
+ * one, but the contract measures it beside the comparison rather than inside it, so it is reported
+ * under independent_series and never appears in per_symbol_primary. Reading FX as "the panel" is
+ * what put two assertions here at odds with the module.
+ */
+const PANEL = ["EURUSD", "USDJPY", "GBPUSD", "EURGBP", "AUDNZD"];
 /** 12:30 UTC, the real CPI and NFP release slot on US standard time. */
 const SLOT_OFFSET = 50;
 
@@ -172,7 +179,7 @@ test("the study reports every frozen horizon and judges the primary one only", (
   assert.equal(study.source.valid_events, 5);
   assert.deepEqual(study.response_curve.map((point) => point.horizon), [1, 2, 4, 8, 16]);
   assert.equal(study.empirical_null.level.observed, study.response_curve.find((point) => point.horizon === 4).usd_direct);
-  assert.deepEqual(Object.keys(study.per_symbol_primary).sort(), [...FX].sort());
+  assert.deepEqual(Object.keys(study.per_symbol_primary).sort(), [...PANEL].sort());
   // Five events cannot clear a minimum of eighty, and that is the condition that must be failing.
   const minimum = study.entry_conditions.find((condition) => condition.condition === "minimum_valid_events");
   assert.equal(minimum.met, false);
@@ -212,7 +219,8 @@ test("an event missing from one pair is dropped from all five, because the compa
   const study = runMacroEventResponseStudy({ ...input, series: input.series.map((entry) => entry.manifest.symbol === "EURGBP" ? replacement : entry) });
   assert.equal(study.source.valid_events, 4);
   assert.deepEqual(study.source.excluded_missing_anchor, [dropped]);
-  for (const symbol of FX) assert.ok(Number.isFinite(study.per_symbol_primary[symbol]));
+  for (const symbol of PANEL) assert.ok(Number.isFinite(study.per_symbol_primary[symbol]));
+  assert.equal(study.per_symbol_primary.XAUUSD, undefined, "the independent series is not part of the panel");
 });
 
 test("the baseline is causal: bars after the last measured window cannot move the response curve", () => {
