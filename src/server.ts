@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
-import type { StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
+import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -67,6 +67,9 @@ import { computeFuturesFlowContext, futuresFlowMapping } from "./futuresFlowCont
 import { computeSessionProfile, validateSessionClockDefinitions } from "./sessionProfile.js";
 import { computeMarketRegimes, marketRegimeResolutionMilliseconds, MAX_MARKET_REGIME_OBSERVATIONS } from "./marketRegimes.js";
 import { computeCorrelationRegimes } from "./correlationRegimes.js";
+import { computeCrossAssetShockPreflight, type CrossAssetShockRole } from "./crossAssetShockPreflight.js";
+import { computeCrossAssetShockStates } from "./crossAssetShockState.js";
+import { evaluateCrossAssetShockOutcomes } from "./crossAssetShockOutcome.js";
 import { computeLeadLagRelationships, resampleClosedBarsToUtcGrid } from "./leadLagRelationships.js";
 import { futuresSessionObservationDate, type FuturesOpenInterestFirstSeenStore } from "./futuresOpenInterestHistory.js";
 import { getPolicyRateContext } from "./policyRateContext.js";
@@ -8196,6 +8199,252 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           timeframe: primary.resolution, window: window ?? 20, strongThreshold: strong_threshold ?? 0.7,
           neutralThreshold: neutral_threshold ?? 0.2, ...result,
           limitations: ["Correlation is calculated only from exact-time-aligned closed-bar returns.", "It is descriptive and does not imply a causal or stable relationship."], });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  const readCrossAssetShockEvidence = async (input: {
+    targetChartIndex: number;
+    auxiliaryChartIndex: number;
+    expectedTargetSymbol: "OANDA:EURUSD" | "OANDA:USDJPY";
+    expectedTimeframe: "5" | "15";
+    count: number;
+    loadMoreBars: number;
+  }) => {
+    if (input.targetChartIndex === input.auxiliaryChartIndex) throw new Error("cross-asset shock target and auxiliary chart indexes must differ");
+    const replay = await tv.getReplayStatus();
+    if (replay.started || replay.toolbarVisible) throw new Error("cross-asset shock evidence collection is blocked while Bar Replay is active");
+    const context = await tv.getChartContext();
+    const targetChart = context.charts.find((chart) => chart.index === input.targetChartIndex);
+    const auxiliaryChart = context.charts.find((chart) => chart.index === input.auxiliaryChartIndex);
+    if (!targetChart || !auxiliaryChart) throw new Error("cross-asset shock requested chart is not present in the layout");
+    if (targetChart.symbol.toUpperCase() !== input.expectedTargetSymbol || normalizeResolution(targetChart.resolution) !== input.expectedTimeframe) {
+      throw new Error("cross-asset shock target chart does not match the requested binding");
+    }
+    const loadHistory = async (chartIndex: number) => {
+      const calls = [];
+      let remaining = input.loadMoreBars;
+      while (remaining > 0) {
+        const requested = Math.min(remaining, 5_000);
+        const loaded = await tv.loadMoreHistory({ count: requested, chartIndex });
+        calls.push(loaded);
+        remaining -= requested;
+        if (loaded.moreAvailable === false) break;
+      }
+      return {
+        requested_additional_bars: input.loadMoreBars,
+        calls,
+        added: calls.reduce((sum, loaded) => sum + loaded.added, 0),
+        bars_before: calls[0]?.barsBefore ?? null,
+        bars_after: calls.at(-1)?.barsAfter ?? null,
+        more_available: calls.at(-1)?.moreAvailable ?? null,
+      };
+    };
+    const historyLoadResults: Partial<Record<CrossAssetShockRole, unknown>> = {};
+    if (input.loadMoreBars > 0) {
+      historyLoadResults.target_fx = await loadHistory(input.targetChartIndex);
+    }
+    const target = await tv.getOhlcv(input.count, input.targetChartIndex);
+    if (target.symbol.toUpperCase() !== input.expectedTargetSymbol || normalizeResolution(target.resolution) !== input.expectedTimeframe) {
+      throw new Error("cross-asset shock target OHLC does not match the requested chart binding");
+    }
+    const contextSymbols = [
+      { role: "dxy" as const, symbol: "TVC:DXY" },
+      { role: "us_yield" as const, symbol: "TVC:US10Y" },
+      { role: "xauusd" as const, symbol: "OANDA:XAUUSD" },
+    ];
+    const temporaryReads: Array<{ role: Exclude<CrossAssetShockRole, "target_fx">; symbol: string; bars: OhlcvBar[] }> = [];
+    for (const item of contextSymbols) {
+      const transaction = await withTemporaryChartState(tv, input.auxiliaryChartIndex, { symbol: item.symbol, resolution: input.expectedTimeframe }, async () => {
+        await assertChartState(tv, input.auxiliaryChartIndex, { symbol: item.symbol, resolution: input.expectedTimeframe });
+        if (input.loadMoreBars > 0) {
+          historyLoadResults[item.role] = await loadHistory(input.auxiliaryChartIndex);
+        }
+        const history = await tv.getOhlcv(input.count, input.auxiliaryChartIndex);
+        if (history.symbol.toUpperCase() !== item.symbol || normalizeResolution(history.resolution) !== input.expectedTimeframe) {
+          throw new Error(`cross-asset shock ${item.role} OHLC does not match the temporary chart binding`);
+        }
+        return history.bars;
+      }, { resolutionFirst: true });
+      if (!transaction.restored) {
+        const operationMessage = transaction.operationError instanceof Error
+          ? transaction.operationError.message : String(transaction.operationError ?? "no operation error");
+        const restoreMessage = transaction.restoreError instanceof Error
+          ? transaction.restoreError.message : String(transaction.restoreError ?? "unknown restore error");
+        throw new Error(`cross-asset shock ${item.role} read failed (${operationMessage}) and auxiliary chart restore also failed (${restoreMessage})`);
+      }
+      if (transaction.operationError !== null || transaction.value === null) throw transaction.operationError ?? new Error(`cross-asset shock ${item.role} read returned no bars`);
+      temporaryReads.push({ role: item.role, symbol: item.symbol, bars: transaction.value });
+    }
+    return {
+      target,
+      temporaryReads,
+      execution: {
+        target_chart_index: input.targetChartIndex,
+        auxiliary_chart_index: input.auxiliaryChartIndex,
+        requested_count: input.count,
+        history_load: input.loadMoreBars === 0 ? null : {
+          requested_additional_bars_per_series: input.loadMoreBars,
+          results: historyLoadResults,
+        },
+        auxiliary_original: { symbol: auxiliaryChart.symbol, timeframe: normalizeResolution(auxiliaryChart.resolution) },
+        auxiliary_restored_after_each_context_read: true,
+      },
+    };
+  };
+
+  const alignCrossAssetShockEvidence = (timeframe: "5" | "15", evidence: Awaited<ReturnType<typeof readCrossAssetShockEvidence>>) => {
+    const series = [{ role: "target_fx" as const, symbol: evidence.target.symbol, bars: evidence.target.bars }, ...evidence.temporaryReads];
+    const preflight = computeCrossAssetShockPreflight({ timeframe, minimumAlignedBars: 2, series });
+    const byRole = Object.fromEntries(series.map((item) => [item.role, new Map(item.bars.filter((bar) => bar.forming !== true).map((bar) => [bar.time, bar]))])) as Record<CrossAssetShockRole, Map<number, OhlcvBar>>;
+    const bars = [...byRole.target_fx.values()].filter((bar) => ["dxy", "us_yield", "xauusd"].every((role) => byRole[role as Exclude<CrossAssetShockRole, "target_fx">].has(bar.time))).sort((left, right) => left.time - right.time);
+    return { preflight, bars, observations: bars.map((bar) => ({ time: bar.time, timeIso: bar.timeIso, target_fx: bar.close, dxy: byRole.dxy.get(bar.time)!.close, us_yield: byRole.us_yield.get(bar.time)!.close, xauusd: byRole.xauusd.get(bar.time)!.close })) };
+  };
+
+  server.registerTool(
+    "preflight_cross_asset_shock",
+    {
+      description:
+        "Coverage preflight for the cross-asset shock study. It binds an EURUSD or USDJPY " +
+        "target chart, then temporarily reuses one auxiliary chart for DXY, US10Y, and XAUUSD at the " +
+        "same 5 or 15 minute timeframe, restoring that auxiliary chart after each read. An optional " +
+        "explicit history load can add older bars but never changes symbols or timeframes persistently. " +
+        "Only exact UTC closed-bar intersections are counted; no shock threshold, direction, outcome, " +
+        "order-flow claim, or trading instruction is produced.",
+      inputSchema: {
+        target_chart_index: z.number().int().min(0),
+        auxiliary_chart_index: z.number().int().min(0),
+        expected_target_symbol: z.enum(["OANDA:EURUSD", "OANDA:USDJPY"]),
+        expected_timeframe: z.enum(["5", "15"]),
+        count: z.number().int().min(100).max(5000).optional(),
+        minimum_aligned_bars: z.number().int().min(100).max(5000).optional(),
+        load_more_bars: z.number().int().min(0).max(5000).optional()
+          .describe("Additional history to request for the target and each temporary context before reading. Default: 0"),
+      },
+    },
+    async ({ target_chart_index, auxiliary_chart_index, expected_target_symbol, expected_timeframe, count, minimum_aligned_bars, load_more_bars }) => chartOperations.run(async () => {
+      try {
+        const requestedCount = count ?? 1000;
+        const minimumAlignedBars = minimum_aligned_bars ?? 500;
+        const historyLoadBars = load_more_bars ?? 0;
+        if (minimumAlignedBars > requestedCount) throw new Error("minimum_aligned_bars cannot exceed count");
+        const evidence = await readCrossAssetShockEvidence({
+          targetChartIndex: target_chart_index, auxiliaryChartIndex: auxiliary_chart_index,
+          expectedTargetSymbol: expected_target_symbol, expectedTimeframe: expected_timeframe,
+          count: requestedCount, loadMoreBars: historyLoadBars,
+        });
+        const result = computeCrossAssetShockPreflight({
+          timeframe: expected_timeframe,
+          minimumAlignedBars,
+          series: [
+            { role: "target_fx", symbol: evidence.target.symbol, bars: evidence.target.bars },
+            ...evidence.temporaryReads,
+          ],
+        });
+        return jsonResult({
+          ...result,
+          execution: evidence.execution,
+        });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "classify_cross_asset_shocks",
+    {
+      description:
+        "Classify observed EURUSD or USDJPY shocks after exact-time cross-asset collection. It temporarily " +
+        "uses one auxiliary chart for DXY, US10Y, and XAUUSD, restores it after each read, and applies the " +
+        "frozen same-UTC-slot baseline contract. It reports observed state only, never a forward outcome, " +
+        "candidate, order-flow claim, or trading instruction.",
+      inputSchema: {
+        target_chart_index: z.number().int().min(0),
+        auxiliary_chart_index: z.number().int().min(0),
+        expected_target_symbol: z.enum(["OANDA:EURUSD", "OANDA:USDJPY"]),
+        expected_timeframe: z.enum(["5", "15"]),
+        count: z.number().int().min(100).max(20000).optional(),
+        load_more_bars: z.number().int().min(0).max(20000).optional()
+          .describe("Additional history to request for the target and each temporary context before reading. Default: 0"),
+        minimum_classified_states: z.number().int().min(1).max(500).optional(),
+        state_limit: z.number().int().min(1).max(500).optional()
+          .describe("Maximum latest classified state rows to return. Aggregate counts use every eligible row. Default: 200"),
+      },
+    },
+    async ({ target_chart_index, auxiliary_chart_index, expected_target_symbol, expected_timeframe,
+      count, load_more_bars, minimum_classified_states, state_limit }) => chartOperations.run(async () => {
+      try {
+        const evidence = await readCrossAssetShockEvidence({
+          targetChartIndex: target_chart_index, auxiliaryChartIndex: auxiliary_chart_index,
+          expectedTargetSymbol: expected_target_symbol, expectedTimeframe: expected_timeframe,
+          count: count ?? 10_000, loadMoreBars: load_more_bars ?? 0,
+        });
+        const series = [
+          { role: "target_fx" as const, symbol: evidence.target.symbol, bars: evidence.target.bars },
+          ...evidence.temporaryReads,
+        ];
+        const preflight = computeCrossAssetShockPreflight({ timeframe: expected_timeframe, minimumAlignedBars: 2, series });
+        const byRole = Object.fromEntries(series.map((item) => {
+          const closedBars = item.bars.filter((bar) => bar.forming !== true);
+          return [item.role, new Map(closedBars.map((bar) => [bar.time, bar]))];
+        })) as Record<CrossAssetShockRole, Map<number, OhlcvBar>>;
+        const observations = [...byRole.target_fx.values()]
+          .filter((targetBar) => ["dxy", "us_yield", "xauusd"].every((role) => byRole[role as Exclude<CrossAssetShockRole, "target_fx">].has(targetBar.time)))
+          .sort((left, right) => left.time - right.time)
+          .map((targetBar) => ({
+            time: targetBar.time, timeIso: targetBar.timeIso,
+            target_fx: targetBar.close, dxy: byRole.dxy.get(targetBar.time)!.close,
+            us_yield: byRole.us_yield.get(targetBar.time)!.close, xauusd: byRole.xauusd.get(targetBar.time)!.close,
+          }));
+        const result = computeCrossAssetShockStates({
+          timeframe: expected_timeframe, targetSymbol: expected_target_symbol, observations,
+        });
+        const classifiedStates = result.states.filter((state) => [
+          "cross_asset_confirmed", "partial_confirmation", "target_only", "cross_asset_conflict",
+        ].includes(state.state));
+        const requiredStates = minimum_classified_states ?? 20;
+        const qualityIssues = [
+          ...(classifiedStates.length < requiredStates ? ["minimum_classified_states_not_met"] : []),
+          ...(result.quality.non_contiguous_input_intervals > 0 ? ["non_contiguous_common_intervals_excluded_from_returns"] : []),
+        ];
+        return jsonResult({
+          ...result,
+          status: classifiedStates.length >= requiredStates ? "complete" : "partial",
+          evidence: {
+            sources: preflight.sources, alignment: preflight.alignment,
+            forming_bars_excluded: preflight.quality.forming_bars_excluded,
+          },
+          classified_states: classifiedStates.length,
+          minimum_classified_states: requiredStates,
+          quality_issues: qualityIssues,
+          states: classifiedStates.slice(-(state_limit ?? 200)),
+          execution: evidence.execution,
+        });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "evaluate_cross_asset_shock_outcomes",
+    {
+      description: "Measure descriptive 15/30/60/120-minute outcomes for frozen observed cross-asset shock states. It uses exact-time common bars, excludes overlapping state windows, and never produces a candidate or trade instruction.",
+      inputSchema: {
+        target_chart_index: z.number().int().min(0), auxiliary_chart_index: z.number().int().min(0),
+        expected_target_symbol: z.enum(["OANDA:EURUSD", "OANDA:USDJPY"]), expected_timeframe: z.enum(["5", "15"]),
+        count: z.number().int().min(100).max(20000).optional(), load_more_bars: z.number().int().min(0).max(20000).optional(),
+        minimum_events_per_state: z.number().int().min(1).max(500).optional(), event_limit: z.number().int().min(1).max(500).optional(),
+      },
+    },
+    async ({ target_chart_index, auxiliary_chart_index, expected_target_symbol, expected_timeframe, count, load_more_bars, minimum_events_per_state, event_limit }) => chartOperations.run(async () => {
+      try {
+        const evidence = await readCrossAssetShockEvidence({ targetChartIndex: target_chart_index, auxiliaryChartIndex: auxiliary_chart_index, expectedTargetSymbol: expected_target_symbol, expectedTimeframe: expected_timeframe, count: count ?? 12000, loadMoreBars: load_more_bars ?? 0 });
+        const aligned = alignCrossAssetShockEvidence(expected_timeframe, evidence);
+        const classified = computeCrossAssetShockStates({ timeframe: expected_timeframe, targetSymbol: expected_target_symbol, observations: aligned.observations });
+        const states = classified.states.filter((state) => ["cross_asset_confirmed", "partial_confirmation", "target_only", "cross_asset_conflict"].includes(state.state)).map((state) => ({
+          time: state.time, target_return_bps: state.target_return_bps,
+          state: state.state as "cross_asset_confirmed" | "partial_confirmation" | "target_only" | "cross_asset_conflict",
+        }));
+        const result = evaluateCrossAssetShockOutcomes({ timeframe: expected_timeframe, targetSymbol: expected_target_symbol, bars: aligned.bars, states, minimumEventsPerState: minimum_events_per_state ?? 20, eventLimit: event_limit ?? 200 });
+        return jsonResult({ ...result, classification: { state_counts: classified.state_counts, quality: classified.quality }, evidence: { sources: aligned.preflight.sources, alignment: aligned.preflight.alignment }, execution: evidence.execution });
       } catch (err) { return errorResult(err); }
     }),
   );

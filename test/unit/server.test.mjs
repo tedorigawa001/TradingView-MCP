@@ -740,7 +740,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the ninety-seven expected tools", async () => {
+test("exposes exactly the one hundred expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -750,6 +750,7 @@ test("exposes exactly the ninety-seven expected tools", async () => {
       "apply_analysis_overlay",
       "audit_pine_indicator",
       "carry_panel_preflight",
+      "classify_cross_asset_shocks",
       "compare_indicator_observations",
       "compare_strategy_experiments",
       "compute_correlation_regimes",
@@ -764,6 +765,7 @@ test("exposes exactly the ninety-seven expected tools", async () => {
       "ensure_analysis_overlay",
       "estimate_carry_panel_effective_sample",
       "evaluate_analysis_overlay_outcome",
+      "evaluate_cross_asset_shock_outcomes",
       "evaluate_due_analyses",
       "get_aligned_history",
       "get_analysis_calibration",
@@ -810,6 +812,7 @@ test("exposes exactly the ninety-seven expected tools", async () => {
       "list_pine_scripts",
       "load_more_history",
       "measure_carry_panel_dependence",
+      "preflight_cross_asset_shock",
       "reconcile_gold_open_interest",
       "record_strategy_experiment",
       "register_event_study_hypothesis",
@@ -1086,6 +1089,211 @@ test("compute_correlation_regimes binds two exact-time chart histories", async (
   assert.equal(parsed.status, "complete");
   assert.equal(parsed.alignmentPolicy, "exact_utc_timestamp_no_forward_fill");
   assert.equal(parsed.observations.at(-1).regime, "strong_negative");
+});
+
+test("preflight_cross_asset_shock reads exact-time contexts and restores the auxiliary chart", async () => {
+  const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
+  const auxiliaryChart = { symbol: "OANDA:GBPUSD", resolution: "60" };
+  const operations = [];
+  const historyLoads = [];
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+    { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
+    { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
+  ] });
+  const barsFor = (symbol) => Array.from({ length: 120 }, (_, index) => {
+    const close = 100 + index + symbol.length / 100;
+    const time = Date.UTC(2026, 0, 2) / 1_000 + index * 900;
+    return { time, timeIso: new Date(time * 1_000).toISOString(), open: close - 0.1,
+      high: close + 0.2, low: close - 0.2, close, volume: 1 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getOhlcv: async (count, chartIndex) => {
+      const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
+      return { symbol: chart.symbol, resolution: chart.resolution, count, bars: barsFor(chart.symbol) };
+    },
+    setSymbol: async (symbol, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.symbol = symbol;
+      operations.push(`symbol:${symbol}`);
+      return { symbol, resolution: auxiliaryChart.resolution, bars: 120 };
+    },
+    setResolution: async (resolution, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.resolution = resolution;
+      operations.push(`resolution:${resolution}`);
+      return { symbol: auxiliaryChart.symbol, resolution, bars: 120 };
+    },
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      historyLoads.push({ count, chartIndex });
+      return { requested: count, barsBefore: 300, barsAfter: 400, added: 100, moreAvailable: true };
+    },
+  }}));
+
+  const response = await client.callTool({ name: "preflight_cross_asset_shock", arguments: {
+    target_chart_index: 0, auxiliary_chart_index: 1, expected_target_symbol: "OANDA:EURUSD",
+    expected_timeframe: "15", count: 120, minimum_aligned_bars: 100, load_more_bars: 100,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.alignment.common_closed_bars, 120);
+  assert.deepEqual(parsed.execution.auxiliary_original, { symbol: "OANDA:GBPUSD", timeframe: "60" });
+  assert.equal(parsed.execution.auxiliary_restored_after_each_context_read, true);
+  assert.deepEqual(historyLoads, [
+    { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 },
+    { count: 100, chartIndex: 1 }, { count: 100, chartIndex: 1 },
+  ]);
+  assert.equal(parsed.execution.history_load.requested_additional_bars_per_series, 100);
+  assert.equal(parsed.execution.history_load.results.us_yield.added, 100);
+  assert.deepEqual(auxiliaryChart, { symbol: "OANDA:GBPUSD", resolution: "60" });
+  assert.deepEqual(operations, [
+    "resolution:15", "symbol:TVC:DXY", "symbol:OANDA:GBPUSD", "resolution:60",
+    "resolution:15", "symbol:TVC:US10Y", "symbol:OANDA:GBPUSD", "resolution:60",
+    "resolution:15", "symbol:OANDA:XAUUSD", "symbol:OANDA:GBPUSD", "resolution:60",
+  ]);
+});
+
+test("preflight_cross_asset_shock restores the auxiliary chart when a temporary history is misbound", async () => {
+  const targetChart = { symbol: "OANDA:USDJPY", resolution: "5" };
+  const auxiliaryChart = { symbol: "OANDA:EURUSD", resolution: "15" };
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+    { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
+    { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
+  ] });
+  const bars = Array.from({ length: 120 }, (_, index) => ({ time: 1_700_000_000 + index * 300,
+    timeIso: new Date((1_700_000_000 + index * 300) * 1_000).toISOString(), open: 100, high: 101, low: 99, close: 100, volume: 1 }));
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getOhlcv: async (_count, chartIndex) => {
+      const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
+      return { symbol: chart.symbol === "TVC:US10Y" ? "TVC:DXY" : chart.symbol, resolution: chart.resolution, count: bars.length, bars };
+    },
+    setSymbol: async (symbol, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.symbol = symbol;
+      return { symbol, resolution: auxiliaryChart.resolution, bars: bars.length };
+    },
+    setResolution: async (resolution, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.resolution = resolution;
+      return { symbol: auxiliaryChart.symbol, resolution, bars: bars.length };
+    },
+  }}));
+
+  const response = await client.callTool({ name: "preflight_cross_asset_shock", arguments: {
+    target_chart_index: 0, auxiliary_chart_index: 1, expected_target_symbol: "OANDA:USDJPY",
+    expected_timeframe: "5", count: 120, minimum_aligned_bars: 100,
+  } });
+  assert.match(response.content[0].text, /cross-asset shock us_yield OHLC does not match/);
+  assert.deepEqual(auxiliaryChart, { symbol: "OANDA:EURUSD", resolution: "15" });
+});
+
+test("classify_cross_asset_shocks classifies a frozen observed state and restores the auxiliary chart", async () => {
+  const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
+  const auxiliaryChart = { symbol: "OANDA:XAUUSD", resolution: "1D" };
+  const historyLoads = [];
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+    { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
+    { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
+  ] });
+  const barsFor = (symbol) => {
+    const start = Date.UTC(2026, 0, 2, 13, 45) / 1_000;
+    const rows = [];
+    for (let week = 0; week < 13; week += 1) {
+      const time = start + week * 7 * 24 * 60 * 60;
+      const movement = week < 12 ? 0.0001 : 0.005;
+      const polarity = symbol === "TVC:DXY" || symbol === "TVC:US10Y" ? -1 : 1;
+      rows.push({ time, timeIso: new Date(time * 1_000).toISOString(), open: 100, high: 100, low: 100, close: 100, volume: 1 });
+      rows.push({ time: time + 900, timeIso: new Date((time + 900) * 1_000).toISOString(), open: 100,
+        high: 101, low: 99, close: 100 * (1 + movement * polarity), volume: 1 });
+    }
+    return rows;
+  };
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getOhlcv: async (count, chartIndex) => {
+      const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
+      return { symbol: chart.symbol, resolution: chart.resolution, count, bars: barsFor(chart.symbol) };
+    },
+    setSymbol: async (symbol, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.symbol = symbol;
+      return { symbol, resolution: auxiliaryChart.resolution, bars: 26 };
+    },
+    setResolution: async (resolution, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.resolution = resolution;
+      return { symbol: auxiliaryChart.symbol, resolution, bars: 26 };
+    },
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      historyLoads.push({ count, chartIndex });
+      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+    },
+  }}));
+
+  const response = await client.callTool({ name: "classify_cross_asset_shocks", arguments: {
+    target_chart_index: 0, auxiliary_chart_index: 1, expected_target_symbol: "OANDA:EURUSD",
+    expected_timeframe: "15", count: 100, minimum_classified_states: 1, load_more_bars: 6000,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.classified_states, 1);
+  assert.equal(parsed.states[0].state, "cross_asset_confirmed");
+  assert.equal(parsed.states[0].context.us_yield.direction, "confirming");
+  assert.deepEqual(historyLoads.map((item) => item.count), [5000, 1000, 5000, 1000, 5000, 1000, 5000, 1000]);
+  assert.equal(parsed.execution.history_load.results.dxy.calls.length, 2);
+  assert.equal(parsed.execution.history_load.results.dxy.added, 6000);
+  assert.deepEqual(auxiliaryChart, { symbol: "OANDA:XAUUSD", resolution: "1D" });
+});
+
+test("evaluate_cross_asset_shock_outcomes wires frozen states to outcomes and restores the auxiliary chart", async () => {
+  const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
+  const auxiliaryChart = { symbol: "OANDA:XAUUSD", resolution: "1D" };
+  const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+    { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
+    { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
+  ] });
+  const barsFor = (symbol) => {
+    const start = Date.UTC(2026, 0, 2, 13, 45) / 1_000;
+    const rows = [];
+    for (let week = 0; week < 13; week += 1) {
+      const time = start + week * 7 * 24 * 60 * 60;
+      const movement = week < 12 ? 0.0001 : 0.005;
+      const polarity = symbol === "TVC:DXY" || symbol === "TVC:US10Y" ? -1 : 1;
+      rows.push({ time, timeIso: new Date(time * 1_000).toISOString(), open: 100, high: 100, low: 100, close: 100, volume: 1 });
+      rows.push({ time: time + 900, timeIso: new Date((time + 900) * 1_000).toISOString(), open: 100,
+        high: 101, low: 99, close: 100 * (1 + movement * polarity), volume: 1 });
+    }
+    return rows;
+  };
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => context(),
+    getOhlcv: async (count, chartIndex) => {
+      const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
+      return { symbol: chart.symbol, resolution: chart.resolution, count, bars: barsFor(chart.symbol) };
+    },
+    setSymbol: async (symbol, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.symbol = symbol;
+      return { symbol, resolution: auxiliaryChart.resolution, bars: 26 };
+    },
+    setResolution: async (resolution, chartIndex) => {
+      assert.equal(chartIndex, 1);
+      auxiliaryChart.resolution = resolution;
+      return { symbol: auxiliaryChart.symbol, resolution, bars: 26 };
+    },
+  }}));
+
+  const response = await client.callTool({ name: "evaluate_cross_asset_shock_outcomes", arguments: {
+    target_chart_index: 0, auxiliary_chart_index: 1, expected_target_symbol: "OANDA:EURUSD",
+    expected_timeframe: "15", count: 100, minimum_events_per_state: 1,
+  } });
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.contract.contract_id, "cross_asset_shock_outcome_v1");
+  assert.equal(parsed.classification.state_counts.cross_asset_confirmed, 1);
+  assert.equal(parsed.by_state.cross_asset_confirmed.events, 1);
+  assert.equal(parsed.quality.overlapping_states_excluded, 0);
+  assert.deepEqual(auxiliaryChart, { symbol: "OANDA:XAUUSD", resolution: "1D" });
 });
 
 test("compute_correlation_regimes with confirm:true performs multi-ref symbol verification and restores chart state", async () => {
