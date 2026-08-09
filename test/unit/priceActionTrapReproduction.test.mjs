@@ -71,12 +71,12 @@ const FIXTURE_SLOTS = 24;
 const FIXTURE_DAYS = 420;
 const FIXTURE_MS = 15 * 60_000;
 
-function buildFixtureDay(day, out) {
+function buildFixtureDay(day, out, slots = FIXTURE_SLOTS) {
   const shifted = day % 140 === 0;
   const phase = day % 4;
   const short = day % 2 === 0;
   const base = 100;
-  for (let slot = 0; slot < FIXTURE_SLOTS; slot += 1) {
+  for (let slot = 0; slot < slots; slot += 1) {
     const timeIso = new Date(FIXTURE_START + day * 86_400_000 + (shifted ? 40 + slot : slot) * FIXTURE_MS).toISOString();
     const rel = slot - phase;
     let bar;
@@ -98,9 +98,12 @@ function buildFixtureDay(day, out) {
   }
 }
 
-function fixtureSeries(symbol) {
+function fixtureSeries(symbol, { slots = FIXTURE_SLOTS, edit } = {}) {
   const bars = [];
-  for (let day = 0; day < FIXTURE_DAYS; day += 1) buildFixtureDay(day, bars);
+  for (let day = 0; day < FIXTURE_DAYS; day += 1) buildFixtureDay(day, bars, slots);
+  // Applied before the digest, so an edited series is a consistent aggregate rather than one the
+  // hash check would reject for the wrong reason.
+  edit?.(bars);
   return {
     manifest: {
       schema_version: "1.0", series: "fx_csv_m1_aggregate", evidence_tier: "official_revised_history",
@@ -196,4 +199,56 @@ test("the response curve and the artifact hash describe the events that were kep
   assert.deepEqual(Object.keys(study.response_curve), PRICE_ACTION_TRAP_REPRODUCTION_V1.horizons.map(String));
   // Same inputs, same artifact: the seed is frozen, so a rerun must reproduce the hash.
   assert.equal(runPriceActionTrapReproduction(PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols.map(fixtureSeries)).artifact_hash, study.artifact_hash);
+});
+
+const runWith = (options) => runPriceActionTrapReproduction(PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols.map((symbol) => fixtureSeries(symbol, options)));
+
+test("an aggregate is held to the same admissibility policy as every other CSV study", () => {
+  // A bar built from one traded minute is not a fifteen-minute bar, and a hash-consistent aggregate
+  // of such bars would otherwise reproduce as a valid historical result.
+  assert.throws(
+    () => runWith({ edit: (bars) => { bars[500].minutesPresent = 1; } }),
+    /reports 1 of 15 minutes/,
+  );
+  // And a series aggregated under a policy that permits them is refused before its bars are read.
+  assert.throws(
+    () => runPriceActionTrapReproduction(PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols.map((symbol) => {
+      const entry = fixtureSeries(symbol);
+      return { ...entry, manifest: { ...entry.manifest, minimum_minute_coverage: 4 } };
+    })),
+    /minimum_minute_coverage 4/,
+  );
+  // A logarithmic return needs a positive price, which a positive high alone does not guarantee.
+  assert.throws(
+    () => runWith({ edit: (bars) => { Object.assign(bars[500], { open: 0.5, close: 0.5, high: 1, low: -1 }); } }),
+    /non-positive price/,
+  );
+});
+
+test("a horizon left short of the minimum is reported unevaluated, not as a null-valued measurement", () => {
+  // Shorter days, so the longest horizon runs off the end for half the events while the primary is
+  // untouched. Before this the shortfall arrived as NaN and JSON wrote it as null - identical on
+  // the page to a horizon that was measured and came out empty.
+  const study = runWith({ slots: 21 });
+  const primary = study.response_curve[String(PRICE_ACTION_TRAP_REPRODUCTION_V1.primary_horizon)];
+  const longest = study.response_curve["16"];
+
+  assert.equal(primary.status, "measured");
+  assert.ok(Number.isFinite(primary.mean_bps));
+  assert.ok(primary.events >= PRICE_ACTION_TRAP_REPRODUCTION_V1.minimum_events);
+
+  assert.equal(longest.status, "not_evaluated");
+  assert.ok(longest.events < PRICE_ACTION_TRAP_REPRODUCTION_V1.minimum_events);
+  assert.equal(longest.mean_bps, null);
+  assert.equal(longest.lower_bps, null);
+  assert.equal(longest.upper_bps, null);
+  // Explicitly null, not NaN coerced to null on the way out.
+  assert.equal(JSON.parse(JSON.stringify(longest)).status, "not_evaluated");
+});
+
+test("every horizon says which of the two it is, so a null is never ambiguous", () => {
+  for (const point of Object.values(fixtureRun().response_curve)) {
+    assert.ok(point.status === "measured" || point.status === "not_evaluated");
+    assert.equal(point.status === "measured", Number.isFinite(point.mean_bps));
+  }
 });

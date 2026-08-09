@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import { canonicalDefinitionHash } from "./canonicalDefinition.js";
+import { assertAdmissibleAggregate } from "./fxCsvFeatureScanCli.js";
 
 export const PRICE_ACTION_TRAP_REPRODUCTION_V1 = {
   contract_id: "price_action_four_bar_trap_v1",
@@ -47,6 +47,13 @@ const quantile95 = (values: readonly number[]) => values[Math.min(values.length 
 const slotCell = (timeIso: string) => `${timeIso.slice(11, 16)}|${new Date(timeIso).getUTCDay()}`;
 
 function interval(values: readonly number[]) {
+  // A single observation has no sample variance, and an empty one has no mean. Both fall out of the
+  // arithmetic as NaN, and JSON.stringify writes NaN as null - so an interval that was never
+  // computed would reach the artifact looking exactly like one that was computed and came out empty.
+  //
+  // Unreachable while the caller keeps its minimum-events guard above two, which is the point: it
+  // holds that guarantee in place rather than depending on it staying true elsewhere.
+  if (values.length < 2) throw new Error(`an interval needs at least two observations, got ${values.length}`);
   const average = mean(values);
   const variance = values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1);
   const half = 1.96 * Math.sqrt(variance / values.length);
@@ -55,18 +62,20 @@ function interval(values: readonly number[]) {
 
 function assertAggregate(input: AggregateInput) {
   const { manifest, bars } = input;
+  // The shared admissibility policy every other CSV study is held to, rather than a second weaker
+  // one written beside it. It covers the manifest digest, strictly increasing bucket-aligned
+  // timestamps and candle well-formedness, and - the part missing here before - that the series was
+  // aggregated with a minimum_minute_coverage of at least half a bucket and that every bar actually
+  // holds that many minutes. Without it a bar built from a single traded minute counted the same as
+  // a full one, and a hash-consistent aggregate of such bars would reproduce as a valid result.
+  assertAdmissibleAggregate(manifest, bars);
   if (manifest.bucket_minutes !== PRICE_ACTION_TRAP_REPRODUCTION_V1.timeframe_minutes) {
     throw new Error(`${manifest.symbol} must be a 15-minute aggregate`);
   }
-  if (bars.length !== manifest.bar_count || bars.length === 0) throw new Error(`${manifest.symbol} aggregate bar count does not match its manifest`);
-  const digest = `sha256:${createHash("sha256").update(JSON.stringify(bars), "utf8").digest("hex")}`;
-  if (digest !== manifest.normalized_sha256) throw new Error(`${manifest.symbol} aggregate does not match normalized_sha256`);
-  let prior = -Infinity;
   for (const bar of bars) {
-    const at = Date.parse(bar.timeIso);
-    if (!Number.isFinite(at) || at <= prior || at % (INTERVAL_SECONDS * 1000) !== 0) throw new Error(`${manifest.symbol} bars are not strictly increasing M15 timestamps`);
-    if (!(bar.high >= Math.max(bar.open, bar.close) && bar.low <= Math.min(bar.open, bar.close) && bar.low > 0)) throw new Error(`${manifest.symbol} has an invalid candle at ${bar.timeIso}`);
-    prior = at;
+    // Returns here are logarithmic, so a non-positive price is not merely an odd candle. The shared
+    // guard requires a positive high, which does not force the low or the close positive with it.
+    if (!(bar.low > 0)) throw new Error(`${manifest.symbol} has a non-positive price at ${bar.timeIso}`);
   }
 }
 
@@ -185,9 +194,17 @@ export function runPriceActionTrapReproduction(inputs: readonly AggregateInput[]
     nullDistribution.push(sum / samplingRows.length);
   }
   nullDistribution.sort((left, right) => left - right);
+  // An event is kept on the strength of its primary horizon alone, so an auxiliary horizon can be
+  // left with far fewer windows - or none, where the series ends or a gap runs long. Such a horizon
+  // is reported as unevaluated with explicit nulls rather than measured, because a mean over one
+  // observation and an interval over none both arrive in the artifact as null either way, and there
+  // would be nothing in the file to say which of the two happened.
   const curve = Object.fromEntries(PRICE_ACTION_TRAP_REPRODUCTION_V1.horizons.map((horizon) => {
     const values = eligible.map((event) => event.forward_returns_bps[String(horizon)]).filter((value): value is number => value !== undefined);
-    return [String(horizon), { events: values.length, ...interval(values) }];
+    if (values.length < PRICE_ACTION_TRAP_REPRODUCTION_V1.minimum_events) {
+      return [String(horizon), { events: values.length, status: "not_evaluated" as const, mean_bps: null, lower_bps: null, upper_bps: null }];
+    }
+    return [String(horizon), { events: values.length, status: "measured" as const, ...interval(values) }];
   }));
   const observedPrimary = mean(observed);
   const result = {
