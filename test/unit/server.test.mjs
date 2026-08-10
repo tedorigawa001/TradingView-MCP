@@ -1,4 +1,7 @@
 import test from "node:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -29,6 +32,7 @@ import {
 
 function makeDeps(overrides = {}) {
   return {
+    chartOperationLock: overrides.chartOperationLock ?? { acquire: async () => async () => {} },
     cdp: {
       screenshot: async (fmt) => "ZmFrZQ==", // "fake"
       ...overrides.cdp,
@@ -525,6 +529,7 @@ function makeDeps(overrides = {}) {
       ...overrides.policyRateOfficialHistory,
     },
     policyRateHeartbeats: overrides.policyRateHeartbeats,
+    bookmapFlowDirectory: overrides.bookmapFlowDirectory,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -740,7 +745,7 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the one hundred expected tools", async () => {
+test("exposes exactly the one hundred one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -812,6 +817,7 @@ test("exposes exactly the one hundred expected tools", async () => {
       "list_pine_scripts",
       "load_more_history",
       "measure_carry_panel_dependence",
+      "preflight_bookmap_flow_price_join",
       "preflight_cross_asset_shock",
       "reconcile_gold_open_interest",
       "record_strategy_experiment",
@@ -848,6 +854,36 @@ test("exposes exactly the one hundred expected tools", async () => {
       "validate_trade_plan",
     ],
   );
+});
+
+test("Bookmap flow price preflight binds EURUSD M1 and reads only the configured local evidence session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-bookmap-flow-"));
+  const fileName = "bookmap-flow-6EQ6.CME_BMD-1.jsonl";
+  const receivedAt = "2026-08-10T00:00:10.000Z";
+  const rows = [
+    { schema_version: "1.1", source: "bookmap", event_type: "instrument", instrument_alias: "6EQ6.CME@BMD", bookmap_time_ns: "1780000000000000001", received_at: "2026-08-10T00:00:01.000Z", symbol: "6EQ6", exchange: "CME", is_full_depth: true, mbo_captured: false, is_crypto: false },
+    { schema_version: "1.1", source: "bookmap", event_type: "snapshot_end", instrument_alias: "6EQ6.CME@BMD", bookmap_time_ns: "1780000000000000002", received_at: "2026-08-10T00:00:02.000Z" },
+    { schema_version: "1.1", source: "bookmap", event_type: "trade", instrument_alias: "6EQ6.CME@BMD", bookmap_time_ns: "1780000000000000003", received_at: receivedAt, aggressor: "buy", size: 2 },
+  ];
+  await writeFile(join(directory, fileName), `${rows.map(JSON.stringify).join("\n")}\n`);
+  const bars = [
+    { time: Date.parse("2026-08-10T00:01:00.000Z") / 1000, timeIso: "2026-08-10T00:01:00.000Z", open: 1.1, high: 1.1, low: 1.1, close: 1.1, volume: 1 },
+  ];
+  const client = await connectedClient(makeDeps({
+    bookmapFlowDirectory: directory,
+    tv: {
+      getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "1", studies: [] }] }),
+      getOhlcv: async () => ({ symbol: "OANDA:EURUSD", resolution: "1", count: bars.length, bars }),
+    },
+  }));
+  const response = await client.callTool({ name: "preflight_bookmap_flow_price_join", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "1", session_file: fileName, minimum_intervals: 1,
+  } });
+  assert.notEqual(response.isError, true, response.content[0].text);
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "complete");
+  assert.equal(parsed.coverage.exact_target_bar_intervals, 1);
+  assert.equal(parsed.contract.minimum_target_lag_bars, 1);
 });
 
 test("reconcile_gold_open_interest only returns same-day official CME evidence", async () => {

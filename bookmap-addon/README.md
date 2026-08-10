@@ -16,16 +16,19 @@ modify, or cancel orders, and it does not expose the data over a network.
   guessed as buy or sell.
 - `depth`: incremental bid/ask book-level size updates.
 - `bbo`: best bid/ask price-level and size updates.
+- `snapshot_end`: Bookmap's initial depth snapshot completion marker. Only sessions
+  containing this marker can later support a reconstructed book-balance feature.
 - `collector_stop`: clean shutdown marker.
 
-Each record has the latest Bookmap timestamp in nanoseconds when available and
-the local receipt timestamp. `bookmap_time_ns` is the most recently received
+Each record has the latest Bookmap timestamp in nanoseconds as a decimal string when available and
+the local receipt timestamp, rounded to canonical milliseconds. `bookmap_time_ns` is the most recently received
 `TimeListener` value, not a per-callback exchange timestamp; it can be `null`
 before the first timestamp callback. Do not treat it as tick-exact ordering
 evidence until the selected feed's callback ordering and timestamp semantics
 have been measured. The add-on writes one append-only JSONL file per attached
-instrument under `fxdata/bookmap-raw/`; this directory is already excluded
-from Git.
+instrument under `/Volumes/HD/bookmap_data`; this external-data directory is
+not part of Git. Set `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY` for the MCP
+server when using another location.
 
 The data represents the selected Bookmap feed and instrument only. For FX
 research, use CME futures such as `6E`, `6J`, or `GC` as explicitly labelled
@@ -52,8 +55,8 @@ bookmap-addon/test.sh
 1. In Bookmap, open `Settings` then API plug-in configuration.
 2. Add the generated JAR and enable **Bushido Flow Collector** for the intended
    futures instrument.
-3. Keep the default output directory or configure a writable local directory.
-4. Confirm that a new JSONL file appears in `fxdata/bookmap-raw/`.
+3. Keep `/Volumes/HD/bookmap_data` or configure a writable local directory.
+4. Confirm that a new JSONL file appears in the configured directory.
 5. Disable the add-on before moving or deleting its output files.
 
 Bookmap may require an application restart after adding or updating an API

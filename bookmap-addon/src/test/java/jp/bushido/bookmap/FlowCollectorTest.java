@@ -17,6 +17,7 @@ public final class FlowCollectorTest {
         escapesJsonStringsAndSanitizesFileNames();
         usesOnlyBookmapSupportedParameterTypes();
         serializesDepthWithNormalizedPriceAndTimestamp();
+        writesSnapshotCompletionMarker();
         preservesUnknownTradeMetadataInsteadOfInventingASide();
         preservesProvidedTradeMetadata();
         recordsInstrumentEvidenceRequiredToInterpretTheFeed();
@@ -120,11 +121,19 @@ public final class FlowCollectorTest {
         String line = output.toString().split("\\n")[0];
         assertContains(line, "\"event_type\":\"depth\"");
         assertContains(line, "\"instrument_alias\":\"6EQ6:CME\"");
-        assertContains(line, "\"bookmap_time_ns\":1234567890");
+        assertContains(line, "\"bookmap_time_ns\":\"1234567890\"");
         assertContains(line, "\"side\":\"bid\"");
         assertContains(line, "\"price_level\":115600");
         assertContains(line, "\"price\":1.156");
         assertContains(line, "\"size\":42");
+    }
+
+    private static void writesSnapshotCompletionMarker() throws Exception {
+        StringWriter output = new StringWriter();
+        FlowCollector collector = collector(output);
+        collector.onSnapshotEnd();
+        collector.stop();
+        assertContains(output.toString(), "\"event_type\":\"snapshot_end\"");
     }
 
     private static void writesStopMarkerAndFlushesPendingRecords() throws Exception {

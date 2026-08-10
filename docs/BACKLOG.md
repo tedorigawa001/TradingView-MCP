@@ -1656,6 +1656,14 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **結果契約 v1 (2026-08-09, 実データ適用前に凍結)**: 状態バー終値を参照価格とし、発生時のFXショック方向へ1/2/4/8本(15/30/60/120分)先の方向性リターン、MFE、MAEを測る。未来側も厳密一致した共通列の連続バーに限る。最大8本の評価窓内で後発した状態は除外する。状態ごとの最小イベント数は20。区間は記述的で、イベント依存・複数比較を調整しないためcandidate化や採用判断に使わない
 - **実機結果測定 (2026-08-09, EURUSD M15)**: 117状態のうち、8本窓の後発36件を除外して81イベントを評価した。最小20件を満たすのは`cross_asset_confirmed` 22件と`partial_confirmation` 41件のみ。完全確認の方向別平均リターンは15/30/60/120分で-1.81/-2.91/+0.06/+3.49 bps、部分確認は+0.08/+0.10/-0.50/-0.39 bpsで、全ての95%記述区間がゼロを含む。`target_only` 16件、`cross_asset_conflict` 2件は最小件数未達であり、数値比較や候補化をしない。したがってv1は持続優位を示さず、次段階の同時刻・同一regime対照、曜日・セッション一致プラセボ、経験的ヌルには進まない
 
+### #83 Bookmap flow-to-price 結合 preflight (契約 v1, 2026-08-10)
+
+- **目的と境界**: Bookmap Collector の CME 通貨先物イベントを、EURUSD の spot 市場全体の order flow と呼ばず、`6E` の単一集中市場 proxy としてのみ扱う。最初の実装は候補・売買判断・将来リターンを一切出さず、価格との結合に必要な証跡・時計・coverage だけを確認する
+- **時計**: Bookmap の `bookmap_time_ns` は `TimeListener` の直近値であり、イベント個別の exchange timestamp ではない。さらに旧 Collector v1.0 の JSON number は JavaScript で精度を検証できない。したがって結合時計は Collector が実際に受け取った canonical ISO `received_at` とする。v1.1 は 64bit Bookmap timestamp を decimal string として保存するが、結合には使わない
+- **結合規則**: M1 は60秒、M5は300秒の UTC receipt interval `[T,T+Δ)` に depth/BBO/trade 更新数を集約する。特徴量は interval end で初めて利用可能とし、その end 時刻と**厳密一致**する確定EURUSDバーにのみ対応付ける。前方補完・近傍時刻への丸めはしない。将来の outcome 評価を行う場合も、この observation から最低1本遅らせる
+- **初期特徴量**: depth更新数、BBO更新数、trade数だけを品質確認対象とする。aggressor が全件既知の場合だけ buy/sell size と trade delta を計算し、`unknown` を売買いずれにも補完しない。板残高/imbalance は `snapshot_end` が記録された session に限るが、v1では未実装
+- **必要証跡**: Collector schema version、CME symbol/exchange、full-depth/MBO/crypto/OTC/delay metadata、sessionの開始/終了receipt時刻、event counts、snapshot完了を返す。crypto、full depth未確認、snapshot未完了、trade未取得、旧時刻精度、必要interval不足は `partial` とし、研究候補化を拒む
+
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する

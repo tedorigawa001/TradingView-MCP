@@ -136,6 +136,13 @@ import {
 } from "./volumeProfileReactionStudy.js";
 import { OANDA_FLOW_INSTRUMENTS, oandaFlowTokenConfigured } from "./oandaFlow.js";
 import {
+  aggregateBookmapFlowByReceiptInterval,
+  listBookmapFlowSessions,
+  preflightBookmapFlowPriceJoin,
+  readBookmapFlowSession,
+  resolveBookmapFlowDirectory,
+} from "./bookmapFlow.js";
+import {
   AnalysisDefinitionConflictError,
   analysisDefinitionHash,
   type AnalysisJournalDefinition,
@@ -187,6 +194,10 @@ export interface ServerDeps {
   policyRateHeartbeats?: Pick<PolicyRateCollectionHeartbeatStore, "getRunsAsOf">;
   policyRateOfficialHistory?: Pick<OfficialPolicyRateHistoryStore, "getLatest" | "getRevisedSeries" | "coverage">;
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
+  /** Local-only Bookmap Collector directory. It is read-only evidence, never a trading feed. */
+  bookmapFlowDirectory?: string;
+  /** Test seam; production uses the process-wide file lock by default. */
+  chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
 
 const FIELD_SCHEMA = z.string().regex(/^[\w.|]{1,64}$/);
@@ -377,8 +388,8 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest }: ServerDeps): McpServer {
-  const chartOperations = new SerialOperationQueue(new ChartOperationLock());
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock }: ServerDeps): McpServer {
+  const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
     primaryChart: { index: number; symbol: string; timeframe: string },
@@ -8445,6 +8456,52 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }));
         const result = evaluateCrossAssetShockOutcomes({ timeframe: expected_timeframe, targetSymbol: expected_target_symbol, bars: aligned.bars, states, minimumEventsPerState: minimum_events_per_state ?? 20, eventLimit: event_limit ?? 200 });
         return jsonResult({ ...result, classification: { state_counts: classified.state_counts, quality: classified.quality }, evidence: { sources: aligned.preflight.sources, alignment: aligned.preflight.alignment }, execution: evidence.execution });
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "preflight_bookmap_flow_price_join",
+    {
+      description: "Read a local Bookmap Collector session and verify its conservative, receipt-time-only join coverage to the active EURUSD M1 or M5 chart. Bookmap CME flow is retained as a single-venue futures proxy, never presented as spot-FX-wide flow. This preflight creates no candidate, outcome study, chart change, or order.",
+      inputSchema: {
+        expected_symbol: z.literal("OANDA:EURUSD"),
+        expected_timeframe: z.enum(["1", "5"]),
+        count: z.number().int().min(100).max(15_000).optional(),
+        session_file: z.string().regex(/^bookmap-flow-[A-Za-z0-9._-]+\.jsonl$/).optional()
+          .describe("Collector JSONL basename. Default: latest lexicographic session in the configured local directory"),
+        interval_seconds: z.union([z.literal(60), z.literal(300)]).optional(),
+        minimum_intervals: z.number().int().min(1).max(10_000).optional(),
+      },
+    },
+    async ({ expected_symbol, expected_timeframe, count, session_file, interval_seconds, minimum_intervals }) => chartOperations.run(async () => {
+      try {
+        const expectedInterval = expected_timeframe === "1" ? 60 : 300;
+        if (interval_seconds !== undefined && interval_seconds !== expectedInterval) {
+          throw new Error(`interval_seconds must be ${expectedInterval} for ${expected_timeframe}-minute EURUSD evidence`);
+        }
+        const context = await tv.getChartContext();
+        const activeIndex = context.activeChartIndex ?? 0;
+        const chart = context.charts.find((item) => item.index === activeIndex);
+        if (!chart || chart.symbol.toUpperCase() !== expected_symbol || normalizeResolution(chart.resolution) !== expected_timeframe) {
+          throw new Error(`active chart binding does not match: expected ${expected_symbol} ${expected_timeframe}`);
+        }
+        const replay = await tv.getReplayStatus();
+        if (replay.started || replay.toolbarVisible) throw new Error("Bookmap flow preflight is blocked while Bar Replay is active");
+        const history = await tv.getOhlcv(count ?? 5_000, activeIndex);
+        if (history.symbol.toUpperCase() !== expected_symbol || normalizeResolution(history.resolution) !== expected_timeframe) {
+          throw new Error("OHLC evidence does not match the bound chart");
+        }
+        const directory = resolveBookmapFlowDirectory(bookmapFlowDirectory);
+        const sessions = await listBookmapFlowSessions(directory);
+        const fileName = session_file ?? sessions.at(-1);
+        if (!fileName) throw new Error("no Bookmap Collector JSONL sessions found in the configured directory");
+        const session = await readBookmapFlowSession(directory, fileName);
+        const intervals = aggregateBookmapFlowByReceiptInterval(session, expectedInterval);
+        return jsonResult(preflightBookmapFlowPriceJoin({
+          session, intervals, targetBars: history.bars, expectedTimeframe: expected_timeframe,
+          minimumIntervals: minimum_intervals ?? 100,
+        }));
       } catch (err) { return errorResult(err); }
     }),
   );

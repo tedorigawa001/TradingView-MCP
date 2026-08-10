@@ -21,6 +21,7 @@ import velox.api.layer1.simplified.CustomModule;
 import velox.api.layer1.simplified.DepthDataListener;
 import velox.api.layer1.simplified.InitialState;
 import velox.api.layer1.simplified.Parameter;
+import velox.api.layer1.simplified.SnapshotEndListener;
 import velox.api.layer1.simplified.TimeListener;
 import velox.api.layer1.simplified.TradeDataListener;
 
@@ -32,11 +33,10 @@ import velox.api.layer1.simplified.TradeDataListener;
 @Layer1StrategyName("Bushido Flow Collector")
 @Layer1ApiVersion(Layer1ApiVersionValue.VERSION1)
 public final class FlowCollector implements CustomModule, DepthDataListener,
-        TradeDataListener, BboListener, TimeListener {
+        TradeDataListener, BboListener, TimeListener, SnapshotEndListener {
 
     @Parameter(name = "Output directory")
-    public String outputDirectory = System.getProperty("user.home")
-            + "/Documents/GitHub/TradingView-MCP/fxdata/bookmap-raw";
+    public String outputDirectory = "/Volumes/HD/bookmap_data";
 
     @Parameter(name = "Flush every records", minimum = 1, maximum = 10000, step = 1)
     public Integer flushEveryRecords = 250;
@@ -86,6 +86,12 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
     public synchronized void onTimestamp(long timestampNs) {
         latestBookmapTimeNs = timestampNs;
         flushIfNeeded(false);
+    }
+
+    @Override
+    public synchronized void onSnapshotEnd() {
+        write("snapshot_end", "\"meaning\":\"bookmap_initial_snapshot_complete\"");
+        flushIfNeeded(true);
     }
 
     @Override
@@ -146,12 +152,12 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
             return;
         }
         try {
-            writer.write("{\"schema_version\":\"1.0\",\"source\":\"bookmap\","
+            writer.write("{\"schema_version\":\"1.1\",\"source\":\"bookmap\","
                     + "\"event_type\":\"" + eventType + "\","
                     + "\"instrument_alias\":" + jsonString(alias) + ","
                     + "\"bookmap_time_ns\":"
-                    + (latestBookmapTimeNs >= 0 ? Long.toString(latestBookmapTimeNs) : "null") + ","
-                    + "\"received_at\":\"" + Instant.now().toString() + "\"," + fields + "}\n");
+                    + (latestBookmapTimeNs >= 0 ? jsonString(Long.toString(latestBookmapTimeNs)) : "null") + ","
+                    + "\"received_at\":\"" + receivedAt() + "\"," + fields + "}\n");
             pendingFlushRecords += 1;
             flushIfNeeded(false);
         } catch (IOException error) {
@@ -206,5 +212,9 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
 
     private static String jsonNumber(double value) {
         return Double.isFinite(value) ? Double.toString(value) : "null";
+    }
+
+    private static String receivedAt() {
+        return Instant.ofEpochMilli(Instant.now().toEpochMilli()).toString();
     }
 }
