@@ -6,6 +6,8 @@ BOOKMAP_HOME="${BOOKMAP_HOME:-/Applications/Bookmap.app/Contents/app}"
 LIB="$BOOKMAP_HOME/lib"
 OUT="$ROOT/bookmap-addon/dist"
 CLASSES="$OUT/classes"
+COLLECTOR_JAR="$OUT/bushidoyasu_flow_collector_delayed_replay_v1_1.jar"
+SIGNAL_RESEARCH_JAR="$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
 JAVA_21_HOME="${JAVA_21_HOME:-/usr/local/opt/openjdk@21}"
 JAVAC="$JAVA_21_HOME/bin/javac"
 JAR="$JAVA_21_HOME/bin/jar"
@@ -34,7 +36,20 @@ mkdir -p "$CLASSES"
 "$JAVAC" --release 17 \
   -cp "$SIMPLIFIED_API:$L1_API" \
   -d "$CLASSES" \
-  "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowCollector.java"
+  "$ROOT"/bookmap-addon/src/main/java/jp/bushido/bookmap/*.java
 
-"$JAR" --create --file "$OUT/bushido-bookmap-flow-collector.jar" -C "$CLASSES" .
-printf 'Built %s\n' "$OUT/bushido-bookmap-flow-collector.jar"
+# The collector writes external JSONL. Keep the installable artifact narrowly
+# scoped so it cannot be confused with a future approved display-only JAR.
+"$JAR" --create --file "$COLLECTOR_JAR" \
+  -C "$CLASSES" jp/bushido/bookmap/FlowCollector.class
+printf 'Built delayed/Replay-only collector %s\n' "$COLLECTOR_JAR"
+
+# The signal recorder is a separate delayed/Replay-only artifact. It includes
+# the pure signal engine but never the raw-data collector.
+(
+  cd "$CLASSES"
+  "$JAR" --create --file "$SIGNAL_RESEARCH_JAR" \
+    jp/bushido/bookmap/FlowSignalResearch.class \
+    jp/bushido/bookmap/FlowSignalEngine*.class
+)
+printf 'Built delayed/Replay-only signal research %s\n' "$SIGNAL_RESEARCH_JAR"

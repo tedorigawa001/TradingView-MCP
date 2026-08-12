@@ -8,6 +8,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 
 import velox.api.layer1.annotations.Layer1ApiVersion;
 import velox.api.layer1.annotations.Layer1ApiVersionValue;
@@ -34,6 +36,9 @@ import velox.api.layer1.simplified.TradeDataListener;
 @Layer1ApiVersion(Layer1ApiVersionValue.VERSION1)
 public final class FlowCollector implements CustomModule, DepthDataListener,
         TradeDataListener, BboListener, TimeListener, SnapshotEndListener {
+
+    private static final DateTimeFormatter RECEIPT_TIME_FORMAT = DateTimeFormatter
+            .ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     @Parameter(name = "Output directory")
     public String outputDirectory = "/Volumes/HD/bookmap_data";
@@ -96,13 +101,16 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
 
     @Override
     public synchronized void onTrade(double price, int size, TradeInfo tradeInfo) {
+        // Bookmap defines bid aggressor as a sell market order hitting the bid.
         String aggressor = tradeInfo == null ? "unknown"
-                : (tradeInfo.isBidAggressor ? "buy" : "sell");
+                : (tradeInfo.isBidAggressor ? "sell" : "buy");
         write("trade", "\"price_level\":" + jsonNumber(price) + ","
                 + "\"price\":" + jsonNumber(normalizedPrice(price)) + ","
                 + "\"size\":" + size + ","
                 + "\"aggressor\":\"" + aggressor + "\","
                 + "\"trade_info_available\":" + (tradeInfo != null) + ","
+                + "\"is_bid_aggressor\":"
+                + (tradeInfo == null ? "null" : tradeInfo.isBidAggressor) + ","
                 + "\"is_otc\":" + (tradeInfo == null ? "null" : tradeInfo.isOtc) + ","
                 + "\"is_execution_start\":"
                 + (tradeInfo == null ? "null" : tradeInfo.isExecutionStart) + ","
@@ -152,7 +160,7 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
             return;
         }
         try {
-            writer.write("{\"schema_version\":\"1.1\",\"source\":\"bookmap\","
+            writer.write("{\"schema_version\":\"1.2\",\"source\":\"bookmap\","
                     + "\"event_type\":\"" + eventType + "\","
                     + "\"instrument_alias\":" + jsonString(alias) + ","
                     + "\"bookmap_time_ns\":"
@@ -215,6 +223,6 @@ public final class FlowCollector implements CustomModule, DepthDataListener,
     }
 
     private static String receivedAt() {
-        return Instant.ofEpochMilli(Instant.now().toEpochMilli()).toString();
+        return RECEIPT_TIME_FORMAT.format(Instant.ofEpochMilli(Instant.now().toEpochMilli()));
     }
 }

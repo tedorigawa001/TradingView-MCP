@@ -50,6 +50,7 @@ public final class FlowCollectorTest {
         String line = output.toString().split("\\n")[0];
         assertContains(line, "\"aggressor\":\"unknown\"");
         assertContains(line, "\"trade_info_available\":false");
+        assertContains(line, "\"is_bid_aggressor\":null");
         assertContains(line, "\"is_otc\":null");
         assertContains(line, "\"is_execution_start\":null");
         assertContains(line, "\"is_execution_end\":null");
@@ -62,8 +63,9 @@ public final class FlowCollectorTest {
         collector.stop();
 
         String line = output.toString().split("\\n")[0];
-        assertContains(line, "\"aggressor\":\"buy\"");
+        assertContains(line, "\"aggressor\":\"sell\"");
         assertContains(line, "\"trade_info_available\":true");
+        assertContains(line, "\"is_bid_aggressor\":true");
         assertContains(line, "\"is_otc\":true");
         assertContains(line, "\"is_execution_start\":true");
         assertContains(line, "\"is_execution_end\":false");
@@ -122,6 +124,7 @@ public final class FlowCollectorTest {
         assertContains(line, "\"event_type\":\"depth\"");
         assertContains(line, "\"instrument_alias\":\"6EQ6:CME\"");
         assertContains(line, "\"bookmap_time_ns\":\"1234567890\"");
+        assertMatches(line, ".*\\\"received_at\\\":\\\"\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\\".*");
         assertContains(line, "\"side\":\"bid\"");
         assertContains(line, "\"price_level\":115600");
         assertContains(line, "\"price\":1.156");
@@ -177,6 +180,12 @@ public final class FlowCollectorTest {
         }
     }
 
+    private static void assertMatches(String actual, String regex) {
+        if (!actual.matches(regex)) {
+            throw new AssertionError("Expected <" + actual + "> to match <" + regex + ">");
+        }
+    }
+
     private static void assertEquals(Object expected, Object actual) {
         if (!expected.equals(actual)) {
             throw new AssertionError("Expected <" + expected + "> but got <" + actual + ">");
@@ -188,4 +197,5 @@ public final class FlowCollectorTest {
             throw new AssertionError("Expected false");
         }
     }
+
 }

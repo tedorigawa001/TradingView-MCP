@@ -1664,6 +1664,17 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **初期特徴量**: depth更新数、BBO更新数、trade数だけを品質確認対象とする。aggressor が全件既知の場合だけ buy/sell size と trade delta を計算し、`unknown` を売買いずれにも補完しない。板残高/imbalance は `snapshot_end` が記録された session に限るが、v1では未実装
 - **必要証跡**: Collector schema version、CME symbol/exchange、full-depth/MBO/crypto/OTC/delay metadata、sessionの開始/終了receipt時刻、event counts、snapshot完了を返す。crypto、full depth未確認、snapshot未完了、trade未取得、旧時刻精度、必要interval不足は `partial` とし、研究候補化を拒む
 
+### #84 Bookmap display-only flow research (構想: 事前実装検証, 2026-08-11)
+
+- **契約境界**: BookmapData realtime は市場データ、派生値、外部シグナルをアプリ外へ露出するcustom add-onを現時点で許可しない。JSONL Collectorは遅延BookmapData／Replay専用とする。realtime add-onはBookmapのチャートまたはindicator paneへの描画だけで完結し、ファイル、ネットワーク、MCP、外部通知、clipboardへの出力を一切行わない。BookmapのDeveloper Agreement、`@UnrestrictedData`、一意なJAR名、サーバー側承認を得た**別JAR**としてのみ作る
+- **研究の往復**: 遅延／ReplayでCollectorの監査可能な観察から条件・閾値・除外規則を固定し、そのロジックだけをdisplay-only add-onへ移す。realtimeの表示結果は外へ回収せず、次の変更候補は再び遅延／Replayで検証する
+- **v1対象: trade-flow pressure / CVD**: known aggressor tradeだけを一定セッションで累積し、unknown aggressorが混じる区間は値を更新せず`unavailable`として描画する。aggressorのbuy/sell極性は、BookmapのReplayでbubble表示と突合してから固定する。これは成行約定方向の集計であり、spot FX全体の売買圧力ではない
+- **v1対象: possible absorption**: price levelでknown aggressor tradeが短い**約定数窓**の間に閾値以上積み上がり、同価格近傍のaggregate depthが枯渇しない場合に表示する。depth/BBO callbackはこの窓を進めない。窓切れ、価格帯の消滅、または観測できる板の再補充で新しいepisodeとして再アームする。`absorption`や機関投資家の存在を断定せず、表示名は`possible_passive_absorption`とする。初期snapshot完了前、unknown aggressor、depth欠損では表示しない
+- **v1対象: possible liquidity withdrawal**: BBOまたは近傍価格帯のaggregate depthが減少し、その後の短い**約定数窓**で同方向のknown tradeが続くときに表示する。depth/BBO callbackはこの窓を進めない。cancel/replenishは観測するが、意図・不正行為・spoofingを推定しない。表示名は`possible_liquidity_withdrawal`とする
+- **v1対象: trade sweep**: 既知方向のtradeが短いcallback窓で連続し、複数price levelを単調に通過した場合に`trade_sweep`を表示する。これは約定の価格通過を表すだけで、stop-loss clusterや大口の意図は主張しない
+- **v1対象外: iceberg / stop hunting / spoofing**: price-level aggregate depthだけでは注文ID単位のreplenishmentを識別できず、icebergの断定はしない。MBO listenerが利用可能でも、MBO callbackのReplay検証と別の固定契約なしには対象に加えない。stopの所在とspoofingの意図はデータから直接観測できない
+- **実装順**: (1) delayed/Replay専用の純粋なsignal engineを作り、callback順・snapshot・unknown trade・session resetをunit testで固定、(2) Bookmap内indicator描画を付け、Replayで表示の意味を人手照合、(3) Bookmapのrealtime approvalを得た後だけ、同一ロジックを外部I/Oなしの一意JARへパッケージする。価格結果との統計評価はCollector側の遅延／Replay研究でのみ行う
+
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する

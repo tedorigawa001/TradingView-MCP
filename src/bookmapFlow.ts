@@ -2,10 +2,10 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { OhlcvBar } from "./tradingview.js";
 
-const SESSION_FILE = /^bookmap-flow-[A-Za-z0-9._-]+\.jsonl$/;
+const SESSION_FILE = /^bookmap-flow-(?!signals-)[A-Za-z0-9._-]+\.jsonl$/;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 const MAX_LINE_BYTES = 256 * 1024;
-const SUPPORTED_SCHEMA_VERSIONS = new Set(["1.0", "1.1"]);
+const SUPPORTED_SCHEMA_VERSIONS = new Set(["1.0", "1.1", "1.2"]);
 const EVENT_TYPES = new Set(["instrument", "depth", "bbo", "trade", "snapshot_end", "collector_stop"]);
 
 type JsonRecord = Record<string, unknown>;
@@ -197,10 +197,13 @@ export function aggregateBookmapFlowByReceiptInterval(session: BookmapFlowSessio
 export function preflightBookmapFlowPriceJoin(input: { session: BookmapFlowSession; intervals: BookmapFlowInterval[]; targetBars: OhlcvBar[]; expectedTimeframe: "1" | "5"; minimumIntervals: number }) {
   const closed = input.targetBars.filter((bar) => !bar.forming);
   const targetTimes = new Set(closed.map((bar) => bar.timeIso));
-  const exactIntervals = input.intervals.filter((interval) => targetTimes.has(interval.end));
+  const latestTargetMs = closed.length === 0 ? null : Math.max(...closed.map((bar) => bar.time * 1_000));
+  const targetAvailable = latestTargetMs === null ? [] : input.intervals.filter((interval) => Date.parse(interval.end) <= latestTargetMs);
+  const pendingTargetClose = input.intervals.length - targetAvailable.length;
+  const exactIntervals = targetAvailable.filter((interval) => targetTimes.has(interval.end));
   const qualityIssues = [...input.session.quality_issues];
-  if (input.intervals.length < input.minimumIntervals) qualityIssues.push("minimum_bookmap_intervals_not_met");
-  if (exactIntervals.length !== input.intervals.length) qualityIssues.push("non_exact_target_bar_joins_excluded");
+  if (exactIntervals.length < input.minimumIntervals) qualityIssues.push("minimum_bookmap_intervals_not_met");
+  if (exactIntervals.length !== targetAvailable.length) qualityIssues.push("non_exact_target_bar_joins_excluded");
   if (input.intervals.some((interval) => interval.trades > 0 && interval.trade_delta === null)) qualityIssues.push("unknown_aggressor_trade_intervals_not_eligible_for_delta");
   return {
     contract: {
@@ -216,8 +219,9 @@ export function preflightBookmapFlowPriceJoin(input: { session: BookmapFlowSessi
       event_counts: input.session.event_counts, snapshot_complete: input.session.snapshot_complete,
     },
     coverage: {
-      receipt_intervals: input.intervals.length, exact_target_bar_intervals: exactIntervals.length,
-      unmatched_intervals: input.intervals.length - exactIntervals.length, target_closed_bars: closed.length,
+      receipt_intervals: input.intervals.length, target_available_intervals: targetAvailable.length,
+      pending_target_close_intervals: pendingTargetClose, exact_target_bar_intervals: exactIntervals.length,
+      unmatched_intervals: targetAvailable.length - exactIntervals.length, target_closed_bars: closed.length,
       minimum_intervals: input.minimumIntervals,
     },
     status: qualityIssues.length === 0 ? "complete" : "partial",

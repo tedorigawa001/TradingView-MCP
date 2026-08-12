@@ -49,6 +49,7 @@ test("Bookmap price preflight uses an exact interval-end join and never forward 
     expectedTimeframe: "1", minimumIntervals: 1,
   });
   assert.equal(result.coverage.exact_target_bar_intervals, 1);
+  assert.equal(result.coverage.pending_target_close_intervals, 0);
   assert.equal(result.coverage.unmatched_intervals, 0);
   assert.equal(result.contract.minimum_target_lag_bars, 1);
   assert.equal(result.status, "complete");
@@ -60,6 +61,15 @@ test("Bookmap price preflight uses an exact interval-end join and never forward 
   });
   assert.equal(noExact.coverage.exact_target_bar_intervals, 0);
   assert.ok(noExact.quality_issues.includes("non_exact_target_bar_joins_excluded"));
+
+  const pending = preflightBookmapFlowPriceJoin({
+    session: parsed, intervals,
+    targetBars: [{ time: Date.parse("2026-08-10T00:00:00.000Z") / 1_000, timeIso: "2026-08-10T00:00:00.000Z", open: 1, high: 1, low: 1, close: 1, volume: 1 }],
+    expectedTimeframe: "1", minimumIntervals: 1,
+  });
+  assert.equal(pending.coverage.pending_target_close_intervals, 1);
+  assert.equal(pending.coverage.unmatched_intervals, 0);
+  assert.equal(pending.quality_issues.includes("non_exact_target_bar_joins_excluded"), false);
 });
 
 test("legacy Bookmap timestamps are marked unverifiable and malformed receipt timestamps fail closed", () => {
@@ -69,6 +79,17 @@ test("legacy Bookmap timestamps are marked unverifiable and malformed receipt ti
   const nanosecondReceipt = parseBookmapFlowSession(`${legacy.replace(".000Z", ".123456789Z")}\n`, "bookmap-flow-6EQ6.CME_BMD-3.jsonl");
   assert.ok(nanosecondReceipt.quality_issues.includes("legacy_receipt_timestamp_normalized_to_milliseconds"));
   assert.throws(() => parseBookmapFlowSession(`${legacy.replace("2026-08-10", "not-a-date")}\n`, "bookmap-flow-6EQ6.CME_BMD-4.jsonl"), /ISO UTC/);
+});
+
+test("signal-research JSONL is never accepted as a raw Collector session", () => {
+  const signalRecord = JSON.stringify({
+    schema_version: "1.1", source: "bookmap_flow_signal_research", event_type: "flow_signal",
+    instrument_alias: "6JQ6.CME@BMD", received_at: "2026-08-11T00:00:00.000Z",
+  });
+  assert.throws(
+    () => parseBookmapFlowSession(`${signalRecord}\n`, "bookmap-flow-signals-6JQ6.CME_BMD-1.jsonl"),
+    /collector JSONL basename/,
+  );
 });
 
 const INSTRUMENT = { symbol: "6EQ6", exchange: "CME", is_full_depth: true, mbo_captured: false, is_crypto: false };
@@ -113,7 +134,8 @@ test("a forming bar is not a join target, because its timestamp is not yet a clo
   });
   assert.equal(result.coverage.target_closed_bars, 0);
   assert.equal(result.coverage.exact_target_bar_intervals, 0);
-  assert.ok(result.quality_issues.includes("non_exact_target_bar_joins_excluded"));
+  assert.equal(result.coverage.pending_target_close_intervals, 1);
+  assert.equal(result.quality_issues.includes("non_exact_target_bar_joins_excluded"), false);
 });
 
 test("every condition the contract calls partial actually makes the preflight partial", () => {
