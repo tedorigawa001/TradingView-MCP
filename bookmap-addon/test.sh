@@ -20,10 +20,14 @@ SIGNAL_RESEARCH_JAR="$ROOT/bookmap-addon/dist/bushidoyasu_flow_signal_research_d
 
 "$ROOT/bookmap-addon/build.sh"
 
-# Without the licensed SDK only the engine exists, so only its test can run. It
-# is the one that carries the signal logic; the two skipped tests cover the thin
-# Bookmap adapters around it.
-if [[ ! -f "$LIB/bm-simplified-api-wrapper.jar" ]]; then
+# Without the complete licensed SDK only the engine exists, so only its test can
+# run. Keep this dependency check aligned with build.sh; a partial SDK install
+# cannot compile or test the Bookmap adapters.
+SDK_PRESENT=1
+for dependency in "$LIB/bm-simplified-api-wrapper.jar" "$LIB/bm-l1api.jar"; do
+  if [[ ! -f "$dependency" ]]; then SDK_PRESENT=0; fi
+done
+if [[ "$SDK_PRESENT" -eq 0 ]]; then
   rm -rf "$TEST_CLASSES"
   mkdir -p "$TEST_CLASSES"
   "$JAVAC" --release 17 -cp "$ROOT/bookmap-addon/dist/classes" -d "$TEST_CLASSES" \

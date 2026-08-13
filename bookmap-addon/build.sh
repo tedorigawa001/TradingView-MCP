@@ -42,6 +42,7 @@ rm -rf "$CLASSES"
 mkdir -p "$CLASSES"
 
 if [[ "$SDK_PRESENT" -eq 0 ]]; then
+  rm -f "$COLLECTOR_JAR" "$SIGNAL_RESEARCH_JAR"
   printf 'Bookmap SDK not found under %s - building the SDK-free signal engine only\n' "$LIB"
   "$JAVAC" --release 17 -d "$CLASSES" \
     "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowSignalEngine.java"
