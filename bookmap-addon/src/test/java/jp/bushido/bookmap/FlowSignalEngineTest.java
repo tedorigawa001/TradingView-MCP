@@ -11,11 +11,13 @@ public final class FlowSignalEngineTest {
         sweepExpiresByElapsedTimeAndRecordsEpisodeMetrics();
         requiresSnapshotAndKnownAggressionForPossibleAbsorption();
         labelsWithdrawalWithoutClaimingSpoofing();
+        ignoresZeroSizeCallbacksForWithdrawal();
         withdrawalWindowCountsTradesRatherThanDepthOrBboCallbacks();
         withdrawalExpiresByElapsedTime();
         absorptionRequiresAConcentratedTradeBurst();
         absorptionRearmsAfterThePassiveLevelIsRecreated();
         removesZeroSizeDepthLevels();
+        unknownAggressionEndsAnEpisodeInsteadOfJoiningOne();
         System.out.println("FlowSignalEngineTest: PASS");
     }
 
@@ -84,6 +86,16 @@ public final class FlowSignalEngineTest {
         assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL, signal.kind());
     }
 
+    private static void ignoresZeroSizeCallbacksForWithdrawal() {
+        FlowSignalEngine engine = engine();
+        engine.onBbo(20, 20);
+        engine.onBbo(20, 5);
+        assertNull(engine.onTrade(101, 0, FlowSignalEngine.Direction.BUY));
+        FlowSignalEngine.Signal signal = engine.onTrade(101, 7, FlowSignalEngine.Direction.BUY);
+        assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL, signal.kind());
+        assertEquals(7L, signal.aggressiveVolume());
+    }
+
     private static void absorptionRequiresAConcentratedTradeBurst() {
         TestClock clock = new TestClock();
         FlowSignalEngine engine = new FlowSignalEngine(
@@ -144,6 +156,28 @@ public final class FlowSignalEngineTest {
         } catch (ReflectiveOperationException error) {
             throw new AssertionError("Unable to inspect " + fieldName, error);
         }
+    }
+
+    /**
+     * A trade Bookmap could not attribute is not a quiet trade on one side. It
+     * ends whatever was in progress, so it can neither complete a sweep nor
+     * satisfy an armed withdrawal, and it emits nothing of its own.
+     */
+    private static void unknownAggressionEndsAnEpisodeInsteadOfJoiningOne() {
+        FlowSignalEngine engine = engine();
+        assertNull(engine.onTrade(100, 1, FlowSignalEngine.Direction.BUY));
+        assertNull(engine.onTrade(101, 1, FlowSignalEngine.Direction.BUY));
+        // Two thirds of a sweep, then an unattributed trade at the next level up.
+        assertNull(engine.onTrade(102, 1, null));
+        // Had the unknown trade been counted, this fourth level would complete it.
+        assertNull(engine.onTrade(103, 1, FlowSignalEngine.Direction.BUY));
+
+        FlowSignalEngine armed = engine();
+        armed.onBbo(100, 100);
+        armed.onBbo(100, 10);
+        assertNull(armed.onTrade(200, 1, null));
+        // The withdrawal was disarmed by the unknown trade, not merely postponed.
+        assertNull(armed.onTrade(200, 1, FlowSignalEngine.Direction.BUY));
     }
 
     private static void assertNull(Object value) {

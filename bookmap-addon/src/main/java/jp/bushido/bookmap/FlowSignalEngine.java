@@ -157,6 +157,9 @@ public final class FlowSignalEngine {
         sequence += 1;
         long nowNanos = monotonicNanos.getAsLong();
         if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
+        // Bookmap can emit an execution-chain boundary callback with zero new
+        // quantity. It carries metadata, not an aggressive trade to score.
+        if (size == 0) return null;
         if (direction == null) {
             resetSweep();
             withdrawalDirection = null;

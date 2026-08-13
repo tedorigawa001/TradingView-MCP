@@ -9,29 +9,45 @@ CLASSES="$OUT/classes"
 COLLECTOR_JAR="$OUT/bushidoyasu_flow_collector_delayed_replay_v1_1.jar"
 SIGNAL_RESEARCH_JAR="$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
 JAVA_21_HOME="${JAVA_21_HOME:-/usr/local/opt/openjdk@21}"
-JAVAC="$JAVA_21_HOME/bin/javac"
-JAR="$JAVA_21_HOME/bin/jar"
+# The pinned JDK when it is installed, otherwise whatever is on PATH. CI has a
+# JDK but not this one, and the engine is ordinary Java that any of them builds.
+if [[ -x "$JAVA_21_HOME/bin/javac" ]]; then
+  JAVAC="$JAVA_21_HOME/bin/javac"
+  JAR="$JAVA_21_HOME/bin/jar"
+else
+  JAVAC="$(command -v javac || true)"
+  JAR="$(command -v jar || true)"
+fi
 
 SIMPLIFIED_API="$LIB/bm-simplified-api-wrapper.jar"
 L1_API="$LIB/bm-l1api.jar"
 
-for dependency in "$SIMPLIFIED_API" "$L1_API"; do
-  if [[ ! -f "$dependency" ]]; then
-    printf 'Bookmap SDK dependency not found: %s\n' "$dependency" >&2
+for tool in "$JAVAC" "$JAR"; do
+  if [[ -z "$tool" || ! -x "$tool" ]]; then
+    printf 'No JDK found. Install openjdk@21 or set JAVA_21_HOME to a JDK root.\n' >&2
     exit 1
   fi
 done
 
-for tool in "$JAVAC" "$JAR"; do
-  if [[ ! -x "$tool" ]]; then
-    printf 'Java 21 build tool not found: %s\n' "$tool" >&2
-    printf 'Install openjdk@21 or set JAVA_21_HOME to its JDK root.\n' >&2
-    exit 1
-  fi
+# The Bookmap SDK is a licensed desktop install, so it cannot be present on a CI
+# runner. Everything that imports it is skipped there rather than failing the
+# build; FlowSignalEngine imports nothing from Bookmap and is always built and
+# tested, which is where the signal logic actually lives.
+SDK_PRESENT=1
+for dependency in "$SIMPLIFIED_API" "$L1_API"; do
+  if [[ ! -f "$dependency" ]]; then SDK_PRESENT=0; fi
 done
 
 rm -rf "$CLASSES"
 mkdir -p "$CLASSES"
+
+if [[ "$SDK_PRESENT" -eq 0 ]]; then
+  printf 'Bookmap SDK not found under %s - building the SDK-free signal engine only\n' "$LIB"
+  "$JAVAC" --release 17 -d "$CLASSES" \
+    "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowSignalEngine.java"
+  printf 'Built FlowSignalEngine (no installable JAR without the SDK)\n'
+  exit 0
+fi
 
 "$JAVAC" --release 17 \
   -cp "$SIMPLIFIED_API:$L1_API" \
