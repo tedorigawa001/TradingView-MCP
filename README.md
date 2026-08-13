@@ -430,6 +430,7 @@ E2E verifies rejection of incorrect chart binding, deterministic dry-runs, train
 - `test/e2e/` - configuration-driven E2E from MCP stdio to the real app
 - `test/smoke.mjs` - integration smoke test against the real app
 - `build/` - ignored TypeScript output
+- `bookmap-addon/` - Java Bookmap add-on. `FlowSignalEngine` and `FlowSignalMarker` import nothing from the Bookmap SDK and are built and tested everywhere, including CI; `FlowCollector` and `FlowSignalResearch` need the locally installed SDK and are skipped without it. `dist/` is ignored
 - `docs/` - design and research documentation
 
 ### Documentation
