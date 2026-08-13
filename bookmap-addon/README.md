@@ -42,24 +42,40 @@ single-venue proxies; do not describe it as whole-market FX spot order flow.
 bookmap-addon/build.sh
 ```
 
-The script reads the locally installed Bookmap SDK from
-`/Applications/Bookmap.app`. It creates two delayed/Replay-only JARs:
+The build requires a JDK that supports `--release 17`. It uses
+`JAVA_21_HOME` when set (the default Homebrew location is
+`/usr/local/opt/openjdk@21`) and otherwise uses the JDK on `PATH`.
+
+When both required Bookmap SDK JARs are available under the locally installed
+`/Applications/Bookmap.app`, the script creates two delayed/Replay-only JARs:
 
 - `bookmap-addon/dist/bushidoyasu_flow_collector_delayed_replay_v1_1.jar`:
   raw evidence collector.
 - `bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar`:
   provisional flow-signal recorder.
 
-This artifact deliberately contains `FlowCollector` only. The pure research
-class `FlowSignalEngine` is packaged only into the signal-research JAR. The
-two JARs cannot contain one another's Bookmap module. No display-only
+The collector artifact deliberately contains `FlowCollector` only. The pure
+research class `FlowSignalEngine` is packaged only into the signal-research
+JAR. The two JARs cannot contain one another's Bookmap module. No display-only
 real-time JAR exists yet.
 
-Run the no-dependency unit tests with:
+The licensed Bookmap SDK is not available on GitHub-hosted runners. If either
+SDK dependency is absent, the build compiles only the SDK-free
+`FlowSignalEngine`, removes stale installable JARs from `dist`, and exits
+successfully without producing a JAR. A partial SDK installation is treated as
+unavailable rather than attempting an incomplete adapter build.
+
+Run the Java tests with:
 
 ```bash
 bookmap-addon/test.sh
 ```
+
+With the complete SDK, this tests the collector, signal engine, and Bookmap
+signal adapter. Without the SDK, it tests the signal engine and reports the two
+adapter tests as skipped. `npm test` invokes this script, so GitHub Actions
+always compiles and tests the SDK-free signal logic while local development
+with Bookmap installed exercises all three Java tests.
 
 ## Install and run
 

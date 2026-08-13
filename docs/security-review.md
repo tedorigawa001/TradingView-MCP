@@ -1,429 +1,296 @@
-# セキュリティレビュー(2026-07-07)
+# Security Review (2026-07-07)
 
-対象: 初期実装一式(`src/cdp.ts`, `src/tradingview.ts`, `src/server.ts`, `src/index.ts`)
-方法: 手動コードレビュー + `npm audit` + ユニットテストによる検証
-(注: `/security-review` スキルは git リモートが前提のため、リモート設定後は毎回のPRで利用推奨)
+Scope: initial implementation (`src/cdp.ts`, `src/tradingview.ts`, `src/server.ts`, and `src/index.ts`).
 
-## 結果サマリー
+Method: manual code review, `npm audit`, and unit-test verification. Run the repository security-review workflow on every pull request.
 
-| # | 項目 | 深刻度 | 状態 |
+## Summary
+
+| # | Finding | Severity | Status |
 |---|---|---|---|
-| 1 | CDP デバッグポート開放によるローカル攻撃面 | Medium | 文書化・受容(下記) |
-| 2 | `Runtime.evaluate` へのコードインジェクション | High → なし | 対策済み・テストで担保 |
-| 3 | CDP ターゲット選定の部分文字列マッチ | Low | 修正済み |
-| 4 | 依存パッケージの既知脆弱性 | — | `npm audit`: 0件 |
-| 5 | ページ由来データの AI への流入(間接プロンプトインジェクション) | Low | 文書化 |
-| 6 | スクリーンショットの情報漏えい | Info | 文書化 |
+| 1 | Local attack surface from the CDP debug port | Medium | Documented and accepted |
+| 2 | Code injection through `Runtime.evaluate` | High -> none | Mitigated and tested |
+| 3 | Substring-based CDP target selection | Low | Fixed |
+| 4 | Known dependency vulnerabilities | - | `npm audit`: zero |
+| 5 | Page-controlled data entering the AI context | Low | Documented |
+| 6 | Screenshot information disclosure | Informational | Documented |
 
-## 詳細
+## Details
 
-### 1. CDP デバッグポート(9222)— Medium、受容
+### 1. CDP Debug Port 9222 - Medium, Accepted
 
-`--remote-debugging-port=9222` で起動中は、**同一マシン上の任意のプロセス**が TradingView のログイン済みセッションを完全に操作できる。
+While TradingView runs with `--remote-debugging-port=9222`, **any process on the same machine** can fully control the signed-in TradingView session.
 
-緩和要素:
-- ポートは localhost バインドのみ(Chrome/Electron のデフォルト)
-- Chromium は WebSocket 接続時に Origin ヘッダ付き(=ブラウザ経由)の接続を拒否するため、Web ページからの DNS リバインディング系攻撃は成立しない
-- 攻撃には既にローカルでコード実行できていることが前提 → その時点で脅威モデル外
+Mitigations:
 
-運用ルール:
-- **MCP を使う時だけ**デバッグポート付きで起動し、平常時は通常起動する
-- 共有マシンでは使用しない
+- Chrome/Electron binds the port to localhost by default.
+- Chromium rejects browser-origin WebSocket connections carrying an `Origin` header, preventing the ordinary web-page DNS-rebinding path.
+- An attacker otherwise needs existing local code execution, which is outside this threat model.
 
-### 2. `Runtime.evaluate` インジェクション — 対策済み
+Operational rules:
 
-ユーザー/AI 入力がページ内で実行される JS 式に埋め込まれる箇所がインジェクションポイントになり得る。
+- Enable the debug port **only while using the MCP server**; launch normally at other times.
+- Do not use this configuration on a shared machine.
 
-対策(多層):
-- 文字列(`symbol`)は `JSON.stringify` で必ず文字列リテラル化(ES2019+ では JSON は JS の完全部分集合であり、リテラル脱出は不可能)
-- `resolution` は `JSON.stringify` に加えて形式ホワイトリスト(`/^[0-9]*[SDWM]?$/i`)
-- 数値(`count` / `chartIndex`)は `Number.isFinite` / `Number.isInteger` 検証後にのみ式へ埋め込み
-- MCP 層でも zod スキーマで型・範囲を検証(不正入力はハンドラ到達前に -32602 で拒否)
-- **任意 JS を実行する MCP ツールは意図的に公開していない**(evaluate は内部 API のみ)
+### 2. `Runtime.evaluate` Injection - Mitigated
 
-テスト: `test/unit/tradingview.test.mjs` にインジェクションペイロードのテストあり(悪意ある symbol がエスケープされること、不正な resolution/count/chartIndex がページ到達前に拒否されることを検証)。
+User or AI input embedded into in-page JavaScript expressions could be an injection point. Controls are layered:
 
-### 3. CDP ターゲット選定 — 修正済み
+- Strings such as `symbol` are converted to literals with `JSON.stringify`.
+- `resolution` is also allowlisted with `/^[0-9]*[SDWM]?$/i`.
+- Numeric values such as `count` and `chartIndex` enter expressions only after finite/integer validation.
+- Zod validates type and range at the MCP boundary and rejects invalid input with `-32602` before the handler.
+- **No MCP tool exposes arbitrary JavaScript execution**; evaluation remains an internal API.
 
-旧: `t.url.includes("tradingview.com/chart")` の部分文字列マッチ。`https://evil.example/tradingview.com/chart` のような URL にも一致し得た。
+`test/unit/tradingview.test.mjs` verifies escaping of malicious symbols and pre-page rejection of invalid resolution, count, and chart index.
 
-新: URL をパースし `https:` + ホスト名が `tradingview.com`(またはそのサブドメイン)+ パスが `/chart` で始まることを厳密に検証(`src/cdp.ts` の `findChartTarget`)。
+### 3. CDP Target Selection - Fixed
 
-### 4. 依存関係 — クリーン
+The former `t.url.includes("tradingview.com/chart")` check could match a URL such as `https://evil.example/tradingview.com/chart`. `findChartTarget` now parses the URL and requires HTTPS, `tradingview.com` or a subdomain, and a path beginning with `/chart`.
 
-- ランタイム依存は 3 つのみ: `@modelcontextprotocol/sdk` / `ws` / `zod`(いずれも活発にメンテされている)
-- `npm audit --audit-level=high`: **0 vulnerabilities**(2026-07-20、Node 24.18.0)
-- `package-lock.json` をコミットしてバージョンを固定すること
-- 定期的な `npm audit` を推奨(CI 導入時に組み込む)
+### 4. Dependencies - Clean
 
-### 5. ページ由来データの AI への流入 — Low
+- Runtime dependencies are limited to `@modelcontextprotocol/sdk`, `ws`, and `zod`.
+- `npm audit --audit-level=high`: **zero vulnerabilities** as of 2026-07-20 on Node 24.18.0.
+- `package-lock.json` is committed, and CI runs the audit.
 
-シンボル名・インジケーター名・レイアウト名などページ側の文字列がツール結果として AI に渡る。理論上は悪意ある文字列による間接プロンプトインジェクションの経路だが、データ源はユーザー自身の TradingView セッション(自分で追加したインジケーター等)であり、実質的リスクは低い。将来「公開アイデア/コメント欄」等の第三者コンテンツを取得するツールを追加する場合は再評価すること。
+### 5. Page Data Entering AI Context - Low
 
-### 6. スクリーンショットの情報漏えい — Info
+Page strings such as symbol, indicator, and layout names enter tool results. Malicious text could theoretically carry an indirect prompt injection, but the source is the user's own TradingView session. Reassess this risk before adding public ideas, comments, or other third-party content.
 
-`get_chart_screenshot` はウォッチリスト・口座関連 UI・レイアウト全体を含む画像を AI(および AI プロバイダ)へ送信する。ユーザーが意図して使う前提のツールだが、画面に見えているものはすべて送られることを README に明記済み。
+### 6. Screenshot Disclosure - Informational
 
-## 追補: Phase 3(2026-07-07)
+`get_chart_screenshot` sends the visible TradingView UI, including watchlists, account-related UI, and the full layout, to the AI provider. The README states that everything visible is transmitted.
 
-`get_indicator_values` / `get_indicator_inputs` 追加に伴うレビュー:
+## Addendum: Phase 3 (2026-07-07)
 
-- **Pine スクリプトソースの漏えい防止**: `getInputValues()` に含まれる `text`(保護スクリプトでは暗号化ソース)・`pineId`・`pineVersion`・`pineFeatures` をページ内でフィルタし、ツール出力に含めない。加えて 200 文字超の文字列値は切り詰め。統合テストで漏えいゼロを毎回検証
-- **`study_id` のインジェクション対策**: `/^[\w$]{1,64}$/` のホワイトリスト検証(zod 層 + TradingView 層の二重)後に `JSON.stringify` で埋め込み。ユニットテストで担保
-- 読み取り専用ツールのみ追加(`setInputValues` 等の変更系 API には触れていない)
+Review of `get_indicator_values` and `get_indicator_inputs`:
 
-## 追補: Phase 4(2026-07-07)
+- In-page filtering removes `text`, `pineId`, `pineVersion`, and `pineFeatures`; strings over 200 characters are truncated. Integration tests verify no Pine-source leakage.
+- `study_id` is validated by `/^[\w$]{1,64}$/` at both Zod and TradingView layers and embedded with `JSON.stringify`.
+- Only read-only tools were added.
 
-`get_watchlist` / `get_quotes` / `scan_market` 追加に伴うレビュー:
+## Addendum: Phase 4 (2026-07-07)
 
-- **外部 HTTP(scanner.tradingview.com)**: ベース URL は固定(https)。市場名は `/^[a-z]{2,24}$/`、フィールド名は `/^[\w.|]{1,64}$/`、ティッカーは `/^[\w!.:&-]{1,48}$/`、演算子はホワイトリストで検証してからリクエストを構築(パストラバーサル・任意ボディ注入不可)。応答は zod スキーマで検証(申し送り対応済み)。タイムアウトは AbortController で強制
-- **ウォッチリスト取得**: ページ内 fetch(`credentials: "include"`)で TradingView 自身のオリジンにのみアクセス。取得は読み取り専用 GET。式に外部入力の埋め込みなし(引数ゼロ)
-- **第三者コンテンツ**: スキャナー応答の銘柄説明等が AI に渡る(公開マーケットデータであり、間接プロンプトインジェクションのリスクは従来評価どおり Low)
-- 当時は変更系(ウォッチリストへの追加・削除、アラート作成)を非公開とした。アラート作成は2026-07-20に#26の限定confirm経路だけを追加した
+- `scanner.tradingview.com` uses a fixed HTTPS base URL. Market, field, ticker, and operator inputs are allowlisted; responses are Zod-validated and requests use `AbortController` timeouts.
+- Watchlist retrieval performs a read-only same-origin GET with `credentials: "include"` and no external expression input.
+- Public scanner descriptions enter AI context, retaining the Low indirect-injection assessment.
+- Watchlist writes remained unavailable. Alert creation was later added only through #26's constrained confirmation path.
 
-## 追補: Phase 5(2026-07-08)
+## Addendum: Phase 5 (2026-07-08)
 
-`get_indicator_graphics` / `load_more_history` / `list_alerts` 追加に伴うレビュー:
+- `list_alerts` performs read-only GETs to `pricealerts.tradingview.com`; messages are truncated to 300 characters.
+- `get_indicator_graphics` is read-only, validates `study_id`, and constrains `limit_per_kind` to 1-500.
+- `load_more_history` changes only loaded history, not viewport/layout; count is 1-5,000 and polling terminates within 15 seconds.
 
-- **`list_alerts`**: ページ内 fetch(`credentials: "include"`)で pricealerts.tradingview.com への読み取り専用 GET のみ。作成・変更・削除エンドポイントは呼ばない(ユニットテストで read-only を検証)。message は 300 文字に切り詰め
-- **`get_indicator_graphics`**: 読み取り専用。`study_id` は既存のホワイトリスト検証+JSON 埋め込み、`limit_per_kind` は 1〜500 の整数検証。ラベルテキストはユーザー自身のインジケーター由来(第三者コンテンツではない)
-- **`load_more_history`**: ページ状態を変更する唯一の新ツールだが、ユーザーが左スクロールした場合と同一の挙動(データロードのみ、ビュー位置・レイアウトは不変)。count は 1〜5000 の整数検証。ポーリングは最長15秒で必ず終了
+## Addendum: Backlog #5/#6 (2026-07-08)
 
-## 追補: バックログ #5/#6(2026-07-08)
+- `get_key_levels` composes existing read-only data. `range_percent` is `(0, 50]`, `limit` is 1-200, and non-price studies are excluded so oscillator values cannot be presented as prices.
+- `get_economic_events` performs an unauthenticated GET to a fixed HTTPS host. Country, ISO dates, a 92-day range, and limit 1-200 are validated before query construction. Zod and field guards discard unknown long fields. Public event text retains the Low indirect-injection assessment.
 
-`get_key_levels` / `get_economic_events` 追加に伴うレビュー:
+## Addendum: Backlog #9 (2026-07-08)
 
-- **`get_key_levels`**: 既存の読み取り専用操作(OHLCV・インジケーター値・graphics)の Node 側合成のみで、新しいページアクセス・式テンプレートは追加していない。`range_percent` は (0, 50]、`limit` は 1〜200 の検証。`is_price_study: false` のスタディ(RSI 等のオシレーター)を除外するのは正確性と安全性を兼ねる: オシレーター値を価格レベルとして AI に誤提示しない
-- **`get_economic_events`(新規外部エンドポイント)**: economic-calendar.tradingview.com への Node 側 GET。**認証・Cookie は一切送信しない**(必要なのは固定の Origin ヘッダーのみ)。ベース URL は固定(https)。国コードは `/^[A-Z]{2}$/`、日付は ISO 8601 解析+期間 92 日上限、`limit` 1〜200 を検証してから URLSearchParams でクエリ構築(注入不可)。応答は zod でトップレベル形状を検証し、フィールドは型ガード付きで個別マッピング — 長文の `comment` 等の未知フィールドは出力に含めない。イベントタイトル等の第三者コンテンツが AI に渡る点は公開経済データであり、間接プロンプトインジェクションのリスクは従来評価どおり Low
+`get_indicator_tables` is read-only. It validates `study_id` and nonnegative `chart_index`, truncates cell text/tooltips to 200 characters, and caps tables at 2,000 cells.
 
-## 追補: バックログ #9(2026-07-08)
+## Addendum: Backlog #10 (2026-07-08)
 
-`get_indicator_tables` 追加に伴うレビュー:
+`list_pine_scripts` and `get_pine_source` are limited to user-owned scripts:
 
-- 読み取り専用。`study_id` は既存のホワイトリスト検証(`/^[\w$]{1,64}$/`)+ JSON 埋め込み、`chart_index` は非負整数検証で、式への注入経路なし
-- セルテキスト・ツールチップは 200 文字で切り詰め、グリッドは 2000 セル上限(巨大テーブルによるペイロード肥大を防止)
-- 内容はユーザー自身が表示しているインジケーターの描画物であり、第三者コンテンツではない(リスク評価は get_indicator_graphics と同等)
+- `pineId` must match `/^USER;[\w]{8,64}$/`; `PUB;` scripts are rejected before network access, and listings use only `filter=saved`.
+- Only GET requests reach pine-facade; save, delete, and publish endpoints are absent.
+- IDs are allowlisted, JSON-embedded, and URL-encoded in page context.
+- Full user-owned source is intellectual property sent into the AI context; onward handling follows the MCP client's policy.
 
-## 追補: バックログ #10(2026-07-08)
+## Addendum: Backlog #8 (2026-07-08)
 
-`list_pine_scripts` / `get_pine_source` 追加に伴うレビュー:
+`run_backtest` temporarily adds a strategy, retrieves its report, and removes it. Removal runs by default even after report failure; failures are surfaced as warnings, and `keep_on_chart:true` is explicit opt-in. Only `USER;` strategies are accepted and `isTVScriptStrategy` is checked before addition. Because stale watched values may remain, reports require an active strategy and matching ownership. Replay buy/sell APIs remain unexposed; Pine backtests do not access real accounts or orders. Integration tests verify the post-run study set.
 
-- **自作スクリプト限定**: `get_pine_source` は `pineId` を `/^USER;[\w]{8,64}$/` で検証し、`PUB;`(公開/保護/招待制スクリプト)はネットワーク到達前に拒否。一覧も `filter=saved`(自分のワークスペース)のみ。**他者のスクリプトソースを引き出す経路はない**。チャート側の隠し入力 `text`(コンパイル済みIL)のフィルタも従来どおり維持
-- **読み取り専用**: pine-facade への GET のみ。保存・削除・公開系エンドポイントは呼ばない(ユニットテストで `/save|/delete|method:` 不在を検証)
-- **注入対策**: pineId はホワイトリスト検証後に JSON 埋め込み+ページ内で encodeURIComponent
-- **留意点**: ユーザー自身のソースコード全文(知的財産)が AI のコンテキストに送信される。ツール説明に用途(レビュー・改善提案)を明記済み。ソースの外部送信は MCP クライアント(AI エージェント)のポリシーに従う
+## Addendum: Backlog #11 (2026-07-08) - First Write Tools
 
-## 追補: バックログ #8(2026-07-08)
+`save_pine_script` and `add_pine_to_chart` introduced writes only for user-owned Pine with confirmation:
 
-`get_strategy_report` / `run_backtest` 追加に伴うレビュー:
+- Without `confirm:true`, tools return a dry-run and write nothing.
+- New scripts use `saveNew` without overwrite; duplicate names are rejected.
+- Existing scripts receive only a new `saveNext` version, and every previous version remains retrievable.
+- Compile failures include `compileOk`, line-specific `compileErrors`, and `revertHint`; source is read back and verified.
+- The `USER;` gate exists at Zod and TradingView layers.
+- `add_pine_to_chart` only adds. The later #16 tool handles confirmed removal of one verified owned study.
+- Orders, existing-alert modification, webhooks, watchlist writes, Pine-library deletion, and Replay buy/sell remain unavailable.
 
-- **`run_backtest` はチャート状態を一時変更する**(ストラテジーを追加→レポート取得→削除)。set_symbol と同じ「操作系・自己復元」クラス。レポートの成否に関わらずデフォルトで削除を実行し、削除失敗は WARNING として結果に明記。`keep_on_chart: true` は明示オプトイン
-- **自作スクリプト限定**: `pine_id` は #10 と同じ `USER;` ゲート(zod + TradingView 層の二重)。適用前に `isTVScriptStrategy` を検証し、strategy 以外は追加せず拒否
-- **誤情報防止**: レポートの WatchedValue はストラテジー削除後も残留するため、(1) `activeStrategy` が null ならレポートを返さない、(2) `run_backtest` はレポートの帰属(description 一致)を確認してから受理 — 別ストラテジーの成績を返すより タイムアウト失敗を選ぶ
-- **注文系には触れない**: replayApi に buy/sell 等が存在するが公開していない。バックテストは Pine エンジンのシミュレーションであり、実口座・実注文とは無関係
-- 統合テストで「実行後にチャートのスタディ構成が実行前と一致」を毎回検証
+## Addendum: Backlog #12 (2026-07-09)
 
-## 追補: バックログ #11(2026-07-08)— 方針変更: 初の書き込み系ツール
+`set_indicator_input` changes only inputs on an existing study. It does not save Pine source, but the live chart input may persist through TradingView layout autosave. Hidden Pine inputs (`text`, `pineId`, `pineVersion`, `pineFeatures`, and `__profile`) are rejected. Study and input IDs are dual-layer allowlisted, values are primitive only, and unknown IDs are rejected before `setInputValues`. The tool neither deletes nor replaces studies.
 
-`save_pine_script` / `add_pine_to_chart` 追加に伴うレビュー。「書き込み系は非公開」の方針を、**Pine スクリプトの保存に限り**確認フロー付きで解除した:
+## Addendum: Backlog #15 (2026-07-15)
 
-- **confirm フロー**: `confirm: true` なしでは一切書き込まず、ドライラン(対象・現行バージョン・サイズ比較)を返す。ツール説明で「ドライランをユーザーに提示し承認を得てから confirm する」ことを AI に指示
-- **非破壊の不変条件**:
-  - 新規作成は `saveNew` を overwrite オプションなしで呼ぶ。同名スクリプトは事前検知して拒否(サーバーの汎用エラーに頼らない)
-  - 既存スクリプトへは新バージョン追記のみ(`saveNext`)。**全旧バージョンが `get_pine_source(pine_id, version)` で取得可能**なことを統合テストで検証 — 復元手段が常にある
-  - **当時は削除 API を非公開**とした。2026-07-15に、所有Pine ID・対象チャート・confirmを必須とする限定版`remove_owned_study`だけを#16で公開
-- **正直な結果報告**: pine-facade はコンパイル失敗でもバージョンを保存する。結果に `compileOk` / 行番号付き `compileErrors` / `revertHint` を含め、保存後にソースを取得し直して一致検証(`verified`)。改行は CRLF 正規化差を吸収
-- **対象は自作スクリプトのみ**: `USER;` ゲート(zod + TradingView 層の二重)。他者スクリプトへの書き込み経路はない
-- **`add_pine_to_chart` 自体は追加のみ**: 削除を暗黙に行わない。削除は#16の所有確認・confirm付き専用ツールへ分離し、追加されたスタディはユーザーがUIからも外せる
-- 引き続き非公開: 注文系、既存アラートの変更・再開・削除、Webhook、ウォッチリスト変更、Pineライブラリのスクリプト削除、リプレイの buy/sell。新規アラート作成は2026-07-20に#26の限定confirm経路だけを追加した
+Review of `get_analysis_overlay_template` and `apply_analysis_overlay`:
 
-## 追補: バックログ #12(2026-07-09)
+- Pine source is a fixed template; analysis text and external data are passed only as typed inputs, preventing Pine-code injection.
+- Chart index, exact symbol/timeframe, study name, and the fixed input contract are verified before writes.
+- Without `confirm:true`, only contract validation and preview occur.
+- Future analysis times, inverted Entry bands, directionally inconsistent levels, and nonpositive values are rejected. Expired analyses render as `EXPIRED` rather than being deleted or presented as current.
+- Inputs are read back after writing. If recalculation does not settle within 20 seconds, the result is unverified and stale drawing checks are skipped with a warning.
+- `input.time` uses Unix epoch milliseconds; USDJPY 4H readback and drawing position were verified on the real app.
+- The tool does not delete Pine-library scripts or access orders or alerts. Layout autosave may preserve inputs.
 
-`set_indicator_input` 追加に伴うレビュー:
+## Addendum: Backlog #16 (2026-07-15)
 
-- **Pine ソース/ライブラリへの永続化はない書き込み**: `chart.getStudyById(studyId).setInputValues()` は pine-facade には一切触れない(保存済みスクリプトは無傷)。ただし**チャート上のスタディインスタンスの入力値はライブ状態として残り**、復元するまで変更されたまま。ユーザーが手動で Settings ダイアログを開いて値を変えるのと等価な操作であり、TradingView 側のレイアウト自動保存の対象にもなり得る点は明記した上で、`save_pine_script` のような confirm フローは不要と判断(`set_symbol`/`set_timeframe` と同じ分類 — こちらもチャートのライブ状態を変更し自動保存対象になり得るが confirm 不要としている前例に倣う)
-- **入力対象の限定**: 書き込み先は `study_id` で指定した既存スタディの入力のみ。Pine内部入力(`text`/`pineId`/`pineVersion`/`pineFeatures`/`__profile`)は `get_indicator_inputs` 同様に書き込み拒否
-- **注入対策**: `study_id`・入力`id` は共に `/^[\w$]{1,64}$/` ホワイトリスト検証(zod + TradingView層の二重)後に JSON埋め込み。value は number/string/boolean のみ許可(オブジェクト・配列は拒否)
-- **未知IDの拒否**: ページ内で対象スタディの現行入力一覧と照合し、存在しないIDへの書き込みは明確なエラーで拒否してから `setInputValues` を呼ぶ
-- `set_indicator_input`自体は既存スタディの削除・置換を行わない。削除は#16の所有確認・confirm付き専用ツールへ分離
+`ensure_analysis_overlay` and `remove_owned_study` enforce ownership and transaction ordering:
 
-## 追補: バックログ #15(2026-07-15)
+- Only `USER;` Pine is removable. Public and TradingView layers both verify chart/study association and hidden `pineId` before `removeEntity`.
+- Delete, add, update, and migration require confirmation; one current instance is reused without writing.
+- The latest library source must exactly match the normalized fixed template.
+- Logical overlay version and TradingView Pine-library version remain separate.
+- Migration adds and verifies the new 18-input instance before deleting the legacy 14-input instance. Failure removes the new study and preserves the old one.
+- If current and outdated instances coexist, only the outdated one is removed and preview warns that its inputs are not migrated.
+- Multiple current instances, multiple legacy instances, or three or more total instances are rejected as ambiguous.
 
-`get_analysis_overlay_template` / `apply_analysis_overlay` 追加に伴うレビュー:
+## Addendum: Backlog #17 (2026-07-15)
 
-- **固定テンプレート**: MCPが返すPineソースは静的定数で、分析文や外部データをソースコードへ連結しない。分析値は保存済みスタディの型付き入力としてのみ渡すため、Pineコード注入経路を作らない
-- **誤適用のfail-closed検証**: 書き込み前に`chart_index`、完全な銘柄名、時間足を現在のチャートと照合する。さらにスタディ名は完全一致、14個の入力ID・表示名は固定契約に一致しなければ、既存の別インジケーターを変更せず拒否する
-- **confirmフロー**: `confirm: true`がない呼び出しはチャート状態と入力契約の確認およびプレビューだけを行う。明示確認後に限り、専用オーバーレイの入力を一括更新する
-- **時点と方向の検証**: `analyzed_at`の未来時刻、逆転したエントリー帯、方向と矛盾するStop・Invalidation・Target、非正値を拒否する。`expires_at`経過後は削除や現在判断への見せかけをせず、Pine側で`EXPIRED`として灰色表示する
-- **書き込み後の検証**: 全入力を読み戻して期待値との一致を返し、再計算がsettleした場合だけ描画プリミティブ数も取得する。20秒デッドラインで`settled:false`の場合は`verified:false`とwarningを返し、staleになり得る描画検証をスキップする。描画読取りだけが失敗した場合も、入力更新成功と検証不能を区別してwarningを返す
-- **時刻単位の実機確認**: Pineの`input.time`契約に合わせUnix epochミリ秒を渡す。USDJPY 4H実機で`1784115245774`の入力読み戻し一致と、同日の分析開始位置からボックスが描画されることをスクリーンショット確認済み
-- **権限境界**: Pineライブラリの削除・注文・アラート作成には接続しない。Study削除は#16の所有確認・confirm付き経路に限定する。TradingViewレイアウトの自動保存により入力値が残る可能性は`set_indicator_input`と同じ
+`get_analysis_overlay_status` is read-only. It verifies owned Pine ID, exact script identity/type, single placement, deployed version/source, and all 18 inputs. Missing, ambiguous, default/unconfigured, source-mismatched, or corrupt states are not trusted. Context mismatch stops price interpretation. Current close geometry never claims historical touch order, fills, or P&L. Drawing-count checks detect missing primitives but do not prove coordinates or visibility.
 
-## 追補: バックログ #16(2026-07-15)
+## Addendum: Backlog #18 (2026-07-15)
 
-`ensure_analysis_overlay` / `remove_owned_study`追加に伴うレビュー:
+`evaluate_analysis_overlay_outcome` reuses #17's trust boundary. It excludes the analysis-time and forming bars, and only includes bars closing before expiry. It does not infer intrabar order or a fill across an opening gap. Invalidation before Confirmation cancels the setup; after activation, Target 1 versus Stop is a binary first-hit evaluation. Daily/weekly aliases are supported, while calendar-month `M` is not approximated. Insufficient history returns `incomplete`, not no-entry. Results are closed-OHLC evidence, not orders, fills, slippage, or realized P&L.
 
-- **所有確認**: 削除可能なのは`USER;`形式の自作Pineだけ。公開ツール層で`list_pine_scripts.usedBy`のchart/study対応を確認し、TradingView層でもStudyのhidden `pineId`が要求値と完全一致しなければ`removeEntity`を呼ばない
-- **confirmフロー**: 削除、追加、更新、旧版入れ替えは`confirm:true`なしではプレビューのみ。すでに現行版が1つだけ存在する場合は書き込みなしで同じ`study_id`を返す
-- **監査済みソース限定**: ensureはPineライブラリのlatestソースを取得し、改行正規化後に固定テンプレートと完全一致しなければ拒否する。名前だけ一致する別スクリプトを自動更新しない
-- **版識別**: Studyのhidden `pineVersion`を読み取り専用で`list_pine_scripts.usedBy.version`へ公開し、ライブラリlatestと配置版を比較する
-- **版番号の分離**: `ANALYSIS_OVERLAY_VERSION`は固定テンプレートの論理版であり、TradingViewが保存ごとに付与するPineライブラリ版とは独立する。symbol/timeframe/snapshot ID/strategy versionの4入力追加により論理版を`2.0`とする
-- **トランザクション順序**: 旧版を先に削除しない。latest追加→18入力移行→settle→全入力読み戻し→配置版確認の順で検証し、成功後だけ旧版を削除する。旧14入力版はプレビューで文脈拘束が必要なことを明示し、confirm後だけ現在の検証済みsymbol/timeframeを追加する。途中失敗時は新規Studyを削除して旧版を保持する
-- **既存latest優先**: latestとoutdatedが同時配置済みならlatestを保持し、outdatedだけを削除する。このcleanupではoutdated側の入力を移行しないため、confirm前のプレビューへ明示警告を返す
-- **曖昧性拒否**: 同一チャートにlatestが複数、旧版が複数、または全体で3個以上ある場合は、自動的に残す個体を選ばず拒否する
+## Addendum: Backlog #19 (2026-07-16)
 
-## 追補: バックログ #17(2026-07-15)
+An optional `evaluation_timeframe` temporarily changes only the verified target chart and always attempts restoration. Symbol, chart index, and timeframe are checked before, after, and after restoration. Stale bars or zero-bar evidence fail closed. A restoration failure preserves the evaluation result but returns `chartState.restored:false`, current timeframe, and the restore error. In-process operations are serialized; manual UI actions and other processes remain residual races detected through readback.
 
-`get_analysis_overlay_status`追加に伴うレビュー:
+## Addendum: Backlog #20 (2026-07-16)
 
-- **読み取り専用**: チャート、Pineライブラリ、入力、アラート、注文を変更しない。対象チャートのコンテキスト、保存済みPine、配置版ソース、18入力、最新OHLCV、描画プリミティブだけを取得する。入力に拘束されたsymbol/timeframeが現在チャートと違う場合は`stale_context`として価格判定を停止する
-- **信頼境界**: `USER;` Pine ID、完全一致するスクリプト名・種別、対象チャート上の単一配置、配置版番号、配置版ソースと固定テンプレートの完全一致を順に確認する。未配置は`not_installed`、複数配置は`ambiguous`、初期入力は`unconfigured`、ソース不一致や入力破損は`blocked`として分析値を信頼しない。初期入力と入力破損ではOHLCV・描画を取得しない
-- **現在値判定の限界**: 最新バー終値と各水準の現在位置だけを返し、形成中バーかどうかも併記する。現在価格が水準以上・以下でも、過去に接触した事実、接触順序、約定、損益を推定しない
-- **描画整合性**: 分析入力から期待されるlabel・line・box数と実際のプリミティブ数を比較する。これは表示要素の欠落検知であり、座標や画面上の視認性を保証するものではない
-- **曖昧性の拒否**: 同一Pineが対象チャートへ複数配置されている場合、自動選択せず`study_id`候補を返して停止する
+The analysis journal is local-only and defaults to `~/.tradingview-mcp/analysis-journal.jsonl`:
 
-## 追補: バックログ #18(2026-07-15)
+- Directories/files require 0700/0600, current-user ownership, regular files, size limits, `O_NOFOLLOW`, full writes, fsync, and an owner-token cross-process lock.
+- Corrupt JSONL, missing sequence numbers, and symlinks fail closed. A stale lock is reclaimed only after PID, descriptor, inode, and mtime checks.
+- Business `analysisId` is separate from event UUIDs. Definitions are SHA-256 bound to symbol, timeframe, time, levels, confidence, note, and optional snapshot/strategy version.
+- Confirmed overlay input readback is required before automatic recording. Outcome recording remains opt-in with `record:true`.
+- Journal failure after chart success does not roll back the chart; it returns `journal.recorded:false` with a redacted error.
+- Completed outcomes cannot regress to `ongoing`, identical evidence is idempotent, and conflicting completed labels are rejected.
+- Calibration uses only Target-before-Stop as 1 and Stop-before-Target as 0; all ambiguous and nonterminal cases are exclusions.
+- The JSONL is not encrypted and does not protect confidentiality after OS-account compromise. It has no automatic rotation and stops at 64 MiB.
 
-`evaluate_analysis_overlay_outcome`追加に伴うレビュー:
+## Addendum: Backlog #22 (2026-07-20)
 
-- **読み取り専用・同一信頼境界**: #17と同じ所有Pine、単一配置、配置版、固定ソース、18入力、未設定・文脈不一致検知を通過した分析だけを評価する。注文、アラート、評価ログを変更せず、評価時間足指定時の一時切替だけを復元付きで行う
-- **先読み防止**: 分析時刻を含む足は、時刻以前のHigh/Lowが混在するため丸ごと除外する。形成中足も除外し、期限が足の途中にある場合は終了時刻が期限内に収まる足だけを対象にする
-- **OHLCの限界**: 同一足内のEntry/Confirmation、Confirmation/Invalidation、Entry/Terminal、Target/Stopの順序は復元しない。直前終値から始値でTerminalを飛び越えたギャップも約定扱いせず`ambiguous`にする
-- **水準の意味論**: Entry後、Confirmation前のInvalidation接触は分析シナリオの取消として扱う。有効化後の二値first-hitだけをTarget 1対Stopで判定する。Target順とStop/Invalidation相対順は入力契約で検証し、手動編集による矛盾は`blocked`にする
-- **月足**: `D`/`W`の数字省略は1単位として受理するが、`M`は暦月長が可変なため30日近似せず`not_evaluable`にする
-- **履歴完全性**: 取得した最古の確定足が分析開始以前を覆わない場合、または期限内に評価可能な確定足が0本の場合、Entryなしと誤判定せず`incomplete`にする。自動履歴ロードは行わず、利用者が`load_more_history`または短い時間足を準備して再評価する
-- **非約定評価**: 結果は確定OHLC上のfirst-hit証拠であり、注文成立、約定価格、部分利確、スリッページ、実現損益を表さない
+`validate_trade_plan` is a pure Node calculation with no CDP, TradingView, network, journal, alert, or order side effect. It blocks directional inconsistency, expiry, future/stale evidence, already-terminal geometry, event blackout, and inadequate net reward/risk with structured reasons. It never infers historical touches or execution. Round-trip cost is explicitly in instrument price units.
 
-## 追補: バックログ #19(2026-07-16)
+## Addendum: Backlog #23 (2026-07-20)
 
-`evaluate_analysis_overlay_outcome.evaluation_timeframe`追加に伴うレビュー:
+`get_trade_decision_context` combines read-only chart, OHLC, levels, scanner, calendar, COT, and real-yield evidence. Exact chart binding is checked before and after acquisition. Each source retains required/status/time/freshness metadata; failures are never replaced with zero or another source. `decision_status` is a completeness/event/execution gate and `directional_recommendation` is always null. Chart quotes require fresh `lp_time`, streaming, active session, real-time load, and valid bid/ask. Scanner fallback proves only local liveness after an observed quote change; receipt time is not a market timestamp. `trade_ready` does not guarantee fills, liquidity, or exchange sequencing.
 
-- **条件付きチャート操作**: パラメータ未指定時は従来どおり読み取り専用。指定時だけ、検証済みの対象`chart_index`を証拠用時間足へ一時変更し、OHLCV取得後に元の時間足へ復元する。symbolやPine入力は変更しない
-- **誤チャート防止**: `setResolution`をチャート番号対応にし、非アクティブ面を指定した評価でもactive chartへ誤適用しない。切替前・切替後・復元後に`chart_index`、symbol、timeframeを照合する
-- **証拠の鮮度**: 切替後に旧時間足のバーが残る場合を考慮し、OHLCVのsymbol・resolution一致と1本以上のバーを必須とする。不一致は評価せず`evaluation_evidence_unavailable`でfail closedする
-- **復元失敗**: 証拠取得または評価の成否にかかわらず復元を試みる。証拠が評価可能でも復元に失敗した場合は結果を消さず、`chartState.restored: false`、`currentTimeframe`、`restoreError`、`chart_timeframe_restore_failed`を返す
-- **競合制御と残余リスク**: 同一MCPプロセス内の主要チャート読み取り、時間足・銘柄変更、バックテスト、Pine追加、入力変更、分析オーバーレイ管理を直列化する。TradingView UIからの手動操作や別MCPプロセスによる変更までは排他できないため、各段階の状態照合は引き続き必須
+## Addendum: Backlog #25 (2026-07-20)
 
-## 追補: バックログ #20(2026-07-16)
+`compute_position_size` is a pure calculation. It includes Stop distance and round-trip cost, floors to `quantity_step`, and reduces another step if floating-point error exceeds the risk budget. Unsupported precision is rejected. Cross-currency sizing requires a positive, fresh, timestamped conversion with its symbol. Results are instrument units, not lots; broker limits and multipliers are caller-supplied. The estimate does not cover gaps, slippage, margin calls, tax, swap, liquidity, or fillability.
 
-分析ジャーナル追加に伴うレビュー:
+## Addendum: Backlog #26 (2026-07-20)
 
-- **ローカル専用・権限境界**: 保存先は既定`~/.tradingview-mcp/analysis-journal.jsonl`で、チャート・Pineライブラリ・注文・アラートへ書き戻さない。保存ディレクトリ0700、ファイル0600、現ユーザー所有、通常ファイル、サイズ上限を検証し、`O_NOFOLLOW`、fsync、プロセス内直列化、所有トークン付きプロセス間ロックを使う。破損JSONL、連番欠落、シンボリックリンクは黙って補正せずfail closedする。ロックは60秒超かつ所有PID不在の場合だけdescriptor/inode/mtime再照合後に回収し、生存PIDまたは確認不能なら奪取しない。タイムアウト時は手動復旧可能な`.lock`パスをエラーへ含める
-- **識別子の分離**: 業務キー`analysisId`へUUID形式を強制せず、イベント識別には別の`event_id` UUIDを使う。分析定義はsymbol・時間足・分析時刻・全水準・confidence・noteを固定順序JSONからSHA-256化し、同じIDを異なる定義へ再利用できない。衝突は`analysis_id_definition_conflict`として構造化し、ストレージ再試行ではなく新しい`analysis_id`での再適用を案内する
-- **書き込み条件**: `apply_analysis_overlay(confirm:true)`でsymbol/timeframeを含む18入力の読み戻しが全一致した場合だけ定義を自動追記する。任意のsnapshot IDとstrategy versionも定義hashへ拘束する。再計算タイムアウト時も入力一致が確認できれば、描画検証不能のwarningと区別して分析定義を記録する。事後評価は従来の読み取り専用既定を維持し、`record:true`の明示時だけ追記する
-- **部分失敗**: チャート反映後のジャーナル失敗を反映失敗に見せず、ロールバックもしない。`applied:true`または評価結果を維持し、`journal.recorded:false`、秘匿情報を除いたエラー、冪等な再試行方法を返す
-- **状態遷移と衝突**: 各評価に証拠として確認した最終足時刻`evidenceThrough`を保存する。参照・集計時は`complete`を後発の`ongoing`で逆戻りさせず、同じ証拠・時間足・ラベルの再記録は冪等にする。異なる`complete`ラベルは時間足差やデータ差の調査対象であり、自動的に最新版へ上書きせず拒否する
-- **較正の母集団**: 確信度をシナリオ成功確率として扱い、`target_before_stop=1`、`stop_before_target=0`だけでBrier scoreと確信度帯別実現率を算出する。同一足順序不明、ギャップ、履歴不足、未発動、無効化、neutral等を勝敗へ丸めず、理由別除外数を返す。少数標本では値を表示しても統計的信頼性を保証しない
-- **残余リスク**: JSONLは暗号化しないため、OSアカウントや端末自体が侵害された場合の秘匿性は提供しない。`note`には取引分析以外の機微情報を入れない。ログは追記専用で自動ローテーションを行わず、64MiB上限到達時は明示エラーになる
+`create_analysis_alerts` is a constrained confirmed write:
 
-## 追補: バックログ #22(2026-07-20)
+- Without confirmation it only previews. After confirmation it requires the exact owned template, one placement, 18 valid inputs, matching analysis ID/context, and future expiry.
+- Ownership names are fixed as `BUSHIDO-MCP:<first-16-SHA256-of-analysisId>:<kind>`. Exact alerts are reused; mismatched, stopped, or duplicate alerts are not modified, restarted, or deleted.
+- Requests use a fixed HTTPS origin and validate symbol, resolution, operator, positive level, future expiry, owner name, and bounded message before POST and readback.
+- Only mobile push and popup are enabled by default; email, SMS, and webhook remain disabled. No order or broker API is used.
+- Current close geometry can suppress or reject alerts but never proves pre-creation touches.
+- Creation stops after the first unverified error and re-lists all targets. Timeout does not trigger automatic deletion or immediate retry. Journal failure never rolls back valid TradingView alerts.
 
-`validate_trade_plan`追加に伴うレビュー:
+## Addendum: Backlog #27 (2026-07-20)
 
-- **純粋な事前検証**: 入力された分析定義、現在価格、観測時刻、往復コスト、イベントだけをNode内で決定論的に評価する。CDP、TradingView、Pine、アラート、注文、分析ジャーナル、外部HTTPへアクセスせず、副作用を持たない
-- **fail closed**: 方向矛盾、期限切れ、未来または期限超過の市場証拠、観測時点でConfirmation/Invalidation/Stopへ到達済み、重要イベント停止時間、コスト控除後RR不足を個別のerrorコードで`blocked`にする。分析契約違反を生のMCPエラーへせず、修正候補付きの構造化結果として返す
-- **推測の禁止**: `current_price`は呼び出し側が明示した観測値だけを使用し、過去の水準接触、約定、執行可能性を推定しない。Entryを過ぎConfirmation前の状態は`warning`であり、到達履歴の証明ではない。イベント配列も渡された範囲だけを評価し、カレンダー完全性を保証しない
-- **単位境界**: `estimated_round_trip_cost_price`は銘柄価格単位であり、`compute_round_trip_cost.total_price_per_unit`と接続できる。口座通貨の総額やpipsを暗黙変換せず、Target 1のnet RRは往復コストを報酬から控除しリスクへ加算して算出する
+`evaluate_due_analyses` is a dry-run without confirmation. Confirmed execution uses one chart index, a verified journal definition, bounded scanning, and serialized symbol/timeframe/history/evaluation operations. Every item restores and verifies the original chart; ordinary item failures continue, but restoration failure stops the batch. Optional history loading is disclosed as persistent because loaded bars cannot be unloaded. Records remain definition-hash bound and idempotent.
 
-## 追補: バックログ #23(2026-07-20)
+## Addendum: Backlog #28 (2026-07-20)
 
-`get_trade_decision_context`追加に伴うレビュー:
+`get_analysis_performance` reads only the validated live-analysis journal. It stores derived path metrics rather than raw OHLC and excludes activation/terminal-bar highs and lows whose intrabar order is unknowable. Entry midpoint and gross/net R are analytical geometry, not fill price or account return. Missing costs are excluded rather than treated as zero. Each metric reports its own population and exclusions, accepts only methodology version `1.0`, rejects duplicate symbol costs, and discloses the 500-definition scan limit.
 
-- **読み取り専用統合**: 既存のTradingView chart context/OHLC/キーレベル、公開scanner・経済カレンダー、CFTC COT、米財務省実質金利の読み取りだけを束ねる。symbol、時間足、インジケーター入力、Pine、アラート、注文、ジャーナルを変更せず、口座情報や認証情報も受け取らない
-- **文脈拘束**: `chart_index`のsymbolと`expected_timeframe`を取得前に照合し、不一致時はOHLCとキーレベルを読まない。取得後もOHLCとキーレベルのsymbol/timeframeを再照合し、staleまたは別チャート由来の証拠を破棄する
-- **部分失敗の保持**: 各ソースを`required/status/source/observed_at/source_at/freshness/data`で包み、失敗をゼロ値や別ソースで補完しない。chart contextや必須ソースの失敗は他の取得済み証拠とUUID `snapshot_id`を保持した構造化`blocked`として返し、任意COT・実質金利・キーレベルの失敗は`partial`に留める
-- **判断境界**: `decision_status`はデータ完全性・イベント停止・執行証拠だけのゲートで、`directional_recommendation`は常に`null`。`trade_ready`を売買推奨として扱わない。重要イベント時間帯は`wait`、必須証拠破損は`blocked`とする
-- **執行鮮度**: 開いているチャートのquoteは`lp_time`、`current_session`、`hub_rt_loaded`、`trade_loaded`、bid/askを同時に読み、source時刻SLA・streaming・active session・realtime loadedをすべて満たす場合だけreadyとする。`lp_time`はlast-price時刻でありbid/ask個別のexchange timestampではないため、単独では鮮度証明に使わない。チャート未配置時のscanner fallbackには市場側timestampとsession calendarがないため受信時刻をsource timeへ置換せず、リクエスト後のbid/ask変化を観測した場合だけローカルなlivenessを検証済みとする。静止、遅延、stale、欠落、crossed quoteはreadyにしない。`get_trade_decision_context`はこの条件と他の必須ゲートを満たした場合だけ`trade_ready`へ進む。チャート終値をbid/askや約定可能価格へ代用せず、readyも約定・流動性・exchange sequencingの保証とはしない
+## Addendum: Backlog #29 (2026-07-20)
 
-## 追補: バックログ #25(2026-07-20)
+`set_symbol` and `set_timeframe` accept an explicit nonnegative existing chart index, snapshot the original context, read back every stage, and roll back partial application. A rollback error is reported alongside the original operation error. Shared temporary-chart operations reuse the same transaction. In-process serialization cannot exclude manual UI or another MCP process; readback detects mismatches, while a race after final readback remains residual risk.
 
-`compute_position_size`追加に伴うレビュー:
+## Addendum: Backlog #8 Bar Replay (2026-07-20)
 
-- **純粋計算・権限境界**: 呼び出し側が明示した口座通貨、評価額、リスク、価格、コスト、数量制約、換算証拠だけをNode内で計算する。ブローカー口座、認証情報、TradingView、CDP、外部HTTP、注文、チャート、ジャーナルへ接続せず、入力と結果を永続化しない
-- **リスク上限**: EntryからStopまでの値幅と往復コストをquantity当たり損失へ含め、最大数量適用後も`quantity_step`単位で下方向へ丸める。浮動小数点誤差で推定損失が予算を超えた場合はさらに1 step減らし、12桁を超えるstepや安全整数範囲外の正確な丸めは推定せず拒否する
-- **通貨換算のfail closed**: instrument registryのquote通貨と口座通貨が異なる場合、`quote_to_account_rate`を「quote通貨1単位あたりの口座通貨」と固定し、conversion symbol、ISO観測時刻、最大鮮度をすべて要求する。欠落、stale、未来時刻、非正値、未知quote通貨では数量をnullにする。同一通貨の場合だけ換算率1を内部設定する
-- **ブローカー仕様を推測しない**: 戻り値はinstrument unitでありlotではない。最小/最大数量、数量刻み、contract multiplierはブローカー、商品、口座種別、地域で異なるため自動推定せず入力必須または明示optionalとする。MCPのXAUUSD metadataはquote通貨とtickを識別するだけで、取引可能数量や契約仕様を保証しない
-- **非執行性**: 結果はStop価格での単純な損失見積りであり、ギャップ、滑り、流動性、追証、証拠金、価格改善、税、swap、約定可能性を保証しない。往復コストとcontract multiplierの正確性は呼び出し側の証拠品質に依存する
+The public surface is limited to `get_replay_status`, `start_chart_replay`, `step_chart_replay`, and `stop_chart_replay`. Replay buy/sell/close, positions/P&L, autoplay, random/first date, and resolution changes remain private. Start and stop default to dry-run, require confirmation and exact symbol/timeframe binding, and verify state within a deadline. A start accepts only a canonical historical ISO timestamp, and partial startup attempts cleanup. Steps are limited to 1-100 while paused and must advance Replay time. `get_trade_decision_context` blocks while Replay is active so historical chart evidence cannot be mixed with real-time alerts, orders, or quotes. Internal API changes fail explicitly; there is no UI-click fallback. In-process chart serialization cannot prevent concurrent manual UI changes or a second MCP process, so final readback is a detection boundary rather than a global lock.
 
-## 追補: バックログ #26(2026-07-20)
+## Addendum: Backlog #31 (2026-07-20)
 
-`create_analysis_alerts`追加に伴うレビュー:
+`get_strategy_trade_ledger` is read-only and rejects residual reports without an active strategy. A canonical SHA-256 `ledgerId` binds strategy, symbol/timeframe, Pine ID/version, public inputs, period, currency, capital, and all normalized trades; pagination stops if the expected ID changes. Internal Pine fields and unsupported values are excluded. Pages are capped at 500 trades and offset at 10,000,000. Missing Strategy Tester fields are not imputed. A trailing live row is classified as open only under strict summary and exit-ID conditions. Results remain simulated and do not prove fills, intrabar order, liquidity, or account P&L. Private API changes produce explicit quality errors rather than guessed field mappings.
 
-- **限定された書き込み**: `confirm:true`がない呼び出しはpreviewのみ。確認後も固定テンプレートと完全一致する所有Pine、対象チャート上の単一配置、18入力、`analysisId`、symbol/timeframe、未来の分析期限をすべて照合した場合だけ、Confirmation、Invalidation、Target 1の不足アラートを作成する
-- **非破壊・冪等**: 所有名は`BUSHIDO-MCP:<analysisIdのSHA-256先頭16桁>:<kind>`に固定する。同名アラートが完全一致すれば再利用し、定義違い、停止済み、重複なら上書き・再開・削除せず停止する。Confirmationだけが欠け、InvalidationまたはTarget 1が既存の場合も、到達済み省略と手動削除を区別できないため後付け作成しない。他のユーザーアラートは名前照合以外の管理対象にしない
-- **通信境界**: ログイン済みTradingViewページ内から固定HTTPS originの`create_alert`へPOSTし、`list_alerts`で読み戻す。symbol、resolution、operator、正値level、未来expiration、所有名、300文字以内messageをNode側で検証してからJSON化する。公開APIではなくアプリ内部契約への依存なので、HTTP・応答shape・読み戻しの不一致は成功にせず停止する
-- **通知・執行境界**: mobile pushとpopupだけを既定有効とし、soundは任意。email、SMS、Webhookは常に無効で、注文・ブローカー・Pine strategyには接続しない。既存アラートのmodify/restart/delete endpointは実装しない
-- **時間と履歴の限界**: expirationは分析期限へ拘束する。作成時点の最新終値がInvalidationまたはTarget 1のTerminal側なら拒否し、Confirmation側ならそのアラートを省略するが、作成前の接触やOHLC内の到達順序を証明しない
-- **部分失敗と監査**: 1件ずつ作成し、最初の未検証エラーで停止後、全対象を再取得して`complete/partial`を返す。タイムアウトしたPOSTが実際には到達している可能性があるため自動削除・即時再試行を行わない。完全一致集合だけを既存分析定義hashへ拘束してジャーナルへ追記し、記録失敗でもTradingView上の有効アラートは巻き戻さない
+## Addendum: Backlog #32 (2026-07-20)
 
-## 追補: バックログ #27(2026-07-20)
+`run_strategy_experiment` defaults to dry-run and compares exactly two variants only after confirmation and exact chart/Pine binding. Overrides are at most 20 primitive known inputs. Full ledgers are paginated and hash-bound; methodology and experiment definitions also receive SHA-256 IDs. No aggregate score or automatic adoption is returned, and differing costs, capital, fill settings, or periods make variants non-comparable. Each temporary owned study is removed after success or failure. Baseline or cleanup failure prevents the candidate; candidate failure preserves baseline evidence. Real-app testing verified input readback, distinct ledgers, cleanup, and restoration.
 
-`evaluate_due_analyses`追加に伴うレビュー:
+## Addendum: Backlog #33 (2026-07-20)
 
-- **確認境界**: `confirm:true`なしではチャートを変更せず、候補と推定変更だけを返す。確認後は指定した一つの`chart_index`だけを使い、symbol/timeframe変更、任意の履歴追加、OHLCV取得、評価記録を既存のプロセス内直列キューで実行する
-- **対象の信頼境界**: 破損・改ざん検証済みのローカルジャーナル定義を評価ソースとし、配置中Pineや現在のオーバーレイ入力へ依存しない。neutralと既存終端評価を除き、期限到来未評価、非終端再評価、明示指定された有効未評価だけを選ぶ。最大500定義の走査上限と切り詰めを返し、未走査対象がないと推定しない
-- **チャート分離**: `setSymbol`と`setResolution`の内部APIを`chart_index`対応にし、対象ペイン以外を変更しない。各切替後にchart context、取得後にOHLCVのsymbol/timeframe/バー有無を再照合し、別symbolやstale resolutionの証拠を評価しない
-- **復元規則**: 各分析の成功・失敗にかかわらず元symbol/timeframeへの復元と読み戻しを行う。個別の切替・履歴・評価・journal失敗は次の分析へ進むが、復元不能ではチャート前提が失われるため残件を即時中止する。TradingView UIや別プロセスの同時操作は排他できないため、段階ごとの再照合を省略しない
-- **履歴の副作用**: `load_more_bars`既定値は0。明示値がある時だけTradingViewの履歴を追加ロードする。追加済み履歴はアンロードできず元のメモリ状態へ戻せないため、dry-runでpersistent history loadとして表示する。履歴不足、形成中足、同一足順序、ギャップ、暦月は既存評価と同じfail-closed契約を維持する
-- **ジャーナル整合性**: 評価は保存済み`definition_hash`へ直接拘束し、別定義への記録を拒否する。同じstatus/outcome/evidence timeframe/evidenceThroughは冪等で、再試行時に重複イベントを増やさない。評価結果が得られた後のjournal失敗はチャート評価を消さず、項目単位のエラーとして保持する
+`run_backtest_matrix` permits 1-24 explicit jobs after confirmation, at most 20 primitive inputs each, bounded strings, and a 30-1,800 second soft deadline. Jobs run serially and bind exact Pine version, symbol/timeframe, definition hash, and full ledger ID. Normal failures are isolated; cleanup or restoration failure stops remaining jobs. The deadline prevents starting a new job but never force-cancels an in-flight operation that still needs cleanup. Results stay in input order with no ranking or automatic adoption.
 
-## 追補: バックログ #28(2026-07-20)
+## Addendum: Backlog #34 (2026-07-20)
 
-`get_analysis_performance`と評価経路指標追加に伴うレビュー:
+`run_strategy_walk_forward` partitions complete ledgers without private Deep Backtesting writes or Pine modification. Only trades whose Entry and Exit are both within `[from,to)` are included; crossing, open, and untimestamped trades are counted separately. Inputs are bounded to 2-8 candidates, 2-12 folds, and explicit embargo. Selection uses train only, hides unselected candidates' test metrics, rejects ties, and requires every candidate to pass collection, ownership, quality, coverage, cleanup, and comparable-condition checks. Drawdown is explicitly closed-trade-equity drawdown, not TradingView's bar-level maximum DD. Ledger partitioning does not neutralize repainting and may retain pre-fold warm-up state; it is identified as `ledger_partition_v1`.
 
-- **読み取り境界**: 集計ツールは検証済みローカル分析ジャーナルだけを読み、TradingView、CDP、外部HTTP、Pine、アラート、注文、ブローカー口座へ接続しない。ライブ分析だけを対象とし、Strategy Tester・walk-forward・その他バックテストを同じ母集団へ混在させない
-- **経路指標の保存**: 評価時にOHLC原本ではなく、Entry帯midpoint、midpoint-to-Stopのstructural risk、MFE/MAE、gross R、経過時間だけをoutcome resultへ保存する。既存64KiBイベント上限、追記専用、definition hash拘束、0600権限を維持する。同一意味・同一証拠の旧イベントにmetricsがない場合だけ一度の拡充追記を許し、metrics付きイベントが存在すれば再度の追記は冪等に抑止する
-- **足内不確実性**: activation足とterminal足のHigh/Lowはイベント前後を区別できないためMFE/MAEから除き、terminal水準だけを一点追加する。activation後・terminal前の確定足だけを使うため保守的だが、真の足内excursionを完全には測定しない。曖昧足やギャップを推定でterminalへ変換しない
-- **非約定R**: Entry midpointは分析形状の基準であって約定価格ではない。gross Rは価格距離比、net Rは明示された銘柄別往復価格コストをstructural riskで割って控除した参考値であり、金額、lot、口座収益率、実現損益ではない。コスト欠落はゼロ扱いせずnet母集団から除く
-- **データ品質**: 最新評価、二値勝敗、実現R、excursion、各時間指標を別母集団として件数を返す。旧レコード、未評価、非二値、未activation、コスト欠落を個別に数え、ゼロ埋めしない。経路指標は`methodologyVersion: "1.0"`だけを採用し、将来の算出法変更を同じ平均へ混在させない。重複symbolのコスト前提は順序依存にせず拒否する
-- **集計上限**: 1回に検証済み最新500定義を読み、全件数・走査件数・切り詰めを返す。上限外の履歴を含む完全統計だと主張しない。OSアカウント侵害時のジャーナル改ざん・秘匿性は#20と同じ残余リスクを持つ
+## Addendum: Backlog #35 (2026-07-21)
 
-## 追補: バックログ #29(2026-07-20)
+`validate_research_protocol` is read-only and binds an exact user-owned Pine version, canonical windows, candidate set, and lifecycle. Overlapping/future/OOS-modified protocols are blocked. Static Pine risks and unverified restart behavior remain warnings, and adoption requires no warnings. `stress_test_strategy` defaults to dry-run, serially reruns at most eight explicit scenarios after confirmation, and includes only ledgers with verified ownership, cleanup, and chart restoration. Regime matrices are bounded, serial, and do not rank or pool currencies. Session classification is explicit, DST-aware, and nonexclusive by default. Cost models do not guess pip/account conversion, and seeded trade-order bootstrap is not presented as a market-path Monte Carlo. No raw ledgers, arbitrary grids, automatic adoption, or orders are returned.
 
-`set_symbol`/`set_timeframe`のチャート指定一般化に伴うレビュー:
-
-- **明示的な対象ペイン**: 両ツールは任意の`chart_index`を受け取り、省略時だけ現在のactive chartを使う。非負整数かつchart contextに存在するindexを要求し、対象不明のままactive chartへ推測適用しない
-- **不変スナップショットと段階検証**: 操作前のsymbol/timeframe/studiesをコピーして保持し、APIが参照オブジェクトを更新しても復元先を失わない。symbol変更後と最終状態で対象ペインを読み戻し、要求値と一致しなければ成功にしない。低レベルAPIの入力検証、JSON文字列化、バー0本拒否も維持する
-- **ロールバック**: symbol変更後のtimeframe失敗など部分適用でも、対象ペインだけを元のsymbol/timeframeへ戻して再検証する。復元も失敗した場合は最初の操作エラーを上書きせず、操作原因と復元原因の両方を返す
-- **共通トランザクション**: #27の分析ごとの一時切替も同じ変更・復元処理を使う。バッチ開始時の元状態を各候補の直前に再確認し、途中の外部変更を暗黙の新基準として受け入れない。復元不能時は残件を停止する
-- **競合と残余リスク**: 公開操作と主要なチャート依存処理は既存のプロセス内`SerialOperationQueue`で直列化する。TradingView UIの手動操作や別MCPプロセスまでは排他できないため、段階ごとの読み戻しで不一致を検出してfail closedする。外部操作が読み戻し後に発生する競合窓そのものは残る
+## Addendum: Backlog #36 Session Auction v1 (2026-07-21)
 
-## 追補: バックログ #8 Bar Replay(2026-07-20)
-
-- **限定公開**: 公開する内部APIは状態取得、`selectDate`、`doStep`、`stopReplay`だけ。実機で存在を確認した`buy`、`sell`、`closePosition`、Replay Tradingの損益/position、autoplay、random/first date、replay resolution変更は公開しない
-- **開始境界**: `start_chart_replay`はdry-runを既定とし、`confirm:true`、過去のISO日時、active chartの期待symbol/timeframe完全一致、Replay利用可能、既存sessionなしをページ内で再検証してから開始する。日時とsymbolはNode側検証後にJSON文字列化し、開始後20秒以内のstarted/current time読み戻しを要求する。`selectDate`失敗またはタイムアウト時は部分的に開いたsession/toolbarを`stopReplay`で閉じ、cleanupも失敗した場合は元原因とcleanup原因を併記する
-- **ステップ境界**: `step_chart_replay`は開始済み・ready・autoplay停止中だけ1〜100本を進める。各`doStep`後にcurrent timeが変わったことを確認し、進まない場合はreached endとして停止する。無期限autoplayやバックグラウンド継続を作らない
-- **終了境界**: `stop_chart_replay`もdry-run/confirmを使い、`stopReplay`後にstartedとtoolbarの両方がfalseになるまで読み戻す。終了はチャートをリアルタイム表示へ戻すが、TradingViewが保存する過去のreplay session履歴自体の削除は保証しない
-- **リアルタイムとの混在防止**: TradingView公式は、リプレイ中もserver-side alerts、orders、trading panelとquote listをリアルタイム側としている。`get_trade_decision_context`はreplay状態を必須証拠にし、toolbarまたはsession稼働中はOHLC/キーレベルを読まず`decision_status: blocked`にする。チャート証拠取得後にも状態を再確認し、途中でreplayが開始された場合や再確認不能時は取得済み証拠を破棄する。執行quoteを過去時点へ巻き戻したと解釈しない
-- **競合と残余リスク**: 4ツールは既存のプロセス内`SerialOperationQueue`で他の主要チャート操作と直列化する。UIや別プロセスの同時操作は排他できず、開始前・開始後・各step・終了後のreadbackで検出する。TradingView内部の非公開API変更は明示エラーとなり、自動でUIクリックへフォールバックしない
+`run_market_event_study` is read-only, exact-chart-bound, Replay-blocked, and limited to 5,000 loaded closed bars. IANA timezone conversion handles DST for same-day ordered windows; overnight sessions, holiday calendars, and early closes are outside v1. The first post-range boundary touch is classified without inferring intrabar order, and ambiguous sweeps remain ambiguous. Horizons, folds, events, targets, and response detail are bounded; raw OHLC is never returned. Confidence intervals are descriptive asymptotic/Wilson intervals, not causal or profitability claims. Trial count is caller-declared and multiple-comparison limitations are explicit. Optional regimes use only labels closed before the signal. Session-auction horizons require timestamp continuity and do not forward-fill weekends.
 
-## 追補: バックログ #31(2026-07-20)
-
-`get_strategy_trade_ledger`追加に伴うレビュー:
+## Addendum: Backlog #37 Market Regime v1 (2026-07-21)
 
-- **読み取り境界**: アクティブチャートのStrategy Testerが既に保持するレポートだけを読み、ストラテジー追加、入力変更、Pine保存、チャート変更、注文、口座、外部HTTP、ジャーナル書き込みを行わない。`activeStrategy`がない残留レポートは拒否する
-- **ページ整合性**: 取引全件とstrategy、symbol/timeframe、Pine ID/版、公開入力、期間、通貨、初期資本をcanonical JSON化し、ページ内Web CryptoでSHA-256 `ledgerId`を算出する。後続ページの`expected_ledger_id`が違えば、再計算前後の取引を混在させず停止する
-- **情報最小化**: 入力値はPine内部の`text`、`pineFeatures`、`__profile`を除外し、`pineId`/`pineVersion`は専用メタデータとして返す。サポート外の複合入力値は文字列化せずnullと品質問題にする。認証情報、Pineソース本文、ブラウザセッション情報は返さない
-- **応答上限**: 1ページは最大500取引、offsetは0〜10,000,000へ制限する。全件はhash計算のためページ内メモリで正規化するが、CDP/MCPへ返すのは要求ページだけとし、巨大レポートの応答増幅を抑える
-- **データ意味論**: Strategy Testerの損益とcommission/run-up/drawdownはTradingViewが返した値だけを採用し、欠落をゼロやOHLC推定で補わない。TradingViewがライブポジションを現在値の仮exit付き末尾行として返す場合は、summaryとの差が1件かつexit IDが空の厳格条件でのみopenへ正規化し、summary件数をclosed行数と照合する。それ以外の配列件数不一致、時刻逆行、active study帰属不能は品質問題として返す。Strategy Testerのシミュレーションは実約定、足内順序、滑り、流動性、口座損益の証明ではない
-- **内部API互換層**: 2026-07-20時点で旧`backtestingStrategyApi()`が削除されたため、現行active chart modelのstrategy sourceを読み取り専用で適応するfallbackを追加した。fallbackは`reportData()`、`metaInfo()`、`id()`相当だけを公開形状へ写し、chart modelの書き込みmethodや注文系APIを露出しない。短縮取引fieldは許可した既知キーだけを正規化し、未確認fieldから意味を推測しない
-- **残余リスク**: TradingView内部APIは非公開で、field名・chart modelへの到達経路・active strategy表現・レポート保持方式が変更され得る。旧・現行両経路のfixtureで回帰を固定するが、将来の変更は明示エラーまたは品質問題として扱い、UI操作や曖昧なfield推測へ自動fallbackしない。SHA-256はページ間同一性を保証するが、TradingViewが生成した元データの正しさや完全性までは保証しない
+`compute_market_regimes` is read-only, exact-chart-bound, Replay-blocked, and uses only evidence available by each bar. It never uses full-period quantiles, revised thresholds, or forward fill. Lookbacks and output are bounded and raw OHLC is omitted. Labels describe past price paths rather than predictions or trade permission. Strategy regime analysis temporarily runs exact owned Pine after confirmation, obtains a complete ledger, removes it, restores the chart, and joins Entry only to labels already closed. Session assignment is explicit and DST-aware; nonexclusive matching is the default. Strategy Tester values are not reconstructed from OHLC and do not prove real execution.
 
-## 追補: バックログ #32(2026-07-20)
+## Addendum: Backlog #41 Yield-Price Nonconfirmation (2026-07-21)
 
-`run_strategy_experiment`追加に伴うレビュー:
+The study requires distinct target and driver charts and verifies both chart context and returned OHLC. A driver bar is unavailable until its nominal close, and no target bar beginning earlier is joined. Exact timestamp matching and forward fill are absent; calendar months and Replay are rejected. Output is bounded aggregate/fold/event evidence without raw OHLC. Signal close is a reference, not a fill. Nominal close, caller-supplied direct/inverse relation, thresholds, and multiple-trial handling remain residual methodological risks. Horizons count observed target bars and may include weekend reopening moves; quality flags distinguish this from contiguous-clock studies.
 
-- **書き込み確認**: 既定はdry-runで、具体的Pine版、入力、最低取引数、active chart拘束、実行操作だけを返す。`confirm:true`、期待symbol/timeframe完全一致、自作`USER;` strategy、保存版取得成功を満たす場合だけ一時Studyを追加する。Pine保存、symbol/timeframe変更、アラート、注文、口座、外部HTTP、ジャーナル書き込みは行わない
-- **入力境界**: variantは2件固定、各入力overrideは既知形式のIDとprimitive値だけで最大20件。任意コード、Pine source、式、無制限gridを受け取らない。実行前の`last`を具体的保存版へ解決し、取得台帳のPine ID/版が違えば結果を拒否する
-- **証拠拘束**: 各variantの全取引を最大500件のページで収集し、後続ページは先頭`ledgerId`へ拘束する。ledger hashはPine ID/版、公開入力、symbol/timeframe、期間、通貨、資本、全正規化取引を含む一方、再追加ごとに変わる一時`studyId`は除外する。比較methodology versionと実験定義にもSHA-256を付ける
-- **比較境界**: 総合スコアや自動採用を返さない。取得できない指標はnullとし、最低取引数、欠落path metric、Strategy Tester品質問題を明示する。commission、slippage、capital/currency、quantity/margin、fill設定、期間が違う場合は`conditions_differ`として比較適格にしない
-- **cleanup・部分失敗**: 各variantは成功・失敗を問わず、取得した一時study IDを所有Pine IDと照合して削除する。`run_backtest`もレポート失敗時は`keepOnChart:true`に関係なく削除する。baseline失敗またはcleanup失敗時はcandidateを開始せず、candidate失敗時はbaseline証拠を保持する。各段階と終了時に元symbol/timeframe/study集合を照合し、復元失敗を隠さない
-- **残余リスク**: TradingView UIや別プロセスの同時操作はプロセス内queueで排他できない。期待context、Pine帰属、ledger ID、終了時chart fingerprintで検出するが、Strategy Tester内部のactive tab状態やUI選択状態までは復元証明に含まれない。バックテスト値はシミュレーションであり、実約定・流動性・足内順序の証明ではない
-- **実機復元確認**: USDJPY 4Hの同一Pine v2.0で1入力だけを変えるA/Bを実行し、両variantのcondition一致、全取引証拠、cleanup成功を確認した。終了後は元Study集合とcontextに加え、既存Strategy Testerがbaselineと同じledger IDおよび元入力へ戻ったことを別のread-only呼び出しで確認した
+## Addendum: Backlog #38 Feature-Outcome Relationships (2026-07-21)
 
-## 追補: バックログ #33(2026-07-20)
+Features use only signal-bar and prior ATR/range/close evidence; future bars appear only in outcomes. Full-period quantiles, optimization, and forward fill are prohibited. Output is bounded and does not imply causality, prediction, fills, costs, or PF. Horizons count observed market bars and explicitly include calendar gaps. Fold timestamps are canonical UTC ISO only at both MCP and internal validation layers.
 
-`run_backtest_matrix`追加に伴うレビュー:
+## Addendum: Backlog #40 Session Profile (2026-07-21)
 
-- **書き込み確認と上限**: 既定dry-runで、`confirm:true`後だけチャートを一時変更する。jobは1〜24件、各入力は最大20件、primitiveのみ、文字列256文字、soft runtimeは30〜1800秒に制限する。任意コード、Pine source、式、無制限parameter grid、並列実行、注文を受け付けない
-- **帰属と証拠**: 各jobを実行前の保存済み自作strategyと具体的Pine版へ固定し、job/matrix定義をSHA-256化する。取得ledgerのPine ID/版に加えてsymbol/timeframeも要求jobと一致しなければ証拠を拒否し、全ページを先頭ledger IDへ拘束する
-- **逐次変更と復元**: process内chart queueで全matrixを直列化し、jobごとに対象symbol/timeframeへ変更、入力settle、全証拠取得、一時Study削除、元symbol/timeframe/study fingerprint照合まで行う。通常の計算失敗は行へ隔離して続行するが、cleanupまたは復元により元fingerprintを証明できない場合は残jobを開始しない
-- **期限の意味**: soft deadlineは期限到達後に新しいjobを開始しないための境界であり、進行中のCDP処理を強制cancelしない。強制中断でcleanupを失う危険を避ける代わりに、最終経過時間が指定秒数を超える可能性をレスポンスとREADMEで明示する
-- **研究境界**: 全行を入力順に返し、成功行だけの抽出、ランキング、総合スコア、自動採用を行わない。matrixは探索証拠であり、同じデータから選んだ最良値をOOS成績と扱わず、候補数を固定して#34 walk-forwardへ渡す
-- **残余リスク**: TradingView UIや別プロセスの同時操作、非公開Strategy Tester API変更、履歴プラン差、銘柄ごとの足内約定モデルは排除できない。chart/ledger帰属と復元で検出可能な差をfail closedにするが、バックテスト値自体は実約定の証明ではない
+`compute_session_profile` is read-only, exact-symbol-bound, Replay-blocked, and accepts numeric minute timeframes only. One to eight IANA sessions are assigned deterministically with DST and overnight ownership by session start. No holiday calendar is inferred; missing weekday sessions reduce coverage. Inputs and output are bounded, forming bars are excluded, and gaps are not filled. TradingView volume is labelled `unverified_tick_or_exchange_volume` and is not presented as centralized FX or institutional flow.
 
-## 追補: バックログ #34(2026-07-20)
+## Addendum: Backlog #39 Futures Flow Context (2026-07-21)
 
-`run_strategy_walk_forward`追加に伴うレビュー:
+`get_futures_flow_context` uses fixed spot-to-continuous-futures mappings, explicit chart index, exact symbol, and daily closed bars. It does not treat TradingView volume as a CME final bulletin. Without an authenticated first-seen OI provider, OI-derived quadrants remain unavailable rather than being imputed from COT or volume. Inputs and response size are bounded, and COT failure does not discard price/volume evidence. Top-level status is derived from final quality issues. Volume Z-score is activity evidence, not identification of institutions, aggressors, or new long/short positions; roll, basis, vendor aggregation, and preliminary/final differences remain residual risks.
 
-- **期間境界**: Premium依存かつ通常reportと結果が異なるDeep Backtestingの非公開書き込みAPIを使用しない。Pine sourceも改変せず、完全ledgerのclosed tradeをentry/exitともに`[from,to)`内の場合だけ含める。境界跨ぎ、open、時刻欠落を別集計し、ledger date rangeが全foldを覆わない場合はデータなしと推測しない
-- **探索・応答上限**: 候補2〜8、fold 2〜12、入力20件、文字列256文字、embargo 1〜100bar、soft runtime 30〜1800秒へ制限する。foldは明示ISO timestamp、test非重複、時系列前進、anchored/rolling契約をdry-run前に検証し、任意コードや自動parameter gridを受け取らない。included tradeの全indexは集計内部だけで使い、fold応答には件数・指標・除外理由だけを返す
-- **OOS秘匿**: 選定は各foldのtrain ledgerだけで行い、非選択候補のtest指標を計算結果へ含めない。同点や最低train件数不足で恣意的な候補を選ばず、選択不能としてtestを返さない。OOS集計には最低test件数と品質を満たした選択候補foldだけを含め、evaluable fold数を併記する
-- **候補集合の固定**: 一候補でも収集、input settle、Pine帰属、ledger完全性、品質、期間coverage、cleanup、chart fingerprint復元に失敗した場合、残った候補だけで選定しない。commission、slippage、capital/currency、quantity/margin、fill設定、report期間が候補間で違う場合も評価不能にする
-- **指標意味論**: fold指標はledger tradeから再計算し、欠落profitをゼロ補完しない。期間別のbar-level equityを持たないためTradingView最大DD、Sharpe、Sortinoを按分せず、closed trade累積損益からの`maxClosedTradeEquityDrawdown`として明示する。PFは損失tradeがない場合に無限大を返さずnullとする
-- **非リペイント境界**: 時刻分割は未来取引の選定混入を防ぐが、Pine自身のlookahead/repaintを無害化しない。採用候補は既存source auditとrestart差分検証を通し、#35でコスト・遅延・近傍・期間移動のストレスを追加する
-- **残余リスク**: 全期間を一度計算したstrategy内部stateはfold開始以前の履歴をwarm-upとして利用する。これは当時利用可能な過去情報だが、独立初期化したDeep Backtesting foldとは一致しない可能性がある。結果は`ledger_partition_v1`として識別し、別methodologyと無言で比較しない
+## Addendum: Backlog #42 (2026-07-20)
 
-## 追補: バックログ #35(2026-07-21)
+Strategy research records are isolated from live analysis, evaluation logs, and TradingView in a local JSONL. Inputs are limited to concise hypotheses, structured contracts, exact Pine/ledger IDs, allowlisted metrics, guardrails, and decisions; raw OHLC, Pine source, arbitrary code/metrics, and account credentials are rejected. Definition and evidence hashes are recomputed on read. Sequence, entity, parent-child order, hypothesis existence, and evidence collisions fail closed. File safety requires 0700/0600, current ownership, regular files, no-follow, size limits, full writes, fsync, and verified stale-lock recovery. Comparisons require exact hashes and matching population, symbol/timeframe, methodology, and conditions; heterogeneous evidence is never ranked.
 
-- **事前契約**: `validate_research_protocol`はread-onlyで、具体的な自作Pine ID/版だけを取得して静的監査する。候補IDはSHA-256、窓とlifecycleはcanonical ISO timestamp、件数・配列・文字列は上限付き構造化入力とし、任意コードやPine sourceをクライアントから受け取らない。チャート、Strategy Tester、外部HTTP、注文には接続しない
-- **先読み防止**: IS/OOSとOOS同士の半開区間重複、未来窓、形成中足、凍結後変更、OOS初回閲覧後変更をblockedにする。静的監査は非リペイントの証明ではないため、request.security、pivot、varip、timenow、intrabar/realtime分岐とrestart差分未確認をwarningとして保持し、警告ゼロの場合だけ`adoptionEligible:true`にする
-- **ストレス実行境界**: `stress_test_strategy`は既定dry-runでprotocol ID、chart binding、Pine版、入力、評価窓、全シナリオ、seed/反復回数を固定する。confirm後はprocess内queueでbaseline Strategyを一時追加し、input readback一致・settle、完全ledger取得、所有確認付き削除、元chart fingerprint照合を行う。任意の再実行scenarioも同じ手順で最大8件まで直列処理し、復元不能時は後続を停止する。cleanup/復元を証明できない台帳は評価へ含めない
-- **一括レジーム分析境界**: `run_strategy_regime_matrix`は既定dry-run、最大12job、直列実行、soft deadline最大1,800秒とする。各jobで明示symbol/timeframeへ一時切替し、任意の履歴ロードを合計最大20,000本・1回5,000本・最大4回に制限する。series cacheの増加は元のメモリ状態へ明示的に戻せない一方、symbol/timeframeを離れた後まで保持される保証もないため、各job内でロード直後に取得・評価する。取得OHLCを再拘束してから完全台帳をpoint-in-time regimeへ結合し、個別失敗は他jobへ波及させず、元chart fingerprintの復元失敗時だけ後続を停止する。Pine source、注文、ランキング、異通貨のportfolio集計は扱わない
-- **session分類境界**: optional session分解は最大8件の明示IANA timezoneとHH:MM半開区間だけを受け、Entry timestampから決定論的に分類する。DSTはIANA database、日跨ぎはsession開始日へ帰属し、週末開始sessionを除外する。重複窓は全該当groupへ非排他的に計上して`all_matches_non_exclusive`を返し、件数合算、因果、最良session選択を行わない
-- **計算境界**: 追加コストはreport通貨/取引としてのみ受け、pipsから口座通貨への不確かな換算をしない。commission倍率はtrade commissionが全件ある場合だけ計算する。期間ずらしはentry/exitともに半開区間内のclosed tradeだけを含め、境界跨ぎを除外する。bootstrapはseed固定・100〜10,000回・同数復元抽出に限定し、市場経路や自己相関を再現したMonte Carloとは表現しない
-- **出力・増幅制限**: モデルscenario 1〜20、再実行scenario 0〜8、各入力20、開始ずらし1〜100bar、bootstrap最大10,000回。反復ごとのsampleやtrade/index列、生台帳を返さず、baseline、scenario別収集状態、集計、相対劣化、分位点、worst、破綻率だけを返す。任意parameter grid、ランキング、単一score、自動採用、注文を実装しない
-- **残余リスク**: trade順序bootstrapは独立同分布を仮定し、連敗のregime依存を過小評価し得る。Strategy再実行はPineが公開する入力だけを変更でき、入力の意味や妥当な近傍幅をMCPは証明しない。Entry遅延やStop/Target入力を持たないStrategyに効果を後付けせず、同一評価期間での再計算も独立OOS検証の代替とはしない
-- **実機確認**: Smart Money Strategy v3.0のboolean入力をfalse/trueでbaseline+1再実行し、異なる完全ledger ID、入力readback、最低件数、劣化集計、各回cleanup、最終chart fingerprint一致を確認した。応答には生trade/ledgerを含めず、収集状態と集計だけを返した
+`register_event_study_hypothesis` and `get_event_study_journal` use the same bounded, append-only research-journal boundary for event and observational feature studies. Registration canonicalizes and hash-binds the immutable audit definition and evaluation contract. Evidence comparison requires paired `study_ids` and `evidence_hashes` of equal bounded length; the read path never accesses TradingView. These records are research evidence, not live-analysis state or authorization to trade.
 
-## 追補: バックログ #36 session auction初版(2026-07-21)
+## Addendum: Price Action and Volume Profile Research (2026-08-13)
 
-- **読み取り境界**: `run_market_event_study`はactive chartのsymbol/timeframeを要求値へ厳密拘束し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、symbol/timeframe変更、Pine、Strategy Tester、外部HTTP、ファイル、注文へ接続しない
-- **時間契約**: clientからUTC offsetを計算させず、64文字以下のIANA timezoneを`Intl.DateTimeFormat`へ渡す。同一local dayで`range_start < range_end < auction_end`だけを許可し、DSTに伴うUTC offset変化を日別に解決する。日跨ぎ、休日calendar、session早期終了は推測せず初版の対象外とする
-- **先読み・曖昧性**: 形成中足を除外し、range終了後の最初のboundary touchだけを分類する。上下両側sweep、OHLC矛盾、重複timestamp、境界後の反対側touchは拒否またはambiguousへ数え、足内順序を推測しない。signal bar closeはevent referenceであり約定と表現しない
-- **応答上限**: horizon 1〜8件・最大96本、fold最大12、event明細最大200、target最大1,000bps。反復ごとのbar列や全OHLCを返さず、集計とbounded event evidenceだけを返す。各horizonはtimestamp連続性を要求し、週末等をforward fillしない
-- **統計境界**: 記述統計、fold分離、v2の限定的なconfidence intervalは、因果、有意性、収益性を証明しない。多重比較補正と重複event policyは未実装であるため、複数parameterを回して最良行だけを採用しない
-- **推論区間(v2)**: 全体branch×horizonの方向調整return平均には標本分散を使う90/95/99%正規近似、positive率・target到達率にはWilson score区間だけを追加した。平均は2観測未満、比率は0観測で利用不能とし、ゼロ幅や0%として補完しない。これはevent独立性を仮定する漸近区間で、session連続性・volatility regime等の系列依存を調整しない。p値、有意/非有意ラベル、因果、採用判定は返さない
-- **試行数・応答境界(v2)**: `configuration_trials`はcallerが今回までに閲覧した関連設定数を申告する監査メタデータであり、MCPが正しさを推測しない。未申告は`not_declared`、多重比較補正は常に`none`として明示する。区間は全体の主要3指標だけに限定し、foldは件数、return平均/中央値、positive率、target率だけへ圧縮する。最大fold×horizonで区間やMFE/MAE詳細を複製せず、branch×horizon×3の設定済みinterval数とfoldの省略契約を返す
-- **実機応答確認(v2)**: EURUSD 15分5,000本、43 event、4 horizon、2 foldで全体推論値を維持しながら応答を約89KBから52KBへ削減した。`event_limit:0`でもaggregate/foldは返る設計のため応答はゼロにならないが、生OHLC・event明細・fold区間・fold MFE/MAEは含めない。range coverage不足1日はpartialとして保持した
-- **event-regime時刻境界**: optional regime分解はsignal足自身のOHLC labelを使わず、`regime bar start + nominal resolution <= signal bar start`を満たす直前確定labelだけへ結合する。signalはその足のcloseで初めて成立するため、これは1本以上前の市場状態を条件にする保守的契約である。signal足で初めて分類warmupを満たす境界ケースがjoin 0件になることをテストで固定した
-- **event-regime小標本・増幅境界**: directional 4、volatility 3、combined 12の固定19セルだけを生成し、最低event数未満は`not_evaluable`として区間を返さない。評価可能セルもreturn、positive率、target率の主要3指標だけに限定し、生label列、event×regime明細、MFE/MAE、ランキングを返さない。regime分割で閲覧結果数が増える警告と、調整なしのconfigured interval数を明示する
-- **event-regime実機確認**: EURUSD 15分5,000本の43eventを43件すべて直前確定regimeへ結合し、signal足不使用、age 0、coverage 100%、固定19セル中9セル評価可能、全108区間、多重比較補正なしを確認した。event明細0の応答は約106KBで、生OHLC、全regime観測、event×label明細を含まない。評価可能セルの4本後return区間は全てゼロを跨ぎ、自動選択を行わなかった
-- **horizon連続性**: session auctionは短期session反応を対象とするため、signalから各horizonまでのtimestamp差が名目時間足の1.5倍以内で連続する場合だけ結果を有効にする。週末、休場、未ロード区間を跨ぐhorizonはnullとし、観測市場足基準の#38/#41とは契約フラグで区別する
+`get_price_action_context_template` and `get_volume_profile_context_template` return fixed local Pine source only. Their context readers accept only `USER;...` script IDs and verify the saved script name, kind, latest version, exact source bytes, on-chart placement, input contract, symbol, and timeframe before returning values. `get_price_action_context` rejects disabled close confirmation; an unconfirmed zero is not represented as a confirmed absence. These patterns describe candle geometry, not order flow or participant intent.
 
-## 追補: バックログ #37 市場レジーム初版(2026-07-21)
+`run_price_action_pattern_study` is exact-chart-bound and caps requested history at 5,000 bars. History paging may enlarge TradingView's local loaded-history cache but does not change the symbol, timeframe, Pine source, alerts, or orders. Returned intervals are explicitly descriptive because events and forward windows can overlap.
 
-- **読み取り境界**: `compute_market_regimes`はactive chartのsymbol/timeframeを要求値へ厳密拘束し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、chart変更、Pine、Strategy Tester、外部HTTP、ファイル、注文へ接続しない
-- **先読み防止**: 各barの効率比、ATR、方向移動、volatility baselineは当該bar以前だけから計算する。未来全期間の分位点、後方修正されたthreshold、forward fillを使用しない。同一時刻のlabelが将来bar追加後も変わらないことをテストで固定する
-- **入力・応答上限**: trend lookback最大500、ATR最大250、volatility baseline最大1,000、OHLC最大5,000、明細最大500。閾値は有限値と相互順序を検証し、aggregateは全分類bar、明細は末尾だけを返す。raw OHLCは応答へ複製しない
-- **解釈境界**: labelは過去価格経路の記述であり、予測、売買signal、稼働許可ではない。初版は価格方向とvolatilityだけで、相関、session、event、Strategy台帳成績を含まない。非連続timestampは報告するが補間せず、少数barは`partial`として扱う
-- **Strategy実行境界**: `run_strategy_regime_analysis`は既定dry-runで、confirm後だけ正確な保存済みPine ID/版を一時追加する。入力settle、完全ledger pagination、所有確認付き削除、元chart fingerprint照合をprocess内queueで直列実行し、cleanupまたは復元失敗時はblockedとする。regime証拠はロード済みOHLCを最大20,000本まで内部処理するが、生OHLCや全観測行は応答せず集計と品質情報だけを返す。Pine保存、alert、Replay Trading、注文、外部HTTP、ファイルへ接続しない
-- **時刻join境界**: trade Entryと同じbarの未確定終値を参照せず、`bar start + nominal resolution <= entry time`を満たす最新labelだけを使う。最大regime ageをbar数で明示し、古い証拠、Entry時刻欠落、profit欠落、OHLC coverage外を別件数で除外する。未来bar追加で既存labelを再fitせず、forward fillや全期間分位点を使用しない
-- **台帳・出力境界**: PF、期待値、勝率、DD、run-up/drawdown、commissionは完全Strategy Tester台帳の許可済み数値だけから計算し、OHLCから約定や損益を再構成しない。raw OHLC、raw trade明細、反復列は返さず、全体とregime別aggregate、coverage、ledger ID、品質だけを返す。loss 0のPFを無限大として順位付けせず`null`にする
-- **session割当境界**: session未指定時は分類しない。指定時の既定は全一致の`all_matches_non_exclusive`で、`first_match_exclusive`を明示した場合だけ入力配列順の最初の一致へ割り当てる。排他時はpriorityを結果へ返し、policyだけをsessionsなしで指定する入力は拒否する。どちらの方式もDST対応classifierを共有し、結果から最良sessionを選択しない
-- **実機確認**: USDJPY 4HのTurtle v4.0とRSI2 v2.0で、完全ledger取得、98%以上のas-of join coverage、所有確認付き一時Strategy削除、元chart fingerprint復元を確認した。Forex週末を含む非連続timestampは通常休場と欠損を推測で区別せず、品質通知として保持する
+`get_volume_profile_context` accepts completed prior-session levels only. `run_volume_profile_reaction_study` and `run_volume_profile_poc_reversion_study` are Replay-blocked, verify the audited template and frozen 24-row/70-percent/exchange-volume inputs, bind returned OHLC to the expected chart, bound bars and event output, and keep the reaction and POC populations separate. TradingView volume remains an exchange- or vendor-reported chart field; none of these tools claims Bid/Ask flow, MBO, institutional activity, or executable fills.
 
-## 追補: バックログ #41 Yield-Price Nonconfirmation(2026-07-21)
+## Addendum: Read-Only Context and Calibration Tools (2026-08-13)
 
-- **読み取り境界**: `run_yield_price_nonconfirmation_study`はtarget/driverに異なる明示`chart_index`を要求し、chart contextと取得OHLCの両方でexact symbol/timeframeを検証する。各系列最大5,000本のロード済みOHLCだけを読み、チャート、Pine、Strategy Tester、alert、外部HTTP、ファイル、注文を変更しない
-- **時刻リーク防止**: driver barは`bar start + fixed nominal duration`まで利用不能とし、その時刻より前に開始したtarget barへ結合しない。timestamp完全一致やforward fillは行わない。月足は期間が可変なため拒否し、Bar Replay中はリアルタイムdriverとの混在を避けるため拒否する
-- **出力境界**: 生OHLCを返さず、全eventを使った集計、最大12 fold、最大200 event明細、除外件数、source coverageだけを返す。signal bar closeはevent referenceでありfillではなく、MFE/MAEの足内順序、コスト、slippage、PF、収益性は評価しない
-- **残余リスク**: 名目closeは市場固有の公表時刻や遅延ではなく時間足から算出した保守的proxyである。caller指定のdirect/inverse関係と閾値は妥当性を保証せず、複数閾値探索を行う場合の試行数・多重比較補正は未実装である
-- **horizon・欠落境界**: outcomeは次の観測target barを単位とし、週末等のcalendar gapを実際の再開価格変化として含める。gapをforward fillせず、target/driver別の不規則intervalを品質情報へ出す。`contiguousBarsRequired:false`を返すため、連続名目足を要求する#36の結果と同じhorizon保証として扱わない
+`get_dxy_context_gate_template` returns a fixed `lookahead_off` Pine template and performs no chart or filesystem write. `compute_correlation_regimes` requires two distinct explicit chart bindings, joins closed bars on exact UTC timestamps, never forward-fills, and returns descriptive labels rather than a signal. `run_lead_lag_falsification_audit` is bounded deterministic synthetic computation: it does not read TradingView, call a network, write a journal, or establish profitability.
 
-## 追補: バックログ #38 Feature-Outcome Relationships(2026-07-21)
+`get_oanda_flow_collection_readiness` reports only whether the token environment variable is configured; it neither returns the credential nor makes a network request. Its evidence label is broker-client retail percentages, not market-wide flow. `get_cot_crowding_unwind_context` is daily-chart-bound and Replay-blocked; its leveraged-money percentile plus prior-range break is a proxy, not observed orders, stops, institutions, or execution. `get_cot_crowding_unwind_overlay_template` is fixed source and consumes explicit MCP-produced COT inputs rather than fetching data from Pine.
 
-- **読み取り境界**: `compute_feature_outcome_relationships`はactive chartのexact symbol/timeframeをchart contextと取得OHLCで二重検証し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、chart、Pine、Strategy Tester、alert、外部HTTP、ファイル、注文を変更しない
-- **未来リーク防止**: 各feature labelはsignal足の確定OHLCとそれ以前のATR、range、closeだけで計算する。全期間分位点、未来bar、forward fill、閾値最適化は使わない。後続barは結果のforward return/upside/downside集計にだけ使い、不規則timestampは補間せず品質問題として返す
-- **出力境界**: raw OHLCを返さず、feature/bucket/horizon集計、最大12fold、最新最大500観測、品質カウント、source coverageだけを返す。associationは因果、予測、売買方向、fill、コスト、PFを意味しない
-- **horizon・欠落境界**: outcomeは次の観測barを単位とし、calendar gapを跨いだ再開価格変化を含む。不規則intervalは品質issueへ出すが、forward fillやhorizon除外は行わない。`horizonClock:observed_market_bars`、`contiguousBarsRequired:false`、`calendarGapsIncluded:true`を返し、#36の連続名目足契約と区別する
-- **時刻入力境界**: #36/#38/#41のfold境界はMCP schemaと内部validatorの両方でcanonical UTC ISO(`YYYY-MM-DDTHH:mm:ss.sssZ`)だけを受理する。オフセット表記や秒・ミリ秒省略を入口で拒否し、schema通過後に異なる形式条件で失敗する非対称をなくす
+`get_carry_core_primary_readiness` reads local first-seen policy-rate versions and complete collection heartbeats without changing a chart. `run_carry_core_primary_test` requires confirmation before temporarily collecting the frozen five-pair daily panel, restores chart state, uses only versions available by each anchor close, and remains `not_evaluable` below the preregistered 60 complete clusters. Revised official-history data is kept outside this primary-test evidence path.
 
-## 追補: バックログ #40 Session Profile(2026-07-21)
+## Addendum: Cross-Asset Shock Research (Backlog #82, 2026-08-13)
 
-- **読み取り境界**: `compute_session_profile`はactive chartのexact symbolと数字のみのminute timeframeをchart contextと取得OHLCで二重検証し、最大5,000本のロード済みOHLCだけを読む。Bar Replay中は拒否し、chart、Pine、Strategy Tester、alert、外部HTTP、ファイル、注文を変更しない
-- **時刻境界**: 1〜8件のsessionをIANA timezoneへ変換し、DSTと日跨ぎをsession開始日へ決定論的に帰属させる。休日カレンダーを推測せず、平日sessionの欠落はcoverage低下として返す。直前session比較は、その名目最終barが現在session開始前にclose済みの場合だけ行う
-- **入力・出力境界**: minute OHLC最大5,000本、opening range最大100本、明細最大500件。raw bar列は返さず全session-day aggregateとbounded observationsだけを返す。形成中足を除外し、非連続timestampや不足barをforward fillしない
-- **解釈境界**: TradingView bar volumeは`unverified_tick_or_exchange_volume`と明示し、FXの集中取引所出来高や大口フローと断定しない。結果は過去sessionの記述であり、予測、約定、コスト、PF、売買許可を表さない
+`preflight_cross_asset_shock`, `classify_cross_asset_shocks`, and `evaluate_cross_asset_shock_outcomes` bind an EURUSD or USDJPY target and a distinct auxiliary chart at M5 or M15. They temporarily reuse the auxiliary chart for fixed DXY, US10Y, and XAUUSD sources under serialized chart operations and restore it after each read. Returned evidence is intersected on exact closed-bar UTC timestamps without forward filling. Counts, history loads, states, and events are bounded; optional history loading can persist in TradingView's local cache.
 
-## 追補: バックログ #39 Futures Flow Context(2026-07-21)
+The preflight reports coverage only, classification reports contemporaneous frozen states only, and outcome evaluation excludes overlapping state windows. None returns an order-flow claim, candidate, trading instruction, or order. Manual UI changes and other processes remain residual chart-race risks; symbol/timeframe readback and restoration checks fail closed when detected.
 
-- **読み取り境界**: `get_futures_flow_context`は固定済みspot→CME/COMEX continuous futures対応、明示chart index、exact symbol、日足をcontextと取得OHLCVで二重検証する。最大5,000本のロード済み確定足と既存CFTC APIだけを読み、chart、Pine、Strategy Tester、alert、外部ファイル、注文を変更しない。Bar Replay中は現在COTとの混在を拒否する
-- **データ源境界**: TradingView futures volumeをCME Daily Bulletin確報として扱わない。認証済み・first-seen追跡済みの日次OI providerがないためOIと価格×OI四象限はnull/unavailableとし、COT週次OIやvolumeから補完しない。将来provider追加時も取得開始前のavailable_atを遡及生成しない
-- **入力・増幅制限**: 対象mappingは5 spot symbol・4 continuous futuresに固定し、volume lookback最大250、OHLCV最大5,000、返却観測最大500、COT最大52週とする。raw OHLCVを返さず正規化観測だけを返す。COT失敗はredact済み構造化unavailableへ畳み、価格・volume結果を破棄しない
-- **品質状態**: 結合後のトップレベル`status`は最終`qualityIssues`の有無だけから導出し、日次OI provider未設定、COT取得不能、COT point-in-time不完全を明示する。個別証拠の欠落とトップレベル状態が乖離しないよう固定する
-- **解釈境界**: 6Jの方向反転とcrossの単一GBP脚proxyを明示する。volume Z-scoreは参加活発度候補であり、機関投資家、大口、aggressive buyer/seller、新規long/shortを識別しない。continuous contractのroll、basis、TradingView vendor集計、速報/確報差は残余リスクである
+## Addendum: Bookmap Local Evidence Preflight (Backlog #83, 2026-08-13)
 
-## 追補: バックログ #42(2026-07-20)
+`preflight_bookmap_flow_price_join` is the externally configurable local-evidence read boundary. It reads from `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY`, defaulting to `/Volumes/HD/bookmap_data`, and accepts only a basename matching `bookmap-flow-*.jsonl`; path separators, traversal, absolute paths, and `bookmap-flow-signals-*` research outputs are rejected. The configured directory must be a real nonsymlink directory, and listed or selected sessions must be real nonsymlink regular files. A session is capped at 64 MiB and each JSONL line at 256 KiB before schema processing.
 
-- **分離保存**: strategy研究記録はライブ分析ジャーナル、評価ログ、TradingViewから分離したローカルJSONLへ保存する。パスは専用環境変数でのみ上書きし、外部HTTP、クラウド、チャート、Pine保存、注文へ接続しない
-- **入力最小化**: 仮説は短いtitle/thesisと構造化評価契約だけ、実験はPine ID/版、ledger ID、許可済みmetrics、guardrail、採否だけを受ける。OHLC、Pine source、任意コード、任意metric、認証・口座情報は拒否する。各文字列・配列・レコードサイズに上限を置く
-- **改ざん検知**: definition hashとevidence hashを保存時に生成し、再読込時にもpayloadから再計算する。event ID、sequence、entity ID、親子順序、仮説存在、重複証拠を検証し、破損や手動改変を部分的に無視して続行しない
-- **ファイル安全性**: ディレクトリ0700、journal/lock 0600、current-user ownership、regular file、NOFOLLOW、64MiB/64KiB上限、完全write、fsyncを要求する。lockはtoken/inodeを照合し、60秒超かつ記録PID不在を確認できる場合だけ回収する
-- **比較境界**: 比較は正確なexperiment/evidence hashを2〜20件指定するread-only操作。同一仮説、population、symbol/timeframe、methodology、condition一致以外は`comparable:false`とし、異種母集団のランキングや総合スコアを作らない
+Every row must be valid JSON with supported `source: "bookmap"`, schema version, event type, instrument alias, and canonicalizable receipt timestamp. Mixed instruments, duplicate instrument records, unsupported provenance, and missing instrument metadata fail closed. Crypto, unconfirmed full depth, missing snapshot completion, legacy timestamp precision, and absent trades become explicit quality issues. The reader is read-only: it does not write, delete, follow a user-supplied path, change the chart, access Bookmap over the network, create a candidate, or place an order.
 
-## 将来フェーズへの申し送り
+The join is limited to an active, exactly bound EURUSD M1 or M5 chart and is blocked during Replay. It aggregates by local receipt time and treats CME futures flow as a single-venue proxy, never as complete spot-FX flow. Receipt time is not exchange event time, delayed/replay feeds are not live evidence, and exact bar association does not prove causal ordering. A filesystem replacement between `lstat` and `readFile` is a residual local same-user race because the current implementation does not open the file with an atomic no-follow descriptor.
 
-- 注文系(`trading`)APIとReplay Tradingは非公開を維持する。アラートは#26の新規作成だけを明示確認付きで公開し、変更・再開・削除・Webhookは公開しない
-- ~~スキャナー API(Phase 4)追加時は外部 HTTP 応答のスキーマ検証を入れる~~ → Phase 4 で対応済み(zod 検証)
-- CIは#30で導入済み。NodeのLTS/EOL移行時にmatrixと`engines`を更新し、固定済みActions SHAも依存更新として定期レビューする
+## Handoff for Future Phases
+
+- Keep trading and Replay Trading APIs private. Alert exposure remains limited to #26's confirmed creation path; modification, restart, deletion, and webhooks remain unavailable.
+- External scanner response validation was completed in Phase 4 with Zod.
+- CI was introduced in #30. Update the Node matrix and `engines` at LTS/EOL transitions and periodically review pinned GitHub Actions SHAs as dependencies.
