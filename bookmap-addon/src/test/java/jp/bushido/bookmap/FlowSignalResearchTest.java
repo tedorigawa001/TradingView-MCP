@@ -2,16 +2,25 @@ package jp.bushido.bookmap;
 
 import java.io.BufferedWriter;
 import java.io.StringWriter;
+import java.awt.Color;
+import java.awt.image.BufferedImage;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 import velox.api.layer1.data.TradeInfo;
+import velox.api.layer1.simplified.AxisRules;
+import velox.api.layer1.simplified.Indicator;
+import velox.api.layer1.simplified.LineStyle;
+import velox.api.layer1.simplified.WidgetRules;
 
 /** Unit tests for the delayed/Replay flow-signal recorder. */
 public final class FlowSignalResearchTest {
     public static void main(String[] args) throws Exception {
         usesOnlyBookmapSupportedParameterTypes();
         recordsAFlowSignalWithAuditableFields();
+        displaysExactlyOneMarkerAtTheSignalPrice();
+        markerSettingDoesNotDisableEvidenceRecording();
+        markerFailureDoesNotDisableEvidenceRecording();
         usesBookmapTimeForReplayWindowExpiry();
         rejectsNonIntegralPriceLevelsWithoutInventingASignal();
         System.out.println("FlowSignalResearchTest: PASS");
@@ -23,6 +32,50 @@ public final class FlowSignalResearchTest {
         assertEquals(Double.class, FlowSignalResearch.class.getField("withdrawalRatio").getType());
         assertEquals(Integer.class, FlowSignalResearch.class.getField("absorptionWindowMilliseconds").getType());
         assertEquals(Integer.class, FlowSignalResearch.class.getField("sweepWindowMilliseconds").getType());
+        assertEquals(Boolean.class, FlowSignalResearch.class.getField("showChartMarkers").getType());
+    }
+
+    private static void displaysExactlyOneMarkerAtTheSignalPrice() throws Exception {
+        StringWriter output = new StringWriter();
+        FlowSignalResearch research = research(output);
+        RecordingIndicator indicator = new RecordingIndicator();
+        set(research, "markerIndicator", indicator);
+
+        research.onTrade(101.0, 1, new TradeInfo(false, true, false, false));
+        research.onTrade(100.0, 1, new TradeInfo(false, true, false, false));
+
+        assertEquals(1, indicator.icons);
+        assertEquals(100.0, indicator.value);
+        assertTrue(indicator.image != null, "signal marker image must be present");
+        assertTrue(indicator.yOffset < 0, "SELL marker must render above its price");
+    }
+
+    private static void markerSettingDoesNotDisableEvidenceRecording() throws Exception {
+        StringWriter output = new StringWriter();
+        FlowSignalResearch research = research(output);
+        RecordingIndicator indicator = new RecordingIndicator();
+        research.showChartMarkers = false;
+        set(research, "markerIndicator", indicator);
+
+        emitSellSweep(research);
+
+        assertEquals(0, indicator.icons);
+        assertContains(output.toString(), "\"event_type\":\"flow_signal\"");
+    }
+
+    private static void markerFailureDoesNotDisableEvidenceRecording() throws Exception {
+        StringWriter output = new StringWriter();
+        FlowSignalResearch research = research(output);
+        set(research, "markerIndicator", new FailingIndicator());
+
+        emitSellSweep(research);
+
+        assertContains(output.toString(), "\"event_type\":\"flow_signal\"");
+    }
+
+    private static void emitSellSweep(FlowSignalResearch research) {
+        research.onTrade(101.0, 1, new TradeInfo(false, true, false, false));
+        research.onTrade(100.0, 1, new TradeInfo(false, true, false, false));
     }
 
     private static void recordsAFlowSignalWithAuditableFields() throws Exception {
@@ -101,9 +154,47 @@ public final class FlowSignalResearchTest {
         }
     }
 
+    private static void assertTrue(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
     private static void assertEquals(Object expected, Object actual) {
         if (expected == null ? actual != null : !expected.equals(actual)) {
             throw new AssertionError("Expected <" + expected + "> but got <" + actual + ">");
         }
+    }
+
+    private static final class RecordingIndicator implements Indicator {
+        private int icons;
+        private double value;
+        private BufferedImage image;
+        private int yOffset;
+
+        @Override public void addPoint(double value) {}
+        @Override public void addIcon(double value, BufferedImage image, int x, int y) {
+            icons += 1;
+            this.value = value;
+            this.image = image;
+            this.yOffset = y;
+        }
+        @Override public void setColor(Color color) {}
+        @Override public void setWidth(int width) {}
+        @Override public void setLineStyle(LineStyle style) {}
+        @Override public void setRenderPriority(int priority) {}
+        @Override public void setAxisRules(AxisRules rules) {}
+        @Override public void setWidgetRules(WidgetRules rules) {}
+    }
+
+    private static final class FailingIndicator implements Indicator {
+        @Override public void addPoint(double value) {}
+        @Override public void addIcon(double value, BufferedImage image, int x, int y) {
+            throw new IllegalStateException("synthetic marker failure");
+        }
+        @Override public void setColor(Color color) {}
+        @Override public void setWidth(int width) {}
+        @Override public void setLineStyle(LineStyle style) {}
+        @Override public void setRenderPriority(int priority) {}
+        @Override public void setAxisRules(AxisRules rules) {}
+        @Override public void setWidgetRules(WidgetRules rules) {}
     }
 }

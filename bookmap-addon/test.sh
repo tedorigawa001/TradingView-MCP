@@ -16,7 +16,7 @@ else
 fi
 TEST_CLASSES="$ROOT/bookmap-addon/dist/test-classes"
 COLLECTOR_JAR="$ROOT/bookmap-addon/dist/bushidoyasu_flow_collector_delayed_replay_v1_1.jar"
-SIGNAL_RESEARCH_JAR="$ROOT/bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
+SIGNAL_RESEARCH_JAR="$ROOT/bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar"
 
 "$ROOT/bookmap-addon/build.sh"
 
@@ -31,9 +31,12 @@ if [[ "$SDK_PRESENT" -eq 0 ]]; then
   rm -rf "$TEST_CLASSES"
   mkdir -p "$TEST_CLASSES"
   "$JAVAC" --release 17 -cp "$ROOT/bookmap-addon/dist/classes" -d "$TEST_CLASSES" \
-    "$ROOT/bookmap-addon/src/test/java/jp/bushido/bookmap/FlowSignalEngineTest.java"
+    "$ROOT/bookmap-addon/src/test/java/jp/bushido/bookmap/FlowSignalEngineTest.java" \
+    "$ROOT/bookmap-addon/src/test/java/jp/bushido/bookmap/FlowSignalMarkerTest.java"
   "$JAVA" -ea -cp "$TEST_CLASSES:$ROOT/bookmap-addon/dist/classes" \
     jp.bushido.bookmap.FlowSignalEngineTest
+  "$JAVA" -Djava.awt.headless=true -ea -cp "$TEST_CLASSES:$ROOT/bookmap-addon/dist/classes" \
+    jp.bushido.bookmap.FlowSignalMarkerTest
   printf 'SKIPPED (no Bookmap SDK): FlowCollectorTest, FlowSignalResearchTest\n'
   exit 0
 fi
@@ -44,6 +47,10 @@ if "$JAR" --list --file "$COLLECTOR_JAR" | grep -q 'FlowSignalEngine'; then
 fi
 if "$JAR" --list --file "$SIGNAL_RESEARCH_JAR" | grep -q 'FlowCollector'; then
   printf 'Signal research JAR must not contain the raw-data collector\n' >&2
+  exit 1
+fi
+if ! "$JAR" --list --file "$SIGNAL_RESEARCH_JAR" | grep -q 'FlowSignalMarker.class'; then
+  printf 'Signal research JAR must contain the chart marker presentation class\n' >&2
   exit 1
 fi
 rm -rf "$TEST_CLASSES"
@@ -62,6 +69,10 @@ mkdir -p "$TEST_CLASSES"
   -cp "$TEST_CLASSES:$ROOT/bookmap-addon/dist/classes:$LIB/bm-simplified-api-wrapper.jar:$LIB/bm-l1api.jar" \
   jp.bushido.bookmap.FlowSignalEngineTest
 
-"$JAVA" -ea \
+"$JAVA" -Djava.awt.headless=true -ea \
+  -cp "$TEST_CLASSES:$ROOT/bookmap-addon/dist/classes:$LIB/bm-simplified-api-wrapper.jar:$LIB/bm-l1api.jar" \
+  jp.bushido.bookmap.FlowSignalMarkerTest
+
+"$JAVA" -Djava.awt.headless=true -ea \
   -cp "$TEST_CLASSES:$ROOT/bookmap-addon/dist/classes:$LIB/bm-simplified-api-wrapper.jar:$LIB/bm-l1api.jar" \
   jp.bushido.bookmap.FlowSignalResearchTest

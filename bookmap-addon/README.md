@@ -51,13 +51,13 @@ When both required Bookmap SDK JARs are available under the locally installed
 
 - `bookmap-addon/dist/bushidoyasu_flow_collector_delayed_replay_v1_1.jar`:
   raw evidence collector.
-- `bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar`:
-  provisional flow-signal recorder.
+- `bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar`:
+  provisional flow-signal recorder with in-Bookmap chart markers.
 
 The collector artifact deliberately contains `FlowCollector` only. The pure
-research class `FlowSignalEngine` is packaged only into the signal-research
-JAR. The two JARs cannot contain one another's Bookmap module. No display-only
-real-time JAR exists yet.
+research classes `FlowSignalEngine` and `FlowSignalMarker` are packaged only
+into the signal-research JAR. The two JARs cannot contain one another's
+Bookmap module. No display-only real-time JAR exists yet.
 
 The licensed Bookmap SDK is not available on GitHub-hosted runners. If either
 SDK dependency is absent, the build compiles only the SDK-free
@@ -71,11 +71,12 @@ Run the Java tests with:
 bookmap-addon/test.sh
 ```
 
-With the complete SDK, this tests the collector, signal engine, and Bookmap
-signal adapter. Without the SDK, it tests the signal engine and reports the two
-adapter tests as skipped. `npm test` invokes this script, so GitHub Actions
-always compiles and tests the SDK-free signal logic while local development
-with Bookmap installed exercises all three Java tests.
+With the complete SDK, this tests the collector, signal engine, chart-marker
+presentation, and Bookmap signal adapter. Without the SDK, it tests the engine
+and marker presentation and reports the two adapter tests as skipped. `npm
+test` invokes this script, so GitHub Actions always compiles and tests the
+SDK-free signal and display logic while local development with Bookmap
+installed exercises all four Java tests.
 
 ## Install and run
 
@@ -88,13 +89,26 @@ with Bookmap installed exercises all three Java tests.
 
 ## Confirm flow signals
 
-Add `bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar` alongside the
+Add `bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar` alongside the
 raw collector only on the same delayed or Replay instrument. After Bookmap
 delivers `snapshot_end`, it creates a separate
 `bookmap-flow-signals-<alias>-<timestamp>.jsonl` file in the configured output
 directory. A `flow_signal` record contains `kind`, `direction`, `price_level`,
 normalized `price`, callback sequence, episode start timestamp, duration,
 trade count, price-level count, and aggressive volume.
+
+With **Show chart markers** enabled, the same emitted signal also appears on
+the Bookmap heatmap at its integer price level. A sweep uses green `BUY SWEEP`
+or red `SELL SWEEP` to identify observed aggressor direction. Absorption uses
+neutral `BUY ABSORBED` or `SELL ABSORBED` with `POSSIBLE ABSORPTION`; it does
+not reverse that observation into a price forecast. Withdrawal uses neutral
+`ASK WITHDRAWAL` or `BID WITHDRAWAL` with `POSSIBLE`. These labels describe
+observed or provisional flow mechanics, not a trade recommendation or an
+order. Sell sweep, absorption, and withdrawal use separate lanes above the
+price so different mechanisms do not directly overlap; buy sweep remains
+below the price. Disable the setting to keep JSONL recording without chart
+markers. Multiple occurrences of the same mechanism at nearly the same time
+and price can still overlap.
 
 Withdrawal, absorption, and sweep windows are configured in milliseconds and use the
 Bookmap `TimeListener` clock. They do not depend on a contract's trade
@@ -119,7 +133,7 @@ Bookmap support, that is data exposure and is not permitted for a custom add-on
 on BookmapData real-time instruments, even if the process is local and
 read-only. Therefore
 both `bushidoyasu_flow_collector_delayed_replay_v1_1.jar` and
-`bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar` are for delayed
+`bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar` are for delayed
 BookmapData or Replay development only: do not add either to a Trading mode
 instrument and do not submit either for real-time approval.
 

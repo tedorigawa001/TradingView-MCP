@@ -7,7 +7,11 @@ LIB="$BOOKMAP_HOME/lib"
 OUT="$ROOT/bookmap-addon/dist"
 CLASSES="$OUT/classes"
 COLLECTOR_JAR="$OUT/bushidoyasu_flow_collector_delayed_replay_v1_1.jar"
-SIGNAL_RESEARCH_JAR="$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
+SIGNAL_RESEARCH_JAR="$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar"
+LEGACY_SIGNAL_RESEARCH_JARS=(
+  "$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
+  "$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_1.jar"
+)
 JAVA_21_HOME="${JAVA_21_HOME:-/usr/local/opt/openjdk@21}"
 # The pinned JDK when it is installed, otherwise whatever is on PATH. CI has a
 # JDK but not this one, and the engine is ordinary Java that any of them builds.
@@ -42,13 +46,16 @@ rm -rf "$CLASSES"
 mkdir -p "$CLASSES"
 
 if [[ "$SDK_PRESENT" -eq 0 ]]; then
-  rm -f "$COLLECTOR_JAR" "$SIGNAL_RESEARCH_JAR"
+  rm -f "$COLLECTOR_JAR" "$SIGNAL_RESEARCH_JAR" "${LEGACY_SIGNAL_RESEARCH_JARS[@]}"
   printf 'Bookmap SDK not found under %s - building the SDK-free signal engine only\n' "$LIB"
   "$JAVAC" --release 17 -d "$CLASSES" \
-    "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowSignalEngine.java"
+    "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowSignalEngine.java" \
+    "$ROOT/bookmap-addon/src/main/java/jp/bushido/bookmap/FlowSignalMarker.java"
   printf 'Built FlowSignalEngine (no installable JAR without the SDK)\n'
   exit 0
 fi
+
+rm -f "${LEGACY_SIGNAL_RESEARCH_JARS[@]}"
 
 "$JAVAC" --release 17 \
   -cp "$SIMPLIFIED_API:$L1_API" \
@@ -67,6 +74,7 @@ printf 'Built delayed/Replay-only collector %s\n' "$COLLECTOR_JAR"
   cd "$CLASSES"
   "$JAR" --create --file "$SIGNAL_RESEARCH_JAR" \
     jp/bushido/bookmap/FlowSignalResearch.class \
-    jp/bushido/bookmap/FlowSignalEngine*.class
+    jp/bushido/bookmap/FlowSignalEngine*.class \
+    jp/bushido/bookmap/FlowSignalMarker*.class
 )
 printf 'Built delayed/Replay-only signal research %s\n' "$SIGNAL_RESEARCH_JAR"

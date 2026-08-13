@@ -17,11 +17,13 @@ import velox.api.layer1.annotations.Layer1SimpleAttachable;
 import velox.api.layer1.annotations.Layer1StrategyName;
 import velox.api.layer1.data.InstrumentInfo;
 import velox.api.layer1.data.TradeInfo;
+import velox.api.layer1.messages.indicators.Layer1ApiUserMessageModifyIndicator.GraphType;
 import velox.api.layer1.simplified.Api;
 import velox.api.layer1.simplified.BboListener;
 import velox.api.layer1.simplified.CustomModule;
 import velox.api.layer1.simplified.DepthDataListener;
 import velox.api.layer1.simplified.InitialState;
+import velox.api.layer1.simplified.Indicator;
 import velox.api.layer1.simplified.Parameter;
 import velox.api.layer1.simplified.SnapshotEndListener;
 import velox.api.layer1.simplified.TimeListener;
@@ -69,20 +71,25 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
     @Parameter(name = "Sweep window milliseconds", minimum = 1, maximum = 600000, step = 1)
     public Integer sweepWindowMilliseconds = 10_000;
 
+    @Parameter(name = "Show chart markers")
+    public Boolean showChartMarkers = true;
+
     private BufferedWriter writer;
     private String alias;
     private double tickSize;
     private long latestBookmapTimeNs = -1L;
     private FlowSignalEngine engine;
+    private Indicator markerIndicator;
     private boolean writeFailed;
+    private boolean markerFailed;
 
     @Override
     public synchronized void initialize(String alias, InstrumentInfo info, Api api,
             InitialState initialState) {
         this.alias = alias;
         this.tickSize = info.pips;
+        engine = createEngine();
         try {
-            engine = createEngine();
             Path directory = Paths.get(outputDirectory).toAbsolutePath().normalize();
             Files.createDirectories(directory);
             Path output = directory.resolve("bookmap-flow-signals-" + safeFilePart(alias)
@@ -100,6 +107,16 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
             writeFailed = true;
             System.err.println("Bushido Flow Signal Research could not initialize: "
                     + error.getMessage());
+        }
+        if (Boolean.TRUE.equals(showChartMarkers)) {
+            try {
+                markerIndicator = api.registerIndicator("Bushido Flow Signals", GraphType.PRIMARY);
+                markerIndicator.setRenderPriority(100);
+            } catch (RuntimeException error) {
+                markerFailed = true;
+                System.err.println("Bushido Flow Signal Research chart markers disabled: "
+                        + error.getMessage());
+            }
         }
     }
 
@@ -135,6 +152,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                         ? FlowSignalEngine.Direction.SELL : FlowSignalEngine.Direction.BUY);
         FlowSignalEngine.Signal signal = engine.onTrade(priceLevel, size, direction);
         if (signal == null) return;
+        display(signal);
         write("flow_signal", "\"kind\":" + jsonString(signal.kind().name()) + ","
                 + "\"direction\":" + jsonString(signal.direction().name()) + ","
                 + "\"price_level\":" + signal.priceLevel() + ","
@@ -146,6 +164,20 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                 + "\"trade_count\":" + signal.tradeCount() + ","
                 + "\"price_levels\":" + signal.priceLevels() + ","
                 + "\"aggressive_volume\":" + signal.aggressiveVolume());
+    }
+
+    private void display(FlowSignalEngine.Signal signal) {
+        if (markerIndicator == null || markerFailed || !Boolean.TRUE.equals(showChartMarkers)) return;
+        FlowSignalMarker.Marker marker = FlowSignalMarker.forSignal(signal);
+        try {
+            // PRIMARY indicator values use Bookmap integer price levels, not decimal prices.
+            markerIndicator.addIcon(signal.priceLevel(), marker.image(),
+                    marker.horizontalOffsetPixels(), marker.verticalOffsetPixels());
+        } catch (RuntimeException error) {
+            markerFailed = true;
+            System.err.println("Bushido Flow Signal Research chart markers disabled: "
+                    + error.getMessage());
+        }
     }
 
     @Override

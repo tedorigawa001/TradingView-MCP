@@ -1674,6 +1674,11 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **v1対象: trade sweep**: 既知方向のtradeが短いcallback窓で連続し、複数price levelを単調に通過した場合に`trade_sweep`を表示する。これは約定の価格通過を表すだけで、stop-loss clusterや大口の意図は主張しない
 - **v1対象外: iceberg / stop hunting / spoofing**: price-level aggregate depthだけでは注文ID単位のreplenishmentを識別できず、icebergの断定はしない。MBO listenerが利用可能でも、MBO callbackのReplay検証と別の固定契約なしには対象に加えない。stopの所在とspoofingの意図はデータから直接観測できない
 - **実装順**: (1) delayed/Replay専用の純粋なsignal engineを作り、callback順・snapshot・unknown trade・session resetをunit testで固定、(2) Bookmap内indicator描画を付け、Replayで表示の意味を人手照合、(3) Bookmapのrealtime approvalを得た後だけ、同一ロジックを外部I/Oなしの一意JARへパッケージする。価格結果との統計評価はCollector側の遅延／Replay研究でのみ行う
+- **チャートマーカー契約 v1 (2026-08-13、同日訂正)**: delayed/Replay研究JARで`FlowSignalEngine`が返したものと同じ単一シグナルを、Bookmap PRIMARY indicatorの時刻・価格座標へ表示する。初版は全種別の`direction`を価格含意と誤読して`FLOW BUY/SELL`へ写したため撤回した。訂正版は、sweepだけを観測された攻撃側として緑の`BUY SWEEP`／赤の`SELL SWEEP`とする。absorptionは攻撃側が受け止められた観測なので、中立色の`BUY ABSORBED`／`SELL ABSORBED`と`POSSIBLE ABSORPTION`を表示し、反対方向の予測へ変換しない。withdrawalは中立色の`ASK WITHDRAWAL`／`BID WITHDRAWAL`と`POSSIBLE`を表示する。いずれも売買推奨・注文・約定を意味しない。マーカー価格はBookmapの整数price levelを使い、Replay時計は既存どおり`TimeListener`値を使う。JSONL記録の成否は表示可否へ影響させず、表示の成否も研究証跡を書き換えない
+- **表示の安全境界**: 設定はBookmapが許可する`Boolean`の`Show chart markers`とし、既定は有効。無効時はJSONL記録だけを継続する。マーカーは外部通知、clipboard、ネットワーク、MCP、注文APIを呼ばない。リアルタイム承認版へ移すときは同じ純粋engineと表示部だけを別の`@UnrestrictedData` JARへ含め、writer・出力ディレクトリ・Collectorクラスを含めない。Bookmapサーバー承認前にrealtimeへ導入しない
+- **検証条件**: SDKなしCIでも、種別ごとの観測意味、表示文言、方向色を使う範囲、中立色、上下オフセットを純粋Java unit testで固定する。SDKありビルドではPRIMARY indicator登録とシグナル発火時の`addIcon`接続を確認し、最後にReplayで同一記録と同一時刻・価格へ1個だけ表示されることを目視確認する。アイコンは価格・時刻座標であり画面固定座標ではないため、ズームやスクロールで位置が変わることを許容する
+- **実装 (2026-08-13)**: delayed/Replay研究JARへSDK-freeの`FlowSignalMarker`とPRIMARY indicator接続を追加した。初版v1.1の吸収表示は攻撃側を価格含意へ誤変換したため使用禁止とし、観測事実表示へ直したv1.2へ更新した。種別別の意味・文言・色・上下位置、同一callbackで1個だけの描画、設定OFF時の証跡継続、描画例外時の証跡継続をunit testで固定し、旧v1.0/v1.1 JARはビルド時に削除する。`npm test`とSDKありJava 4スイートは通過。残る作業はBookmap Replayでの実表示位置・可読性・JSONLとの1対1対応の目視確認であり、realtime display-only JARの作成・承認は未着手
+- **表示レーン訂正 (2026-08-13)**: 方向中立のabsorptionとwithdrawalをともに上側へ置く方針は維持するが、初版はsell sweepを含む3種が同じ`-46px`で重なり得た。v1.2ではbuy sweepを`+8px`、sell sweepを`-46px`、absorptionを`-88px`、withdrawalを`-130px`の別レーンへ固定した。同種のシグナルがほぼ同時刻・同価格で再発した場合の重なりは残余の表示制約とし、観測を間引いて解消しない
 
 ## 運用メモ
 
