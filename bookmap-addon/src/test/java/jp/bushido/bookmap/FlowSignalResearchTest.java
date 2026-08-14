@@ -19,6 +19,7 @@ public final class FlowSignalResearchTest {
         usesOnlyBookmapSupportedParameterTypes();
         recordsAFlowSignalWithAuditableFields();
         displaysExactlyOneMarkerAtTheSignalPrice();
+        drawsOneMarkerPerEpisodeWhileRecordingEveryContinuation();
         markerSettingDoesNotDisableEvidenceRecording();
         markerFailureDoesNotDisableEvidenceRecording();
         usesBookmapTimeForReplayWindowExpiry();
@@ -48,6 +49,37 @@ public final class FlowSignalResearchTest {
         assertEquals(100.0, indicator.value);
         assertTrue(indicator.image != null, "signal marker image must be present");
         assertTrue(indicator.yOffset < 0, "SELL marker must render above its price");
+    }
+
+    /**
+     * Continuations of a run arrive seconds apart at nearly the same price. The
+     * evidence file keeps every one of them; the chart gets the first only,
+     * because stacked badges were unreadable on the real feed.
+     */
+    private static void drawsOneMarkerPerEpisodeWhileRecordingEveryContinuation() throws Exception {
+        StringWriter output = new StringWriter();
+        FlowSignalResearch research = research(output);
+        RecordingIndicator indicator = new RecordingIndicator();
+        set(research, "markerIndicator", indicator);
+
+        for (int round = 0; round < 3; round += 1) {
+            research.onTimestamp(1_000_000_000L + round * 4_000_000_000L);
+            // The bid side halves, which arms a SELL withdrawal; isBidAggressor
+            // maps to SELL, so the trade that follows is the one that can match it.
+            research.onBbo(99, 100, 101, 100);
+            research.onBbo(99, 10, 101, 100);
+            research.onTrade(99.0, 3, new TradeInfo(false, true, false, false));
+        }
+
+        long recorded = output.toString().lines()
+                .filter(line -> line.contains("\"event_type\":\"flow_signal\"")).count();
+        assertEquals(3L, recorded);
+        assertEquals(1, indicator.icons);
+        long drawn = output.toString().lines()
+                .filter(line -> line.contains("\"chart_marker_drawn\":true")).count();
+        assertEquals(1L, drawn);
+        assertTrue(output.toString().contains("\"episode_signal_index\":3"),
+                "the third signal must be recorded as the third of its episode");
     }
 
     private static void markerSettingDoesNotDisableEvidenceRecording() throws Exception {

@@ -18,6 +18,8 @@ public final class FlowSignalEngineTest {
         absorptionRearmsAfterThePassiveLevelIsRecreated();
         removesZeroSizeDepthLevels();
         unknownAggressionEndsAnEpisodeInsteadOfJoiningOne();
+        consecutiveSignalsShareOneEpisodeAndOnlyTheFirstIsDrawn();
+        anEpisodeGapAndTheOppositeSideEachStartTheirOwnEpisode();
         System.out.println("FlowSignalEngineTest: PASS");
     }
 
@@ -178,6 +180,80 @@ public final class FlowSignalEngineTest {
         assertNull(armed.onTrade(200, 1, null));
         // The withdrawal was disarmed by the unknown trade, not merely postponed.
         assertNull(armed.onTrade(200, 1, FlowSignalEngine.Direction.BUY));
+    }
+
+    private static void armAskWithdrawal(FlowSignalEngine engine, TestClock clock) {
+        engine.onBbo(100, 100);
+        clock.advanceMilliseconds(50);
+        engine.onBbo(100, 10);
+        clock.advanceMilliseconds(1_000);
+    }
+
+    /**
+     * The chart draws one marker per episode. Continuations land within a few
+     * seconds at nearly the same price, so drawing each one stacks badges until
+     * none of them can be read.
+     */
+    private static void consecutiveSignalsShareOneEpisodeAndOnlyTheFirstIsDrawn() {
+        TestClock clock = new TestClock();
+        FlowSignalEngine engine = new FlowSignalEngine(
+                new FlowSignalEngine.Settings(3, 3, 100, 25, 0.5, 10_000, 10_000, 10_000, 30_000), clock);
+        engine.onSnapshotEnd();
+
+        armAskWithdrawal(engine, clock);
+        FlowSignalEngine.Signal first = engine.onTrade(700, 3, FlowSignalEngine.Direction.BUY);
+        assertEquals(1, first.episode().signalIndex());
+        assertEquals(true, first.episode().startsEpisode());
+
+        long sequence = first.episode().sequence();
+        FlowSignalEngine.Signal last = null;
+        for (int index = 2; index <= 4; index += 1) {
+            clock.advanceMilliseconds(4_000);
+            armAskWithdrawal(engine, clock);
+            last = engine.onTrade(700 + index, 3, FlowSignalEngine.Direction.BUY);
+            assertEquals(sequence, last.episode().sequence());
+            assertEquals(index, last.episode().signalIndex());
+            assertEquals(false, last.episode().startsEpisode());
+        }
+        // Totals are running, so the last signal of the run carries the whole of it.
+        assertEquals(4, last.episode().tradeCount());
+        assertEquals(4, last.episode().priceLevels());
+        assertEquals(12L, last.episode().aggressiveVolume());
+        assertEquals(true, last.episode().durationMilliseconds() > 0);
+    }
+
+    private static void anEpisodeGapAndTheOppositeSideEachStartTheirOwnEpisode() {
+        TestClock clock = new TestClock();
+        FlowSignalEngine engine = new FlowSignalEngine(
+                new FlowSignalEngine.Settings(3, 3, 100, 25, 0.5, 10_000, 10_000, 10_000, 30_000), clock);
+        engine.onSnapshotEnd();
+
+        armAskWithdrawal(engine, clock);
+        long first = engine.onTrade(700, 3, FlowSignalEngine.Direction.BUY).episode().sequence();
+
+        // A quiet stretch longer than the gap ends the run rather than extending it.
+        clock.advanceMilliseconds(40_000);
+        armAskWithdrawal(engine, clock);
+        FlowSignalEngine.Signal afterGap = engine.onTrade(700, 3, FlowSignalEngine.Direction.BUY);
+        assertEquals(true, afterGap.episode().sequence() != first);
+        assertEquals(1, afterGap.episode().signalIndex());
+
+        // The bid side runs its own episode and does not interrupt the ask side.
+        long askRun = afterGap.episode().sequence();
+        clock.advanceMilliseconds(2_000);
+        engine.onBbo(100, 100);
+        clock.advanceMilliseconds(50);
+        engine.onBbo(10, 100);
+        clock.advanceMilliseconds(1_000);
+        FlowSignalEngine.Signal bid = engine.onTrade(700, 3, FlowSignalEngine.Direction.SELL);
+        assertEquals(true, bid.episode().sequence() != askRun);
+        assertEquals(1, bid.episode().signalIndex());
+
+        clock.advanceMilliseconds(2_000);
+        armAskWithdrawal(engine, clock);
+        FlowSignalEngine.Signal askAgain = engine.onTrade(700, 3, FlowSignalEngine.Direction.BUY);
+        assertEquals(askRun, askAgain.episode().sequence());
+        assertEquals(2, askAgain.episode().signalIndex());
     }
 
     private static void assertNull(Object value) {

@@ -152,7 +152,10 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                         ? FlowSignalEngine.Direction.SELL : FlowSignalEngine.Direction.BUY);
         FlowSignalEngine.Signal signal = engine.onTrade(priceLevel, size, direction);
         if (signal == null) return;
-        display(signal);
+        // One marker per episode. Continuations are recorded but not drawn: they
+        // land at nearly the same price and time and would stack unreadably, which
+        // is what prompted this aggregation.
+        if (signal.episode().startsEpisode()) display(signal);
         write("flow_signal", "\"kind\":" + jsonString(signal.kind().name()) + ","
                 + "\"direction\":" + jsonString(signal.direction().name()) + ","
                 + "\"price_level\":" + signal.priceLevel() + ","
@@ -163,6 +166,13 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                 + "\"duration_ms\":" + signal.durationMilliseconds() + ","
                 + "\"trade_count\":" + signal.tradeCount() + ","
                 + "\"price_levels\":" + signal.priceLevels() + ","
+                + "\"episode_sequence\":" + signal.episode().sequence() + ","
+                + "\"episode_signal_index\":" + signal.episode().signalIndex() + ","
+                + "\"episode_duration_ms\":" + signal.episode().durationMilliseconds() + ","
+                + "\"episode_trade_count\":" + signal.episode().tradeCount() + ","
+                + "\"episode_price_levels\":" + signal.episode().priceLevels() + ","
+                + "\"episode_aggressive_volume\":" + signal.episode().aggressiveVolume() + ","
+                + "\"chart_marker_drawn\":" + signal.episode().startsEpisode() + ","
                 + "\"aggressive_volume\":" + signal.aggressiveVolume());
     }
 

@@ -25,14 +25,52 @@ public final class FlowSignalEngine {
 
     public record Signal(SignalKind kind, Direction direction, int priceLevel,
             long sequence, long episodeStartedAtNanos, long durationMilliseconds,
-            int tradeCount, int priceLevels, long aggressiveVolume) {}
+            int tradeCount, int priceLevels, long aggressiveVolume, Episode episode) {
+        /**
+         * A signal not yet placed in a run. It stands as an episode of one rather
+         * than carrying a null, so nothing downstream has to test for absence.
+         */
+        public Signal(SignalKind kind, Direction direction, int priceLevel, long sequence,
+                long episodeStartedAtNanos, long durationMilliseconds, int tradeCount,
+                int priceLevels, long aggressiveVolume) {
+            this(kind, direction, priceLevel, sequence, episodeStartedAtNanos,
+                    durationMilliseconds, tradeCount, priceLevels, aggressiveVolume,
+                    new Episode(0L, 1, episodeStartedAtNanos, durationMilliseconds,
+                            tradeCount, priceLevels, aggressiveVolume));
+        }
+
+        public Signal {
+            if (episode == null) throw new IllegalArgumentException("signal requires an episode");
+        }
+    }
+
+    /**
+     * A run of same-kind, same-direction signals separated by no more than the
+     * configured gap. Totals are running: they describe the episode up to and
+     * including the signal carrying them, so the highest signalIndex for a given
+     * sequence holds the final figures.
+     *
+     * An episode is kept per kind and direction, so a sweep between two ask
+     * withdrawals does not split the withdrawal run. Only the first signal of an
+     * episode is meant to be drawn; the rest are recorded and would otherwise
+     * stack on top of one another at nearly the same price and time.
+     */
+    public record Episode(long sequence, int signalIndex, long startedAtNanos,
+            long durationMilliseconds, int tradeCount, int priceLevels,
+            long aggressiveVolume) {
+        public boolean startsEpisode() {
+            return signalIndex == 1;
+        }
+    }
 
     private static final int DEFAULT_ABSORPTION_WINDOW_MILLISECONDS = 10_000;
+    private static final int DEFAULT_EPISODE_GAP_MILLISECONDS = 30_000;
 
     public record Settings(int minimumSweepTrades, int minimumSweepPriceLevels,
             int minimumAbsorptionVolume, int minimumPassiveSize,
             double withdrawalRatio, int withdrawalWindowMilliseconds,
-            int absorptionWindowMilliseconds, int sweepWindowMilliseconds) {
+            int absorptionWindowMilliseconds, int sweepWindowMilliseconds,
+            int episodeGapMilliseconds) {
         public Settings(int minimumSweepTrades, int minimumSweepPriceLevels,
                 int minimumAbsorptionVolume, int minimumPassiveSize,
                 double withdrawalRatio, int withdrawalWindowMilliseconds) {
@@ -40,7 +78,8 @@ public final class FlowSignalEngine {
                     minimumAbsorptionVolume, minimumPassiveSize,
                     withdrawalRatio, withdrawalWindowMilliseconds,
                     DEFAULT_ABSORPTION_WINDOW_MILLISECONDS,
-                    DEFAULT_ABSORPTION_WINDOW_MILLISECONDS);
+                    DEFAULT_ABSORPTION_WINDOW_MILLISECONDS,
+                    DEFAULT_EPISODE_GAP_MILLISECONDS);
         }
 
         public Settings(int minimumSweepTrades, int minimumSweepPriceLevels,
@@ -50,7 +89,19 @@ public final class FlowSignalEngine {
             this(minimumSweepTrades, minimumSweepPriceLevels,
                     minimumAbsorptionVolume, minimumPassiveSize,
                     withdrawalRatio, withdrawalWindowMilliseconds,
-                    absorptionWindowMilliseconds, DEFAULT_ABSORPTION_WINDOW_MILLISECONDS);
+                    absorptionWindowMilliseconds, DEFAULT_ABSORPTION_WINDOW_MILLISECONDS,
+                    DEFAULT_EPISODE_GAP_MILLISECONDS);
+        }
+
+        public Settings(int minimumSweepTrades, int minimumSweepPriceLevels,
+                int minimumAbsorptionVolume, int minimumPassiveSize,
+                double withdrawalRatio, int withdrawalWindowMilliseconds,
+                int absorptionWindowMilliseconds, int sweepWindowMilliseconds) {
+            this(minimumSweepTrades, minimumSweepPriceLevels,
+                    minimumAbsorptionVolume, minimumPassiveSize,
+                    withdrawalRatio, withdrawalWindowMilliseconds,
+                    absorptionWindowMilliseconds, sweepWindowMilliseconds,
+                    DEFAULT_EPISODE_GAP_MILLISECONDS);
         }
 
         public Settings {
@@ -58,7 +109,7 @@ public final class FlowSignalEngine {
                     || minimumAbsorptionVolume < 1 || minimumPassiveSize < 1
                     || !(withdrawalRatio > 0 && withdrawalRatio < 1)
                     || withdrawalWindowMilliseconds < 1 || absorptionWindowMilliseconds < 1
-                    || sweepWindowMilliseconds < 1) {
+                    || sweepWindowMilliseconds < 1 || episodeGapMilliseconds < 1) {
                 throw new IllegalArgumentException("invalid flow signal settings");
             }
         }
@@ -66,13 +117,15 @@ public final class FlowSignalEngine {
 
     private static final Settings DEFAULTS = new Settings(3, 3, 100, 25, 0.5,
             10_000, DEFAULT_ABSORPTION_WINDOW_MILLISECONDS,
-            DEFAULT_ABSORPTION_WINDOW_MILLISECONDS);
+            DEFAULT_ABSORPTION_WINDOW_MILLISECONDS, DEFAULT_EPISODE_GAP_MILLISECONDS);
 
     private final Settings settings;
     private final LongSupplier monotonicNanos;
     private final Map<Integer, Integer> bidDepth = new HashMap<>();
     private final Map<Integer, Integer> askDepth = new HashMap<>();
     private final Map<AbsorptionKey, AbsorptionState> absorptionStates = new HashMap<>();
+    private final Map<EpisodeKey, EpisodeState> episodes = new HashMap<>();
+    private long episodeSequence;
     private long sequence;
     private boolean snapshotComplete;
     private Direction sweepDirection;
@@ -171,7 +224,33 @@ public final class FlowSignalEngine {
         // Exactly one display marker per callback keeps the first detectable
         // mechanism visible; priority is an implementation display choice, not
         // a ranking of economic importance.
-        return withdrawal != null ? withdrawal : sweep != null ? sweep : absorption;
+        Signal signal = withdrawal != null ? withdrawal : sweep != null ? sweep : absorption;
+        return signal == null ? null : withEpisode(signal, nowNanos);
+    }
+
+    private Signal withEpisode(Signal signal, long nowNanos) {
+        EpisodeKey key = new EpisodeKey(signal.kind(), signal.direction());
+        EpisodeState state = episodes.get(key);
+        if (state == null || nowNanos - state.lastAtNanos()
+                > windowNanos(settings.episodeGapMilliseconds)) {
+            episodeSequence += 1;
+            state = new EpisodeState(episodeSequence, 0, nowNanos, nowNanos, 0, 0L, new HashSet<>());
+        }
+        Set<Integer> levels = new HashSet<>(state.priceLevels());
+        levels.add(signal.priceLevel());
+        state = new EpisodeState(state.sequence(), state.signalIndex() + 1,
+                state.startedAtNanos(), nowNanos,
+                state.tradeCount() + signal.tradeCount(),
+                state.aggressiveVolume() + signal.aggressiveVolume(), levels);
+        episodes.put(key, state);
+        Episode episode = new Episode(state.sequence(), state.signalIndex(),
+                state.startedAtNanos(),
+                (nowNanos - state.startedAtNanos()) / 1_000_000L,
+                state.tradeCount(), levels.size(), state.aggressiveVolume());
+        return new Signal(signal.kind(), signal.direction(), signal.priceLevel(),
+                signal.sequence(), signal.episodeStartedAtNanos(),
+                signal.durationMilliseconds(), signal.tradeCount(),
+                signal.priceLevels(), signal.aggressiveVolume(), episode);
     }
 
     private Signal maybeWithdrawal(int priceLevel, int size, Direction direction, long nowNanos) {
@@ -251,6 +330,12 @@ public final class FlowSignalEngine {
         sweepAggressiveVolume = 0;
         sweepLevels = new HashSet<>();
     }
+
+    private record EpisodeKey(SignalKind kind, Direction direction) {}
+
+    private record EpisodeState(long sequence, int signalIndex, long startedAtNanos,
+            long lastAtNanos, int tradeCount, long aggressiveVolume,
+            Set<Integer> priceLevels) {}
 
     private record AbsorptionKey(int priceLevel, Direction direction) {}
 

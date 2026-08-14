@@ -36,6 +36,20 @@ The data represents the selected Bookmap feed and instrument only. For FX
 research, use CME futures such as `6E`, `6J`, or `GC` as explicitly labelled
 single-venue proxies; do not describe it as whole-market FX spot order flow.
 
+## Episodes
+
+Signals of the same kind and direction, separated by no more than
+`Episode gap ms` (30 s by default), form one episode. Every signal is written
+to the JSONL with `episode_sequence`, `episode_signal_index` and running
+`episode_trade_count`, `episode_price_levels` and `episode_aggressive_volume`,
+so the highest index for a sequence carries the totals for the whole run.
+
+Only the first signal of an episode is drawn on the chart, and each record says
+which it was in `chart_marker_drawn`. On the delayed feed, withdrawals arrive in
+runs seconds apart at nearly the same price, and drawing each one stacked the
+badges until none could be read. Episodes are kept per kind and direction, so a
+sweep between two ask withdrawals does not split the withdrawal run.
+
 ## Build
 
 ```bash

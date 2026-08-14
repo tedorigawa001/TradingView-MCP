@@ -1681,6 +1681,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **検証条件**: SDKなしCIでも、種別ごとの観測意味、表示文言、方向色を使う範囲、中立色、上下オフセットを純粋Java unit testで固定する。SDKありビルドではPRIMARY indicator登録とシグナル発火時の`addIcon`接続を確認し、最後にReplayで同一記録と同一時刻・価格へ1個だけ表示されることを目視確認する。アイコンは価格・時刻座標であり画面固定座標ではないため、ズームやスクロールで位置が変わることを許容する
 - **実装 (2026-08-13)**: delayed/Replay研究JARへSDK-freeの`FlowSignalMarker`とPRIMARY indicator接続を追加した。初版v1.1の吸収表示は攻撃側を価格含意へ誤変換したため使用禁止とし、観測事実表示へ直したv1.2へ更新した。種別別の意味・文言・色・上下位置、同一callbackで1個だけの描画、設定OFF時の証跡継続、描画例外時の証跡継続をunit testで固定し、旧v1.0/v1.1 JARはビルド時に削除する。`npm test`とSDKありJava 4スイートは通過。残る作業はBookmap Replayでの実表示位置・可読性・JSONLとの1対1対応の目視確認であり、realtime display-only JARの作成・承認は未着手
 - **表示レーン訂正 (2026-08-13)**: 方向中立のabsorptionとwithdrawalをともに上側へ置く方針は維持するが、初版はsell sweepを含む3種が同じ`-46px`で重なり得た。v1.2ではbuy sweepを`+8px`、sell sweepを`-46px`、absorptionを`-88px`、withdrawalを`-130px`の別レーンへ固定した。同種のシグナルがほぼ同時刻・同価格で再発した場合の重なりは残余の表示制約とし、観測を間引いて解消しない
+- **実機E2E (2026-08-13)**: delayed BookmapDataのM6Eチャートでv1.2を確認し、中立色の`BID WITHDRAWAL`／`ASK WITHDRAWAL`、`POSSIBLE`副表示、上側withdrawalレーンへの描画が契約どおり動作した。同時に、同種withdrawalが近い時刻・価格で連続すると同一レーン上で重なる残余制約も再現した。研究JSONLは間引かず、将来の表示改善を行う場合は証跡と独立した表示専用cooldown／集約として別契約にする
 
 ### #84 重複する前向き窓へiid区間を当てている件(留保として記録, 2026-08-13)
 
