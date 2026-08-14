@@ -68,6 +68,9 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
     @Parameter(name = "Absorption window milliseconds", minimum = 1, maximum = 600000, step = 1)
     public Integer absorptionWindowMilliseconds = 10_000;
 
+    @Parameter(name = "Episode gap milliseconds", minimum = 1, maximum = 600000, step = 1)
+    public Integer episodeGapMilliseconds = 30_000;
+
     @Parameter(name = "Sweep window milliseconds", minimum = 1, maximum = 600000, step = 1)
     public Integer sweepWindowMilliseconds = 10_000;
 
@@ -155,7 +158,10 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
         // One marker per episode. Continuations are recorded but not drawn: they
         // land at nearly the same price and time and would stack unreadably, which
         // is what prompted this aggregation.
-        if (signal.episode().startsEpisode()) display(signal);
+        // Whether a marker actually reached the chart, not whether one was wanted.
+        // Markers can be switched off, the indicator can be absent, and addIcon can
+        // throw; recording the intent would have logged all three as drawn.
+        boolean markerDrawn = signal.episode().startsEpisode() && display(signal);
         write("flow_signal", "\"kind\":" + jsonString(signal.kind().name()) + ","
                 + "\"direction\":" + jsonString(signal.direction().name()) + ","
                 + "\"price_level\":" + signal.priceLevel() + ","
@@ -172,21 +178,23 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                 + "\"episode_trade_count\":" + signal.episode().tradeCount() + ","
                 + "\"episode_price_levels\":" + signal.episode().priceLevels() + ","
                 + "\"episode_aggressive_volume\":" + signal.episode().aggressiveVolume() + ","
-                + "\"chart_marker_drawn\":" + signal.episode().startsEpisode() + ","
+                + "\"chart_marker_drawn\":" + markerDrawn + ","
                 + "\"aggressive_volume\":" + signal.aggressiveVolume());
     }
 
-    private void display(FlowSignalEngine.Signal signal) {
-        if (markerIndicator == null || markerFailed || !Boolean.TRUE.equals(showChartMarkers)) return;
+    private boolean display(FlowSignalEngine.Signal signal) {
+        if (markerIndicator == null || markerFailed || !Boolean.TRUE.equals(showChartMarkers)) return false;
         FlowSignalMarker.Marker marker = FlowSignalMarker.forSignal(signal);
         try {
             // PRIMARY indicator values use Bookmap integer price levels, not decimal prices.
             markerIndicator.addIcon(signal.priceLevel(), marker.image(),
                     marker.horizontalOffsetPixels(), marker.verticalOffsetPixels());
+            return true;
         } catch (RuntimeException error) {
             markerFailed = true;
             System.err.println("Bushido Flow Signal Research chart markers disabled: "
                     + error.getMessage());
+            return false;
         }
     }
 
@@ -208,7 +216,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
     private void write(String eventType, String fields) {
         if (writer == null || writeFailed) return;
         try {
-            writer.write("{\"schema_version\":\"1.1\",\"source\":\"bookmap_flow_signal_research\","
+            writer.write("{\"schema_version\":\"1.2\",\"source\":\"bookmap_flow_signal_research\","
                     + "\"event_type\":" + jsonString(eventType) + ","
                     + "\"instrument_alias\":" + jsonString(alias) + ","
                     + "\"bookmap_time_ns\":"
@@ -228,7 +236,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
                 minimumSweepTrades, minimumSweepPriceLevels,
                 minimumAbsorptionVolume, minimumPassiveSize, withdrawalRatio,
                 withdrawalWindowMilliseconds, absorptionWindowMilliseconds,
-                sweepWindowMilliseconds),
+                sweepWindowMilliseconds, episodeGapMilliseconds),
                 () -> latestBookmapTimeNs);
     }
 

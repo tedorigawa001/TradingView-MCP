@@ -20,6 +20,7 @@ public final class FlowSignalEngineTest {
         unknownAggressionEndsAnEpisodeInsteadOfJoiningOne();
         consecutiveSignalsShareOneEpisodeAndOnlyTheFirstIsDrawn();
         anEpisodeGapAndTheOppositeSideEachStartTheirOwnEpisode();
+        anEpisodeUnionsEveryLevelASweepCrossed();
         System.out.println("FlowSignalEngineTest: PASS");
     }
 
@@ -180,6 +181,34 @@ public final class FlowSignalEngineTest {
         assertNull(armed.onTrade(200, 1, null));
         // The withdrawal was disarmed by the unknown trade, not merely postponed.
         assertNull(armed.onTrade(200, 1, FlowSignalEngine.Direction.BUY));
+    }
+
+    /**
+     * A sweep crosses several levels and reports all of them. Folding only its
+     * terminal price into the episode counted a three-level sweep as one, so the
+     * episode figure contradicted the per-signal figure beside it.
+     */
+    private static void anEpisodeUnionsEveryLevelASweepCrossed() {
+        TestClock clock = new TestClock();
+        FlowSignalEngine engine = new FlowSignalEngine(
+                new FlowSignalEngine.Settings(3, 3, 100, 25, 0.5, 10_000, 10_000, 10_000, 30_000), clock);
+        engine.onSnapshotEnd();
+
+        FlowSignalEngine.Signal sweep = null;
+        for (int index = 0; index < 3; index += 1) {
+            clock.advanceMilliseconds(300);
+            sweep = engine.onTrade(100 + index, 4, FlowSignalEngine.Direction.BUY);
+        }
+        assertEquals(3, sweep.priceLevels());
+        assertEquals(3, sweep.priceLevelsTouched().size());
+        assertEquals(3, sweep.episode().priceLevels());
+
+        // A second sweep over two of the same levels and one new one adds only the new one.
+        for (int index = 0; index < 3; index += 1) {
+            clock.advanceMilliseconds(300);
+            sweep = engine.onTrade(101 + index, 4, FlowSignalEngine.Direction.BUY);
+        }
+        assertEquals(4, sweep.episode().priceLevels());
     }
 
     private static void armAskWithdrawal(FlowSignalEngine engine, TestClock clock) {

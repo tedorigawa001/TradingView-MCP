@@ -25,7 +25,8 @@ public final class FlowSignalEngine {
 
     public record Signal(SignalKind kind, Direction direction, int priceLevel,
             long sequence, long episodeStartedAtNanos, long durationMilliseconds,
-            int tradeCount, int priceLevels, long aggressiveVolume, Episode episode) {
+            int tradeCount, int priceLevels, long aggressiveVolume,
+            Set<Integer> priceLevelsTouched, Episode episode) {
         /**
          * A signal not yet placed in a run. It stands as an episode of one rather
          * than carrying a null, so nothing downstream has to test for absence.
@@ -35,12 +36,20 @@ public final class FlowSignalEngine {
                 int priceLevels, long aggressiveVolume) {
             this(kind, direction, priceLevel, sequence, episodeStartedAtNanos,
                     durationMilliseconds, tradeCount, priceLevels, aggressiveVolume,
+                    Set.of(priceLevel),
                     new Episode(0L, 1, episodeStartedAtNanos, durationMilliseconds,
                             tradeCount, priceLevels, aggressiveVolume));
         }
 
         public Signal {
-            if (episode == null) throw new IllegalArgumentException("signal requires an episode");
+            if (episode == null) {
+                episode = new Episode(0L, 1, episodeStartedAtNanos, durationMilliseconds,
+                        tradeCount, priceLevels, aggressiveVolume);
+            }
+            if (priceLevelsTouched == null || priceLevelsTouched.isEmpty()) {
+                throw new IllegalArgumentException("signal requires the levels it touched");
+            }
+            priceLevelsTouched = Set.copyOf(priceLevelsTouched);
         }
     }
 
@@ -236,8 +245,11 @@ public final class FlowSignalEngine {
             episodeSequence += 1;
             state = new EpisodeState(episodeSequence, 0, nowNanos, nowNanos, 0, 0L, new HashSet<>());
         }
+        // The union of every level each signal touched. A sweep crosses several and
+        // reports them in priceLevelsTouched; adding only its terminal price counted
+        // a three-level sweep as one.
         Set<Integer> levels = new HashSet<>(state.priceLevels());
-        levels.add(signal.priceLevel());
+        levels.addAll(signal.priceLevelsTouched());
         state = new EpisodeState(state.sequence(), state.signalIndex() + 1,
                 state.startedAtNanos(), nowNanos,
                 state.tradeCount() + signal.tradeCount(),
@@ -250,7 +262,8 @@ public final class FlowSignalEngine {
         return new Signal(signal.kind(), signal.direction(), signal.priceLevel(),
                 signal.sequence(), signal.episodeStartedAtNanos(),
                 signal.durationMilliseconds(), signal.tradeCount(),
-                signal.priceLevels(), signal.aggressiveVolume(), episode);
+                signal.priceLevels(), signal.aggressiveVolume(),
+                signal.priceLevelsTouched(), episode);
     }
 
     private Signal maybeWithdrawal(int priceLevel, int size, Direction direction, long nowNanos) {
@@ -289,7 +302,8 @@ public final class FlowSignalEngine {
                 || sweepLevels.size() < settings.minimumSweepPriceLevels) return null;
         Signal signal = new Signal(SignalKind.TRADE_SWEEP, direction, priceLevel, sequence,
                 sweepStartedAtNanos, durationMilliseconds(sweepStartedAtNanos, nowNanos),
-                sweepTrades, sweepLevels.size(), sweepAggressiveVolume);
+                sweepTrades, sweepLevels.size(), sweepAggressiveVolume,
+                Set.copyOf(sweepLevels), null);
         resetSweep();
         return signal;
     }

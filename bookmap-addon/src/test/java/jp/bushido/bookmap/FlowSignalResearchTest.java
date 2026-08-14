@@ -20,6 +20,7 @@ public final class FlowSignalResearchTest {
         recordsAFlowSignalWithAuditableFields();
         displaysExactlyOneMarkerAtTheSignalPrice();
         drawsOneMarkerPerEpisodeWhileRecordingEveryContinuation();
+        chartMarkerDrawnReportsTheDrawAndNotTheIntent();
         markerSettingDoesNotDisableEvidenceRecording();
         markerFailureDoesNotDisableEvidenceRecording();
         usesBookmapTimeForReplayWindowExpiry();
@@ -80,6 +81,48 @@ public final class FlowSignalResearchTest {
         assertEquals(1L, drawn);
         assertTrue(output.toString().contains("\"episode_signal_index\":3"),
                 "the third signal must be recorded as the third of its episode");
+    }
+
+    /**
+     * The field is evidence of what reached the chart. An episode start whose
+     * marker never rendered - no indicator, markers switched off, or addIcon
+     * throwing - must not be recorded as drawn.
+     */
+    private static void chartMarkerDrawnReportsTheDrawAndNotTheIntent() throws Exception {
+        StringWriter noIndicator = new StringWriter();
+        FlowSignalResearch withoutIndicator = research(noIndicator);
+        emitOneWithdrawal(withoutIndicator);
+        assertTrue(noIndicator.toString().contains("\"chart_marker_drawn\":false"),
+                "an episode start with no indicator is not drawn");
+
+        StringWriter disabled = new StringWriter();
+        FlowSignalResearch markersOff = research(disabled);
+        set(markersOff, "markerIndicator", new RecordingIndicator());
+        markersOff.showChartMarkers = false;
+        emitOneWithdrawal(markersOff);
+        assertTrue(disabled.toString().contains("\"chart_marker_drawn\":false"),
+                "markers switched off are not drawn");
+
+        StringWriter failing = new StringWriter();
+        FlowSignalResearch throwing = research(failing);
+        set(throwing, "markerIndicator", new FailingIndicator());
+        emitOneWithdrawal(throwing);
+        assertTrue(failing.toString().contains("\"chart_marker_drawn\":false"),
+                "a marker whose render threw is not drawn");
+
+        StringWriter drawn = new StringWriter();
+        FlowSignalResearch working = research(drawn);
+        set(working, "markerIndicator", new RecordingIndicator());
+        emitOneWithdrawal(working);
+        assertTrue(drawn.toString().contains("\"chart_marker_drawn\":true"),
+                "a marker that rendered is drawn");
+    }
+
+    private static void emitOneWithdrawal(FlowSignalResearch research) {
+        research.onTimestamp(1_000_000_000L);
+        research.onBbo(99, 100, 101, 100);
+        research.onBbo(99, 10, 101, 100);
+        research.onTrade(99.0, 3, new TradeInfo(false, true, false, false));
     }
 
     private static void markerSettingDoesNotDisableEvidenceRecording() throws Exception {
