@@ -10,6 +10,23 @@ checks the module's constant pool for file, network, clipboard and process APIs
 rather than taking the claim on trust - adding a single `Files.writeString` to it
 fails the build.
 
+## Result (2026-08-14): refused as well
+
+The display JAR was refused on the instrument that refuses the other two, with
+the same message. **The boundary is the module, not what it does.** A module that
+writes no file, opens no socket and keeps no state is treated exactly like one
+that records everything, so nothing that can be changed inside an add-on will
+open a protected instrument.
+
+Three explanations were proposed and all three are now dead: the JAR filename
+changing between builds, the Indicator API used by the recorder but not the
+collector, and external output. The remaining path is `@UnrestrictedData`
+together with Bookmap's approval, or keeping add-on work off protected
+instruments entirely.
+
+Practically: delayed instruments without Trading enabled still take all three
+modules, so the threshold and episode work can continue there unchanged.
+
 ## Why it exists
 
 Bookmap marks an instrument `isApiProtected` and then refuses most API modules
