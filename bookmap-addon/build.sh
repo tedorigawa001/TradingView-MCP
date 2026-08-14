@@ -8,6 +8,7 @@ OUT="$ROOT/bookmap-addon/dist"
 CLASSES="$OUT/classes"
 COLLECTOR_JAR="$OUT/bushidoyasu_flow_collector_delayed_replay_v1_1.jar"
 SIGNAL_RESEARCH_JAR="$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar"
+SIGNAL_DISPLAY_JAR="$OUT/bushidoyasu_flow_signal_display_v1_0.jar"
 LEGACY_SIGNAL_RESEARCH_JARS=(
   "$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_0.jar"
   "$OUT/bushidoyasu_flow_signal_research_delayed_replay_v1_1.jar"
@@ -78,3 +79,14 @@ printf 'Built delayed/Replay-only collector %s\n' "$COLLECTOR_JAR"
     jp/bushido/bookmap/FlowSignalMarker*.class
 )
 printf 'Built delayed/Replay-only signal research %s\n' "$SIGNAL_RESEARCH_JAR"
+
+# Display only. It keeps nothing, so it carries neither the collector nor the
+# recorder, and the check below is on the bytecode rather than on intent.
+(
+  cd "$CLASSES"
+  "$JAR" --create --file "$SIGNAL_DISPLAY_JAR" \
+    jp/bushido/bookmap/FlowSignalDisplay.class \
+    jp/bushido/bookmap/FlowSignalEngine*.class \
+    jp/bushido/bookmap/FlowSignalMarker*.class
+)
+printf 'Built display-only signal marker %s\n' "$SIGNAL_DISPLAY_JAR"

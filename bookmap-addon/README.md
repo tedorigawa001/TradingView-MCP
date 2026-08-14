@@ -53,6 +53,19 @@ runs seconds apart at nearly the same price, and drawing each one stacked the
 badges until none could be read. Episodes are kept per kind and direction, so a
 sweep between two ask withdrawals does not split the withdrawal run.
 
+## Artifacts
+
+Three JARs, each with one Bookmap module and none of the others:
+
+| JAR | Module | Keeps |
+|---|---|---|
+| `bushidoyasu_flow_collector_delayed_replay_v1_1.jar` | `FlowCollector` | raw depth/BBO/trade JSONL |
+| `bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar` | `FlowSignalResearch` | signal JSONL, draws markers |
+| `bushidoyasu_flow_signal_display_v1_0.jar` | `FlowSignalDisplay` | nothing - draws markers only |
+
+The first two are for delayed and Replay data. The display JAR is the one to try
+on an instrument that refuses the others; see `display-only/README.md`.
+
 ## Build
 
 ```bash
