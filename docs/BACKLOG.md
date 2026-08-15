@@ -1670,6 +1670,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 
 - **契約境界**: BookmapData realtime は市場データ、派生値、外部シグナルをアプリ外へ露出するcustom add-onを現時点で許可しない。JSONL Collectorは遅延BookmapData／Replay専用とする。realtime add-onはBookmapのチャートまたはindicator paneへの描画だけで完結し、ファイル、ネットワーク、MCP、外部通知、clipboardへの出力を一切行わない。BookmapのDeveloper Agreement、`@UnrestrictedData`、一意なJAR名、サーバー側承認を得た**別JAR**としてのみ作る
 - **研究の往復**: 遅延／ReplayでCollectorの監査可能な観察から条件・閾値・除外規則を固定し、そのロジックだけをdisplay-only add-onへ移す。realtimeの表示結果は外へ回収せず、次の変更候補は再び遅延／Replayで検証する
+- **実装と実測 (2026-08-15、[[#85]])**: `FlowSignalDisplay` として実装した。ファイル・ソケット・クリップボード・プロセスAPIへの参照が無いことを定数プールで検査し、JARにはCollectorもResearchも同梱しない。ただし**保護対象の銘柄では、この出力ゼロのモジュールも拒否された**。本項が前提していた「アプリ外へ出さなければrealtimeで動く」という想定は、そのままでは成立しない。`@UnrestrictedData` とサーバー側承認という本項の残りの条件が、実際には必須である可能性が高い
 - **v1対象: trade-flow pressure / CVD**: known aggressor tradeだけを一定セッションで累積し、unknown aggressorが混じる区間は値を更新せず`unavailable`として描画する。aggressorのbuy/sell極性は、BookmapのReplayでbubble表示と突合してから固定する。これは成行約定方向の集計であり、spot FX全体の売買圧力ではない
 - **v1対象: possible absorption**: price levelでknown aggressor tradeが短い**約定数窓**の間に閾値以上積み上がり、同価格近傍のaggregate depthが枯渇しない場合に表示する。depth/BBO callbackはこの窓を進めない。窓切れ、価格帯の消滅、または観測できる板の再補充で新しいepisodeとして再アームする。`absorption`や機関投資家の存在を断定せず、表示名は`possible_passive_absorption`とする。初期snapshot完了前、unknown aggressor、depth欠損では表示しない
 - **v1対象: possible liquidity withdrawal**: BBOまたは近傍価格帯のaggregate depthが減少し、その後の短い**約定数窓**で同方向のknown tradeが続くときに表示する。depth/BBO callbackはこの窓を進めない。cancel/replenishは観測するが、意図・不正行為・spoofingを推定しない。表示名は`possible_liquidity_withdrawal`とする
@@ -1683,7 +1684,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **表示レーン訂正 (2026-08-13)**: 方向中立のabsorptionとwithdrawalをともに上側へ置く方針は維持するが、初版はsell sweepを含む3種が同じ`-46px`で重なり得た。v1.2ではbuy sweepを`+8px`、sell sweepを`-46px`、absorptionを`-88px`、withdrawalを`-130px`の別レーンへ固定した。同種のシグナルがほぼ同時刻・同価格で再発した場合の重なりは残余の表示制約とし、観測を間引いて解消しない
 - **実機E2E (2026-08-13)**: delayed BookmapDataのM6Eチャートでv1.2を確認し、中立色の`BID WITHDRAWAL`／`ASK WITHDRAWAL`、`POSSIBLE`副表示、上側withdrawalレーンへの描画が契約どおり動作した。同時に、同種withdrawalが近い時刻・価格で連続すると同一レーン上で重なる残余制約も再現した。研究JSONLは間引かず、将来の表示改善を行う場合は証跡と独立した表示専用cooldown／集約として別契約にする
 
-### #84 重複する前向き窓へiid区間を当てている件(留保として記録, 2026-08-13)
+### #86 重複する前向き窓へiid区間を当てている件(留保として記録, 2026-08-13、番号は2026-08-15に#84から訂正)
 
 - **内容**: price action 系(#77〜#80)および event study 群が報告する方向調整returnの95%区間は、iid正規近似である。しかしイベント間隔はhorizonより短くなり得るため、**前向き窓は重なる**。重なった観測は独立ではないので、報告している区間は**本来より狭い**
 - **結論への影響はない**: これまでの判定はすべて「区間がゼロを跨ぐ→採用しない」である。区間を正しく広げても**跨いだままになる**ため、既存の結論は一つも覆らない。#81(4本足トラップ, p=0.9068)のように経験的ヌルで判定したものは、そもそもiid仮定に依存していない
