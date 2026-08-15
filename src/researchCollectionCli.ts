@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, lstat, mkdir, open } from "node:fs/promises";
+import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -210,10 +211,26 @@ async function main(): Promise<void> {
       new StrategyResearchJournalStore(resolveStrategyResearchJournalPath()),
     );
     let written = 0;
+    const recorded = new Set<string>();
     for (const record of records) if (record.status === "complete" && record.value.coverage.sufficient && record.value.primary_available_events > 0) {
-      if (await appendOwnerOnly(args.outputPath, record.value)) written += 1;
+      if (await appendOwnerOnly(args.outputPath, record.value)) { written += 1; recorded.add(record.value.hypothesis_id); }
     }
-    process.stdout.write(`${JSON.stringify(summarizeResearchCollection(records, args.outputPath, written))}\n`);
+    // Written whether or not anything was observed. The evidence file only grows
+    // when a hypothesis fires, so without this a silent week and a dead
+    // collector are the same record, and the second cannot be recovered later.
+    const heartbeat = await new ResearchCollectionHeartbeatStore(resolveResearchCollectionHeartbeatPath()).recordRun({
+      observed_at: new Date().toISOString(),
+      hypotheses: records.map((record, index) => record.status === "complete"
+        ? {
+          hypothesis_id: record.value.hypothesis_id,
+          status: record.value.coverage.sufficient ? "complete" as const : "partial" as const,
+          events: record.value.primary_available_events,
+          recorded: recorded.has(record.value.hypothesis_id),
+        }
+        : { hypothesis_id: HYPOTHESIS_IDS[index], status: "partial" as const, events: 0, recorded: false }),
+      chart_restored: records.every((record) => record.status === "complete"),
+    });
+    process.stdout.write(`${JSON.stringify({ ...summarizeResearchCollection(records, args.outputPath, written), heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
     if (records.some((item) => item.status === "error")) process.exitCode = 1;
   } finally {
     cdp.close();

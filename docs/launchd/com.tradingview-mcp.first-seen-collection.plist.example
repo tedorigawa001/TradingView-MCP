@@ -9,6 +9,14 @@
     <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
     <string>build/collectionCli.js</string>
     <string>collect</string>
+    <!-- Name every symbol. Without these the CLI falls back to its two-symbol
+         default and a third symbol collected once by hand silently stops. -->
+    <string>--cot-symbol</string>
+    <string>OANDA:EURUSD</string>
+    <string>--cot-symbol</string>
+    <string>OANDA:USDJPY</string>
+    <string>--cot-symbol</string>
+    <string>OANDA:XAUUSD</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
