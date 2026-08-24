@@ -1,7 +1,16 @@
 {
-  "name": "tradingview-mcp",
+  "name": "bushido-tradingview-mcp",
   "version": "0.1.0",
   "description": "MCP server that lets AI analyze the TradingView desktop app via Chrome DevTools Protocol",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tradingview",
+    "trading",
+    "market-analysis",
+    "technical-analysis"
+  ],
+  "author": "tedorigawa001",
   "type": "module",
   "bin": {
     "tradingview-mcp": "build/index.js"
@@ -10,8 +19,21 @@
   "files": [
     "build"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tedorigawa001/TradingView-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tedorigawa001/TradingView-MCP/issues"
+  },
+  "homepage": "https://github.com/tedorigawa001/TradingView-MCP#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test",
     "watch": "tsc --watch",
     "start": "node build/index.js",
     "evaluate": "node build/evaluate.js",

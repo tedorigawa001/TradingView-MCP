@@ -38,11 +38,11 @@ AI agent <-> tradingview-mcp <-> TradingView Desktop (your chart)
 In a terminal:
 
 ```bash
-git clone https://github.com/tedorigawa001/TradingView-MCP.git
-cd TradingView-MCP
-npm install
-npm run build
+npm install --global bushido-tradingview-mcp
 ```
+
+The installed command is `tradingview-mcp`. You normally do not run it by
+itself; the AI agent starts it as an MCP stdio server.
 
 ### Step 2: Launch TradingView in Debug Mode
 
@@ -61,7 +61,9 @@ source ~/.zshrc
 
 ### Step 3: Register the MCP Server
 
-Choose the instructions for your agent. Replace `/path/to/TradingView-MCP` with the cloned repository path (run `pwd` from the repository to find it).
+Choose the instructions for your agent. The examples use `npx`, so a global
+installation is optional and the agent can launch the published package
+directly.
 
 <details>
 <summary><b>Claude Code</b></summary>
@@ -69,10 +71,8 @@ Choose the instructions for your agent. Replace `/path/to/TradingView-MCP` with 
 Run one command:
 
 ```bash
-claude mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
+claude mcp add tradingview -- npx -y bushido-tradingview-mcp
 ```
-
-Alternatively, open Claude Code in this repository. The bundled `.mcp.json` registers the server automatically.
 
 Verify by running `/mcp` in Claude Code and confirming that `tradingview` appears.
 
@@ -84,15 +84,15 @@ Verify by running `/mcp` in Claude Code and confirming that `tradingview` appear
 Option 1 - add it with the CLI:
 
 ```bash
-codex mcp add tradingview -- node /path/to/TradingView-MCP/build/index.js
+codex mcp add tradingview -- npx -y bushido-tradingview-mcp
 ```
 
 Option 2 - add it directly to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.tradingview]
-command = "node"
-args = ["/path/to/TradingView-MCP/build/index.js"]
+command = "npx"
+args = ["-y", "bushido-tradingview-mcp"]
 ```
 
 Verify by running `/mcp` in Codex and confirming that `tradingview` appears.
@@ -108,8 +108,8 @@ Create or update `~/.gemini/config/mcp_config.json`:
 {
   "mcpServers": {
     "tradingview": {
-      "command": "node",
-      "args": ["/path/to/TradingView-MCP/build/index.js"]
+      "command": "npx",
+      "args": ["-y", "bushido-tradingview-mcp"]
     }
   }
 }
@@ -379,6 +379,24 @@ See [docs/security-review.md](docs/security-review.md) for the full review. At m
 - `get_chart_screenshot` sends everything visible on screen, including watchlists, to the AI provider.
 
 ## Development
+
+### From Source
+
+The published package provides the MCP server only. Every `npm run` command in
+this document - the collectors, the coverage reports, the studies and the audits
+- is a script in this repository and needs a clone:
+
+```bash
+git clone https://github.com/tedorigawa001/TradingView-MCP.git
+cd TradingView-MCP
+npm install
+npm run build
+```
+
+Opening Claude Code in the clone registers the server from the bundled
+`.mcp.json`, which runs `build/index.js` from the repository rather than the
+published package. That is what you want while developing: it picks up your
+build, not the last release.
 
 ### Testing
 
