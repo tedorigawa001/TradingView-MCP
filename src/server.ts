@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createHash } from "node:crypto";
@@ -388,6 +389,20 @@ function correlation(left: number[], right: number[]): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
+/**
+ * The version clients are told, read from the manifest that ships with the
+ * build rather than written out here. Hardcoding it meant 0.1.1 packed and
+ * installed while every handshake still announced 0.1.0.
+ */
+const SERVER_VERSION: string = (() => {
+  try {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: unknown };
+    return typeof manifest.version === "string" && manifest.version.length > 0 ? manifest.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
@@ -428,7 +443,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   }
   const server = new McpServer({
     name: "tradingview-mcp",
-    version: "0.1.0",
+    version: SERVER_VERSION,
   });
 
   type ExperimentVariant = {

@@ -1,5 +1,5 @@
 import test from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -8260,4 +8260,18 @@ test("get_price_action_context and the pattern study refuse a chart that is not 
   });
   assert.equal(study.isError, true);
   assert.match(study.content[0].text, /symbol/i);
+});
+
+test("the version clients are told is the one the package ships", async () => {
+  // It was written out by hand, so 0.1.1 packed and installed while every
+  // handshake still announced 0.1.0. Reading the manifest is what keeps a
+  // release and what it says about itself from drifting apart again.
+  const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+  const source = await readFile(new URL("../../build/server.js", import.meta.url), "utf8");
+  assert.ok(!/version:\s*"\d+\.\d+\.\d+"/.test(source),
+    "server.js must not carry a literal version string");
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+
+  const client = await connectedClient(makeDeps());
+  assert.equal(client.getServerVersion().version, manifest.version);
 });
