@@ -31,6 +31,10 @@ AI agent <-> tradingview-mcp <-> TradingView Desktop (your chart)
 - [Node.js](https://nodejs.org/) 22 or later (check with `node --version`; Node 20 is EOL)
 - An AI agent such as [Claude Code](https://claude.com/claude-code), [Codex](https://developers.openai.com/codex), or [Antigravity](https://antigravity.google/)
 
+Publishing from source additionally requires a JDK because `prepublishOnly`
+runs the complete Node.js and Bookmap add-on test suites before npm accepts a
+release. npm users do not need Java.
+
 ## Setup in Three Steps
 
 ### Step 1: Install the Server
@@ -42,7 +46,8 @@ npm install --global bushido-tradingview-mcp
 ```
 
 The installed command is `tradingview-mcp`. You normally do not run it by
-itself; the AI agent starts it as an MCP stdio server.
+itself; the AI agent starts it as an MCP stdio server. Node.js is the only
+requirement; the Java add-on in this repository is not part of the package.
 
 ### Step 2: Launch TradingView in Debug Mode
 
@@ -409,6 +414,19 @@ npm run test:e2e           # Real-app E2E over MCP stdio (configuration below)
 `npm test` does not require TradingView. With the complete Bookmap SDK installed locally, it also runs the Collector, signal-engine, and Bookmap-adapter Java tests. With no or partial SDK, it builds and tests only the SDK-free `FlowSignalEngine` for Java 17 and explicitly skips adapter tests.
 
 On pull requests and pushes, GitHub Actions runs `npm test` on Node.js 22 and 24, including the SDK-free signal engine. A separate `npm audit` job rejects high or critical vulnerabilities.
+
+### Publishing
+
+`prepublishOnly` runs `npm test`, which includes the Bookmap Java tests, so
+**publishing requires a JDK that supports `--release 17`** even though the
+published package contains no Java. That is deliberate: a release should not go
+out on a suite that was skipped. The Bookmap SDK itself is not needed - without
+it the Java step builds and tests the SDK-free engine and marker and skips the
+adapters.
+
+`prepack` runs `build:package` (`tsc --sourceMap false`) rather than `build`, and
+`files` is limited to `build/**/*.js`. Source maps would otherwise be about half
+the package while pointing at `src/` files it does not ship.
 
 Integration tests temporarily change symbols and timeframes and restore them afterward.
 
