@@ -14,15 +14,15 @@ test("directory durability remains available on Unix and is an explicit no-op on
 });
 
 test("O_NOFOLLOW is passed where the host has it and is zero where it does not", () => {
-  // Unchanged on POSIX: the flag is whatever the host defines, so every lock and
-  // append keeps the protection it had before this helper existed.
-  assert.equal(noFollowFlag("darwin"), constants.O_NOFOLLOW);
-  assert.equal(noFollowFlag("linux"), constants.O_NOFOLLOW);
-  // Only meaningful where the host defines the constant. Asserting it
-  // unconditionally is the same mistake this helper exists to prevent - it made
-  // the test itself fail on the platform it was written to describe.
-  if (process.platform !== "win32") {
-    assert.ok(constants.O_NOFOLLOW > 0, "a POSIX host must define O_NOFOLLOW for that claim to mean anything");
+  // This branch returns a constant of the HOST, not of the platform being asked
+  // about, so it can only answer what the host defines. Windows defines nothing,
+  // which is the premise the helper rests on, so that is what is asserted there.
+  if (process.platform === "win32") {
+    assert.equal(constants.O_NOFOLLOW, undefined, "Windows is expected not to define O_NOFOLLOW");
+  } else {
+    assert.ok(constants.O_NOFOLLOW > 0, "a POSIX host must define O_NOFOLLOW for the rest to mean anything");
+    assert.equal(noFollowFlag("darwin"), constants.O_NOFOLLOW);
+    assert.equal(noFollowFlag("linux"), constants.O_NOFOLLOW);
   }
 
   // Zero on Windows, deliberately. Node does not define O_NOFOLLOW there, so the
@@ -33,7 +33,9 @@ test("O_NOFOLLOW is passed where the host has it and is zero where it does not",
 
   // Combining is what call sites do, so pin that the combination is untouched
   // off Windows and is a plain open flag on it.
-  assert.equal(constants.O_RDONLY | noFollowFlag("darwin"), constants.O_RDONLY | constants.O_NOFOLLOW);
+  if (process.platform !== "win32") {
+    assert.equal(constants.O_RDONLY | noFollowFlag("darwin"), constants.O_RDONLY | constants.O_NOFOLLOW);
+  }
   assert.equal(constants.O_RDONLY | noFollowFlag("win32"), constants.O_RDONLY);
 });
 
