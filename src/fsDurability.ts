@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 
 /**
  * Persist a newly-created directory entry where the host exposes directory
@@ -59,6 +60,18 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
     throw error;
   }
   if (stat.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
+}
+
+/**
+ * Create a new owner-only file without following an existing symbolic link.
+ *
+ * O_EXCL alone does not reject a dangling symlink on Windows. Keep the explicit
+ * lstat check and the host O_NOFOLLOW flag together so every exclusive-create
+ * call site has the same fail-closed behavior.
+ */
+export async function openExclusiveFile(path: string, label: string): Promise<FileHandle> {
+  await assertNotSymbolicLink(path, label);
+  return open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
 }
 
 export async function syncDirectoryEntry(directory: string, platform = process.platform): Promise<void> {

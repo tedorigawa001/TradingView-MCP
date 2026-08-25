@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -71,11 +71,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(
-          lockPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
-          0o600,
-        );
+        const handle = await openExclusiveFile(lockPath, `${this.label} lock`);
         try {
           await handle.writeFile(`${token} ${process.pid}\n`, "utf8");
           await handle.sync();

@@ -65,6 +65,14 @@ does not run tasks as another user or in a noninteractive session, where the
 TradingView Desktop instance would not be the same one. Use `-TaskKind` to
 register only `research`, `first-seen`, or `policy-rates`.
 
+The scheduled times are local Windows wall-clock times. Their defaults
+(`10:30`, `22:30`, and `10:45`) are the JST operating schedule used by this
+project. On a machine in another time zone, pass local equivalents with
+`-FirstSeenMorningLocalTime`, `-FirstSeenEveningLocalTime`, and
+`-PolicyRateLocalTime`. The first-seen task explicitly collects EURUSD,
+USDJPY, and XAUUSD COT evidence rather than relying on the CLI's two-symbol
+fallback.
+
 ## Filesystem security difference
 
 POSIX owner and `0600`/`0700` checks do not have an exact Node.js equivalent

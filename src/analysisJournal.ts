@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
@@ -358,11 +358,7 @@ export class AnalysisJournalStore {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(
-          lockPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
-          0o600,
-        );
+        const handle = await openExclusiveFile(lockPath, "analysis journal lock");
         try {
           await handle.writeFile(`${token} ${process.pid}\n`, "utf8");
           await handle.sync();

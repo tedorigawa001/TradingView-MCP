@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertNotSymbolicLink, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -412,7 +412,7 @@ export class StrategyResearchJournalStore {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+        const handle = await openExclusiveFile(lockPath, "strategy research journal lock");
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
         return async () => {
           let lock;

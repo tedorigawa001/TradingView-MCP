@@ -292,19 +292,19 @@ Both divergences are now named in code rather than implied: `posixModeEnforced`
 returns false on Windows, where Node synthesises a mode from the read-only
 attribute and reading it as an access decision refuses every directory, and
 `noFollowFlag` returns zero there, where the constant is undefined and the flag
-silently disappeared into `O_RDONLY`. Because that flag is the only symlink
-defence POSIX gets for free, the evidence stores now also call
-`assertNotSymbolicLink` before opening a path, which holds on every platform:
-Windows keeps the symlink rejection rather than documenting its loss. It is a
-check and then an open, so a replacement between the two remains the same
-residual local same-user race already recorded for the Bookmap reader. Every Unix check is unchanged and tested
-as unchanged; a test also fails if any store reintroduces a bare `& 0o077` or
-`constants.O_NOFOLLOW`.
-The implementation still rejects observed symbolic links and uses exclusive
-creation for locks, but it cannot claim the same race-resistant reparse-point
-guarantee as Unix. Windows evidence must remain under an owner-restricted NTFS
-profile or volume. This is a documented residual risk, not a weakening of the
-Unix checks.
+silently disappeared into `O_RDONLY`. Explicit evidence boundaries reject an
+observed symbolic link with `assertNotSymbolicLink`. Every exclusive file or
+lock creation additionally goes through `openExclusiveFile`, because Windows
+does not reject a dangling symlink with `O_EXCL` alone. Tests fail if a module
+bypasses that shared exclusive-create boundary, reintroduces a bare `& 0o077`,
+or uses `constants.O_NOFOLLOW` directly.
+
+The explicit link check and open are separate operations, so a replacement
+between them remains the same residual local same-user race already recorded
+for the Bookmap reader. The implementation cannot claim the same race-resistant
+reparse-point guarantee as Unix. Windows evidence must remain under an
+owner-restricted NTFS profile or volume. This is a documented residual risk,
+not a weakening of the Unix checks.
 
 Every row must be valid JSON with supported `source: "bookmap"`, schema version, event type, instrument alias, and canonicalizable receipt timestamp. Mixed instruments, duplicate instrument records, unsupported provenance, and missing instrument metadata fail closed. Crypto, unconfirmed full depth, missing snapshot completion, legacy timestamp precision, and absent trades become explicit quality issues. The reader is read-only: it does not write, delete, follow a user-supplied path, change the chart, access Bookmap over the network, create a candidate, or place an order.
 

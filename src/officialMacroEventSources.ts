@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
-import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 export type OfficialMacroEventKind = "us_cpi" | "us_nfp" | "fomc_statement";
 
@@ -140,7 +140,7 @@ export async function archiveOfficialMacroRaw(directory: string, sha256: string,
   if (!stat.isDirectory() || stat.isSymbolicLink() || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("official macro raw archive directory is unsafe");
   const path = join(directory, `${sha256.slice(7)}.raw`);
   try {
-    const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+    const handle = await openExclusiveFile(path, "official macro-event raw archive");
     try { await handle.writeFile(raw, "utf8"); await handle.sync(); } finally { await handle.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

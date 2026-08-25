@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertNotSymbolicLink, noFollowFlag } from "./fsDurability.js";
+import { assertNotSymbolicLink, noFollowFlag, openExclusiveFile } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -31,7 +31,7 @@ export class AppendOnlyEvaluationLog {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+        const handle = await openExclusiveFile(lockPath, "evaluation log lock");
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); } finally { await handle.close(); }
         return async () => {
           let handle;

@@ -3,7 +3,13 @@ param(
     [ValidateSet("all", "research", "first-seen", "policy-rates")]
     [string]$TaskKind = "all",
     [string]$ProjectDirectory = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$NodeExecutable
+    [string]$NodeExecutable,
+    [ValidatePattern("^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")]
+    [string]$FirstSeenMorningLocalTime = "10:30",
+    [ValidatePattern("^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")]
+    [string]$FirstSeenEveningLocalTime = "22:30",
+    [ValidatePattern("^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")]
+    [string]$PolicyRateLocalTime = "10:45"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +27,12 @@ $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 $weekdays = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+
+function ConvertTo-LocalTriggerTime {
+    param([string]$Value)
+    $parts = $Value.Split(":")
+    return [datetime]::Today.AddHours([int]$parts[0]).AddMinutes([int]$parts[1])
+}
 
 function Register-CollectorTask {
     param(
@@ -53,15 +65,15 @@ if ($TaskKind -in @("all", "research")) {
 
 if ($TaskKind -in @("all", "first-seen")) {
     $triggers = @(
-        (New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At ([datetime]::Today.AddHours(10).AddMinutes(30))),
-        (New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At ([datetime]::Today.AddHours(22).AddMinutes(30)))
+        (New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At (ConvertTo-LocalTriggerTime $FirstSeenMorningLocalTime)),
+        (New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At (ConvertTo-LocalTriggerTime $FirstSeenEveningLocalTime))
     )
     Register-CollectorTask "TradingView-MCP First-Seen Collection" `
-        "build\collectionCli.js" "collect" $triggers
+        "build\collectionCli.js" "collect --cot-symbol OANDA:EURUSD --cot-symbol OANDA:USDJPY --cot-symbol OANDA:XAUUSD" $triggers
 }
 
 if ($TaskKind -in @("all", "policy-rates")) {
-    $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At ([datetime]::Today.AddHours(10).AddMinutes(45))
+    $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek $weekdays -At (ConvertTo-LocalTriggerTime $PolicyRateLocalTime)
     Register-CollectorTask "TradingView-MCP Policy-Rate Collection" `
         "build\policyRateCollectionCli.js" "--confirm-chart-switch" @($trigger)
 }

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, posixModeEnforced, syncDirectoryEntry } from "../../build/fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, syncDirectoryEntry } from "../../build/fsDurability.js";
 
 test("directory durability remains available on Unix and is an explicit no-op on Windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-durability-"));
@@ -50,6 +50,54 @@ test("no evidence store passes O_NOFOLLOW unconditionally any more", async () =>
     if (source.includes("constants.O_NOFOLLOW")) offenders.push(name);
   }
   assert.deepEqual(offenders, [], `these still use constants.O_NOFOLLOW directly: ${offenders.join(", ")}`);
+});
+
+test("all exclusive file creation goes through the shared symlink guard", async () => {
+  const directory = new URL("../../src/", import.meta.url);
+  const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");
+  const offenders = [];
+  for (const name of files) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    if (source.includes("O_EXCL")) offenders.push(name);
+  }
+  assert.deepEqual(offenders, [], `exclusive create bypasses openExclusiveFile: ${offenders.join(", ")}`);
+});
+
+test("openExclusiveFile creates once and explicitly refuses existing and dangling symlinks", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-exclusive-"));
+
+  const createdPath = join(directory, "created.lock");
+  const created = await openExclusiveFile(createdPath, "test exclusive file");
+  try {
+    await created.writeFile("owner\n", "utf8");
+  } finally {
+    await created.close();
+  }
+  assert.equal((await lstat(createdPath)).isFile(), true);
+
+  await assert.rejects(
+    openExclusiveFile(createdPath, "test exclusive file"),
+    (error) => error?.code === "EEXIST",
+  );
+
+  const existingTarget = join(directory, "existing-target");
+  await writeFile(existingTarget, "unchanged", "utf8");
+  const existingLink = join(directory, "existing-link");
+  await symlink(existingTarget, existingLink);
+  await assert.rejects(
+    openExclusiveFile(existingLink, "test existing symlink"),
+    /test existing symlink path must be a regular file, not a symbolic link/,
+  );
+  assert.equal(await readFile(existingTarget, "utf8"), "unchanged");
+
+  const missingTarget = join(directory, "missing-target");
+  const danglingLink = join(directory, "dangling-link");
+  await symlink(missingTarget, danglingLink);
+  await assert.rejects(
+    openExclusiveFile(danglingLink, "test dangling symlink"),
+    /test dangling symlink path must be a regular file, not a symbolic link/,
+  );
+  await assert.rejects(lstat(missingTarget), (error) => error?.code === "ENOENT");
 });
 
 test("POSIX mode is enforced where it means something and not where it does not", () => {

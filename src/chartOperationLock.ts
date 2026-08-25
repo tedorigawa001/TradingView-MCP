@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -59,7 +59,7 @@ export class ChartOperationLock {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(this.filePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+        const handle = await openExclusiveFile(this.filePath, "chart operation lock");
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
         return async () => {
           const owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag());

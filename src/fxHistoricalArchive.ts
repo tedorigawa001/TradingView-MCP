@@ -3,7 +3,7 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 
@@ -23,7 +23,7 @@ export class FxHistoricalArchive {
     await this.ensureDirectory();
     const path = join(this.directory, `${rawSha256.slice(7)}.raw`);
     try {
-      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+      const handle = await openExclusiveFile(path, "FX historical raw archive");
       try { const written = await handle.write(raw); if (written.bytesWritten !== raw.byteLength) throw new Error("short write to FX historical raw archive"); await handle.sync(); } finally { await handle.close(); }
       return { stored: true, bytes: raw.byteLength };
     } catch (error) {
