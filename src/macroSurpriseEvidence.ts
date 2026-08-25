@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -121,7 +121,7 @@ async function ensureOwnerDirectory(directory: string, label: string): Promise<v
   const stat = await lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} directory must be a regular directory`);
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${label} directory must be owned by the current user`);
-  if ((stat.mode & 0o077) !== 0) throw new Error(`${label} directory permissions must not allow group or other access`);
+  if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error(`${label} directory permissions must not allow group or other access`);
 }
 
 /** Raw provider payloads are kept independently of the normalized values they support. */
@@ -142,7 +142,7 @@ export class MacroSurpriseRawArchive {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const stat = await lstat(path);
-      if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || stat.size !== body.byteLength || (stat.mode & 0o077) !== 0) throw new Error("macro-surprise raw archive existing payload is unsafe");
+      if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || stat.size !== body.byteLength || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise raw archive existing payload is unsafe");
       const existing = await readFile(path);
       if (`sha256:${createHash("sha256").update(existing).digest("hex")}` !== rawSha256) throw new Error("macro-surprise raw archive existing payload hash does not match");
       return { stored: false, bytes: body.byteLength };
@@ -157,7 +157,7 @@ export class MacroSurpriseEvidenceStore {
   private async readUnlocked(): Promise<MacroSurpriseEvidenceRecord[]> {
     try {
       const stat = await lstat(this.filePath);
-      if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0 || stat.size > MAX_HISTORY_BYTES) throw new Error("macro-surprise evidence path is unsafe");
+      if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || stat.size > MAX_HISTORY_BYTES) throw new Error("macro-surprise evidence path is unsafe");
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     const text = await readFile(this.filePath, "utf8");
     const records = text.trim().split("\n").filter(Boolean).map((line, index) => {
@@ -204,7 +204,7 @@ export class MacroSurpriseEvidenceStore {
         try {
           handle = await open(path, constants.O_RDONLY | noFollowFlag());
           const stat = await handle.stat();
-          if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) throw new Error("macro-surprise evidence lock path is unsafe");
+          if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
           if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
             await handle.readFile("utf8");
             const current = await lstat(path);

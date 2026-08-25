@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "./fsDurability.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, lstat, mkdir, open } from "node:fs/promises";
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
@@ -152,7 +153,7 @@ export function summarizeResearchCollection(
 async function appendOwnerOnly(path: string, row: { hypothesis_id: string; primary_available_events: number }): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const directory = await lstat(dirname(path));
-  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077) !== 0) throw new Error("research collection directory is unsafe");
+  if (!directory.isDirectory() || directory.isSymbolicLink() || (posixModeEnforced() && (directory.mode & 0o077) !== 0)) throw new Error("research collection directory is unsafe");
   let existingPrimaryEvents = 0;
   try {
     const existing = await open(path, "r");

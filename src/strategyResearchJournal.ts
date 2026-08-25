@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -377,7 +377,7 @@ export class StrategyResearchJournalStore {
     const stat = await lstat(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("strategy research journal directory is unsafe");
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("strategy research journal directory must be owned by the current user");
-    if ((stat.mode & 0o077) !== 0) throw new Error("strategy research journal directory permissions must be 0700");
+    if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("strategy research journal directory permissions must be 0700");
   }
 
   private async reclaimStaleLock(lockPath: string, observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean> {
@@ -453,7 +453,7 @@ export class StrategyResearchJournalStore {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("strategy research journal path must be a regular file");
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("strategy research journal file must be owned by the current user");
-      if ((stat.mode & 0o077) !== 0) throw new Error("strategy research journal file permissions must be 0600");
+      if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("strategy research journal file permissions must be 0600");
       if (stat.size > MAX_FILE_BYTES) throw new Error("strategy research journal file is too large");
       const text = await handle.readFile("utf8");
       const entries = text.trim().split("\n").filter(Boolean).map((line, index) => {

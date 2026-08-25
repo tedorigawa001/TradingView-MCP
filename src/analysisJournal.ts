@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
+import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
@@ -315,7 +315,7 @@ export class AnalysisJournalStore {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error("analysis journal directory must be owned by the current user");
     }
-    if ((stat.mode & 0o077) !== 0) throw new Error("analysis journal directory permissions must be 0700");
+    if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("analysis journal directory permissions must be 0700");
   }
 
   private async reclaimStaleLock(lockPath: string, observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean> {
@@ -424,7 +424,7 @@ export class AnalysisJournalStore {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error("analysis journal file must be owned by the current user");
       }
-      if ((stat.mode & 0o077) !== 0) throw new Error("analysis journal file permissions must be 0600");
+      if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("analysis journal file permissions must be 0600");
       if (stat.size > MAX_JOURNAL_BYTES) throw new Error("analysis journal file is too large");
       const text = await handle.readFile("utf8");
       const entries = text.trim().split("\n").filter(Boolean).map((line, index) => {

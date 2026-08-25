@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
+import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -59,7 +59,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error(`${this.label} history directory must be owned by the current user`);
     }
-    if ((stat.mode & 0o077) !== 0) {
+    if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) {
       throw new Error(`${this.label} history directory permissions must not allow group or other access`);
     }
   }
@@ -135,7 +135,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error(`${this.label} history file must be owned by the current user`);
       }
-      if ((stat.mode & 0o077) !== 0) throw new Error(`${this.label} history file permissions must be 0600 or stricter`);
+      if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error(`${this.label} history file permissions must be 0600 or stricter`);
       if (stat.size > this.limits.maxFileBytes) throw new Error(`${this.label} history file is too large`);
       const text = await handle.readFile("utf8");
       const records = text.trim().split("\n").filter(Boolean).map((line, index) => {

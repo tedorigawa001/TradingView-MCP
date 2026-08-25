@@ -3,7 +3,7 @@ import { mkdir, open, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
+import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_RAW_BYTES = 32 * 1024 * 1024;
 
@@ -48,7 +48,7 @@ export class OfficialPolicyRateRawArchive {
     const stat = await lstat(this.directory);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("official policy-rate raw archive must be a regular directory");
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("official policy-rate raw archive must be owned by the current user");
-    if ((stat.mode & 0o077) !== 0) throw new Error("official policy-rate raw archive permissions must not allow group or other access");
+    if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("official policy-rate raw archive permissions must not allow group or other access");
   }
 
   private async assertExistingPayload(path: string, expectedHash: string, expectedBytes: number): Promise<void> {
@@ -59,7 +59,7 @@ export class OfficialPolicyRateRawArchive {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("official policy-rate raw archive path must be a regular file");
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("official policy-rate raw archive file must be owned by the current user");
-      if ((stat.mode & 0o077) !== 0) throw new Error("official policy-rate raw archive file permissions must be 0600 or stricter");
+      if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("official policy-rate raw archive file permissions must be 0600 or stricter");
       if (stat.size !== expectedBytes || stat.size > MAX_RAW_BYTES) throw new Error("official policy-rate raw archive existing payload size does not match");
       const body = await handle.readFile();
       const actual = `sha256:${createHash("sha256").update(body).digest("hex")}`;

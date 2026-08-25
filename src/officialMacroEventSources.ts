@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 export type OfficialMacroEventKind = "us_cpi" | "us_nfp" | "fomc_statement";
 
@@ -137,7 +137,7 @@ export function parseFomcHistoricalPage(raw: string, sourceUrl: string, rawSha25
 export async function archiveOfficialMacroRaw(directory: string, sha256: string, raw: string): Promise<void> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("official macro raw archive directory is unsafe");
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("official macro raw archive directory is unsafe");
   const path = join(directory, `${sha256.slice(7)}.raw`);
   try {
     const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);

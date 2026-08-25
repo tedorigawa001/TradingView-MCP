@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, syncDirectoryEntry } from "../../build/fsDurability.js";
+import { noFollowFlag, posixModeEnforced, syncDirectoryEntry } from "../../build/fsDurability.js";
 
 test("directory durability remains available on Unix and is an explicit no-op on Windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-durability-"));
@@ -43,4 +43,36 @@ test("no evidence store passes O_NOFOLLOW unconditionally any more", async () =>
     if (source.includes("constants.O_NOFOLLOW")) offenders.push(name);
   }
   assert.deepEqual(offenders, [], `these still use constants.O_NOFOLLOW directly: ${offenders.join(", ")}`);
+});
+
+test("POSIX mode is enforced where it means something and not where it does not", () => {
+  // Unix keeps every check it had. A group-readable directory is still refused.
+  const loose = { mode: 0o755 };
+  assert.equal(posixModeEnforced("darwin") && (loose.mode & 0o077) !== 0, true);
+  assert.equal(posixModeEnforced("linux") && (loose.mode & 0o077) !== 0, true);
+
+  // Windows has no POSIX mode; Node synthesises one from the read-only
+  // attribute. Reading it as an access decision refused every directory the
+  // process had just created, which is how CI went red for about 150 tests.
+  // This does not weaken the Unix checks - it declines to ask a question the
+  // platform cannot answer, and the security review carries the residual risk.
+  assert.equal(posixModeEnforced("win32"), false);
+  assert.equal(posixModeEnforced("win32") && (loose.mode & 0o077) !== 0, false);
+
+  // An owner-only directory is acceptable everywhere, so the guard cannot be
+  // mistaken for one that simply passes.
+  const strict = { mode: 0o700 };
+  assert.equal(posixModeEnforced("darwin") && (strict.mode & 0o077) !== 0, false);
+});
+
+test("no store reads a stat mode without asking whether the host has one", async () => {
+  const directory = new URL("../../src/", import.meta.url);
+  const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");
+  const offenders = [];
+  for (const name of files) {
+    for (const line of (await readFile(new URL(name, directory), "utf8")).split("\n")) {
+      if (line.includes("& 0o077") && !line.includes("posixModeEnforced")) offenders.push(`${name}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `unguarded mode checks:\n${offenders.join("\n")}`);
 });

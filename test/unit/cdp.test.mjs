@@ -1,3 +1,4 @@
+import { cdpPortInspectionRemedy, tradingViewLaunchRemedy } from "../../build/platformSupport.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CdpClient, TradingViewNotAvailableError } from "../../build/cdp.js";
@@ -257,16 +258,21 @@ test("a port answered by something else names what replied instead of blaming th
   assert.match(error.message, /2 CDP targets/);
   assert.match(error.message, /https:\/\/samurai-dash\.web\.app/);
   assert.match(error.message, /Something other than the desktop app is answering/);
-  // The advice must name the port actually in use, not a hard-coded default.
+  // The advice must name the port actually in use, not a hard-coded default, and
+  // must be the advice for this host: the wording differs per platform, so
+  // asserting the macOS text made this fail on every Linux and Windows runner.
   const port = new URL(mock.baseUrl).port;
-  assert.match(error.message, new RegExp(`lsof -nP -iTCP:${port} `));
+  assert.ok(error.message.includes(cdpPortInspectionRemedy(port)),
+    `expected this host's port advice naming ${port}, got: ${error.message}`);
+  assert.match(error.message, new RegExp(port));
   // This endpoint is already IPv4, so the IPv6 explanation does not apply and is withheld.
   assert.doesNotMatch(error.message, /IPv6/);
   // Origins only: a query string from whatever the other process has open must not travel.
   assert.doesNotMatch(error.message, /token=secret/);
   assert.doesNotMatch(error.message, /daily-threads/);
-  // The relaunch advice is wrong here and must not be offered.
-  assert.doesNotMatch(error.message, /open -a TradingView/);
+  // The relaunch advice is wrong here and must not be offered, on any host.
+  assert.ok(!error.message.includes(tradingViewLaunchRemedy()),
+    "a port answered by another process must not suggest relaunching the app");
 });
 
 test("an endpoint with no pages at all still advises launching the app", async (t) => {
@@ -276,5 +282,6 @@ test("an endpoint with no pages at all still advises launching the app", async (
   const error = await cdp.evaluate("1").then(() => null, (err) => err);
   assert.ok(error instanceof TradingViewNotAvailableError);
   assert.match(error.message, /returned no page targets/);
-  assert.match(error.message, /open -a TradingView/);
+  assert.ok(error.message.includes(tradingViewLaunchRemedy()),
+    `expected this host's launch advice, got: ${error.message}`);
 });

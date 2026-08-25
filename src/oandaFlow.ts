@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 export const OANDA_FLOW_INSTRUMENTS = ["EUR_USD", "USD_JPY"] as const;
 export type OandaFlowInstrument = typeof OANDA_FLOW_INSTRUMENTS[number];
@@ -124,7 +124,7 @@ export class OandaFlowRawArchive {
     if (digest(raw) !== rawSha256) throw new Error("OANDA flow raw archive hash does not match payload");
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const directory = await lstat(this.directory);
-    if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077) !== 0) throw new Error("OANDA flow raw archive directory is unsafe");
+    if (!directory.isDirectory() || directory.isSymbolicLink() || (posixModeEnforced() && (directory.mode & 0o077) !== 0)) throw new Error("OANDA flow raw archive directory is unsafe");
     const path = join(this.directory, `${rawSha256.slice(7)}.raw`);
     try {
       const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);

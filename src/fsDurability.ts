@@ -20,6 +20,24 @@ export function noFollowFlag(platform = process.platform): number {
   return platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
 }
 
+/**
+ * Whether a stat mode can be read as an access decision on this host.
+ *
+ * Windows has no POSIX mode. Node synthesises one from the read-only attribute,
+ * so `mode & 0o077` there describes nothing and rejecting on it refuses every
+ * directory the process itself just created - which is exactly what happened:
+ * about 150 tests failed on windows-latest for directories that were fine.
+ *
+ * Returning false is not a relaxation of the Unix checks, which are untouched.
+ * It says the question cannot be asked here. On Windows access is an NTFS ACL
+ * matter this process cannot evaluate, which is why the security review
+ * requires evidence to sit under an owner-restricted profile and records that
+ * as a residual risk rather than an equivalent guarantee.
+ */
+export function posixModeEnforced(platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 export async function syncDirectoryEntry(directory: string, platform = process.platform): Promise<void> {
   if (platform === "win32") return;
   const handle = await open(directory, constants.O_RDONLY | noFollowFlag(platform));

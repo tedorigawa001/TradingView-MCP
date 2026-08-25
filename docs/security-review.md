@@ -288,6 +288,13 @@ The preflight reports coverage only, classification reports contemporaneous froz
 On Windows, the default Bookmap evidence directory is under
 `%LOCALAPPDATA%\TradingView-MCP\bookmap-data`. POSIX owner and mode checks do
 not map to Windows ACLs, and Node.js does not expose `O_NOFOLLOW` on Windows.
+Both divergences are now named in code rather than implied: `posixModeEnforced`
+returns false on Windows, where Node synthesises a mode from the read-only
+attribute and reading it as an access decision refuses every directory, and
+`noFollowFlag` returns zero there, where the constant is undefined and the flag
+silently disappeared into `O_RDONLY`. Every Unix check is unchanged and tested
+as unchanged; a test also fails if any store reintroduces a bare `& 0o077` or
+`constants.O_NOFOLLOW`.
 The implementation still rejects observed symbolic links and uses exclusive
 creation for locks, but it cannot claim the same race-resistant reparse-point
 guarantee as Unix. Windows evidence must remain under an owner-restricted NTFS

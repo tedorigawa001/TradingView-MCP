@@ -3,7 +3,7 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 
@@ -31,7 +31,7 @@ export class FxHistoricalArchive {
       const existing = await open(path, constants.O_RDONLY | noFollowFlag());
       try {
         const stat = await existing.stat();
-        if (!stat.isFile() || stat.size !== raw.byteLength || (stat.mode & 0o077) !== 0) throw new Error("FX historical raw archive existing payload is unsafe");
+        if (!stat.isFile() || stat.size !== raw.byteLength || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("FX historical raw archive existing payload is unsafe");
         const body = await existing.readFile();
         if (`sha256:${createHash("sha256").update(body).digest("hex")}` !== rawSha256) throw new Error("FX historical raw archive existing payload hash does not match");
       } finally { await existing.close(); }
@@ -46,7 +46,7 @@ export class FxHistoricalArchive {
     const handle = await open(path, constants.O_RDONLY | noFollowFlag());
     try {
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_ARCHIVE_BYTES || (stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error("FX historical raw archive payload is unsafe");
+      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_ARCHIVE_BYTES || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error("FX historical raw archive payload is unsafe");
       const body = await handle.readFile();
       if (`sha256:${createHash("sha256").update(body).digest("hex")}` !== rawSha256) throw new Error("FX historical raw archive payload hash does not match");
       return body;
@@ -56,6 +56,6 @@ export class FxHistoricalArchive {
   private async ensureDirectory() {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const stat = await lstat(this.directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error("FX historical raw archive directory is unsafe");
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error("FX historical raw archive directory is unsafe");
   }
 }

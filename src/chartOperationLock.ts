@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag } from "./fsDurability.js";
+import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -20,7 +20,7 @@ export class ChartOperationLock {
     const directory = dirname(this.filePath);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const stat = await lstat(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) {
       throw new Error("chart operation lock directory is unsafe");
     }
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
