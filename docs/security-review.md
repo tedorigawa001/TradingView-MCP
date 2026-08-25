@@ -292,7 +292,12 @@ Both divergences are now named in code rather than implied: `posixModeEnforced`
 returns false on Windows, where Node synthesises a mode from the read-only
 attribute and reading it as an access decision refuses every directory, and
 `noFollowFlag` returns zero there, where the constant is undefined and the flag
-silently disappeared into `O_RDONLY`. Every Unix check is unchanged and tested
+silently disappeared into `O_RDONLY`. Because that flag is the only symlink
+defence POSIX gets for free, the evidence stores now also call
+`assertNotSymbolicLink` before opening a path, which holds on every platform:
+Windows keeps the symlink rejection rather than documenting its loss. It is a
+check and then an open, so a replacement between the two remains the same
+residual local same-user race already recorded for the Bookmap reader. Every Unix check is unchanged and tested
 as unchanged; a test also fails if any store reintroduces a bare `& 0o077` or
 `constants.O_NOFOLLOW`.
 The implementation still rejects observed symbolic links and uses exclusive

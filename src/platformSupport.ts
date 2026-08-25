@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 
 export function tradingViewLaunchRemedy(platform = process.platform): string {
   if (platform === "win32") {
@@ -27,5 +27,7 @@ export function defaultBookmapFlowDirectory(
     return win32.join(localAppData?.trim() || home, "TradingView-MCP", "bookmap-data");
   }
   if (platform === "darwin") return "/Volumes/HD/bookmap_data";
-  return join(home, ".tradingview-mcp", "bookmap-data");
+  // posix.join, not join: this function takes the target platform as an
+  // argument, so its answer must not change with the host running it.
+  return posix.join(home, ".tradingview-mcp", "bookmap-data");
 }

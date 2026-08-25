@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { noFollowFlag } from "./fsDurability.js";
+import { assertNotSymbolicLink, noFollowFlag } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -79,6 +79,7 @@ export class AppendOnlyEvaluationLog {
   private async readAllUnlocked(): Promise<EvaluationLogEntry[]> {
     let handle;
     try {
+      await assertNotSymbolicLink(this.filePath, "evaluation log");
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];

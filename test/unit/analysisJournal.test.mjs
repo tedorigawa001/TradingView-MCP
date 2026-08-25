@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -56,8 +57,8 @@ test("AnalysisJournalStore persists definitions idempotently with owner-only per
   assert.equal(second.recorded, false);
   assert.equal(second.idempotent, true);
   assert.equal((await readFile(path, "utf8")).trim().split("\n").length, 1);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
-  assert.equal((await stat(join(directory, "private"))).mode & 0o777, 0o700);
+  if (posixModeEnforced()) assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await stat(join(directory, "private"))).mode & 0o777, 0o700);
 
   await assert.rejects(store.recordAnalysis({ ...value, confidence: 0.4 }), (err) => {
     assert.ok(err instanceof AnalysisDefinitionConflictError);

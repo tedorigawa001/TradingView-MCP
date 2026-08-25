@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -445,6 +445,7 @@ export class StrategyResearchJournalStore {
 
   private async readUnlocked(): Promise<ResearchJournalEntry[]> {
     let handle;
+    await assertNotSymbolicLink(this.filePath, "strategy research journal");
     try { handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag()); } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("unable to open strategy research journal as a regular file", { cause: err });

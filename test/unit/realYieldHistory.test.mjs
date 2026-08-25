@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdtemp, readFile, symlink, unlink, writeFile } from "node:fs/promises";
@@ -24,8 +25,8 @@ test("RealYieldFirstSeenStore persists one version with owner-only permissions",
   assert.equal(first.first_seen_at, "2026-07-14T01:00:00.000Z");
   assert.equal(first.unit, "percent_per_annum_bond_equivalent");
   assert.equal(first.source, "us_treasury");
-  assert.equal((await lstat(path)).mode & 0o777, 0o600);
-  assert.equal((await lstat(dir)).mode & 0o777, 0o700);
+  if (posixModeEnforced()) assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await lstat(dir)).mode & 0o777, 0o700);
 
   const restarted = new RealYieldFirstSeenStore(path);
   const same = await restarted.observe(version({ observed_at: "2026-07-14T02:00:00.000Z" }));
@@ -105,11 +106,17 @@ test("RealYieldFirstSeenStore rejects clock regression, corruption and unsafe pa
   await symlink(path, symlinkPath);
   await assert.rejects(() => new RealYieldFirstSeenStore(symlinkPath).observe(version()), /regular file/);
 
-  const broadDir = await mkdtemp(join(tmpdir(), "tv-mcp-real-yield-mode-"));
-  await chmod(broadDir, 0o777);
-  const modeStore = new RealYieldFirstSeenStore(join(broadDir, "history.jsonl"));
-  await assert.rejects(() => modeStore.observe(version()), /permissions/);
-  assert.equal((await lstat(broadDir)).mode & 0o777, 0o777, "existing directory permissions must not be changed");
+  // A group- and world-writable directory is refused where the host has POSIX
+  // modes. Windows has none, so chmod does nothing there and the store cannot
+  // ask the question - asserting the rejection unconditionally was asserting
+  // the platform.
+  if (posixModeEnforced()) {
+    const broadDir = await mkdtemp(join(tmpdir(), "tv-mcp-real-yield-mode-"));
+    await chmod(broadDir, 0o777);
+    const modeStore = new RealYieldFirstSeenStore(join(broadDir, "history.jsonl"));
+    await assert.rejects(() => modeStore.observe(version()), /permissions/);
+    assert.equal((await lstat(broadDir)).mode & 0o777, 0o777, "existing directory permissions must not be changed");
+  }
 });
 
 test("RealYieldFirstSeenStore rejects semantically corrupt history ordering", async () => {

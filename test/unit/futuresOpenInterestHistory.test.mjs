@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "../../build/fsDurability.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { lstat, mkdtemp, writeFile } from "node:fs/promises";
@@ -34,7 +35,7 @@ test("futures open interest store writes owner-only and keeps only changed value
   const first = await store.observeMany([observation()]);
   assert.equal(first.recorded.length, 1);
   assert.equal(first.recorded[0].sequence, 1);
-  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await lstat(path)).mode & 0o777, 0o600);
 
   // Re-reading an unchanged series is the normal case and must not grow the log.
   const again = await store.observeMany([observation({ observed_at: "2026-07-24T00:00:00.000Z" })]);

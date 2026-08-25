@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -83,7 +84,7 @@ test("strategy research journal binds immutable hypotheses and multiple exact ev
   ]);
   assert.equal(comparison.comparable, true);
   assert.equal(comparison.experiments.length, 2);
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await readFile(file, "utf8")).trim().split("\n").length, 3);
 });
 

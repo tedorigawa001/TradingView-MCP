@@ -18,7 +18,12 @@ test("O_NOFOLLOW is passed where the host has it and is zero where it does not",
   // append keeps the protection it had before this helper existed.
   assert.equal(noFollowFlag("darwin"), constants.O_NOFOLLOW);
   assert.equal(noFollowFlag("linux"), constants.O_NOFOLLOW);
-  assert.ok(constants.O_NOFOLLOW > 0, "the host must define O_NOFOLLOW for that claim to mean anything");
+  // Only meaningful where the host defines the constant. Asserting it
+  // unconditionally is the same mistake this helper exists to prevent - it made
+  // the test itself fail on the platform it was written to describe.
+  if (process.platform !== "win32") {
+    assert.ok(constants.O_NOFOLLOW > 0, "a POSIX host must define O_NOFOLLOW for that claim to mean anything");
+  }
 
   // Zero on Windows, deliberately. Node does not define O_NOFOLLOW there, so the
   // previous `constants.O_RDONLY | constants.O_NOFOLLOW` reduced to O_RDONLY and

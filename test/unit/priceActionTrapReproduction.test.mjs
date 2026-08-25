@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -49,7 +51,9 @@ test("trap reproduction CLI requires an explicit local import and exactly eight 
   const paths = Array.from({ length: 8 }, (_, index) => `series-${index}.json`);
   const parsed = parsePriceActionTrapReproductionCliArguments(["--confirm-local-import", ...paths.flatMap((path) => ["--aggregate", path])]);
   assert.deepEqual(parsed.aggregatePaths, paths);
-  assert.match(parsed.outputPath, /price-action-reproductions\/four-bar-trap-v1\.json$/);
+  // Built with join(), so the separator is the host's. Comparing against a
+  // literal forward slash asserted the developer's platform, not the contract.
+  assert.equal(parsed.outputPath, join(homedir(), ".tradingview-mcp", "price-action-reproductions", "four-bar-trap-v1.json"));
   assert.throws(() => parsePriceActionTrapReproductionCliArguments(paths.flatMap((path) => ["--aggregate", path])), /confirm-local-import/);
   assert.throws(() => parsePriceActionTrapReproductionCliArguments(["--confirm-local-import", "--aggregate", "only-one.json"]), /exactly eight/);
 });

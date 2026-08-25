@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 
 /**
  * Persist a newly-created directory entry where the host exposes directory
@@ -36,6 +36,29 @@ export function noFollowFlag(platform = process.platform): number {
  */
 export function posixModeEnforced(platform = process.platform): boolean {
   return platform !== "win32";
+}
+
+/**
+ * Refuse a path that is a symbolic link, on every platform.
+ *
+ * O_NOFOLLOW does this on POSIX and does not exist on Windows, so a store that
+ * relied on the flag alone followed links there silently. Checking explicitly
+ * keeps the guarantee instead of documenting its loss.
+ *
+ * This is a check and then an open, so a replacement between the two is a
+ * residual local same-user race - the same one the security review already
+ * records for the Bookmap reader. It is narrower than O_NOFOLLOW, which is why
+ * the flag is still passed wherever the host has it.
+ */
+export async function assertNotSymbolicLink(path: string, label: string): Promise<void> {
+  let stat;
+  try {
+    stat = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
 }
 
 export async function syncDirectoryEntry(directory: string, platform = process.platform): Promise<void> {

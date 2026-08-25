@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -123,6 +123,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
 
   async readAllUnlocked(): Promise<T[]> {
     let handle;
+    await assertNotSymbolicLink(this.filePath, `${this.label} history`);
     try {
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {

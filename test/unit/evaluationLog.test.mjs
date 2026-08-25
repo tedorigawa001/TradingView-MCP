@@ -1,3 +1,4 @@
+import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, lstat, symlink } from "node:fs/promises";
@@ -16,7 +17,7 @@ test("AppendOnlyEvaluationLog writes newline-delimited records with owner-only p
   const rows = (await readFile(path, "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(rows.length, 2);
   assert.equal(rows[1].kind, "features");
-  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await lstat(path)).mode & 0o777, 0o600);
   assert.equal((await log.readBySnapshotId(SNAPSHOT_ID)).length, 2);
 });
 

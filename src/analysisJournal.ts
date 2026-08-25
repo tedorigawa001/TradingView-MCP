@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
@@ -413,6 +413,7 @@ export class AnalysisJournalStore {
   private async readAllUnlocked(): Promise<AnalysisJournalEntry[]> {
     let handle;
     try {
+      await assertNotSymbolicLink(this.filePath, "analysis journal");
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
