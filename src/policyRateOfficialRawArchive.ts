@@ -3,7 +3,7 @@ import { mkdir, open, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_RAW_BYTES = 32 * 1024 * 1024;
 
@@ -24,6 +24,10 @@ export class OfficialPolicyRateRawArchive {
     if (`sha256:${createHash("sha256").update(body).digest("hex")}` !== rawSha256) throw new Error("official policy-rate raw archive hash does not match payload");
     await this.ensureDirectory();
     const path = join(this.directory, `${rawSha256.slice("sha256:".length)}.raw`);
+    // O_EXCL catches an existing entry, but a dangling symlink is not one on
+    // Windows: the open follows it and creates the target, so the archive would
+    // write through the link rather than refuse it.
+    await assertNotSymbolicLink(path, "official policy-rate raw archive");
     try {
       const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
       try {
