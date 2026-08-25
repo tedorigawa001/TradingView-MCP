@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { noFollowFlag } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -32,7 +33,7 @@ export class ChartOperationLock {
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) {
       throw new Error(`chart operation lock must be owned by the current user: ${this.filePath}`);
     }
-    const handle = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     try {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
@@ -58,10 +59,10 @@ export class ChartOperationLock {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(this.filePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        const handle = await open(this.filePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
         return async () => {
-          const owner = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          const owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
           try {
             const before = await owner.stat();
             const contents = await owner.readFile("utf8");

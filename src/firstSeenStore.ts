@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -72,7 +73,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       try {
         const handle = await open(
           lockPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
           0o600,
         );
         try {
@@ -84,7 +85,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
             const stat = await handle.stat();
             if (!stat.isFile()) throw new Error(`${this.label} history lock path is unsafe`);
             const contents = await handle.readFile("utf8");
@@ -123,7 +124,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
   async readAllUnlocked(): Promise<T[]> {
     let handle;
     try {
-      handle = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error(`unable to open ${this.label} history as a regular file`, { cause: err });
@@ -175,7 +176,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     if (line.byteLength > this.limits.maxRecordBytes) throw new Error(`${this.label} history record is too large`);
     const handle = await open(
       this.filePath,
-      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW,
+      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
       0o600,
     );
     try {
@@ -193,12 +194,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       await handle.sync();
       await handle.chmod(0o600);
       if (stat.size === 0) {
-        const directoryHandle = await open(dirname(this.filePath), constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-          await directoryHandle.sync();
-        } finally {
-          await directoryHandle.close();
-        }
+        await syncDirectoryEntry(dirname(this.filePath));
       }
     } finally {
       await handle.close();

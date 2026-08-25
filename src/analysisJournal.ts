@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
@@ -325,7 +326,7 @@ export class AnalysisJournalStore {
 
     let handle;
     try {
-      handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
@@ -359,7 +360,7 @@ export class AnalysisJournalStore {
       try {
         const handle = await open(
           lockPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
           0o600,
         );
         try {
@@ -371,7 +372,7 @@ export class AnalysisJournalStore {
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
             const stat = await handle.stat();
             const contents = await handle.readFile("utf8");
             await handle.close();
@@ -412,7 +413,7 @@ export class AnalysisJournalStore {
   private async readAllUnlocked(): Promise<AnalysisJournalEntry[]> {
     let handle;
     try {
-      handle = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("unable to open analysis journal as a regular file", { cause: err });
@@ -469,7 +470,7 @@ export class AnalysisJournalStore {
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("analysis journal record is too large");
     const handle = await open(
       this.filePath,
-      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW,
+      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
       0o600,
     );
     try {
@@ -484,8 +485,7 @@ export class AnalysisJournalStore {
       if (bytesWritten !== line.byteLength) throw new Error("short write to analysis journal");
       await handle.sync();
       if (stat.size === 0) {
-        const directoryHandle = await open(dirname(this.filePath), constants.O_RDONLY | constants.O_NOFOLLOW);
-        try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+        await syncDirectoryEntry(dirname(this.filePath));
       }
     } finally {
       await handle.close();

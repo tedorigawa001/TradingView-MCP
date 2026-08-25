@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
+import { noFollowFlag } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -135,7 +136,7 @@ export class MacroSurpriseRawArchive {
     await ensureOwnerDirectory(this.directory, "macro-surprise raw archive");
     const path = join(this.directory, `${rawSha256.slice(7)}.raw`);
     try {
-      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
       try { const written = await handle.write(body); if (written.bytesWritten !== body.byteLength) throw new Error("short write to macro-surprise raw archive"); await handle.sync(); } finally { await handle.close(); }
       return { stored: true, bytes: body.byteLength };
     } catch (error) {
@@ -174,7 +175,7 @@ export class MacroSurpriseEvidenceStore {
     await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
     const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("macro-surprise evidence record is too large");
-    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(), 0o600);
     try { await handle.chmod(0o600); const written = await handle.write(line); if (written.bytesWritten !== line.byteLength) throw new Error("short write to macro-surprise evidence"); await handle.sync(); } finally { await handle.close(); }
   }
 
@@ -183,12 +184,12 @@ export class MacroSurpriseEvidenceStore {
     const path = `${this.filePath}.lock`; const token = randomUUID(); const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
         try { await handle.writeFile(`${token}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
         return async () => {
           let handle;
           try {
-            handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await open(path, constants.O_RDONLY | noFollowFlag());
             const stat = await handle.stat(); const contents = await handle.readFile("utf8");
             const current = await lstat(path);
             if (!stat.isFile() || current.ino !== stat.ino || current.mtimeMs !== stat.mtimeMs || contents !== `${token}\n`) throw new Error("macro-surprise evidence lock ownership was lost");
@@ -201,7 +202,7 @@ export class MacroSurpriseEvidenceStore {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         let handle;
         try {
-          handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+          handle = await open(path, constants.O_RDONLY | noFollowFlag());
           const stat = await handle.stat();
           if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) throw new Error("macro-surprise evidence lock path is unsafe");
           if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {

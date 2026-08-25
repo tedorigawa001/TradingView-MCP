@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { noFollowFlag } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -384,7 +385,7 @@ export class StrategyResearchJournalStore {
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) throw new Error(`strategy research journal lock must be owned by the current user: ${lockPath}`);
     let handle;
     try {
-      handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
@@ -411,12 +412,12 @@ export class StrategyResearchJournalStore {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
         return async () => {
           let lock;
           try {
-            lock = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+            lock = await open(lockPath, constants.O_RDONLY | noFollowFlag());
             const stat = await lock.stat();
             const contents = await lock.readFile("utf8");
             await lock.close(); lock = undefined;
@@ -444,7 +445,7 @@ export class StrategyResearchJournalStore {
 
   private async readUnlocked(): Promise<ResearchJournalEntry[]> {
     let handle;
-    try { handle = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (err) {
+    try { handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag()); } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("unable to open strategy research journal as a regular file", { cause: err });
     }
@@ -524,7 +525,7 @@ export class StrategyResearchJournalStore {
     await this.ensureDirectory();
     const line = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("strategy research journal record is too large");
-    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(), 0o600);
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("strategy research journal path must be a regular file");

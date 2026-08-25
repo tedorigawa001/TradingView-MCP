@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
+import { noFollowFlag } from "./fsDurability.js";
 
 export const OANDA_FLOW_INSTRUMENTS = ["EUR_USD", "USD_JPY"] as const;
 export type OandaFlowInstrument = typeof OANDA_FLOW_INSTRUMENTS[number];
@@ -126,7 +127,7 @@ export class OandaFlowRawArchive {
     if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077) !== 0) throw new Error("OANDA flow raw archive directory is unsafe");
     const path = join(this.directory, `${rawSha256.slice(7)}.raw`);
     try {
-      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
       try { await handle.writeFile(body); await handle.sync(); await handle.chmod(0o600); } finally { await handle.close(); }
       return { stored: true, bytes: body.byteLength };
     } catch (error) {

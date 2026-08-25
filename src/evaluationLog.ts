@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
+import { noFollowFlag } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -30,12 +31,12 @@ export class AppendOnlyEvaluationLog {
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
       try {
-        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
         try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); } finally { await handle.close(); }
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
             const stat = await handle.stat();
             const contents = await handle.readFile("utf8");
             await handle.close();
@@ -78,7 +79,7 @@ export class AppendOnlyEvaluationLog {
   private async readAllUnlocked(): Promise<EvaluationLogEntry[]> {
     let handle;
     try {
-      handle = await open(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("evaluation log path must be a regular file", { cause: err });
@@ -118,7 +119,7 @@ export class AppendOnlyEvaluationLog {
       }
       const handle = await open(
         this.filePath,
-        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW,
+        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
         0o600,
       );
       try {

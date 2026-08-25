@@ -69,15 +69,17 @@ on an instrument that refuses the others; see `display-only/README.md`.
 ## Build
 
 ```bash
-bookmap-addon/build.sh
+npm run build:bookmap-addon
 ```
 
-The build requires a JDK that supports `--release 17`. It uses
-`JAVA_21_HOME` when set (the default Homebrew location is
-`/usr/local/opt/openjdk@21`) and otherwise uses the JDK on `PATH`.
+The cross-platform build requires a JDK that supports `--release 17`. It uses
+`JAVA_21_HOME` or `JAVA_HOME`, then the Homebrew JDK 21 locations on macOS,
+and finally the JDK on `PATH`. Set `BOOKMAP_HOME` on Windows to the directory
+whose `lib` subdirectory contains the two Bookmap SDK JARs.
 
-When both required Bookmap SDK JARs are available under the locally installed
-`/Applications/Bookmap.app`, the script creates two delayed/Replay-only JARs:
+When both required Bookmap SDK JARs are available under the default macOS
+Bookmap install or configured `BOOKMAP_HOME`, the command creates two
+delayed/Replay-only JARs:
 
 - `bookmap-addon/dist/bushidoyasu_flow_collector_delayed_replay_v1_1.jar`:
   raw evidence collector.
@@ -95,10 +97,10 @@ SDK dependency is absent, the build compiles only the SDK-free
 successfully without producing a JAR. A partial SDK installation is treated as
 unavailable rather than attempting an incomplete adapter build.
 
-Run the Java tests with:
+Run the Java tests on macOS, Windows, or Linux with:
 
 ```bash
-bookmap-addon/test.sh
+npm run test:bookmap-addon
 ```
 
 With the complete SDK, this tests the collector, signal engine, chart-marker
@@ -113,7 +115,7 @@ installed exercises all four Java tests.
 1. In Bookmap, open `Settings` then API plug-in configuration.
 2. Add `bushidoyasu_flow_collector_delayed_replay_v1_1.jar` and enable
    **Bushido Flow Collector** only for a delayed or Replay instrument.
-3. Keep `/Volumes/HD/bookmap_data` or configure a writable local directory.
+3. Keep the cross-platform `~/.tradingview-mcp/bookmap-data` default or configure a writable local directory.
 4. Confirm that a new JSONL file appears in the configured directory.
 5. Disable the add-on before moving or deleting its output files.
 

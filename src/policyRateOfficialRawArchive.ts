@@ -3,6 +3,7 @@ import { mkdir, open, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { syncDirectoryEntry, noFollowFlag } from "./fsDurability.js";
 
 const MAX_RAW_BYTES = 32 * 1024 * 1024;
 
@@ -24,7 +25,7 @@ export class OfficialPolicyRateRawArchive {
     await this.ensureDirectory();
     const path = join(this.directory, `${rawSha256.slice("sha256:".length)}.raw`);
     try {
-      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
       try {
         const written = await handle.write(body);
         if (written.bytesWritten !== bytes) throw new Error("short write to official policy-rate raw archive");
@@ -53,7 +54,7 @@ export class OfficialPolicyRateRawArchive {
   private async assertExistingPayload(path: string, expectedHash: string, expectedBytes: number): Promise<void> {
     const pathStat = await lstat(path);
     if (!pathStat.isFile() || pathStat.isSymbolicLink()) throw new Error("official policy-rate raw archive existing path is unsafe");
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, constants.O_RDONLY | noFollowFlag());
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("official policy-rate raw archive path must be a regular file");
@@ -69,7 +70,6 @@ export class OfficialPolicyRateRawArchive {
   }
 
   private async syncDirectory(): Promise<void> {
-    const handle = await open(this.directory, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { await handle.sync(); } finally { await handle.close(); }
+    await syncDirectoryEntry(this.directory);
   }
 }

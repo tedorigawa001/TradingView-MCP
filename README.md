@@ -27,7 +27,7 @@ AI agent <-> tradingview-mcp <-> TradingView Desktop (your chart)
 
 ## Requirements
 
-- macOS and [TradingView Desktop](https://www.tradingview.com/desktop/) (the free plan is sufficient)
+- macOS or Windows 10/11 and [TradingView Desktop](https://www.tradingview.com/desktop/) (the free plan is sufficient)
 - [Node.js](https://nodejs.org/) 22 or later (check with `node --version`; Node 20 is EOL)
 - An AI agent such as [Claude Code](https://claude.com/claude-code), [Codex](https://developers.openai.com/codex), or [Antigravity](https://antigravity.google/)
 
@@ -51,7 +51,9 @@ requirement; the Java add-on in this repository is not part of the package.
 
 ### Step 2: Launch TradingView in Debug Mode
 
-**Important:** The AI cannot inspect TradingView when it is launched normally from the app icon. If TradingView is running, quit it with Cmd+Q, then run:
+**Important:** The AI cannot inspect TradingView when it is launched normally from the app icon. Quit the running app first, then use the command for your operating system.
+
+macOS:
 
 ```bash
 open -a TradingView --args --remote-debugging-port=9222
@@ -63,6 +65,20 @@ To avoid typing the full command each time, add an alias and launch it with `tv`
 echo 'alias tv="open -a TradingView --args --remote-debugging-port=9222"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+Windows PowerShell, when the app execution alias is available:
+
+```powershell
+$tv = (Get-Command TradingView.exe).Source
+Start-Process -FilePath $tv -ArgumentList "--remote-debugging-port=9222"
+```
+
+The source checkout also provides `scripts\windows\start-tradingview.ps1`. If
+the alias is not on `PATH`, pass the script
+`-TradingViewExecutable "C:\path\to\TradingView.exe"`. See the [Windows support
+guide](docs/WINDOWS.md) for Bookmap, CI, filesystem, and scheduled-collection
+details. In Windows MCP configuration files, use `npx.cmd` instead of `npx`
+when the client does not resolve npm command shims.
 
 ### Step 3: Register the MCP Server
 

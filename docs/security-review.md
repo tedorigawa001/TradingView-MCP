@@ -283,7 +283,16 @@ The preflight reports coverage only, classification reports contemporaneous froz
 
 ## Addendum: Bookmap Local Evidence Preflight (Backlog #83, 2026-08-13)
 
-`preflight_bookmap_flow_price_join` is the externally configurable local-evidence read boundary. It reads from `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY`, defaulting to `/Volumes/HD/bookmap_data`, and accepts only a basename matching `bookmap-flow-*.jsonl`; path separators, traversal, absolute paths, and `bookmap-flow-signals-*` research outputs are rejected. The configured directory must be a real nonsymlink directory, and listed or selected sessions must be real nonsymlink regular files. A session is capped at 64 MiB and each JSONL line at 256 KiB before schema processing.
+`preflight_bookmap_flow_price_join` is the externally configurable local-evidence read boundary. It reads from `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY`, defaulting to `/Volumes/HD/bookmap_data` on macOS and a user-local directory on Windows/Linux, and accepts only a basename matching `bookmap-flow-*.jsonl`; path separators, traversal, absolute paths, and `bookmap-flow-signals-*` research outputs are rejected. The configured directory must be a real nonsymlink directory, and listed or selected sessions must be real nonsymlink regular files. A session is capped at 64 MiB and each JSONL line at 256 KiB before schema processing.
+
+On Windows, the default Bookmap evidence directory is under
+`%LOCALAPPDATA%\TradingView-MCP\bookmap-data`. POSIX owner and mode checks do
+not map to Windows ACLs, and Node.js does not expose `O_NOFOLLOW` on Windows.
+The implementation still rejects observed symbolic links and uses exclusive
+creation for locks, but it cannot claim the same race-resistant reparse-point
+guarantee as Unix. Windows evidence must remain under an owner-restricted NTFS
+profile or volume. This is a documented residual risk, not a weakening of the
+Unix checks.
 
 Every row must be valid JSON with supported `source: "bookmap"`, schema version, event type, instrument alias, and canonicalizable receipt timestamp. Mixed instruments, duplicate instrument records, unsupported provenance, and missing instrument metadata fail closed. Crypto, unconfirmed full depth, missing snapshot completion, legacy timestamp precision, and absent trades become explicit quality issues. The reader is read-only: it does not write, delete, follow a user-supplied path, change the chart, access Bookmap over the network, create a candidate, or place an order.
 

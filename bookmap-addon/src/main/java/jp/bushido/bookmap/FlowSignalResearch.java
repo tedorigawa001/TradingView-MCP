@@ -1,6 +1,7 @@
 package jp.bushido.bookmap;
 
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -45,7 +46,8 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
             .ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     @Parameter(name = "Output directory")
-    public String outputDirectory = "/Volumes/HD/bookmap_data";
+    public String outputDirectory = System.getProperty("user.home") + File.separator
+            + ".tradingview-mcp" + File.separator + "bookmap-data";
 
     @Parameter(name = "Minimum sweep trades", minimum = 1, maximum = 10000, step = 1)
     public Integer minimumSweepTrades = 3;

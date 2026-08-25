@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { redactSecrets } from "./redact.js";
+import { cdpPortInspectionRemedy, tradingViewLaunchRemedy } from "./platformSupport.js";
 
 export interface CdpClientOptions {
   /** CDP HTTP endpoint, e.g. http://localhost:9222 */
@@ -34,7 +35,7 @@ export class TradingViewNotAvailableError extends Error {
    * `remedy` replaces the launch instruction. Telling someone to start the app is wrong, and
    * costs real time, when the app is already running and something else answered on its port.
    */
-  constructor(detail: string, remedy = "Launch it with: open -a TradingView --args --remote-debugging-port=9222") {
+  constructor(detail: string, remedy = tradingViewLaunchRemedy()) {
     super(`TradingView desktop app is not reachable via CDP (${detail}). ${remedy}`);
     this.name = "TradingViewNotAvailableError";
   }
@@ -105,9 +106,9 @@ export class CdpClient {
       // Naming the port is useful either way. The IPv6 explanation only applies to a localhost
       // endpoint, where the name resolves to [::1] first and can reach a different listener.
       const remedy = collided
-        ? `Something other than the desktop app is answering; check with lsof -nP -iTCP:${port} -sTCP:LISTEN before restarting the app.`
+        ? cdpPortInspectionRemedy(port)
           + (localhost
-            ? ` macOS resolves localhost to IPv6 first, so another process bound to [::1]:${port} answers while the app sits on 127.0.0.1; set TV_CDP_URL=http://127.0.0.1:${port} to reach it.`
+            ? ` If localhost resolves to another listener while the app sits on 127.0.0.1, set TV_CDP_URL=http://127.0.0.1:${port} to reach it.`
             : "")
         : undefined;
       throw new TradingViewNotAvailableError(

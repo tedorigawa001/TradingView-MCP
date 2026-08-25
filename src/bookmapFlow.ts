@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { OhlcvBar } from "./tradingview.js";
+import { defaultBookmapFlowDirectory } from "./platformSupport.js";
 
 const SESSION_FILE = /^bookmap-flow-(?!signals-)[A-Za-z0-9._-]+\.jsonl$/;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -84,7 +85,7 @@ function assertSafeFileName(fileName: string): void {
 }
 
 export function resolveBookmapFlowDirectory(configured = process.env.TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY): string {
-  return resolve(configured ?? "/Volumes/HD/bookmap_data");
+  return resolve(configured ?? defaultBookmapFlowDirectory());
 }
 
 export async function listBookmapFlowSessions(directory: string): Promise<string[]> {
