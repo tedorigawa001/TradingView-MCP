@@ -1,10 +1,11 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
+const pathQueues = new Map<string, Promise<void>>();
 
 export const isCalendarDate = (value: string): boolean => {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -38,7 +39,13 @@ export interface FirstSeenRecordBase {
  * counts as a changed value, belongs to the caller.
  */
 export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
-  private queue: Promise<void> = Promise.resolve();
+  /**
+   * The queue is keyed on the file, not on the spelling of the path that reached this
+   * constructor. Two logs given `a/x.jsonl` and `a/./x.jsonl` write through the same lock
+   * and must share one queue; keying on the raw string would hand them separate queues and
+   * silently restore the race the queue exists to prevent.
+   */
+  private readonly queueKey: string;
 
   constructor(
     private readonly filePath: string,
@@ -47,6 +54,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     private readonly limits: { maxFileBytes: number; maxRecordBytes: number },
   ) {
     if (!filePath) throw new Error(`${label} history path is required`);
+    this.queueKey = resolve(filePath);
   }
 
   private async ensureDirectory(): Promise<void> {
@@ -199,7 +207,8 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
   }
 
   serialize<R>(operation: () => Promise<R>): Promise<R> {
-    const result = this.queue.then(async () => {
+    const predecessor = pathQueues.get(this.queueKey) ?? Promise.resolve();
+    const result = predecessor.then(async () => {
       const release = await this.acquireFileLock();
       try {
         return await operation();
@@ -207,7 +216,11 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
         await release();
       }
     });
-    this.queue = result.then(() => undefined, () => undefined);
+    const settled = result.then(() => undefined, () => undefined);
+    pathQueues.set(this.queueKey, settled);
+    void settled.then(() => {
+      if (pathQueues.get(this.queueKey) === settled) pathQueues.delete(this.queueKey);
+    });
     return result;
   }
 }

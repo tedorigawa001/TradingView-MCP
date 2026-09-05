@@ -5,6 +5,7 @@ import { chmod, lstat, mkdtemp, readFile, symlink, unlink, writeFile } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RealYieldFirstSeenStore } from "../../build/realYieldHistory.js";
+import { AppendOnlyFirstSeenLog } from "../../build/firstSeenStore.js";
 
 const SERIES = "US_TREASURY_PAR_REAL_CMT_10Y";
 const version = (overrides = {}) => ({
@@ -75,6 +76,51 @@ test("RealYieldFirstSeenStore serializes concurrent observations deterministical
   const records = await Promise.all(Array.from({ length: 100 }, (_, index) => stores[index % 2].observe(version())));
   assert.ok(records.every((record) => record.first_seen_at === "2026-07-14T01:00:00.000Z"));
   assert.equal((await readFile(path, "utf8")).trim().split("\n").length, 1);
+});
+
+test("first-seen logs sharing a path queue before starting the file-lock deadline", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-first-seen-path-queue-"));
+  const path = join(dir, "history.jsonl");
+  const limits = { maxFileBytes: 1024, maxRecordBytes: 512 };
+  const first = new AppendOnlyFirstSeenLog(path, "path-queue", (value) => value, limits);
+  const second = new AppendOnlyFirstSeenLog(path, "path-queue", (value) => value, limits);
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+
+  const slow = first.serialize(async () => {
+    markStarted();
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+  });
+  await started;
+  const follower = second.serialize(async () => "acquired-after-predecessor");
+
+  assert.equal(await follower, "acquired-after-predecessor");
+  await slow;
+});
+
+test("two spellings of one path share the queue, because they share the lock", async () => {
+  // The lock lives at `${filePath}.lock`, and the filesystem resolves both spellings to the
+  // same lock file. Keying the queue on the raw string would give these two logs separate
+  // queues, put them back in a race for that one lock, and lose the follower to the 2 s
+  // deadline while the predecessor still holds it.
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-first-seen-path-key-"));
+  const path = join(dir, "history.jsonl");
+  const sameFileOtherSpelling = `${dir}/./history.jsonl`;
+  const limits = { maxFileBytes: 1024, maxRecordBytes: 512 };
+  const first = new AppendOnlyFirstSeenLog(path, "path-key", (value) => value, limits);
+  const second = new AppendOnlyFirstSeenLog(sameFileOtherSpelling, "path-key", (value) => value, limits);
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+
+  const slow = first.serialize(async () => {
+    markStarted();
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+  });
+  await started;
+  const follower = second.serialize(async () => "acquired-after-predecessor");
+
+  assert.equal(await follower, "acquired-after-predecessor");
+  await slow;
 });
 
 test("RealYieldFirstSeenStore never releases a replacement lock owned by another process", async () => {
