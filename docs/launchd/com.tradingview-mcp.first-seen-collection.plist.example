@@ -19,7 +19,7 @@
     <string>OANDA:XAUUSD</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
+  <string>/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP</string>
   <key>RunAtLoad</key>
   <true/>
   <key>StartCalendarInterval</key>

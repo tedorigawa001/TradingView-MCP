@@ -11,7 +11,7 @@
     <string>--confirm-chart-switch</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
+  <string>/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP</string>
   <key>StartInterval</key>
   <integer>3600</integer>
   <key>StandardOutPath</key>

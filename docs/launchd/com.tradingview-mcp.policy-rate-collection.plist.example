@@ -11,7 +11,7 @@
     <string>--confirm-chart-switch</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/bushidoyasu/Documents/GitHub/TradingView-MCP</string>
+  <string>/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP</string>
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>45</integer></dict>
