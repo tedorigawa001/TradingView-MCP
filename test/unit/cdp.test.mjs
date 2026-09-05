@@ -1,8 +1,9 @@
 import { cdpPortInspectionRemedy, tradingViewLaunchRemedy } from "../../build/platformSupport.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CdpClient, TradingViewNotAvailableError } from "../../build/cdp.js";
-import { startMockCdp } from "./helpers/mock-cdp.mjs";
+import { WebSocketServer } from "ws";
+import { CdpClient, TradingViewNotAvailableError, assertDebuggerWebSocketUrl } from "../../build/cdp.js";
+import { startMockCdp, defaultHandler } from "./helpers/mock-cdp.mjs";
 
 test("evaluate returns the value produced by the page", async (t) => {
   const mock = await startMockCdp({
@@ -284,4 +285,103 @@ test("an endpoint with no pages at all still advises launching the app", async (
   assert.match(error.message, /returned no page targets/);
   assert.ok(error.message.includes(tradingViewLaunchRemedy()),
     `expected this host's launch advice, got: ${error.message}`);
+});
+
+// --- the socket the client actually opens, not just the page it checked ---
+
+test("refuses a chart target whose debugger socket points off the CDP endpoint", async (t) => {
+  // findChartTarget validates the page URL, so this target passes that check with a real
+  // tradingview.com/chart URL. What it advertises as its socket is a different listener
+  // entirely — everything the client then sends, Pine source and alert payloads included,
+  // would leave for a host of the endpoint's choosing.
+  const elsewhere = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise((resolve) => elsewhere.on("listening", resolve));
+  let elsewhereConnections = 0;
+  elsewhere.on("connection", () => { elsewhereConnections += 1; });
+  // close() alone waits on live clients forever, which would hang this file rather than
+  // fail it the day the check is removed.
+  t.after(() => new Promise((resolve) => {
+    for (const client of elsewhere.clients) client.terminate();
+    elsewhere.close(resolve);
+  }));
+
+  const mock = await startMockCdp({
+    targets: [{
+      type: "page",
+      title: "chart",
+      url: "https://www.tradingview.com/chart/abc/",
+      webSocketDebuggerUrl: `ws://127.0.0.1:${elsewhere.address().port}/devtools/page/X?tok=secret`,
+    }],
+  });
+  t.after(() => mock.close());
+  // A short timeout so removing the check fails this test promptly instead of parking on
+  // the socket it should never have opened.
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 500 });
+  t.after(() => cdp.close());
+
+  const error = await cdp.evaluate("1").then(() => null, (err) => err);
+  assert.ok(error instanceof TradingViewNotAvailableError, `expected a refusal, got: ${error}`);
+  assert.match(error.message, /webSocketDebuggerUrl points somewhere other than/);
+  assert.equal(elsewhereConnections, 0, "the client must not have opened the advertised socket");
+  // The advertised URL is attacker-shaped by assumption and may carry a query string.
+  assert.doesNotMatch(error.message, /tok=secret/);
+});
+
+test("refuses a debugger socket that is not a WebSocket URL", async (t) => {
+  const mock = await startMockCdp({
+    targets: [{
+      type: "page",
+      title: "chart",
+      url: "https://www.tradingview.com/chart/abc/",
+      webSocketDebuggerUrl: "https://www.tradingview.com/chart/abc/",
+    }],
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  t.after(() => cdp.close());
+
+  await assert.rejects(() => cdp.evaluate("1"), /not a WebSocket URL/);
+});
+
+test("loopback spellings of the same machine stay interchangeable", () => {
+  // Chrome answers with whatever Host it was asked on, so a working setup must keep
+  // working: these all name this host.
+  for (const [socket, endpoint] of [
+    ["ws://localhost:9222/devtools/page/A", "http://127.0.0.1:9222"],
+    ["ws://127.0.0.1:9222/devtools/page/A", "http://localhost:9222"],
+    ["ws://[::1]:9222/devtools/page/A", "http://localhost:9222"],
+  ]) {
+    assert.equal(assertDebuggerWebSocketUrl(socket, endpoint), new URL(socket).href);
+  }
+  // A different port on this host is still a different listener.
+  assert.throws(() => assertDebuggerWebSocketUrl("ws://127.0.0.1:9333/x", "http://127.0.0.1:9222"),
+    TradingViewNotAvailableError);
+  // And an off-host destination is the case that matters.
+  assert.throws(() => assertDebuggerWebSocketUrl("ws://attacker.example:9222/x", "http://127.0.0.1:9222"),
+    TradingViewNotAvailableError);
+  assert.throws(() => assertDebuggerWebSocketUrl("not a url", "http://127.0.0.1:9222"),
+    TradingViewNotAvailableError);
+});
+
+test("a frame that is not JSON is dropped instead of killing the process", async (t) => {
+  // The message handler is synchronous, so a throw inside it is an unhandled listener
+  // exception and the server exits — there is no uncaughtException handler anywhere.
+  let misbehaved = false;
+  const mock = await startMockCdp({
+    onCommand: (msg, ws) => {
+      if (misbehaved) return defaultHandler(msg);
+      misbehaved = true;
+      ws.send("this is not json");
+      ws.send("null"); // valid JSON, but not a message object
+      return null;
+    },
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 300 });
+  t.after(() => cdp.close());
+
+  await assert.rejects(() => cdp.evaluate("1"), /timed out after 300ms/);
+  // Still alive, and still able to serve the next call once the peer behaves.
+  const recovered = await cdp.evaluate("2");
+  assert.deepEqual(recovered, { echo: "2" });
 });

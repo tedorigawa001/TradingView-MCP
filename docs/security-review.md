@@ -11,7 +11,7 @@ Method: manual code review, `npm audit`, and unit-test verification. Run the rep
 | 1 | Local attack surface from the CDP debug port | Medium | Documented and accepted |
 | 2 | Code injection through `Runtime.evaluate` | High -> none | Mitigated and tested |
 | 3 | Substring-based CDP target selection | Low | Fixed |
-| 4 | Known dependency vulnerabilities | - | `npm audit`: zero |
+| 4 | Known dependency vulnerabilities | High | Fixed 2026-09-05 — see addendum |
 | 5 | Page-controlled data entering the AI context | Low | Documented |
 | 6 | Screenshot information disclosure | Informational | Documented |
 
@@ -309,6 +309,95 @@ not a weakening of the Unix checks.
 Every row must be valid JSON with supported `source: "bookmap"`, schema version, event type, instrument alias, and canonicalizable receipt timestamp. Mixed instruments, duplicate instrument records, unsupported provenance, and missing instrument metadata fail closed. Crypto, unconfirmed full depth, missing snapshot completion, legacy timestamp precision, and absent trades become explicit quality issues. The reader is read-only: it does not write, delete, follow a user-supplied path, change the chart, access Bookmap over the network, create a candidate, or place an order.
 
 The join is limited to an active, exactly bound EURUSD M1 or M5 chart and is blocked during Replay. It aggregates by local receipt time and treats CME futures flow as a single-venue proxy, never as complete spot-FX flow. Receipt time is not exchange event time, delayed/replay feeds are not live evidence, and exact bar association does not prove causal ordering. A filesystem replacement between `lstat` and `readFile` is a residual local same-user race because the current implementation does not open the file with an atomic no-follow descriptor.
+
+## Addendum: Repository Vulnerability Review (2026-09-05)
+
+Scope: the whole tree, not a diff — dependencies, the CDP transport, every
+`Runtime.evaluate` call site, every outbound fetch, filesystem boundaries, and
+secret handling. Three issues were found and fixed; each fix is pinned by a test
+that fails when the defect is reintroduced into `build/`.
+
+### A. The debugger socket was never checked against the endpoint — Medium, fixed
+
+Finding #3 above hardened the *page* URL check, but the socket opened immediately
+afterwards is a separate address that nothing validated. `findChartTarget` would
+accept a genuine `https://www.tradingview.com/chart/...` target while the same
+`/json` response advertised a `webSocketDebuggerUrl` pointing anywhere at all,
+and `connect()` opened it. A process squatting the CDP port could therefore
+redirect the debugger session — and everything sent over it, Pine source and
+alert payloads included — off this machine. That is outside the "any local
+process already controls the session" model accepted in finding #1, and it
+defeats the operational rule of opening the port only while the server is in
+use: a closed port is exactly what another process is free to take.
+
+`assertDebuggerWebSocketUrl` now requires `ws:`/`wss:` and the same host and port
+as the configured endpoint before any socket is opened, treating `localhost`,
+`127.0.0.1` and `[::1]` as interchangeable so a working setup keeps working. The
+refusal never echoes the advertised URL, which may carry a query string of its
+own. Confirmed with a proof of concept before the fix: the client connected to an
+attacker-chosen listener.
+
+### B. An unparsable CDP frame killed the process — Medium, fixed
+
+The `ws` message handler is synchronous, so a `JSON.parse` throw inside it is an
+unhandled listener exception, and there is no `uncaughtException` handler
+anywhere in the server. One malformed frame from the peer ended the process. Of
+the thirty `JSON.parse` sites in `src/`, this was the only one neither wrapped
+nor on an awaited path. Frames that are not a CDP message object are now logged
+and dropped; the request they would have answered still fails on its own timeout.
+
+### C. `redactSecrets` was quadratic on attacker-shaped text — Medium, fixed
+
+The unbounded `[\w+.-]*` before `://` cost a scan of the whole remaining string
+at every letter that turned out not to start a scheme. Measured: 40 KB in 2.9 s,
+80 KB in 11.7 s, 200 KB in 72 s. This function runs on **every** tool error
+(`errorResult`) and on every page exception, so a long enough message froze the
+single Node thread — a page choosing its own exception text was enough, and issue
+A gave a rogue peer a direct route to it. Finding #5 rated page-controlled
+strings Low on prompt-injection grounds alone; the denial-of-service face of the
+same input was not considered.
+
+The scheme runs are now bounded at 64 characters, which caps the per-position
+cost without losing any real scheme (200 KB now takes 112 ms). The result is
+additionally capped at 4096 characters, truncated **after** redaction so a
+secret can never survive by straddling the cut.
+
+### D. Dependencies — was no longer clean, now updated
+
+Finding #4's "zero vulnerabilities" had gone stale. On 2026-09-05 `npm audit`
+reported `fast-uri` 3.1.5 (high, SSRF and host confusion, via
+`@modelcontextprotocol/sdk` -> `ajv`) and `qs` 6.15.3 (moderate, via `express`),
+which put `npm audit --audit-level=high` in CI into failure. Both were
+transitive; `npm audit fix` lifted them to `fast-uri` 3.1.7 and `qs` 6.16.0,
+touching nothing else and leaving `package.json` unchanged. `npm audit` now
+reports zero, and the CI gate passes. The runtime
+dependency list in finding #4 is also out of date: `fast-xml-parser` and
+`pdfjs-dist` were added since. The server uses the stdio transport only, so
+`express` — and with it `qs` — is not loaded at runtime; the advisory still
+reaches anyone who audits the published package.
+
+### Reviewed and found sound
+
+`Runtime.evaluate` injection: all 27 call sites interpolate strings through
+`JSON.stringify` and numbers only after integer/finite validation, `pineId`
+through `/^USER;[\w]{8,64}$/`. No `eval`, `new Function`, or child-process call
+exists anywhere in `src/`.
+
+Outbound requests: all 13 fetch paths use hard-coded hosts, `redirect: "manual"`,
+`assertExpectedResponseHost`, and a byte cap. No MCP tool input accepts a URL or
+a filesystem path. The Trading Economics API key travels in the query string as
+that API requires, but the URL persisted as `source_url` is the key-free
+canonical one.
+
+Filesystem: directories are created `0o700` and files `0o600` throughout; the one
+input-derived path join is guarded by a basename allowlist, `lstat` symlink
+rejection, and size caps. No secret is hard-coded in a tracked file.
+
+Residual, accepted: the Federal Reserve statement parser
+(`officialMacroActualSources.ts`) backtracks quadratically — 64 KB in 4.0 s
+against an 8 MB cap — but only on a response from a TLS-protected official host,
+and only in a collection CLI. The `docs/launchd/*.example` files carry real
+absolute home paths and a username.
 
 ## Handoff for Future Phases
 

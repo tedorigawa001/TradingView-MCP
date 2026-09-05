@@ -42,6 +42,57 @@ export class TradingViewNotAvailableError extends Error {
 }
 
 /**
+ * `localhost`, `127.0.0.1` and `[::1]` name the same machine, and which of them the
+ * endpoint echoes back is not ours to decide — Chrome answers with whatever Host it was
+ * asked on. Treating them as interchangeable keeps a working setup working; it does not
+ * widen the check, because all three stay on this host.
+ */
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+const defaultPort = (protocol: string): string =>
+  protocol === "wss:" || protocol === "https:" ? "443" : "80";
+
+/**
+ * The `/json` response is whatever answered the CDP port, so `webSocketDebuggerUrl` is
+ * untrusted input. `findChartTarget` validates the *page* URL, but the socket opened next
+ * is a separate address that nothing checked: an endpoint that squats the port can pass
+ * the page check with a genuine-looking tradingview.com/chart URL and still point the
+ * debugger session at a host of its choosing, carrying everything sent over it — Pine
+ * source, alert payloads — off this machine. That defeats the operational rule of opening
+ * the debug port only while the server is in use, since a closed port is exactly what
+ * another process is free to take.
+ */
+export function assertDebuggerWebSocketUrl(candidate: string, baseUrl: string): string {
+  let socket: URL;
+  try {
+    socket = new URL(candidate);
+  } catch {
+    throw new TradingViewNotAvailableError(
+      "the chart target did not supply a usable webSocketDebuggerUrl",
+    );
+  }
+  if (socket.protocol !== "ws:" && socket.protocol !== "wss:") {
+    throw new TradingViewNotAvailableError(
+      "the chart target's webSocketDebuggerUrl is not a WebSocket URL",
+    );
+  }
+  // The candidate is never echoed: it is attacker-shaped by assumption and may carry a
+  // query string of its own.
+  const endpoint = new URL(baseUrl);
+  const sameHost =
+    socket.hostname === endpoint.hostname ||
+    (LOOPBACK_HOSTNAMES.has(socket.hostname) && LOOPBACK_HOSTNAMES.has(endpoint.hostname));
+  const samePort =
+    (socket.port || defaultPort(socket.protocol)) === (endpoint.port || defaultPort(endpoint.protocol));
+  if (!sameHost || !samePort) {
+    throw new TradingViewNotAvailableError(
+      "the chart target's webSocketDebuggerUrl points somewhere other than the CDP endpoint itself",
+    );
+  }
+  return socket.href;
+}
+
+/**
  * Minimal CDP client bound to the TradingView chart page.
  * Connects lazily and reconnects automatically if the app restarts.
  */
@@ -126,7 +177,8 @@ export class CdpClient {
    */
   private async connect(): Promise<Connection> {
     const target = await this.findChartTarget();
-    const ws = new WebSocket(target.webSocketDebuggerUrl, {
+    const socketUrl = assertDebuggerWebSocketUrl(target.webSocketDebuggerUrl, this.baseUrl);
+    const ws = new WebSocket(socketUrl, {
       maxPayload: 256 * 1024 * 1024,
     });
     const pending = new Map<
@@ -135,7 +187,24 @@ export class CdpClient {
     >();
 
     ws.on("message", (data) => {
-      const msg = JSON.parse(data.toString()) as CdpMessage;
+      // This handler is synchronous, so a throw here is an unhandled listener exception
+      // and the process exits — there is no uncaughtException handler. A frame that is
+      // not JSON is not a reply to anything we sent, so drop it and let the request it
+      // would have answered fail on its own timeout.
+      let msg: CdpMessage;
+      try {
+        const parsed: unknown = JSON.parse(data.toString());
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("frame is not a CDP message object");
+        }
+        msg = parsed as CdpMessage;
+      } catch (err) {
+        console.error(
+          `[tradingview-mcp] ignoring unparsable CDP frame: ` +
+            redactSecrets(err instanceof Error ? err.message : String(err)),
+        );
+        return;
+      }
       if (msg.id !== undefined && pending.has(msg.id)) {
         pending.get(msg.id)!.resolve(msg);
         pending.delete(msg.id);
