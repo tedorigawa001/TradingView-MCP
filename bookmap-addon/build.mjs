@@ -103,7 +103,8 @@ export function buildBookmapAddon() {
     console.log(`Bookmap SDK not found under ${lib} - building the SDK-free signal engine only`);
     run(tools.javac, ["--release", "17", "-d", CLASSES,
       join(mainDirectory, "FlowSignalEngine.java"),
-      join(mainDirectory, "FlowSignalMarker.java")]);
+      join(mainDirectory, "FlowSignalMarker.java"),
+      join(mainDirectory, "FlowSweepReplay.java")]);
     return { sdkPresent, classpath: CLASSES };
   }
 

@@ -6,8 +6,12 @@ import java.util.function.LongSupplier;
 
 /** Unit tests for display-only flow conditions; run with {@code java -ea}. */
 public final class FlowSignalEngineTest {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         detectsOnlyMonotonicKnownTradeSweep();
+        researchSweepSurvivesDisplayPriority();
+        refusesMixedTradeStreamsOnOneInstance();
+        replayBridgeIsDeterministicAndUsesMarketTime();
+        normalizesOnlyFloatingPointNoise();
         sweepExpiresByElapsedTimeAndRecordsEpisodeMetrics();
         requiresSnapshotAndKnownAggressionForPossibleAbsorption();
         labelsWithdrawalWithoutClaimingSpoofing();
@@ -22,6 +26,112 @@ public final class FlowSignalEngineTest {
         anEpisodeGapAndTheOppositeSideEachStartTheirOwnEpisode();
         anEpisodeUnionsEveryLevelASweepCrossed();
         System.out.println("FlowSignalEngineTest: PASS");
+    }
+
+    private static String replay(String input) throws Exception {
+        var priorIn = System.in;
+        var priorOut = System.out;
+        var bytes = new java.io.ByteArrayOutputStream();
+        try {
+            System.setIn(new java.io.ByteArrayInputStream(input.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            System.setOut(new java.io.PrintStream(bytes, true, java.nio.charset.StandardCharsets.UTF_8));
+            FlowSweepReplay.main(new String[]{"3", "3", "10000", "30000"});
+            return bytes.toString(java.nio.charset.StandardCharsets.UTF_8).lines()
+                    .filter(line -> !line.startsWith("#normalization\t"))
+                    .collect(java.util.stream.Collectors.joining("\n"));
+        } finally { System.setIn(priorIn); System.setOut(priorOut); }
+    }
+
+    private static void replayBridgeIsDeterministicAndUsesMarketTime() throws Exception {
+        String input = "1\t0\t100\t1\tbuy\n2\t1\t101\t2\tbuy\n"
+                + "3\t2\t999\t0\tunknown\n4\t9999999999\t102\t3\tbuy\n";
+        String expected = "4\tBUY\t3\t3\t6\t1\t1";
+        assertEquals(expected, replay(input).trim());
+        assertEquals(expected, replay(input.replace("102\t3", "102.00000000000001\t3")).trim());
+        assertEquals("", replay(input.replace("102\t3", "102.5\t3")));
+        assertEquals(replay(input), replay(input));
+        assertEquals("", replay(input.replace("9999999999", "10000000000")));
+        assertEquals("", replay(input.replace("999\t0\tunknown", "999\t1\tunknown")));
+        try {
+            replay("1\t2\t100\t1\tbuy\n2\t1\t101\t1\tbuy\n");
+            throw new AssertionError("backward clock accepted");
+        } catch (IllegalArgumentException expectedError) {
+            assertEquals("clock regression", expectedError.getMessage());
+        }
+    }
+
+    private static void normalizesOnlyFloatingPointNoise() {
+        assertEquals(23053, FlowSignalEngine.normalizePriceLevel(23052.999999999996));
+        for (double base : new double[]{100, -100, 23053}) {
+            double ulp = Math.ulp(base);
+            assertEquals((int) base, FlowSignalEngine.normalizePriceLevel(base + 4 * ulp));
+            assertEquals((int) base, FlowSignalEngine.normalizePriceLevel(base - 4 * ulp));
+            assertNull(FlowSignalEngine.normalizePriceLevel(base + 5 * ulp));
+            assertNull(FlowSignalEngine.normalizePriceLevel(base - 5 * ulp));
+        }
+        assertEquals(Integer.MAX_VALUE, FlowSignalEngine.normalizePriceLevel(Integer.MAX_VALUE));
+        assertEquals(Integer.MIN_VALUE, FlowSignalEngine.normalizePriceLevel(Integer.MIN_VALUE));
+        for (double value : new double[]{100.5, 100.000001, Double.NaN, Double.POSITIVE_INFINITY,
+                Double.NEGATIVE_INFINITY, (double) Integer.MAX_VALUE + 1, (double) Integer.MIN_VALUE - 1}) {
+            assertNull(FlowSignalEngine.normalizePriceLevel(value));
+        }
+    }
+
+    private static void refusesMixedTradeStreamsOnOneInstance() {
+        // Mixing the two entry points corrupts the shared sequence, sweep window and episode
+        // table without raising anything, so the instance refuses the second stream instead.
+        FlowSignalEngine claimedByDisplay = engine();
+        claimedByDisplay.onTrade(100, 1, FlowSignalEngine.Direction.BUY);
+        claimedByDisplay.onTrade(101, 1, FlowSignalEngine.Direction.BUY);
+        try {
+            claimedByDisplay.onSweepTrade(102, 1, FlowSignalEngine.Direction.BUY);
+            throw new AssertionError("display instance accepted a sweep-stream callback");
+        } catch (IllegalStateException expected) {
+            assertEquals("this engine already serves the DISPLAY trade stream;"
+                    + " use a separate instance for SWEEP", expected.getMessage());
+        }
+
+        FlowSignalEngine claimedBySweep = engine();
+        claimedBySweep.onSweepTrade(100, 1, FlowSignalEngine.Direction.BUY);
+        try {
+            claimedBySweep.onTrade(101, 1, FlowSignalEngine.Direction.BUY);
+            throw new AssertionError("sweep instance accepted a display-stream callback");
+        } catch (IllegalStateException expected) {
+            assertEquals("this engine already serves the SWEEP trade stream;"
+                    + " use a separate instance for DISPLAY", expected.getMessage());
+        }
+
+        // A callback that produces no signal still claims the instance: it resets the sweep.
+        FlowSignalEngine claimedByQuietCallback = engine();
+        assertNull(claimedByQuietCallback.onSweepTrade(100, 0, FlowSignalEngine.Direction.BUY));
+        try {
+            claimedByQuietCallback.onTrade(101, 1, FlowSignalEngine.Direction.BUY);
+            throw new AssertionError("a zero-size sweep callback left the instance unclaimed");
+        } catch (IllegalStateException expected) { /* claimed as expected */ }
+
+        // Repeating the same stream stays allowed, and onBbo belongs to neither.
+        FlowSignalEngine sweepOnly = engine();
+        sweepOnly.onBbo(10, 10);
+        sweepOnly.onSweepTrade(100, 1, FlowSignalEngine.Direction.BUY);
+        sweepOnly.onBbo(10, 1);
+        sweepOnly.onSweepTrade(101, 1, FlowSignalEngine.Direction.BUY);
+    }
+
+    private static void researchSweepSurvivesDisplayPriority() {
+        FlowSignalEngine display = engine();
+        FlowSignalEngine research = engine();
+        display.onBbo(10, 10);
+        research.onBbo(10, 10);
+        display.onTrade(100, 1, FlowSignalEngine.Direction.BUY);
+        research.onSweepTrade(100, 1, FlowSignalEngine.Direction.BUY);
+        display.onTrade(101, 1, FlowSignalEngine.Direction.BUY);
+        research.onSweepTrade(101, 1, FlowSignalEngine.Direction.BUY);
+        display.onBbo(10, 1);
+        research.onBbo(10, 1);
+        assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL,
+                display.onTrade(102, 1, FlowSignalEngine.Direction.BUY).kind());
+        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP,
+                research.onSweepTrade(102, 1, FlowSignalEngine.Direction.BUY).kind());
     }
 
     private static FlowSignalEngine engine() {

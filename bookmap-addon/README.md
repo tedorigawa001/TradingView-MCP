@@ -112,6 +112,41 @@ installed exercises all four Java tests.
 
 ## Install and run
 
+### Offline sweep evidence replay
+
+`node bookmap-addon/replay.mjs CONFIG.json RAW.jsonl [RAW.jsonl ...]` builds
+the Java detector and replays saved standard CME 6E schema-1.2 raw files.
+The configuration explicitly supplies `minimumTrades`, `minimumLevels`,
+`windowMs`, `episodeGapMs`, `horizonMs`, and `toleranceMs`; there are no
+research defaults. Keep hypothesis configurations and results outside Git.
+
+The dedicated sweep stream shares `updateSweep` with the chart detector but
+does not lose sweeps to withdrawal display priority. It does not change the
+existing chart signal selection. Trades before `snapshot_end` are excluded.
+Research, display and offline replay share `nearest_integer_within_4_ulps_v1`:
+an SDK price-level double is mapped to its nearest integer only within four
+ULPs of that double. Genuine sub-tick prices, non-finite values and values
+outside the signed-int range are rejected. The replay report records the
+policy, normalized callbacks and rejected callbacks. Original raw bytes are
+never rewritten; results from the earlier strict-integer adapter remain separate.
+After reloading the research JAR, new signal JSONL records expose
+`price_level_policy: "nearest_integer_within_4_ulps_v1"` for installation verification.
+
+Each file starts independent detector and position state. Do not use this
+per-file utility to simulate overlapping sessions as one portfolio. Entry is
+the first subsequent valid BBO within the configured tolerance; exit is the
+first valid BBO at/after the holding horizon, within the same tolerance.
+BUY uses ask/bid and SELL uses bid/ask for entry/exit respectively. Only the
+first sweep per direction/episode may attempt entry. A missing exit blocks
+further entries in that file. No quote is forward-filled.
+
+Reports include raw/source/compiled-class hashes, exact settings, repeat-run
+equality, per-signal endpoints and exclusion reasons. Available endpoints do
+not prove continuous delivery, executable fills or profitability. Missing
+commission and independent collection-continuity evidence still block a
+validated execution backtest. This offline tool neither connects to Bookmap
+nor places orders, and its replay adapter is not packaged into installable JARs.
+
 1. In Bookmap, open `Settings` then API plug-in configuration.
 2. Add `bushidoyasu_flow_collector_delayed_replay_v1_1.jar` and enable
    **Bushido Flow Collector** only for a delayed or Replay instrument.

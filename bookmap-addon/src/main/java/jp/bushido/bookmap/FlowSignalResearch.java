@@ -219,6 +219,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
         if (writer == null || writeFailed) return;
         try {
             writer.write("{\"schema_version\":\"1.2\",\"source\":\"bookmap_flow_signal_research\","
+                    + "\"price_level_policy\":" + jsonString(FlowSignalEngine.PRICE_LEVEL_POLICY) + ","
                     + "\"event_type\":" + jsonString(eventType) + ","
                     + "\"instrument_alias\":" + jsonString(alias) + ","
                     + "\"bookmap_time_ns\":"
@@ -247,9 +248,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
     }
 
     private static Integer exactPriceLevel(double price) {
-        if (!Double.isFinite(price) || price < Integer.MIN_VALUE || price > Integer.MAX_VALUE
-                || price != Math.rint(price)) return null;
-        return (int) price;
+        return FlowSignalEngine.normalizePriceLevel(price);
     }
 
     private static String safeFilePart(String value) {

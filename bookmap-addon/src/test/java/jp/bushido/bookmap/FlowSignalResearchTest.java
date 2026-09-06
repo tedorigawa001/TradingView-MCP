@@ -163,6 +163,7 @@ public final class FlowSignalResearchTest {
 
         String line = lineWith(output.toString(), "\"event_type\":\"flow_signal\"");
         assertContains(line, "\"kind\":\"TRADE_SWEEP\"");
+        assertContains(line, "\"price_level_policy\":\"nearest_integer_within_4_ulps_v1\"");
         assertContains(line, "\"direction\":\"SELL\"");
         assertContains(line, "\"price_level\":100");
         assertContains(line, "\"price\":0.001");
@@ -179,6 +180,7 @@ public final class FlowSignalResearchTest {
         exactPriceLevel.setAccessible(true);
         assertEquals(null, exactPriceLevel.invoke(null, 100.5));
         assertEquals(100, exactPriceLevel.invoke(null, 100.0));
+        assertEquals(23053, exactPriceLevel.invoke(null, 23052.999999999996));
     }
 
     private static void usesBookmapTimeForReplayWindowExpiry() throws Exception {

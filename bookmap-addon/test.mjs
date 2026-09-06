@@ -22,6 +22,12 @@ if (sdkPresent) {
   if (/FlowCollector/.test(researchListing)) throw new Error("Signal research JAR must not contain the raw-data collector");
   if (!/FlowSignalMarker\.class/.test(researchListing)) throw new Error("Signal research JAR must contain the chart marker");
   if (/FlowCollector|FlowSignalResearch/.test(displayListing)) throw new Error("Display JAR must not contain evidence writers");
+  // packagedClasses is an allowlist, so this holds today by construction. It is asserted
+  // because the offline adapter reads stdin and is built beside the packaged classes: a
+  // widened prefix would ship it, and the display bytecode check would not see it.
+  for (const [name, listing] of [["Collector", collectorListing], ["Signal research", researchListing], ["Display", displayListing]]) {
+    if (/FlowSweepReplay/.test(listing)) throw new Error(`${name} JAR must not contain the offline replay adapter`);
+  }
 
   const displayBytecode = run(tools.javap, ["-v", "-cp", artifacts.classes, "jp.bushido.bookmap.FlowSignalDisplay"], { capture: true });
   if (/java\/io\/File|java\/nio\/file|java\/net\/|java\/awt\/datatransfer|ProcessBuilder|RandomAccessFile/.test(displayBytecode)) {
@@ -36,3 +42,4 @@ for (const sourceName of selectedTests) {
   run(tools.java, [...headless, "-ea", "-cp", runtimeClasspath, `jp.bushido.bookmap.${className}`]);
 }
 if (!sdkPresent) console.log("SKIPPED (no Bookmap SDK): FlowCollectorTest, FlowSignalResearchTest");
+run(process.execPath, ["--test", join(artifacts.addon, "replay.test.mjs")]);

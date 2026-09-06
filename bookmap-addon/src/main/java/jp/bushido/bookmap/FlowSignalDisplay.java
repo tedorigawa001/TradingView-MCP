@@ -124,10 +124,8 @@ public final class FlowSignalDisplay implements CustomModule, DepthDataListener,
     @Override
     public synchronized void onTrade(double price, int size, TradeInfo tradeInfo) {
         if (engine == null || !hasBookmapTime()) return;
-        // A price between levels is not a level. The research module refuses it
-        // rather than rounding, and so does this one.
-        if (price != Math.rint(price) || !Double.isFinite(price)) return;
-        int priceLevel = (int) Math.rint(price);
+        Integer priceLevel = FlowSignalEngine.normalizePriceLevel(price);
+        if (priceLevel == null) return;
         FlowSignalEngine.Direction direction = tradeInfo == null ? null
                 : (tradeInfo.isBidAggressor
                         ? FlowSignalEngine.Direction.SELL : FlowSignalEngine.Direction.BUY);

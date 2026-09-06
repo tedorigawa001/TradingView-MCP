@@ -15,6 +15,16 @@ import java.util.function.LongSupplier;
  */
 public final class FlowSignalEngine {
 
+    public static final String PRICE_LEVEL_POLICY = "nearest_integer_within_4_ulps_v1";
+
+    /** Recover only binary rounding noise in SDK price-level doubles, not sub-tick prices. */
+    public static Integer normalizePriceLevel(double price) {
+        if (!Double.isFinite(price) || price < Integer.MIN_VALUE || price > Integer.MAX_VALUE) return null;
+        double nearest = Math.rint(price);
+        if (Math.abs(price - nearest) > 4.0 * Math.ulp(price)) return null;
+        return (int) nearest;
+    }
+
     public enum Direction { BUY, SELL }
 
     public enum SignalKind {
@@ -135,6 +145,24 @@ public final class FlowSignalEngine {
     private final Map<AbsorptionKey, AbsorptionState> absorptionStates = new HashMap<>();
     private final Map<EpisodeKey, EpisodeState> episodes = new HashMap<>();
     private long episodeSequence;
+    /**
+     * The two trade entry points share `sequence`, the sweep window and the episode table, so
+     * feeding both into one instance produces evidence that is wrong without being detectably
+     * wrong: no exception, nothing in the report. A comment cannot hold that. The first trade
+     * callback claims the instance and the other entry point is refused from then on.
+     */
+    private enum TradeStream { DISPLAY, SWEEP }
+
+    private TradeStream claimedStream;
+
+    private void claimStream(TradeStream requested) {
+        if (claimedStream == null) claimedStream = requested;
+        else if (claimedStream != requested) {
+            throw new IllegalStateException("this engine already serves the " + claimedStream
+                    + " trade stream; use a separate instance for " + requested);
+        }
+    }
+
     private long sequence;
     private boolean snapshotComplete;
     private Direction sweepDirection;
@@ -216,6 +244,7 @@ public final class FlowSignalEngine {
      *                  being assigned to either side.
      */
     public Signal onTrade(int priceLevel, int size, Direction direction) {
+        claimStream(TradeStream.DISPLAY);
         sequence += 1;
         long nowNanos = monotonicNanos.getAsLong();
         if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
@@ -235,6 +264,18 @@ public final class FlowSignalEngine {
         // a ranking of economic importance.
         Signal signal = withdrawal != null ? withdrawal : sweep != null ? sweep : absorption;
         return signal == null ? null : withEpisode(signal, nowNanos);
+    }
+
+    /** Dedicated research stream. An instance that has seen onTrade refuses this, and vice versa. */
+    public Signal onSweepTrade(int priceLevel, int size, Direction direction) {
+        claimStream(TradeStream.SWEEP);
+        sequence += 1;
+        if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
+        if (size == 0) return null;
+        if (direction == null) { resetSweep(); return null; }
+        long now = monotonicNanos.getAsLong();
+        Signal signal = updateSweep(priceLevel, size, direction, now);
+        return signal == null ? null : withEpisode(signal, now);
     }
 
     private Signal withEpisode(Signal signal, long nowNanos) {
