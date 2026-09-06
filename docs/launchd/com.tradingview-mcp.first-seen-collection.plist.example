@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
-    <string>build/collectionCli.js</string>
+    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/lib/node_modules/bushido-tradingview-mcp/build/collectionCli.js</string>
     <string>collect</string>
     <!-- Name every symbol. Without these the CLI falls back to its two-symbol
          default and a third symbol collected once by hand silently stops. -->
@@ -18,8 +18,6 @@
     <string>--cot-symbol</string>
     <string>OANDA:XAUUSD</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP</string>
   <key>RunAtLoad</key>
   <true/>
   <key>StartCalendarInterval</key>

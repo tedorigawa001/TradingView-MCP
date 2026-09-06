@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { CotClient } from "./cot.js";
 import { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import { pathToFileURL } from "node:url";
@@ -8,6 +9,7 @@ import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
 import { PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath } from "./policyRateHistory.js";
 import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
+import { FirstSeenCollectionHeartbeatStore, resolveFirstSeenCollectionHeartbeatPath } from "./firstSeenCollectionHeartbeat.js";
 
 const DEFAULT_COT_SYMBOLS = ["OANDA:EURUSD", "OANDA:XAUUSD"];
 const MAX_COT_COLLECTION_WEEKS = 52;
@@ -50,10 +52,13 @@ async function main(): Promise<void> {
   const futuresOiStore = new FuturesOpenInterestFirstSeenStore(resolveFuturesOpenInterestHistoryPath());
   const policyRateStore = new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath());
   const policyRateHeartbeats = new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath());
+  const firstSeenHeartbeats = new FirstSeenCollectionHeartbeatStore(resolveFirstSeenCollectionHeartbeatPath());
   const coverage = () => getUnifiedFirstSeenCoverage({ cot: cotStore, realYield: realYieldStore, futuresOpenInterest: futuresOiStore, policyRates: policyRateStore, policyRateHeartbeats });
-  const result = args.command === "coverage"
-    ? await coverage()
-    : await collectFirstSeenSources({
+  if (args.command === "coverage") {
+    process.stdout.write(`${JSON.stringify({ ...(await coverage()), first_seen_collection_heartbeat: await firstSeenHeartbeats.coverage() })}\n`);
+    return;
+  }
+  const result = await collectFirstSeenSources({
       cot: new CotClient(undefined, undefined, cotStore),
       realYield: new TreasuryRealYieldClient(undefined, undefined, realYieldStore),
       cmeGoldOpenInterest: new CmeDailyBulletinClient(),
@@ -62,7 +67,16 @@ async function main(): Promise<void> {
       cotWeeks: args.cotWeeks,
       coverage,
     });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const heartbeat = await firstSeenHeartbeats.recordRun({
+    observed_at: result.observed_at,
+    status: result.status,
+    cot_symbols: args.cotSymbols,
+    cot_complete: result.cot.filter((item) => item.status === "complete").length,
+    real_yield_status: result.real_yield.status,
+    cme_gold_open_interest_status: result.cme_gold_open_interest.status,
+    coverage_status: result.coverage.status,
+  });
+  process.stdout.write(`${JSON.stringify({ ...result, heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
   if (result.status === "partial") process.exitCode = 1;
 }
 

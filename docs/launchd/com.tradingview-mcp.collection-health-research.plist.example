@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tradingview-mcp.collection-health-research</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
+    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/lib/node_modules/bushido-tradingview-mcp/build/collectionHealthCli.js</string>
+    <string>--scope</string>
+    <string>research</string>
+    <string>--notify</string>
+    <string>--max-research-age-hours</string>
+    <string>2</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/collection-health-research.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bushidoyasu/.tradingview-mcp/collection-health-research.stderr.log</string>
+</dict>
+</plist>

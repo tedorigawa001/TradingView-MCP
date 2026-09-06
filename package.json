@@ -1,6 +1,6 @@
 {
   "name": "bushido-tradingview-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "MCP server that lets AI analyze the TradingView desktop app via Chrome DevTools Protocol",
   "keywords": [
     "mcp",
@@ -13,7 +13,9 @@
   "author": "tedorigawa001",
   "type": "module",
   "bin": {
-    "tradingview-mcp": "build/index.js"
+    "tradingview-mcp": "build/index.js",
+    "tradingview-mcp-health": "build/collectionHealthCli.js",
+    "tradingview-mcp-collect-first-seen": "build/collectionCli.js"
   },
   "main": "build/index.js",
   "files": [
@@ -41,6 +43,7 @@
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
+    "health:collections": "node build/collectionHealthCli.js",
     "collect:policy-rates": "node build/policyRateCollectionCli.js --confirm-chart-switch",
     "collect:official-policy-rates": "node build/officialPolicyRateCollectionCli.js --confirm-exploratory-import",
     "collect:fx-history": "node build/fxHistoryCollectionCli.js --confirm-external-fetch",
