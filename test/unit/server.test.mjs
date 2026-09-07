@@ -530,6 +530,7 @@ function makeDeps(overrides = {}) {
     },
     policyRateHeartbeats: overrides.policyRateHeartbeats,
     bookmapFlowDirectory: overrides.bookmapFlowDirectory,
+    backtestLedgers: overrides.backtestLedgers,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -745,7 +746,38 @@ function outcomeTimeframeDeps(state, overrides = {}) {
   });
 }
 
-test("exposes exactly the one hundred one expected tools", async () => {
+test("summarize_backtest_ledger reads registered evidence without touching the chart", async (t) => {
+  const { BacktestLedgerStore } = await import("../../build/backtestLedger.js");
+  const { rm } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "mcp-ledger-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const data = JSON.parse(await readFile(new URL("../fixtures/backtest-ledger.json", import.meta.url), "utf8"));
+  const store = new BacktestLedgerStore(dir);
+  const { artifact_id } = await store.register(data);
+  let chartCalls = 0;
+  const client = await connectedClient(makeDeps({ backtestLedgers: store,
+    tv: { getChartContext: async () => { chartCalls++; throw new Error("must not read chart"); } } }));
+  t.after(() => client.close());
+  const response = await client.callTool({ name: "summarize_backtest_ledger", arguments: {
+    artifact_id, round_trip_cost_bps: 2, exclude_symbols: ["XAUUSD"], group_by: "symbol",
+  } });
+  assert.ok(!response.isError);
+  const result = JSON.parse(response.content[0].text);
+  assert.equal(result.overall.profit_factor, 2);
+  assert.equal(result.overall.closed_trades, 3);
+  assert.equal(result.overall.missing_outcomes, 1);
+  assert.equal(result.groups.length, 2);
+  assert.equal(result.artifact_id, artifact_id);
+  assert.equal(chartCalls, 0);
+  for (const args of [{ artifact_id }, { artifact_id: "../private", round_trip_cost_bps: 2 },
+    { artifact_id: "sha256:" + "f".repeat(64), round_trip_cost_bps: 2 },
+    { artifact_id, round_trip_cost_bps: 2, from: "2025-01-01T00:00:00.000Z", to: "2024-01-01T00:00:00.000Z" }]) {
+    const failed = await client.callTool({ name: "summarize_backtest_ledger", arguments: args });
+    assert.equal(failed.isError, true);
+  }
+});
+
+test("exposes exactly the one hundred two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -850,6 +882,7 @@ test("exposes exactly the one hundred one expected tools", async () => {
       "step_chart_replay",
       "stop_chart_replay",
       "stress_test_strategy",
+      "summarize_backtest_ledger",
       "validate_research_protocol",
       "validate_trade_plan",
     ],

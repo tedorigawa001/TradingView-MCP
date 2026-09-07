@@ -1,5 +1,33 @@
 # Security Review (2026-07-07)
 
+## Addendum: Saved Backtest Ledger Summary (2026-09-07)
+
+`summarize_backtest_ledger` is read-only and never accesses the chart or network.
+It resolves only `sha256:<64 lowercase hex>` IDs beneath the configured private
+ledger directory; MCP callers cannot supply paths, code, or import content.
+The local import CLI requires an input file and explicit confirmation. It accepts
+only a strict normalized gross-bps schema (not arbitrary Strategy Tester cash
+PnL), unique IDs, finite bounded returns, canonical timestamps and explicit missing
+outcomes. Input and stored artifacts are capped at 32 MiB / 100,000 records.
+Reads remain byte-bounded if a file grows and verify file identity and the hash.
+
+Final artifacts are published by exclusive hardlink only after temp-file fsync.
+Concurrent imports are idempotent at the artifact level; existing corrupted
+destinations are refused, not replaced. Directory/file ownership and private
+modes are enforced on POSIX; Windows relies on user-controlled ACLs. Both platforms
+explicitly reject symlinks, with O_NOFOLLOW where available. POSIX opens are
+nonblocking so a FIFO replacement cannot hang before descriptor checks. Mutable
+ancestors and same-user filesystem races remain trust assumptions. There is no
+total directory quota; imports are explicit local operations. The source hash/tier
+is importer-supplied: integrity does not authenticate or certify the evidence.
+
+The response is bounded to 500 groups and does not expose trade rows. Missing
+outcomes are never zero-filled; costs are applied once to declared gross returns.
+No-loss PF is null with an explicit reason, not Infinity. `complete` describes
+selected-record completeness only and never enables a statistical candidate.
+
+## Original Review
+
 Scope: initial implementation (`src/cdp.ts`, `src/tradingview.ts`, `src/server.ts`, and `src/index.ts`).
 
 Method: manual code review, `npm audit`, and unit-test verification. Run the repository security-review workflow on every pull request.

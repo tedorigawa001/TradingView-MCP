@@ -1,6 +1,6 @@
 {
   "name": "bushido-tradingview-mcp",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MCP server that lets AI analyze the TradingView desktop app via Chrome DevTools Protocol",
   "keywords": [
     "mcp",
@@ -14,6 +14,7 @@
   "type": "module",
   "bin": {
     "tradingview-mcp": "build/index.js",
+    "tradingview-mcp-import-ledger": "build/backtestLedgerCli.js",
     "tradingview-mcp-health": "build/collectionHealthCli.js",
     "tradingview-mcp-collect-first-seen": "build/collectionCli.js"
   },
@@ -40,6 +41,7 @@
     "watch": "tsc --watch",
     "start": "node build/index.js",
     "evaluate": "node build/evaluate.js",
+    "import:backtest-ledger": "node build/backtestLedgerCli.js",
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",

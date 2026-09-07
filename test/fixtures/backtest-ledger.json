@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "source_id": "unit-test",
+  "source_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "evidence_tier": "synthetic_test",
+  "return_unit": "direction_adjusted_gross_bps",
+  "trades": [
+    {"trade_id":"a","symbol":"EURUSD","direction":"long","entry_at":"2024-01-31T20:00:00.000Z","exit_at":"2024-02-01T00:00:00.000Z","gross_return_bps":10},
+    {"trade_id":"b","symbol":"USDJPY","direction":"short","entry_at":"2024-01-02T00:00:00.000Z","exit_at":"2024-01-02T04:00:00.000Z","gross_return_bps":-2},
+    {"trade_id":"c","symbol":"XAUUSD","direction":"long","entry_at":"2024-01-03T00:00:00.000Z","exit_at":"2024-01-03T04:00:00.000Z","gross_return_bps":100},
+    {"trade_id":"d","symbol":"USDJPY","direction":"short","entry_at":"2024-01-04T00:00:00.000Z","exit_at":"2024-01-04T04:00:00.000Z","gross_return_bps":null},
+    {"trade_id":"e","symbol":"EURUSD","direction":"long","entry_at":"2024-01-05T00:00:00.000Z","exit_at":"2024-01-05T04:00:00.000Z","gross_return_bps":2}
+  ]
+}

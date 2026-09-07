@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
+import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -197,6 +198,7 @@ export interface ServerDeps {
   cmeGoldOpenInterest?: Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
   /** Local-only Bookmap Collector directory. It is read-only evidence, never a trading feed. */
   bookmapFlowDirectory?: string;
+  backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -403,7 +405,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore() }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5439,6 +5441,22 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "summarize_backtest_ledger",
+    {
+      description: "Summarize a locally registered immutable backtest ledger by SHA-256 artifact ID. " +
+        "Filter exact symbols, direction, and exit timestamps (UTC, from inclusive/to exclusive); group by symbol/year/month. " +
+        "Requires explicit flat round-trip cost in bps. Recomputes PF from trade-level net wins/losses, never averages PFs. " +
+        "Missing outcomes remain missing. No chart access, orders, imports, or arbitrary file paths. " +
+        "Register normalized direction-adjusted gross-bps evidence with the local import CLI first.",
+      inputSchema: backtestLedgerSummarySchema.shape,
+    },
+    async (request) => {
+      try { return jsonResult(summarizeBacktestLedger(await backtestLedgers.get(request.artifact_id), request)); }
+      catch (err) { return errorResult(err); }
+    },
   );
 
   server.registerTool(
