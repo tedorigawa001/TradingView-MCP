@@ -764,6 +764,8 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
   assert.ok(!response.isError);
   const result = JSON.parse(response.content[0].text);
   assert.equal(result.overall.profit_factor, 2);
+  assert.equal(result.ledger_records, data.trades.length);
+  assert.equal(result.selected_fraction, 4 / data.trades.length);
   assert.equal(result.overall.closed_trades, 3);
   assert.equal(result.overall.missing_outcomes, 1);
   assert.equal(result.groups.length, 2);

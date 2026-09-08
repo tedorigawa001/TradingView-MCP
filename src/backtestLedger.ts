@@ -156,8 +156,10 @@ export function summarizeBacktestLedger(input: unknown, options: unknown) {
   return { artifact_id: request.artifact_id, source_id: ledger.source_id, source_sha256: ledger.source_sha256,
     evidence_tier: ledger.evidence_tier, status: !rows.length ? "empty" : overall.missing_outcomes ? "partial" : "complete",
     candidateEligible: false, time_basis: "exit_at_utc_from_inclusive_to_exclusive", return_unit: "bps",
-    cost_basis: "one_flat_round_trip_cost_per_closed_trade", filters: request, overall,
+    cost_basis: "one_flat_round_trip_cost_per_closed_trade", filters: request,
+    ledger_records: ledger.trades.length, selected_fraction: rows.length / ledger.trades.length, overall,
     groups: [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, group]) => ({ key, ...metrics(group) })),
     limitations: ["content_hash_is_integrity_not_source_authentication", "source_metadata_is_importer_supplied",
+      "content_hash_does_not_prove_prespecified_slice_selection", "slice_search_count_is_not_tracked",
       "missing_outcomes_are_not_zero_returns", "bps_sums_are_not_portfolio_returns", "not_a_statistical_candidate_test"] };
 }

@@ -10,6 +10,28 @@ import { BacktestLedgerStore, backtestLedgerSchema, summarizeBacktestLedger, rea
 const fixture=JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json',import.meta.url),'utf8'));
 const id=(x)=>'sha256:'+createHash('sha256').update(JSON.stringify(backtestLedgerSchema.parse(x))).digest('hex');
 const options=(extra={})=>({artifact_id:id(fixture),round_trip_cost_bps:2,...extra});
+test('ledger exposes the unfiltered denominator for every slice including missing outcomes',()=>{
+  for (const extra of [{}, {include_symbols:['EURUSD']}, {exclude_symbols:['XAUUSD']},
+    {direction:'short'}, {from:'2024-02-01T00:00:00.000Z'}, {to:'2024-02-01T00:00:00.000Z'},
+    {from:'2025-01-01T00:00:00.000Z'}]) {
+    for (const group_by of ['none','symbol','year','month']) {
+      const r=summarizeBacktestLedger(fixture,options({...extra,group_by}));
+      const expected=fixture.trades.filter(t=>(!extra.include_symbols||extra.include_symbols.includes(t.symbol))
+        && !extra.exclude_symbols?.includes(t.symbol) && (!extra.direction||t.direction===extra.direction)
+        && (!extra.from||t.exit_at>=extra.from) && (!extra.to||t.exit_at<extra.to)).length;
+      assert.equal(r.ledger_records,fixture.trades.length);
+      assert.equal(r.overall.records,expected);
+      assert.equal(r.selected_fraction,expected/fixture.trades.length);
+      assert.equal(r.candidateEligible,false);
+      // The limitations are what a reader leans on, and nothing else holds them: the
+      // whole list can be deleted with every other assertion still green.
+      assert.deepEqual(r.limitations,['content_hash_is_integrity_not_source_authentication',
+        'source_metadata_is_importer_supplied','content_hash_does_not_prove_prespecified_slice_selection',
+        'slice_search_count_is_not_tracked','missing_outcomes_are_not_zero_returns',
+        'bps_sums_are_not_portfolio_returns','not_a_statistical_candidate_test']);
+    }
+  }
+});
 async function directory(t) { const d=await mkdtemp(join(tmpdir(),'ledger-test-'));t.after(()=>rm(d,{recursive:true,force:true}));return d; }
 
 test('ledger recomputes pooled PF, applies cost once, and preserves missing and zero outcomes',()=>{

@@ -78,6 +78,14 @@ fraction from 0 to 1; zero net outcomes are not wins.
 The tool returns overall/group counts, missing counts, positive/negative sums,
 net sum, mean, PF, cost/filter metadata and source identity, but no trade rows.
 Missing outcomes are excluded from return denominators, not replaced with zero.
+`ledger_records` counts all records in the original artifact, before any filters,
+including missing outcomes. `selected_fraction` is `overall.records / ledger_records`
+(0 to 1, not a percentage); it is 1 without filters and 0 for an empty selection.
+Grouping does not change this denominator. For example, a 34-record slice of a
+200-record ledger reports 200 and 0.17, even if `low_sample` is false.
+These fields expose selection size, not selection-bias correction. The tool does
+not track the number of slices tried, and a content hash does not establish that
+filters were specified before inspecting outcomes.
 `status: complete` only means no selected records have missing outcomes; it does
 not prove source coverage or profitability. `low_sample` warns below 30 trades,
 not an independent-sample or significance threshold. No candidate is approved.
