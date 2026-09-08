@@ -2,7 +2,18 @@
 
 ## Addendum: Saved Backtest Ledger Summary (2026-09-07)
 
-`summarize_backtest_ledger` is read-only and never accesses the chart or network.
+`summarize_backtest_ledger` never accesses the chart or network. Without
+`research_id` it is read-only; supplying the bounded identifier explicitly opts
+into a local slice exploration journal append before metrics are returned.
+Journal errors fail closed without returning metrics. The identifier is a
+research namespace, not a path or a claim of preregistration. Recorded counts
+exclude external/untracked searches and do not certify statistical validity.
+The exploration stream uses the existing append-only first-seen storage engine
+with process-local queuing and a shared exclusive file lock, owner-only storage,
+record validation and fsync. It is bounded to 32 MiB per file / 64 KiB per record;
+limits or corrupt records prevent summary delivery. Its path is configured only
+by the local server environment, not the MCP caller. Same-user tampering and
+unrecorded exploration remain outside its guarantees.
 It resolves only `sha256:<64 lowercase hex>` IDs beneath the configured private
 ledger directory; MCP callers cannot supply paths, code, or import content.
 The local import CLI requires an input file and explicit confirmation. It accepts

@@ -531,6 +531,7 @@ function makeDeps(overrides = {}) {
     policyRateHeartbeats: overrides.policyRateHeartbeats,
     bookmapFlowDirectory: overrides.bookmapFlowDirectory,
     backtestLedgers: overrides.backtestLedgers,
+    backtestSliceJournal: overrides.backtestSliceJournal,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -770,6 +771,7 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
   assert.equal(result.overall.missing_outcomes, 1);
   assert.equal(result.groups.length, 2);
   assert.equal(result.artifact_id, artifact_id);
+  assert.equal(result.exploration.status, 'untracked');
   assert.equal(chartCalls, 0);
   for (const args of [{ artifact_id }, { artifact_id: "../private", round_trip_cost_bps: 2 },
     { artifact_id: "sha256:" + "f".repeat(64), round_trip_cost_bps: 2 },
@@ -777,6 +779,82 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
     const failed = await client.callTool({ name: "summarize_backtest_ledger", arguments: args });
     assert.equal(failed.isError, true);
   }
+});
+
+test("summarize_backtest_ledger journals before exposing metrics and fails closed on recording failure", async (t) => {
+  const { BacktestLedgerStore } = await import('../../build/backtestLedger.js');
+  const { rm } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'slice-server-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const data = JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json', import.meta.url), 'utf8'));
+  const store = new BacktestLedgerStore(dir);
+  const { artifact_id } = await store.register(data);
+  const calls = [];
+  let fail = false;
+  const client = await connectedClient(makeDeps({ backtestLedgers: store, backtestSliceJournal: {
+    recordSummary: async (researchId, summary) => {
+      calls.push({researchId, summary});
+      if (fail) throw new Error('journal unavailable');
+      return { status: 'tracked', call_count: calls.length };
+    },
+  }}));
+  t.after(() => client.close());
+  const args = {artifact_id, round_trip_cost_bps: 2, research_id: 'slice-review', group_by: 'symbol'};
+  const response = await client.callTool({name: 'summarize_backtest_ledger', arguments: args});
+  assert.ok(!response.isError);
+  assert.equal(JSON.parse(response.content[0].text).exploration.call_count, 1);
+  assert.equal(calls[0].researchId, 'slice-review');
+  assert.equal(calls[0].summary.ledger_records, data.trades.length);
+  assert.equal(calls[0].summary.filters.research_id, undefined);
+  fail = true;
+  const failed = await client.callTool({name: 'summarize_backtest_ledger', arguments: args});
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /journal unavailable/);
+  assert.ok(!failed.content[0].text.includes('profit_factor'));
+  const before = calls.length;
+  for (const patch of [{research_id: '../invalid'}, {include_symbols: ['TYPO']}]) {
+    const invalid = await client.callTool({name: 'summarize_backtest_ledger', arguments: {...args, ...patch}});
+    assert.equal(invalid.isError, true);
+  }
+  assert.equal(calls.length, before);
+  const {research_id, ...untrackedArgs} = args;
+  const untracked = await client.callTool({name: 'summarize_backtest_ledger', arguments: untrackedArgs});
+  assert.ok(!untracked.isError);
+  assert.equal(JSON.parse(untracked.content[0].text).exploration.status, 'untracked');
+  assert.equal(calls.length, before);
+});
+
+test("summarize_backtest_ledger persists slice counts across MCP calls", async (t) => {
+  const { BacktestLedgerStore } = await import('../../build/backtestLedger.js');
+  const { BacktestSliceJournalStore } = await import('../../build/backtestSliceJournal.js');
+  const { rm } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'slice-persist-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const data = JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json', import.meta.url), 'utf8'));
+  const store = new BacktestLedgerStore(join(dir, 'ledgers'));
+  const { artifact_id } = await store.register(data);
+  const client = await connectedClient(makeDeps({backtestLedgers: store,
+    backtestSliceJournal: new BacktestSliceJournalStore(join(dir, 'slices.jsonl'))}));
+  t.after(() => client.close());
+  const args = {artifact_id, round_trip_cost_bps: 2, research_id: 'integration', group_by: 'symbol'};
+  for (let i = 1; i <= 2; i++) {
+    const response = await client.callTool({name: 'summarize_backtest_ledger', arguments: args});
+    assert.ok(!response.isError, response.content[0].text);
+    const r = JSON.parse(response.content[0].text);
+    assert.equal(r.exploration.call_count, i);
+    assert.equal(r.exploration.distinct_conditions, 1);
+    assert.equal(r.candidateEligible, false);
+    assert.ok(!r.limitations.includes('slice_search_count_is_not_tracked'));
+  }
+  const response = await client.callTool({name: 'summarize_backtest_ledger', arguments: {...args, round_trip_cost_bps: 3}});
+  const r = JSON.parse(response.content[0].text);
+  assert.equal(r.exploration.call_count, 3);
+  assert.equal(r.exploration.distinct_conditions, 2);
+  const boundary = await client.callTool({name: 'summarize_backtest_ledger', arguments: {...args, research_id: 'a'.repeat(120)}});
+  assert.ok(!boundary.isError, boundary.content[0].text);
+  assert.equal(JSON.parse(boundary.content[0].text).exploration.call_count, 1);
+  const tooLong = await client.callTool({name: 'summarize_backtest_ledger', arguments: {...args, research_id: 'a'.repeat(121)}});
+  assert.equal(tooLong.isError, true);
 });
 
 test("exposes exactly the one hundred two expected tools", async () => {

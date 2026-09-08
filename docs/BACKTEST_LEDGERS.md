@@ -1,7 +1,8 @@
 # Saved Backtest Ledgers
 
 `summarize_backtest_ledger` reads a registered immutable local artifact. It does
-not contact TradingView or alter a chart. Research strategies and data remain
+not contact TradingView or alter a chart. An optional `research_id` enables local
+slice exploration logging; without it the tool remains read-only. Research strategies and data remain
 local; this repository publishes only the generic import and aggregation code.
 
 ## Import
@@ -83,13 +84,49 @@ including missing outcomes. `selected_fraction` is `overall.records / ledger_rec
 (0 to 1, not a percentage); it is 1 without filters and 0 for an empty selection.
 Grouping does not change this denominator. For example, a 34-record slice of a
 200-record ledger reports 200 and 0.17, even if `low_sample` is false.
-These fields expose selection size, not selection-bias correction. The tool does
-not track the number of slices tried, and a content hash does not establish that
-filters were specified before inspecting outcomes.
+These fields expose selection size, not selection-bias correction. A content hash
+does not establish that filters were specified before inspecting outcomes.
 `status: complete` only means no selected records have missing outcomes; it does
 not prove source coverage or profitability. `low_sample` warns below 30 trades,
 not an independent-sample or significance threshold. No candidate is approved.
 Bps sums across trades/symbols are not a funded portfolio return.
+
+## Slice Exploration Journal
+
+Supply `research_id` to explicitly request local recording before summary metrics
+are returned. Use the same ID throughout one research question. It is an exploration
+namespace, not a registered hypothesis or proof of preregistration. Omit it for
+read-only use; the response then explicitly reports `exploration.status: untracked`.
+Recording failure returns a tool error without metrics, not an untracked success.
+
+For example, add `"research_id": "my-slice-study"` to the existing summary
+arguments. `exploration` then returns `call_count`, `distinct_conditions`, the
+current `condition_hash`, global log `sequence`, scoped `recording_started_at`,
+current `group_keys` and cumulative `grouped_cell_count`. The latter counts
+repeated presentations too; it is not a count of unique groups or independent
+tests. All counts describe this local stream as of the recorded call.
+
+Counts are scoped to the research ID and immutable artifact ID. Total calls and
+distinct normalized conditions are separate: repeated calls increment only the
+former. Symbol sets are deduplicated and sorted. Direction, UTC date bounds,
+grouping and flat round-trip costs remain part of condition identity. Returned
+group keys are recorded as presented comparisons, not independent statistical
+trials. Empty selections are recorded too. Invalid requests that expose no
+summary are not counted. A call recorded before a disconnected response may be
+counted even if the caller did not receive it; retries are additional calls.
+
+This is a separate exploration stream alongside the existing research journals,
+not a change to frozen hypothesis records. Earlier calls, calls without an ID,
+other IDs/artifacts and tool-external exploration are outside the reported counts.
+Neither counts nor group totals are an automatic multiple-testing correction.
+`candidateEligible` stays false regardless of PF or recorded sample size.
+
+Storage defaults to `~/.tradingview-mcp/backtest-slice-journal.jsonl`, configurable
+through `TRADINGVIEW_MCP_BACKTEST_SLICE_JOURNAL_PATH` in the server environment,
+never through an MCP path argument. The local append-only log uses the existing
+first-seen storage lock and durability checks, with 32 MiB file / 64 KiB record
+limits. Reaching a limit fails closed; do not silently rotate or reset the log
+and present the resulting counts as a complete search history.
 
 ## Storage Boundary
 
