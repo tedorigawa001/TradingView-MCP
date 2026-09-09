@@ -936,7 +936,39 @@ test('research period usage detects cross-version access through the real MCP st
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred four expected tools", async () => {
+test('compare_research_evidence reports changed and unknown declarations without chart access', async (t) => {
+  let calls=0;
+  const client=await connectedClient(makeDeps({tv:{getChartContext:async()=>{calls++;throw new Error('unexpected chart');}}}));
+  t.after(()=>client.close());
+  const keys=['data_sha256','code_sha256','runner_sha256','candidate_rule_sha256','parameters_sha256','environment_sha256'];
+  const previous=Object.fromEntries(keys.map(k=>[k,'sha256:'+'a'.repeat(64)]));
+  const call=async(current)=>{
+    const response=await client.callTool({name:'compare_research_evidence',arguments:{previous,current}});
+    assert.ok(!response.isError);
+    return JSON.parse(response.content[0].text);
+  };
+  const changed=await call({...previous,code_sha256:'sha256:'+'b'.repeat(64)});
+  assert.deepEqual(changed.changed_fields,['code_sha256']);
+  assert.equal(changed.fields[0].status,'match');
+  assert.equal(changed.revalidation,'required');
+  assert.ok(changed.required_checks.includes('reproduce_previous_ledger'));
+  const unknown=await call({});
+  assert.equal(unknown.status,'incomplete');
+  assert.equal(unknown.unknown_fields.length,6);
+  const same=await call(previous);
+  assert.equal(same.status,'matching_declarations');
+  assert.equal(same.compatibility_proven,false);
+  assert.equal(same.candidateEligible,false);
+  const extra=await client.callTool({name:'compare_research_evidence',arguments:{previous,current:previous,execute:true}});
+  assert.equal(extra.isError,true);
+  for(const current of [{data_sha256:'invalid'}, {path:'/tmp/data'}]) {
+    const response=await client.callTool({name:'compare_research_evidence',arguments:{previous,current}});
+    assert.equal(response.isError,true);
+  }
+  assert.equal(calls,0);
+});
+
+test("exposes exactly the one hundred five expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -949,6 +981,7 @@ test("exposes exactly the one hundred four expected tools", async () => {
       "check_research_period_usage",
       "classify_cross_asset_shocks",
       "compare_indicator_observations",
+      "compare_research_evidence",
       "compare_strategy_experiments",
       "compute_correlation_regimes",
       "compute_feature_outcome_relationships",

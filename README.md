@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (104 Total)
+## Tools (105 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -380,6 +380,7 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `summarize_backtest_ledger` | Recomputes PF/net bps, sample break-even round-trip cost and cost headroom; compares the full ledger, selected slice and excluded complement with common-opportunity cost decomposition. Optional `research_id` records local exploration; otherwise explicitly untracked. No chart access. See [ledger import contract](docs/BACKTEST_LEDGERS.md) |
 | `record_research_period_usage` | Records reported data access intervals with explicit confirmation; retries are idempotent, conflicting access IDs fail. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
 | `check_research_period_usage` | Finds prior interval use across research IDs and revisions of the same series; absence of records never proves unused OOS. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
+| `compare_research_evidence` | Compares declared data/code/runner/rule/parameter/environment hashes; identifies missing evidence and revalidation checks without certifying compatibility. See [comparison contract](docs/RESEARCH_EVIDENCE_COMPARISON.md) |
 | `run_strategy_experiment` | Serially compares baseline and candidate on one chart; dry-run by default, then after confirmation reports exact Pine versions, ledger IDs, inputs, minimum trades, condition match, and metric deltas before removing both |
 | `run_backtest_matrix` | Runs up to 24 explicit symbol/timeframe/input combinations with a 30-minute soft deadline, per-row full-ledger IDs, insufficiency/failure reasons, and verified restoration; it does not rank results |
 | `run_strategy_walk_forward` | Splits full ledgers for 2-8 candidates into 2-12 explicit train/embargo/test windows, selects on train only, and returns OOS only for the selected candidate with anchored/rolling, tie, minimum-trade, quality, and coverage checks |

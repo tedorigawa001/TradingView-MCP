@@ -7,6 +7,7 @@ import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from 
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema } from "./researchPeriodUsage.js";
+import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -5461,6 +5462,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const {confirm, ...input} = request;
         return jsonResult(await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input)));
       } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "compare_research_evidence",
+    {
+      description: "Compare caller-supplied SHA-256 manifests for previous/current research data, code, runner, candidate rule, parameters and environment. " +
+        "Reports changed and unknown axes plus required revalidation checks. Missing values never match. " +
+        "Does not read files, authenticate hashes, execute code, persist records or certify compatibility, calibration, unused OOS or candidate eligibility.",
+      inputSchema: researchEvidenceComparisonSchema,
+    },
+    async (request) => {
+      try { return jsonResult(compareResearchEvidence(request)); }
+      catch (err) { return errorResult(err); }
     },
   );
 

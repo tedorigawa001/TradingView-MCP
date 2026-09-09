@@ -1,5 +1,14 @@
 # Security Review (2026-07-07)
 
+## Addendum: Research Evidence Comparison (2026-09-09)
+
+`compare_research_evidence` accepts two strict bounded objects of nullable SHA-256
+digests. It performs no filesystem/network access, storage or code execution.
+Digests are caller declarations, not authenticated source or environment evidence.
+Missing values stay unknown; matching hashes do not certify compatibility,
+calibration, unused OOS or eligibility. Revalidation checks are guidance only,
+not automatically executed or a complete assurance argument.
+
 ## Addendum: Research Period Usage (2026-09-09)
 
 `record_research_period_usage` writes only bounded structured access metadata to
