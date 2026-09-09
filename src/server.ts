@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
@@ -203,7 +203,7 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check" | "recordToolAccess">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -5505,23 +5505,45 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "All filters including dates define selection, not the baseline. Missing outcomes remain missing. No chart access, orders, imports, or arbitrary file paths. " +
         "Register normalized direction-adjusted gross-bps evidence with the local import CLI first. " +
         "Optional research_id explicitly enables a local append-only slice exploration journal write before returning metrics; " +
+        "it also records automatic period usage for the entire ledger trade envelope, not underlying price lookbacks. " +
+        "Optional usage_access_id with research_id makes period-record retries idempotent; slice call counts still increment. " +
         "omitting it is explicitly untracked. Recording failure returns an error without metrics. " +
         "Counts cover recorded calls for this research ID and artifact only, not all searches or independent trials.",
       inputSchema: {
         ...backtestLedgerSummarySchema.shape,
         research_id: backtestSliceResearchIdSchema.optional(),
+        usage_access_id: backtestSliceResearchIdSchema.optional(),
       },
     },
     async (request) => {
       try {
-        const { research_id, ...filters } = request;
-        const summary = summarizeBacktestLedger(await backtestLedgers.get(request.artifact_id), filters);
+        const { research_id, usage_access_id, ...filters } = request;
+        if (usage_access_id !== undefined && research_id === undefined) throw new Error("usage_access_id requires research_id");
+        const ledger = await backtestLedgers.get(request.artifact_id);
+        const summary = summarizeBacktestLedger(ledger, filters);
+        let period_usage: unknown = { status: "untracked", limitations: ["research_id_required_for_automatic_period_usage"] };
+        if (research_id !== undefined) {
+          const from = ledger.trades.reduce((min, row) => row.entry_at < min ? row.entry_at : min, ledger.trades[0].entry_at);
+          const last = ledger.trades.reduce((max, row) => row.exit_at > max ? row.exit_at : max, ledger.trades[0].exit_at);
+          // Include the last observed exit in the half-open interval, even for zero-duration trades.
+          const to = new Date(Date.parse(last) + 1).toISOString();
+          const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+          const access_id = usage_access_id ?? `ledger-access:${randomUUID()}`;
+          const recorded = await researchPeriodUsage.recordToolAccess({
+            access_id, research_id, series_id: `ledger-source:${hash(ledger.source_id).slice(7)}`,
+            data_version: request.artifact_id, from, to, purpose: "exploration",
+            request_sha256: hash(JSON.stringify({contract: "ledger_period_usage_v1", filters: summary.filters})),
+          });
+          period_usage = { status: "tracked", access_id, record: recorded,
+            limitations: ["ledger_trade_envelope_not_underlying_price_history", "source_id_is_importer_supplied",
+              "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
+        }
         const exploration = research_id === undefined
           ? { status: "untracked", limitations: ["slice_search_count_is_not_tracked"] }
           : await backtestSliceJournal.recordSummary(research_id, summary);
         const limitations = research_id === undefined ? summary.limitations
           : summary.limitations.filter((item) => item !== "slice_search_count_is_not_tracked");
-        return jsonResult({ ...summary, limitations, exploration });
+        return jsonResult({ ...summary, limitations, exploration, period_usage });
       }
       catch (err) { return errorResult(err); }
     },

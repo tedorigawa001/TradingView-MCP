@@ -2,8 +2,14 @@
 
 `summarize_backtest_ledger` reads a registered immutable local artifact. It does
 not contact TradingView or alter a chart. An optional `research_id` enables local
-slice exploration logging; without it the tool remains read-only. Research strategies and data remain
+slice exploration and automatic trade-envelope period logging; without it the tool remains read-only. Research strategies and data remain
 local; this repository publishes only the generic import and aggregation code.
+
+Period logging includes the full ledger used for the baseline, not just the
+selected slice. Use `usage_access_id` with `research_id` for idempotent period
+retries; slice calls remain counted separately. See the
+[automatic period contract](RESEARCH_PERIOD_USAGE.md#automatic-ledger-tracking)
+for scope, provenance, partial failures and missing underlying price history.
 
 ## Break-Even Cost
 

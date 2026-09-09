@@ -29,24 +29,43 @@ export const researchPeriodUsageCheckSchema = z.object({
 }).strict().refine(ordered, "from must be before to");
 
 export type ResearchPeriodUsageInput = z.infer<typeof researchPeriodUsageRecordSchema>;
+const toolAccessSchema = z.object({
+  access_id: identifier,
+  research_id: identifier,
+  ...period,
+  purpose: inputSchema.shape.purpose,
+  request_sha256: hash,
+}).strict().refine(ordered, "from must be before to");
+export type ResearchPeriodToolAccessInput = z.infer<typeof toolAccessSchema>;
 export type ResearchPeriodUsageCheckInput = z.input<typeof researchPeriodUsageCheckSchema>;
-const storedSchema = z.object({
+const storedFields = {
   ...inputSchema.shape,
   schema_version: z.literal("1.0"),
   namespace: z.literal("research_period_usage"),
-  source: z.literal("user_reported"),
   sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   recorded_at: timestamp,
   first_seen_at: timestamp,
   observation_date: z.string().refine(isCalendarDate),
-}).strict().refine(ordered, "from must be before to");
+};
+const toolMetadata = {
+  source: "tool_observed",
+  tool_name: "summarize_backtest_ledger",
+  scope: "ledger_trade_envelope_only",
+} as const;
+const storedSchema = z.discriminatedUnion("source", [
+  z.object({ ...storedFields, source: z.literal("user_reported") }).strict(),
+  z.object({ ...storedFields, source: z.literal(toolMetadata.source),
+    tool_name: z.literal(toolMetadata.tool_name), scope: z.literal(toolMetadata.scope),
+    request_sha256: hash }).strict(),
+]).refine(ordered, "from must be before to");
 export type ResearchPeriodUsageRecord = z.infer<typeof storedSchema>;
 
 function validateRecord(value: unknown): ResearchPeriodUsageRecord {
   const record = storedSchema.parse(value);
   if (record.recorded_at !== record.first_seen_at
     || record.observation_date !== record.recorded_at.slice(0, 10)
-    || record.accessed_at > record.recorded_at) {
+    || record.accessed_at > record.recorded_at
+    || (record.source === "tool_observed" && record.accessed_at !== record.recorded_at)) {
     throw new Error("invalid research period usage dates");
   }
   return record;
@@ -88,7 +107,15 @@ function assess(records: ResearchPeriodUsageRecord[], query: z.infer<typeof rese
     matches: overlaps.slice(0, 100).map((entry) => ({ ...entry,
       version_relation: entry.data_version === query.data_version ? "same" : "different" })),
     truncated: overlaps.length > 100,
-    limitations: ["user_reported_local_usage_only", "prior_and_external_usage_may_be_missing",
+    limitations: [
+      ...(records.some((entry) => entry.source === "tool_observed")
+        ? ["tool_observed_usage_is_ledger_trade_envelope_only",
+          "series_id_and_data_version_are_importer_supplied_metadata",
+          "ledger_trade_envelope_does_not_include_indicator_lookbacks"]
+        : ["user_reported_local_usage_only"]),
+      ...(records.some((entry) => entry.source === "tool_observed")
+        && records.some((entry) => entry.source === "user_reported") ? ["manual_usage_is_user_reported"] : []),
+      "prior_and_external_usage_may_be_missing", "untracked_external_accesses_may_be_missing",
       "no_recorded_overlap_is_not_proof_of_unused_data", "declarations_do_not_authorize_candidate_eligibility",
       "data_version_is_caller_supplied_not_source_authentication",
       "prior_means_ledger_append_order_not_access_time"],
@@ -161,11 +188,25 @@ export class ResearchPeriodUsageStore {
   }> {
     // Parse before queueing to detach the request from caller-owned mutable data.
     const request = researchPeriodUsageRecordSchema.parse(input);
+    return this.recordBound({ ...request, source: "user_reported" });
+  }
+
+  async recordToolAccess(input: unknown): Promise<ResearchPeriodUsageRecord & {
+    idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
+  }> {
+    const request = toolAccessSchema.parse(input);
+    return this.recordBound({ ...request, ...toolMetadata });
+  }
+
+  private async recordBound(request: (ResearchPeriodUsageInput & { source: "user_reported" })
+    | (ResearchPeriodToolAccessInput & typeof toolMetadata)): Promise<ResearchPeriodUsageRecord & {
+      idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
+    }> {
     return this.log.serialize(async () => {
       const records = await this.readUnlocked();
       const existing = records.find((entry) => entry.access_id === request.access_id);
-      if (existing && Object.keys(request).some((key) =>
-        existing[key as keyof ResearchPeriodUsageInput] !== request[key as keyof ResearchPeriodUsageInput])) {
+      if (existing && Object.entries(request).some(([key, value]) =>
+        (existing as Record<string, unknown>)[key] !== value)) {
         throw new Error("research period usage access_id conflicts with its original input");
       }
       // Retries replay the original prefix, so later reports cannot rewrite this assessment.
@@ -183,8 +224,10 @@ export class ResearchPeriodUsageStore {
       if (records.length && records[records.length - 1].recorded_at > now) {
         throw new Error("research period usage clock moved backwards");
       }
-      const record = validateRecord({ ...request, schema_version: "1.0", namespace: "research_period_usage",
-        source: "user_reported", sequence: records.length + 1, recorded_at: now, first_seen_at: now,
+      const record = validateRecord({ ...request,
+        accessed_at: request.source === "tool_observed" ? now : request.accessed_at,
+        schema_version: "1.0", namespace: "research_period_usage",
+        sequence: records.length + 1, recorded_at: now, first_seen_at: now,
         observation_date: now.slice(0, 10) });
       await this.log.appendUnlocked(record);
       return { ...record, idempotent: false, prior_overlap };

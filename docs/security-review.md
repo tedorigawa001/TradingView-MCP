@@ -1,5 +1,17 @@
 # Security Review (2026-07-07)
 
+## Addendum: Automatic Ledger Period Logging (2026-09-09)
+
+`summarize_backtest_ledger` with `research_id` authorizes a second bounded local
+journal write for tool-observed trade-envelope usage before returning metrics.
+Manual callers cannot forge the tool provenance through the recording MCP tool.
+The verified artifact supplies the version and period; source identity remains
+importer-supplied. No arbitrary paths, raw price reads or orders are added.
+Write failures suppress metrics. The two journals are not atomic, so failed
+delivery can leave conservative usage records. Optional `usage_access_id` binds
+period retries to the same request, not exactly-once slice counts. No provenance,
+unused-period or candidate validity is certified by automatic recording.
+
 ## Addendum: Shared History Lock Contention (2026-09-09)
 
 `AppendOnlyFirstSeenLog` uses a monotonic, finite contention budget (30 seconds

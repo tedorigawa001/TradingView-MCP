@@ -532,7 +532,11 @@ function makeDeps(overrides = {}) {
     bookmapFlowDirectory: overrides.bookmapFlowDirectory,
     backtestLedgers: overrides.backtestLedgers,
     backtestSliceJournal: overrides.backtestSliceJournal,
-    researchPeriodUsage: overrides.researchPeriodUsage,
+    researchPeriodUsage: overrides.researchPeriodUsage ?? {
+      recordToolAccess: async input => ({...input, source:'tool_observed', idempotent:false}),
+      record: async () => {throw new Error('unexpected manual period write');},
+      check: async () => {throw new Error('unexpected period check');},
+    },
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -870,6 +874,100 @@ test("summarize_backtest_ledger persists slice counts across MCP calls", async (
   assert.equal(JSON.parse(boundary.content[0].text).exploration.call_count, 1);
   const tooLong = await client.callTool({name: 'summarize_backtest_ledger', arguments: {...args, research_id: 'a'.repeat(121)}});
   assert.equal(tooLong.isError, true);
+});
+
+test('ledger automatic usage records the full envelope, retries safely and fails before metrics',async t=>{
+  const {BacktestLedgerStore}=await import('../../build/backtestLedger.js');
+  const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
+  const {rm}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'automatic-usage-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const ledger=JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json',import.meta.url),'utf8'));
+  const ledgers=new BacktestLedgerStore(join(dir,'ledgers'));
+  const {artifact_id}=await ledgers.register(ledger);
+  const path=join(dir,'usage.jsonl');
+  const usage=new ResearchPeriodUsageStore(path);
+  let failUsage=false,failSlice=false,sliceCalls=0;
+  const client=await connectedClient(makeDeps({backtestLedgers:ledgers,
+    researchPeriodUsage:{record:input=>usage.record(input),check:input=>usage.check(input),
+      recordToolAccess:input=>{if(failUsage)throw new Error('usage unavailable');return usage.recordToolAccess(input);}},
+    backtestSliceJournal:{recordSummary:async()=>{sliceCalls++;if(failSlice)throw new Error('slice unavailable');return {status:'tracked'};}}}));
+  t.after(()=>client.close());
+  const args={artifact_id,round_trip_cost_bps:2,research_id:'auto',usage_access_id:'attempt-1',exclude_symbols:['XAUUSD']};
+  const call=async input=>client.callTool({name:'summarize_backtest_ledger',arguments:input});
+  const first=await call(args);
+  assert.ok(!first.isError,first.content[0].text);
+  const value=JSON.parse(first.content[0].text).period_usage;
+  assert.equal(value.record.source,'tool_observed');
+  assert.equal(value.record.from,'2024-01-02T00:00:00.000Z');
+  assert.equal(value.record.to,'2024-02-01T00:00:00.001Z');
+  assert.equal(value.record.data_version,artifact_id);
+  const retry=await call(args);
+  assert.ok(!retry.isError,retry.content[0].text);
+  assert.equal(JSON.parse(retry.content[0].text).period_usage.record.idempotent,true);
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,1);
+  const conflict=await call({...args,round_trip_cost_bps:3});
+  assert.equal(conflict.isError,true);
+  assert.equal(sliceCalls,2);
+  failUsage=true;
+  const fail=await call({...args,usage_access_id:'attempt-2'});
+  assert.equal(fail.isError,true);
+  assert.ok(!fail.content[0].text.includes('profit_factor'));
+  assert.equal(sliceCalls,2);
+  failUsage=false;failSlice=true;
+  const partial=await call({...args,usage_access_id:'attempt-2'});
+  assert.equal(partial.isError,true);
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,2);
+  failSlice=false;
+  assert.ok(!(await call({...args,usage_access_id:'attempt-2'})).isError);
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,2);
+  const empty=await call({...args,usage_access_id:'empty',from:'2025-01-01T00:00:00.000Z'});
+  assert.ok(!empty.isError,empty.content[0].text);
+  assert.equal(JSON.parse(empty.content[0].text).period_usage.record.from,value.record.from);
+  const {research_id,usage_access_id,...untracked}=args;
+  const count=(await readFile(path,'utf8')).trim().split('\n').length;
+  assert.equal(JSON.parse((await call(untracked)).content[0].text).period_usage.status,'untracked');
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,count);
+  assert.equal((await call({...untracked,usage_access_id:'orphan'})).isError,true);
+});
+
+test('automatic usage preserves source identity across revisions and separates retry counts',async t=>{
+  const {BacktestLedgerStore}=await import('../../build/backtestLedger.js');
+  const {BacktestSliceJournalStore}=await import('../../build/backtestSliceJournal.js');
+  const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
+  const {rm}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'auto-real-journals-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const ledger=JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json',import.meta.url),'utf8'));
+  const ledgers=new BacktestLedgerStore(join(dir,'ledgers'));
+  const original=await ledgers.register(ledger);
+  const revised=await ledgers.register({...ledger,trades:ledger.trades.map(r=>({...r,gross_return_bps:r.gross_return_bps===null?null:r.gross_return_bps+1}))});
+  const path=join(dir,'usage.jsonl');
+  const client=await connectedClient(makeDeps({backtestLedgers:ledgers,
+    researchPeriodUsage:new ResearchPeriodUsageStore(path),
+    backtestSliceJournal:new BacktestSliceJournalStore(join(dir,'slices.jsonl'))}));
+  t.after(()=>client.close());
+  const args={artifact_id:original.artifact_id,round_trip_cost_bps:2,research_id:'real-auto'};
+  const call=async patch=>{
+    const response=await client.callTool({name:'summarize_backtest_ledger',arguments:{...args,...patch}});
+    assert.ok(!response.isError,response.content[0].text);
+    return JSON.parse(response.content[0].text);
+  };
+  const first=await call({usage_access_id:'same'});
+  const retry=await call({usage_access_id:'same'});
+  assert.equal(first.exploration.call_count,1);
+  assert.equal(retry.exploration.call_count,2);
+  assert.equal(retry.period_usage.record.idempotent,true);
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,1);
+  const other=await call({artifact_id:revised.artifact_id,usage_access_id:'revision'});
+  assert.equal(other.period_usage.record.series_id,first.period_usage.record.series_id);
+  assert.notEqual(other.period_usage.record.data_version,first.period_usage.record.data_version);
+  assert.equal(other.period_usage.record.prior_overlap.overlapping_records,1);
+  assert.equal(other.period_usage.record.prior_overlap.matches[0].version_relation,'different');
+  const a=await call({}),b=await call({});
+  assert.match(a.period_usage.access_id,/^ledger-access:[a-f0-9-]{36}$/);
+  assert.notEqual(a.period_usage.access_id,b.period_usage.access_id);
+  assert.equal((await readFile(path,'utf8')).trim().split('\n').length,4);
 });
 
 test('research period tools require explicit recording and do not hide storage failures', async (t) => {

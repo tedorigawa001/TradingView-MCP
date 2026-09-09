@@ -19,6 +19,106 @@ async function setup(t) {
   return { directory, path, store: new ResearchPeriodUsageStore(path) };
 }
 const saved = async (path) => (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse);
+const toolInput = (patch = {}) => {
+  const { accessed_at, ...request } = input();
+  return { ...request, request_sha256: version('c'), ...patch };
+};
+
+test('tool access persists internal metadata and replays its timestamp and original prefix later', async (t) => {
+  const { store, path } = await setup(t);
+  const before = new Date().toISOString();
+  const first = await store.recordToolAccess(toolInput());
+  assert.equal(first.source, 'tool_observed');
+  assert.equal(first.tool_name, 'summarize_backtest_ledger');
+  assert.equal(first.scope, 'ledger_trade_envelope_only');
+  assert.equal(first.request_sha256, version('c'));
+  assert.equal(first.accessed_at, first.recorded_at);
+  assert.ok(first.accessed_at >= before && first.accessed_at <= new Date().toISOString());
+  const { idempotent, prior_overlap, ...row } = first;
+  assert.equal(idempotent, false);
+  assert.deepEqual(await saved(path), [row]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const later = await store.recordToolAccess(toolInput({ access_id: 'later' }));
+  assert.ok(later.accessed_at > first.accessed_at);
+  assert.equal(later.prior_overlap.overlapping_records, 1);
+  const bytes = await readFile(path, 'utf8');
+  assert.deepEqual(await new ResearchPeriodUsageStore(path).recordToolAccess(toolInput()),
+    { ...first, idempotent: true });
+  assert.equal(await readFile(path, 'utf8'), bytes);
+  for (const result of [later.prior_overlap, await store.check(query())]) {
+    assert.ok(!result.limitations.includes('user_reported_local_usage_only'));
+    assert.ok(result.limitations.some((s) => s.includes('importer_supplied_metadata')));
+    assert.ok(result.limitations.some((s) => s.includes('untracked_external')));
+    assert.ok(result.limitations.some((s) => s.includes('lookbacks')));
+  }
+  await store.record(input({ access_id: 'manual' }));
+  const mixed = await store.check(query());
+  assert.equal(mixed.overlapping_records, 3);
+  assert.ok(!mixed.limitations.includes('user_reported_local_usage_only'));
+  assert.ok(mixed.limitations.includes('manual_usage_is_user_reported'));
+});
+
+test('tool retries bind every input field and manual/tool ID collisions reject both ways', async (t) => {
+  const { store, path } = await setup(t);
+  const first = await store.recordToolAccess(toolInput());
+  const bytes = await readFile(path, 'utf8');
+  for (const patch of [{ request_sha256: version('d') }, { research_id: 'other' },
+    { series_id: 'other' }, { data_version: version('b') }, { from: ts(9) },
+    { to: ts(21) }, { purpose: 'validation' }]) {
+    await assert.rejects(store.recordToolAccess(toolInput(patch)), /conflicts/);
+    assert.equal(await readFile(path, 'utf8'), bytes);
+  }
+  await assert.rejects(store.record(input({ accessed_at: first.accessed_at })), /conflicts/);
+  await store.record(input({ access_id: 'manual' }));
+  await assert.rejects(store.recordToolAccess(toolInput({ access_id: 'manual' })), /conflicts/);
+  assert.equal((await saved(path)).length, 2);
+});
+
+test('manual and tool inputs reject spoofed metadata and tool access timestamps', async (t) => {
+  const { store, path } = await setup(t);
+  for (const patch of [{ source: 'tool_observed' }, { source: 'user_reported' },
+    { tool_name: 'summarize_backtest_ledger' }, { scope: 'ledger_trade_envelope_only' },
+    { request_sha256: version('c') }]) await assert.rejects(store.record(input(patch)));
+  for (const patch of [{ source: 'tool_observed' }, { tool_name: 'summarize_backtest_ledger' },
+    { scope: 'ledger_trade_envelope_only' }, { accessed_at: ts(25) },
+    { request_sha256: undefined }, { request_sha256: 'bad' }, { request_sha256: version('A') },
+    { from: ts(20) }]) await assert.rejects(store.recordToolAccess(toolInput(patch)));
+  await assert.rejects(readFile(path), { code: 'ENOENT' });
+});
+
+test('corrupt source-specific metadata and tool timestamp semantics fail closed', async (t) => {
+  const { store, path } = await setup(t);
+  await store.recordToolAccess(toolInput());
+  const [original] = await saved(path);
+  for (const patch of [{ source: 'unknown' }, { source: 'user_reported' }, { source: undefined },
+    { tool_name: undefined }, { tool_name: 'other' }, { scope: undefined }, { scope: 'all_data' },
+    { request_sha256: undefined }, { request_sha256: 'bad' }, { accessed_at: ts(25) }]) {
+    const bytes = JSON.stringify({ ...original, ...patch }) + '\n';
+    await writeFile(path, bytes);
+    await assert.rejects(store.check(query()));
+    await assert.rejects(store.record(input({ access_id: 'new' })));
+    await assert.rejects(store.recordToolAccess(toolInput()));
+    assert.equal(await readFile(path, 'utf8'), bytes);
+  }
+  const { tool_name, scope, request_sha256, ...manual } = original;
+  manual.source = 'user_reported';
+  for (const patch of [{ tool_name }, { scope }, { request_sha256 }, { source: 'tool_observed' }]) {
+    await writeFile(path, JSON.stringify({ ...manual, ...patch }) + '\n');
+    await assert.rejects(store.check(query()));
+  }
+});
+
+test('concurrent tool accesses snapshot input and share global idempotency', async (t) => {
+  const { store, path } = await setup(t);
+  const request = toolInput();
+  const pending = store.recordToolAccess(request);
+  request.request_sha256 = version('d');
+  const results = await Promise.all([pending, new ResearchPeriodUsageStore(path).recordToolAccess(toolInput())]);
+  assert.deepEqual(results.map((r) => r.idempotent).sort(), [false, true]);
+  assert.equal(results[0].accessed_at, results[1].accessed_at);
+  assert.equal(results[0].request_sha256, version('c'));
+  assert.equal((await saved(path)).length, 1);
+});
 
 test('absent history and declarations never prove unused or authorize eligibility', async (t) => {
   const { store, path } = await setup(t);
@@ -227,8 +327,8 @@ test('caller input is snapshotted before waiting for lock', async (t) => {
   assert.equal((await pending).research_id, 'research:1');
 });
 
-for (const failure of ['file', 'directory']) {
-  test(`identical retry must recover ${failure} sync failure before acknowledging durability`, async (t) => {
+for (const method of ['record', 'recordToolAccess']) for (const failure of ['file', 'directory']) {
+  test(`${method} identical retry must recover ${failure} sync failure before acknowledging durability`, async (t) => {
     if (failure === 'directory' && process.platform === 'win32') {
       t.skip('Windows does not expose directory fsync');
       return;
@@ -259,16 +359,16 @@ for (const failure of ['file', 'directory']) {
       const request = JSON.parse(rawInput);
       const store = new ResearchPeriodUsageStore(path);
       const error = new RegExp('injected ' + failure + ' sync failure');
-      await assert.rejects(store.record(request), error);
+      await assert.rejects(store[${JSON.stringify(method)}](request), error);
       const before = await fs.readFile(path, 'utf8');
       const original = JSON.parse(before.trim());
       assert.equal(original.sequence, 1);
       // The bytes exist, but a new instance must still refuse success while fsync fails.
-      await assert.rejects(new ResearchPeriodUsageStore(path).record(request), error);
+      await assert.rejects(new ResearchPeriodUsageStore(path)[${JSON.stringify(method)}](request), error);
       assert.equal(await fs.readFile(path, 'utf8'), before);
       fail = false;
       syncs.length = 0;
-      const retry = await new ResearchPeriodUsageStore(path).record(request);
+      const retry = await new ResearchPeriodUsageStore(path)[${JSON.stringify(method)}](request);
       assert.equal(retry.idempotent, true);
       assert.equal(retry.sequence, original.sequence);
       assert.equal(retry.recorded_at, original.recorded_at);
@@ -278,7 +378,7 @@ for (const failure of ['file', 'directory']) {
       await assert.rejects(fs.stat(path + '.lock'), { code: 'ENOENT' });
     `;
     await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script,
-      path, directory, failure, JSON.stringify(input())], { timeout: 10000 });
+      path, directory, failure, JSON.stringify(method === 'record' ? input() : toolInput())], { timeout: 10000 });
   });
 }
 
