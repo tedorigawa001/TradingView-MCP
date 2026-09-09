@@ -5,6 +5,24 @@ not contact TradingView or alter a chart. An optional `research_id` enables loca
 slice exploration logging; without it the tool remains read-only. Research strategies and data remain
 local; this repository publishes only the generic import and aggregation code.
 
+## Break-Even Cost
+
+Every metrics object (overall, groups and comparison populations) includes
+`break_even_cost` under `flat_round_trip_cost_complete_case_v1`.
+`mean_gross_bps` averages only known direction-adjusted gross outcomes.
+`max_nonnegative_round_trip_cost_bps` equals that mean if it is nonnegative:
+it is the largest uniform round-trip cost for which sample mean net return is
+nonnegative. Zero is a valid limit. A negative gross mean returns a null limit
+and `negative_gross_mean`, since even zero cost cannot break even. No known
+outcomes returns null and `no_known_outcomes`.
+
+`headroom_at_assumed_cost_bps` is signed mean gross minus the requested cost;
+it may be negative. Counts explicitly retain missing outcomes, which are excluded,
+not imputed as zero. This is an equal-trade sample mean, not a portfolio return,
+confidence bound, realistic spread/slippage estimate or proof of tradability.
+The limit is independent of the requested cost. It does not change eligibility,
+slice condition hashes, or the fixed comparison contract.
+
 ## Import
 
 After building a checkout:

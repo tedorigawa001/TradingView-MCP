@@ -134,6 +134,9 @@ export function summarizeBacktestLedger(input: unknown, options: unknown) {
     && !request.exclude_symbols?.includes(r.symbol) && (!request.direction || r.direction === request.direction)
     && (!request.from || r.exit_at >= request.from) && (!request.to || r.exit_at < request.to));
   const metrics = (group: typeof rows) => {
+    const gross = group.flatMap((r) => r.gross_return_bps === null ? [] : [r.gross_return_bps]);
+    const grossSum = gross.reduce((sum, value) => sum + value, 0);
+    const meanGross = gross.length ? (grossSum === 0 ? 0 : grossSum / gross.length) : null;
     const net = group.flatMap((r) => r.gross_return_bps === null ? [] : [r.gross_return_bps - request.round_trip_cost_bps]);
     const profit = net.reduce((s, n) => s + Math.max(n, 0), 0);
     const loss = net.reduce((s, n) => s + Math.max(-n, 0), 0);
@@ -142,6 +145,14 @@ export function summarizeBacktestLedger(input: unknown, options: unknown) {
       mean_net_bps: net.length ? (profit - loss) / net.length : null,
       profit_factor: loss > 0 ? profit / loss : null,
       profit_factor_status: !net.length ? "no_closed_trades" : loss === 0 ? "no_losses" : "defined",
+      break_even_cost: {
+        contract: "flat_round_trip_cost_complete_case_v1",
+        status: meanGross === null ? "no_known_outcomes" : meanGross < 0 ? "negative_gross_mean" : "defined",
+        known_outcomes: gross.length, missing_outcomes: group.length - gross.length,
+        mean_gross_bps: meanGross,
+        max_nonnegative_round_trip_cost_bps: meanGross !== null && meanGross >= 0 ? meanGross : null,
+        headroom_at_assumed_cost_bps: meanGross === null ? null : meanGross - request.round_trip_cost_bps,
+      },
       win_rate: net.length ? net.filter((n) => n > 0).length / net.length : null,
       low_sample: net.length < 30 };
   };
@@ -184,5 +195,6 @@ export function summarizeBacktestLedger(input: unknown, options: unknown) {
     groups: [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, group]) => ({ key, ...metrics(group) })),
     limitations: ["content_hash_is_integrity_not_source_authentication", "source_metadata_is_importer_supplied",
       "content_hash_does_not_prove_prespecified_slice_selection", "slice_search_count_is_not_tracked",
-      "missing_outcomes_are_not_zero_returns", "bps_sums_are_not_portfolio_returns", "not_a_statistical_candidate_test"] };
+      "missing_outcomes_are_not_zero_returns", "bps_sums_are_not_portfolio_returns", "not_a_statistical_candidate_test",
+      "break_even_cost_is_sample_mean_not_execution_feasibility_or_confidence_bound"] };
 }

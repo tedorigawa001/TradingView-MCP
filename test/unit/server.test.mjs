@@ -768,6 +768,11 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
   assert.equal(result.overall.profit_factor, 2);
   assert.equal(result.comparison.contract, 'same_ledger_filter_partition_v1');
   assert.equal(result.comparison.baseline.records, 5);
+  assert.equal(result.comparison.baseline.break_even_cost.max_nonnegative_round_trip_cost_bps, 27.5);
+  assert.equal(result.comparison.excluded.break_even_cost.max_nonnegative_round_trip_cost_bps, 100);
+  assert.equal(result.overall.break_even_cost.mean_gross_bps, 10 / 3);
+  assert.equal(result.overall.break_even_cost.missing_outcomes, 1);
+  assert.equal(result.overall.break_even_cost.contract, 'flat_round_trip_cost_complete_case_v1');
   assert.equal(result.comparison.excluded.records, 1);
   assert.deepEqual(result.comparison.selected, result.overall);
   assert.equal(result.comparison.common_opportunities.delta_mean_net_bps, -24.5);
@@ -777,6 +782,9 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
   assert.equal(result.overall.closed_trades, 3);
   assert.equal(result.overall.missing_outcomes, 1);
   assert.equal(result.groups.length, 2);
+  assert.equal(result.groups.find(g => g.key === 'EURUSD').break_even_cost.max_nonnegative_round_trip_cost_bps, 6);
+  assert.equal(result.groups.find(g => g.key === 'USDJPY').break_even_cost.status, 'negative_gross_mean');
+  assert.equal(result.groups.find(g => g.key === 'USDJPY').break_even_cost.max_nonnegative_round_trip_cost_bps, null);
   assert.equal(result.artifact_id, artifact_id);
   assert.equal(result.exploration.status, 'untracked');
   assert.equal(chartCalls, 0);

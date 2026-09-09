@@ -10,6 +10,28 @@ import { BacktestLedgerStore, backtestLedgerSchema, summarizeBacktestLedger, rea
 const fixture=JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json',import.meta.url),'utf8'));
 const id=(x)=>'sha256:'+createHash('sha256').update(JSON.stringify(backtestLedgerSchema.parse(x))).digest('hex');
 const options=(extra={})=>({artifact_id:id(fixture),round_trip_cost_bps:2,...extra});
+test('break-even cost uses known gross outcomes and distinguishes negative, zero and missing',()=>{
+  for (const [values,mean,status,limit] of [
+    [[10,-2,null],4,'defined',4], [[-2,-4],-3,'negative_gross_mean',null],
+    [[2,-2],0,'defined',0], [[null],null,'no_known_outcomes',null],
+  ]) {
+    const ledger={...fixture,trades:values.map((value,i)=>({...fixture.trades[0],trade_id:`cost-${i}`,gross_return_bps:value}))};
+    for(const cost of [0,2,10]) {
+      const r=summarizeBacktestLedger(ledger,{artifact_id:id(ledger),round_trip_cost_bps:cost,group_by:'symbol'});
+      const b=r.overall.break_even_cost;
+      assert.equal(b.mean_gross_bps,mean);
+      assert.equal(b.status,status);
+      assert.equal(b.max_nonnegative_round_trip_cost_bps,limit);
+      assert.equal(b.headroom_at_assumed_cost_bps,mean===null?null:mean-cost);
+      assert.equal(b.known_outcomes,values.filter(v=>v!==null).length);
+      assert.equal(b.missing_outcomes,values.filter(v=>v===null).length);
+      assert.deepEqual(r.groups[0].break_even_cost,b);
+      assert.deepEqual(r.comparison.baseline.break_even_cost,b);
+      assert.equal(r.comparison.excluded.break_even_cost.status,'no_known_outcomes');
+      if(limit!==null) assert.ok(Math.abs(summarizeBacktestLedger(ledger,{artifact_id:id(ledger),round_trip_cost_bps:limit}).overall.mean_net_bps)<1e-10);
+    }
+  }
+});
 test('ledger comparison partitions the entire ledger and separates gross selection from avoided costs',()=>{
   const r=summarizeBacktestLedger(fixture,options({exclude_symbols:['XAUUSD']}));
   const c=r.comparison;
@@ -78,7 +100,8 @@ test('ledger exposes the unfiltered denominator for every slice including missin
       assert.deepEqual(r.limitations,['content_hash_is_integrity_not_source_authentication',
         'source_metadata_is_importer_supplied','content_hash_does_not_prove_prespecified_slice_selection',
         'slice_search_count_is_not_tracked','missing_outcomes_are_not_zero_returns',
-        'bps_sums_are_not_portfolio_returns','not_a_statistical_candidate_test']);
+        'bps_sums_are_not_portfolio_returns','not_a_statistical_candidate_test',
+        'break_even_cost_is_sample_mean_not_execution_feasibility_or_confidence_bound']);
     }
   }
 });
