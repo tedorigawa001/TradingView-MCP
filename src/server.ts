@@ -6,6 +6,7 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
+import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema } from "./researchPeriodUsage.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -201,6 +202,7 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -407,7 +409,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore() }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore() }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5443,6 +5445,38 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "record_research_period_usage",
+    {
+      description: "Record a user-reported research data access in a local append-only journal. Requires confirm:true. " +
+        "Use a stable series_id across revisions and research projects; data_version is a content hash. " +
+        "Records the full inspected UTC interval [from,to), purpose and actual accessed_at. Retries with the same access_id are idempotent; conflicts fail. " +
+        "No chart access, orders or file paths. Reporting use is not preregistration or proof of an unused OOS period.",
+      inputSchema: {...researchPeriodUsageRecordSchema.shape, confirm: z.literal(true)},
+    },
+    async (request) => {
+      try {
+        const {confirm, ...input} = request;
+        return jsonResult(await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input)));
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "check_research_period_usage",
+    {
+      description: "Check recorded research data usage for a UTC interval [from,to). " +
+        "Finds overlapping use of the same stable series_id across ALL research IDs and data versions. " +
+        "No recorded overlap means unknown outside this journal, never unused or approved OOS. " +
+        "A declared-unused assertion is user supplied and cannot prove unused status. Does not record an access or reserve a period.",
+      inputSchema: researchPeriodUsageCheckSchema.shape,
+    },
+    async (request) => {
+      try { return jsonResult(await researchPeriodUsage.check(researchPeriodUsageCheckSchema.parse(request))); }
+      catch (err) { return errorResult(err); }
+    },
   );
 
   server.registerTool(

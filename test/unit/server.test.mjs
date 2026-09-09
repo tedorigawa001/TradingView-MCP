@@ -532,6 +532,7 @@ function makeDeps(overrides = {}) {
     bookmapFlowDirectory: overrides.bookmapFlowDirectory,
     backtestLedgers: overrides.backtestLedgers,
     backtestSliceJournal: overrides.backtestSliceJournal,
+    researchPeriodUsage: overrides.researchPeriodUsage,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -863,7 +864,71 @@ test("summarize_backtest_ledger persists slice counts across MCP calls", async (
   assert.equal(tooLong.isError, true);
 });
 
-test("exposes exactly the one hundred two expected tools", async () => {
+test('research period tools require explicit recording and do not hide storage failures', async (t) => {
+  const calls=[];
+  const client=await connectedClient(makeDeps({researchPeriodUsage:{
+    record:async(input)=>{calls.push(input);return {recorded:true,unused_proven:false};},
+    check:async(input)=>{calls.push(input);return {status:'no_recorded_overlap',unused_proven:false};},
+  }}));
+  t.after(()=>client.close());
+  const base={series_id:'FX.EURUSD',data_version:'sha256:'+'a'.repeat(64),from:'2024-01-01T00:00:00.000Z',to:'2024-02-01T00:00:00.000Z'};
+  const record={...base,access_id:'access-1',research_id:'study-1',purpose:'exploration',accessed_at:'2025-01-01T00:00:00.000Z'};
+  const denied=await client.callTool({name:'record_research_period_usage',arguments:record});
+  assert.equal(denied.isError,true);
+  assert.equal(calls.length,0);
+  const ok=await client.callTool({name:'record_research_period_usage',arguments:{...record,confirm:true}});
+  assert.ok(!ok.isError,ok.content[0].text);
+  assert.deepEqual(calls[0],record);
+  const checked=await client.callTool({name:'check_research_period_usage',arguments:base});
+  assert.ok(!checked.isError,checked.content[0].text);
+  assert.equal(JSON.parse(checked.content[0].text).unused_proven,false);
+  for(const name of ['record_research_period_usage','check_research_period_usage']) {
+    const bad=await client.callTool({name,arguments:{...record,confirm:true,to:base.from}});
+    assert.equal(bad.isError,true);
+  }
+  assert.equal(calls.length,2);
+  const broken=await connectedClient(makeDeps({researchPeriodUsage:{
+    record:async()=>{throw new Error('period journal unavailable');},
+    check:async()=>{throw new Error('period journal unavailable');},
+  }}));
+  t.after(()=>broken.close());
+  for(const name of ['record_research_period_usage','check_research_period_usage']) {
+    const r=await broken.callTool({name,arguments:name.startsWith('record')?{...record,confirm:true}:base});
+    assert.equal(r.isError,true);
+    assert.match(r.content[0].text,/period journal unavailable/);
+  }
+});
+
+test('research period usage detects cross-version access through the real MCP store', async (t) => {
+  const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
+  const {rm}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'period-mcp-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  let chartCalls=0;
+  const client=await connectedClient(makeDeps({researchPeriodUsage:new ResearchPeriodUsageStore(join(dir,'usage.jsonl')),
+    tv:{getChartContext:async()=>{chartCalls++;throw new Error('no chart');}}}));
+  t.after(()=>client.close());
+  const base={series_id:'FX.EURUSD',data_version:'sha256:'+'a'.repeat(64),from:'2024-01-01T00:00:00.000Z',to:'2024-02-01T00:00:00.000Z'};
+  const call=async(name,args)=>{
+    const r=await client.callTool({name,arguments:args});
+    assert.ok(!r.isError,r.content[0].text);
+    return JSON.parse(r.content[0].text);
+  };
+  const empty=await call('check_research_period_usage',{...base,prior_usage_declaration:'declared_unused'});
+  assert.equal(empty.unused_proven,false);
+  assert.equal(empty.overlapping_records,0);
+  const record={...base,access_id:'mcp-access',research_id:'old-study',purpose:'exploration',accessed_at:'2025-01-01T00:00:00.000Z',confirm:true};
+  await call('record_research_period_usage',record);
+  await call('record_research_period_usage',record);
+  const found=await call('check_research_period_usage',{...base,data_version:'sha256:'+'b'.repeat(64),from:'2024-01-15T00:00:00.000Z'});
+  assert.equal(found.overlapping_records,1);
+  assert.equal(found.unused_proven,false);
+  const adjacent=await call('check_research_period_usage',{...base,from:base.to,to:'2024-03-01T00:00:00.000Z'});
+  assert.equal(adjacent.overlapping_records,0);
+  assert.equal(chartCalls,0);
+});
+
+test("exposes exactly the one hundred four expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -873,6 +938,7 @@ test("exposes exactly the one hundred two expected tools", async () => {
       "apply_analysis_overlay",
       "audit_pine_indicator",
       "carry_panel_preflight",
+      "check_research_period_usage",
       "classify_cross_asset_shocks",
       "compare_indicator_observations",
       "compare_strategy_experiments",
@@ -938,6 +1004,7 @@ test("exposes exactly the one hundred two expected tools", async () => {
       "preflight_bookmap_flow_price_join",
       "preflight_cross_asset_shock",
       "reconcile_gold_open_interest",
+      "record_research_period_usage",
       "record_strategy_experiment",
       "register_event_study_hypothesis",
       "register_strategy_hypothesis",

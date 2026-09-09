@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (102 Total)
+## Tools (104 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -378,6 +378,8 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `get_strategy_report` | Reads net profit, win rate, PF, drawdown, and recent trades for the active strategy |
 | `get_strategy_trade_ledger` | Pages the full Strategy Tester ledger in batches of up to 500, binds it to a SHA-256 ID, rejects cross-page recomputation, exposes available costs/run-up/drawdown/inputs/Pine version, and separates the trailing mark-to-market open row |
 | `summarize_backtest_ledger` | Recomputes PF/net bps and compares the full ledger, selected slice and excluded complement with common-opportunity cost decomposition. Optional `research_id` records local exploration; otherwise explicitly untracked. No chart access. See [ledger import contract](docs/BACKTEST_LEDGERS.md) |
+| `record_research_period_usage` | Records reported data access intervals with explicit confirmation; retries are idempotent, conflicting access IDs fail. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
+| `check_research_period_usage` | Finds prior interval use across research IDs and revisions of the same series; absence of records never proves unused OOS. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
 | `run_strategy_experiment` | Serially compares baseline and candidate on one chart; dry-run by default, then after confirmation reports exact Pine versions, ledger IDs, inputs, minimum trades, condition match, and metric deltas before removing both |
 | `run_backtest_matrix` | Runs up to 24 explicit symbol/timeframe/input combinations with a 30-minute soft deadline, per-row full-ledger IDs, insufficiency/failure reasons, and verified restoration; it does not rank results |
 | `run_strategy_walk_forward` | Splits full ledgers for 2-8 candidates into 2-12 explicit train/embargo/test windows, selects on train only, and returns OOS only for the selected candidate with anchored/rolling, tie, minimum-trade, quality, and coverage checks |

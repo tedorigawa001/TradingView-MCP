@@ -1,5 +1,16 @@
 # Security Review (2026-07-07)
 
+## Addendum: Research Period Usage (2026-09-09)
+
+`record_research_period_usage` writes only bounded structured access metadata to
+a private local journal after `confirm:true`; the caller supplies no path or code.
+`check_research_period_usage` does not record an access or reserve a holdout. Both
+use canonical UTC intervals and stable series identity; version or research-ID
+changes do not bypass overlap checks within the same series. Storage errors fail
+closed. User reports and declared-unused assertions are not authenticated access
+telemetry. Missing history, aliases, unreported use and same-user tampering remain
+outside the assurance boundary. Neither tool approves OOS validity or candidates.
+
 ## Addendum: Saved Backtest Ledger Summary (2026-09-07)
 
 `summarize_backtest_ledger` never accesses the chart or network. Without
