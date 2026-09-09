@@ -392,6 +392,21 @@ This enables a read -> modify -> save -> backtest improvement loop:
 
 ## Troubleshooting
 
+### Concurrent history writers
+
+Shared first-seen/heartbeat/research journals wait up to 30 seconds for a
+cross-process lock by default. Set `TV_MCP_HISTORY_LOCK_WAIT_MS` to an integer
+from 100 to 120000 in each MCP/collector process environment to override it;
+restart processes after changing it. Invalid values fail at store construction.
+This setting applies to `AppendOnlyFirstSeenLog`, not every lock in the project.
+Timeouts include the lock path and `HISTORY_LOCK_TIMEOUT` error code internally.
+They do not discard evidence, skip fsync or steal another writer's lock.
+Reduce overlapping jobs or investigate storage latency if timeouts continue.
+Stale-lock recovery remains manual after confirming no writer is active.
+The budget bounds contention retries, not an unresponsive filesystem syscall,
+whole collection run or time queued inside the same process. A longer wait does
+not guarantee fairness or cure sustained overload.
+
 | Symptom | Cause and resolution |
 |---|---|
 | `TradingView desktop app is not reachable` | TradingView is not in debug mode. Quit it and relaunch it with the Step 2 command |

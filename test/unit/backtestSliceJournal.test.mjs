@@ -206,7 +206,7 @@ test('independent processes use the existing durable file lock', async (t) => {
     const store = new BacktestSliceJournalStore(process.argv[1]);
     for (let i = 0; i < 8; i++) await store.recordSummary('r', JSON.parse(process.argv[2]));`;
   await Promise.all(Array.from({ length: 4 }, () => promisify(execFile)(process.execPath,
-    ['--input-type=module', '-e', script, path, JSON.stringify(summary())], { timeout: 15_000 })));
+    ['--input-type=module', '-e', script, path, JSON.stringify(summary())], { timeout: 90_000 })));
   const result = await new BacktestSliceJournalStore(path).recordSummary('r', summary());
   assert.equal(result.call_count, 33);
   assert.equal(result.sequence, 33);

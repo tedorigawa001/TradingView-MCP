@@ -78,7 +78,25 @@ test("RealYieldFirstSeenStore serializes concurrent observations deterministical
   assert.equal((await readFile(path, "utf8")).trim().split("\n").length, 1);
 });
 
-test("first-seen logs sharing a path queue before starting the file-lock deadline", async () => {
+/**
+ * These two tests prove the queue by making the follower fail without it, and the only
+ * failure available is the lock deadline. Raising the production budget from 2s to 30s
+ * silently removed that: both kept passing with the per-path queue reverted, pinning
+ * nothing. They now bind the budget explicitly instead of inheriting whatever it is.
+ */
+const LOCK_BUDGET_MS = 200;
+const HOLD_MS = 600;
+function withLockBudget(t) {
+  const previous = process.env.TV_MCP_HISTORY_LOCK_WAIT_MS;
+  process.env.TV_MCP_HISTORY_LOCK_WAIT_MS = String(LOCK_BUDGET_MS);
+  t.after(() => {
+    if (previous === undefined) delete process.env.TV_MCP_HISTORY_LOCK_WAIT_MS;
+    else process.env.TV_MCP_HISTORY_LOCK_WAIT_MS = previous;
+  });
+}
+
+test("first-seen logs sharing a path queue before starting the file-lock deadline", async (t) => {
+  withLockBudget(t);
   const dir = await mkdtemp(join(tmpdir(), "tv-mcp-first-seen-path-queue-"));
   const path = join(dir, "history.jsonl");
   const limits = { maxFileBytes: 1024, maxRecordBytes: 512 };
@@ -89,7 +107,7 @@ test("first-seen logs sharing a path queue before starting the file-lock deadlin
 
   const slow = first.serialize(async () => {
     markStarted();
-    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
   });
   await started;
   const follower = second.serialize(async () => "acquired-after-predecessor");
@@ -98,7 +116,8 @@ test("first-seen logs sharing a path queue before starting the file-lock deadlin
   await slow;
 });
 
-test("two spellings of one path share the queue, because they share the lock", async () => {
+test("two spellings of one path share the queue, because they share the lock", async (t) => {
+  withLockBudget(t);
   // The lock lives at `${filePath}.lock`, and the filesystem resolves both spellings to the
   // same lock file. Keying the queue on the raw string would give these two logs separate
   // queues, put them back in a race for that one lock, and lose the follower to the 2 s
@@ -114,7 +133,7 @@ test("two spellings of one path share the queue, because they share the lock", a
 
   const slow = first.serialize(async () => {
     markStarted();
-    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
   });
   await started;
   const follower = second.serialize(async () => "acquired-after-predecessor");

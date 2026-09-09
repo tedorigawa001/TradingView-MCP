@@ -1822,5 +1822,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 
 ## 運用メモ
 
+- 共有履歴ロック競合の本番修正 (2026-09-09): Windows高負荷時に4プロセスの検証/追記/fsyncが旧2秒予算を超える指摘を受け、2.3秒保持テストで旧実装の失敗を再現。`AppendOnlyFirstSeenLog` を既定30秒・`TV_MCP_HISTORY_LOCK_WAIT_MS` (100〜120000ms) に変更し、単調時計、ジッター付き有限再試行、期限超過のロックパス/診断コードを追加。排他・所有者確認・検証・fsyncは維持し、ロック奪取を行わない。4プロセス×8書込みの本数/整合性検査は維持し、子プロセス全体の監視期限のみ90秒へ変更。関連42テスト、全体Node992件・Java各スイート・raw-to-Javaが通過。独立レビューに重大指摘なし。追加の既定値/壁時計ジャンプ検証も実施。実行環境はmacOSであり、Windowsランナーの再実行は未確認。高負荷の根本的I/O削減、公平性、stale lock回復は別問題として残る。
+
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
 - **ストラテジーテスターAPI移行**(2026-07-20訂正): 当初はアプリ再起動直後の`TradingViewApi.backtestingStrategyApi`不在を遅延初期化と判断していたが、Strategy Tester表示後も復活せず、現行版ではactive chart modelのstrategy sourceへ移行したことを実機確認した。旧APIがあれば優先し、現行APIをWatchedValue相当へ適応する互換層を追加。`set_indicator_input`のsettle、`get_strategy_report`、`get_strategy_trade_ledger`、`run_backtest`を両経路へ統一した

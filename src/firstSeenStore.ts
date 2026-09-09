@@ -1,10 +1,20 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { dirname, resolve } from "node:path";
 import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
-const LOCK_WAIT_MS = 2_000;
+const DEFAULT_LOCK_WAIT_MS = 30_000;
+function lockWaitMilliseconds(): number {
+  const raw = process.env.TV_MCP_HISTORY_LOCK_WAIT_MS;
+  if (raw === undefined) return DEFAULT_LOCK_WAIT_MS;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < 100 || value > 120_000) {
+    throw new Error("TV_MCP_HISTORY_LOCK_WAIT_MS must be an integer from 100 to 120000");
+  }
+  return value;
+}
 const pathQueues = new Map<string, Promise<void>>();
 
 export const isCalendarDate = (value: string): boolean => {
@@ -46,6 +56,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
    * silently restore the race the queue exists to prevent.
    */
   private readonly queueKey: string;
+  private readonly lockWaitMs: number;
 
   constructor(
     private readonly filePath: string,
@@ -55,6 +66,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
   ) {
     if (!filePath) throw new Error(`${label} history path is required`);
     this.queueKey = resolve(filePath);
+    this.lockWaitMs = lockWaitMilliseconds();
   }
 
   private async ensureDirectory(): Promise<void> {
@@ -76,8 +88,16 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     await this.ensureDirectory();
     const lockPath = `${this.filePath}.lock`;
     const token = randomUUID();
-    const deadline = Date.now() + LOCK_WAIT_MS;
+    const started = performance.now();
+    const deadline = started + this.lockWaitMs;
+    const timeout = () => Object.assign(new Error(
+      `timed out acquiring ${this.label} history lock after ${this.lockWaitMs}ms: ${lockPath}; ` +
+      "another process may still hold it; do not remove a live owner's lock",
+    ), { code: "HISTORY_LOCK_TIMEOUT" });
+    let attempted = false;
     while (true) {
+      if (attempted && performance.now() >= deadline) throw timeout();
+      attempted = true;
       try {
         const handle = await openExclusiveFile(lockPath, `${this.label} lock`);
         try {
@@ -119,8 +139,10 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
           throw statError;
         }
         if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${this.label} history lock path is unsafe`);
-        if (Date.now() >= deadline) throw new Error(`timed out acquiring ${this.label} history lock`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw timeout();
+        // Jitter reduces synchronized polling by collectors in different processes.
+        await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 25 + Math.random() * 50)));
       }
     }
   }

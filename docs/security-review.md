@@ -1,5 +1,14 @@
 # Security Review (2026-07-07)
 
+## Addendum: Shared History Lock Contention (2026-09-09)
+
+`AppendOnlyFirstSeenLog` uses a monotonic, finite contention budget (30 seconds
+by default, `TV_MCP_HISTORY_LOCK_WAIT_MS` bounded to 100–120000ms) and jittered
+retry polling. File exclusivity, ownership checks, validation and fsync remain
+unchanged. Timeout errors identify the lock path; no lock stealing or silent
+write omission is introduced. This is availability hardening, not fair queuing,
+automatic stale-lock recovery or a filesystem I/O timeout.
+
 ## Addendum: Research Evidence Comparison (2026-09-09)
 
 `compare_research_evidence` accepts two strict bounded objects of nullable SHA-256
