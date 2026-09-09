@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, stat, truncate, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile, rm, stat, truncate, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -213,8 +213,8 @@ test('independent processes share durable locking, including retries', async (t)
       if (result.prior_overlap.overlapping_records !== result.sequence - 1) throw new Error('non-atomic assessment');
       await store.record({...input, access_id: 'shared'});
     }`;
-  await Promise.all(Array.from({ length: 3 }, (_, i) => promisify(execFile)('bdo',
-    ['proxy', process.execPath, '--input-type=module', '-e', script, path, JSON.stringify(input()), String(i)], { timeout: 15000 })));
+  await Promise.all(Array.from({ length: 3 }, (_, i) => promisify(execFile)(process.execPath,
+    ['--input-type=module', '-e', script, path, JSON.stringify(input()), String(i)], { timeout: 15000 })));
   assert.equal((await store.check(query())).overlapping_records, 19);
   assert.deepEqual((await saved(path)).map((r) => r.sequence), Array.from({ length: 19 }, (_, i) => i + 1));
 });
@@ -277,7 +277,7 @@ for (const failure of ['file', 'directory']) {
       assert.equal(await fs.readFile(path, 'utf8'), before);
       await assert.rejects(fs.stat(path + '.lock'), { code: 'ENOENT' });
     `;
-    await promisify(execFile)('bdo', ['proxy', process.execPath, '--input-type=module', '-e', script,
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script,
       path, directory, failure, JSON.stringify(input())], { timeout: 10000 });
   });
 }
@@ -302,4 +302,35 @@ test('unsafe file and lock paths fail closed; owner-only permissions are enforce
     await assert.rejects(store.record(input()), /permissions|owner-only/);
     await chmod(path, 0o600);
   }
+});
+
+test('no source spawns a developer-machine wrapper instead of node itself', async () => {
+  // These tests spawn real subprocesses, and the command was written as `bdo proxy <node>` -
+  // a token-saving CLI that exists only on the author's machine. Every test passed locally
+  // for exactly that reason, and every CI runner failed with spawn bdo ENOENT. A subprocess
+  // must be started by process.execPath or an absolute path resolved at run time, never by a
+  // bare name that happens to be installed here. This catches a literal bare name only; a
+  // command built into a variable first still escapes it.
+  // The calls here go through promisify, so the spawn name is followed by a closing paren
+  // before the argument list. A pattern requiring an open paren immediately after the name
+  // matched nothing at all - including the defect it was written for. Keep this comment free
+  // of a literal example: the scan reads comments too.
+  const spawnCall = /\b(execFile|execFileSync|spawn|spawnSync)\s*\)?\s*\(\s*['"`]([^'"`]*)['"`]/g;
+  // Adding a name here asserts every CI runner that reaches the call has it. mkfifo is POSIX
+  // and its caller is already skipped where it is absent.
+  const PORTABLE = new Set(['mkfifo']);
+  const roots = [new URL('../../src/', import.meta.url), new URL('./', import.meta.url)];
+  const offenders = [];
+  for (const root of roots) {
+    for (const name of await readdir(root)) {
+      if (!/\.(ts|mjs)$/.test(name)) continue;
+      const source = await readFile(new URL(name, root), 'utf8');
+      for (const [, call, command] of source.matchAll(spawnCall)) {
+        if (!command.startsWith('/') && !PORTABLE.has(command)) {
+          offenders.push(`${name}: ${call}(${JSON.stringify(command)})`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `spawned by a bare name CI may not have: ${offenders.join(', ')}`);
 });
