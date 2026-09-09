@@ -23,7 +23,8 @@ const conditionsSchema = z.object({
 export type BacktestSliceConditions = z.infer<typeof conditionsSchema>;
 type Summary = ReturnType<typeof summarizeBacktestLedger>;
 export type BacktestSliceSummary = Pick<Summary, "artifact_id" | "source_sha256" | "filters" | "ledger_records" | "selected_fraction">
-  & { overall: Pick<Summary["overall"], "records">; groups: { key: string }[] };
+  & { overall: Pick<Summary["overall"], "records">; groups: { key: string }[];
+    comparison?: Pick<Summary["comparison"], "contract"> };
 
 export function normalizeBacktestSliceConditions(filters: unknown): BacktestSliceConditions {
   const request = backtestLedgerSummarySchema.parse(filters);
@@ -59,6 +60,7 @@ const recordSchema = z.object({
   selected_records: count,
   selected_fraction: z.number().min(0).max(1),
   group_keys: z.array(z.string().min(1).max(64)).max(500),
+  comparison_contract: z.literal("same_ledger_filter_partition_v1").optional(),
 }).strict();
 type SliceRecord = z.infer<typeof recordSchema>;
 
@@ -145,6 +147,7 @@ export class BacktestSliceJournalStore {
       conditions, condition_hash: conditionHash(conditions), ledger_records: summary.ledger_records,
       selected_records: summary.overall.records, selected_fraction: summary.selected_fraction,
       group_keys: summary.groups.map((group) => group.key).sort(),
+      ...(summary.comparison ? { comparison_contract: summary.comparison.contract } : {}),
     });
     return this.log.serialize(async () => {
       // The generic log tolerates blank lines and missing terminators. For an exposure

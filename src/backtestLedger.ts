@@ -153,11 +153,34 @@ export function summarizeBacktestLedger(input: unknown, options: unknown) {
     if (groups.size > 500) throw new Error("too many groups; narrow the date filters");
   }
   const overall = metrics(rows);
+  const selectedIds = new Set(rows.map((row) => row.trade_id));
+  const excluded = metrics(ledger.trades.filter((row) => !selectedIds.has(row.trade_id)));
+  const baseline = metrics(ledger.trades);
+  const known = baseline.closed_trades;
+  const perOpportunity = (sum: number) => known ? (sum === 0 ? 0 : sum / known) : null;
+  const avoidedCost = excluded.closed_trades * request.round_trip_cost_bps;
+  const comparison = {
+    contract: "same_ledger_filter_partition_v1",
+    population: "entire_artifact_before_all_filters",
+    status: baseline.missing_outcomes ? "partial" : "complete",
+    baseline, selected: overall, excluded,
+    common_opportunities: {
+      known_outcomes: known, missing_outcomes: baseline.missing_outcomes,
+      baseline_mean_net_bps: perOpportunity(baseline.net_sum_bps),
+      selected_policy_mean_net_bps: perOpportunity(overall.net_sum_bps),
+      delta_mean_net_bps: perOpportunity(-excluded.net_sum_bps),
+      delta_mean_gross_bps: perOpportunity(-excluded.net_sum_bps - avoidedCost),
+      avoided_cost_mean_bps: perOpportunity(avoidedCost),
+    },
+    limitations: ["complete_case_comparison_missing_outcomes_excluded_from_both_policies",
+      "selected_policy_skips_excluded_known_opportunities_without_replacement",
+      "not_a_causal_effect_or_funded_portfolio_return", "no_selection_bias_correction_or_significance_test"],
+  };
   return { artifact_id: request.artifact_id, source_id: ledger.source_id, source_sha256: ledger.source_sha256,
     evidence_tier: ledger.evidence_tier, status: !rows.length ? "empty" : overall.missing_outcomes ? "partial" : "complete",
     candidateEligible: false, time_basis: "exit_at_utc_from_inclusive_to_exclusive", return_unit: "bps",
     cost_basis: "one_flat_round_trip_cost_per_closed_trade", filters: request,
-    ledger_records: ledger.trades.length, selected_fraction: rows.length / ledger.trades.length, overall,
+    ledger_records: ledger.trades.length, selected_fraction: rows.length / ledger.trades.length, overall, comparison,
     groups: [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, group]) => ({ key, ...metrics(group) })),
     limitations: ["content_hash_is_integrity_not_source_authentication", "source_metadata_is_importer_supplied",
       "content_hash_does_not_prove_prespecified_slice_selection", "slice_search_count_is_not_tracked",

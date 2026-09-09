@@ -5451,7 +5451,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: "Summarize a locally registered immutable backtest ledger by SHA-256 artifact ID. " +
         "Filter exact symbols, direction, and exit timestamps (UTC, from inclusive/to exclusive); group by symbol/year/month. " +
         "Requires explicit flat round-trip cost in bps. Recomputes PF from trade-level net wins/losses, never averages PFs. " +
-        "Missing outcomes remain missing. No chart access, orders, imports, or arbitrary file paths. " +
+        "Returns the entire-ledger baseline, selected subset and excluded complement at the same cost, with complete-case common-opportunity deltas. " +
+        "All filters including dates define selection, not the baseline. Missing outcomes remain missing. No chart access, orders, imports, or arbitrary file paths. " +
         "Register normalized direction-adjusted gross-bps evidence with the local import CLI first. " +
         "Optional research_id explicitly enables a local append-only slice exploration journal write before returning metrics; " +
         "omitting it is explicitly untracked. Recording failure returns an error without metrics. " +

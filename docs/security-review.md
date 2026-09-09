@@ -33,6 +33,12 @@ total directory quota; imports are explicit local operations. The source hash/ti
 is importer-supplied: integrity does not authenticate or certify the evidence.
 
 The response is bounded to 500 groups and does not expose trade rows. Missing
+outcomes also remain explicit in the fixed same-ledger comparison. The baseline
+includes the whole artifact before every filter, including dates; the complement
+and selected policy use the same cost. Common-opportunity means use only known
+baseline outcomes. These descriptive deltas do not authorize trades or certify
+causality/significance, and comparison quality is partial if any baseline outcome
+is missing. No new file access or chart operation is introduced. Missing
 outcomes are never zero-filled; costs are applied once to declared gross returns.
 No-loss PF is null with an explicit reason, not Infinity. `complete` describes
 selected-record completeness only and never enables a statistical candidate.

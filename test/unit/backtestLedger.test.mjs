@@ -10,6 +10,56 @@ import { BacktestLedgerStore, backtestLedgerSchema, summarizeBacktestLedger, rea
 const fixture=JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json',import.meta.url),'utf8'));
 const id=(x)=>'sha256:'+createHash('sha256').update(JSON.stringify(backtestLedgerSchema.parse(x))).digest('hex');
 const options=(extra={})=>({artifact_id:id(fixture),round_trip_cost_bps:2,...extra});
+test('ledger comparison partitions the entire ledger and separates gross selection from avoided costs',()=>{
+  const r=summarizeBacktestLedger(fixture,options({exclude_symbols:['XAUUSD']}));
+  const c=r.comparison;
+  assert.equal(c.status,'partial');
+  assert.deepEqual(c.selected,r.overall);
+  assert.equal(c.baseline.records,5);
+  assert.equal(c.excluded.records,1);
+  assert.equal(c.baseline.net_sum_bps,102);
+  assert.equal(c.excluded.net_sum_bps,98);
+  assert.equal(c.baseline.profit_factor,26.5);
+  assert.equal(c.excluded.profit_factor,null);
+  assert.equal(c.common_opportunities.known_outcomes,4);
+  assert.equal(c.common_opportunities.missing_outcomes,1);
+  assert.equal(c.common_opportunities.baseline_mean_net_bps,25.5);
+  assert.equal(c.common_opportunities.selected_policy_mean_net_bps,1);
+  assert.equal(c.common_opportunities.delta_mean_net_bps,-24.5);
+  assert.equal(c.common_opportunities.delta_mean_gross_bps,-25);
+  assert.equal(c.common_opportunities.avoided_cost_mean_bps,0.5);
+});
+test('comparison reconciles all filters and grouping without averaging subgroup PFs',()=>{
+  for(const filters of [{},{include_symbols:['EURUSD']},{exclude_symbols:['XAUUSD']},{direction:'short'},
+    {from:'2024-02-01T00:00:00.000Z'},{to:'2024-02-01T00:00:00.000Z'},
+    {direction:'long',include_symbols:['EURUSD'],from:'2024-02-01T00:00:00.000Z'},
+    {from:'2025-01-01T00:00:00.000Z'}]) {
+    for(const group_by of ['none','symbol','year','month']) {
+      const r=summarizeBacktestLedger(fixture,options({...filters,group_by}));
+      const {baseline,selected,excluded,common_opportunities:c}=r.comparison;
+      assert.deepEqual(selected,r.overall);
+      for(const field of ['records','closed_trades','missing_outcomes','gross_profit_bps','gross_loss_bps','net_sum_bps'])
+        assert.equal(selected[field]+excluded[field],baseline[field]);
+      assert.equal(c.delta_mean_net_bps,c.selected_policy_mean_net_bps-c.baseline_mean_net_bps);
+      assert.equal(c.delta_mean_net_bps,c.delta_mean_gross_bps+c.avoided_cost_mean_bps);
+    }
+  }
+});
+test('comparison handles empty selection and unknown outcomes without claiming zero missing returns',()=>{
+  const empty=summarizeBacktestLedger(fixture,options({from:'2025-01-01T00:00:00.000Z'}));
+  assert.equal(empty.status,'empty');
+  assert.equal(empty.comparison.common_opportunities.selected_policy_mean_net_bps,0);
+  const missing={...fixture,trades:fixture.trades.map(r=>({...r,gross_return_bps:null}))};
+  const r=summarizeBacktestLedger(missing,{...options(),artifact_id:id(missing)});
+  assert.equal(r.comparison.status,'partial');
+  assert.equal(r.comparison.common_opportunities.known_outcomes,0);
+  for(const [key,value] of Object.entries(r.comparison.common_opportunities))
+    if(key.endsWith('_bps')) assert.equal(value,null);
+  const onlyKnown=summarizeBacktestLedger(fixture,options({include_symbols:['EURUSD']}));
+  assert.equal(onlyKnown.status,'complete');
+  assert.equal(onlyKnown.comparison.status,'partial');
+  assert.equal(onlyKnown.comparison.excluded.missing_outcomes,1);
+});
 test('ledger exposes the unfiltered denominator for every slice including missing outcomes',()=>{
   for (const extra of [{}, {include_symbols:['EURUSD']}, {exclude_symbols:['XAUUSD']},
     {direction:'short'}, {from:'2024-02-01T00:00:00.000Z'}, {to:'2024-02-01T00:00:00.000Z'},

@@ -765,6 +765,12 @@ test("summarize_backtest_ledger reads registered evidence without touching the c
   assert.ok(!response.isError);
   const result = JSON.parse(response.content[0].text);
   assert.equal(result.overall.profit_factor, 2);
+  assert.equal(result.comparison.contract, 'same_ledger_filter_partition_v1');
+  assert.equal(result.comparison.baseline.records, 5);
+  assert.equal(result.comparison.excluded.records, 1);
+  assert.deepEqual(result.comparison.selected, result.overall);
+  assert.equal(result.comparison.common_opportunities.delta_mean_net_bps, -24.5);
+  assert.equal(result.comparison.status, 'partial');
   assert.equal(result.ledger_records, data.trades.length);
   assert.equal(result.selected_fraction, 4 / data.trades.length);
   assert.equal(result.overall.closed_trades, 3);

@@ -91,6 +91,36 @@ not prove source coverage or profitability. `low_sample` warns below 30 trades,
 not an independent-sample or significance threshold. No candidate is approved.
 Bps sums across trades/symbols are not a funded portfolio return.
 
+## Same-Ledger Control Comparison
+
+Every summary also returns `comparison` with contract
+`same_ledger_filter_partition_v1`: `baseline` is the entire artifact, `selected`
+equals the existing `overall`, and `excluded` is the exact complement. All three
+use the same flat round-trip cost and return definitions. **Date filters select
+records; they do not narrow the baseline.** `group_by` affects only the existing
+selected-group breakdown. Counts and profit/loss sums partition the baseline;
+PFs are recomputed from sums, never averaged across subsets.
+
+Each subset's `mean_net_bps` uses its own known outcomes. In contrast,
+`common_opportunities` uses all baseline records with non-null outcomes as a
+shared denominator N. It compares taking every known opportunity with taking
+only the selected ones and leaving excluded opportunities untraded, without
+replacement or reinvestment. No missing outcome enters N or either policy:
+
+- `baseline_mean_net_bps`: baseline net sum / N.
+- `selected_policy_mean_net_bps`: selected net sum / N.
+- `delta_mean_net_bps`: negative excluded net sum / N.
+- `delta_mean_gross_bps`: negative excluded gross sum / N.
+- `avoided_cost_mean_bps`: excluded known trades times round-trip cost / N.
+
+The net delta equals gross delta plus avoided cost, up to floating-point rounding.
+With no known outcomes all these means are null. An empty selection with N > 0
+has zero policy return from not trading; this does not impute missing returns.
+`comparison.status` is partial if **any baseline** outcome is missing, even when
+the selected summary is complete. This is a complete-case descriptive comparison,
+not evidence that missingness is harmless, a causal filter effect, an executable
+portfolio or a significance test. It does not change `candidateEligible`.
+
 ## Slice Exploration Journal
 
 Supply `research_id` to explicitly request local recording before summary metrics
@@ -105,6 +135,10 @@ current `condition_hash`, global log `sequence`, scoped `recording_started_at`,
 current `group_keys` and cumulative `grouped_cell_count`. The latter counts
 repeated presentations too; it is not a count of unique groups or independent
 tests. All counts describe this local stream as of the recorded call.
+New records also identify the fixed `comparison_contract` presented. Older
+records without that field do not claim that baseline/complement metrics were
+shown. This fixed presentation addition does not create a new filter condition;
+the grouped-cell counter continues to count only explicit `group_by` output.
 
 Counts are scoped to the research ID and immutable artifact ID. Total calls and
 distinct normalized conditions are separate: repeated calls increment only the

@@ -52,8 +52,22 @@ test('normalization deduplicates and sorts sets; repeated calls append across re
   assert.equal(saved[0].ledger_records, a.ledger_records);
   assert.equal(saved[0].selected_records, a.overall.records);
   assert.equal(saved[0].selected_fraction, a.selected_fraction);
+  assert.equal(saved[0].comparison_contract, 'same_ledger_filter_partition_v1');
   assert.deepEqual(saved[0].conditions.include_symbols, ['EURUSD', 'USDJPY']);
   assert.equal(first.condition_hash, 'sha256:' + createHash('sha256').update(JSON.stringify(saved[0].conditions)).digest('hex'));
+});
+
+test('legacy exposure records remain readable without claiming comparison was displayed', async (t) => {
+  const {path,store}=await setup(t);
+  const {comparison,...legacy}=summary();
+  const before=await store.recordSummary('legacy',legacy);
+  const after=await store.recordSummary('legacy',summary());
+  assert.equal(after.call_count,2);
+  assert.equal(after.distinct_conditions,1);
+  assert.equal(after.condition_hash,before.condition_hash);
+  const saved=await records(path);
+  assert.equal(saved[0].comparison_contract,undefined);
+  assert.equal(saved[1].comparison_contract,'same_ledger_filter_partition_v1');
 });
 
 test('absent defaults and negative zero are canonical; every condition dimension affects the hash', async (t) => {
