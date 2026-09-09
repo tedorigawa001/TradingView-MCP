@@ -89,6 +89,33 @@ Automatic tracking currently covers only the opted-in ledger summary above;
 other research tools do not automatically record all data they expose. Check and report use as part of the
 research workflow, but do not claim full coverage from this journal alone.
 
+## OOS Preflight
+
+`preflight_research_oos` accepts the same strict input as the check tool.
+Supply the proposed evaluation interval, not a cherry-picked subset of trades.
+Use the stable identity returned by automatic tracking when checking its ledger
+history; price-series aliases and unrelated source IDs are not linked for you.
+
+Any recorded overlap, including validation use or another research/data version,
+returns `status: blocked`. No overlap returns `review_required`, even if the
+caller declares the period unused. Both return `execution_allowed: false`,
+`unused_proven: false` and `candidateEligible: false`. Version 1 intentionally
+has no automatic approval path: this journal does not establish complete access
+coverage. Review external/untracked usage, related series, frozen protocols and
+data provenance separately. A refusal can guide exploratory use instead, but
+must not be relabeled an unused OOS result.
+
+The full bounded usage assessment is returned with counts and truncated matches.
+`checked_at` labels the current check, not a historical as-of attestation. Reads
+are validated under the shared journal lock; storage failures return an error,
+never a clean preflight. No access record is appended and no market data is read.
+
+This is an advisory pre-execution check, not enforcement inside existing
+backtest tools. It neither reserves a period nor issues a reusable permission
+token. Concurrent or subsequent access may change the answer after the lock is
+released. Atomic check-and-execute integration is future work and must not rely
+on a previously returned snapshot as authorization.
+
 ## Storage and Failure
 
 Only bounded structured metadata is accepted, not raw market data, arbitrary

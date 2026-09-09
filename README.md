@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (105 Total)
+## Tools (106 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -244,6 +244,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_cot_crowding_unwind_overlay_template` | Returns the audited Pine overlay for supplied COT crowding context and prior daily structure; it does not fetch or infer orders or stops |
 | `get_cot_crowding_unwind_context` | Describes a daily EURUSD/USDJPY leveraged-money crowding and price-break proxy without claiming observed execution flow |
 | `preflight_cross_asset_shock` | Verifies exact closed-bar coverage for an EURUSD/USDJPY, DXY, US10Y, and XAUUSD shock study while restoring the temporary auxiliary chart |
+| `preflight_research_oos` | Checks recorded usage before OOS evaluation. Overlap blocks; absent records require review, never automatic approval. No reservation or backtest interception. See [OOS preflight](docs/RESEARCH_PERIOD_USAGE.md#oos-preflight) |
 | `classify_cross_asset_shocks` | Classifies frozen same-UTC cross-asset shock states without producing outcomes, candidates, or trade instructions |
 | `evaluate_cross_asset_shock_outcomes` | Measures descriptive 15/30/60/120-minute outcomes for non-overlapping frozen shock states without producing a candidate |
 | `preflight_bookmap_flow_price_join` | Reads one bounded local Bookmap Collector JSONL and verifies conservative receipt-time coverage against active EURUSD M1/M5; CME flow remains a single-venue futures proxy |

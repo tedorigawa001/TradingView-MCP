@@ -19,6 +19,52 @@ async function setup(t) {
   return { directory, path, store: new ResearchPeriodUsageStore(path) };
 }
 const saved = async (path) => (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse);
+
+test('OOS preflight has no approval path, even with an unused declaration',async t=>{
+  const {store,path}=await setup(t);
+  for(const prior_usage_declaration of ['unknown','declared_unused']) {
+    const r=await store.preflightOos(query({prior_usage_declaration}));
+    assert.equal(r.status,'review_required');
+    // The reason is the sentence a reader acts on, and this is the one that decides whether
+    // the review case reads as caution or as clearance. Only the blocked reason was pinned:
+    // rewriting this one to period_is_unused broke nothing.
+    assert.equal(r.reason,'absence_of_usage_records_is_not_unused_evidence');
+    assert.equal(r.contract,'recorded_usage_oos_preflight_v1');
+    assert.deepEqual(r.limitations,[
+      'read_only_snapshot_not_a_reservation_or_execution_token',
+      'existing_backtest_tools_are_not_intercepted','concurrent_or_later_access_may_change_readiness',
+      'all_research_ids_versions_and_purposes_are_considered_for_exact_series_id',
+      'no_automatic_approval_path_in_v1']);
+    assert.equal(r.execution_allowed,false);
+    assert.equal(r.unused_proven,false);
+    assert.equal(r.candidateEligible,false);
+    assert.equal(r.usage.overlapping_records,0);
+    assert.equal(new Date(r.checked_at).toISOString(),r.checked_at);
+  }
+  await assert.rejects(readFile(path),{code:'ENOENT'});
+});
+test('OOS preflight blocks both purposes and versions without changing the journal',async t=>{
+  const {store,path}=await setup(t);
+  await store.record(input({purpose:'validation',research_id:'other',data_version:version('b')}));
+  const before=await readFile(path,'utf8');
+  const r=await store.preflightOos(query({prior_usage_declaration:'declared_unused'}));
+  assert.equal(r.status,'blocked');
+  assert.equal(r.reason,'evaluation_period_has_recorded_usage');
+  assert.equal(r.usage.validation_records,1);
+  assert.equal(r.execution_allowed,false);
+  assert.equal(await readFile(path,'utf8'),before);
+  assert.equal((await store.preflightOos(query({from:ts(20),to:ts(21)}))).status,'review_required');
+  assert.equal((await store.preflightOos(query({series_id:'different'}))).status,'review_required');
+  await store.record(input({access_id:'another',purpose:'exploration'}));
+  assert.equal((await store.preflightOos(query())).usage.exploration_records,1);
+});
+test('OOS preflight fails closed on corrupt storage and invalid intervals',async t=>{
+  const {store,path}=await setup(t);
+  await assert.rejects(store.preflightOos(query({to:ts(10)})));
+  await store.record(input());
+  await writeFile(path,'broken\n');
+  await assert.rejects(store.preflightOos(query()));
+});
 const toolInput = (patch = {}) => {
   const { accessed_at, ...request } = input();
   return { ...request, request_sha256: version('c'), ...patch };
@@ -238,6 +284,11 @@ test('matched output is bounded to 100 while totals cover the complete history',
   assert.equal(result.validation_records, 51);
   assert.equal(result.matches.length, 100);
   assert.equal(result.truncated, true);
+  const preflight=await store.preflightOos(query());
+  assert.equal(preflight.status,'blocked');
+  assert.equal(preflight.usage.overlapping_records,103);
+  assert.equal(preflight.usage.matches.length,100);
+  assert.equal(preflight.usage.truncated,true);
 });
 
 test('corrupt framing, metadata, dates, IDs and sequences fail closed on reads and writes', async (t) => {

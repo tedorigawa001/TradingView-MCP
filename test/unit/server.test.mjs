@@ -1066,7 +1066,37 @@ test('compare_research_evidence reports changed and unknown declarations without
   assert.equal(calls,0);
 });
 
-test("exposes exactly the one hundred five expected tools", async () => {
+test('OOS preflight returns refusal or review without accessing charts, and propagates failures',async t=>{
+  const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
+  const {rm,writeFile}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'oos-preflight-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const path=join(dir,'usage.jsonl'), store=new ResearchPeriodUsageStore(path);
+  let chartCalls=0;
+  const client=await connectedClient(makeDeps({researchPeriodUsage:store,
+    tv:{getChartContext:async()=>{chartCalls++;throw new Error('unexpected chart');}}}));
+  t.after(()=>client.close());
+  const args={series_id:'test',data_version:'sha256:'+'a'.repeat(64),from:'2024-01-01T00:00:00.000Z',to:'2024-02-01T00:00:00.000Z',prior_usage_declaration:'declared_unused'};
+  const call=()=>client.callTool({name:'preflight_research_oos',arguments:args});
+  const empty=await call();
+  assert.ok(!empty.isError);
+  assert.equal(JSON.parse(empty.content[0].text).status,'review_required');
+  const {prior_usage_declaration,...period}=args;
+  await store.recordToolAccess({...period,access_id:'observed',research_id:'other',purpose:'exploration',request_sha256:'sha256:'+'b'.repeat(64)});
+  const blocked=await call();
+  assert.ok(!blocked.isError);
+  const r=JSON.parse(blocked.content[0].text);
+  assert.equal(r.status,'blocked');
+  assert.equal(r.execution_allowed,false);
+  assert.equal(r.usage.matches[0].source,'tool_observed');
+  const extra=await client.callTool({name:'preflight_research_oos',arguments:{...args,execute:true}});
+  assert.equal(extra.isError,true);
+  await writeFile(path,'broken\n');
+  assert.equal((await call()).isError,true);
+  assert.equal(chartCalls,0);
+});
+
+test("exposes exactly the one hundred six expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1142,6 +1172,7 @@ test("exposes exactly the one hundred five expected tools", async () => {
       "measure_carry_panel_dependence",
       "preflight_bookmap_flow_price_join",
       "preflight_cross_asset_shock",
+      "preflight_research_oos",
       "reconcile_gold_open_interest",
       "record_research_period_usage",
       "record_strategy_experiment",

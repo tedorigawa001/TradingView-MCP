@@ -238,4 +238,29 @@ export class ResearchPeriodUsageStore {
     const query = researchPeriodUsageCheckSchema.parse(input);
     return this.log.serialize(async () => assess(await this.readUnlocked(), query));
   }
+
+  async preflightOos(input: unknown) {
+    const query = researchPeriodUsageCheckSchema.parse(input);
+    return this.log.serialize(async () => {
+      const usage = assess(await this.readUnlocked(), query);
+      const overlap = usage.overlapping_records > 0;
+      return {
+        contract: "recorded_usage_oos_preflight_v1",
+        checked_at: new Date().toISOString(),
+        status: overlap ? "blocked" : "review_required",
+        reason: overlap ? "evaluation_period_has_recorded_usage" : "absence_of_usage_records_is_not_unused_evidence",
+        execution_allowed: false,
+        candidateEligible: false,
+        unused_proven: false,
+        usage,
+        required_actions: overlap
+          ? ["do_not_label_this_period_unused_oos", "choose_a_separate_uninspected_period_or_report_as_exploratory"]
+          : ["review_untracked_external_and_related_series_access", "verify_frozen_protocol_and_data_provenance"],
+        limitations: ["read_only_snapshot_not_a_reservation_or_execution_token",
+          "existing_backtest_tools_are_not_intercepted", "concurrent_or_later_access_may_change_readiness",
+          "all_research_ids_versions_and_purposes_are_considered_for_exact_series_id",
+          "no_automatic_approval_path_in_v1"],
+      };
+    });
+  }
 }

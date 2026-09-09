@@ -1,5 +1,15 @@
 # Security Review (2026-07-07)
 
+## Addendum: OOS Preflight (2026-09-09)
+
+`preflight_research_oos` accepts strict bounded series/version/UTC-interval
+metadata and reads the existing validated usage journal under lock. It does not
+append access records, read market data, execute a backtest or reserve a period.
+Overlap returns blocked; missing history never authorizes execution, including
+when the caller declares unused status. Read errors fail closed. This snapshot
+is not an execution token and existing backtest tools are not intercepted;
+post-check concurrent access remains outside this advisory boundary.
+
 ## Addendum: Automatic Ledger Period Logging (2026-09-09)
 
 `summarize_backtest_ledger` with `research_id` authorizes a second bounded local

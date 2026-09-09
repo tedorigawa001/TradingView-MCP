@@ -1822,6 +1822,8 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 
 ## 運用メモ
 
+- OOS実行前チェックv1 (2026-09-09): `preflight_research_oos` を追加。評価区間の既知利用を研究ID・版・探索/検証目的をまたいで照合し、重複はblocked、記録なしは未使用申告があってもreview_required。execution_allowed/unused_proven/candidateEligibleはfalse固定。既存バックテストの自動停止・期間予約・実行許可トークンは実装せず、読み取り専用の判断支援として提供する。台帳の厳密検証と共有ロックを利用し、読み込みエラーを空履歴へ落とさない。変更後ビルド・期間管理/MCP219テスト・独立レビューが通過。契約/limitationsと100件省略後も総数に基づく拒否を追加固定。README106ツール・利用契約・security review更新。ライブ確認は再接続後。実行器との原子的接続、全参照元の利用coverage確立は別の残課題。
+
 - 研究利用履歴の自動記録v1 (2026-09-09): 最初の対象を `summarize_backtest_ledger` に限定。research_id指定時に、全台帳の最早entry〜最終exit+1msとartifact版をtool_observedとして記録してから探索記録・成績返却へ進む。source_id由来の安定系列IDで改訂を照合し、フィルターや空集合でbaseline参照を隠さない。入力lookbackは台帳に無いためledger_trade_envelope_onlyと明示し、別source ID/外部/他ツール参照は自動照合しない。research_id省略は未追跡。任意usage_access_idで期間記録の同一要求再送を冪等化し、要求変更・手動/自動のID衝突・自動出自偽装を拒否。既存探索呼出回数は再送でも増加する。
 - 保存失敗時は成績を返さないが、2台帳は非トランザクションなので後段失敗時の利用試行記録は保守的に残る。ビルド、関連241テスト、全体Node1001件・Java各スイート・raw-to-Javaが通過。独立レビュー後、自動ID/改訂系列/両実ストア再送の統合ケースを追加検証した。公開文書更新済み。実機確認はMCP再接続後。自動記録の他ツール拡張、入力価格履歴の完全な出自接続、OOS実行前拒否は未実装。
 

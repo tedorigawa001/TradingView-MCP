@@ -203,7 +203,7 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check" | "recordToolAccess">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check" | "recordToolAccess" | "preflightOos">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -5462,6 +5462,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const {confirm, ...input} = request;
         return jsonResult(await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input)));
       } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "preflight_research_oos",
+    {
+      description: "Read-only pre-execution OOS usage check for an evaluation interval [from,to). " +
+        "Any recorded exploration or validation across research IDs and versions of the exact series blocks it. " +
+        "No overlap, including declared-unused input, requires external review and never authorizes execution. " +
+        "This is a snapshot, not a reservation or execution token; existing backtest tools are not intercepted. No data/chart access or journal append.",
+      inputSchema: researchPeriodUsageCheckSchema,
+    },
+    async (request) => {
+      try { return jsonResult(await researchPeriodUsage.preflightOos(request)); }
+      catch (err) { return errorResult(err); }
     },
   );
 
