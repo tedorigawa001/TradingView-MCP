@@ -1,6 +1,6 @@
 {
   "name": "bushido-tradingview-mcp",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "MCP server that lets AI analyze the TradingView desktop app via Chrome DevTools Protocol",
   "keywords": [
     "mcp",
@@ -16,6 +16,7 @@
     "tradingview-mcp": "build/index.js",
     "tradingview-mcp-import-ledger": "build/backtestLedgerCli.js",
     "tradingview-mcp-generate-evidence": "build/researchEvidenceCli.js",
+    "tradingview-mcp-reproduce": "build/researchReproductionCli.js",
     "tradingview-mcp-health": "build/collectionHealthCli.js",
     "tradingview-mcp-collect-first-seen": "build/collectionCli.js"
   },

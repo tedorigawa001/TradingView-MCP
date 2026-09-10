@@ -12,6 +12,21 @@ import {reproduceResearch} from '../../build/researchReproduction.js';
 import {backtestLedgerSchema,summarizeBacktestLedger} from '../../build/backtestLedger.js';
 import {runResearchReproductionCli} from '../../build/researchReproductionCli.js';
 const hash=x=>`sha256:${createHash('sha256').update(x).digest('hex')}`;
+test('every declared command exists, is locked and is executable',async()=>{
+  // The reproduction CLI shipped without a bin entry. Pinning that one name would have
+  // caught it and nothing else: health and collect-first-seen were already absent from the
+  // lockfile at the time. Whatever is declared gets checked, including the next one added.
+  const pkg=JSON.parse(await readFile(new URL('../../package.json',import.meta.url),'utf8'));
+  const lock=JSON.parse(await readFile(new URL('../../package-lock.json',import.meta.url),'utf8'));
+  const declared=Object.entries(pkg.bin);
+  assert.ok(declared.length>=6,'expected every CLI to stay declared');
+  assert.equal(pkg.bin['tradingview-mcp-reproduce'],'build/researchReproductionCli.js');
+  for (const [name,target] of declared) {
+    assert.equal(lock.packages[''].bin[name],target,`${name} missing from the lockfile`);
+    assert.match(await readFile(new URL(`../../${target}`,import.meta.url),'utf8'),
+      /^#!\/usr\/bin\/env node\n/,`${name} target lacks a node shebang`);
+  }
+});
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'reproduction-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));

@@ -1,5 +1,11 @@
 # Local Research Reproduction
 
+The installed command is `tradingview-mcp-reproduce`. For example:
+
+```sh
+tradingview-mcp-reproduce --input /absolute/config.json --output /absolute/new-report.json --confirm-local-read
+```
+
 This first version reruns the fixed `summarizeBacktestLedger` calculation on a
 saved ledger. It does not rerun the strategy, create trades, access TradingView,
 authorize OOS use, execute supplied commands, or establish profitability.
