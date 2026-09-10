@@ -429,6 +429,9 @@ Generate comparison-ready local evidence with `npm run generate:research-evidenc
 This hashes explicit files and records the current Node environment without executing research code.
 See [evidence generation](docs/RESEARCH_EVIDENCE_GENERATION.md) for scope, limits and optional private output.
 
+Rerun a fixed saved-ledger summary with `npm run reproduce:research -- --input /absolute/config.json --output /absolute/new-report.json --confirm-local-read`.
+See [local reproduction](docs/RESEARCH_REPRODUCTION.md); this does not rerun a strategy or authorize OOS use.
+
 ### From Source
 
 The published package provides the MCP server only. Every `npm run` command in

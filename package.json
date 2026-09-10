@@ -44,6 +44,7 @@
     "evaluate": "node build/evaluate.js",
     "import:backtest-ledger": "node build/backtestLedgerCli.js",
     "generate:research-evidence": "node build/researchEvidenceCli.js",
+    "reproduce:research": "node build/researchReproductionCli.js",
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",

@@ -1,5 +1,19 @@
 # Security Review (2026-07-07)
 
+## Addendum: Fixed Summary Reproduction (2026-09-10)
+
+`reproduce:research` runs only the built-in ledger summarizer after explicit local
+read confirmation. Strict configuration rejects commands and other task names.
+Inputs use bounded regular-file readers, and consumed bytes must match generated
+evidence. Results are hashed, not printed as performance data. Reports are staged,
+synced and published by exclusive hard link; existing destinations are untouched.
+A post-publication directory-sync failure may leave complete bytes but returns an
+error. Parent-directory races, abrupt-stop staging files, and Windows ACL limits
+remain. No OOS authorization, journal reservation, strategy execution or remote
+access is provided. Match/mismatch itself reveals information, so this untracked
+local check cannot establish an unused holdout. Entrypoint hashes do not prove the
+complete dependency tree or already-loaded module contents.
+
 ## Addendum: Local Evidence Generator (2026-09-10)
 
 The explicitly confirmed local CLI hashes only named regular files, rejecting
