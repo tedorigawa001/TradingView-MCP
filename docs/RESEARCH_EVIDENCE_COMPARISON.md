@@ -4,6 +4,9 @@
 and `current`. This is a bounded, read-only metadata comparison, not an artifact
 reader, environment collector, experiment rerunner, or preregistration system.
 It neither stores reports nor verifies that submitted hashes describe real files.
+The separate [local generation CLI](RESEARCH_EVIDENCE_GENERATION.md) can create
+`manifest` from explicitly selected files and the current Node environment.
+The comparison tool still treats submitted manifests as caller-supplied.
 
 ## Manifest Contract
 
@@ -53,5 +56,5 @@ OOS, or statistical-calibration proof. `compatibility_proven` and
 `candidateEligible` always remain false; `statistical_calibration` is
 `not_assessed`. Existing frozen contracts and candidate gates are unchanged.
 No chart, orders, filesystem paths, network requests or executable payloads are
-used by this tool. Automatic artifact extraction and result reproduction remain
-separate future work.
+used by this tool. The local CLI provides explicit-file hashing, not automatic
+dependency discovery or result reproduction; those remain separate work.

@@ -1,5 +1,19 @@
 # Security Review (2026-07-07)
 
+## Addendum: Local Evidence Generator (2026-09-10)
+
+The explicitly confirmed local CLI hashes only named regular files, rejecting
+final-component symlinks and detecting common replacement/mutation races with
+identity/timestamp checks and two byte-hash passes. Limits are 128 MiB per file,
+512 MiB per pass and 20 files per axis. No MCP arbitrary-path reader, network,
+code execution, recursive scan or environment-variable/argument dump is added.
+Output contains logical IDs, digests, counts and allowlisted current runtime
+metadata, not input paths or contents. Output creation is exclusive and synced;
+CLI failures are redacted. Parent symlinks, hostile same-user races, changes after
+verification and unresponsive filesystem calls remain residual risks. The result
+does not authenticate the producer, validate dependency installation or prove
+that any recorded runtime executed a research run.
+
 ## Addendum: OOS Preflight (2026-09-09)
 
 `preflight_research_oos` accepts strict bounded series/version/UTC-interval

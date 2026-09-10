@@ -425,6 +425,10 @@ See [docs/security-review.md](docs/security-review.md) for the full review. At m
 
 ## Development
 
+Generate comparison-ready local evidence with `npm run generate:research-evidence -- --input /absolute/config.json --confirm-local-read`.
+This hashes explicit files and records the current Node environment without executing research code.
+See [evidence generation](docs/RESEARCH_EVIDENCE_GENERATION.md) for scope, limits and optional private output.
+
 ### From Source
 
 The published package provides the MCP server only. Every `npm run` command in

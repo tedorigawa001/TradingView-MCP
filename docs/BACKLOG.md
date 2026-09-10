@@ -1829,5 +1829,11 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 
 - 共有履歴ロック競合の本番修正 (2026-09-09): Windows高負荷時に4プロセスの検証/追記/fsyncが旧2秒予算を超える指摘を受け、2.3秒保持テストで旧実装の失敗を再現。`AppendOnlyFirstSeenLog` を既定30秒・`TV_MCP_HISTORY_LOCK_WAIT_MS` (100〜120000ms) に変更し、単調時計、ジッター付き有限再試行、期限超過のロックパス/診断コードを追加。排他・所有者確認・検証・fsyncは維持し、ロック奪取を行わない。4プロセス×8書込みの本数/整合性検査は維持し、子プロセス全体の監視期限のみ90秒へ変更。関連42テスト、全体Node992件・Java各スイート・raw-to-Javaが通過。独立レビューに重大指摘なし。追加の既定値/壁時計ジャンプ検証も実施。実行環境はmacOSであり、Windowsランナーの再実行は未確認。高負荷の根本的I/O削減、公平性、stale lock回復は別問題として残る。
 
+- 証跡自動生成CLI v1 (2026-09-10): `generate:research-evidence` / `tradingview-mcp-generate-evidence` を追加。明示したdata/code/runner/candidate_rule/parametersファイルと任意lockfileから、既存比較ツール互換の6軸manifestを生成する。未指定軸はnull、環境は今回のCLIプロセスのNode/OS/依存lockfileに限定し、過去・別プロセスの実行証明にしない。論理ID順と生バイトSHA-256のレシピを固定し、パス・環境変数値・生内容を出力しない。
+- 各軸20ファイル、1ファイル128MiB、各読取パス合計512MiBで制限。ストリーム読取と2回の照合で変更を検出し、非通常ファイル/末端symlinkを拒否する。複数ファイルの原子的snapshotや親ディレクトリの同一ユーザー競合防止は保証しない。出力は既存上書き禁止・所有者権限・fsync。任意MCPファイル読取は追加せず、明示確認付きローカルCLIのみ。
+- 検証: build、全Node 1,022件、Java各スイートとraw-to-Java replayが通過。独立レビューのstdoutパス露出を修正、再レビューで追加指摘なし。実fixture/code/runner/lockfileから生成し、0600・パス非出力・未指定2軸を比較側がincompleteに保つことを確認した。公開ドキュメントは `docs/RESEARCH_EVIDENCE_GENERATION.md`。自動依存列挙、実行と証跡の原子的束縛、過去ランの環境再構成は未対応。Windows実行は今回未確認。
+
+- 証跡CLI診断改善 (2026-09-10): 生成器の既知失敗を専用エラー型と6つの固定コードへ分類。不存在/アクセス拒否/非通常ファイル/変更検出/単一容量/合計容量をパスなしで表示する。任意error.codeやmessageは信用せず、JSON/Zod/未分類エラーは伏せる。設定ファイル・出力ファイルの詳細診断は未対応。ビルドと関連23テスト通過、独立レビューに追加指摘なし。今回の小修正では全体テストは再実行していない。
+
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
 - **ストラテジーテスターAPI移行**(2026-07-20訂正): 当初はアプリ再起動直後の`TradingViewApi.backtestingStrategyApi`不在を遅延初期化と判断していたが、Strategy Tester表示後も復活せず、現行版ではactive chart modelのstrategy sourceへ移行したことを実機確認した。旧APIがあれば優先し、現行APIをWatchedValue相当へ適応する互換層を追加。`set_indicator_input`のsettle、`get_strategy_report`、`get_strategy_trade_ledger`、`run_backtest`を両経路へ統一した

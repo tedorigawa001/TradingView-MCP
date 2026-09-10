@@ -15,6 +15,7 @@
   "bin": {
     "tradingview-mcp": "build/index.js",
     "tradingview-mcp-import-ledger": "build/backtestLedgerCli.js",
+    "tradingview-mcp-generate-evidence": "build/researchEvidenceCli.js",
     "tradingview-mcp-health": "build/collectionHealthCli.js",
     "tradingview-mcp-collect-first-seen": "build/collectionCli.js"
   },
@@ -42,6 +43,7 @@
     "start": "node build/index.js",
     "evaluate": "node build/evaluate.js",
     "import:backtest-ledger": "node build/backtestLedgerCli.js",
+    "generate:research-evidence": "node build/researchEvidenceCli.js",
     "walk-forward": "node build/walkForwardCli.js",
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
