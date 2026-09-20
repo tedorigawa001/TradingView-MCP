@@ -1610,7 +1610,7 @@ USDJPY 4Hを実分析した際、チャート自体は`OANDA:USDJPY`だった一
 - **point-in-time**: `available_at`がlocal first-seenとして観測された最新COTだけをライブ文脈に使う。既存250週は2026年7月に一括first-seenされたため、過去時点の利用可能性を証明せず、歴史バックテスト・候補採用・OOS根拠には使わない。週次の前向き収集から新規signalを記録し、十分なsignal数が貯まるまで評価値を出さない
 - **初期実装(2026-08-02)**: COT内部読み出し上限を250週へ拡張し、`get_cot_crowding_unwind_context`を追加した。active chartのexact `EURUSD`/`USDJPY`・`1D`を拘束し、3年percentileと20日support/resistance、終値breakを構造化して返す。candidateは常にfalseで、Bar Replayを拒否する。前向きhorizon、同一regime対照、empirical null、OOSは未実装であり、現段階のcontextを売買判断や成績主張へ昇格させない
 
-### #79 外生情報・週次フローによる新規手法探索(優先度: 高, 2026-08-08)
+### #99 外生情報・週次フローによる新規手法探索(優先度: 高, 2026-08-08、番号は2026-09-20に#79から訂正)
 
 - **背景**: #77/#78を含む短期Price Action、追加のセッション条件、VP proxyの価格反応は、固定契約・同一regime対照・経験的ヌルの下で候補へ進める根拠を残していない。価格足だけから派生する条件を増やして再開せず、価格形成の外側にある、時刻が固定された情報と低頻度ポジショニングへ探索空間を移す
 - **優先1: マクロ・サプライズ後の方向性ドリフト**: 既存のM15 macro event studyでNFP/FOMCは反応**量**の評価を次段階へ進めたが、方向シグナルはまだ存在しない。発表時点で利用可能だった市場予想値、actual、revision、release timestamp、取得時刻・raw hashをfirst-seen契約で保存し、`surprise = actual - consensus`の符号を事前固定して、CPI/NFP/FOMCを混合せず別母集団として検証する。USD直結のEURUSD/USDJPY/GBPUSD、金(XAUUSD)、非USD対照のEURGBP/AUDNZDを同じ発表時刻・同じ手続きで比較し、対照まで同方向へ反応するなら指標固有の根拠と扱わない。M15のアンカーは発表時刻ちょうどに開始する確定バー、horizonは15分/30分/60分/120分/240分を事前固定する。市場予想のpoint-in-time証跡が整うまでは、既存の反応量結果を方向性・売買候補へ昇格させない
@@ -1713,6 +1713,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **健全だった箇所**: `Runtime.evaluate` の27箇所は全て `JSON.stringify` または整数検証後の数値のみを埋め込む。`eval`・`new Function`・子プロセス呼び出しは `src/` に一つも無い。外向き fetch はホスト固定・`redirect: "manual"`・`assertExpectedResponseHost`・バイト上限。MCP ツール入力に URL やパスを取るものは無い。ディレクトリ `0o700` / ファイル `0o600`、入力由来のパス結合1箇所は basename 許可リスト+`lstat` シンボリックリンク拒否+サイズ上限で守られている
 - **残: Fed 声明パーサーの二次バックトラック**(`officialMacroActualSources.ts:65`、64 KB で4.0秒、上限8 MB)。federalreserve.gov の TLS 応答が前提で、影響も収集 CLI 止まりのため受容とした。同じ `{0,n}` 化で潰せるが、対象パターンが5本あり回帰リスクの方が大きい
 - **残: `docs/launchd/*.example` に実パス**(ユーザー名、nodenv のバージョン、ディレクトリ構成)が入ったまま公開されている。加えてこれらが指す `Documents/GitHub/...` は現在のコレクター停止の原因そのものであり、未修正である
+- **hono の床固定(2026-09-11、0.1.12 で配布)**: GHSA-gqvv-2mrq-wpjv / GHSA-g6gw-c38x-mqfc / GHSA-crvj-82cr-hjcx(いずれも `< 4.13.5` が対象)。0.1.11 では lockfile を 4.13.7 へ上げただけで、SDK の範囲 `^4.11.4` を再解決すれば床を割れた。`overrides` に `hono ^4.13.5` と `@hono/node-server ^2.0.11` を置き、`test/unit/dependencyPolicy.test.mjs` が override の床を読んで lockfile の解決版がそれを下回れば落ちる。hono は streamable HTTP トランスポート経由でしか読み込まれず本サーバーは使っていないが、監査が拒否する lockfile を配布しないための措置。Dependabot の3件は push 後24分で fixed になった。
 
 ### #88 ML学習曲線と限定パラメータ探索 (着手, 2026-09-07)
 
@@ -1820,8 +1821,6 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - 実行環境・契約差分確認v1 (2026-09-09): `compare_research_evidence` を追加。前回/今回のデータ・コード・runner・候補規則・パラメータ・実行環境の6種SHA-256宣言を比較し、一致/変更/不明と再検証チェックリストを返す。データ一致でもコード変更を検出し、両側欠落を一致にしない。変更と不足の併存はincompleteかつrevalidation required。ハッシュ対象の構築・実ファイル認証・環境自動採取・結果再現は初版に含めず、互換性/校正/OOS/候補資格を認定しない。公開するのは汎用比較機能だけで、研究内容は非公開のまま。
 - ビルドと関連238テストが通過。独立レビューでMCPのshape登録による最上位余分引数の黙示除去を検出し、完全strictスキーマに変更してMCP拒否テストを追加。6項目の欠落左右対称性、項目別再検証リスト、重複除去、データ同一・コード変更を固定した。READMEは105ツールへ更新し、専用契約とsecurity reviewを追記。ライブMCP確認は再接続後。#98の5項目は初版実装済みだが、利用履歴の自動追跡、OOS実行拒否、原本/環境の自動証跡抽出、再検証の自動実行は別の残課題。
 
-## 運用メモ
-
 - OOS実行前チェックv1 (2026-09-09): `preflight_research_oos` を追加。評価区間の既知利用を研究ID・版・探索/検証目的をまたいで照合し、重複はblocked、記録なしは未使用申告があってもreview_required。execution_allowed/unused_proven/candidateEligibleはfalse固定。既存バックテストの自動停止・期間予約・実行許可トークンは実装せず、読み取り専用の判断支援として提供する。台帳の厳密検証と共有ロックを利用し、読み込みエラーを空履歴へ落とさない。変更後ビルド・期間管理/MCP219テスト・独立レビューが通過。契約/limitationsと100件省略後も総数に基づく拒否を追加固定。README106ツール・利用契約・security review更新。ライブ確認は再接続後。実行器との原子的接続、全参照元の利用coverage確立は別の残課題。
 
 - 研究利用履歴の自動記録v1 (2026-09-09): 最初の対象を `summarize_backtest_ledger` に限定。research_id指定時に、全台帳の最早entry〜最終exit+1msとartifact版をtool_observedとして記録してから探索記録・成績返却へ進む。source_id由来の安定系列IDで改訂を照合し、フィルターや空集合でbaseline参照を隠さない。入力lookbackは台帳に無いためledger_trade_envelope_onlyと明示し、別source ID/外部/他ツール参照は自動照合しない。research_id省略は未追跡。任意usage_access_idで期間記録の同一要求再送を冪等化し、要求変更・手動/自動のID衝突・自動出自偽装を拒否。既存探索呼出回数は再送でも増加する。
@@ -1838,6 +1837,8 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - 再現検証の自動実行v1 (2026-09-10): `reproduce:research` CLIで保存台帳の固定再集計を実行し、明示された期待結果SHA-256と照合する。任意コマンド/戦略バックテスト/TradingView操作は含めない。元artifact IDを維持し、消費した入力バイトと前後の証跡を照合。不一致はレポート保存後exit 2、失敗exit 1、一致exit 0。非公開stagingへの同期後に排他的hard linkで公開する。ビルドと関連29テスト通過、固定期待ハッシュ・費用差異・ID不整合・保存失敗後再試行・CLI実行を確認。独立レビューの部分書込み指摘を反映。全体テスト/Windows実機は今回未実施。戦略再実行・完全依存/ロード済みコード証明・利用台帳への自動記録・OOS許可は残課題。契約は `docs/RESEARCH_REPRODUCTION.md`。
 
 - 戦略再バックテスト接続の実証 (2026-09-10): 非公開の既存5系統について、凍結実装を別ディレクトリへ複製し、価格入力の検証→学習→シグナル→取引生成→独立約定会計検証→旧台帳/集計/学習情報/前後証跡照合を自動実行した。元結果は非上書き、設定変更なし。売買生成4系統と無標本による停止1系統の旧状態を再現した。戦略9テスト・比較器2テスト通過。環境のPython ABI/CPU不整合を検出し、既存ライブラリと互換の実行環境を明示選択。実装・銘柄別成績・成果物はGit対象外。汎用MCPへの外部戦略runner登録、安全な子プロセス契約、全依存の環境固定、他のチューニング版の接続は未実装であり、今回のローカル専用ランナーを公開機能完了とはしない。
+
+## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
 - **ストラテジーテスターAPI移行**(2026-07-20訂正): 当初はアプリ再起動直後の`TradingViewApi.backtestingStrategyApi`不在を遅延初期化と判断していたが、Strategy Tester表示後も復活せず、現行版ではactive chart modelのstrategy sourceへ移行したことを実機確認した。旧APIがあれば優先し、現行APIをWatchedValue相当へ適応する互換層を追加。`set_indicator_input`のsettle、`get_strategy_report`、`get_strategy_trade_ledger`、`run_backtest`を両経路へ統一した
