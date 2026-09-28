@@ -203,6 +203,12 @@ test('a near-copy secondary is not distinct; a squared-return-like one is, even 
   assert.equal(nearCopy.secondary.distinct, false);
   assert.ok(nearCopy.secondary.spearman_rho > 0.99);
   assert.equal(nearCopy.battery_outcome, 'not_assessed_secondary_proxy_not_distinct');
+  assert.deepEqual(nearCopy.withheld_reasons, ['not_assessed_secondary_proxy_not_distinct']);
+  // Row 6 comes before row 7, and both stay listed.
+  const untrackedCopy = compareForecastLosses(setFromD(uniform(), { secondary: (p) => p.map((x, i) => x * (1 + 1e-6 * Math.sin(i))) }),
+    { loss: 'mse', tracked: false });
+  assert.equal(untrackedCopy.battery_outcome, 'not_assessed_secondary_proxy_not_distinct');
+  assert.deepEqual(untrackedCopy.withheld_reasons, ['not_assessed_secondary_proxy_not_distinct', 'no_listed_conflict_untracked']);
   // QLIKE with A's log level swinging over [0, 100]: c_t = log a_t dominates d, so d and d2 correlate
   // above 0.99, but the proxy-dependent parts do not.
   const T = 400, random = createRandom(11);
@@ -313,6 +319,24 @@ test('evaluability, drop causes and hard-day diagnostics', () => {
   assert.equal(constant.withheld_reasons_scope, 'side_independent_only');
   assert.deepEqual(constant.withheld_reasons, ['not_assessed_secondary_proxy_absent']);
   assert.equal(constant.dm.DM, null);
+});
+
+test('the favoured side needs p below 0.05, and the upper tail keeps its precision', () => {
+  // Centred uniform noise shifted by a constant: DM is linear in the shift, since S depends on the noise only.
+  const random = createRandom(5);
+  const noise = Array.from({ length: 300 }, () => (random() - 0.5) * 0.4);
+  const centre = noise.reduce((sum, x) => sum + x, 0) / noise.length;
+  const shifted = (c) => noise.map((x) => x - centre + c);
+  const between = compareForecastLosses(setFromD(shifted(-0.008), { secondary: independentSecondary }), tracked);
+  assert.ok(between.dm.p_a > 0.05 && between.dm.p_a < 0.1, `p_a ${between.dm.p_a}`);
+  assert.equal(between.mean_favours, 'neither', 'a two-sided 10% test, not a one-sided 10% one');
+  assert.equal(between.battery_outcome, 'not_applicable');
+  // DM near +10: p_B = Φ(−DM) is about 1e-23, while 1 − Φ(DM) would round to exactly 0.
+  const far = compareForecastLosses(setFromD(shifted(0.053), { secondary: independentSecondary }), tracked);
+  assert.equal(far.mean_favours, 'B');
+  assert.ok(far.dm.DM > 9 && far.dm.DM < 11, `DM ${far.dm.DM}`);
+  assert.ok(far.dm.p_b > 0);
+  close(far.dm.p_b, normalCdf(-far.dm.DM), 1e-12, 'p_b');
 });
 
 test('neither side favoured: not applicable, both one-sided trims labelled by forecast, no k*', () => {
