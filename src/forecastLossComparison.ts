@@ -315,7 +315,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     ...(secondaryStatus === "not_evaluable" && secondaryMean !== null && reverses(secondaryMean)
       ? ["non_evaluable_secondary_mean_reverses"] : []),
   ];
-  const outcome = conflicts.length ? "conflicts_found"
+  const outcome: BatteryOutcome = conflicts.length ? "conflicts_found"
     : m > k ? "blocked_by_dropped_days"
       : secondaryStatus !== "evaluable" ? "not_assessed_secondary_proxy_absent"
         : distinct === false ? "not_assessed_secondary_proxy_not_distinct"

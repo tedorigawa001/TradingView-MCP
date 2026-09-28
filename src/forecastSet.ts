@@ -214,7 +214,10 @@ export class ForecastSetStore {
     await this.checkDirectory();
     const body = await readBacktestLedgerFile(join(this.directory, `${artifactId.slice(7)}.json`), true);
     if (digest(body.toString("utf8")) !== artifactId) throw new Error("forecast set artifact hash mismatch");
-    const { set, artifact_id } = normalizeForecastSet(JSON.parse(body.toString("utf8")));
+    const stored = JSON.parse(body.toString("utf8"));
+    // The stored form writes an absent secondary or labels as null; the input schema takes them as absent.
+    for (const key of ["secondary", "labels"]) if (stored?.[key] === null) delete stored[key];
+    const { set, artifact_id } = normalizeForecastSet(stored);
     if (artifact_id !== artifactId) throw new Error("forecast set is not in normalized form");
     return set;
   }

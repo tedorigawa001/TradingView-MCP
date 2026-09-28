@@ -536,7 +536,10 @@ function makeDeps(overrides = {}) {
       recordToolAccess: async input => ({...input, source:'tool_observed', idempotent:false}),
       record: async () => {throw new Error('unexpected manual period write');},
       check: async () => {throw new Error('unexpected period check');},
+      recordToolAccessBatch: async () => {throw new Error('unexpected forecast period write');},
     },
+    forecastSets: overrides.forecastSets ?? { get: async () => { throw new Error('unexpected forecast set read'); } },
+    forecastLossJournal: overrides.forecastLossJournal ?? { record: async () => { throw new Error('unexpected forecast loss journal write'); } },
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -1144,7 +1147,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred seven expected tools", async () => {
+test("exposes exactly the one hundred eight expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1156,6 +1159,7 @@ test("exposes exactly the one hundred seven expected tools", async () => {
       "carry_panel_preflight",
       "check_research_period_usage",
       "classify_cross_asset_shocks",
+      "compare_forecast_losses",
       "compare_indicator_observations",
       "compare_research_evidence",
       "compare_strategy_experiments",
@@ -8679,4 +8683,226 @@ test("the version clients are told is the one the package ships", async () => {
 
   const client = await connectedClient(makeDeps());
   assert.equal(client.getServerVersion().version, manifest.version);
+});
+
+// compare_forecast_losses (docs/FORECAST_LOSS_COMPARISON_PLAN.md, step 6). Synthetic sets only: an MSE
+// scalar set whose daily d = loss(A) − loss(B) is chosen directly (a = p + √(1 + d), b = p + 1).
+const forecastDay = (i) => new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
+function forecastSetInput({ days = 400, d = (i) => -0.05 + 0.02 * Math.sin(i * 1.3), series = ['fx:EURUSD'], secondary = true,
+  labels, source = 'synthetic-forecasts', start = 0 } = {}) {
+  const idx = Array.from({ length: days }, (_, i) => start + i);
+  const p = idx.map((i) => 1 + ((i * 7919) % 13) / 10);
+  return {
+    schema_version: '1.0', source_id: source, source_sha256: 'sha256:' + 'a'.repeat(64), evidence_tier: 'synthetic_test',
+    horizon: 1, n: 1, underlying_series_ids: series, dates: idx.map(forecastDay),
+    windows: idx.map((i) => ({ from: `${forecastDay(i)}T00:00:00.000Z`, to: `${forecastDay(i)}T23:00:00.000Z` })),
+    a: p.map((x, i) => x + Math.sqrt(1 + d(idx[i]))), b: p.map((x) => x + 1), primary: p,
+    ...(secondary ? { secondary: idx.map((i) => 0.8 + ((i * 104729) % 17) / 12) } : {}),
+    ...(labels ? { labels: idx.map(labels) } : {}),
+  };
+}
+async function forecastStores(t) {
+  const { ForecastSetStore } = await import('../../build/forecastSet.js');
+  const { ForecastLossJournalStore } = await import('../../build/forecastLossJournal.js');
+  const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+  const { rm } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'forecast-loss-tool-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const paths = { sets: join(dir, 'sets'), usage: join(dir, 'usage.jsonl'), journal: join(dir, 'journal.jsonl') };
+  return { dir, paths, forecastSets: new ForecastSetStore(paths.sets), researchPeriodUsage: new ResearchPeriodUsageStore(paths.usage),
+    forecastLossJournal: new ForecastLossJournalStore(paths.journal) };
+}
+const jsonLines = async (path) => {
+  try { return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+};
+async function forecastClient(t, deps) {
+  const client = await connectedClient(makeDeps(deps));
+  t.after(() => client.close());
+  const raw = (args) => client.callTool({ name: 'compare_forecast_losses', arguments: args });
+  const call = async (args) => {
+    const response = await raw(args);
+    assert.ok(!response.isError, response.content[0].text);
+    return JSON.parse(response.content[0].text);
+  };
+  return { raw, call };
+}
+
+test('compare_forecast_losses records period usage, then the journal, then responds in the design order', async (t) => {
+  const stores = await forecastStores(t);
+  const order = [];
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput({ series: ['fx:EURUSD', 'fx:USDJPY'].slice(0, 1) }));
+  const { call } = await forecastClient(t, { forecastSets: stores.forecastSets,
+    researchPeriodUsage: { recordToolAccessBatch: async (tool, inputs) => { order.push('period'); return stores.researchPeriodUsage.recordToolAccessBatch(tool, inputs); } },
+    forecastLossJournal: { record: async (exposure) => { order.push('journal'); return stores.forecastLossJournal.record(exposure); } } });
+  const r = await call({ artifact_id, loss: 'mse', research_id: 'study:forecast', usage_access_id: 'forecast-run-1' });
+  assert.deepEqual(order, ['period', 'journal']);
+  assert.deepEqual(Object.keys(r).slice(0, 10), ['contract', 'status', 'battery_outcome', 'robustness_conflicts',
+    'non_decisive_disagreements', 'withheld_reasons', 'withheld_reasons_scope', 'search', 'period_usage', 'input']);
+  assert.equal(r.battery_outcome, 'no_listed_conflict');
+  assert.equal(r.mean_favours, 'A');
+  assert.equal(r.candidateEligible, false);
+  assert.equal(r.statistical_calibration, 'not_assessed');
+  assert.equal(r.input, 'artifact');
+  assert.ok(!r.limitations.includes('inline_input_not_stored_hash_not_reverifiable'));
+  // Period usage: index 0 is the set source, then the series; one scope, bound to this tool.
+  const usage = await jsonLines(stores.paths.usage);
+  assert.deepEqual(usage.map((row) => [row.access_id, row.tool_name, row.scope, row.data_version, row.from, row.to]), [
+    ['forecast-run-1:0', 'compare_forecast_losses', 'forecast_evaluation_window_only', artifact_id, '2020-01-01T00:00:00.000Z', '2021-02-03T23:00:00.000Z'],
+    ['forecast-run-1:1', 'compare_forecast_losses', 'forecast_evaluation_window_only', artifact_id, '2020-01-01T00:00:00.000Z', '2021-02-03T23:00:00.000Z'],
+  ]);
+  const { createHash } = await import('node:crypto');
+  const sha = (value) => 'sha256:' + createHash('sha256').update(value).digest('hex');
+  assert.deepEqual(usage.map((row) => row.series_id), [`forecast-set-source:${sha('synthetic-forecasts').slice(7)}`, 'fx:EURUSD']);
+  assert.equal(usage[0].request_sha256, sha(JSON.stringify({ artifact: artifact_id, contract: 'forecast_loss_comparison_v1', loss: 'mse' })));
+  assert.deepEqual(r.period_usage.records.map((row) => row.idempotent), [false, false]);
+  const journal = await jsonLines(stores.paths.journal);
+  assert.equal(journal.length, 1);
+  assert.equal(journal[0].battery_outcome, 'no_listed_conflict');
+  assert.equal(r.search.status, 'tracked');
+  assert.equal(r.search.this_research_id.calls, 1);
+  assert.deepEqual(r.search.period_usage_prior_overlap.per_series.map((row) => row.overlapping_records), [0, 0]);
+  assert.ok(!JSON.stringify(r.search).includes('"matches"'), 'the prior overlap is summarized, never listed');
+});
+
+test('compare_forecast_losses: untracked calls write nothing and cap the outcome', async (t) => {
+  const stores = await forecastStores(t);
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput());
+  const { call, raw } = await forecastClient(t, { forecastSets: stores.forecastSets });   // throwing period and journal defaults
+  const r = await call({ artifact_id, loss: 'mse' });
+  assert.equal(r.battery_outcome, 'no_listed_conflict_untracked');
+  assert.deepEqual(r.withheld_reasons, ['no_listed_conflict_untracked']);
+  assert.equal(r.search.status, 'untracked');
+  assert.equal(r.period_usage.status, 'untracked');
+  const orphan = await raw({ artifact_id, loss: 'mse', usage_access_id: 'x' });
+  assert.equal(orphan.isError, true);
+  assert.match(orphan.content[0].text, /usage_access_id requires research_id/);
+});
+
+test('compare_forecast_losses: a failure in either write returns no statistics', async (t) => {
+  const stores = await forecastStores(t);
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput());
+  let journalCalls = 0;
+  const periodDown = await forecastClient(t, { forecastSets: stores.forecastSets,
+    researchPeriodUsage: { recordToolAccessBatch: async () => { throw new Error('period store unavailable'); } },
+    forecastLossJournal: { record: async () => { journalCalls++; return {}; } } });
+  const first = await periodDown.raw({ artifact_id, loss: 'mse', research_id: 'r' });
+  assert.equal(first.isError, true);
+  assert.match(first.content[0].text, /period store unavailable/);
+  assert.doesNotMatch(first.content[0].text, /dbar|battery_outcome/);
+  assert.equal(journalCalls, 0, 'the journal is never written without the period records');
+  const journalDown = await forecastClient(t, { forecastSets: stores.forecastSets, researchPeriodUsage: stores.researchPeriodUsage,
+    forecastLossJournal: { record: async () => { throw new Error('journal unavailable'); } } });
+  const second = await journalDown.raw({ artifact_id, loss: 'mse', research_id: 'r', usage_access_id: 'half' });
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /after period usage was recorded as half:0-1; no statistics returned: journal unavailable/);
+  assert.doesNotMatch(second.content[0].text, /dbar|battery_outcome/);
+  assert.equal((await jsonLines(stores.paths.usage)).length, 2, 'the period records stay, as the error says');
+});
+
+test('compare_forecast_losses: usage_access_id derivation, its limit, retries and conflicts', async (t) => {
+  const stores = await forecastStores(t);
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput());
+  const { call, raw } = await forecastClient(t, stores);
+  const a = await call({ artifact_id, loss: 'mse', research_id: 'r' });
+  const b = await call({ artifact_id, loss: 'mse', research_id: 'r' });
+  assert.match(a.period_usage.access_id_base, /^forecast-access:[a-f0-9-]{36}$/);
+  assert.notEqual(a.period_usage.access_id_base, b.period_usage.access_id_base);
+  assert.deepEqual(a.period_usage.records.map((row) => row.access_id), [0, 1].map((i) => `${a.period_usage.access_id_base}:${i}`));
+  const longest = 'x'.repeat(100);
+  const first = await call({ artifact_id, loss: 'mse', research_id: 'r', usage_access_id: longest });
+  const retry = await call({ artifact_id, loss: 'mse', research_id: 'r', usage_access_id: longest });
+  assert.deepEqual(retry.period_usage.records.map((row) => row.idempotent), [true, true]);
+  assert.deepEqual(retry.period_usage.records.map((row) => row.access_id), first.period_usage.records.map((row) => row.access_id));
+  assert.equal(retry.search.this_research_id.calls, 4, 'retries still count as calls');
+  assert.equal((await jsonLines(stores.paths.usage)).length, 6);
+  const tooLong = await raw({ artifact_id, loss: 'mse', research_id: 'r', usage_access_id: 'x'.repeat(101) });
+  assert.equal(tooLong.isError, true);
+  // The loss is in request_sha256, so reusing the ID for another loss conflicts instead of passing as a retry.
+  const otherLoss = await raw({ artifact_id, loss: 'qlike', research_id: 'r', usage_access_id: longest });
+  assert.equal(otherLoss.isError, true);
+  assert.match(otherLoss.content[0].text, /conflicts with its original input/);
+  // Access IDs share one namespace across tools: a ledger record at base:0 makes the base collide.
+  await stores.researchPeriodUsage.recordToolAccess({ access_id: 'shared:0', research_id: 'r', series_id: 'ledger-source:abc',
+    data_version: 'sha256:' + 'b'.repeat(64), from: '2020-01-01T00:00:00.000Z', to: '2020-02-01T00:00:00.000Z',
+    purpose: 'exploration', request_sha256: 'sha256:' + 'c'.repeat(64) });
+  const collided = await raw({ artifact_id, loss: 'mse', research_id: 'r', usage_access_id: 'shared' });
+  assert.equal(collided.isError, true);
+  assert.equal((await jsonLines(stores.paths.journal)).length, 4, 'failed calls add no journal entry');
+  assert.equal((await jsonLines(stores.paths.usage)).length, 7);
+});
+
+test('compare_forecast_losses: the inline path, input selection and an artifact hash mismatch', async (t) => {
+  const stores = await forecastStores(t);
+  const { normalizeForecastSet } = await import('../../build/forecastSet.js');
+  const { call, raw } = await forecastClient(t, stores);
+  const input = forecastSetInput();
+  const inline = await call({ inline_set: input, loss: 'mse', research_id: 'inline' });
+  assert.equal(inline.input, 'inline');
+  assert.equal(inline.artifact_id, normalizeForecastSet(input).artifact_id);
+  assert.ok(inline.limitations.includes('inline_input_not_stored_hash_not_reverifiable'));
+  const { artifact_id } = await stores.forecastSets.register(input);
+  assert.equal(artifact_id, inline.artifact_id, 'the same content hashes the same on either path');
+  const stored = await call({ artifact_id, loss: 'mse', research_id: 'inline' });
+  assert.equal(stored.dm.DM, inline.dm.DM);
+  for (const args of [{ loss: 'mse' }, { artifact_id, inline_set: input, loss: 'mse' }]) {
+    const r = await raw(args);
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /exactly one of artifact_id and inline_set/);
+  }
+  const tooMany = await raw({ inline_set: forecastSetInput({ days: 2001 }), loss: 'mse' });
+  assert.equal(tooMany.isError, true);
+  assert.match(tooMany.content[0].text, /at most 2000 dates/);
+  const matrix = { ...forecastSetInput({ days: 1, secondary: false }), n: 2, underlying_series_ids: ['fx:EURUSD', 'fx:USDJPY'],
+    a: [[[2, 0], [0, 2]]], b: [[[1, 0], [0, 1]]], primary: [[[1, 0], [0, 1]]] };
+  const matrixInline = await raw({ inline_set: matrix, loss: 'mse' });
+  assert.equal(matrixInline.isError, true);
+  assert.match(matrixInline.content[0].text, /inline sets must be scalar/);
+  // A stored file whose content no longer hashes to its name fails closed before anything is written.
+  const before = { usage: (await jsonLines(stores.paths.usage)).length, journal: (await jsonLines(stores.paths.journal)).length };
+  const { artifact_id: other } = await stores.forecastSets.register(forecastSetInput({ source: 'other-source' }));
+  const { chmod } = await import('node:fs/promises');
+  const otherPath = join(stores.paths.sets, `${other.slice(7)}.json`);
+  await chmod(otherPath, 0o600);
+  await writeFile(otherPath, JSON.stringify(normalizeForecastSet(input).set));
+  const mismatch = await raw({ artifact_id: other, loss: 'mse', research_id: 'inline' });
+  assert.equal(mismatch.isError, true);
+  assert.match(mismatch.content[0].text, /artifact hash mismatch/);
+  assert.deepEqual({ usage: (await jsonLines(stores.paths.usage)).length, journal: (await jsonLines(stores.paths.journal)).length }, before);
+});
+
+test('compare_forecast_losses: not_evaluable results are still recorded', async (t) => {
+  const stores = await forecastStores(t);
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput({ days: 60 }));
+  const { call } = await forecastClient(t, stores);
+  const r = await call({ artifact_id, loss: 'qlike', research_id: 'short' });
+  assert.equal(r.battery_outcome, 'not_evaluable');
+  assert.equal(r.status.reason, 'fewer_than_100_used_days');
+  assert.equal((await jsonLines(stores.paths.journal))[0].battery_outcome, 'not_evaluable');
+  assert.equal((await jsonLines(stores.paths.usage)).length, 2);
+});
+
+test('compare_forecast_losses: 5,000 dates, 50 maximum-length labels and a saturated research-ID union stay under 64 KiB', async (t) => {
+  const stores = await forecastStores(t);
+  const labels = Array.from({ length: 50 }, (_, i) => `${String(i).padStart(2, '0')}`.padEnd(64, 'L'));
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput({ days: 5000, labels: (i) => labels[i % 50] }));
+  const researchId = (i) => `${String(i).padStart(4, '0')}`.padEnd(120, 'r');
+  let offset = 0;
+  const { raw } = await forecastClient(t, { forecastSets: stores.forecastSets, forecastLossJournal: stores.forecastLossJournal,
+    researchPeriodUsage: { recordToolAccessBatch: async (tool, inputs) => inputs.map((input) => ({
+      ...input, source: 'tool_observed', tool_name: tool, idempotent: false,
+      prior_overlap: { status: 'recorded_overlap', overlapping_records: 5000, exploration_records: 5000, validation_records: 0,
+        truncated: true, limitations: ['prior_and_external_usage_may_be_missing'],
+        matches: Array.from({ length: 100 }, () => ({ research_id: researchId(offset++) })) },
+    })) } });
+  const response = await raw({ artifact_id, loss: 'mse', research_id: researchId(9999), usage_access_id: 'u'.repeat(100) });
+  assert.ok(!response.isError, response.content[0].text);
+  const r = JSON.parse(response.content[0].text);
+  assert.equal(r.caller_label_means.length, 50);
+  assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids.length, 100);
+  assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids_seen, 200);
+  assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids_truncated, true);
+  const bytes = Buffer.byteLength(response.content[0].text, 'utf8');
+  assert.ok(bytes < 64 * 1024, `${bytes} bytes`);
+  t.diagnostic(`response ${bytes} bytes`);
 });

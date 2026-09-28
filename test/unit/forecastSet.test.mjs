@@ -153,6 +153,11 @@ test('the store registers immutably, returns the same ID on re-import and refuse
   await writeFile(path, body.replace('"n":1', '"n":1 '));
   await assert.rejects(store.get(first.artifact_id), /hash mismatch/);
   await assert.rejects(store.get('not-a-hash'));
+  // Without a secondary or labels the stored form holds nulls, and it still reads back.
+  const bare = scalarSet(5, { secondary: undefined, labels: undefined });
+  const registered = await store.register(bare);
+  assert.equal(registered.artifact_id, normalizeForecastSet(bare).artifact_id);
+  assert.deepEqual(await store.get(registered.artifact_id), normalizeForecastSet(bare).set);
 });
 
 test('the import CLI requires both flags and registers the file', async (t) => {

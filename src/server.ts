@@ -6,6 +6,9 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
+import { ForecastSetStore, forecastSetInputSchema, normalizeInlineForecastSet } from "./forecastSet.js";
+import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
+import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
@@ -204,7 +207,9 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "preflightOos">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos">;
+  forecastSets?: Pick<ForecastSetStore, "get">;
+  forecastLossJournal?: Pick<ForecastLossJournalStore, "record">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -411,7 +416,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore() }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore() }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5593,6 +5598,76 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const limitations = research_id === undefined ? summary.limitations
           : summary.limitations.filter((item) => item !== "slice_search_count_is_not_tracked");
         return jsonResult({ ...summary, limitations, exploration, period_usage });
+      }
+      catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "compare_forecast_losses",
+    {
+      description: "Compare two variance or covariance forecasts, A and B, on one horizon-1 forecast evaluation set under QLIKE or MSE " +
+        "(d = loss(A) - loss(B), lower is better). Returns the Diebold-Mariano test with Newey-West HAC and a fixed robustness battery: " +
+        "four fixed sub-periods, the trim of the 1% of days most favourable to the favoured side with its own missing days imputed worst case, " +
+        "the breakdown count k*, a secondary proxy and a centred stationary bootstrap. " +
+        "battery_outcome no_listed_conflict means only that the listed sign checks did not flip; it is never evidence of superiority. " +
+        "Pass exactly one of artifact_id (registered with tradingview-mcp-import-forecast-set) or inline_set (scalar, at most 2,000 dates, same schema). " +
+        "Optional research_id writes period usage for each underlying series and the set source, then an exploration journal entry, before returning; " +
+        "search then counts calls under this research_id and calls under any research_id on overlapping data. " +
+        "Without research_id the outcome is at most no_listed_conflict_untracked and nothing is written. " +
+        "Optional usage_access_id (1-100 characters) with research_id makes period-record retries idempotent; journal call counts still increment. " +
+        "A recording failure returns an error without statistics. No chart access, orders or arbitrary file paths.",
+      inputSchema: {
+        artifact_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+        inline_set: forecastSetInputSchema.optional(),
+        loss: z.enum(["qlike", "mse"]),
+        research_id: backtestSliceResearchIdSchema.optional(),
+        usage_access_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(),
+      },
+    },
+    async ({ artifact_id, inline_set, loss, research_id, usage_access_id }) => {
+      try {
+        if ((artifact_id === undefined) === (inline_set === undefined)) throw new Error("pass exactly one of artifact_id and inline_set");
+        if (usage_access_id !== undefined && research_id === undefined) throw new Error("usage_access_id requires research_id");
+        const inline = inline_set !== undefined;
+        const loaded = artifact_id !== undefined
+          ? { set: await forecastSets.get(artifact_id), artifact_id }
+          : normalizeInlineForecastSet(inline_set);
+        const result = compareForecastLosses(loaded.set, { loss, tracked: research_id !== undefined });
+        let period_usage: unknown = { status: "untracked", limitations: ["research_id_required_for_automatic_period_usage"] };
+        let search: unknown = { status: "untracked", limitations: ["search_count_is_not_tracked"] };
+        if (research_id !== undefined) {
+          const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+          const base = usage_access_id ?? `forecast-access:${randomUUID()}`;
+          const { from, to } = forecastSetEnvelope(loaded.set);
+          const request_sha256 = hash(JSON.stringify({ artifact: loaded.artifact_id, contract: FORECAST_LOSS_CONTRACT, loss }));
+          // Index 0 is the set's source; the underlying series follow in artifact order, so a retry maps to the same IDs.
+          const series = [`forecast-set-source:${hash(loaded.set.source_id).slice(7)}`, ...loaded.set.underlying_series_ids];
+          const recorded = await researchPeriodUsage.recordToolAccessBatch("compare_forecast_losses", series.map((series_id, index) => ({
+            access_id: `${base}:${index}`, research_id, series_id, data_version: loaded.artifact_id, from, to,
+            purpose: "exploration", request_sha256,
+          })));
+          period_usage = { status: "tracked", access_id_base: base,
+            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent })),
+            limitations: ["forecast_evaluation_window_not_estimation_history", "source_id_and_series_ids_are_importer_supplied",
+              "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
+          let journal;
+          try {
+            journal = await forecastLossJournal.record({ research_id, artifact_id: loaded.artifact_id, set: loaded.set, loss,
+              battery_outcome: result.battery_outcome });
+          } catch (error) {
+            throw new Error(`forecast loss journal write failed after period usage was recorded as ${base}:0-${series.length - 1}; ` +
+              `no statistics returned: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          search = { ...journal, period_usage_prior_overlap: summarizePriorOverlap(recorded) };
+        }
+        const { contract, status, battery_outcome, robustness_conflicts, non_decisive_disagreements, withheld_reasons,
+          withheld_reasons_scope, candidateEligible, statistical_calibration, limitations, ...statistics } = result;
+        return jsonResult({ contract, status, battery_outcome, robustness_conflicts, non_decisive_disagreements,
+          withheld_reasons, withheld_reasons_scope, search, period_usage,
+          input: inline ? "inline" : "artifact", artifact_id: loaded.artifact_id, ...statistics,
+          candidateEligible, statistical_calibration,
+          limitations: inline ? [...limitations, "inline_input_not_stored_hash_not_reverifiable"] : limitations });
       }
       catch (err) { return errorResult(err); }
     },
