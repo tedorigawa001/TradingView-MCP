@@ -7,7 +7,8 @@ Backlog #101, item 2. Review history:
 - rev 4: APPROVE WITH FINDINGS, LOW only (P1–P3), with no further design round needed;
 - code review of the implementation: APPROVE WITH FINDINGS, 2 MEDIUM and 9 LOW (CR-M1, CR-M2,
   CR-L1–CR-L9);
-- re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4).
+- re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4);
+- diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1).
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
@@ -62,14 +63,17 @@ statement of superiority.
   - **Near copies (CR-M2):**
     - The secondary is also `not_distinct` when one common scaling of the primary covers a
       majority (more than half) of the jointly nonzero days, among the days used by both.
-    - That is the largest group of days on which P₂ is within 1e-6 relative of λP for one λ,
-      with the group's ratios agreeing within 1e-6 relative.
+    - That is the largest group of days on which P₂ is within 1e-3 relative of λP for one λ,
+      with the group's ratios agreeing within 1e-3 relative.
     - Without this rule, a copy of the primary altered on one extreme day passes: the input rule
       needs every day, and one full-range rank move pulls ρ below 0.99.
-    - The re-review changed the first version's parameters, 1e-12 and 5%:
+    - The re-review and the diff check changed the first version's parameters, 1e-12 and 5%:
       - R-M1: 1e-12 missed copies that went through rounding;
-      - R-L1: 5% flagged genuinely different coarse-tick or floored proxies, which share one
-        exact scale on up to about 11% of days.
+      - R2-M1: 1e-6 still missed copies written with printf/awk `%g` (6 significant digits) or
+        fixed decimals such as `%.8f` on small variances. At 1e-3 both are caught;
+      - R-L1: 5% flagged genuinely different coarse-tick or floored proxies. At 1e-3 these share
+        one scale on at most about 0.39 of days from roughly five price changes a day upward,
+        below the majority line.
     - Norms use a scaled hypotenuse, so an extreme rescaling of a matrix set cannot evade this
       rule or the input rule (R-L3).
   - A secondary mean that is not finite, even when every day is, makes the secondary not
@@ -443,4 +447,4 @@ Without `research_id`, `search` is `untracked`, and the outcome can be at most
 9. **Windows (N6):** explicit per-date UTC windows only.
 10. **Secondary distinctness (N2):** Spearman ρ > 0.99 means not distinct. Per M3 it is measured
     on the proxy-dependent parts of d, and scaled copies are rejected outright. Per CR-M2, a
-    common scaling on a majority of jointly nonzero days (within 1e-6) also means not distinct.
+    common scaling on a majority of jointly nonzero days (within 1e-3) also means not distinct.

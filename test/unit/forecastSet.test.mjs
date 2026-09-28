@@ -176,19 +176,20 @@ test('the near-copy measure finds the largest group sharing one scale, over join
   const primary = [1, 2, 3, 4, 5, 6, 0, 7, null];
   const secondary = [2, 4, 6, 20, 25, 1, 3, 0, 1];
   assert.deepEqual(largestCommonScaleGroup(primary, secondary), { jointly_nonzero: 6, largest_group: 3 });
-  // Ratios within 1e-6 relative join one group, so rounding-level copies count (R-M1); 1e-5 apart they do not.
-  assert.equal(NEAR_COPY_TOLERANCE, 1e-6);
-  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 5e-7)]).largest_group, 2);
-  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-5)]).largest_group, 1);
+  // Ratios within 1e-3 relative join one group, so copies through common export formats count (R2-M1);
+  // 1e-2 apart they do not.
+  assert.equal(NEAR_COPY_TOLERANCE, 1e-3);
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 5e-4)]).largest_group, 2);
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-2)]).largest_group, 1);
   // Matrices: a day counts only if P₂ is proportional to P, not merely equal in norm.
   const p = [[1, 0.2], [0.2, 1]];
   const scaled = p.map((row) => row.map((x) => 3 * x));
   const sameNorm = [[1, -0.2], [-0.2, 1]].map((row) => row.map((x) => 3 * x));
   assert.deepEqual(largestCommonScaleGroup([p, p, p], [scaled, scaled, sameNorm]), { jointly_nonzero: 3, largest_group: 2 });
-  // A matrix off proportional by 1e-5 relative is not a copy day; by 1e-7 it is.
+  // A matrix off proportional by 1e-2 relative is not a copy day; by 1e-4 it is.
   const offBy = (e) => [[3, 0.6], [0.6, 3 * (1 + e)]];
-  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-5)]).largest_group, 1);
-  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-7)]).largest_group, 2);
+  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-2)]).largest_group, 1);
+  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-4)]).largest_group, 2);
   assert.deepEqual(largestCommonScaleGroup([], []), { jointly_nonzero: 0, largest_group: 0 });
 });
 

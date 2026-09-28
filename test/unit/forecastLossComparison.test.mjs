@@ -461,6 +461,22 @@ test('a copy that went through rounding or tiny noise is still a near copy (R-M1
   assert.equal(noisy.secondary.distinct, false);
 });
 
+test('copies through common export formats are near copies: %g and fixed decimals (R2-M1)', () => {
+  // Daily variances near 1e-4. %g keeps 6 significant digits; %.8f keeps 8 decimals, a relative error of
+  // up to about 1e-4 here. Both missed the 1e-6 tolerance.
+  const random = createRandom(21);
+  const proxy = Array.from({ length: 400 }, () => 1e-4 * Math.exp(random() * 2 - 1));
+  const d = uniform();
+  const part = d.map((x, i) => Math.abs((Math.sqrt(1 + x) - 1) * proxy[i]));
+  const largest = part.indexOf(Math.max(...part));
+  for (const [format, value] of [['%g', (x) => Number(x.toPrecision(6))], ['%.8f', (x) => Number(x.toFixed(8))]]) {
+    const r = compareForecastLosses(setFromD(d, { proxy, secondary: (p) => p.map((x, i) => (i === largest ? 1e-3 * x : value(x))) }), tracked);
+    assert.ok(r.secondary.spearman_rho < 0.99, `${format}: ρ ${r.secondary.spearman_rho}`);
+    assert.ok(r.secondary.near_copy_share > 0.99, `${format}: share ${r.secondary.near_copy_share}`);
+    assert.equal(r.battery_outcome, 'not_assessed_secondary_proxy_not_distinct', format);
+  }
+});
+
 test('a genuinely different coarse-tick secondary shares one scale on some days and stays distinct (R-L1)', () => {
   // Squared close-to-close move against the Parkinson range, 40 one-tick moves a day. On days that close
   // at one extreme having opened at the other, the two are the same number up to 1/(4 ln 2), exactly.

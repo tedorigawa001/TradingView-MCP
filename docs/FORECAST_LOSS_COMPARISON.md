@@ -161,19 +161,24 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 - **Near copies:**
   - `near_copy_share` is the largest share of jointly nonzero days, among those used, on which P₂
     is one common scaling of P.
-    - On each such day, P₂ is within 1e-6 relative of rP, where r = ‖P₂‖/‖P‖.
-    - The days' ratios agree within 1e-6 relative.
+    - On each such day, P₂ is within 1e-3 relative of rP, where r = ‖P₂‖/‖P‖.
+    - The days' ratios agree within 1e-3 relative.
     - Norms are computed with `Math.hypot`, so rescaling a matrix set changes nothing.
   - Above 0.5, a majority of days, the secondary is not distinct, whatever ρ is.
     - Without this rule, a copy of the primary altered on a few days is missed: the input rule
       needs every day, and one extreme day can pull ρ below 0.99.
-    - The 1e-6 tolerance also catches a copy that went through rounding, for example a
-      7-significant-digit export, or through a different code path.
-  - Genuinely different proxies can share one exact scale on a minority of days. A scalar day is
-    always a multiple of itself, so it forms a group of at least one. Coarse-tick proxies, for
-    example a squared close-to-close move against a Parkinson range, coincide up to a constant on
-    the days that close at one extreme, about 2–11% of days. Floors shared by both proxies add
-    more. The majority line leaves these distinct.
+    - The 1e-3 (0.1%) tolerance also catches a copy that went through rounding of up to that
+      relative error, as in common export formats: `%g` in printf or awk keeps 6 significant
+      digits, and fixed decimals such as `%.8f` on variances near 1e-4 err by about 1e-4.
+  - Genuinely different proxies can share one scale on a minority of days.
+    - A scalar day is always a multiple of itself, so it forms a group of at least one.
+    - Coarse-tick proxies, for example a squared close-to-close move against a Parkinson range,
+      coincide up to a constant on the days that close at one extreme. Floors shared by both
+      proxies add more.
+    - In the re-review's measurements, such proxies stayed at or below 0.39 of days from about
+      five price changes a day upward. The majority line leaves them distinct.
+  - With only a handful of price changes a day, the two proxies coincide on most days and are
+    flagged. They then carry nearly the same information, so that is intended.
   - The share is null with fewer than 2 jointly nonzero days.
 - `distinct` is judged whenever a secondary is present, even when it is not evaluable, so
   `not_assessed_secondary_proxy_not_distinct` is listed next to
