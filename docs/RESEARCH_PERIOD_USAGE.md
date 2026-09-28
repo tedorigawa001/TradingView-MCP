@@ -93,6 +93,46 @@ proof of what was known at its reported historical access time. Late reports
 cannot retroactively establish that knowledge. Use the check tool for the
 current full journal view.
 
+## Automatic Forecast-Loss Tracking
+
+`compare_forecast_losses` with `research_id` records period usage and then its
+own exploration journal entry before returning statistics; without it, nothing
+is written. The records are `tool_observed` with the tool name
+`compare_forecast_losses` and the scope `forecast_evaluation_window_only`,
+written as one atomic batch through the same checks as the batch tool: nothing
+is written unless every record passes validation, the conflict check and the
+capacity check.
+
+One record covers the set's source and one covers each underlying series:
+- index 0 is `forecast-set-source:` plus the lowercase SHA-256 hex digest of the
+  UTF-8 `source_id`;
+- the underlying series IDs follow in artifact order. They are importer-supplied
+  stable IDs such as `fxdata-m1:EURUSD`, and may not use the reserved
+  `ledger-source:` or `forecast-set-source:` prefixes.
+
+Every record has the artifact ID as `data_version` and the same interval: the
+window envelope from the earliest window start to the latest window end, over
+every date in the set, dropped ones included. The scope is the evaluation window
+only. The history used to estimate the forecasts is not covered, and must be
+reported separately when it matters.
+
+Access IDs are `<base>:<index>`, where the base is `usage_access_id` or a
+generated `forecast-access:<uuid>`. The request hash binds the artifact, the
+contract and the loss, so a retry of the same request is idempotent while
+reusing a base for another loss or artifact conflicts. Access IDs share one
+namespace across tools and manual reports. Failure semantics match the ledger:
+either write failing returns an error without statistics, and a journal failure
+after the period write leaves the period records, which the error names. See
+[the contract](FORECAST_LOSS_COMPARISON.md#records) for the journal and the
+search counts.
+
+The store binds each observing tool to its own scope on every stored record, so
+a ledger record cannot carry the forecast scope or the reverse. Assessments add
+`tool_observed_usage_is_forecast_evaluation_window_only`,
+`series_id_and_data_version_are_importer_supplied_metadata` and
+`forecast_estimation_history_not_covered` whenever the journal holds records from
+this tool.
+
 ## Check
 
 `check_research_period_usage` accepts `series_id`, `data_version`, `from`, `to`
@@ -110,8 +150,9 @@ full list.
 
 The check does not itself record an access, reserve the period, freeze a protocol
 or enforce a backtest gate. A later check can differ after additional reports.
-Automatic tracking currently covers only the opted-in ledger summary above;
-other research tools do not automatically record all data they expose. Check and report use as part of the
+Automatic tracking currently covers only the opted-in ledger summary and
+forecast loss comparison above; other research tools do not automatically
+record all data they expose. Check and report use as part of the
 research workflow, but do not claim full coverage from this journal alone.
 
 ## OOS Preflight
@@ -119,7 +160,8 @@ research workflow, but do not claim full coverage from this journal alone.
 `preflight_research_oos` accepts the same strict input as the check tool.
 Supply the proposed evaluation interval, not a cherry-picked subset of trades.
 Use the stable identity returned by automatic tracking when checking its ledger
-history; price-series aliases and unrelated source IDs are not linked for you.
+or forecast-set history; price-series aliases and unrelated source IDs are not
+linked for you.
 
 Any recorded overlap, including validation use or another research/data version,
 returns `status: blocked`. No overlap returns `review_required`, even if the
