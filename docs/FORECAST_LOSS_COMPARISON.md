@@ -175,8 +175,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
     - Coarse-tick proxies, for example a squared close-to-close move against a Parkinson range,
       coincide up to a constant on the days that close at one extreme. Floors shared by both
       proxies add more.
-    - In the re-review's measurements, such proxies stayed at or below 0.39 of days from about
-      five price changes a day upward. The majority line leaves them distinct.
+    - In the review's measurements across seeds, such proxies stayed below about 0.45 of days from
+      about five price changes a day upward. The majority line leaves them distinct.
   - With only a handful of price changes a day, the two proxies coincide on most days and are
     flagged. They then carry nearly the same information, so that is intended.
   - The share is null with fewer than 2 jointly nonzero days.

@@ -121,8 +121,8 @@ export function secondaryCopyReason(primary: ForecastValue[], secondary: Forecas
  * Relative tolerance of the near-copy measure: 0.1%. A copy that went through a common export format
  * still counts: printf/awk %g keeps 6 significant digits (relative error up to 5e-6), and fixed
  * decimals such as %.8f on variances near 1e-4 err by up to about 1e-4 (code review R-M1, R2-M1).
- * Genuinely different proxies measured in the re-review stay far below the majority line at this
- * tolerance (at most 0.39 of days, for a proxy with five price changes a day).
+ * Genuinely different proxies measured in the review stay below the majority line at this
+ * tolerance (below about 0.45 of days across seeds, for proxies with five or more price changes a day).
  */
 export const NEAR_COPY_TOLERANCE = 1e-3;
 

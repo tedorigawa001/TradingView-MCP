@@ -72,8 +72,8 @@ statement of superiority.
       - R2-M1: 1e-6 still missed copies written with printf/awk `%g` (6 significant digits) or
         fixed decimals such as `%.8f` on small variances. At 1e-3 both are caught;
       - R-L1: 5% flagged genuinely different coarse-tick or floored proxies. At 1e-3 these share
-        one scale on at most about 0.39 of days from roughly five price changes a day upward,
-        below the majority line.
+        one scale on below about 0.45 of days (across seeds) from roughly five price changes a
+        day upward, below the majority line.
     - Norms use a scaled hypotenuse, so an extreme rescaling of a matrix set cannot evade this
       rule or the input rule (R-L3).
   - A secondary mean that is not finite, even when every day is, makes the secondary not
