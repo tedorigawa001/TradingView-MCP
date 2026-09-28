@@ -268,6 +268,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   else if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
   else if (T < MIN_USED_DAYS) reason = "fewer_than_100_used_days";
   const hac = finite && T >= 2 ? neweyWest(d) : null;
+  // Finite losses can still overflow in the squares: S = Infinity gave DM = 0 and p = 0.5 as if evaluable.
+  if (!reason && hac && !(Number.isFinite(hac.S) && Number.isFinite(hac.dbar))) reason = "hac_variance_not_finite";
   if (!reason && hac && (!(hac.S > 0) || hac.S < 1e-12 * mean(d.map((x) => x * x)))) reason = "hac_variance_not_positive";
   // Statistics follow the design's field order in every branch.
   if (reason) {
@@ -300,7 +302,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const dm = { dbar, S, L, DM, p_a: pA, p_b: pB, T };
 
   if (favours === "neither") {
-    const s = sign(dbar);
+    // The side the mean leans to, in the favoured branch's convention: d̄ < 0 leans to A, s = +1.
+    const s = -sign(dbar);
     return {
       ...base,
       status: { evaluable: true, reason: null },

@@ -66,7 +66,7 @@ export interface ForecastSet {
   labels: string[] | null;
 }
 
-const digest = (body: string) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
+const digest = (body: string | Buffer) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
 const previousDay = (date: string) => new Date(Date.parse(`${date}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
 
 function fail(message: string): never {
@@ -255,7 +255,8 @@ export class ForecastSetStore {
     hashSchema.parse(artifactId);
     await this.checkDirectory();
     const body = await readBacktestLedgerFile(join(this.directory, `${artifactId.slice(7)}.json`), true);
-    if (digest(body.toString("utf8")) !== artifactId) throw new Error("forecast set artifact hash mismatch");
+    // Hash the bytes as stored: decoding first maps invalid UTF-8 to U+FFFD, which could hide corruption.
+    if (digest(body) !== artifactId) throw new Error("forecast set artifact hash mismatch");
     const stored = JSON.parse(body.toString("utf8"));
     // The stored form writes an absent secondary or labels as null; the input schema takes them as absent.
     for (const key of ["secondary", "labels"]) if (stored?.[key] === null) delete stored[key];

@@ -331,6 +331,14 @@ test('the favoured side needs p below 0.05, and the upper tail keeps its precisi
   assert.ok(between.dm.p_a > 0.05 && between.dm.p_a < 0.1, `p_a ${between.dm.p_a}`);
   assert.equal(between.mean_favours, 'neither', 'a two-sided 10% test, not a one-sided 10% one');
   assert.equal(between.battery_outcome, 'not_applicable');
+  // With neither, the bootstrap tests the side the mean leans to: d̄ < 0 leans to A, so s = +1 and p is
+  // small, not its complement. The mirror leans to B and gives the same p.
+  assert.ok(between.dm.dbar < 0);
+  assert.ok(between.bootstrap.p < 0.1, `bootstrap p ${between.bootstrap.p}`);
+  const betweenSet = setFromD(shifted(-0.008), { secondary: independentSecondary });
+  const mirrored = compareForecastLosses({ ...betweenSet, a: betweenSet.b, b: betweenSet.a }, tracked);
+  assert.ok(mirrored.dm.dbar > 0);
+  assert.equal(mirrored.bootstrap.p, between.bootstrap.p);
   // DM near +10: p_B = Φ(−DM) is about 1e-23, while 1 − Φ(DM) would round to exactly 0.
   const far = compareForecastLosses(setFromD(shifted(0.053), { secondary: independentSecondary }), tracked);
   assert.equal(far.mean_favours, 'B');
@@ -506,4 +514,15 @@ test('a secondary mean that overflows makes the secondary not evaluable (R-L2)',
   assert.equal(r.secondary.status, 'not_evaluable');
   assert.ok(!r.robustness_conflicts.includes('secondary_proxy_reverses'));
   assert.ok(r.withheld_reasons.includes('not_assessed_secondary_proxy_absent'));
+});
+
+test('an HAC variance that overflows is not evaluable, not DM = 0 (external review)', () => {
+  // One MSE day with a − p = 1.25e77: d ≈ 1.6e154 is finite, but its square overflows, so S = Infinity.
+  const a = Array.from({ length: 200 }, (_, i) => (i === 10 ? 1.25e77 : i % 2 ? 1 : 2));
+  const r = compareForecastLosses(scalarSet({ a, b: a.map(() => 1.5), primary: a.map(() => 1) }), tracked);
+  assert.ok(Number.isFinite(r.dm.dbar));
+  assert.equal(r.dm.S, Infinity);
+  assert.deepEqual(r.status, { evaluable: false, reason: 'hac_variance_not_finite' });
+  assert.equal(r.dm.DM, null);
+  assert.equal(r.battery_outcome, 'not_evaluable');
 });

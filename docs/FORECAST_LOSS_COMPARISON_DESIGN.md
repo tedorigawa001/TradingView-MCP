@@ -8,7 +8,8 @@ Backlog #101, item 2. Review history:
 - code review of the implementation: APPROVE WITH FINDINGS, 2 MEDIUM and 9 LOW (CR-M1, CR-M2,
   CR-L1–CR-L9);
 - re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4);
-- diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1).
+- diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1); final diff check: APPROVE;
+- external review (pasted by the user, 2026-09-29): 3 MEDIUM (EXT-1 to EXT-3), all fixed.
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
@@ -17,7 +18,9 @@ approved by the user on 2026-09-28:
   R-L1);
 - the trim conflict is tested through k* (CR-L1);
 - distinctness is judged whenever a secondary is present (CR-L2);
-- the access-ID collision rule is amended (CR-L4).
+- the access-ID collision rule is amended (CR-L4);
+- with `neither`, the bootstrap measures the side the mean leans to, and a non-finite HAC variance
+  is not evaluable (EXT-1, EXT-2). EXT-3, the store hashing its raw bytes, is an implementation fix.
 
 The implementation is in docs/FORECAST_LOSS_COMPARISON.md.
 
@@ -116,6 +119,9 @@ statement of superiority.
     `non_finite_loss`, checked first.
   - A non-finite secondary d, or a non-finite proxy-dependent part, makes that day an invalid
     secondary day.
+  - A non-finite d̄ or HAC variance makes the result `not_evaluable` with reason
+    `hac_variance_not_finite`. Finite d near 1e154 overflows in the squares, and S = ∞ had
+    given DM = 0 and p = 0.5 as if evaluable (EXT-2).
 - **Hard-day diagnostics:**
   - B's mean loss on `a_only_null` days is reported next to B's mean loss on used days.
   - A's mean loss on `b_only_null` days is reported next to A's mean loss on used days.
@@ -197,7 +203,9 @@ Nothing in the battery can be set per call: it is part of the contract `forecast
     sequences are unchanged).
 - For the favoured side, it reports the centred, unstudentized p:
   p = (1 + #{s·(d̄*_r − d̄) ≤ s·d̄}) / (1 + R), where s = +1 if A is favoured and −1 if B is.
-- With `neither`, s = sign(d̄), or null if d̄ = 0 (N8).
+- With `neither`, s = −sign(d̄), or null if d̄ = 0 (N8). The first version wrote sign(d̄), which
+  measured the tail away from the side the mean leans to. For a set leaning to A, it reported
+  0.973 where the correct p is 0.027 (external review, EXT-1).
 - The Monte Carlo standard error is reported as well. The bootstrap is descriptive.
 
 ## Conflicts and outcome (F1, F3, F5)

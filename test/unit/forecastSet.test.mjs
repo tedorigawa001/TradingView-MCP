@@ -231,3 +231,16 @@ test('both copy rules hold for matrices at extreme scales (R-L3)', () => {
     assert.equal(secondaryCopyReason(p, other), null, `scale ${scale}`);
   }
 });
+
+test('the store hashes the stored bytes, so invalid UTF-8 cannot pass as U+FFFD (external review)', async (t) => {
+  const { directory, store } = await tempStore(t);
+  const { artifact_id } = await store.register(scalarSet(5, { labels: ['x\uFFFD', 'y', 'x\uFFFD', 'y', 'y'] }));
+  const path = join(directory, 'sets', `${artifact_id.slice(7)}.json`);
+  const bytes = await readFile(path);
+  const at = bytes.indexOf(Buffer.from([0xef, 0xbf, 0xbd]));
+  assert.ok(at > 0);
+  // One U+FFFD (EF BF BD) becomes the invalid byte FF, which decodes back to U+FFFD.
+  await chmod(path, 0o600);
+  await writeFile(path, Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 3)]));
+  await assert.rejects(store.get(artifact_id), /hash mismatch/);
+});

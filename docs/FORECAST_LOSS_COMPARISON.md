@@ -44,8 +44,8 @@ same ID without replacing the stored file.
 Storage defaults to `~/.tradingview-mcp/forecast-sets`. Set
 `TRADINGVIEW_MCP_FORECAST_SET_DIR` identically for the CLI and the MCP process to use another
 private directory. The store follows the ledger store: owner-only, exclusive create, sync before
-publishing by hard link, and a hash check on every read. Hash integrity is not source
-authentication.
+publishing by hard link, and a hash check of the stored bytes on every read (before any UTF-8
+decoding, so invalid bytes cannot pass as U+FFFD). Hash integrity is not source authentication.
 
 ### Set schema
 
@@ -95,6 +95,8 @@ The result is `not_evaluable`, with the first matching reason, if:
   forecasts and proxies are valid, for example with a proxy of 1e155 under MSE;
 - more than 5% of dates are dropped (`more_than_5_percent_of_dates_dropped`);
 - fewer than 100 days are used (`fewer_than_100_used_days`);
+- d̄ or the HAC variance is not finite (`hac_variance_not_finite`). Finite losses near 1e154 can
+  still overflow in the squares; S = ∞ would otherwise give DM = 0 as if evaluable;
 - the HAC variance is not positive (`hac_variance_not_positive`: S ≤ 0 or S < 1e-12·mean(d²);
   S is never clamped).
 
@@ -193,7 +195,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
   otherwise it moves to (previous + 1) mod T.
 - The centred, unstudentized one-sided p is (1 + #{s·(d̄* − d̄) ≤ s·d̄})/(1 + R), with s = +1 for A
   and −1 for B.
-- With `neither`, s = sign(d̄), or no bootstrap if d̄ = 0.
+- With `neither`, s is the side the mean leans to, in the same convention: s = −sign(d̄), so
+  d̄ < 0 leans to A and gives s = +1. There is no bootstrap if d̄ = 0.
 - `mc_se` = √(p(1 − p)/R). The bootstrap is descriptive.
 
 ## Outcome
