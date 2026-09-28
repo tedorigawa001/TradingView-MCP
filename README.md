@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (106 Total)
+## Tools (107 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -380,6 +380,7 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `get_strategy_trade_ledger` | Pages the full Strategy Tester ledger in batches of up to 500, binds it to a SHA-256 ID, rejects cross-page recomputation, exposes available costs/run-up/drawdown/inputs/Pine version, and separates the trailing mark-to-market open row |
 | `summarize_backtest_ledger` | Recomputes PF/net bps, sample break-even round-trip cost and cost headroom; compares full/selected/excluded populations. Optional `research_id` records local exploration and automatic full-ledger period usage; `usage_access_id` supports period-record retries. Otherwise explicitly untracked. No chart access. See [ledger import contract](docs/BACKTEST_LEDGERS.md) |
 | `record_research_period_usage` | Records reported data access intervals with explicit confirmation; retries are idempotent, conflicting access IDs fail. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
+| `record_research_period_usage_batch` | Records 1-20 access reports in one call; the whole batch is validated and capacity-checked before any write; a retry resumes after complete lines, while a torn line fails closed. `summary_only` returns counts instead of every overlap. See [batch](docs/RESEARCH_PERIOD_USAGE.md#batch) |
 | `check_research_period_usage` | Finds prior interval use across research IDs and revisions of the same series; absence of records never proves unused OOS. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
 | `compare_research_evidence` | Compares declared data/code/runner/rule/parameter/environment hashes; identifies missing evidence and revalidation checks without certifying compatibility. See [comparison contract](docs/RESEARCH_EVIDENCE_COMPARISON.md) |
 | `run_strategy_experiment` | Serially compares baseline and candidate on one chart; dry-run by default, then after confirmation reports exact Pine versions, ledger IDs, inputs, minimum trades, condition match, and metric deltas before removing both |

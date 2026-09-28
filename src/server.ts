@@ -6,7 +6,8 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
-import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema } from "./researchPeriodUsage.js";
+import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
+  RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import {
   MAX_MTF_SYMBOLS,
@@ -203,7 +204,7 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "check" | "recordToolAccess" | "preflightOos">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "preflightOos">;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -5448,19 +5449,44 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       }),
   );
 
+  const summaryOnlySchema = z.boolean().default(false)
+    .describe("Return counts and distinct research IDs instead of every overlapping record.");
+
   server.registerTool(
     "record_research_period_usage",
     {
       description: "Record a user-reported research data access in a local append-only journal. Requires confirm:true. " +
         "Use a stable series_id across revisions and research projects; data_version is a content hash. " +
         "Records the full inspected UTC interval [from,to), purpose and actual accessed_at. Retries with the same access_id are idempotent; conflicts fail. " +
-        "No chart access, orders or file paths. Reporting use is not preregistration or proof of an unused OOS period.",
-      inputSchema: {...researchPeriodUsageRecordSchema.shape, confirm: z.literal(true)},
+        "No chart access, orders or file paths. Reporting use is not preregistration or proof of an unused OOS period. " +
+        "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
+      inputSchema: {...researchPeriodUsageRecordSchema.shape, confirm: z.literal(true), summary_only: summaryOnlySchema},
     },
     async (request) => {
       try {
-        const {confirm, ...input} = request;
-        return jsonResult(await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input)));
+        const {confirm, summary_only, ...input} = request;
+        const result = await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input));
+        return jsonResult(summary_only ? {...result, prior_overlap: summarizeAssessment(result.prior_overlap)} : result);
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "record_research_period_usage_batch",
+    {
+      description: `Record 1-${RESEARCH_PERIOD_USAGE_BATCH_MAX} user-reported research data accesses in one call, same fields and rules as record_research_period_usage. ` +
+        "Requires confirm:true and unique access_ids. Every record is validated, conflict-checked and capacity-checked before any write, so a rejected batch writes nothing. " +
+        "If an I/O failure stops the append after complete lines, an identical retry completes it; a torn partial line fails closed until the file is repaired. " +
+        "Records are appended in order, so a later record's prior_overlap includes earlier ones. " +
+        "summary_only:true replaces listed overlapping records with counts and distinct research IDs. Reporting use is not preregistration or proof of an unused OOS period.",
+      inputSchema: {records: researchPeriodUsageBatchSchema, confirm: z.literal(true), summary_only: summaryOnlySchema},
+    },
+    async ({records, summary_only}) => {
+      try {
+        const results = await researchPeriodUsage.recordBatch(records);
+        return jsonResult({recorded: results.filter((result) => !result.idempotent).length,
+          idempotent: results.filter((result) => result.idempotent).length,
+          results: summary_only ? results.map((result) => ({...result, prior_overlap: summarizeAssessment(result.prior_overlap)})) : results});
       } catch (err) { return errorResult(err); }
     },
   );
@@ -5471,12 +5497,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: "Read-only pre-execution OOS usage check for an evaluation interval [from,to). " +
         "Any recorded exploration or validation across research IDs and versions of the exact series blocks it. " +
         "No overlap, including declared-unused input, requires external review and never authorizes execution. " +
-        "This is a snapshot, not a reservation or execution token; existing backtest tools are not intercepted. No data/chart access or journal append.",
-      inputSchema: researchPeriodUsageCheckSchema,
+        "This is a snapshot, not a reservation or execution token; existing backtest tools are not intercepted. No data/chart access or journal append. " +
+        "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
+      inputSchema: z.object({...researchPeriodUsageCheckSchema.shape, summary_only: summaryOnlySchema}).strict(),
     },
     async (request) => {
-      try { return jsonResult(await researchPeriodUsage.preflightOos(request)); }
-      catch (err) { return errorResult(err); }
+      try {
+        const {summary_only, ...query} = request;
+        const result = await researchPeriodUsage.preflightOos(query);
+        return jsonResult(summary_only ? {...result, usage: summarizeAssessment(result.usage)} : result);
+      } catch (err) { return errorResult(err); }
     },
   );
 
@@ -5500,12 +5530,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: "Check recorded research data usage for a UTC interval [from,to). " +
         "Finds overlapping use of the same stable series_id across ALL research IDs and data versions. " +
         "No recorded overlap means unknown outside this journal, never unused or approved OOS. " +
-        "A declared-unused assertion is user supplied and cannot prove unused status. Does not record an access or reserve a period.",
-      inputSchema: researchPeriodUsageCheckSchema.shape,
+        "A declared-unused assertion is user supplied and cannot prove unused status. Does not record an access or reserve a period. " +
+        "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
+      inputSchema: {...researchPeriodUsageCheckSchema.shape, summary_only: summaryOnlySchema},
     },
     async (request) => {
-      try { return jsonResult(await researchPeriodUsage.check(researchPeriodUsageCheckSchema.parse(request))); }
-      catch (err) { return errorResult(err); }
+      try {
+        const {summary_only, ...query} = request;
+        const result = await researchPeriodUsage.check(researchPeriodUsageCheckSchema.parse(query));
+        return jsonResult(summary_only ? summarizeAssessment(result) : result);
+      } catch (err) { return errorResult(err); }
     },
   );
 

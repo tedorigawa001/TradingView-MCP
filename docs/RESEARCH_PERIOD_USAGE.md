@@ -35,6 +35,24 @@ content fails. A genuine repeated inspection needs a new access ID. Historical
 manual or external use can be reported with its actual access time. Manual reports
 are user supplied, not independently observed browsing telemetry.
 
+### Batch
+
+`record_research_period_usage_batch` records 1-20 reports in one call:
+`records` (each with the fields above), `confirm: true`, and optional
+`summary_only`. Access IDs must be unique within the batch. Under the lock, the
+whole batch is validated, conflict-checked and capacity-checked (every record and
+the resulting file size against the storage limits) before any byte is written, so
+an invalid, conflicting or oversized batch writes nothing. Records are appended in
+the given order, and a later record's `prior_overlap` includes earlier records of
+the same batch. The response gives `recorded`, `idempotent` and one `results`
+entry per request, in order.
+
+Recovery is limited to complete lines. If an I/O failure stops the append after one
+or more complete records, an identical retry reports them as idempotent and appends
+the rest. A torn partial line (for example after a short write or a crash inside a
+write) is not resumable: reads fail closed on JSONL framing, and the file must be
+repaired before any further record or check succeeds.
+
 ## Automatic Ledger Tracking
 
 `summarize_backtest_ledger` with `research_id` now opts into both slice logging
@@ -82,6 +100,13 @@ and optional `prior_usage_declaration` (`unknown` or `declared_unused`). The
 declaration is a caller assertion, not proof or a way to override overlaps.
 No recorded overlap is not equivalent to unused: earlier, omitted, external,
 other-series and untracked accesses may exist. `unused_proven` remains false.
+
+`summary_only: true` (also accepted by both record tools and the preflight)
+replaces the listed overlapping records with `matches_omitted`, the sorted
+distinct `overlapping_research_ids` and `overlapping_research_ids_truncated`.
+Counts, flags and limitations are unchanged, plus
+`summary_omits_matching_records_use_full_check_for_detail`. The default is the
+full list.
 
 The check does not itself record an access, reserve the period, freeze a protocol
 or enforce a backtest gate. A later check can differ after additional reports.

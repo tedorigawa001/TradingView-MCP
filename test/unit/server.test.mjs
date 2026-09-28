@@ -1034,6 +1034,54 @@ test('research period usage detects cross-version access through the real MCP st
   assert.equal(chartCalls,0);
 });
 
+test('research period usage batch and summary_only through the real MCP store', async (t) => {
+  const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
+  const {rm,readFile}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'period-batch-mcp-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const path=join(dir,'usage.jsonl');
+  const client=await connectedClient(makeDeps({researchPeriodUsage:new ResearchPeriodUsageStore(path)}));
+  t.after(()=>client.close());
+  const period=(series)=>({series_id:series,data_version:'sha256:'+'a'.repeat(64),from:'2024-01-01T00:00:00.000Z',to:'2024-02-01T00:00:00.000Z'});
+  const entry=(id,series,research='study-a')=>({...period(series),access_id:id,research_id:research,purpose:'exploration',accessed_at:'2025-01-01T00:00:00.000Z'});
+  const call=async(name,args)=>{
+    const r=await client.callTool({name,arguments:args});
+    assert.ok(!r.isError,r.content[0].text);
+    return JSON.parse(r.content[0].text);
+  };
+  const records=[entry('b1','FX.EURUSD'),entry('b2','FX.USDJPY'),entry('b3','FX.EURUSD','study-b')];
+  const denied=await client.callTool({name:'record_research_period_usage_batch',arguments:{records}});
+  assert.equal(denied.isError,true);
+  const first=await call('record_research_period_usage_batch',{records,confirm:true,summary_only:true});
+  assert.deepEqual([first.recorded,first.idempotent],[3,0]);
+  assert.deepEqual(first.results.map((r)=>r.sequence),[1,2,3]);
+  // Appended in order: the third record sees the first as prior overlap, in summary form.
+  assert.equal(first.results[2].prior_overlap.overlapping_records,1);
+  assert.deepEqual(first.results[2].prior_overlap.overlapping_research_ids,['study-a']);
+  assert.equal('matches' in first.results[2].prior_overlap,false);
+  const retry=await call('record_research_period_usage_batch',{records,confirm:true});
+  assert.deepEqual([retry.recorded,retry.idempotent],[0,3]);
+  assert.equal(retry.results[2].prior_overlap.matches.length,1);
+  const before=await readFile(path,'utf8');
+  for(const bad of [[...records.slice(0,2),{...records[2],purpose:'validation'}],
+    [entry('new-1','FX.GBPUSD'),entry('new-1','FX.AUDNZD')], []]) {
+    const r=await client.callTool({name:'record_research_period_usage_batch',arguments:{records:bad,confirm:true}});
+    assert.equal(r.isError,true);
+  }
+  assert.equal(await readFile(path,'utf8'),before,'a rejected batch writes nothing');
+  const full=await call('check_research_period_usage',period('FX.EURUSD'));
+  const brief=await call('check_research_period_usage',{...period('FX.EURUSD'),summary_only:true});
+  assert.equal(full.matches.length,2);
+  assert.deepEqual([brief.overlapping_records,brief.matches_omitted,brief.unused_proven],[2,2,false]);
+  assert.deepEqual(brief.overlapping_research_ids,['study-a','study-b']);
+  assert.ok(brief.limitations.includes('no_recorded_overlap_is_not_proof_of_unused_data'));
+  const pre=await call('preflight_research_oos',{...period('FX.EURUSD'),summary_only:true});
+  assert.equal(pre.status,'blocked');
+  assert.equal('matches' in pre.usage,false);
+  const single=await call('record_research_period_usage',{...entry('s1','FX.EURUSD','study-c'),confirm:true,summary_only:true});
+  assert.equal(single.prior_overlap.matches_omitted,2);
+});
+
 test('compare_research_evidence reports changed and unknown declarations without chart access', async (t) => {
   let calls=0;
   const client=await connectedClient(makeDeps({tv:{getChartContext:async()=>{calls++;throw new Error('unexpected chart');}}}));
@@ -1096,7 +1144,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred six expected tools", async () => {
+test("exposes exactly the one hundred seven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1175,6 +1223,7 @@ test("exposes exactly the one hundred six expected tools", async () => {
       "preflight_research_oos",
       "reconcile_gold_open_interest",
       "record_research_period_usage",
+      "record_research_period_usage_batch",
       "record_strategy_experiment",
       "register_event_study_hypothesis",
       "register_strategy_hypothesis",

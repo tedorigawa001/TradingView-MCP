@@ -29,6 +29,11 @@ export const researchPeriodUsageCheckSchema = z.object({
 }).strict().refine(ordered, "from must be before to");
 
 export type ResearchPeriodUsageInput = z.infer<typeof researchPeriodUsageRecordSchema>;
+export const RESEARCH_PERIOD_USAGE_BATCH_MAX = 20;
+export const researchPeriodUsageBatchSchema = z.array(researchPeriodUsageRecordSchema)
+  .min(1).max(RESEARCH_PERIOD_USAGE_BATCH_MAX)
+  .refine((records) => new Set(records.map((record) => record.access_id)).size === records.length,
+    "access_id must be unique within a batch");
 const toolAccessSchema = z.object({
   access_id: identifier,
   research_id: identifier,
@@ -122,12 +127,31 @@ function assess(records: ResearchPeriodUsageRecord[], query: z.infer<typeof rese
   };
 }
 
+export type ResearchPeriodUsageSummary = Omit<ResearchPeriodUsageAssessment, "matches" | "truncated"> & {
+  matches_omitted: number;
+  overlapping_research_ids: string[];
+  overlapping_research_ids_truncated: boolean;
+};
+
+/** summary_only view: counts and distinct research IDs instead of every overlapping record. */
+export function summarizeAssessment(assessment: ResearchPeriodUsageAssessment): ResearchPeriodUsageSummary {
+  const { matches, truncated, ...rest } = assessment;
+  const ids = [...new Set(matches.map((entry) => entry.research_id))].sort();
+  return { ...rest, matches_omitted: assessment.overlapping_records, overlapping_research_ids: ids,
+    overlapping_research_ids_truncated: truncated,
+    limitations: [...assessment.limitations, "summary_omits_matching_records_use_full_check_for_detail"] };
+}
+
+type RecordRequest = (ResearchPeriodUsageInput & { source: "user_reported" })
+  | (ResearchPeriodToolAccessInput & typeof toolMetadata);
+type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment };
+
 export class ResearchPeriodUsageStore {
   private readonly log: AppendOnlyFirstSeenLog<ResearchPeriodUsageRecord>;
 
-  constructor(private readonly filePath = join(homedir(), ".tradingview-mcp", "research-period-usage.jsonl")) {
-    this.log = new AppendOnlyFirstSeenLog(filePath, "research period usage", validateRecord,
-      { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 });
+  constructor(private readonly filePath = join(homedir(), ".tradingview-mcp", "research-period-usage.jsonl"),
+    private readonly limits = { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 }) {
+    this.log = new AppendOnlyFirstSeenLog(filePath, "research period usage", validateRecord, limits);
   }
 
   private async readUnlocked(): Promise<ResearchPeriodUsageRecord[]> {
@@ -135,7 +159,7 @@ export class ResearchPeriodUsageStore {
     try {
       const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
       if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
-        || Buffer.byteLength(line, "utf8") + 1 > 16 * 1024)) {
+        || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
         throw new Error("invalid research period usage JSONL framing or record size");
       }
     } catch (error) {
@@ -183,54 +207,73 @@ export class ResearchPeriodUsageStore {
     }
   }
 
-  async record(input: unknown): Promise<ResearchPeriodUsageRecord & {
-    idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
-  }> {
+  async record(input: unknown): Promise<RecordResult> {
     // Parse before queueing to detach the request from caller-owned mutable data.
     const request = researchPeriodUsageRecordSchema.parse(input);
-    return this.recordBound({ ...request, source: "user_reported" });
+    return (await this.recordBound([{ ...request, source: "user_reported" }]))[0];
   }
 
-  async recordToolAccess(input: unknown): Promise<ResearchPeriodUsageRecord & {
-    idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
-  }> {
+  /**
+   * Records 1-20 user-reported accesses under one lock. Every request is validated, conflict-checked
+   * and capacity-checked (record and file limits for the whole batch) before anything is written,
+   * so a rejected batch writes nothing. If an I/O failure stops the append after complete lines,
+   * an identical retry treats those lines as idempotent and appends the rest. A torn partial line
+   * is not resumable: the next read fails closed on JSONL framing until the file is repaired.
+   */
+  async recordBatch(input: unknown): Promise<RecordResult[]> {
+    const requests = researchPeriodUsageBatchSchema.parse(input);
+    return this.recordBound(requests.map((request) => ({ ...request, source: "user_reported" as const })));
+  }
+
+  async recordToolAccess(input: unknown): Promise<RecordResult> {
     const request = toolAccessSchema.parse(input);
-    return this.recordBound({ ...request, ...toolMetadata });
+    return (await this.recordBound([{ ...request, ...toolMetadata }]))[0];
   }
 
-  private async recordBound(request: (ResearchPeriodUsageInput & { source: "user_reported" })
-    | (ResearchPeriodToolAccessInput & typeof toolMetadata)): Promise<ResearchPeriodUsageRecord & {
-      idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
-    }> {
+  private async recordBound(requests: RecordRequest[]): Promise<RecordResult[]> {
     return this.log.serialize(async () => {
       const records = await this.readUnlocked();
-      const existing = records.find((entry) => entry.access_id === request.access_id);
-      if (existing && Object.entries(request).some(([key, value]) =>
-        (existing as Record<string, unknown>)[key] !== value)) {
-        throw new Error("research period usage access_id conflicts with its original input");
-      }
-      // Retries replay the original prefix, so later reports cannot rewrite this assessment.
-      // Reports in that prefix may describe accesses later than request.accessed_at.
-      const prior = existing ? records.filter((entry) => entry.sequence < existing.sequence) : records;
-      const prior_overlap = assess(prior, {
-        series_id: request.series_id, data_version: request.data_version,
-        from: request.from, to: request.to, prior_usage_declaration: "unknown",
-      });
-      if (existing) {
-        await this.syncRetryUnlocked();
-        return { ...existing, idempotent: true, prior_overlap };
-      }
       const now = new Date().toISOString();
-      if (records.length && records[records.length - 1].recorded_at > now) {
-        throw new Error("research period usage clock moved backwards");
+      const planned: ResearchPeriodUsageRecord[] = [];
+      const results: RecordResult[] = [];
+      let retried = false;
+      for (const request of requests) {
+        // Earlier requests of this batch are prior reports in ledger append order.
+        const current = [...records, ...planned];
+        const existing = current.find((entry) => entry.access_id === request.access_id);
+        if (existing && Object.entries(request).some(([key, value]) =>
+          (existing as Record<string, unknown>)[key] !== value)) {
+          throw new Error("research period usage access_id conflicts with its original input");
+        }
+        // Retries replay the original prefix, so later reports cannot rewrite this assessment.
+        // Reports in that prefix may describe accesses later than request.accessed_at.
+        const prior = existing ? current.filter((entry) => entry.sequence < existing.sequence) : current;
+        const prior_overlap = assess(prior, {
+          series_id: request.series_id, data_version: request.data_version,
+          from: request.from, to: request.to, prior_usage_declaration: "unknown",
+        });
+        if (existing) {
+          retried = true;
+          results.push({ ...existing, idempotent: true, prior_overlap });
+          continue;
+        }
+        if (current.length && current[current.length - 1].recorded_at > now) {
+          throw new Error("research period usage clock moved backwards");
+        }
+        const record = validateRecord({ ...request,
+          accessed_at: request.source === "tool_observed" ? now : request.accessed_at,
+          schema_version: "1.0", namespace: "research_period_usage",
+          sequence: current.length + 1, recorded_at: now, first_seen_at: now,
+          observation_date: now.slice(0, 10) });
+        planned.push(record);
+        results.push({ ...record, idempotent: false, prior_overlap });
       }
-      const record = validateRecord({ ...request,
-        accessed_at: request.source === "tool_observed" ? now : request.accessed_at,
-        schema_version: "1.0", namespace: "research_period_usage",
-        sequence: records.length + 1, recorded_at: now, first_seen_at: now,
-        observation_date: now.slice(0, 10) });
-      await this.log.appendUnlocked(record);
-      return { ...record, idempotent: false, prior_overlap };
+      // Nothing is written until every request has passed validation, the conflict check and a
+      // capacity check for the whole batch (per-record checks alone could stop part-way).
+      if (planned.length) await this.log.assertAppendCapacityUnlocked(planned);
+      if (retried) await this.syncRetryUnlocked();
+      for (const record of planned) await this.log.appendUnlocked(record);
+      return results;
     });
   }
 

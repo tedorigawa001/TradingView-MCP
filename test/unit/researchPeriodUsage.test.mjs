@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, writeFile, rm, stat, truncate, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile, appendFile, rm, stat, truncate, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema } from '../../build/researchPeriodUsage.js';
+import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, summarizeAssessment,
+  RESEARCH_PERIOD_USAGE_BATCH_MAX } from '../../build/researchPeriodUsage.js';
 
 const ts = (day) => `2024-01-${String(day).padStart(2, '0')}T00:00:00.000Z`;
 const version = (char) => 'sha256:' + char.repeat(64);
@@ -484,4 +485,130 @@ test('no source spawns a developer-machine wrapper instead of node itself', asyn
     }
   }
   assert.deepEqual(offenders, [], `spawned by a bare name CI may not have: ${offenders.join(', ')}`);
+});
+
+test('a batch is validated in full before any write, and a retry completes a partial append', async (t) => {
+  const { path, store } = await setup(t);
+  const a = input({ access_id: 'batch:a' });
+  const b = input({ access_id: 'batch:b', series_id: 'USDJPY' });
+  const c = input({ access_id: 'batch:c', research_id: 'research:2' });
+  // A conflict in the last request rejects the whole batch: nothing is written.
+  await store.record(a);
+  const before = await readFile(path, 'utf8');
+  await assert.rejects(store.recordBatch([b, c, { ...a, purpose: 'validation' }]), /conflicts with its original input/);
+  assert.equal(await readFile(path, 'utf8'), before);
+  // Too many, too few, duplicated, or a future timestamp: rejected before the lock.
+  await assert.rejects(store.recordBatch([]));
+  await assert.rejects(store.recordBatch(Array.from({ length: RESEARCH_PERIOD_USAGE_BATCH_MAX + 1 },
+    (_, i) => input({ access_id: `many:${i}` }))));
+  await assert.rejects(store.recordBatch([b, { ...b }]), /unique within a batch/);
+  await assert.rejects(store.recordBatch([b, input({ access_id: 'future', accessed_at: '2999-01-01T00:00:00.000Z' })]));
+  assert.equal(await readFile(path, 'utf8'), before);
+  // A batch that repeats an existing record appends only the new ones, in order.
+  const results = await store.recordBatch([a, b, c]);
+  assert.deepEqual(results.map((r) => [r.access_id, r.idempotent, r.sequence]),
+    [['batch:a', true, 1], ['batch:b', false, 2], ['batch:c', false, 3]]);
+  assert.equal(results[0].prior_overlap.overlapping_records, 0);
+  assert.equal(results[2].prior_overlap.overlapping_records, 1, 'a later record sees an earlier one of its batch');
+  assert.deepEqual((await saved(path)).map((r) => r.access_id), ['batch:a', 'batch:b', 'batch:c']);
+  const again = await store.recordBatch([a, b, c]);
+  assert.ok(again.every((r) => r.idempotent));
+  assert.deepEqual(again.map((r) => r.prior_overlap.overlapping_records), [0, 0, 1]);
+  assert.equal((await saved(path)).length, 3);
+});
+
+test('summarizeAssessment keeps counts, flags and limitations but drops the records', async (t) => {
+  const { store } = await setup(t);
+  await store.recordBatch([input({ access_id: 'x1', research_id: 'r-b' }), input({ access_id: 'x2', research_id: 'r-a' }),
+    input({ access_id: 'x3', research_id: 'r-b', purpose: 'validation' })]);
+  const full = await store.check(query());
+  const brief = summarizeAssessment(full);
+  assert.equal('matches' in brief, false);
+  assert.equal('truncated' in brief, false);
+  assert.deepEqual([brief.overlapping_records, brief.exploration_records, brief.validation_records, brief.matches_omitted],
+    [3, 2, 1, 3]);
+  assert.deepEqual(brief.overlapping_research_ids, ['r-a', 'r-b']);
+  assert.equal(brief.overlapping_research_ids_truncated, false);
+  assert.equal(brief.unused_proven, false);
+  assert.equal(brief.candidateEligible, false);
+  for (const limitation of full.limitations) assert.ok(brief.limitations.includes(limitation), limitation);
+  assert.ok(brief.limitations.includes('summary_omits_matching_records_use_full_check_for_detail'));
+});
+
+test('batch capacity is checked for the whole batch before any write', async (t) => {
+  const { path } = await setup(t);
+  const a = input({ access_id: 'cap:a' });
+  const b = input({ access_id: 'cap:b', series_id: 'USDJPY' });
+  const c = input({ access_id: 'cap:c', series_id: 'GBPUSD' });
+  await new ResearchPeriodUsageStore(path).record(a);
+  const line = (await stat(path)).size;
+  // Room for one more record of this size, not two.
+  const limited = new ResearchPeriodUsageStore(path, { maxFileBytes: line * 2 + Math.floor(line / 2), maxRecordBytes: 16 * 1024 });
+  const before = await readFile(path, 'utf8');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(limited.recordBatch([b, c]), /too large/);
+    assert.equal(await readFile(path, 'utf8'), before, 'an oversized batch writes nothing, and so does its retry');
+  }
+  const [only] = await limited.recordBatch([b]);
+  assert.deepEqual([only.access_id, only.idempotent, only.sequence], ['cap:b', false, 2]);
+});
+
+test('an oversized record later in a batch rejects the batch before the earlier ones are written', async (t) => {
+  const { directory } = await setup(t);
+  const short = input({ access_id: 's' });
+  const long = input({ access_id: 'l'.repeat(120), research_id: 'r'.repeat(120) });
+  const size = async (name, record) => {
+    const path = join(directory, name);
+    await new ResearchPeriodUsageStore(path).record(record);
+    return (await stat(path)).size;
+  };
+  const shortBytes = await size('short.jsonl', short);
+  const longBytes = await size('long.jsonl', long);
+  assert.ok(longBytes > shortBytes);
+  const path = join(directory, 'limited.jsonl');
+  const limited = new ResearchPeriodUsageStore(path,
+    { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: shortBytes + Math.floor((longBytes - shortBytes) / 2) });
+  await assert.rejects(limited.recordBatch([short, long]), /too large/);
+  await assert.rejects(stat(path), { code: 'ENOENT' });
+});
+
+function injectAppendFailure(store, failAt, onFail) {
+  const log = store.log;
+  const real = log.appendUnlocked.bind(log);
+  let calls = 0;
+  log.appendUnlocked = async (record) => {
+    calls += 1;
+    if (calls === failAt) { await onFail(record); throw new Error('injected append failure'); }
+    return real(record);
+  };
+  return () => { log.appendUnlocked = real; };
+}
+
+test('an identical retry resumes a batch stopped after complete lines', async (t) => {
+  const { path, store } = await setup(t);
+  const batch = [input({ access_id: 'res:a' }), input({ access_id: 'res:b', series_id: 'USDJPY' }),
+    input({ access_id: 'res:c', research_id: 'research:2' })];
+  const restore = injectAppendFailure(store, 2, async () => {});
+  await assert.rejects(store.recordBatch(batch), /injected append failure/);
+  restore();
+  assert.deepEqual((await saved(path)).map((r) => r.access_id), ['res:a']);
+  const results = await store.recordBatch(batch);
+  assert.deepEqual(results.map((r) => [r.access_id, r.idempotent, r.sequence]),
+    [['res:a', true, 1], ['res:b', false, 2], ['res:c', false, 3]]);
+  assert.equal(results[2].prior_overlap.overlapping_records, 1);
+  assert.equal((await saved(path)).length, 3);
+});
+
+test('a torn partial line fails closed and is not resumed', async (t) => {
+  const { path, store } = await setup(t);
+  const batch = [input({ access_id: 'torn:a' }), input({ access_id: 'torn:b', series_id: 'USDJPY' })];
+  const restore = injectAppendFailure(store, 2, async (record) => {
+    await appendFile(path, JSON.stringify(record).slice(0, 40));   // a short write, no newline
+  });
+  await assert.rejects(store.recordBatch(batch), /injected append failure/);
+  restore();
+  const torn = await readFile(path, 'utf8');
+  await assert.rejects(store.recordBatch(batch), /framing/);
+  await assert.rejects(store.check(query()), /framing/);
+  assert.equal(await readFile(path, 'utf8'), torn, 'the retry did not append past a torn line');
 });

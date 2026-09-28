@@ -197,6 +197,26 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     }
   }
 
+  /**
+   * Checks, before any write, that appending every record in order stays within the record and
+   * file limits. Callers appending a batch use this so a batch cannot stop part-way on capacity.
+   */
+  async assertAppendCapacityUnlocked(records: T[]): Promise<void> {
+    let total = 0;
+    for (const record of records) {
+      const bytes = Buffer.byteLength(`${JSON.stringify(record)}\n`, "utf8");
+      if (bytes > this.limits.maxRecordBytes) throw new Error(`${this.label} history record is too large`);
+      total += bytes;
+    }
+    let size = 0;
+    try {
+      size = (await lstat(this.filePath)).size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (size + total > this.limits.maxFileBytes) throw new Error(`${this.label} history file is too large`);
+  }
+
   async appendUnlocked(record: T): Promise<void> {
     await this.ensureDirectory();
     const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
