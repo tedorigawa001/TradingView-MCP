@@ -1,6 +1,7 @@
 import type { OhlcvBar } from "./tradingview.js";
 import { createHash } from "node:crypto";
 import { estimateEffectiveMultiplicity, type EffectiveMultiplicityEstimate } from "./effectiveMultiplicity.js";
+import { createRandom } from "./seededRandom.js";
 import { marketRegimeResolutionMilliseconds } from "./marketRegimes.js";
 
 export interface LeadLagFold {
@@ -221,17 +222,6 @@ function fisherTwoSidedPValue(correlation: number | null, observations: number):
   if (correlation === null || observations <= 3 || Math.abs(correlation) >= 1) return null;
   const statistic = Math.abs(Math.atanh(correlation)) * Math.sqrt(observations - 3);
   return Math.max(0, Math.min(1, 2 * (1 - normalCdf(statistic))));
-}
-
-function createRandom(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
-  };
 }
 
 function lagStatistic(primary: number[], reference: number[], lagBars: number): number | null {

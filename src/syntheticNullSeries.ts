@@ -1,4 +1,5 @@
 import type { OhlcvBar } from "./tradingview.js";
+import { createRandom } from "./seededRandom.js";
 
 /**
  * Price series with no exploitable predictability, used to calibrate what this project treats as a
@@ -50,20 +51,8 @@ export const MAX_SEED = 0xffffffff;
 export const DEFAULT_VOLATILITY = 0.008;
 export const DEFAULT_FACTOR_RHO = 0.7;
 
-/**
- * mulberry32. The audit is only meaningful if a reported candidate rate can be reproduced exactly,
- * so the generator never touches Math.random.
- */
-const createRandom = (seed: number): (() => number) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
+// The audit is only meaningful if a reported candidate rate can be reproduced exactly, so the
+// generator (mulberry32, src/seededRandom.ts) never touches Math.random.
 
 /** Box-Muller. Returns one standard normal per call, caching the second of each pair. */
 const createNormal = (random: () => number): (() => number) => {
