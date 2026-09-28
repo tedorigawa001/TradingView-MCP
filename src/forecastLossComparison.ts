@@ -18,8 +18,12 @@ export const MIN_USED_DAYS = 100;
 export const MAX_DROPPED_SHARE = 0.05;
 export const FAVOURED_P = 0.05;
 export const DISTINCT_RHO = 0.99;
-/** Code review M2: a secondary that is one common scaling of the primary on more than this share of days is not distinct. */
-export const NEAR_COPY_SHARE = 0.05;
+/**
+ * A secondary that is one common scaling of the primary on more than this share of jointly nonzero
+ * days is not distinct (code review M2). A majority, because coarse-tick or floored proxies that are
+ * genuinely different share one exact scale on up to about 11% of days (code review R-L1).
+ */
+export const NEAR_COPY_SHARE = 0.5;
 const SYMMETRY_TOLERANCE = 1e-12;
 
 export type ForecastLoss = "qlike" | "mse";
@@ -217,8 +221,11 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
 
   // The secondary proxy: evaluated on used days where it is valid; > 5% of them dropped = not evaluable.
   const secondaryDropped = T - secondary.d.length;
+  const secondaryMean = meanOrNull(secondary.d);
+  // Finite days can still sum past the double range; such a mean cannot be read (code review R-L2).
   const secondaryStatus: "absent" | "not_evaluable" | "evaluable" = !set.secondary ? "absent"
-    : (T === 0 || secondary.d.length === 0 || secondaryDropped / T > MAX_DROPPED_SHARE ? "not_evaluable" : "evaluable");
+    : (T === 0 || secondary.d.length === 0 || secondaryDropped / T > MAX_DROPPED_SHARE || !Number.isFinite(secondaryMean)
+      ? "not_evaluable" : "evaluable");
   const rho = set.secondary ? spearman(secondary.partP, secondary.partP2) : null;
   const group = set.secondary ? largestCommonScaleGroup(secondary.rawP, secondary.rawP2) : null;
   const nearCopyShare = group && group.jointly_nonzero >= 2 ? group.largest_group / group.jointly_nonzero : null;
@@ -227,7 +234,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     ? rho !== null && rho <= DISTINCT_RHO && !(nearCopyShare !== null && nearCopyShare > NEAR_COPY_SHARE) : null;
   const secondaryResult = {
     status: secondaryStatus,
-    mean: meanOrNull(secondary.d),
+    mean: secondaryMean,
     used: secondary.d.length,
     dropped: set.secondary ? secondaryDropped : null,
     spearman_rho: rho,
@@ -322,7 +329,6 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const decisive = means[k];
   const found = means.findIndex(reverses);
   const kStar = found < 0 ? null : found;
-  const secondaryMean = secondaryResult.mean;
   const bootstrap = stationaryBootstrap(d, side === "A" ? 1 : -1);
 
   const conflicts = [

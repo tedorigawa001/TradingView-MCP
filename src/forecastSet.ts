@@ -85,11 +85,12 @@ function canonicalValue(value: z.infer<typeof valueSchema>, n: number, where: st
 }
 
 const zeroValue = (value: number | number[][]) => typeof value === "number" ? value === 0 : value.every((row) => row.every((x) => x === 0));
-const frobenius = (value: number | number[][]) => typeof value === "number" ? Math.abs(value)
-  : Math.sqrt(value.reduce((sum, row) => sum + row.reduce((s, x) => s + x * x, 0), 0));
+// Math.hypot scales internally, so norms of very small or very large matrices neither underflow nor
+// overflow; squaring raw entries let a rescaled set evade both copy rules (code review R-L3).
+const frobenius = (value: number | number[][]) => typeof value === "number" ? Math.abs(value) : Math.hypot(...value.flat());
 const scaledDifference = (p2: number | number[][], p: number | number[][], lambda: number) => typeof p2 === "number"
   ? Math.abs(p2 - lambda * (p as number))
-  : Math.sqrt(p2.reduce((sum, row, i) => sum + row.reduce((s, x, j) => s + (x - lambda * (p as number[][])[i][j]) ** 2, 0), 0));
+  : Math.hypot(...p2.flatMap((row, i) => row.map((x, j) => x - lambda * (p as number[][])[i][j])));
 
 function median(values: number[]): number {
   const sorted = [...values].sort((x, y) => x - y);
@@ -117,9 +118,16 @@ export function secondaryCopyReason(primary: ForecastValue[], secondary: Forecas
 }
 
 /**
+ * Relative tolerance of the near-copy measure. It is far looser than the input rule's 1e-12, so a
+ * copy that went through rounding (for example a 7-significant-digit export) still counts, and far
+ * tighter than the noise between genuinely different proxies (code review R-M1).
+ */
+export const NEAR_COPY_TOLERANCE = 1e-6;
+
+/**
  * Near-copy measure (code review M2). Over days where both proxies are present and nonzero, the
- * largest group of days on which P₂ = λP for one common λ: each day's P₂ is within 1e-12 of
- * r·P with r = ‖P₂‖/‖P‖, and the group's ratios agree within 1e-12 relative. A copy of the primary
+ * largest group of days on which P₂ = λP for one common λ: each day's P₂ is within the tolerance of
+ * r·P with r = ‖P₂‖/‖P‖, and the group's ratios agree within the tolerance. A copy of the primary
  * altered on a few days, which the all-days rule above does not reject, still forms a large group.
  */
 export function largestCommonScaleGroup(primary: ForecastValue[], secondary: ForecastValue[]): { jointly_nonzero: number; largest_group: number } {
@@ -130,12 +138,12 @@ export function largestCommonScaleGroup(primary: ForecastValue[], secondary: For
     if (p === null || p2 === null || zeroValue(p) || zeroValue(p2)) continue;
     jointlyNonzero++;
     const ratio = frobenius(p2) / frobenius(p);
-    if (ratio > 0 && Number.isFinite(ratio) && scaledDifference(p2, p, ratio) <= 1e-12 * frobenius(p2)) ratios.push(ratio);
+    if (ratio > 0 && Number.isFinite(ratio) && scaledDifference(p2, p, ratio) <= NEAR_COPY_TOLERANCE * frobenius(p2)) ratios.push(ratio);
   }
   ratios.sort((x, y) => x - y);
   let largest = 0;
   for (let low = 0, high = 0; high < ratios.length; high++) {
-    while (ratios[high] - ratios[low] > 1e-12 * ratios[high]) low++;
+    while (ratios[high] - ratios[low] > NEAR_COPY_TOLERANCE * ratios[high]) low++;
     largest = Math.max(largest, high - low + 1);
   }
   return { jointly_nonzero: jointlyNonzero, largest_group: largest };

@@ -150,7 +150,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 
 **Secondary proxy.**
 - It is evaluated on the used days where it is valid and its losses are finite. More than 5% of
-  those dropped makes it `not_evaluable`.
+  those dropped makes it `not_evaluable`, as does a mean that is not finite (finite days whose
+  sum overflows).
 - `secondary.mean` is the mean d under it.
 - Distinctness is the Spearman ρ between the proxy-dependent parts ⟨G, P⟩ and ⟨G, P₂⟩, where
   G = S_A⁻¹ − S_B⁻¹ for QLIKE and −2(S_A − S_B) for MSE. The forecast-only term of d is left
@@ -159,13 +160,20 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
   ranks for ties.
 - **Near copies:**
   - `near_copy_share` is the largest share of jointly nonzero days, among those used, on which P₂
-    is one common scaling of P. On each such day P₂ is within 1e-12 of λP for a single λ, and the
-    days' ratios agree within 1e-12 relative.
-  - Above 0.05 the secondary is not distinct, whatever ρ is. A copy of the primary altered on a
-    few days is otherwise missed: the input rule needs every day, and one extreme day can pull ρ
-    below 0.99.
-  - Genuinely different proxies share one exact scale on essentially no days. In practice only
-    the day holding the median ratio matches, which is one day.
+    is one common scaling of P.
+    - On each such day, P₂ is within 1e-6 relative of rP, where r = ‖P₂‖/‖P‖.
+    - The days' ratios agree within 1e-6 relative.
+    - Norms are computed with `Math.hypot`, so rescaling a matrix set changes nothing.
+  - Above 0.5, a majority of days, the secondary is not distinct, whatever ρ is.
+    - Without this rule, a copy of the primary altered on a few days is missed: the input rule
+      needs every day, and one extreme day can pull ρ below 0.99.
+    - The 1e-6 tolerance also catches a copy that went through rounding, for example a
+      7-significant-digit export, or through a different code path.
+  - Genuinely different proxies can share one exact scale on a minority of days. A scalar day is
+    always a multiple of itself, so it forms a group of at least one. Coarse-tick proxies, for
+    example a squared close-to-close move against a Parkinson range, coincide up to a constant on
+    the days that close at one extreme, about 2–11% of days. Floors shared by both proxies add
+    more. The majority line leaves these distinct.
   - The share is null with fewer than 2 jointly nonzero days.
 - `distinct` is judged whenever a secondary is present, even when it is not evaluable, so
   `not_assessed_secondary_proxy_not_distinct` is listed next to

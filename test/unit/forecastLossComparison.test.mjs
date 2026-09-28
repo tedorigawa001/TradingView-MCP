@@ -27,8 +27,8 @@ function scalarSet({ a, b, primary, secondary, labels }) {
 const proxyP = (T) => Array.from({ length: T }, (_, i) => 1 + ((i * 7919) % 13) / 10);
 const proxyQ = (T) => Array.from({ length: T }, (_, i) => 0.8 + ((i * 104729) % 17) / 12);
 /** MSE scalar set with a chosen daily d: b = p + c, a = p + e, d = e² − c². */
-function setFromD(d, { nullA = [], secondary, labels } = {}) {
-  const p = proxyP(d.length);
+function setFromD(d, { nullA = [], secondary, labels, proxy } = {}) {
+  const p = proxy ?? proxyP(d.length);
   const e = d.map((x) => (x >= -1 ? Math.sqrt(1 + x) : 0)), c = d.map((x) => (x >= -1 ? 1 : Math.sqrt(-x)));
   return scalarSet({ a: p.map((x, i) => (nullA.includes(i) ? null : x + e[i])), b: p.map((x, i) => x + c[i]), primary: p,
     secondary: secondary?.(p, e, c), labels });
@@ -394,14 +394,15 @@ test('a secondary that is one scaling of the primary on most days is not distinc
   close(r.secondary.near_copy_share, 399 / 400, 1e-15, 'share');
   assert.equal(r.secondary.distinct, false);
   assert.equal(r.battery_outcome, 'not_assessed_secondary_proxy_not_distinct');
-  // The line: copies (2P) on exactly 5% of jointly nonzero days pass, one day more does not.
+  // The line: copies (2P) on exactly half of the jointly nonzero days pass, one day more does not.
   const q = (i) => 0.8 + ((i * 104729) % 17) / 12;
   const copies = (days) => compareForecastLosses(setFromD(uniform(), { secondary: (pp) => pp.map((x, i) => (i < days ? 2 * x : q(i))) }), tracked);
-  const atLine = copies(20), overLine = copies(21);
-  assert.equal(NEAR_COPY_SHARE, 0.05);
-  assert.equal(atLine.secondary.near_copy_share, 20 / 400);
+  const atLine = copies(200), overLine = copies(201);
+  assert.equal(NEAR_COPY_SHARE, 0.5);
+  assert.equal(atLine.secondary.near_copy_share, 200 / 400);
+  assert.ok(atLine.secondary.spearman_rho <= 0.99);
   assert.equal(atLine.secondary.distinct, true);
-  assert.equal(overLine.secondary.near_copy_share, 21 / 400);
+  assert.equal(overLine.secondary.near_copy_share, 201 / 400);
   assert.equal(overLine.secondary.distinct, false);
   // With fewer than 2 jointly nonzero days the share is undefined, and ρ alone decides.
   const single = compareForecastLosses(setFromD(uniform(), { secondary: (pp) => pp.map((x, i) => (i === 5 ? x : 0)) }), tracked);
@@ -438,4 +439,55 @@ test('k* and the decisive trim agree exactly, even when the trimmed mean is zero
     assert.equal(r.robustness_conflicts.includes('trimmed_mean_reverses'), r.breakdown.k_star !== null && r.breakdown.k_star <= r.trimmed.k,
       `seed ${seed}: k* ${r.breakdown.k_star}, k ${r.trimmed.k}, decisive ${r.trimmed.decisive.mean}`);
   }
+});
+
+// Re-review fixes (R-M1, R-L1, R-L2).
+
+test('a copy that went through rounding or tiny noise is still a near copy (R-M1)', () => {
+  // A continuous primary, like a realized variance. The day with the largest proxy-dependent part is
+  // corrected to 1/1000, moving it from the top rank to the bottom, so that ρ alone would pass it.
+  const random = createRandom(9);
+  const proxy = Array.from({ length: 400 }, () => Math.exp(random() * 2 - 1));
+  const d = uniform();
+  const part = d.map((x, i) => Math.abs((Math.sqrt(1 + x) - 1) * proxy[i]));
+  const largest = part.indexOf(Math.max(...part));
+  const copy = (value) => compareForecastLosses(setFromD(d, { proxy, secondary: (p) => p.map((x, i) => (i === largest ? 1e-3 * x : value(x))) }), tracked);
+  const rounded = copy((x) => Number(x.toPrecision(7)));          // a 7-significant-digit export
+  assert.ok(rounded.secondary.spearman_rho < 0.99, `ρ ${rounded.secondary.spearman_rho}`);
+  assert.ok(rounded.secondary.near_copy_share > 0.99);
+  assert.equal(rounded.battery_outcome, 'not_assessed_secondary_proxy_not_distinct');
+  const noisy = copy((x) => x * (1 + 1e-9 * (random() - 0.5)));
+  assert.ok(noisy.secondary.near_copy_share > 0.99);
+  assert.equal(noisy.secondary.distinct, false);
+});
+
+test('a genuinely different coarse-tick secondary shares one scale on some days and stays distinct (R-L1)', () => {
+  // Squared close-to-close move against the Parkinson range, 40 one-tick moves a day. On days that close
+  // at one extreme having opened at the other, the two are the same number up to 1/(4 ln 2), exactly.
+  const random = createRandom(3);
+  const proxy = [], range = [];
+  for (let t = 0; t < 400; t++) {
+    let x = 0, high = 0, low = 0;
+    for (let m = 0; m < 40; m++) { x += random() < 0.5 ? -1 : 1; high = Math.max(high, x); low = Math.min(low, x); }
+    proxy.push(x * x);
+    range.push((high - low) ** 2 / (4 * Math.log(2)));
+  }
+  const r = compareForecastLosses(setFromD(uniform(), { proxy, secondary: () => range }), tracked);
+  assert.ok(r.secondary.near_copy_share > 0.05 && r.secondary.near_copy_share < NEAR_COPY_SHARE, `share ${r.secondary.near_copy_share}`);
+  assert.ok(r.secondary.spearman_rho < 0.99);
+  assert.equal(r.secondary.distinct, true);
+});
+
+test('a secondary mean that overflows makes the secondary not evaluable (R-L2)', () => {
+  // QLIKE: on two days A forecasts 1e-10 and the secondary is 1e298, so each secondary d is about 1e308,
+  // finite, while their sum is not.
+  const base = setFromD(uniform(), { secondary: independentSecondary });
+  const set = { ...base, a: base.a.map((x, i) => (i === 3 || i === 4 ? 1e-10 : x)),
+    secondary: base.secondary.map((x, i) => (i === 3 || i === 4 ? 1e298 : x)) };
+  const r = compareForecastLosses(set, { loss: 'qlike', tracked: true });
+  assert.equal(r.secondary.dropped, 0, 'every day is finite on its own');
+  assert.ok(!Number.isFinite(r.secondary.mean));
+  assert.equal(r.secondary.status, 'not_evaluable');
+  assert.ok(!r.robustness_conflicts.includes('secondary_proxy_reverses'));
+  assert.ok(r.withheld_reasons.includes('not_assessed_secondary_proxy_absent'));
 });

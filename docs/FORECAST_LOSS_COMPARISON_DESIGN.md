@@ -6,12 +6,14 @@ Backlog #101, item 2. Review history:
 - rev 3: APPROVE WITH FINDINGS, 7 new findings (M1–M3, L1–L4);
 - rev 4: APPROVE WITH FINDINGS, LOW only (P1–P3), with no further design round needed;
 - code review of the implementation: APPROVE WITH FINDINGS, 2 MEDIUM and 9 LOW (CR-M1, CR-M2,
-  CR-L1–CR-L9).
+  CR-L1–CR-L9);
+- re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4).
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
 - non-finite losses fail closed (CR-M1);
-- the near-copy rule for the secondary (CR-M2);
+- the near-copy rule for the secondary (CR-M2), with its parameters set by the re-review (R-M1,
+  R-L1);
 - the trim conflict is tested through k* (CR-L1);
 - distinctness is judged whenever a secondary is present (CR-L2);
 - the access-ID collision rule is amended (CR-L4).
@@ -58,12 +60,20 @@ statement of superiority.
   - If ρ > 0.99, or if ρ is undefined (a constant series, or all ties), the secondary is
     `not_distinct`.
   - **Near copies (CR-M2):**
-    - The secondary is also `not_distinct` when one common scaling of the primary covers more
-      than 5% of the jointly nonzero days, among the days used by both. That is the largest group
-      of days on which P₂ is within 1e-12 of λP for one λ, with the group's ratios agreeing within
-      1e-12 relative.
+    - The secondary is also `not_distinct` when one common scaling of the primary covers a
+      majority (more than half) of the jointly nonzero days, among the days used by both.
+    - That is the largest group of days on which P₂ is within 1e-6 relative of λP for one λ,
+      with the group's ratios agreeing within 1e-6 relative.
     - Without this rule, a copy of the primary altered on one extreme day passes: the input rule
       needs every day, and one full-range rank move pulls ρ below 0.99.
+    - The re-review changed the first version's parameters, 1e-12 and 5%:
+      - R-M1: 1e-12 missed copies that went through rounding;
+      - R-L1: 5% flagged genuinely different coarse-tick or floored proxies, which share one
+        exact scale on up to about 11% of days.
+    - Norms use a scaled hypotenuse, so an extreme rescaling of a matrix set cannot evade this
+      rule or the input rule (R-L3).
+  - A secondary mean that is not finite, even when every day is, makes the secondary not
+    evaluable (R-L2).
   - Distinctness is judged whenever a secondary is present, even when it is not evaluable, so
     row 6 is listed alongside row 5 (CR-L2).
   - Both parts still share the sign and scale of G_t, so ρ remains biased upward. The bias is
@@ -229,7 +239,8 @@ An empty conflicts list therefore does not hide these.
   - the statistics: `dm {dbar, S, L, DM, p_a, p_b, T}`, `mean_favours`, `drops {…by cause, N}`,
     hard-day diagnostics, `sub_periods[4]`, `trimmed_mean_decisive` (with
     `own_nulls_imputed_worst_case`), `trimmed_mean_both_tails`, `breakdown {k_star, fraction,
-    k_star_status}`, `secondary {mean, used, dropped, spearman_rho, sign_change_share}`,
+    k_star_status}`, `secondary {status, mean, used, dropped, spearman_rho, near_copy_share,
+    sign_change_share, distinct}`,
     `bootstrap {p, mc_se}`, and descriptive `caller_label_means`.
 - **Always the same:** `candidateEligible: false`, `statistical_calibration: "not_assessed"`.
 - **Limitations:**
@@ -432,4 +443,4 @@ Without `research_id`, `search` is `untracked`, and the outcome can be at most
 9. **Windows (N6):** explicit per-date UTC windows only.
 10. **Secondary distinctness (N2):** Spearman ρ > 0.99 means not distinct. Per M3 it is measured
     on the proxy-dependent parts of d, and scaled copies are rejected outright. Per CR-M2, a
-    common scaling on more than 5% of jointly nonzero days also means not distinct.
+    common scaling on a majority of jointly nonzero days (within 1e-6) also means not distinct.

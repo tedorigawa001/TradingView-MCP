@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   ForecastSetStore, normalizeForecastSet, normalizeInlineForecastSet, forecastSetComponentHashes, secondaryCopyReason,
-  FORECAST_SET_MAX_LABELS, largestCommonScaleGroup, forecastSetSourceDigest,
+  FORECAST_SET_MAX_LABELS, largestCommonScaleGroup, forecastSetSourceDigest, NEAR_COPY_TOLERANCE,
 } from '../../build/forecastSet.js';
 import { importForecastSet } from '../../build/forecastSetCli.js';
 
@@ -176,14 +176,19 @@ test('the near-copy measure finds the largest group sharing one scale, over join
   const primary = [1, 2, 3, 4, 5, 6, 0, 7, null];
   const secondary = [2, 4, 6, 20, 25, 1, 3, 0, 1];
   assert.deepEqual(largestCommonScaleGroup(primary, secondary), { jointly_nonzero: 6, largest_group: 3 });
-  // Ratios within 1e-12 relative join one group; 1e-9 apart they do not.
-  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-13)]).largest_group, 2);
-  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-9)]).largest_group, 1);
+  // Ratios within 1e-6 relative join one group, so rounding-level copies count (R-M1); 1e-5 apart they do not.
+  assert.equal(NEAR_COPY_TOLERANCE, 1e-6);
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 5e-7)]).largest_group, 2);
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-5)]).largest_group, 1);
   // Matrices: a day counts only if P₂ is proportional to P, not merely equal in norm.
   const p = [[1, 0.2], [0.2, 1]];
   const scaled = p.map((row) => row.map((x) => 3 * x));
   const sameNorm = [[1, -0.2], [-0.2, 1]].map((row) => row.map((x) => 3 * x));
   assert.deepEqual(largestCommonScaleGroup([p, p, p], [scaled, scaled, sameNorm]), { jointly_nonzero: 3, largest_group: 2 });
+  // A matrix off proportional by 1e-5 relative is not a copy day; by 1e-7 it is.
+  const offBy = (e) => [[3, 0.6], [0.6, 3 * (1 + e)]];
+  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-5)]).largest_group, 1);
+  assert.equal(largestCommonScaleGroup([p, p], [scaled, offBy(1e-7)]).largest_group, 2);
   assert.deepEqual(largestCommonScaleGroup([], []), { jointly_nonzero: 0, largest_group: 0 });
 });
 
@@ -211,4 +216,17 @@ test('the store refuses a symlinked artifact and a group-readable directory', as
   await assert.rejects(store.get(artifact_id), /owner-only/);
   await chmod(sets, 0o700);
   assert.deepEqual(await store.get(artifact_id), normalizeForecastSet(scalarSet()).set);
+});
+
+test('both copy rules hold for matrices at extreme scales (R-L3)', () => {
+  const m = (x, y, c) => [[x, c], [c, y]];
+  const primary = Array.from({ length: 10 }, (_, i) => m(1 + i, 2, 0.1));
+  for (const scale of [1, 1e-170, 1e160]) {
+    const p = primary.map((v) => v.map((row) => row.map((x) => x * scale)));
+    const copy = p.map((v) => v.map((row) => row.map((x) => 3 * x)));
+    assert.deepEqual(largestCommonScaleGroup(p, copy), { jointly_nonzero: 10, largest_group: 10 }, `scale ${scale}`);
+    assert.equal(secondaryCopyReason(p, copy), 'scaled_copy', `scale ${scale}`);
+    const other = copy.map((v, i) => (i === 0 ? v.map((row) => row.map((x) => x * 2)) : v));
+    assert.equal(secondaryCopyReason(p, other), null, `scale ${scale}`);
+  }
 });
