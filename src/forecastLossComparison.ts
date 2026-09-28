@@ -21,6 +21,13 @@ export const DISTINCT_RHO = 0.99;
 const SYMMETRY_TOLERANCE = 1e-12;
 
 export type ForecastLoss = "qlike" | "mse";
+/** Every battery outcome, in the design's first-match order. */
+export const BATTERY_OUTCOMES = [
+  "not_evaluable", "not_applicable", "conflicts_found", "blocked_by_dropped_days",
+  "not_assessed_secondary_proxy_absent", "not_assessed_secondary_proxy_not_distinct",
+  "no_listed_conflict_untracked", "no_listed_conflict",
+] as const;
+export type BatteryOutcome = (typeof BATTERY_OUTCOMES)[number];
 export type Side = "A" | "B";
 type Forecast = { s: Matrix; inverse: Matrix; logDet: number };
 
