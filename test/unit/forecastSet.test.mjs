@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, readdir, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, readdir, chmod, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   ForecastSetStore, normalizeForecastSet, normalizeInlineForecastSet, forecastSetComponentHashes, secondaryCopyReason,
-  FORECAST_SET_MAX_LABELS,
+  FORECAST_SET_MAX_LABELS, largestCommonScaleGroup, forecastSetSourceDigest,
 } from '../../build/forecastSet.js';
 import { importForecastSet } from '../../build/forecastSetCli.js';
 
@@ -168,4 +169,46 @@ test('the import CLI requires both flags and registers the file', async (t) => {
   await assert.rejects(importForecastSet(['--confirm-local-import'], store), /--input/);
   const result = await importForecastSet(['--input', input, '--confirm-local-import'], store);
   assert.equal(result.artifact_id, normalizeForecastSet(scalarSet()).artifact_id);
+});
+
+test('the near-copy measure finds the largest group sharing one scale, over jointly nonzero days (M2)', () => {
+  // Scalars: 3 days at ×2, 2 at ×5, one other ratio; zero and null days do not count.
+  const primary = [1, 2, 3, 4, 5, 6, 0, 7, null];
+  const secondary = [2, 4, 6, 20, 25, 1, 3, 0, 1];
+  assert.deepEqual(largestCommonScaleGroup(primary, secondary), { jointly_nonzero: 6, largest_group: 3 });
+  // Ratios within 1e-12 relative join one group; 1e-9 apart they do not.
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-13)]).largest_group, 2);
+  assert.equal(largestCommonScaleGroup([1, 1], [2, 2 * (1 + 1e-9)]).largest_group, 1);
+  // Matrices: a day counts only if P₂ is proportional to P, not merely equal in norm.
+  const p = [[1, 0.2], [0.2, 1]];
+  const scaled = p.map((row) => row.map((x) => 3 * x));
+  const sameNorm = [[1, -0.2], [-0.2, 1]].map((row) => row.map((x) => 3 * x));
+  assert.deepEqual(largestCommonScaleGroup([p, p, p], [scaled, scaled, sameNorm]), { jointly_nonzero: 3, largest_group: 2 });
+  assert.deepEqual(largestCommonScaleGroup([], []), { jointly_nonzero: 0, largest_group: 0 });
+});
+
+test('the source digest is sha256 of the raw source_id and is the journal component (L5)', () => {
+  const set = normalizeForecastSet(scalarSet()).set;
+  assert.equal(forecastSetSourceDigest('test-source'),
+    'sha256:' + createHash('sha256').update('test-source').digest('hex'));
+  assert.equal(forecastSetComponentHashes(set).source, forecastSetSourceDigest('test-source'));
+});
+
+test('the store refuses a symlinked artifact and a group-readable directory', async (t) => {
+  const { directory, store } = await tempStore(t);
+  const { artifact_id } = await store.register(scalarSet());
+  const sets = join(directory, 'sets');
+  const path = join(sets, `${artifact_id.slice(7)}.json`);
+  const moved = join(directory, 'elsewhere.json');
+  await writeFile(moved, await readFile(path));
+  await chmod(path, 0o600);
+  await unlink(path);
+  await symlink(moved, path);
+  await assert.rejects(store.get(artifact_id), /symlink|regular file/);
+  await unlink(path);
+  await store.register(scalarSet());
+  await chmod(sets, 0o750);
+  await assert.rejects(store.get(artifact_id), /owner-only/);
+  await chmod(sets, 0o700);
+  assert.deepEqual(await store.get(artifact_id), normalizeForecastSet(scalarSet()).set);
 });

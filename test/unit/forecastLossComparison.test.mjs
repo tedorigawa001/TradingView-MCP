@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   compareForecastLosses, evaluateLoss, neweyWest, blockBounds, trimFavourable, breakdownCount, stationaryBootstrap,
-  FORECAST_LOSS_CONTRACT, BOOTSTRAP_SEED,
+  FORECAST_LOSS_CONTRACT, BOOTSTRAP_SEED, NEAR_COPY_SHARE,
 } from '../../build/forecastLossComparison.js';
 import { normalizeForecastSet } from '../../build/forecastSet.js';
 import { normalCdf, spearman } from '../../build/numerics.js';
@@ -360,4 +360,82 @@ test('non-decisive disagreements: both-tail trim, bootstrap, caller labels', () 
   assert.ok(r.caller_label_means.every((l) => l.days === 1000));
   // Caller labels never raise a conflict, however they fall.
   assert.ok(!r.robustness_conflicts.some((c) => c.startsWith('caller_label')));
+});
+
+// Code review fixes (M1, M2, L1, L2).
+
+test('an overflowing loss fails closed: a secondary day is dropped, a primary day makes the result not evaluable (M1)', () => {
+  // Scoring against B makes the secondary a conflict; one day with a proxy of 1e155 overflows both MSE losses.
+  const overflow = compareForecastLosses(setFromD(uniform(), { secondary: (p, e, c) => p.map((x, i) => (i === 123 ? 1e155 : x + c[i])) }), tracked);
+  assert.equal(overflow.secondary.status, 'evaluable');
+  assert.equal(overflow.secondary.dropped, 1);
+  assert.ok(Number.isFinite(overflow.secondary.mean) && overflow.secondary.mean > 0);
+  assert.ok(overflow.robustness_conflicts.includes('secondary_proxy_reverses'));
+  assert.equal(overflow.battery_outcome, 'conflicts_found');
+  const primary = setFromD(uniform(), { secondary: independentSecondary });
+  const broken = { ...primary, primary: primary.primary.map((x, i) => (i === 50 ? 1e155 : x)) };
+  const r = compareForecastLosses(broken, tracked);
+  assert.deepEqual(r.status, { evaluable: false, reason: 'non_finite_loss' });
+  assert.equal(r.dm, null);
+  // QLIKE overflows through tr(S⁻¹P) when a forecast is tiny and the proxy large.
+  const q = compareForecastLosses({ ...primary, a: primary.a.map((x, i) => (i === 7 ? 1e-300 : x)),
+    primary: primary.primary.map((x, i) => (i === 7 ? 1e10 : x)) }, { loss: 'qlike', tracked: true });
+  assert.equal(q.status.reason, 'non_finite_loss');
+});
+
+test('a secondary that is one scaling of the primary on most days is not distinct (M2)', () => {
+  // Equal to the primary on 399 of 400 days; the day with the largest proxy-dependent part is scaled by 0.3.
+  const d = uniform();
+  const p = Array.from({ length: 400 }, (_, i) => 1 + ((i * 7919) % 13) / 10);
+  const part = d.map((x, i) => Math.abs((Math.sqrt(1 + x) - 1) * p[i]));
+  const largest = part.indexOf(Math.max(...part));
+  const r = compareForecastLosses(setFromD(d, { secondary: (q) => q.map((x, i) => (i === largest ? 0.3 * x : x)) }), tracked);
+  assert.ok(r.secondary.spearman_rho < 0.99, `ρ ${r.secondary.spearman_rho}: the ρ rule alone would pass it`);
+  close(r.secondary.near_copy_share, 399 / 400, 1e-15, 'share');
+  assert.equal(r.secondary.distinct, false);
+  assert.equal(r.battery_outcome, 'not_assessed_secondary_proxy_not_distinct');
+  // The line: copies (2P) on exactly 5% of jointly nonzero days pass, one day more does not.
+  const q = (i) => 0.8 + ((i * 104729) % 17) / 12;
+  const copies = (days) => compareForecastLosses(setFromD(uniform(), { secondary: (pp) => pp.map((x, i) => (i < days ? 2 * x : q(i))) }), tracked);
+  const atLine = copies(20), overLine = copies(21);
+  assert.equal(NEAR_COPY_SHARE, 0.05);
+  assert.equal(atLine.secondary.near_copy_share, 20 / 400);
+  assert.equal(atLine.secondary.distinct, true);
+  assert.equal(overLine.secondary.near_copy_share, 21 / 400);
+  assert.equal(overLine.secondary.distinct, false);
+  // With fewer than 2 jointly nonzero days the share is undefined, and ρ alone decides.
+  const single = compareForecastLosses(setFromD(uniform(), { secondary: (pp) => pp.map((x, i) => (i === 5 ? x : 0)) }), tracked);
+  assert.equal(single.secondary.near_copy_share, null);
+  assert.equal(single.secondary.distinct, single.secondary.spearman_rho !== null && single.secondary.spearman_rho <= 0.99);
+  assert.equal(single.secondary.distinct, true);
+  // Genuinely different proxies stay distinct.
+  const independent = compareForecastLosses(setFromD(uniform(), { secondary: independentSecondary }), tracked);
+  assert.ok(independent.secondary.near_copy_share < NEAR_COPY_SHARE);
+  assert.equal(independent.secondary.distinct, true);
+});
+
+test('distinctness is judged whenever a secondary is present, so both reasons are listed (L2)', () => {
+  const r = compareForecastLosses(setFromD(uniform(), {
+    secondary: (p) => p.map((x, i) => (i % 10 === 3 ? -1 : x * (1 + 1e-6 * Math.sin(i)))) }), tracked);
+  assert.equal(r.secondary.status, 'not_evaluable');
+  assert.equal(r.secondary.distinct, false);
+  assert.equal(r.battery_outcome, 'not_assessed_secondary_proxy_absent');
+  assert.deepEqual(r.withheld_reasons, ['not_assessed_secondary_proxy_absent', 'not_assessed_secondary_proxy_not_distinct']);
+});
+
+test('k* and the decisive trim agree exactly, even when the trimmed mean is zero at rounding level (L1)', () => {
+  // Ten spread days of −999,999 and 990 centred uniform values whose sum is zero up to rounding.
+  for (let seed = 1; seed <= 40; seed++) {
+    const random = createRandom(seed);
+    const u = Array.from({ length: 990 }, () => random());
+    const centre = u.reduce((sum, x) => sum + x, 0) / u.length;
+    const rest = u.map((x) => x - centre);
+    const sample = rest.flatMap((x, i) => (i % 99 === 49 ? [-999_999, x] : [x]));
+    const kStar = breakdownCount(sample, 'A');
+    assert.equal(trimFavourable(sample, 10, 'A') >= 0, kStar !== null && kStar <= 10, `seed ${seed}`);
+    const r = compareForecastLosses(setFromD(sample.map((x) => x), { secondary: independentSecondary }), tracked);
+    assert.equal(r.mean_favours, 'A');
+    assert.equal(r.robustness_conflicts.includes('trimmed_mean_reverses'), r.breakdown.k_star !== null && r.breakdown.k_star <= r.trimmed.k,
+      `seed ${seed}: k* ${r.breakdown.k_star}, k ${r.trimmed.k}, decisive ${r.trimmed.decisive.mean}`);
+  }
 });

@@ -116,6 +116,31 @@ export function secondaryCopyReason(primary: ForecastValue[], secondary: Forecas
   return pairs.every(([p, p2]) => scaledDifference(p2, p, lambda) <= 1e-12 * frobenius(p2)) ? "scaled_copy" : null;
 }
 
+/**
+ * Near-copy measure (code review M2). Over days where both proxies are present and nonzero, the
+ * largest group of days on which P₂ = λP for one common λ: each day's P₂ is within 1e-12 of
+ * r·P with r = ‖P₂‖/‖P‖, and the group's ratios agree within 1e-12 relative. A copy of the primary
+ * altered on a few days, which the all-days rule above does not reject, still forms a large group.
+ */
+export function largestCommonScaleGroup(primary: ForecastValue[], secondary: ForecastValue[]): { jointly_nonzero: number; largest_group: number } {
+  const ratios: number[] = [];
+  let jointlyNonzero = 0;
+  for (let i = 0; i < primary.length; i++) {
+    const p = primary[i], p2 = secondary[i];
+    if (p === null || p2 === null || zeroValue(p) || zeroValue(p2)) continue;
+    jointlyNonzero++;
+    const ratio = frobenius(p2) / frobenius(p);
+    if (ratio > 0 && Number.isFinite(ratio) && scaledDifference(p2, p, ratio) <= 1e-12 * frobenius(p2)) ratios.push(ratio);
+  }
+  ratios.sort((x, y) => x - y);
+  let largest = 0;
+  for (let low = 0, high = 0; high < ratios.length; high++) {
+    while (ratios[high] - ratios[low] > 1e-12 * ratios[high]) low++;
+    largest = Math.max(largest, high - low + 1);
+  }
+  return { jointly_nonzero: jointlyNonzero, largest_group: largest };
+}
+
 /** Validate and normalize to the canonical form. Key order is fixed here, not left to the parser. */
 export function normalizeForecastSet(input: unknown, options: { maxBytes?: number } = {}): { set: ForecastSet; artifact_id: string; bytes: number } {
   const raw = forecastSetInputSchema.parse(input);
@@ -176,8 +201,15 @@ export function normalizeInlineForecastSet(input: unknown) {
 }
 
 /**
+ * sha256 of the UTF-8 source_id itself (design M2). The period record's `forecast-set-source:` series
+ * and the journal's source_hash both use it, so the two records join on it.
+ */
+export const forecastSetSourceDigest = (sourceId: string) => digest(sourceId);
+
+/**
  * Per-component hashes for the exploration journal: sha256 of JSON.stringify of each normalized
- * component. They persist in the journal, so this serialization is a cross-version contract.
+ * component, and the source digest above. They persist in the journal, so this serialization is a
+ * cross-version contract.
  */
 export function forecastSetComponentHashes(set: ForecastSet) {
   const hash = (value: unknown) => digest(JSON.stringify(value));
@@ -188,7 +220,7 @@ export function forecastSetComponentHashes(set: ForecastSet) {
     primary: hash(set.primary),
     secondary: set.secondary ? hash(set.secondary) : "absent",
     labels: set.labels ? hash(set.labels) : "absent",
-    source: hash(set.source_id),
+    source: forecastSetSourceDigest(set.source_id),
   };
 }
 

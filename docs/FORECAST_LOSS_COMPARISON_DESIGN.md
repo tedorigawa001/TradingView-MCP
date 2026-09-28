@@ -1,13 +1,22 @@
-# Forecast loss comparison: design memo (rev 4.1, design review approved; not implemented)
+# Forecast loss comparison: design memo (rev 4.2, implemented; code review folded in)
 
 Backlog #101, item 2. Review history:
 - rev 1: BLOCK, 14 findings (F1–F14);
 - rev 2: APPROVE WITH FINDINGS, 12 new findings (N1–N12);
 - rev 3: APPROVE WITH FINDINGS, 7 new findings (M1–M3, L1–L4);
-- rev 4: APPROVE WITH FINDINGS, LOW only (P1–P3), with no further design round needed.
+- rev 4: APPROVE WITH FINDINGS, LOW only (P1–P3), with no further design round needed;
+- code review of the implementation: APPROVE WITH FINDINGS, 2 MEDIUM and 9 LOW (CR-M1, CR-M2,
+  CR-L1–CR-L9).
 
-Rev 4.1 folds in P1–P3 as clarifications. Nothing is implemented; an implementation plan comes
-next.
+Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
+approved by the user on 2026-09-28:
+- non-finite losses fail closed (CR-M1);
+- the near-copy rule for the secondary (CR-M2);
+- the trim conflict is tested through k* (CR-L1);
+- distinctness is judged whenever a secondary is present (CR-L2);
+- the access-ID collision rule is amended (CR-L4).
+
+The implementation is in docs/FORECAST_LOSS_COMPARISON.md.
 
 ## Problem
 
@@ -48,6 +57,15 @@ statement of superiority.
     the two proxies is reported as well.
   - If ρ > 0.99, or if ρ is undefined (a constant series, or all ties), the secondary is
     `not_distinct`.
+  - **Near copies (CR-M2):**
+    - The secondary is also `not_distinct` when one common scaling of the primary covers more
+      than 5% of the jointly nonzero days, among the days used by both. That is the largest group
+      of days on which P₂ is within 1e-12 of λP for one λ, with the group's ratios agreeing within
+      1e-12 relative.
+    - Without this rule, a copy of the primary altered on one extreme day passes: the input rule
+      needs every day, and one full-range rank move pulls ρ below 0.99.
+  - Distinctness is judged whenever a secondary is present, even when it is not evaluable, so
+    row 6 is listed alongside row 5 (CR-L2).
   - Both parts still share the sign and scale of G_t, so ρ remains biased upward. The bias is
     conservative: it can only produce more `not_distinct`, never a pass. A limitation says so (P2).
   - Whether the secondary is independent of the primary is the caller's assertion, and a
@@ -78,6 +96,12 @@ statement of superiority.
   All four counts are reported.
 - **Evaluability:** the result is `not_evaluable` if dropped/N > 5%, or if the number of used
   days T < 100.
+- **Non-finite losses (CR-M1):** a loss can overflow even when the forecasts and proxies are
+  valid, for example with a proxy of 1e155 under MSE.
+  - A non-finite d on a used day makes the result `not_evaluable` with reason
+    `non_finite_loss`, checked first.
+  - A non-finite secondary d, or a non-finite proxy-dependent part, makes that day an invalid
+    secondary day.
 - **Hard-day diagnostics:**
   - B's mean loss on `a_only_null` days is reported next to B's mean loss on used days.
   - A's mean loss on `b_only_null` days is reported next to A's mean loss on used days.
@@ -143,6 +167,10 @@ Nothing in the battery can be set per call: it is part of the contract `forecast
   computed (N8).
 - Consistency, tested: removing a most-favourable value never moves the mean toward the favoured
   side, so on the same D′ with the same k, a decisive-trim conflict occurs exactly when k* ≤ k.
+- **Rounding (CR-L1):**
+  - The trimmed means and k* read one array of means computed from one suffix-sum pass.
+  - The conflict is raised when k* ≤ k. Mathematically this is the same as the decisive mean
+    crossing zero, and it stays exact at rounding level, where separate summations had disagreed.
 
 **Secondary proxy**
 - The mean d under the secondary proxy.
@@ -175,7 +203,7 @@ mirrored.
 | 3 | `conflicts_found` | At least one conflict. They are listed in `robustness_conflicts[]`. |
 | 4 | `blocked_by_dropped_days` | The favoured side's own nulls exceed ceil(T/100). |
 | 5 | `not_assessed_secondary_proxy_absent` | The secondary proxy is missing or not evaluable. |
-| 6 | `not_assessed_secondary_proxy_not_distinct` | The secondary's ρ exceeds 0.99 (N2). |
+| 6 | `not_assessed_secondary_proxy_not_distinct` | The secondary's ρ exceeds 0.99 or is undefined (N2), or it is a near copy (CR-M2). |
 | 7 | `no_listed_conflict_untracked` | The call has no `research_id` (F4). |
 | 8 | `no_listed_conflict` | None of the above. The listed sign checks did not flip; this is not superiority. |
 
@@ -264,7 +292,10 @@ the response:
        ledger does with `ledger-access:<uuid>`;
      - index 0 is the `forecast-set-source:` record, and the underlying series follow in artifact
        order, so a retry maps to the same access IDs;
-     - a base that collides with an existing ledger access ID fails closed as a conflict;
+     - access IDs share one namespace with every other tool and manual report, so a base whose
+       `<base>:<index>` IDs already exist with other content fails closed as a conflict. Amended
+       by CR-L4: a base that merely equals another access ID is not rejected. It creates no
+       ambiguity, since the exact-ID conflict check is what protects retries;
    - `request_sha256` is the hash of {contract, artifact hash, loss}, so a retry with a different
      loss conflicts rather than becoming idempotent;
    - the envelope runs from the earliest validated window start to the latest window end, over
@@ -400,4 +431,5 @@ Without `research_id`, `search` is `untracked`, and the outcome can be at most
 8. **Own nulls (N5):** worst-case imputation in the decisive trim, plus the ceil(T/100) cap.
 9. **Windows (N6):** explicit per-date UTC windows only.
 10. **Secondary distinctness (N2):** Spearman ρ > 0.99 means not distinct. Per M3 it is measured
-    on the proxy-dependent parts of d, and scaled copies are rejected outright.
+    on the proxy-dependent parts of d, and scaled copies are rejected outright. Per CR-M2, a
+    common scaling on more than 5% of jointly nonzero days also means not distinct.

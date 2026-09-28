@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, appendFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, appendFile, rm, stat, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap, PRIOR_OVERLAP_RESEARCH_ID_CAP } from '../../build/forecastLossJournal.js';
+import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap, PRIOR_OVERLAP_RESEARCH_ID_CAP,
+  FORECAST_LOSS_JOURNAL_MAX_BYTES } from '../../build/forecastLossJournal.js';
+import { BACKTEST_LEDGER_MAX_BYTES } from '../../build/backtestLedger.js';
 import { normalizeForecastSet } from '../../build/forecastSet.js';
 import { ResearchPeriodUsageStore } from '../../build/researchPeriodUsage.js';
 
@@ -49,7 +51,8 @@ test('one record per call with the design fields (M2), owner-only', async (t) =>
   assert.equal(record.namespace, 'forecast_loss_comparison_exploration');
   assert.equal(record.contract, 'forecast_loss_comparison_v1');
   assert.equal(record.artifact_id, call.artifact_id);
-  assert.equal(record.source_hash, sha(JSON.stringify('synthetic-source')));
+  // The raw source_id digest, the same one the period record's forecast-set-source: series uses (L5).
+  assert.equal(record.source_hash, sha('synthetic-source'));
   assert.equal(record.component_hashes.a, sha(JSON.stringify(call.set.a)));
   assert.equal(record.component_hashes.secondary, 'absent');
   assert.equal(record.component_hashes.labels, sha(JSON.stringify(call.set.labels)));
@@ -209,4 +212,16 @@ test('prior_overlap summary flags truncation from any record and from the union 
   assert.equal(over.overlapping_research_ids_seen, 101, 'the shared ID counts once');
   assert.equal(over.overlapping_research_ids_truncated, true);
   assert.deepEqual(over.overlapping_research_ids, [...ids('a', 60), ...ids('b', 40)]);
+});
+
+test('the journal cap equals the framing reader cap, and an oversized journal fails closed without appending (L6)', async (t) => {
+  // A larger log cap let one append cross the reader's limit, after which every call failed.
+  assert.equal(FORECAST_LOSS_JOURNAL_MAX_BYTES, BACKTEST_LEDGER_MAX_BYTES);
+  const { path, store } = await setup(t);
+  await store.record(exposure('r'));
+  await truncate(path, FORECAST_LOSS_JOURNAL_MAX_BYTES + 1);
+  const before = await stat(path);
+  await assert.rejects(store.record(exposure('r')), /size/);
+  const after = await stat(path);
+  assert.deepEqual([after.size, after.mtimeMs], [before.size, before.mtimeMs]);
 });

@@ -99,9 +99,10 @@ current full journal view.
 own exploration journal entry before returning statistics; without it, nothing
 is written. The records are `tool_observed` with the tool name
 `compare_forecast_losses` and the scope `forecast_evaluation_window_only`,
-written as one atomic batch through the same checks as the batch tool: nothing
-is written unless every record passes validation, the conflict check and the
-capacity check.
+validated as one batch through the same checks as the batch tool: nothing is
+written unless every record passes validation, the conflict check and the
+capacity check. The append is sequential, so an I/O failure part-way follows the
+[batch](#batch) resume rule.
 
 One record covers the set's source and one covers each underlying series:
 - index 0 is `forecast-set-source:` plus the lowercase SHA-256 hex digest of the

@@ -8737,8 +8737,11 @@ test('compare_forecast_losses records period usage, then the journal, then respo
     forecastLossJournal: { record: async (exposure) => { order.push('journal'); return stores.forecastLossJournal.record(exposure); } } });
   const r = await call({ artifact_id, loss: 'mse', research_id: 'study:forecast', usage_access_id: 'forecast-run-1' });
   assert.deepEqual(order, ['period', 'journal']);
-  assert.deepEqual(Object.keys(r).slice(0, 10), ['contract', 'status', 'battery_outcome', 'robustness_conflicts',
-    'non_decisive_disagreements', 'withheld_reasons', 'withheld_reasons_scope', 'search', 'period_usage', 'input']);
+  // The design's field order, statistics included (code review L3).
+  assert.deepEqual(Object.keys(r), ['contract', 'status', 'battery_outcome', 'robustness_conflicts',
+    'non_decisive_disagreements', 'withheld_reasons', 'withheld_reasons_scope', 'search', 'period_usage', 'input',
+    'artifact_id', 'loss', 'dm', 'mean_favours', 'mean_favours_test', 'drops', 'hard_days', 'sub_periods', 'trimmed',
+    'breakdown', 'secondary', 'bootstrap', 'caller_label_means', 'candidateEligible', 'statistical_calibration', 'limitations']);
   assert.equal(r.battery_outcome, 'no_listed_conflict');
   assert.equal(r.mean_favours, 'A');
   assert.equal(r.candidateEligible, false);
@@ -8759,6 +8762,8 @@ test('compare_forecast_losses records period usage, then the journal, then respo
   const journal = await jsonLines(stores.paths.journal);
   assert.equal(journal.length, 1);
   assert.equal(journal[0].battery_outcome, 'no_listed_conflict');
+  // The journal and the period record join on the same source digest (code review L5).
+  assert.equal(journal[0].source_hash, 'sha256:' + usage[0].series_id.slice('forecast-set-source:'.length));
   assert.equal(r.search.status, 'tracked');
   assert.equal(r.search.this_research_id.calls, 1);
   assert.deepEqual(r.search.period_usage_prior_overlap.per_series.map((row) => row.overlapping_records), [0, 0]);
@@ -8774,6 +8779,9 @@ test('compare_forecast_losses: untracked calls write nothing and cap the outcome
   assert.deepEqual(r.withheld_reasons, ['no_listed_conflict_untracked']);
   assert.equal(r.search.status, 'untracked');
   assert.equal(r.period_usage.status, 'untracked');
+  // A misspelled argument fails instead of running silently untracked (code review L9).
+  const typo = await raw({ artifact_id, loss: 'mse', researchid: 'r' });
+  assert.equal(typo.isError, true);
   const orphan = await raw({ artifact_id, loss: 'mse', usage_access_id: 'x' });
   assert.equal(orphan.isError, true);
   assert.match(orphan.content[0].text, /usage_access_id requires research_id/);

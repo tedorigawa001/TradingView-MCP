@@ -1,14 +1,19 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { readBacktestLedgerFile } from "./backtestLedger.js";
+import { BACKTEST_LEDGER_MAX_BYTES, readBacktestLedgerFile } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { BATTERY_OUTCOMES, FORECAST_LOSS_CONTRACT, type BatteryOutcome, type ForecastLoss } from "./forecastLossComparison.js";
 import { FORECAST_SET_MAX_DIMENSION, forecastSetComponentHashes, type ForecastSet } from "./forecastSet.js";
 import type { ResearchPeriodUsageAssessment } from "./researchPeriodUsage.js";
 
 export const FORECAST_LOSS_JOURNAL_NAMESPACE = "forecast_loss_comparison_exploration";
-const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * The framing check reads through readBacktestLedgerFile, which is capped at the ledger limit, so the
+ * log's own cap must not exceed it: a larger cap let one append cross the reader's limit and fail
+ * every later call (code review L6).
+ */
+export const FORECAST_LOSS_JOURNAL_MAX_BYTES = BACKTEST_LEDGER_MAX_BYTES;
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const hash = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const optionalHash = z.union([hash, z.literal("absent")]);
@@ -117,7 +122,7 @@ export class ForecastLossJournalStore {
 
   constructor(private readonly filePath = resolveForecastLossJournalPath()) {
     this.log = new AppendOnlyFirstSeenLog(filePath, "forecast loss journal", validateRecord,
-      { maxFileBytes: JOURNAL_MAX_BYTES, maxRecordBytes: 16 * 1024 });
+      { maxFileBytes: FORECAST_LOSS_JOURNAL_MAX_BYTES, maxRecordBytes: 16 * 1024 });
   }
 
   async record(exposure: ForecastLossExposure): Promise<ForecastLossSearch> {

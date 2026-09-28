@@ -27,6 +27,8 @@ Other arguments:
 - `usage_access_id` (optional, 1–100 characters, only with `research_id`): makes period-record
   retries idempotent.
 
+Any other argument is an error, so a misspelled `research_id` cannot run silently untracked.
+
 ### Import
 
 After building a checkout:
@@ -88,10 +90,13 @@ Each date is used or dropped for exactly one cause, checked in this order: `prox
 primary), `both_null`, then `a_only_null` or `b_only_null`. `drops` reports N (all dates), `used`
 and each cause.
 
-The result is `not_evaluable` if more than 5% of dates are dropped
-(`more_than_5_percent_of_dates_dropped`), if fewer than 100 days are used
-(`fewer_than_100_used_days`), or if the HAC variance is not positive
-(`hac_variance_not_positive`: S ≤ 0 or S < 1e-12·mean(d²); S is never clamped).
+The result is `not_evaluable`, with the first matching reason, if:
+- a loss on a used day is not finite (`non_finite_loss`). A loss can overflow even when the
+  forecasts and proxies are valid, for example with a proxy of 1e155 under MSE;
+- more than 5% of dates are dropped (`more_than_5_percent_of_dates_dropped`);
+- fewer than 100 days are used (`fewer_than_100_used_days`);
+- the HAC variance is not positive (`hac_variance_not_positive`: S ≤ 0 or S < 1e-12·mean(d²);
+  S is never clamped).
 
 `hard_days` reports B's mean loss on `a_only_null` days next to its mean on used days, and A's
 mean loss on `b_only_null` days next to its mean on used days, so you can see whether the
@@ -135,18 +140,36 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 - `breakdown.k_star` is the fewest most-favourable values of D′ whose removal makes the mean cross
   zero (≥ 0 for A, ≤ 0 for B); `fraction` is k*/(T + m).
 - `k_star_status` is `crossed`, or `no_crossing` with a null k*.
-- It is descriptive. On the same D′, a decisive-trim conflict occurs exactly when k* ≤ k.
+- The trimmed means and k* are read from one array of means, computed from one suffix-sum pass.
+- `trimmed_mean_reverses` is raised when k* ≤ k, that is, when removing k or fewer of the most
+  favourable values makes the mean cross zero. Removing such a value never moves the mean toward
+  the favoured side, so this is the decisive trimmed mean crossing zero. Testing it through k*
+  keeps the two exactly consistent at rounding level.
+- k* itself is descriptive.
 - It is null with `neither`.
 
 **Secondary proxy.**
-- It is evaluated on the used days where it is valid. More than 5% of those dropped makes it
-  `not_evaluable`.
+- It is evaluated on the used days where it is valid and its losses are finite. More than 5% of
+  those dropped makes it `not_evaluable`.
 - `secondary.mean` is the mean d under it.
 - Distinctness is the Spearman ρ between the proxy-dependent parts ⟨G, P⟩ and ⟨G, P₂⟩, where
   G = S_A⁻¹ − S_B⁻¹ for QLIKE and −2(S_A − S_B) for MSE. The forecast-only term of d is left
   out, because it inflates the correlation of the two d series.
 - ρ > 0.99, or ρ undefined (a constant rank vector), means not distinct. Spearman uses average
   ranks for ties.
+- **Near copies:**
+  - `near_copy_share` is the largest share of jointly nonzero days, among those used, on which P₂
+    is one common scaling of P. On each such day P₂ is within 1e-12 of λP for a single λ, and the
+    days' ratios agree within 1e-12 relative.
+  - Above 0.05 the secondary is not distinct, whatever ρ is. A copy of the primary altered on a
+    few days is otherwise missed: the input rule needs every day, and one extreme day can pull ρ
+    below 0.99.
+  - Genuinely different proxies share one exact scale on essentially no days. In practice only
+    the day holding the median ratio matches, which is one day.
+  - The share is null with fewer than 2 jointly nonzero days.
+- `distinct` is judged whenever a secondary is present, even when it is not evaluable, so
+  `not_assessed_secondary_proxy_not_distinct` is listed next to
+  `not_assessed_secondary_proxy_absent` when both apply.
 - `sign_change_share` is the share of days on which d changes sign between the proxies, with
   sign(0) = 0.
 
@@ -175,7 +198,7 @@ lists them as `sub_period_<i>_reverses`, `trimmed_mean_reverses` and `secondary_
 | 3 | `conflicts_found` | At least one conflict |
 | 4 | `blocked_by_dropped_days` | The favoured side's own nulls exceed k (m > k) |
 | 5 | `not_assessed_secondary_proxy_absent` | The secondary is missing or not evaluable |
-| 6 | `not_assessed_secondary_proxy_not_distinct` | The secondary is not distinct |
+| 6 | `not_assessed_secondary_proxy_not_distinct` | The secondary is not distinct (ρ or near copy) |
 | 7 | `no_listed_conflict_untracked` | The call has no `research_id` |
 | 8 | `no_listed_conflict` | None of the above. This is not superiority. |
 
@@ -233,8 +256,11 @@ before the response.
 ### Period usage
 
 One `tool_observed` record per series goes to the
-[period usage journal](RESEARCH_PERIOD_USAGE.md#automatic-forecast-loss-tracking) in a single
-atomic batch. The scope is `forecast_evaluation_window_only`.
+[period usage journal](RESEARCH_PERIOD_USAGE.md#automatic-forecast-loss-tracking) as one batch:
+every record is validated and conflict- and capacity-checked before any is written. The append
+itself is sequential; an I/O failure part-way follows the
+[batch resume rule](RESEARCH_PERIOD_USAGE.md#batch). The scope is
+`forecast_evaluation_window_only`.
 - Index 0 is `forecast-set-source:` plus the lowercase SHA-256 hex digest of the UTF-8
   `source_id`; the underlying series follow in artifact order.
 - Access IDs are `<base>:<index>`. The base is `usage_access_id`, or `forecast-access:<uuid>` when
@@ -256,17 +282,20 @@ retries must be idempotent; a generated base is lost with a lost response.
 One line per call, in the namespace `forecast_loss_comparison_exploration`, at
 `TRADINGVIEW_MCP_FORECAST_LOSS_JOURNAL_PATH` (default
 `~/.tradingview-mcp/forecast-loss-journal.jsonl`), on the same append-only, owner-only first-seen
-log as the other journals, with 64 MiB file and 16 KiB record limits. A record holds:
+log as the other journals, with 32 MiB file and 16 KiB record limits. A record holds:
 - the contract, loss, `research_id` and `artifact_id`;
 - the per-component hashes: `dates`, `a`, `b`, `primary`, and `secondary` and `labels` (or
   `absent`). Each is the SHA-256 of `JSON.stringify` of the normalized component, a format that
   persists across versions;
-- `source_hash`, the same kind of hash of `source_id`;
+- `source_hash`, the SHA-256 of the raw UTF-8 `source_id`: the same digest as the period
+  record's `forecast-set-source:` series, so the two records join on it;
 - the sorted `underlying_series_ids` and the window `envelope`;
 - the `battery_outcome`.
 
-One `artifact_id` recorded with different content, a torn line, or an edited record fails closed
-without appending. `not_evaluable` results are recorded too: any response that exposes a
+Some damage fails closed without appending: one `artifact_id` recorded with different content, a
+torn line, a blank line, or an edit that breaks the schema or the sequence. An edit that keeps a
+record valid, such as a changed outcome or research ID, is not detected. The journal is private
+local state, not tamper evidence. `not_evaluable` results are recorded too: any response that exposes a
 statistic is recorded. Retries are additional calls.
 
 ### Failures

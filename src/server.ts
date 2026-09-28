@@ -6,7 +6,7 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
-import { ForecastSetStore, forecastSetInputSchema, normalizeInlineForecastSet } from "./forecastSet.js";
+import { ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
 import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
 import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
@@ -5617,13 +5617,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Without research_id the outcome is at most no_listed_conflict_untracked and nothing is written. " +
         "Optional usage_access_id (1-100 characters) with research_id makes period-record retries idempotent; journal call counts still increment. " +
         "A recording failure returns an error without statistics. No chart access, orders or arbitrary file paths.",
-      inputSchema: {
+      // Strict: a misspelled research_id must fail, not run silently untracked (code review L9).
+      inputSchema: z.object({
         artifact_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
         inline_set: forecastSetInputSchema.optional(),
         loss: z.enum(["qlike", "mse"]),
         research_id: backtestSliceResearchIdSchema.optional(),
         usage_access_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(),
-      },
+      }).strict(),
     },
     async ({ artifact_id, inline_set, loss, research_id, usage_access_id }) => {
       try {
@@ -5642,7 +5643,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           const { from, to } = forecastSetEnvelope(loaded.set);
           const request_sha256 = hash(JSON.stringify({ artifact: loaded.artifact_id, contract: FORECAST_LOSS_CONTRACT, loss }));
           // Index 0 is the set's source; the underlying series follow in artifact order, so a retry maps to the same IDs.
-          const series = [`forecast-set-source:${hash(loaded.set.source_id).slice(7)}`, ...loaded.set.underlying_series_ids];
+          const series = [`forecast-set-source:${forecastSetSourceDigest(loaded.set.source_id).slice(7)}`, ...loaded.set.underlying_series_ids];
           const recorded = await researchPeriodUsage.recordToolAccessBatch("compare_forecast_losses", series.map((series_id, index) => ({
             access_id: `${base}:${index}`, research_id, series_id, data_version: loaded.artifact_id, from, to,
             purpose: "exploration", request_sha256,

@@ -1,4 +1,4 @@
-import type { ForecastSet, ForecastValue } from "./forecastSet.js";
+import { largestCommonScaleGroup, type ForecastSet, type ForecastValue } from "./forecastSet.js";
 import {
   allFinite, cholesky, frobeniusInner, inverseFromCholesky, logDeterminantFromCholesky, normalCdf,
   positiveSemidefinite, spearman, symmetricWithin, symmetrize, type Matrix,
@@ -18,6 +18,8 @@ export const MIN_USED_DAYS = 100;
 export const MAX_DROPPED_SHARE = 0.05;
 export const FAVOURED_P = 0.05;
 export const DISTINCT_RHO = 0.99;
+/** Code review M2: a secondary that is one common scaling of the primary on more than this share of days is not distinct. */
+export const NEAR_COPY_SHARE = 0.05;
 const SYMMETRY_TOLERANCE = 1e-12;
 
 export type ForecastLoss = "qlike" | "mse";
@@ -127,22 +129,33 @@ export function stationaryBootstrap(d: number[], s: 1 | -1, draws = BOOTSTRAP_DR
   return { p, mc_se: Math.sqrt(p * (1 - p) / draws), draws, mean_block: block, seed };
 }
 
-/** k* on the imputed sample: fewest most-favourable removals whose remaining mean crosses zero. */
-export function breakdownCount(sample: number[], side: Side): number | null {
-  const ordered = [...sample].sort((x, y) => (side === "A" ? x - y : y - x));   // most favourable first
-  let rest = ordered.reduce((sum, x) => sum + x, 0);
-  for (let j = 0; j < ordered.length; j++) {
-    const m = rest / (ordered.length - j);
-    if (side === "A" ? m >= 0 : m <= 0) return j;
-    rest -= ordered[j];
+const crosses = (x: number, side: Side) => (side === "A" ? x >= 0 : x <= 0);
+
+/**
+ * The mean after removing the j values most favourable to side (smallest first for A, largest first
+ * for B), for every j, from one suffix-sum pass. The decisive trim and k* both read this array, so
+ * they never disagree through different summation orders (code review L1).
+ */
+function trimmedMeans(sample: number[], side: Side): number[] {
+  const ordered = [...sample].sort((x, y) => (side === "A" ? x - y : y - x));
+  const means = new Array<number>(ordered.length);
+  let rest = 0;
+  for (let j = ordered.length - 1; j >= 0; j--) {
+    rest += ordered[j];
+    means[j] = rest / (ordered.length - j);
   }
-  return null;
+  return means;
+}
+
+/** k*: the fewest most-favourable removals whose remaining mean crosses zero; null if none does. */
+export function breakdownCount(sample: number[], side: Side): number | null {
+  const found = trimmedMeans(sample, side).findIndex((x) => crosses(x, side));
+  return found < 0 ? null : found;
 }
 
 /** Mean after removing the k values most favourable to side (smallest for A, largest for B). */
 export function trimFavourable(sample: number[], k: number, side: Side): number {
-  const ordered = [...sample].sort((x, y) => (side === "A" ? x - y : y - x));
-  return mean(ordered.slice(k));
+  return trimmedMeans(sample, side)[k];
 }
 
 export const LIMITATIONS = [
@@ -167,7 +180,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const drops = { N, used: 0, proxy_invalid: 0, both_null: 0, a_only_null: 0, b_only_null: 0 };
   const d: number[] = [], usedDates: string[] = [], usedLabels: string[] = [], lossA: number[] = [], lossB: number[] = [];
   const bOnANull: number[] = [], aOnBNull: number[] = [];
-  const secondary = { d: [] as number[], primaryD: [] as number[], partP: [] as number[], partP2: [] as number[] };
+  const secondary = { d: [] as number[], primaryD: [] as number[], partP: [] as number[], partP2: [] as number[],
+    rawP: [] as ForecastValue[], rawP2: [] as ForecastValue[] };
   for (let t = 0; t < N; t++) {
     const p = proxy(set.primary[t]);
     const a = forecast(set.a[t]), b = forecast(set.b[t]);
@@ -181,11 +195,16 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     if (set.labels) usedLabels.push(set.labels[t]);
     if (set.secondary) {
       const p2 = proxy(set.secondary[t]);
-      if (p2) {
-        secondary.d.push(lossOf(a, p2, loss) - lossOf(b, p2, loss));
+      const d2 = p2 ? lossOf(a, p2, loss) - lossOf(b, p2, loss) : NaN;
+      const part = p2 ? proxyPart(a, b, p, loss) : NaN, part2 = p2 ? proxyPart(a, b, p2, loss) : NaN;
+      // A loss that overflows leaves the day without a secondary d, like an invalid proxy (code review M1).
+      if (p2 && Number.isFinite(d2) && Number.isFinite(part) && Number.isFinite(part2)) {
+        secondary.d.push(d2);
         secondary.primaryD.push(la - lb);
-        secondary.partP.push(proxyPart(a, b, p, loss));
-        secondary.partP2.push(proxyPart(a, b, p2, loss));
+        secondary.partP.push(part);
+        secondary.partP2.push(part2);
+        secondary.rawP.push(set.primary[t]);
+        secondary.rawP2.push(set.secondary[t]);
       }
     }
   }
@@ -201,13 +220,18 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const secondaryStatus: "absent" | "not_evaluable" | "evaluable" = !set.secondary ? "absent"
     : (T === 0 || secondary.d.length === 0 || secondaryDropped / T > MAX_DROPPED_SHARE ? "not_evaluable" : "evaluable");
   const rho = set.secondary ? spearman(secondary.partP, secondary.partP2) : null;
-  const distinct = secondaryStatus === "evaluable" ? rho !== null && rho <= DISTINCT_RHO : null;
+  const group = set.secondary ? largestCommonScaleGroup(secondary.rawP, secondary.rawP2) : null;
+  const nearCopyShare = group && group.jointly_nonzero >= 2 ? group.largest_group / group.jointly_nonzero : null;
+  // Judged whenever a secondary is present, so row 6 is listed even when row 5 wins (code review L2).
+  const distinct = set.secondary
+    ? rho !== null && rho <= DISTINCT_RHO && !(nearCopyShare !== null && nearCopyShare > NEAR_COPY_SHARE) : null;
   const secondaryResult = {
     status: secondaryStatus,
     mean: meanOrNull(secondary.d),
     used: secondary.d.length,
     dropped: set.secondary ? secondaryDropped : null,
     spearman_rho: rho,
+    near_copy_share: nearCopyShare,
     sign_change_share: secondary.d.length
       ? secondary.d.filter((x, i) => sign(x) !== sign(secondary.primaryD[i])).length / secondary.d.length : null,
     distinct,
@@ -215,7 +239,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   // Side-independent withheld reasons (rows 5-7).
   const sideIndependent: string[] = [
     ...(secondaryStatus !== "evaluable" ? ["not_assessed_secondary_proxy_absent"] : []),
-    ...(secondaryStatus === "evaluable" && distinct === false ? ["not_assessed_secondary_proxy_not_distinct"] : []),
+    ...(distinct === false ? ["not_assessed_secondary_proxy_not_distinct"] : []),
     ...(!tracked ? ["no_listed_conflict_untracked"] : []),
   ];
   const labelMeans = set.labels ? [...new Set(usedLabels)].sort().map((label) => {
@@ -230,12 +254,15 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     limitations: [...LIMITATIONS],
   };
 
-  // Evaluability of the primary.
+  // Evaluability of the primary. A loss that overflows makes d non-finite; nothing else is computable (code review M1).
   let reason: string | null = null;
-  if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
+  const finite = d.every(Number.isFinite);
+  if (!finite) reason = "non_finite_loss";
+  else if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
   else if (T < MIN_USED_DAYS) reason = "fewer_than_100_used_days";
-  const hac = T >= 2 ? neweyWest(d) : null;
+  const hac = finite && T >= 2 ? neweyWest(d) : null;
   if (!reason && hac && (!(hac.S > 0) || hac.S < 1e-12 * mean(d.map((x) => x * x)))) reason = "hac_variance_not_positive";
+  // Statistics follow the design's field order in every branch.
   if (reason) {
     return {
       ...base,
@@ -263,45 +290,46 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   }));
   const sorted = [...d].sort((x, y) => x - y);
   const bothTails = mean(sorted.slice(k, T - k));
-  const common = {
-    ...base,
-    status: { evaluable: true, reason: null },
-    dm: { dbar, S, L, DM, p_a: pA, p_b: pB, T },
-    mean_favours: favours,
-    mean_favours_test: "two_sided_10_percent" as const,
-    drops, hard_days: hardDays, sub_periods: subPeriods, secondary: secondaryResult, caller_label_means: labelMeans,
-  };
+  const dm = { dbar, S, L, DM, p_a: pA, p_b: pB, T };
 
   if (favours === "neither") {
     const s = sign(dbar);
     return {
-      ...common,
+      ...base,
+      status: { evaluable: true, reason: null },
       battery_outcome: "not_applicable" as const,
       robustness_conflicts: [] as string[],
       withheld_reasons: sideIndependent,
       withheld_reasons_scope: "side_independent_only" as const,
       non_decisive_disagreements: [] as string[],
+      dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
+      drops, hard_days: hardDays, sub_periods: subPeriods,
       trimmed: { k, decisive: null, both_tails: bothTails,
         a_tail_removed: trimFavourable(d, k, "A"), b_tail_removed: trimFavourable(d, k, "B") },
       breakdown: null,
+      secondary: secondaryResult,
       bootstrap: s === 0 ? null : stationaryBootstrap(d, s as 1 | -1),
+      caller_label_means: labelMeans,
     };
   }
 
   const side = favours;
-  const reverses = (x: number) => (side === "A" ? x >= 0 : x <= 0);
+  const reverses = (x: number) => crosses(x, side);
   // D′: used d plus m copies of the least favourable observed d (design M1).
   const m = side === "A" ? drops.a_only_null : drops.b_only_null;
   const worst = side === "A" ? sorted[T - 1] : sorted[0];
-  const imputed = [...d, ...new Array<number>(m).fill(worst)];
-  const decisive = trimFavourable(imputed, k, side);
-  const kStar = breakdownCount(imputed, side);
+  const means = trimmedMeans([...d, ...new Array<number>(m).fill(worst)], side);
+  const decisive = means[k];
+  const found = means.findIndex(reverses);
+  const kStar = found < 0 ? null : found;
   const secondaryMean = secondaryResult.mean;
   const bootstrap = stationaryBootstrap(d, side === "A" ? 1 : -1);
 
   const conflicts = [
     ...subPeriods.flatMap((block, i) => (reverses(block.mean) ? [`sub_period_${i + 1}_reverses`] : [])),
-    ...(reverses(decisive) ? ["trimmed_mean_reverses"] : []),
+    // Through k*, so the conflict and k* ≤ k are the same test (L1). Removing a most-favourable value
+    // never moves the mean toward the favoured side, so this is the decisive trimmed mean reversing.
+    ...(kStar !== null && kStar <= k ? ["trimmed_mean_reverses"] : []),
     ...(secondaryStatus === "evaluable" && secondaryMean !== null && reverses(secondaryMean) ? ["secondary_proxy_reverses"] : []),
   ];
   const withheld = [
@@ -322,16 +350,21 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
           : !tracked ? "no_listed_conflict_untracked"
             : "no_listed_conflict";
   return {
-    ...common,
+    ...base,
+    status: { evaluable: true, reason: null },
     battery_outcome: outcome,
     robustness_conflicts: conflicts,
     withheld_reasons: withheld,
     withheld_reasons_scope: "all" as const,
     non_decisive_disagreements: nonDecisive,
+    dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
+    drops, hard_days: hardDays, sub_periods: subPeriods,
     trimmed: { k, decisive: { mean: decisive, own_nulls_imputed_worst_case: m }, both_tails: bothTails },
     breakdown: { k_star: kStar, fraction: kStar === null ? null : kStar / (T + m),
       k_star_status: kStar === null ? "no_crossing" : "crossed" },
+    secondary: secondaryResult,
     bootstrap,
+    caller_label_means: labelMeans,
   };
 }
 
