@@ -42,6 +42,9 @@ const toolAccessSchema = z.object({
   request_sha256: hash,
 }).strict().refine(ordered, "from must be before to");
 export type ResearchPeriodToolAccessInput = z.infer<typeof toolAccessSchema>;
+const toolAccessBatchSchema = z.array(toolAccessSchema).min(1).max(RESEARCH_PERIOD_USAGE_BATCH_MAX)
+  .refine((records) => new Set(records.map((record) => record.access_id)).size === records.length,
+    "access_id must be unique within a batch");
 export type ResearchPeriodUsageCheckInput = z.input<typeof researchPeriodUsageCheckSchema>;
 const storedFields = {
   ...inputSchema.shape,
@@ -52,17 +55,29 @@ const storedFields = {
   first_seen_at: timestamp,
   observation_date: z.string().refine(isCalendarDate),
 };
+/** Each observing tool records one fixed scope; the binding is enforced on every stored record. */
+export const OBSERVING_TOOL_SCOPES = {
+  summarize_backtest_ledger: "ledger_trade_envelope_only",
+  compare_forecast_losses: "forecast_evaluation_window_only",
+} as const;
+export type ObservingTool = keyof typeof OBSERVING_TOOL_SCOPES;
+const observingTools = Object.keys(OBSERVING_TOOL_SCOPES) as [ObservingTool, ...ObservingTool[]];
+const observingScopes = Object.values(OBSERVING_TOOL_SCOPES) as [string, ...string[]];
+const observingToolSchema = z.enum(observingTools);
 const toolMetadata = {
   source: "tool_observed",
   tool_name: "summarize_backtest_ledger",
-  scope: "ledger_trade_envelope_only",
+  scope: OBSERVING_TOOL_SCOPES.summarize_backtest_ledger,
 } as const;
+// One tool_observed variant: zod rejects a second variant with the same discriminator value.
 const storedSchema = z.discriminatedUnion("source", [
   z.object({ ...storedFields, source: z.literal("user_reported") }).strict(),
-  z.object({ ...storedFields, source: z.literal(toolMetadata.source),
-    tool_name: z.literal(toolMetadata.tool_name), scope: z.literal(toolMetadata.scope),
+  z.object({ ...storedFields, source: z.literal("tool_observed"),
+    tool_name: observingToolSchema, scope: z.enum(observingScopes),
     request_sha256: hash }).strict(),
-]).refine(ordered, "from must be before to");
+]).refine(ordered, "from must be before to")
+  .refine((record) => record.source !== "tool_observed" || OBSERVING_TOOL_SCOPES[record.tool_name] === record.scope,
+    "tool_name and scope do not match");
 export type ResearchPeriodUsageRecord = z.infer<typeof storedSchema>;
 
 function validateRecord(value: unknown): ResearchPeriodUsageRecord {
@@ -112,19 +127,27 @@ function assess(records: ResearchPeriodUsageRecord[], query: z.infer<typeof rese
     matches: overlaps.slice(0, 100).map((entry) => ({ ...entry,
       version_relation: entry.data_version === query.data_version ? "same" : "different" })),
     truncated: overlaps.length > 100,
-    limitations: [
-      ...(records.some((entry) => entry.source === "tool_observed")
+    limitations: [...new Set([
+      ...(observed(records, "summarize_backtest_ledger")
         ? ["tool_observed_usage_is_ledger_trade_envelope_only",
           "series_id_and_data_version_are_importer_supplied_metadata",
-          "ledger_trade_envelope_does_not_include_indicator_lookbacks"]
-        : ["user_reported_local_usage_only"]),
+          "ledger_trade_envelope_does_not_include_indicator_lookbacks"] : []),
+      ...(observed(records, "compare_forecast_losses")
+        ? ["tool_observed_usage_is_forecast_evaluation_window_only",
+          "series_id_and_data_version_are_importer_supplied_metadata",
+          "forecast_estimation_history_not_covered"] : []),
+      ...(records.some((entry) => entry.source === "tool_observed") ? [] : ["user_reported_local_usage_only"]),
       ...(records.some((entry) => entry.source === "tool_observed")
         && records.some((entry) => entry.source === "user_reported") ? ["manual_usage_is_user_reported"] : []),
       "prior_and_external_usage_may_be_missing", "untracked_external_accesses_may_be_missing",
       "no_recorded_overlap_is_not_proof_of_unused_data", "declarations_do_not_authorize_candidate_eligibility",
       "data_version_is_caller_supplied_not_source_authentication",
-      "prior_means_ledger_append_order_not_access_time"],
+      "prior_means_ledger_append_order_not_access_time"])],
   };
+}
+
+function observed(records: ResearchPeriodUsageRecord[], tool: ObservingTool): boolean {
+  return records.some((entry) => entry.source === "tool_observed" && entry.tool_name === tool);
 }
 
 export type ResearchPeriodUsageSummary = Omit<ResearchPeriodUsageAssessment, "matches" | "truncated"> & {
@@ -143,7 +166,8 @@ export function summarizeAssessment(assessment: ResearchPeriodUsageAssessment): 
 }
 
 type RecordRequest = (ResearchPeriodUsageInput & { source: "user_reported" })
-  | (ResearchPeriodToolAccessInput & typeof toolMetadata);
+  | (ResearchPeriodToolAccessInput & { source: "tool_observed"; tool_name: ObservingTool;
+    scope: (typeof OBSERVING_TOOL_SCOPES)[ObservingTool] });
 type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment };
 
 export class ResearchPeriodUsageStore {
@@ -228,6 +252,18 @@ export class ResearchPeriodUsageStore {
   async recordToolAccess(input: unknown): Promise<RecordResult> {
     const request = toolAccessSchema.parse(input);
     return (await this.recordBound([{ ...request, ...toolMetadata }]))[0];
+  }
+
+  /**
+   * Tool-observed batch for a server-chosen tool. The tool is an argument, never input: the input
+   * schema stays strict, so a caller cannot supply tool_name or scope. Same all-or-nothing
+   * validation, conflict and capacity checks as recordBatch.
+   */
+  async recordToolAccessBatch(tool: unknown, inputs: unknown): Promise<RecordResult[]> {
+    const name = observingToolSchema.parse(tool);   // TypeScript types are erased at runtime
+    const requests = toolAccessBatchSchema.parse(inputs);
+    return this.recordBound(requests.map((request) => ({ ...request, source: "tool_observed" as const,
+      tool_name: name, scope: OBSERVING_TOOL_SCOPES[name] })));
   }
 
   private async recordBound(requests: RecordRequest[]): Promise<RecordResult[]> {

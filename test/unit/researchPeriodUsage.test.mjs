@@ -612,3 +612,83 @@ test('a torn partial line fails closed and is not resumed', async (t) => {
   await assert.rejects(store.check(query()), /framing/);
   assert.equal(await readFile(path, 'utf8'), torn, 'the retry did not append past a torn line');
 });
+
+const FIXTURE = new URL('../fixtures/period-usage/format-0.1.13.jsonl', import.meta.url);
+async function fixtureStore(t, transform = (lines) => lines) {
+  const { directory, path } = await setup(t);
+  const lines = (await readFile(FIXTURE, 'utf8')).trim().split('\n');
+  await writeFile(path, transform(lines).join('\n') + '\n', { mode: 0o600 });
+  return { directory, path, store: new ResearchPeriodUsageStore(path) };
+}
+const fixtureQuery = { series_id: 'fixture-series', data_version: 'sha256:' + 'a'.repeat(64),
+  from: '2024-01-10T00:00:00.000Z', to: '2024-01-20T00:00:00.000Z' };
+
+test('records written in the 0.1.13 format still read, check and extend', async (t) => {
+  const { path, store } = await fixtureStore(t);
+  const usage = await store.check(fixtureQuery);
+  assert.equal(usage.overlapping_records, 2);
+  assert.deepEqual(usage.matches.map((m) => [m.access_id, m.source, m.tool_name ?? null, m.scope ?? null]),
+    [['fixture:manual', 'user_reported', null, null],
+      ['fixture:ledger', 'tool_observed', 'summarize_backtest_ledger', 'ledger_trade_envelope_only']]);
+  assert.deepEqual(usage.limitations.slice(0, 3), ['tool_observed_usage_is_ledger_trade_envelope_only',
+    'series_id_and_data_version_are_importer_supplied_metadata', 'ledger_trade_envelope_does_not_include_indicator_lookbacks']);
+  assert.ok(!usage.limitations.includes('forecast_estimation_history_not_covered'));
+  const [added] = await store.recordToolAccessBatch('compare_forecast_losses',
+    [{ ...fixtureQuery, access_id: 'fixture:forecast:0', research_id: 'r', purpose: 'exploration', request_sha256: 'sha256:' + 'c'.repeat(64) }]);
+  assert.equal(added.sequence, 3);
+  assert.equal(added.prior_overlap.overlapping_records, 2);
+  assert.equal((await saved(path)).length, 3);
+});
+
+test('a stored record whose tool and scope do not belong together is refused', async (t) => {
+  for (const [tool, scope] of [['compare_forecast_losses', 'ledger_trade_envelope_only'],
+    ['summarize_backtest_ledger', 'forecast_evaluation_window_only']]) {
+    const { store } = await fixtureStore(t, (lines) => lines.map((line) => {
+      const record = JSON.parse(line);
+      return JSON.stringify(record.source === 'tool_observed' ? { ...record, tool_name: tool, scope } : record);
+    }));
+    await assert.rejects(store.check(fixtureQuery), /tool_name and scope do not match/, `${tool} with ${scope}`);
+  }
+});
+
+test('recordToolAccessBatch binds the server-chosen tool to its scope and keeps inputs strict', async (t) => {
+  const { path, store } = await setup(t);
+  const access = (i, patch = {}) => ({ ...query({ series_id: `S${i}` }), access_id: `batch-tool:${i}`,
+    research_id: 'research:1', purpose: 'exploration', request_sha256: version('d'), ...patch });
+  await assert.rejects(store.recordToolAccessBatch('manual', [access(0)]));
+  await assert.rejects(store.recordToolAccessBatch('record_research_period_usage', [access(0)]));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', [access(0, { tool_name: 'compare_forecast_losses' })]));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', [access(0, { scope: 'forecast_evaluation_window_only' })]));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', [access(0, { accessed_at: ts(1) })]));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', []));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses',
+    Array.from({ length: RESEARCH_PERIOD_USAGE_BATCH_MAX + 1 }, (_, i) => access(i))));
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', [access(0), access(0)]), /unique within a batch/);
+  await assert.rejects(stat(path), { code: 'ENOENT' }, 'nothing was written');
+  const results = await store.recordToolAccessBatch('compare_forecast_losses', [access(0), access(1), access(2)]);
+  const stored = await saved(path);
+  assert.deepEqual(stored.map((r) => [r.access_id, r.source, r.tool_name, r.scope]),
+    [0, 1, 2].map((i) => [`batch-tool:${i}`, 'tool_observed', 'compare_forecast_losses', 'forecast_evaluation_window_only']));
+  assert.ok(stored.every((r) => r.accessed_at === r.recorded_at), 'the server clock sets accessed_at');
+  assert.ok(results.every((r) => !r.idempotent));
+  const retry = await store.recordToolAccessBatch('compare_forecast_losses', [access(0), access(1), access(2)]);
+  assert.ok(retry.every((r) => r.idempotent));
+  // A conflict anywhere in the batch writes nothing, including against another tool's record.
+  const before = await readFile(path, 'utf8');
+  await assert.rejects(store.recordToolAccessBatch('summarize_backtest_ledger', [access(3), access(0)]), /conflicts/);
+  await assert.rejects(store.recordToolAccessBatch('compare_forecast_losses', [access(3), access(1, { request_sha256: version('e') })]), /conflicts/);
+  assert.equal(await readFile(path, 'utf8'), before);
+  const usage = await store.check(query({ series_id: 'S0' }));
+  assert.ok(usage.limitations.includes('tool_observed_usage_is_forecast_evaluation_window_only'));
+  assert.ok(usage.limitations.includes('forecast_estimation_history_not_covered'));
+  assert.ok(!usage.limitations.includes('ledger_trade_envelope_does_not_include_indicator_lookbacks'));
+  assert.equal(usage.limitations.filter((l) => l === 'series_id_and_data_version_are_importer_supplied_metadata').length, 1);
+  // The single-record ledger path is unchanged and still ledger-bound.
+  const ledger = await store.recordToolAccess(access(9, { series_id: 'S0' }));
+  assert.deepEqual([ledger.tool_name, ledger.scope], ['summarize_backtest_ledger', 'ledger_trade_envelope_only']);
+  const both = await store.check(query({ series_id: 'S0' }));
+  for (const l of ['ledger_trade_envelope_does_not_include_indicator_lookbacks', 'forecast_estimation_history_not_covered']) {
+    assert.ok(both.limitations.includes(l), l);
+  }
+  assert.equal(both.limitations.filter((l) => l === 'series_id_and_data_version_are_importer_supplied_metadata').length, 1);
+});
