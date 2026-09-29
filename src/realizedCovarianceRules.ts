@@ -44,7 +44,13 @@ export function canonicalizeRules(input: unknown): { rules: RealizedCovarianceRu
   if (new Set(raw.day_weekdays).size !== raw.day_weekdays.length) reject("invalid_rules", "day_weekdays must not repeat");
   const zone = checkTimeZoneName(raw.time_zone);
   if (zone !== "ok") reject(zone, `time_zone ${JSON.stringify(raw.time_zone)}`);
-  const rules: RealizedCovarianceRules = {
+  const rules = canonicalRulesForm(raw);
+  return { rules, rules_sha256: hashRules(rules) };
+}
+
+/** The canonical form: fixed key order and sorted weekdays. No zone-name check, so stored rules re-hash unchanged (H3). */
+export function canonicalRulesForm(raw: RealizedCovarianceRules): RealizedCovarianceRules {
+  return {
     interval_minutes: raw.interval_minutes,
     time_zone: raw.time_zone,
     day_end_local: raw.day_end_local,
@@ -53,7 +59,23 @@ export function canonicalizeRules(input: unknown): { rules: RealizedCovarianceRu
     first_interval: raw.first_interval,
     return_unit: raw.return_unit,
   };
-  return { rules, rules_sha256: `sha256:${createHash("sha256").update(JSON.stringify(rules)).digest("hex")}` };
+}
+
+/** `rules_sha256`: the SHA-256 of JSON.stringify of the canonical form. */
+export const hashRules = (rules: RealizedCovarianceRules) =>
+  `sha256:${createHash("sha256").update(JSON.stringify(canonicalRulesForm(rules))).digest("hex")}`;
+
+/** Produced labels in [fromDate, toDate]: calendar arithmetic only, no zone data needed. */
+export function producedLabels(rules: RealizedCovarianceRules, fromDate: string, toDate: string): string[] {
+  const weekdays = new Set(rules.day_weekdays);
+  const labels: string[] = [];
+  for (let date = fromDate; date <= toDate; date = addDays(date, 1)) {
+    if (weekdays.has(isoWeekday(date))) {
+      labels.push(date);
+      if (labels.length > REALIZED_COVARIANCE_MAX_DATES) reject("too_many_dates", `more than ${REALIZED_COVARIANCE_MAX_DATES} produced days`);
+    }
+  }
+  return labels;
 }
 
 export const addDays = (date: string, days: number) =>
@@ -94,13 +116,7 @@ export function planCalendar(rules: RealizedCovarianceRules, fromDate: string, t
   }
   if (fromDate > toDate) reject("invalid_date_range", "from_date is after to_date");
   const weekdays = new Set(rules.day_weekdays);
-  const labels: string[] = [];
-  for (let date = fromDate; date <= toDate; date = addDays(date, 1)) {
-    if (weekdays.has(isoWeekday(date))) {
-      labels.push(date);
-      if (labels.length > REALIZED_COVARIANCE_MAX_DATES) reject("too_many_dates", `more than ${REALIZED_COVARIANCE_MAX_DATES} produced days`);
-    }
-  }
+  const labels = producedLabels(rules, fromDate, toDate);
   if (labels.length === 0) reject("no_produced_days", "no date in the range has a weekday in day_weekdays");
 
   const [hour, minute] = rules.day_end_local.split(":").map(Number);
