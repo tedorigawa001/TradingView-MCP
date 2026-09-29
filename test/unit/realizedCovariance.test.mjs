@@ -86,6 +86,11 @@ test('the #100-shaped scenario: causes in order, the D9 first day, non-slot bars
   assert.equal(r.summary.kept_days, 16);
   assert.equal(r.summary.missing_slots.days, 19);
   assert.equal(r.summary.missing_slots.max, 96, 'the holiday misses every slot');
+  // Pinned literally: the list is part of the contract (docs/REALIZED_COVARIANCE.md, "Response").
+  assert.deepEqual(r.limitations, ['realized_covariance_is_a_noisy_proxy_not_the_true_covariance', 'rules_are_caller_asserted_research_choices',
+    'missing_bars_widen_intervals_no_fill', 'bar_timestamps_assumed_open_time', 'holidays_cascade_with_from_previous_endpoint',
+    'tzdata_version_reported_not_pinned', 'bar_source_integrity_not_source_authentication', 'not_a_trading_or_risk_management_result',
+    'first_interval_spans_non_slot_bars']);
   assert.deepEqual(r.limitations, [...REALIZED_COVARIANCE_LIMITATIONS, FIRST_INTERVAL_LIMITATION]);
   const within = run(REFERENCE.scenarios.find((s) => s.name === 'B_within_day_log'));
   assert.ok(!within.limitations.includes(FIRST_INTERVAL_LIMITATION), 'the first-interval limitation is conditional');
@@ -216,19 +221,21 @@ test('modal local times break ties toward the earlier time', () => {
 });
 
 test('regression goldens: rules hashes, proxy-set IDs and the bits of the first kept day (plan section 3d)', () => {
-  // Pinned from the step 8 build on Node 24. A change here changes every ID for the same bars and rules.
+  // Pinned from the fdlibm-log build. Math.log gave other bits on arm64 than on x64, and so other IDs: CI on x64
+  // Linux and Windows got the A_100_shaped ID below while arm64 macOS did not. The port gives these on every CPU.
+  // A change here changes every ID for the same bars and rules.
   const bits = (x) => { const b = Buffer.alloc(8); b.writeDoubleBE(x); return b.toString('hex'); };
   const pick = (v) => (typeof v === 'number' ? [bits(v)] : [bits(v[0][0]), bits(v[0][1]), bits(v[1][1])]);
   const GOLDEN = {
     A_100_shaped: ['sha256:5e1a2a693fa3476bb3debe5f3acf044b879fc00a3f7419b740801c666de46346',
-      'sha256:75ee68c3142e297811477dc5083bd3a4bf5a174ef9c93fc7c6c5af23976fa7b9',
-      ['3faa74fb742a477d', 'bf8917ca123eaadf', '3fb568087e274499'], ['3fb2534e41f42853', 'bfc6685ccd9cfcde', '3fdb663892dfe37a']],
+      'sha256:cebe8165860fe49e9207e767bd7d8643b66a21f71e949a5898aaf14aeab197f1',
+      ['3faa74fb742a477d', 'bf8917ca123eab8b', '3fb568087e2744bb'], ['3fb2534e41f42853', 'bfc6685ccd9cfcde', '3fdb663892dfe37a']],
     B_within_day_log: ['sha256:c921334fe9f0ddeefcf41e730cc04ad2ea4ed6665f0968b8fac63ad44c7bc82a',
-      'sha256:9dee5f04052f47052899bd7c4dd65f952d4a0e57f0220c31759bcc0ae5fd0c53',
-      ['3ed59c11675a2b32', 'beb4073d69f18f36', '3ee1665cd02c3a30'], ['3ee06de520c47c80', 'bef3f38871c36b92', '3f083a759bb4c880']],
+      'sha256:8bba43b427981be97feaffe599dcb7e7c4301ea48e03624f74c9f493d6e9d6fe',
+      ['3ed59c11675a2b32', 'beb4073d69f18f85', '3ee1665cd02c3a50'], ['3ee06de520c47c80', 'bef3f38871c36b92', '3f083a759bb4c880']],
     D_tokyo_0700: ['sha256:1acae4b7ef9fe01e3220e1f8c0a4ca77d4d0d4b9e0df19d212d6a910e3f78b18',
-      'sha256:46de8aee69d591ae146abcdd7b5b27dd51397b3348be9a5bc3c4ab721865386a',
-      ['3fb5831b266f89bf', '3f6bc547576edf5f', '3f6a2e3126e21dc6'], ['3fd22fffef9d8b4f', 'bfa1bf6ff91be0b8', '3f715198a879d8c2']],
+      'sha256:061258db362ac1b5a29aba69dbc1aa2147b3e82a5ce9c1fa8cbcdcd327e3f9c5',
+      ['3fb5831b266f89bf', '3f6bc547576ee061', '3f6a2e3126e21e9a'], ['3fd22fffef9d8b4f', 'bfa1bf6ff91be0b8', '3f715198a879d8c2']],
   };
   for (const [name, [rulesSha, proxySetId, rcBits, outerBits]] of Object.entries(GOLDEN)) {
     const r = run(REFERENCE.scenarios.find((s) => s.name === name));

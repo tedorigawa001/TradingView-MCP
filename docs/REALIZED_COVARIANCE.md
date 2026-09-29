@@ -144,7 +144,8 @@ series has a valid close for that bar. D's endpoint is the close of its last exp
 opening at e(D) − interval. Missing slots are expected minus common slots.
 
 **Returns.** The formulas are pinned by `algorithm_version: "realized_covariance_v1"`:
-- per bar, L = s·`Math.log`(close), with s = 100 for `log_percent` and 1 for `log`;
+- per bar, L = s·log(close), with s = 100 for `log_percent` and 1 for `log`, where log is a
+  JavaScript port of fdlibm's `__ieee754_log`, not `Math.log` (below);
 - the start point P₀ is the endpoint of P(D) with `from_previous_endpoint`, read even before
   `from_date`, or D's first common slot with `within_day`;
 - P₁…P_m are D's common slots after P₀, in time order, ending at D's endpoint;
@@ -155,9 +156,15 @@ opening at e(D) − interval. Missing slots are expected minus common slots.
 - daily_outer_ij = r_D,i·r_D,j, the second proxy, also mirrored;
 - asserted invariant: |Σₖ stepₖ − r_D| ≤ 1e-12·max(1, maxₖ |yₖ|) per series.
 
-**`Math.log` bits can differ across JavaScript engines.** The same bars and rules give the same
-proxy-set ID on one engine, but an engine whose `log` differs in the last bit gives other values
-and so another ID.
+**The same bars and rules give the same bits, and so the same proxy-set ID, on every CPU and
+conforming engine whose time-zone data resolves the same boundaries** (see
+[Verification](#verification) for tzdata changes).
+V8's `Math.log` differs by one ulp between its arm64 and x64 builds on a small share of inputs
+(about 3% of EURUSD-like closes near 1.1), so with it an Apple Silicon Mac and x64 Linux or Windows
+got different IDs for the same input. The port uses only double arithmetic, which JavaScript
+defines exactly, so it gives the x64 build's bits on every CPU and conforming engine. Every other
+step is plain arithmetic in a fixed order. A regression test pins the port's output digest and
+three proxy-set IDs, and CI checks them on arm64 and x64.
 
 **Kept and dropped days.** Each produced day is kept or dropped for the first cause that applies:
 1. `no_endpoint`: some series lacks D's endpoint;
@@ -233,7 +240,6 @@ near-singular proxies and are not caught.**
 - `bar_timestamps_assumed_open_time`
 - `holidays_cascade_with_from_previous_endpoint`
 - `tzdata_version_reported_not_pinned`
-- `cross_engine_math_log_bits_not_guaranteed`
 - `bar_source_integrity_not_source_authentication`
 - `not_a_trading_or_risk_management_result`
 - `first_interval_spans_non_slot_bars`, with `from_previous_endpoint` only
@@ -402,7 +408,7 @@ with `proxy_set_not_found` unless a matching proxy set exists.
 `node scripts/benchmark-realized-covariance.mjs` (after `npm run build`) uses 8 series of about
 479,000 M15 bars each (3.8 million closes, 5,000 Mon–Fri days). On the development machine:
 - importing the 8 series took about 2.0 s, and reading them back with the hash check 0.9 s;
-- the computation took about 1.0 s, and normalizing and storing the 13.3 MiB proxy set 0.4 s;
+- the computation took about 1.1 s, and normalizing and storing the 13.3 MiB proxy set 0.4 s;
 - journaling after 21,000 records (30 MiB) took about 0.35 s;
 - re-deriving 5,000 days took about 70 ms, and the whole verification, including that journal,
   about 0.48 s;

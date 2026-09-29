@@ -1,4 +1,4 @@
-# compute_realized_covariance: design memo (rev 2.4, implemented; code review folded in)
+# compute_realized_covariance: design memo (rev 2.5, implemented; code review folded in)
 
 Backlog #101, item 4.
 
@@ -15,7 +15,9 @@ Rev 2 folded in F1–F17, rev 2.1 folded in G1–G10, and rev 2.2 folded in H1�
 decisions of 2026-09-29 (section "Decisions"). Rev 2.3 makes three clarifications from the plan
 review and its diff check (Q1, Q4, Q6, R1): the identical-series definition, the verification
 error rules, and the conditional limitation. Rev 2.4 adds two contract items from the code
-review: the date bounds (C1) and `join_run_has_no_kept_day` (C6). The implementation follows
+review: the date bounds (C1) and `join_run_has_no_kept_day` (C6). Rev 2.5 replaces `Math.log`
+with a port of fdlibm's log (D13), after CI showed V8's arm64 and x64 builds disagree in the last
+bit. The implementation follows
 [REALIZED_COVARIANCE_PLAN.md](REALIZED_COVARIANCE_PLAN.md); the contract is
 [REALIZED_COVARIANCE.md](REALIZED_COVARIANCE.md).
 
@@ -202,8 +204,8 @@ and s(D) and e(D) for every produced D (G1).
 ### Returns (F6, F12)
 
 The formulas are pinned by `algorithm_version: "realized_covariance_v1"`:
-- Per bar, L = s · Math.log(close), with s = 100 for `log_percent` and 1 for `log`. #100 used
-  100·log(close).
+- Per bar, L = s · log(close), with s = 100 for `log_percent` and 1 for `log`. #100 used
+  100·log(close). log is a JavaScript port of fdlibm's `__ieee754_log` (D13), not `Math.log`.
 - The start point P₀:
   - `from_previous_endpoint`: the endpoint of P(D), always read, even before `from_date` (D9);
   - `within_day`: the first common slot of D.
@@ -216,7 +218,9 @@ The formulas are pinned by `algorithm_version: "realized_covariance_v1"`:
 - daily_outer_ij = r_D,i · r_D,j, also for i ≤ j and mirrored.
 - The invariant, asserted: |Σₖ stepₖ − r_D| ≤ 1e-12 · max(1, maxₖ |yₖ|) per series. It is scaled
   and never exactly zero, so near-parity series whose r_D is exactly 0 pass.
-- `Math.log` bits can differ across JavaScript engines. A limitation says so.
+- The result is bit-identical on every CPU and conforming engine (D13). With `Math.log` it was
+  not: V8's arm64 and x64 builds differ by one ulp on a small share of inputs, which changed
+  proxy-set IDs between an Apple Silicon Mac and x64 Linux.
 
 ### Kept and dropped days
 
@@ -501,7 +505,6 @@ tuples in the computation journal, over the same series and overlapping envelope
 - `bar_timestamps_assumed_open_time`
 - `holidays_cascade_with_from_previous_endpoint`
 - `tzdata_version_reported_not_pinned`
-- `cross_engine_math_log_bits_not_guaranteed`
 - `bar_source_integrity_not_source_authentication`
 - `not_a_trading_or_risk_management_result`
 
@@ -640,3 +643,12 @@ tuples in the computation journal, over the same series and overlapping envelope
     edited directly in the owner-only store are outside the protection boundary, as for the other
     stores. Recomputing from bars was not chosen: it would tie the comparison tool to the bar store
     and cost up to about 2 s.
+13. **D13, the log (after the code review):** L uses a JavaScript port of fdlibm's `__ieee754_log`,
+    the algorithm behind V8's `Math.log`. The first CI run after the review showed that `Math.log`
+    differs by one ulp between V8's arm64 and x64 builds on about 0.1% of general inputs and about
+    3% of EURUSD-like closes, so the same bars and rules got one proxy-set ID on arm64 macOS and
+    another on x64 Linux and Windows. JavaScript rounds every operation to double with no fused
+    multiply-add, so the port gives the x64 bits everywhere. Keeping `Math.log` with IDs per
+    architecture was not chosen, because the same data would then appear as two proxy sets. The
+    limitation `cross_engine_math_log_bits_not_guaranteed` is withdrawn. `algorithm_version` stays
+    `realized_covariance_v1`, since nothing was released under the earlier formula.

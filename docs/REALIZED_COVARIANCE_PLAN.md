@@ -158,7 +158,7 @@ join can reach it, and the verification that justifies it lands in step 7 too.
      - an untracked computation followed by an export leaves no period record (G6);
      - stored `proxy-set:` sets fail closed;
      - tzdata drift (H4);
-     - `Math.log` bits across engines;
+     - `Math.log` bits across engines (superseded by design D13: the port makes them identical);
      - the effective join limit (Q5);
      - scaled and inverted copies are not caught (Q1).
    - Release-note text with the G9 downgrade notes.

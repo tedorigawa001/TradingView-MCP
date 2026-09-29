@@ -1,4 +1,5 @@
 import type { BarSeries } from "./barSeries.js";
+import { fdlibmLog } from "./fdlibmLog.js";
 import { allFinite, positiveSemidefinite, symmetricWithin, type Matrix } from "./numerics.js";
 import {
   RealizedCovarianceError, assertSeriesAgainstRules, isoWeekday, planCalendar, type CalendarDay, type RealizedCovarianceRules,
@@ -22,7 +23,6 @@ export const REALIZED_COVARIANCE_LIMITATIONS = [
   "bar_timestamps_assumed_open_time",
   "holidays_cascade_with_from_previous_endpoint",
   "tzdata_version_reported_not_pinned",
-  "cross_engine_math_log_bits_not_guaranteed",
   "bar_source_integrity_not_source_authentication",
   "not_a_trading_or_risk_management_result",
 ] as const;
@@ -104,7 +104,8 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
   };
   const allValid = (at: number) => grids.every((_, i) => !Number.isNaN(closeAt(i, at)));
   const scale = rules.return_unit === "log_percent" ? 100 : 1;
-  const level = (series: number, at: number) => scale * Math.log(closeAt(series, at));
+  // fdlibm's log, not Math.log, whose bits differ between V8's arm64 and x64 builds (see fdlibmLog.ts).
+  const level = (series: number, at: number) => scale * fdlibmLog(closeAt(series, at));
 
   const identicalCandidates = new Set<string>();
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) identicalCandidates.add(`${i},${j}`);
