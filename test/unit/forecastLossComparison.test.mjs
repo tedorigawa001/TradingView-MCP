@@ -516,13 +516,68 @@ test('a secondary mean that overflows makes the secondary not evaluable (R-L2)',
   assert.ok(r.withheld_reasons.includes('not_assessed_secondary_proxy_absent'));
 });
 
-test('an HAC variance that overflows is not evaluable, not DM = 0 (external review)', () => {
-  // One MSE day with a − p = 1.25e77: d ≈ 1.6e154 is finite, but its square overflows, so S = Infinity.
-  const a = Array.from({ length: 200 }, (_, i) => (i === 10 ? 1.25e77 : i % 2 ? 1 : 2));
-  const r = compareForecastLosses(scalarSet({ a, b: a.map(() => 1.5), primary: a.map(() => 1) }), tracked);
-  assert.ok(Number.isFinite(r.dm.dbar));
-  assert.equal(r.dm.S, Infinity);
-  assert.deepEqual(r.status, { evaluable: false, reason: 'hac_variance_not_finite' });
-  assert.equal(r.dm.DM, null);
-  assert.equal(r.battery_outcome, 'not_evaluable');
+test('HAC runs on d rescaled by a power of two: huge losses evaluate exactly, overflowing S fails closed (EXT-2)', () => {
+  // One MSE day with a − p = 1.25e77: d ≈ 1.6e154 is finite, but its square is not. Unscaled, S = Infinity
+  // gave DM = 0 as if evaluable; rescaled, the result equals the same set shrunk by 2^-300 exactly.
+  const huge = (x) => Array.from({ length: 200 }, (_, i) => (i === 10 ? x : i % 2 ? 1 : 2));
+  const shrink = (values) => values.map((v) => v * 2 ** -300);
+  const a = huge(1.25e77), b = a.map(() => 1.5), primary = a.map(() => 1);
+  const big = compareForecastLosses(scalarSet({ a, b, primary }), tracked);
+  const small = compareForecastLosses(scalarSet({ a: shrink(a), b: shrink(b), primary: shrink(primary) }), tracked);
+  assert.equal(big.status.evaluable, true);
+  assert.ok(Number.isFinite(big.dm.S));
+  assert.equal(big.dm.DM, small.dm.DM);
+  assert.equal(big.mean_favours, small.mean_favours);
+  // At a − p = 1e78, S itself overflows in the input units: not evaluable.
+  const a2 = huge(1e78);
+  const over = compareForecastLosses(scalarSet({ a: a2, b: a2.map(() => 1.5), primary: a2.map(() => 1) }), tracked);
+  assert.equal(over.dm.S, Infinity);
+  assert.deepEqual(over.status, { evaluable: false, reason: 'hac_variance_not_finite' });
+  assert.equal(over.dm.DM, null);
+});
+
+test('scale sweep: MSE decisions are identical from 1e-150 to 1e77, and fail closed beyond (EXT-2b regression guard)', () => {
+  // MSE is homogeneous of degree 2, so scaling forecasts and proxies by s scales d by s² and changes no
+  // decision. Unscaled HAC underflowed near 5e-81 (DM = −∞, a false pass) and lost precision near 1e-80.
+  const wave = Array.from({ length: 400 }, (_, i) => -0.01 + 0.3 * Math.sin((2 * Math.PI * i) / 20));
+  const bases = [
+    ['uniform', setFromD(uniform(), { secondary: independentSecondary })],
+    ['few-day', setFromD(fewDay(), { secondary: independentSecondary })],
+    ['wave', setFromD(wave, { secondary: independentSecondary })],
+  ];
+  const scaleSet = (set, s) => ({ ...set, a: set.a.map((x) => x * s), b: set.b.map((x) => x * s),
+    primary: set.primary.map((x) => x * s), secondary: set.secondary.map((x) => x * s) });
+  const decision = (r) => JSON.stringify([r.status, r.mean_favours, r.battery_outcome, r.robustness_conflicts, r.withheld_reasons]);
+  for (const [name, set] of bases) {
+    const reference = compareForecastLosses(set, tracked);
+    for (const s of [1e-150, 1e-100, 5e-81, 1e-50, 1e50, 1e77]) {
+      const r = compareForecastLosses(scaleSet(set, s), tracked);
+      assert.equal(decision(r), decision(reference), `${name} at ${s}`);
+      close(r.dm.DM, reference.dm.DM, 1e-9, `${name} DM at ${s}`);
+    }
+    assert.deepEqual(compareForecastLosses(scaleSet(set, 1e100), tracked).status,
+      { evaluable: false, reason: 'hac_variance_not_finite' }, `${name} at 1e100`);
+  }
+});
+
+test('a strongly significant set with d near 2e154 evaluates, not hac_variance_not_positive (LOW-1)', () => {
+  // mean(d²) overflows while S is finite; the relative check now runs on rescaled d.
+  const dv = Array.from({ length: 300 }, (_, i) => 2e154 * (1 + 0.01 * Math.sin(i)));
+  const primary = dv.map(() => 1);
+  const r = compareForecastLosses(scalarSet({ a: dv.map((x) => 1 + Math.sqrt(x)), b: primary, primary }), tracked);
+  assert.equal(r.status.evaluable, true);
+  assert.equal(r.mean_favours, 'B');
+  assert.ok(r.dm.DM > 1000);
+});
+
+test('hard-day means use the rescaled mean, so finite losses near the double limit stay finite (LOW-2)', () => {
+  // On three A-null days B's loss is about 1.39e308; their sum overflows, their mean does not.
+  const base = setFromD(uniform(), { secondary: independentSecondary });
+  const days = [7, 8, 9];
+  const set = { ...base, a: base.a.map((x, i) => (days.includes(i) ? null : x)),
+    b: base.b.map((x, i) => (days.includes(i) ? 1.18e154 : x)) };
+  const r = compareForecastLosses(set, tracked);
+  assert.equal(r.drops.a_only_null, 3);
+  assert.ok(Number.isFinite(r.hard_days.b_loss_on_a_only_null_days));
+  close(r.hard_days.b_loss_on_a_only_null_days, (1.18e154 - base.primary[8]) ** 2, 1e-12, 'hard-day mean');
 });

@@ -244,3 +244,12 @@ test('the store hashes the stored bytes, so invalid UTF-8 cannot pass as U+FFFD 
   await writeFile(path, Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 3)]));
   await assert.rejects(store.get(artifact_id), /hash mismatch/);
 });
+
+test('the import CLI rejects a file that is not valid UTF-8 (external review nit)', async (t) => {
+  const { directory, store } = await tempStore(t);
+  const input = join(directory, 'set.json');
+  const text = Buffer.from(JSON.stringify(scalarSet(5, { labels: ['a\uFFFD', 'b', 'a\uFFFD', 'b', 'b'] })));
+  const at = text.indexOf(Buffer.from([0xef, 0xbf, 0xbd]));
+  await writeFile(input, Buffer.concat([text.subarray(0, at), Buffer.from([0xff]), text.subarray(at + 3)]));
+  await assert.rejects(importForecastSet(['--input', input, '--confirm-local-import'], store), /not valid UTF-8/);
+});

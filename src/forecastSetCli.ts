@@ -11,7 +11,11 @@ export async function importForecastSet(args: string[], store = new ForecastSetS
   }, strict: true, allowPositionals: false });
   if (!values.input || !values["confirm-local-import"]) throw new Error("--input and --confirm-local-import are required");
   const body = await readBacktestLedgerFile(values.input);
-  return store.register(JSON.parse(body.toString("utf8")));
+  let text: string;
+  // Strict decoding: invalid UTF-8 is an error, not silently replaced by U+FFFD (external review nit).
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(body); }
+  catch { throw new Error("input is not valid UTF-8"); }
+  return store.register(JSON.parse(text));
 }
 
 function isEntrypoint(): boolean {

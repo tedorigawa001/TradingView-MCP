@@ -9,7 +9,8 @@ Backlog #101, item 2. Review history:
   CR-L1–CR-L9);
 - re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4);
 - diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1); final diff check: APPROVE;
-- external review (pasted by the user, 2026-09-29): 3 MEDIUM (EXT-1 to EXT-3), all fixed.
+- external review (pasted by the user, 2026-09-29): 3 MEDIUM (EXT-1 to EXT-3), all fixed. Its
+  diff check: REQUEST CHANGES, 1 MEDIUM (EXT-2b) and 2 LOW, all fixed.
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
@@ -19,8 +20,11 @@ approved by the user on 2026-09-28:
 - the trim conflict is tested through k* (CR-L1);
 - distinctness is judged whenever a secondary is present (CR-L2);
 - the access-ID collision rule is amended (CR-L4);
-- with `neither`, the bootstrap measures the side the mean leans to, and a non-finite HAC variance
-  is not evaluable (EXT-1, EXT-2). EXT-3, the store hashing its raw bytes, is an implementation fix.
+- with `neither`, the bootstrap measures the side the mean leans to (EXT-1);
+- a non-finite HAC variance is not evaluable, and HAC runs on d rescaled by a power of two (EXT-2,
+  EXT-2b).
+
+EXT-3, the store hashing its raw bytes, is an implementation fix.
 
 The implementation is in docs/FORECAST_LOSS_COMPARISON.md.
 
@@ -119,9 +123,15 @@ statement of superiority.
     `non_finite_loss`, checked first.
   - A non-finite secondary d, or a non-finite proxy-dependent part, makes that day an invalid
     secondary day.
-  - A non-finite d̄ or HAC variance makes the result `not_evaluable` with reason
-    `hac_variance_not_finite`. Finite d near 1e154 overflows in the squares, and S = ∞ had
-    given DM = 0 and p = 0.5 as if evaluable (EXT-2).
+  - A non-finite d̄, HAC variance or DM makes the result `not_evaluable` with reason
+    `hac_variance_not_finite`. S = ∞ had given DM = 0 and p = 0.5 as if evaluable (EXT-2).
+  - HAC, DM and the relative variance test run on d divided by the power of two at or below
+    max|d|, which is exact and scale-invariant.
+    - Without it, a subnormal S at tiny losses gave DM = −∞ and a false pass (EXT-2b, found in the
+      diff check of the EXT fixes).
+    - It also avoids the overflow of mean(d²) that made a strongly significant set
+      `hac_variance_not_positive` (LOW-1).
+    - An MSE scale sweep is the regression guard.
 - **Hard-day diagnostics:**
   - B's mean loss on `a_only_null` days is reported next to B's mean loss on used days.
   - A's mean loss on `b_only_null` days is reported next to A's mean loss on used days.

@@ -39,7 +39,8 @@ npm run import:forecast-set -- --input /absolute/path/set.json --confirm-local-i
 
 The installed package exposes the same command as `tradingview-mcp-import-forecast-set`. It returns
 `artifact_id`, the number of dates and n. Importing the same normalized content again returns the
-same ID without replacing the stored file.
+same ID without replacing the stored file. The input file must be valid UTF-8; invalid bytes are
+an error, not silently replaced.
 
 Storage defaults to `~/.tradingview-mcp/forecast-sets`. Set
 `TRADINGVIEW_MCP_FORECAST_SET_DIR` identically for the CLI and the MCP process to use another
@@ -95,14 +96,16 @@ The result is `not_evaluable`, with the first matching reason, if:
   forecasts and proxies are valid, for example with a proxy of 1e155 under MSE;
 - more than 5% of dates are dropped (`more_than_5_percent_of_dates_dropped`);
 - fewer than 100 days are used (`fewer_than_100_used_days`);
-- d̄ or the HAC variance is not finite (`hac_variance_not_finite`). Finite losses near 1e154 can
-  still overflow in the squares; S = ∞ would otherwise give DM = 0 as if evaluable;
-- the HAC variance is not positive (`hac_variance_not_positive`: S ≤ 0 or S < 1e-12·mean(d²);
-  S is never clamped).
+- d̄, the HAC variance or DM is not finite (`hac_variance_not_finite`). S is reported in the
+  input units, so losses whose variance exceeds the double range (d around 1e156 and above) fail
+  closed here;
+- the HAC variance is not positive (`hac_variance_not_positive`: S ≤ 0 or S < 1e-12·mean(d²),
+  both on rescaled d; S is never clamped).
 
 `hard_days` reports B's mean loss on `a_only_null` days next to its mean on used days, and A's
 mean loss on `b_only_null` days next to its mean on used days, so you can see whether the
-dropped days were hard.
+dropped days were hard. These means are computed on losses rescaled like d below, so finite losses
+near the double limit do not overflow in the sum.
 
 ## Losses
 
@@ -118,6 +121,15 @@ d = loss(A) − loss(B); lower is better, so negative d favours A.
   γ_l have divisor T.
 - The lag is L = min(T − 1, ⌊4(T/100)^(2/9)⌋).
 - DM = d̄/√(S/T), with p_A = Φ(DM) and p_B = Φ(−DM). The upper tail is never computed as 1 − Φ.
+- **Rescaling:** HAC, DM and the relative variance test are computed on d divided by the power of
+  two at or below max|d|.
+  - They are scale-invariant, and dividing by a power of two is exact, so results in the normal
+    range are bit-identical.
+  - Without it, tiny losses let S underflow to a subnormal. Under MSE with inputs scaled by 5e-81,
+    that gave DM = −∞ and a false pass. Huge losses overflowed in the squares.
+  - d̄ and S are reported in the input units, so for extremely small losses the reported S may
+    underflow to 0 while DM is exact.
+  - A test sweeps MSE inputs from 1e-150 to 1e77 and requires identical decisions.
 - Φ uses Cody's erfc, which matches scipy to a relative 1e-12 in both tails.
 
 **Favoured side.** `mean_favours` is `A` if p_A < 0.05, `B` if p_B < 0.05, otherwise

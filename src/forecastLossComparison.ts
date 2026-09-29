@@ -40,6 +40,21 @@ type Forecast = { s: Matrix; inverse: Matrix; logDet: number };
 const asMatrix = (value: number | number[][]): Matrix => typeof value === "number" ? [[value]] : value;
 const mean = (values: number[]) => values.reduce((sum, x) => sum + x, 0) / values.length;
 const meanOrNull = (values: number[]) => values.length ? mean(values) : null;
+
+/**
+ * The power of two at or below max|x| (1 for an all-zero series). Dividing by it is exact, so results
+ * in the normal range are bit-identical, while sums and squares of very large or very small values
+ * stay in range (external review EXT-2b, LOW-1, LOW-2).
+ */
+function powerOfTwoScale(values: number[]): number {
+  const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
+  return largest > 0 && Number.isFinite(largest) ? 2 ** Math.floor(Math.log2(largest)) : 1;
+}
+const scaledMeanOrNull = (values: number[]) => {
+  if (!values.length) return null;
+  const unit = powerOfTwoScale(values);
+  return mean(values.map((x) => x / unit)) * unit;
+};
 const sign = (x: number) => (x > 0 ? 1 : x < 0 ? -1 : 0);
 
 /** Forecast validity: finite, symmetric within 1e-12·max|S|, Cholesky positive-definite. */
@@ -215,8 +230,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const T = d.length;
   drops.used = T;
   const hardDays = {
-    b_loss_on_a_only_null_days: meanOrNull(bOnANull), b_loss_on_used_days: meanOrNull(lossB),
-    a_loss_on_b_only_null_days: meanOrNull(aOnBNull), a_loss_on_used_days: meanOrNull(lossA),
+    b_loss_on_a_only_null_days: scaledMeanOrNull(bOnANull), b_loss_on_used_days: scaledMeanOrNull(lossB),
+    a_loss_on_b_only_null_days: scaledMeanOrNull(aOnBNull), a_loss_on_used_days: scaledMeanOrNull(lossA),
   };
 
   // The secondary proxy: evaluated on used days where it is valid; > 5% of them dropped = not evaluable.
@@ -267,10 +282,21 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   if (!finite) reason = "non_finite_loss";
   else if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
   else if (T < MIN_USED_DAYS) reason = "fewer_than_100_used_days";
-  const hac = finite && T >= 2 ? neweyWest(d) : null;
-  // Finite losses can still overflow in the squares: S = Infinity gave DM = 0 and p = 0.5 as if evaluable.
+  // HAC and DM on d divided by a power of two near max|d|: DM and the relative test are scale-invariant,
+  // and without it S underflowed to a subnormal for tiny losses, giving DM = -Infinity and a pass (EXT-2b).
+  // d̄ and S are reported in the input units.
+  const unit = finite ? powerOfTwoScale(d) : 1;
+  const scaled = d.map((x) => x / unit);
+  const scaledHac = finite && T >= 2 ? neweyWest(scaled) : null;
+  const hac = scaledHac ? { ...scaledHac, dbar: scaledHac.dbar * unit, S: scaledHac.S * unit * unit } : null;
+  const scaledDM = scaledHac ? scaledHac.dbar / Math.sqrt(scaledHac.S / T) : NaN;
+  // Reported in input units, S can still overflow for losses near 1e154; that is not evaluable (EXT-2).
   if (!reason && hac && !(Number.isFinite(hac.S) && Number.isFinite(hac.dbar))) reason = "hac_variance_not_finite";
-  if (!reason && hac && (!(hac.S > 0) || hac.S < 1e-12 * mean(d.map((x) => x * x)))) reason = "hac_variance_not_positive";
+  if (!reason && scaledHac && (!(scaledHac.S > 0) || scaledHac.S < 1e-12 * mean(scaled.map((x) => x * x)))) {
+    reason = "hac_variance_not_positive";
+  }
+  // Backstop only: after the two checks above, the rescaled S is at least 1e-12/T, so DM is finite.
+  if (!reason && !Number.isFinite(scaledDM)) reason = "hac_variance_not_finite";
   // Statistics follow the design's field order in every branch.
   if (reason) {
     return {
@@ -290,7 +316,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   }
 
   const { dbar, S, L } = hac!;
-  const DM = dbar / Math.sqrt(S / T);
+  const DM = scaledDM;
   const pA = normalCdf(DM), pB = normalCdf(-DM);
   const favours: Side | "neither" = pA < FAVOURED_P ? "A" : pB < FAVOURED_P ? "B" : "neither";
   const k = Math.floor((T + 99) / 100);   // ceil(T/100) in integers
