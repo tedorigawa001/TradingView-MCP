@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { wallTimeToUtc, checkTimeZoneName, intlZoneResolver, offsetAt } from '../../build/zonedTime.js';
+import { wallTimeToUtc, checkTimeZoneName, intlZoneResolver, offsetAt, offsetTimeline } from '../../build/zonedTime.js';
 
 // Hand-derived from the published zone rules and cross-checked with Python zoneinfo (plan section 3a).
 const REFERENCE = JSON.parse(readFileSync(new URL('../fixtures/realized-covariance/calendar-reference.json', import.meta.url), 'utf8')).cases;
@@ -41,4 +41,19 @@ test('zone names: unknown names and case variants are rejected; aliases are acce
   assert.equal(checkTimeZoneName('US/Eastern'), 'ok');
   assert.notEqual(checkTimeZoneName('america/new_york'), 'ok');
   assert.equal(checkTimeZoneName('Not/AZone'), 'unknown_time_zone');
+});
+
+test('the offset timeline equals a direct lookup at every minute around each transition, including 30-minute shifts', () => {
+  for (const [zone, from, to] of [['America/New_York', Date.UTC(2026, 0, 1), Date.UTC(2027, 0, 1)],
+    ['Australia/Lord_Howe', Date.UTC(2026, 0, 1), Date.UTC(2027, 0, 1)], ['Africa/Cairo', Date.UTC(2026, 3, 20), Date.UTC(2026, 10, 5)]]) {
+    const timeline = offsetTimeline(zone, from, to);
+    // Every minute within 90 minutes of each change found by a coarse hourly scan, plus a sparse sweep.
+    const checks = [];
+    for (let t = from; t < to; t += 3_600_000) {
+      if (offsetAt(zone, t) !== offsetAt(zone, t + 3_600_000)) for (let m = t - 5_400_000; m <= t + 5_400_000; m += 60_000) checks.push(m);
+    }
+    assert.ok(checks.length > 0, `${zone} has transitions in the range`);
+    for (let t = from; t < to; t += 7 * 3_600_000 + 13 * 60_000) checks.push(t);
+    for (const t of checks) assert.equal(timeline(t), offsetAt(zone, t), `${zone} ${new Date(t).toISOString()}`);
+  }
 });

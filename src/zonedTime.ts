@@ -86,3 +86,40 @@ export function checkTimeZoneName(zone: string): "ok" | "unknown_time_zone" | "t
   catch { return "unknown_time_zone"; }
   return resolved !== zone && resolved.toLowerCase() === zone.toLowerCase() ? "time_zone_case_variant" : "ok";
 }
+
+/**
+ * The zone's offset as a piecewise-constant function over [fromMs, toMs], for mapping many bars to local
+ * time without one Intl call per bar. Offsets are sampled every 12 hours; transitions are at least 78 h
+ * apart (see wallTimeToUtc), so two samples bracket at most one transition, which is then located to the
+ * minute by bisection.
+ */
+export function offsetTimeline(zone: string, fromMs: number, toMs: number, resolver: ZoneResolver = intlZoneResolver) {
+  const minute = 60_000, stride = 12 * HOUR;
+  const starts: number[] = [], offsets: number[] = [];
+  let at = Math.floor(fromMs / minute) * minute;
+  let current = offsetAt(zone, at, resolver);
+  starts.push(-Infinity); offsets.push(current);
+  while (at < toMs) {
+    const next = Math.min(at + stride, Math.ceil(toMs / minute) * minute);
+    const offset = offsetAt(zone, next, resolver);
+    if (offset !== current) {
+      // The first minute at which the offset is `offset`, in (at, next].
+      let low = at, high = next;
+      while (high - low > minute) {
+        const mid = low + Math.floor((high - low) / 2 / minute) * minute;
+        if (offsetAt(zone, mid, resolver) === current) low = mid; else high = mid;
+      }
+      starts.push(high); offsets.push(offset);
+      current = offset;
+    }
+    at = next;
+  }
+  return (ms: number): number => {
+    let low = 0, high = starts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid] <= ms) low = mid; else high = mid - 1;
+    }
+    return offsets[low];
+  };
+}
