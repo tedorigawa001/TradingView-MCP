@@ -1,4 +1,4 @@
-# compute_realized_covariance: design memo (rev 2.3, design review approved; not implemented)
+# compute_realized_covariance: design memo (rev 2.3, design review approved; implemented, code review pending)
 
 Backlog #101, item 4.
 
@@ -12,7 +12,9 @@ Review history:
 Rev 2 folded in F1–F17, rev 2.1 folded in G1–G10, and rev 2.2 folded in H1–H6, with the user's
 decisions of 2026-09-29 (section "Decisions"). Rev 2.3 makes three clarifications from the plan
 review and its diff check (Q1, Q4, Q6, R1): the identical-series definition, the verification
-error rules, and the conditional limitation. Nothing is implemented.
+error rules, and the conditional limitation. The implementation follows
+[REALIZED_COVARIANCE_PLAN.md](REALIZED_COVARIANCE_PLAN.md); the contract is
+[REALIZED_COVARIANCE.md](REALIZED_COVARIANCE.md).
 
 ## Problem
 

@@ -42,6 +42,11 @@ The installed package exposes the same command as `tradingview-mcp-import-foreca
 same ID without replacing the stored file. The input file must be valid UTF-8; invalid bytes are
 an error, not silently replaced.
 
+The same CLI joins forecasts to a realized-covariance proxy set with `--proxy-set <id>`; that mode
+has its own input and is the only way to write a `proxy-set:` source. See
+[Joining forecasts](REALIZED_COVARIANCE.md#joining-forecasts). The plain mode and the inline path
+reject a `source_id` starting with `proxy-set:` and the series prefix `proxy-set-source:`.
+
 Storage defaults to `~/.tradingview-mcp/forecast-sets`. Set
 `TRADINGVIEW_MCP_FORECAST_SET_DIR` identically for the CLI and the MCP process to use another
 private directory. The store follows the ledger store: owner-only, exclusive create, sync before
@@ -58,15 +63,32 @@ The schema is strict:
 | `source_id`, `source_sha256`, `evidence_tier` | Where the set came from; the tier is `historical_exploration`, `prospective` or `synthetic_test` |
 | `horizon` | Must be 1: each forecast is for the next day's proxy, and proxies do not overlap |
 | `n` | Dimension, 1–8 |
-| `underlying_series_ids` | 1..n unique stable series IDs, for example `fxdata-m1:EURUSD`. The prefixes `ledger-source:` and `forecast-set-source:` are reserved. |
+| `underlying_series_ids` | 1..n unique stable series IDs, for example `fxdata-m1:EURUSD`. The prefixes `ledger-source:` and `forecast-set-source:` are reserved; `proxy-set-source:` is reserved where a set enters (the plain CLI and the inline path), so a set stored by 0.1.14 that used it still reads. |
 | `dates` | Strictly increasing calendar dates, at most 5,000 |
-| `windows` | Each date's realized window as canonical UTC `[from, to)`. Windows are strictly increasing and non-overlapping, and each `from` falls on its date or the day before (FX days that start around 21:00–22:00 UTC). |
+| `windows` | Each date's realized window as canonical UTC `[from, to)`. Windows are strictly increasing and non-overlapping, and each `from` falls on its date or the day before (FX days that start around 21:00–22:00 UTC). For a `proxy-set:` source, `from` may fall up to 8 days before its date (D − 8 ≤ UTC date(from) ≤ D), because a realized window starts at the previous produced day's endpoint; such sets are verified against their proxy set (below). |
 | `a`, `b`, `primary` | Per date: a scalar, a full n×n matrix, or null |
 | `secondary` | Optional, same form |
 | `labels` | Optional descriptive labels: at most 50 distinct values, each 1–64 characters |
 
 The normalized set is at most 24 MiB. An n = 1 set is stored as scalars, so a 1×1-matrix encoding
 and a scalar encoding hash identically.
+
+### Proxy-set sources
+
+A set whose `source_id` is `proxy-set:<hex>` was joined to a
+[realized-covariance proxy set](REALIZED_COVARIANCE.md). Before any record or statistic, the tool
+requires the hex to name `source_sha256`, verifies the proxy set (`proxy_set_not_found`,
+`proxy_set_rules_mismatch`, `proxy_set_not_journaled`,
+`proxy_set_windows_changed_under_current_tzdata`), and requires the set's dates to be a contiguous
+run of the proxy set's, with equal n, series, windows, primary and secondary. Any difference is
+`proxy_set_mismatch`, so deleting the dates where one forecast loses badly and re-importing fails
+instead of escaping the 5% drop rule. `search` then adds the rule-variant counts
+([Search](#search)). Other sources never read the proxy-set store or the computation journal.
+
+A set stored by 0.1.14 or earlier with a `proxy-set:` source reads as before, but fails with
+`proxy_set_not_found` unless a matching proxy set exists.
+
+### Secondary copies
 
 A secondary proxy that is identical to the primary, or a scaled copy of it, is rejected as input.
 λ is the median of ‖P₂‖/‖P‖ over the days on which both are nonzero (the mean of the two middle
@@ -376,6 +398,13 @@ not.
   - `overlapping_research_ids_truncated` is true if any record's matches were truncated (each
     assessment carries its first 100) or the union exceeds the cap.
   - Matching records are never listed; use `check_research_period_usage` for detail.
+
+- **`proxy_rule_variants` and `proxy_bar_series_versions`**, for `proxy-set:` sources only: the
+  distinct `rules_sha256` and distinct bar-series tuples in the
+  [computation journal](REALIZED_COVARIANCE.md#computation-journal) over records that share a series
+  ID with the set and overlap its window envelope. Rule shopping on the proxies is then visible
+  where the comparison is read. They are read-only counts, so an untracked call reports them too,
+  next to `status: untracked`.
 
 Search counts cover this local journal only. Earlier calls, untracked calls, other machines and
 exploration outside this tool are not counted, and the counts are not a multiple-testing

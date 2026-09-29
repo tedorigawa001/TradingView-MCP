@@ -134,6 +134,45 @@ a ledger record cannot carry the forecast scope or the reverse. Assessments add
 `forecast_estimation_history_not_covered` whenever the journal holds records from
 this tool.
 
+## Automatic Realized-Covariance Tracking
+
+`compute_realized_covariance` with `research_id` records period usage first,
+then its computation journal entry, then the proxy set, before returning. The
+records are `tool_observed` with the tool name `compute_realized_covariance` and
+the scope `realized_covariance_bar_window_only`, validated as one batch like the
+forecast-loss records above.
+
+One record covers the proxy set and one covers each bar series read:
+- index 0 is `proxy-set-source:` plus the hex of the proxy-set ID, with that ID as
+  `data_version`;
+- the bar series follow in axis order, each with its own `series_id` and its bar
+  artifact ID as `data_version`: the data actually read.
+
+Every record has the same interval: the span the call read, from the open of the
+previous produced day's endpoint bar (with `from_previous_endpoint`) or the first
+day's window start (with `within_day`) to the last day's endpoint, dropped days
+included. Rule variants are not visible through `data_version`; the computation
+journal counts them, and `compare_forecast_losses` reports them for joined sets.
+
+Access IDs are `<base>:<index>`, where the base is `usage_access_id` or a
+generated `rc-access:<uuid>`. The request hash binds the bar artifacts in axis
+order, the rules hash and the date range, so a retry is idempotent while reusing
+a base for another request conflicts. A failure after the period write returns
+an error that names the records written.
+
+**The computation journal is not read here.** Without `research_id` the tool
+still journals the call and stores the proxy set, but writes no period record,
+and this check and the OOS preflight do not see it. An untracked computation
+followed by an export therefore leaves no period record. See
+[the contract](REALIZED_COVARIANCE.md#records).
+
+The prefix `proxy-set-source:` is reserved for these records: bar series and
+entering forecast sets may not use it. Assessments add
+`tool_observed_usage_is_realized_covariance_bar_window_only`,
+`series_id_and_data_version_are_importer_supplied_metadata` and
+`proxy_rules_are_caller_research_choices` whenever the journal holds records from
+this tool.
+
 ## Check
 
 `check_research_period_usage` accepts `series_id`, `data_version`, `from`, `to`
@@ -151,9 +190,9 @@ full list.
 
 The check does not itself record an access, reserve the period, freeze a protocol
 or enforce a backtest gate. A later check can differ after additional reports.
-Automatic tracking currently covers only the opted-in ledger summary and
-forecast loss comparison above; other research tools do not automatically
-record all data they expose. Check and report use as part of the
+Automatic tracking currently covers only the opted-in ledger summary, forecast
+loss comparison and realized covariance computation above; other research tools
+do not automatically record all data they expose. Check and report use as part of the
 research workflow, but do not claim full coverage from this journal alone.
 
 ## OOS Preflight
