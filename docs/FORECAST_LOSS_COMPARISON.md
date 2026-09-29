@@ -221,7 +221,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 - The centred, unstudentized one-sided p is (1 + #{s·(d̄* − d̄) ≤ s·d̄})/(1 + R), with s = +1 for A
   and −1 for B.
 - With `neither`, s is the side the mean leans to, in the same convention: s = −sign(d̄), so
-  d̄ < 0 leans to A and gives s = +1. There is no bootstrap if d̄ = 0.
+  d̄ < 0 leans to A and gives s = +1. The sign is read from the rescaled d̄, since the reported d̄
+  can round to 0 at tiny scale. There is no bootstrap only if d̄ is exactly 0.
 - `mc_se` = √(p(1 − p)/R). The bootstrap is descriptive.
 
 ## Outcome

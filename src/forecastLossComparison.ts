@@ -347,8 +347,9 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const dm = { dbar, S, L, DM, p_a: pA, p_b: pB, T };
 
   if (favours === "neither") {
-    // The side the mean leans to, in the favoured branch's convention: d̄ < 0 leans to A, s = +1.
-    const s = -sign(dbar);
+    // The side the mean leans to, in the favoured branch's convention: d̄ < 0 leans to A, s = +1. Read from
+    // the rescaled d̄: the reported d̄ can round to 0 at tiny scale and skip the bootstrap (external review).
+    const s = -sign(scaledHac!.dbar);
     return {
       ...base,
       status: { evaluable: true, reason: null },

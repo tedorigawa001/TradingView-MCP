@@ -224,7 +224,9 @@ Nothing in the battery can be set per call: it is part of the contract `forecast
     sequences are unchanged).
 - For the favoured side, it reports the centred, unstudentized p:
   p = (1 + #{s·(d̄*_r − d̄) ≤ s·d̄}) / (1 + R), where s = +1 if A is favoured and −1 if B is.
-- With `neither`, s = −sign(d̄), or null if d̄ = 0 (N8). The first version wrote sign(d̄), which
+- With `neither`, s = −sign(d̄) on the rescaled d, or null if d̄ is exactly 0 (N8). Reading the
+  reported d̄ instead skipped the bootstrap at tiny scale, where it rounds to 0 (third external
+  review). The first version wrote sign(d̄), which
   measured the tail away from the side the mean leans to. For a set leaning to A, it reported
   0.973 where the correct p is 0.027 (external review, EXT-1).
 - The Monte Carlo standard error is reported as well. The bootstrap is descriptive.

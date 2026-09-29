@@ -638,3 +638,18 @@ test('reported means are converted back to the input units, bit for bit (EXT-4)'
     ['early', 'late'].map((label) => plainMean(d.filter((_, i) => labels[i] === label))));
   // max|d| is 10, so the unit is 8: a missing conversion would be off by a factor of 8.
 });
+
+test('with neither, the bootstrap direction comes from the rescaled mean, so tiny scale does not skip it (external review)', () => {
+  // One day of 200 differs by one ulp: not significant (DM ≈ −1.01). At 2^-511 the reported d̄ rounds to −0,
+  // which skipped the bootstrap; the rescaled d̄ keeps its sign.
+  const at = (s) => scalarSet({
+    a: Array.from({ length: 200 }, (_, i) => (i === 50 ? 1.125 - 2 ** -52 : 1.125) * s),
+    b: Array.from({ length: 200 }, () => 1.125 * s),
+    primary: Array.from({ length: 200 }, () => 0),
+  });
+  const normal = compareForecastLosses(at(1), tracked), tiny = compareForecastLosses(at(2 ** -511), tracked);
+  assert.equal(normal.mean_favours, 'neither');
+  assert.ok(normal.bootstrap !== null);
+  assert.ok(Object.is(tiny.dm.dbar, -0) || tiny.dm.dbar === 0, 'the reported d̄ rounds to zero');
+  assert.deepEqual([tiny.mean_favours, tiny.bootstrap], [normal.mean_favours, normal.bootstrap]);
+});
