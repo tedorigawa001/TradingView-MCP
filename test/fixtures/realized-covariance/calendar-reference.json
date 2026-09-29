@@ -1,0 +1,24 @@
+{
+ "about": "Wall-time-to-UTC reference instants, derived by hand from the published zone rules (plan section 3a) and cross-checked with Python zoneinfo by check_calendar_zoneinfo.py. They are literals, not recomputed with Intl.",
+ "cases": [
+  {"zone": "America/New_York", "date": "2026-03-08", "time": "02:30", "rule": "spring forward, second Sunday of March 02:00 EST -> 03:00 EDT", "expect": "gap"},
+  {"zone": "America/New_York", "date": "2026-11-01", "time": "01:30", "rule": "fall back, first Sunday of November 02:00 EDT -> 01:00 EST", "expect": ["2026-11-01T05:30:00.000Z", "2026-11-01T06:30:00.000Z"]},
+  {"zone": "America/New_York", "date": "2026-03-08", "time": "16:45", "rule": "EDT (UTC-4) after the switch", "expect": "2026-03-08T20:45:00.000Z"},
+  {"zone": "America/New_York", "date": "2026-11-01", "time": "16:45", "rule": "EST (UTC-5) after the switch", "expect": "2026-11-01T21:45:00.000Z"},
+  {"zone": "Africa/Cairo", "date": "2026-04-24", "time": "00:00", "rule": "DST starts last Friday of April 00:00 -> 01:00", "expect": "gap"},
+  {"zone": "Africa/Cairo", "date": "2026-04-24", "time": "00:45", "rule": "inside the same gap", "expect": "gap"},
+  {"zone": "Africa/Cairo", "date": "2026-04-24", "time": "01:00", "rule": "first instant of EEST (UTC+3)", "expect": "2026-04-23T22:00:00.000Z"},
+  {"zone": "Africa/Cairo", "date": "2026-10-29", "time": "23:30", "rule": "DST ends last Thursday of October 24:00 -> 23:00", "expect": ["2026-10-29T20:30:00.000Z", "2026-10-29T21:30:00.000Z"]},
+  {"zone": "America/Havana", "date": "2026-03-08", "time": "00:30", "rule": "DST starts second Sunday of March 00:00 -> 01:00", "expect": "gap"},
+  {"zone": "America/Havana", "date": "2026-11-01", "time": "00:30", "rule": "DST ends first Sunday of November 01:00 -> 00:00", "expect": ["2026-11-01T04:30:00.000Z", "2026-11-01T05:30:00.000Z"]},
+  {"zone": "Australia/Lord_Howe", "date": "2026-10-04", "time": "02:00", "rule": "DST starts first Sunday of October 02:00 -> 02:30 (+10:30 -> +11)", "expect": "gap"},
+  {"zone": "Australia/Lord_Howe", "date": "2026-10-04", "time": "02:15", "rule": "inside the 30-minute gap", "expect": "gap"},
+  {"zone": "Australia/Lord_Howe", "date": "2026-04-05", "time": "01:30", "rule": "DST ends first Sunday of April 02:00 -> 01:30", "expect": ["2026-04-04T14:30:00.000Z", "2026-04-04T15:00:00.000Z"]},
+  {"zone": "Pacific/Kiritimati", "date": "2026-01-01", "time": "00:00", "rule": "UTC+14", "expect": "2025-12-31T10:00:00.000Z"},
+  {"zone": "Pacific/Kiritimati", "date": "1994-12-31", "time": "12:00", "rule": "the skipped day when the zone moved from UTC-10 to UTC+14", "expect": "gap"},
+  {"zone": "Pacific/Apia", "date": "2011-12-30", "time": "12:00", "rule": "the skipped day when Samoa crossed the date line", "expect": "gap"},
+  {"zone": "America/Sao_Paulo", "date": "2018-11-04", "time": "00:00", "rule": "DST started 2018-11-04 00:00 -> 01:00", "expect": "gap"},
+  {"zone": "Asia/Tokyo", "date": "2026-06-15", "time": "07:00", "rule": "UTC+9, no DST; s(D) for D = 2026-06-16 lands on UTC date D-2", "expect": "2026-06-14T22:00:00.000Z"},
+  {"zone": "Asia/Kolkata", "date": "2026-06-15", "time": "17:00", "rule": "UTC+5:30, off a 60-minute grid", "expect": "2026-06-15T11:30:00.000Z"}
+ ]
+}
