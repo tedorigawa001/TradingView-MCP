@@ -105,6 +105,17 @@ test('call validation: grid, DST gap or fold, slot minimum, dates, and the windo
   fails(() => planCalendar(rules({ first_interval: 'within_day', max_missing_slots: 94 }), '2026-06-15', '2026-06-19'), 'too_few_slots_for_rule');
   fails(() => planCalendar(rules(), '2026-06-19', '2026-06-15'), 'invalid_date_range');
   fails(() => planCalendar(rules(), '2026-02-30', '2026-03-02'), 'invalid_date_range');
+  // Out-of-range fields are invalid dates, not a RangeError from toISOString (re-review R1).
+  for (const bad of ['2026-13-01', '2026-01-32', '2026-00-10', '2026-99-99']) fails(() => planCalendar(rules(), bad, '2026-12-31'), 'invalid_date_range');
+  fails(() => planCalendar(rules(), '2026-06-15', '2026-06-31'), 'invalid_date_range');
+  // Dates stay inside the bar range (code review C1): past 9999-12-31 the next day is an extended year that string
+  // comparison sorts before it, which looped forever; years 0-99 went through Date.UTC as 1900-1999.
+  fails(() => planCalendar(rules(), '9999-12-27', '9999-12-31'), 'invalid_date_range');
+  fails(() => planCalendar(rules({ time_zone: 'UTC' }), '0050-01-04', '0050-01-08'), 'invalid_date_range');
+  fails(() => planCalendar(rules(), '1969-12-29', '1970-01-02'), 'invalid_date_range');
+  fails(() => planCalendar(rules(), '2099-12-28', '2100-01-01'), 'invalid_date_range');
+  assert.equal(planCalendar(rules(), '1970-01-01', '1970-01-02').days.length, 2, 'the first bound is inclusive');
+  assert.equal(planCalendar(rules(), '2099-12-28', '2099-12-31').days.length, 4, 'the last bound is inclusive');
   fails(() => planCalendar(rules({ day_weekdays: [6] }), '2026-06-15', '2026-06-19'), 'no_produced_days');
   const everyDay = rules({ time_zone: 'UTC', day_end_local: '00:00', day_weekdays: [1, 2, 3, 4, 5, 6, 7], first_interval: 'within_day' });
   assert.equal(planCalendar(everyDay, '2000-01-01', addDays('2000-01-01', REALIZED_COVARIANCE_MAX_DATES - 1)).days.length, 5000);

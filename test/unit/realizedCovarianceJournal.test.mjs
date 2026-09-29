@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { RealizedCovarianceJournalStore, REALIZED_COVARIANCE_JOURNAL_MAX_BYTES } from '../../build/realizedCovarianceJournal.js';
 import { canonicalizeRules } from '../../build/realizedCovarianceRules.js';
 import { BACKTEST_LEDGER_MAX_BYTES } from '../../build/backtestLedger.js';
+import { posixModeEnforced } from '../../build/fsDurability.js';
 
 const RULES = canonicalizeRules({ interval_minutes: 15, time_zone: 'America/New_York', day_end_local: '16:45', day_weekdays: [1, 2, 3, 4, 5],
   max_missing_slots: 6, first_interval: 'from_previous_endpoint', return_unit: 'log_percent' });
@@ -35,7 +36,7 @@ test('one owner-only record per call, with the design fields, written without a 
   assert.equal(record.algorithm_version, 'realized_covariance_v1');
   assert.equal((await lines(path))[1].research_id, null);
   assert.deepEqual(first.search, { calls: 1, distinct_rules: 1, distinct_bar_series_versions: 1 });
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await stat(path)).mode & 0o777, 0o600);   // Windows has no POSIX mode bits
   assert.equal(REALIZED_COVARIANCE_JOURNAL_MAX_BYTES, BACKTEST_LEDGER_MAX_BYTES);
 });
 

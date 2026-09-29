@@ -98,6 +98,9 @@ test('verification order: not found, rules and dates, journal, then windows unde
   const removed = await store.register({ ...p, dates: without(p.dates), windows: without(p.windows), rc: without(p.rc), daily_outer: without(p.daily_outer),
     common_slots: without(p.common_slots), expected_slots: without(p.expected_slots), drop_cause: without(p.drop_cause) });
   await assert.rejects(verifyProxySet(removed.artifact_id, deps), code('proxy_set_rules_mismatch'), 'a removed date');
+  // A stored range past the date bounds is a mismatch too, and returns at once instead of looping (code review C1).
+  const farFuture = await store.register({ ...p, to_date: '9999-12-31' });
+  await assert.rejects(verifyProxySet(farFuture.artifact_id, deps), code('proxy_set_rules_mismatch'), 'an out-of-range to_date');
   // 3. No journal record for the set.
   const good = await store.register(p);
   await assert.rejects(verifyProxySet(good.artifact_id, deps), code('proxy_set_not_journaled'));

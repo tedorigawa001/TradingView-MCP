@@ -293,7 +293,8 @@ JavaScript's.
 | Search, this tool | `search: {calls, distinct_rules, distinct_bar_series_versions}` |
 | Search, compare tool (Q10) | For `proxy-set:` sources only, `proxy_rule_variants` and `proxy_bar_series_versions` go inside `search`, tracked or untracked (untracked: next to `status` and `limitations`). They count journal records sharing a series ID whose envelope overlaps `forecastSetEnvelope(set)`. They are absent for other sources. |
 | ServerDeps (Q9) | `barSeries: Pick<BarSeriesStore, "get">`; `proxySets: Pick<ProxySetStore, "get" \| "register">`; `realizedCovarianceJournal: Pick<RealizedCovarianceJournalStore, "record" \| "findByProxySetId" \| "search">`; optional `zoneResolver` |
-| Error names | The design's 13; plus `invalid_date_range`, `no_produced_days`, `interval_mismatch`, `time_zone_case_variant`, `unknown_time_zone` (Q12); plus `join_range_not_contiguous` and `join_length_mismatch` for the join |
+| Error names | The design's 15 (rev 2.4, which added `invalid_date_range` and `join_run_has_no_kept_day` from the code review); plus `no_produced_days`, `interval_mismatch`, `time_zone_case_variant`, `unknown_time_zone` (Q12); plus `join_range_not_contiguous` and `join_length_mismatch` for the join; plus `bar_series_not_found` (step 6) |
+| Date bounds (code review C1) | `from_date` and `to_date` from 1970-01-01 to 2099-12-31, the bar-series time range; outside it, `invalid_date_range` (design rev 2.4) |
 | Access IDs | Base = `usage_access_id` (1–100 characters, research-ID character set) or `rc-access:<uuid>`; index 0 is the `proxy-set-source:` record, then the bar series in axis order |
 | npm scripts | `import:bar-series`, `export:proxy-set` |
 | Response size (R6) | Under 64 KiB at the worst case (tested): 8 series, full diagnostics for every weekday, and a saturated `period_usage_prior_overlap` summary (100 research IDs of 120 characters) |

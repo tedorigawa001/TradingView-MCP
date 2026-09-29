@@ -9194,6 +9194,8 @@ test('compute_realized_covariance: validation errors write nothing', async (t) =
     [{ series: [args.series[0], args.series[0]] }, /duplicate_series/],
     [{ from_date: '2025-12-01' }, /range_outside_series_coverage/],
     [{ from_date: '2026-01-31', to_date: '2026-01-06' }, /invalid_date_range/],
+    [{ from_date: '9999-12-27', to_date: '9999-12-31' }, /invalid_date_range/],   // looped forever before (code review C1)
+    [{ from_date: '2026-13-01' }, /invalid_date_range/],   // a RangeError before (re-review R1)
     [{ from_date: '2026-01-31', to_date: '2026-02-01' }, /no_produced_days/],
     [{ rules: { ...args.rules, day_weekdays: [1, 1, 2] } }, /invalid_rules/],
     [{ rules: { ...args.rules, time_zone: 'Mars/Olympus_Mons' } }, /unknown_time_zone/],

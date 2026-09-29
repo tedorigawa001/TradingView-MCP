@@ -1,4 +1,4 @@
-# compute_realized_covariance: design memo (rev 2.3, design review approved; implemented, code review pending)
+# compute_realized_covariance: design memo (rev 2.4, implemented; code review folded in)
 
 Backlog #101, item 4.
 
@@ -8,11 +8,14 @@ Review history:
   enough.
 - rev 2.1 (diff check): APPROVE WITH FINDINGS, MEDIUM H1 and LOW H2–H6, commit approved after
   the H1 and H2 text edits.
+- code review of the implementation: APPROVE WITH FINDINGS, MEDIUM C1–C2, LOW C3–C4 and NIT
+  C5–C7; the fixes were re-reviewed (APPROVE, LOW R1 and NIT R2).
 
 Rev 2 folded in F1–F17, rev 2.1 folded in G1–G10, and rev 2.2 folded in H1–H6, with the user's
 decisions of 2026-09-29 (section "Decisions"). Rev 2.3 makes three clarifications from the plan
 review and its diff check (Q1, Q4, Q6, R1): the identical-series definition, the verification
-error rules, and the conditional limitation. The implementation follows
+error rules, and the conditional limitation. Rev 2.4 adds two contract items from the code
+review: the date bounds (C1) and `join_run_has_no_kept_day` (C6). The implementation follows
 [REALIZED_COVARIANCE_PLAN.md](REALIZED_COVARIANCE_PLAN.md); the contract is
 [REALIZED_COVARIANCE.md](REALIZED_COVARIANCE.md).
 
@@ -166,6 +169,11 @@ Each of these rejects the whole call. None is decided per day.
     weekly production, found a maximum lag of exactly 8 days. So valid rules cannot trigger this.
   - It stays as a backstop, and is unit-tested in isolation.
 - **`too_many_dates` (G8).** More than 5,000 produced days.
+- **`invalid_date_range` (code review C1).** A date that is not a calendar date from 1970-01-01 to
+  2099-12-31, the bar-series time range, or `from_date` after `to_date`. The bound keeps every
+  label a four-digit-year date: past 9999-12-31 the date arithmetic reached an extended year and
+  looped, and years 0–99 went through `Date.UTC` as 1900–1999. Verifying a stored proxy set whose
+  range is outside the bound gives `proxy_set_rules_mismatch`.
 - **`range_outside_series_coverage` (F7, G8).** The span the call must read has to lie inside
   every series' coverage, from its first bar's open to its last bar's close. The error reports
   each series' first and last bar. The span is:
@@ -334,6 +342,9 @@ tradingview-mcp-import-forecast-set --proxy-set <id> --input <forecasts.json> --
       say so.
   - The join CLI refuses a proxy set whose list is non-empty (`proxy_set_has_identical_series`).
     The tool still computes and reports it, since the proxies themselves are well defined.
+- **A run with no kept day (code review C6).** The join refuses a run in which every date was
+  dropped (`join_run_has_no_kept_day`). It has no proxy at all, and the forecast set's copy rule
+  would otherwise reject it under a misleading name, as a secondary identical to the primary.
 
 ### Verifying a proxy set (G4, D12)
 

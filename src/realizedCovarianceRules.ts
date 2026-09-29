@@ -10,6 +10,12 @@ import { checkTimeZoneName, intlZoneResolver, wallTimeToUtc, type ZoneResolver }
 export const REALIZED_COVARIANCE_MAX_DATES = 5_000;
 /** A realized window may start up to this many calendar days (UTC) before its label (the forecast-set bound, D11). */
 export const REALIZED_COVARIANCE_WINDOW_MAX_LAG_DAYS = 8;
+/**
+ * Call dates lie inside the bar-series time range, so every label is a four-digit-year date: the string
+ * arithmetic below never meets an extended year, and Date.UTC never maps years 0-99 to 1900-1999 (code review C1).
+ */
+export const REALIZED_COVARIANCE_FIRST_DATE = "1970-01-01";
+export const REALIZED_COVARIANCE_LAST_DATE = "2099-12-31";
 
 /** Every rejection carries one of the design's or plan's error names as `code`, and in its message. */
 export class RealizedCovarianceError extends Error {
@@ -20,8 +26,10 @@ export class RealizedCovarianceError extends Error {
 }
 const reject = (code: string, detail: string): never => { throw new RealizedCovarianceError(code, detail); };
 
+// Date.parse first: a month of 13 or a day of 32 is an Invalid Date, whose toISOString() throws (re-review R1).
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((s) => new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s, "invalid calendar date");
+  .refine((s) => Number.isFinite(Date.parse(`${s}T00:00:00.000Z`))
+    && new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s, "invalid calendar date");
 
 export const realizedCovarianceRulesSchema = z.object({
   interval_minutes: z.number().int().min(1).max(1440),
@@ -67,6 +75,12 @@ export const hashRules = (rules: RealizedCovarianceRules) =>
 
 /** Produced labels in [fromDate, toDate]: calendar arithmetic only, no zone data needed. */
 export function producedLabels(rules: RealizedCovarianceRules, fromDate: string, toDate: string): string[] {
+  for (const date of [fromDate, toDate]) {
+    if (!dateSchema.safeParse(date).success || date < REALIZED_COVARIANCE_FIRST_DATE || date > REALIZED_COVARIANCE_LAST_DATE) {
+      reject("invalid_date_range", `from_date and to_date must be calendar dates from ${REALIZED_COVARIANCE_FIRST_DATE} to ${REALIZED_COVARIANCE_LAST_DATE}`);
+    }
+  }
+  if (fromDate > toDate) reject("invalid_date_range", "from_date is after to_date");
   const weekdays = new Set(rules.day_weekdays);
   const labels: string[] = [];
   for (let date = fromDate; date <= toDate; date = addDays(date, 1)) {
@@ -111,12 +125,8 @@ export function assertWindowWithinLag(windowFrom: number, label: string): void {
  */
 export function planCalendar(rules: RealizedCovarianceRules, fromDate: string, toDate: string,
   resolver: ZoneResolver = intlZoneResolver): { days: CalendarDay[]; tzdata: string } {
-  if (!dateSchema.safeParse(fromDate).success || !dateSchema.safeParse(toDate).success) {
-    reject("invalid_date_range", "from_date and to_date must be calendar dates");
-  }
-  if (fromDate > toDate) reject("invalid_date_range", "from_date is after to_date");
   const weekdays = new Set(rules.day_weekdays);
-  const labels = producedLabels(rules, fromDate, toDate);
+  const labels = producedLabels(rules, fromDate, toDate);   // validates both dates and their order
   if (labels.length === 0) reject("no_produced_days", "no date in the range has a weekday in day_weekdays");
 
   const [hour, minute] = rules.day_end_local.split(":").map(Number);

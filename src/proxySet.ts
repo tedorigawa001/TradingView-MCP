@@ -176,9 +176,9 @@ export async function verifyProxySet(proxySetId: string, deps: {
     throw error;
   });
   if (hashRules(set.rules) !== set.rules_sha256) reject("proxy_set_rules_mismatch", "rules_sha256 does not match the rules");
-  if (JSON.stringify(producedLabels(set.rules, set.from_date, set.to_date)) !== JSON.stringify(set.dates)) {
-    reject("proxy_set_rules_mismatch", "dates do not match the rules and range");
-  }
+  let labels: string[] | null;
+  try { labels = producedLabels(set.rules, set.from_date, set.to_date); } catch { labels = null; }   // a stored range out of bounds
+  if (JSON.stringify(labels) !== JSON.stringify(set.dates)) reject("proxy_set_rules_mismatch", "dates do not match the rules and range");
   const records = await deps.journal.findByProxySetId(proxySetId);
   if (!records.some((r) => r.rules_sha256 === set.rules_sha256)) {
     reject("proxy_set_not_journaled", `no computation journal record names ${proxySetId}`);
@@ -239,6 +239,11 @@ export async function buildProxySetForecastSet(proxySetId: string, input: unknow
     if (list && list.length !== count) {
       reject("join_length_mismatch", `${name} has ${list.length} entries for the ${count} dates from ${request.from_date} to ${request.to_date}`);
     }
+  }
+  // A run of dropped days has no proxy at all; without this, the forecast set's copy rule would reject it as a
+  // secondary identical to the primary, which misnames the problem (code review C6).
+  if (proxy.drop_cause.slice(start, end + 1).every((cause) => cause !== null)) {
+    reject("join_run_has_no_kept_day", `every date from ${request.from_date} to ${request.to_date} was dropped`);
   }
   const run = <T>(list: T[]) => list.slice(start, end + 1);
   return {

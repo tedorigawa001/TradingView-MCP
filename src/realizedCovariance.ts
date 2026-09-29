@@ -42,6 +42,17 @@ export interface RealizedCovarianceInput {
 const iso = (ms: number) => new Date(ms).toISOString();
 const reject = (code: string, detail: string): never => { throw new RealizedCovarianceError(code, detail); };
 
+/** The first index whose value is at least `target`, in an ascending array. */
+function lowerBound(sorted: ArrayLike<number>, target: number): number {
+  let low = 0, high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (sorted[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
 /** Nearest-rank quantile of a sorted array. */
 const nearestRank = (sorted: number[], q: number) => sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)];
 
@@ -71,21 +82,25 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
       + coverage.map((c) => `${c.series_id} ${c.first_bar}..${c.last_bar}`).join(", "));
   }
 
-  // Valid closes on a dense grid index, (open − first open) / interval; NaN marks a missing bar or a close that
-  // is null or not positive (design "Bar series artifact"). Bars are on the grid, so the index is exact.
+  // The valid closes inside the span the call reads, as sorted slot indexes (open − spanFrom) / interval with
+  // their closes. Every point the computation reads lies in the span, and memory follows the bars there, never
+  // the series' whole extent or the span's length (code review C3). NaN marks a missing bar or a close that is
+  // null or not positive (design "Bar series artifact"). Bars are on the grid, so the index is exact.
   const grids = input.series.map(({ bars }) => {
-    const first = bars.open_time[0] * 1000;
-    const values = new Float64Array((bars.open_time[bars.open_time.length - 1] * 1000 - first) / step + 1).fill(Number.NaN);
-    bars.open_time.forEach((t, i) => {
-      const close = bars.close[i];
-      if (typeof close === "number" && close > 0) values[(t * 1000 - first) / step] = close;
-    });
-    return { first, values };
+    const slots: number[] = [], values: number[] = [];
+    for (let b = lowerBound(bars.open_time, spanFrom / 1000); b < bars.open_time.length && bars.open_time[b] * 1000 < spanTo; b++) {
+      const close = bars.close[b];
+      if (typeof close === "number" && close > 0) {
+        slots.push((bars.open_time[b] * 1000 - spanFrom) / step);
+        values.push(close);
+      }
+    }
+    return { slots: Float64Array.from(slots), values: Float64Array.from(values) };
   });
   const closeAt = (series: number, at: number) => {
-    const { first, values } = grids[series];
-    const index = (at - first) / step;
-    return index >= 0 && index < values.length ? values[index] : Number.NaN;
+    const { slots, values } = grids[series];
+    const found = lowerBound(slots, (at - spanFrom) / step);
+    return found < slots.length && slots[found] === (at - spanFrom) / step ? values[found] : Number.NaN;
   };
   const allValid = (at: number) => grids.every((_, i) => !Number.isNaN(closeAt(i, at)));
   const scale = rules.return_unit === "log_percent" ? 100 : 1;

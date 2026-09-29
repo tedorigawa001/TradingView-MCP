@@ -85,8 +85,9 @@ run of the proxy set's, with equal n, series, windows, primary and secondary. An
 instead of escaping the 5% drop rule. `search` then adds the rule-variant counts
 ([Search](#search)). Other sources never read the proxy-set store or the computation journal.
 
-A set stored by 0.1.14 or earlier with a `proxy-set:` source reads as before, but fails with
-`proxy_set_not_found` unless a matching proxy set exists.
+A set stored by 0.1.14 or earlier with a `proxy-set:` source reads as before, but its comparison
+fails: with `proxy_set_mismatch` when the text after `proxy-set:` is not the hex of
+`source_sha256`, otherwise with `proxy_set_not_found` unless a matching proxy set exists.
 
 ### Secondary copies
 

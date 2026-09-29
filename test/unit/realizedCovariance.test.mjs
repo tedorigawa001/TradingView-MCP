@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { computeRealizedCovariance, REALIZED_COVARIANCE_LIMITATIONS, FIRST_INTERVAL_LIMITATION } from '../../build/realizedCovariance.js';
 import { canonicalizeRules } from '../../build/realizedCovarianceRules.js';
 import { normalizeBarSeries } from '../../build/barSeries.js';
+import { normalizeProxySet } from '../../build/proxySet.js';
 
 // Independent numpy reference over fixed-offset calendars (plan section 3b). Exact fields must match exactly;
 // RC and daily_outer to relative 1e-12, since numpy's summation order and log can differ by an ulp.
@@ -212,4 +213,63 @@ test('modal local times break ties toward the earlier time', () => {
   const both = computeRealizedCovariance({ rules, rules_sha256, from_date: '2026-01-05', to_date: '2026-01-12', series });
   const mondays = both.diagnostics[0].modal_local_times.find((m) => m.weekday === 1);
   assert.deepEqual([mondays.dates, mondays.first_bar], [2, '00:00']);
+});
+
+test('regression goldens: rules hashes, proxy-set IDs and the bits of the first kept day (plan section 3d)', () => {
+  // Pinned from the step 8 build on Node 24. A change here changes every ID for the same bars and rules.
+  const bits = (x) => { const b = Buffer.alloc(8); b.writeDoubleBE(x); return b.toString('hex'); };
+  const pick = (v) => (typeof v === 'number' ? [bits(v)] : [bits(v[0][0]), bits(v[0][1]), bits(v[1][1])]);
+  const GOLDEN = {
+    A_100_shaped: ['sha256:5e1a2a693fa3476bb3debe5f3acf044b879fc00a3f7419b740801c666de46346',
+      'sha256:75ee68c3142e297811477dc5083bd3a4bf5a174ef9c93fc7c6c5af23976fa7b9',
+      ['3faa74fb742a477d', 'bf8917ca123eaadf', '3fb568087e274499'], ['3fb2534e41f42853', 'bfc6685ccd9cfcde', '3fdb663892dfe37a']],
+    B_within_day_log: ['sha256:c921334fe9f0ddeefcf41e730cc04ad2ea4ed6665f0968b8fac63ad44c7bc82a',
+      'sha256:9dee5f04052f47052899bd7c4dd65f952d4a0e57f0220c31759bcc0ae5fd0c53',
+      ['3ed59c11675a2b32', 'beb4073d69f18f36', '3ee1665cd02c3a30'], ['3ee06de520c47c80', 'bef3f38871c36b92', '3f083a759bb4c880']],
+    D_tokyo_0700: ['sha256:1acae4b7ef9fe01e3220e1f8c0a4ca77d4d0d4b9e0df19d212d6a910e3f78b18',
+      'sha256:46de8aee69d591ae146abcdd7b5b27dd51397b3348be9a5bc3c4ab721865386a',
+      ['3fb5831b266f89bf', '3f6bc547576edf5f', '3f6a2e3126e21dc6'], ['3fd22fffef9d8b4f', 'bfa1bf6ff91be0b8', '3f715198a879d8c2']],
+  };
+  for (const [name, [rulesSha, proxySetId, rcBits, outerBits]] of Object.entries(GOLDEN)) {
+    const r = run(REFERENCE.scenarios.find((s) => s.name === name));
+    assert.equal(r.proxy.rules_sha256, rulesSha, `${name} rules_sha256`);
+    assert.equal(normalizeProxySet(r.proxy).artifact_id, proxySetId, `${name} proxy_set_id`);
+    assert.equal(r.proxy.drop_cause[0], null, `${name} keeps its first day`);
+    assert.deepEqual(pick(r.proxy.rc[0]), rcBits, `${name} rc bits`);
+    assert.deepEqual(pick(r.proxy.daily_outer[0]), outerBits, `${name} daily_outer bits`);
+  }
+});
+
+test('a day lacking both its endpoint and the previous one is no_endpoint: the first cause wins', () => {
+  // A_100_shaped already lacks Wednesday 2026-01-14's endpoint. Removing Thursday's endpoint bar (16:30 New York)
+  // from one series leaves Thursday without both; Friday then lacks only the previous endpoint.
+  const scenario = REFERENCE.scenarios.find((s) => s.name === 'A_100_shaped');
+  const thursdayEndpoint = Date.parse('2026-01-15T21:30:00.000Z') / 1000;
+  const [first, ...rest] = scenario.series;
+  const keep = first.open_time.map((t) => t !== thursdayEndpoint);
+  const trimmed = { ...first, open_time: first.open_time.filter((_, i) => keep[i]), close: first.close.filter((_, i) => keep[i]) };
+  const r = run({ ...scenario, series: [trimmed, ...rest] });
+  assert.deepEqual(r.proxy.dates.slice(6, 9), ['2026-01-14', '2026-01-15', '2026-01-16']);
+  assert.deepEqual(r.proxy.drop_cause.slice(6, 9), ['no_endpoint', 'no_endpoint', 'no_previous_endpoint']);
+});
+
+test('bars outside the span read are ignored: a 1970-2099 M1 series computes one day from its own bars (code review C3)', () => {
+  // The dense grid used to follow each series' whole extent: 547 MB per series here. Now only the day's bars count.
+  const { rules, rules_sha256 } = canonicalizeRules({ interval_minutes: 1, time_zone: 'UTC', day_end_local: '00:00',
+    day_weekdays: [1, 2, 3, 4, 5, 6, 7], max_missing_slots: 0, first_interval: 'within_day', return_unit: 'log' });
+  const day = Date.UTC(2026, 2, 2) / 1000;
+  const spec = (id, drift) => {
+    const open_time = [0, ...Array.from({ length: 1440 }, (_, k) => day + 60 * k), 4_102_444_740];
+    return bars({ series_id: id, interval_minutes: 1, open_time, close: open_time.map((_, k) => 100 + drift * Math.sin(k)) });
+  };
+  const series = [spec('far:A', 0.01), spec('far:B', 0.02)].map((b, i) => ({ artifact_id: artifact(i), bars: b }));
+  const r = computeRealizedCovariance({ rules, rules_sha256, from_date: '2026-03-02', to_date: '2026-03-02', series });
+  assert.deepEqual([r.summary.kept_days, r.proxy.common_slots[0], r.proxy.expected_slots[0]], [1, 1440, 1440]);
+  assert.deepEqual(r.diagnostics.map((d) => [d.first_bar, d.last_bar, d.invalid_closes]),
+    [0, 1].map(() => ['1970-01-01T00:00:00.000Z', '2099-12-31T23:59:00.000Z', 0]));
+  // The same day computed from the day's bars alone gives the same proxies.
+  const alone = (b) => ({ ...b, open_time: b.open_time.slice(1, -1), close: b.close.slice(1, -1) });
+  const bare = computeRealizedCovariance({ rules, rules_sha256, from_date: '2026-03-02', to_date: '2026-03-02',
+    series: series.map((s) => ({ ...s, bars: alone(s.bars) })) });
+  assert.deepEqual([r.proxy.rc, r.proxy.daily_outer], [bare.proxy.rc, bare.proxy.daily_outer]);
 });

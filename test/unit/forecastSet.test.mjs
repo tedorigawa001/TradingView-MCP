@@ -10,6 +10,7 @@ import {
   PROXY_SET_SOURCE_PREFIX, ENTRY_RESERVED_SERIES_PREFIXES, RESERVED_SERIES_PREFIXES,
 } from '../../build/forecastSet.js';
 import { importForecastSet } from '../../build/forecastSetCli.js';
+import { posixModeEnforced } from '../../build/fsDurability.js';
 
 const day = (i) => new Date(Date.UTC(2024, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
 // FX-style windows: [D-1 21:00Z, D 21:00Z).
@@ -214,9 +215,12 @@ test('the store refuses a symlinked artifact and a group-readable directory', as
   await assert.rejects(store.get(artifact_id), /symlink|regular file/);
   await unlink(path);
   await store.register(scalarSet());
-  await chmod(sets, 0o750);
-  await assert.rejects(store.get(artifact_id), /owner-only/);
-  await chmod(sets, 0o700);
+  // POSIX modes only: Windows has no owner-only mode bits, and the stores skip the check there.
+  if (posixModeEnforced()) {
+    await chmod(sets, 0o750);
+    await assert.rejects(store.get(artifact_id), /owner-only/);
+    await chmod(sets, 0o700);
+  }
   assert.deepEqual(await store.get(artifact_id), normalizeForecastSet(scalarSet()).set);
 });
 

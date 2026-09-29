@@ -8,6 +8,7 @@ import {
   BarSeriesStore, normalizeBarSeries, BAR_SERIES_MAX_BARS, BAR_SERIES_MAX_OPEN_TIME,
 } from '../../build/barSeries.js';
 import { importBarSeries } from '../../build/barSeriesCli.js';
+import { posixModeEnforced } from '../../build/fsDurability.js';
 
 // 2024-01-08 (a Monday) 21:45Z, on the 15-minute grid.
 const T0 = Date.UTC(2024, 0, 8, 21, 45) / 1000;
@@ -98,9 +99,12 @@ test('the store registers immutably, is idempotent, and refuses tampering, symli
   await assert.rejects(store.get(first.artifact_id), /symlink|regular file/);
   await unlink(path);
   await store.register(series());
-  await chmod(bars, 0o750);
-  await assert.rejects(store.get(first.artifact_id), /owner-only/);
-  await chmod(bars, 0o700);
+  // POSIX modes only: Windows has no owner-only mode bits, and the stores skip the check there.
+  if (posixModeEnforced()) {
+    await chmod(bars, 0o750);
+    await assert.rejects(store.get(first.artifact_id), /owner-only/);
+    await chmod(bars, 0o700);
+  }
   await assert.rejects(store.get('not-a-hash'));
   // A file whose bytes hash to its own name, but which is not the canonical form (keys reordered), is refused.
   const reordered = JSON.stringify({ close: series().close, ...series() });

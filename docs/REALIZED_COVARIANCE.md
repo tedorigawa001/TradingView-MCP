@@ -110,8 +110,8 @@ returns both.
 - **Window ends and starts.** e(D) = b(D) when m ≥ `interval_minutes`, else b(D + 1); s(D) = e(D − 1).
   Tokyo 07:00, for example, gives s(D) = D−2 22:00Z and e(D) = D−1 22:00Z.
 - **Produced days** are the labels D in [`from_date`, `to_date`] whose ISO weekday is in
-  `day_weekdays`, at most 5,000. P(D) is the previous produced label, which may lie before
-  `from_date`.
+  `day_weekdays`, at most 5,000. Both dates must lie from 1970-01-01 to 2099-12-31. P(D) is the
+  previous produced label, which may lie before `from_date`.
 
 ### Call validation
 
@@ -122,7 +122,7 @@ Each of these rejects the whole call with an error `<code>: <detail>`:
 | `invalid_rules` | `day_weekdays` repeats a weekday. Other schema violations are argument errors. |
 | `interval_mismatch` | `interval_minutes` does not divide 1440, or differs from a series' interval |
 | `unknown_time_zone`, `time_zone_case_variant` | The zone is unknown, or a case variant (above) |
-| `invalid_date_range` | A date is not a calendar date, or `from_date` is after `to_date` |
+| `invalid_date_range` | A date is not a calendar date from 1970-01-01 to 2099-12-31 (the bar-series time range), or `from_date` is after `to_date` |
 | `no_produced_days` | No date in the range has a weekday in `day_weekdays` |
 | `too_many_dates` | More than 5,000 produced days |
 | `boundary_not_on_grid` | A boundary the call uses is not on the bar grid in UTC. Asia/Kolkata 17:00 is 11:30Z, off a 60-minute grid; America/New_York 16:00 with 120-minute bars is on the grid in summer but not in winter. |
@@ -214,7 +214,8 @@ Fields appear in this order:
 6. `search`, `period_usage` (see [Records](#records));
 7. `limitations`.
 
-Per-day values are never returned; they are in the proxy set. With 8 series, modal times for every
+Per-day values are never returned; they are in the proxy set. Memory follows the bars inside the
+span the call reads, not the series' whole extent. With 8 series, modal times for every
 weekday, all 28 series pairs identical and a saturated prior-overlap summary, the response is about
 33 KB.
 
@@ -366,6 +367,7 @@ The join verifies the proxy set, then builds a forecast set with `source_id` `pr
 - `join_range_not_contiguous`: `from_date` or `to_date` is not a date of the proxy set, or they are
   out of order;
 - `join_length_mismatch`: `a`, `b` or `labels` does not have one entry per date of the run;
+- `join_run_has_no_kept_day`: every date of the run was dropped, so it has no proxy;
 - any verification error above, and the forecast-set schema errors.
 
 **The effective join limit is about 4,000 dates at n = 8.** A joined set must fit the 24 MiB
@@ -391,15 +393,16 @@ drop rule. Its `search` then adds `proxy_rule_variants` and `proxy_bar_series_ve
 over the computation journal as above, tracked or untracked.
 
 **Stored `proxy-set:` sets fail closed.** A set stored by 0.1.14 or earlier with a `proxy-set:`
-source (then an ordinary string) reads as before, but its comparison fails with
-`proxy_set_not_found` unless a matching proxy set exists.
+source (then an ordinary string) reads as before, but its comparison fails: with
+`proxy_set_mismatch` when the text after `proxy-set:` is not the hex of `source_sha256`, otherwise
+with `proxy_set_not_found` unless a matching proxy set exists.
 
 ## Performance
 
 `node scripts/benchmark-realized-covariance.mjs` (after `npm run build`) uses 8 series of about
 479,000 M15 bars each (3.8 million closes, 5,000 Mon–Fri days). On the development machine:
 - importing the 8 series took about 2.0 s, and reading them back with the hash check 0.9 s;
-- the computation took about 0.54 s, and normalizing and storing the 13.3 MiB proxy set 0.4 s;
+- the computation took about 1.0 s, and normalizing and storing the 13.3 MiB proxy set 0.4 s;
 - journaling after 21,000 records (30 MiB) took about 0.35 s;
 - re-deriving 5,000 days took about 70 ms, and the whole verification, including that journal,
   about 0.48 s;

@@ -108,6 +108,9 @@ test('join errors: the range, the lengths, identical series and the verification
     [{ ...forecasts(proxy, 0, 4), b: forecasts(proxy, 0, 5).b }, /join_length_mismatch: b has 6 entries for the 5 dates/],
     [forecasts(proxy, 0, 4, { labels: ['x', 'y'] }), /join_length_mismatch: labels has 2 entries/],
     [forecasts(proxy, 0, 1, { a: [1, 2] }), /is a scalar but n = 2/],
+    // Proxy dates 6 and 7 are both dropped (a holiday and the day after it), and so is 6 alone.
+    [forecasts(proxy, 6, 7, { a: [null, null], b: [null, null] }), /join_run_has_no_kept_day: every date from 2026-01-14 to 2026-01-15/],
+    [forecasts(proxy, 6, 6, { a: [null], b: [null] }), code('join_run_has_no_kept_day')],
     [{ ...forecasts(proxy, 0, 1), source_id: 'x' }, /unrecognized|source_id/i],
   ];
   for (const [input, expected] of cases) await assert.rejects(stores.join(id, input), expected, JSON.stringify(input).slice(0, 120));

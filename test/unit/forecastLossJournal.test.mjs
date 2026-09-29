@@ -9,6 +9,7 @@ import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap, P
 import { BACKTEST_LEDGER_MAX_BYTES } from '../../build/backtestLedger.js';
 import { normalizeForecastSet } from '../../build/forecastSet.js';
 import { ResearchPeriodUsageStore } from '../../build/researchPeriodUsage.js';
+import { posixModeEnforced } from '../../build/fsDurability.js';
 
 const sha = (text) => 'sha256:' + createHash('sha256').update(text).digest('hex');
 const day = (i) => new Date(Date.UTC(2021, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
@@ -59,7 +60,7 @@ test('one record per call with the design fields (M2), owner-only', async (t) =>
   assert.deepEqual(record.envelope, { from: '2020-12-31T22:00:00.000Z', to: '2021-01-30T22:00:00.000Z' });
   assert.deepEqual(record.envelope, forecastSetEnvelope(call.set));
   assert.equal(record.battery_outcome, 'conflicts_found');
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (posixModeEnforced()) assert.equal((await stat(path)).mode & 0o777, 0o600);   // Windows has no POSIX mode bits
   assert.deepEqual(result.this_research_id, { calls: 1, distinct_a_for_same_b_primary_dates: 1, distinct_label_sets: 1,
     distinct_secondaries: 1, distinct_losses: 1, earlier_no_listed_conflict: 0 });
   assert.equal(result.overlapping_data.calls, 1);
