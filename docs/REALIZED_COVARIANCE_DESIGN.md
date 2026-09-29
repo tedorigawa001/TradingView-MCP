@@ -1,4 +1,4 @@
-# compute_realized_covariance: design memo (rev 2.2, design review approved; not implemented)
+# compute_realized_covariance: design memo (rev 2.3, design review approved; not implemented)
 
 Backlog #101, item 4.
 
@@ -9,8 +9,10 @@ Review history:
 - rev 2.1 (diff check): APPROVE WITH FINDINGS, MEDIUM H1 and LOW H2–H6, commit approved after
   the H1 and H2 text edits.
 
-Rev 2 folded in F1–F17, rev 2.1 folded in G1–G10, and rev 2.2 folds in H1–H6, with the user's
-decisions of 2026-09-29 (section "Decisions"). Nothing is implemented.
+Rev 2 folded in F1–F17, rev 2.1 folded in G1–G10, and rev 2.2 folded in H1–H6, with the user's
+decisions of 2026-09-29 (section "Decisions"). Rev 2.3 makes three clarifications from the plan
+review and its diff check (Q1, Q4, Q6, R1): the identical-series definition, the verification
+error rules, and the conditional limitation. Nothing is implemented.
 
 ## Problem
 
@@ -320,8 +322,14 @@ tradingview-mcp-import-forecast-set --proxy-set <id> --input <forecasts.json> --
     the single-λ input rule nor the near-copy share fires.
   - Forecasts fitted to such proxies pass Cholesky only through rounding, giving
     rounding-dominated log-determinants.
-  - The proxy set therefore stores `identical_close_pairs`: index pairs of series whose valid
-    closes are identical at every slot the call read.
+  - The proxy set therefore stores `identical_close_pairs` (plan review Q1): index pairs i < j
+    whose closes are bitwise equal at every point used by a kept day, that is every P₀ and
+    P₁…P_m.
+    - Non-slot bars never enter the steps. So a copy with one bar deleted, or with the weekend or
+      Friday 16:45 bars stripped, still gives exactly singular RC, and this definition still
+      catches it.
+    - Scaled or inverted copies (c·A, 1/A) give near-singular proxies and are not caught. The docs
+      say so.
   - The join CLI refuses a proxy set whose list is non-empty (`proxy_set_has_identical_series`).
     The tool still computes and reports it, since the proxies themselves are well defined.
 
@@ -335,13 +343,20 @@ that needs no bars:
 - the computation journal holds a record naming this `proxy_set_id` with the same `rules_sha256`
   (`proxy_set_not_journaled` otherwise).
 
-Failures are errors with no statistics:
-- `proxy_set_not_found`;
-- `proxy_set_rules_mismatch` (hash, dates or expected slots);
-- `proxy_set_windows_changed_under_current_tzdata` (H4): windows re-derived under the current
-  tzdata differ, while the journal records another tzdata version. The error carries both
-  versions, so drift is distinguishable from tampering;
-- `proxy_set_not_journaled`.
+Failures are errors with no statistics. The first failing check gives the error (Q4, R1):
+1. `proxy_set_not_found`.
+2. `proxy_set_rules_mismatch` if `rules_sha256` or `dates` differ. Neither can change with tzdata.
+3. `proxy_set_not_journaled` if no journal record names this ID with the same `rules_sha256`.
+4. Windows and `expected_slots` are re-derived under the current tzdata. They may differ, or
+   re-derivation may throw (for example because a boundary now falls in a gap):
+   - if no journal record for this ID carries the current tzdata version, the error is
+     `proxy_set_windows_changed_under_current_tzdata` (H4). A version of `unknown` never counts
+     as equal. The error carries the journal's versions and the current one, so drift is
+     distinguishable from tampering;
+   - otherwise it is `proxy_set_rules_mismatch`.
+
+A moved boundary usually changes a day's expected slots too (for example 92 against 96), which is
+why slot counts belong to step 4 and not to step 2.
 
 **Limits of the check:**
 - Values edited directly in the owner-only store, with a matching hash and a forged journal line,
@@ -464,12 +479,12 @@ tuples in the computation journal, over the same series and overlapping envelope
   `research_id`), next to `search.status: untracked`.
 - Rule shopping is then visible where the comparison is read.
 
-### Limitations (always returned)
+### Limitations (always returned, except the one marked conditional)
 
 - `realized_covariance_is_a_noisy_proxy_not_the_true_covariance`
 - `rules_are_caller_asserted_research_choices`
 - `missing_bars_widen_intervals_no_fill`
-- `first_interval_spans_non_slot_bars` (with `from_previous_endpoint`)
+- `first_interval_spans_non_slot_bars` (conditional: returned only with `from_previous_endpoint`)
 - `bar_timestamps_assumed_open_time`
 - `holidays_cascade_with_from_previous_endpoint`
 - `tzdata_version_reported_not_pinned`
@@ -487,7 +502,8 @@ tuples in the computation journal, over the same series and overlapping envelope
    `a`, `b`, `evidence_tier`, `labels`) (G9).
 4. **compare_forecast_losses:**
    - verifies proxy-set sources before any record (`proxy_set_not_found`,
-     `proxy_set_rules_mismatch`, `proxy_set_not_journaled`, `proxy_set_mismatch`);
+     `proxy_set_rules_mismatch`, `proxy_set_not_journaled`,
+     `proxy_set_windows_changed_under_current_tzdata`, `proxy_set_mismatch`);
    - adds `proxy_rule_variants` and `proxy_bar_series_versions` to its search;
    - ServerDeps gains the proxy-set store and read access to the computation journal;
    - its description string and docs/FORECAST_LOSS_COMPARISON.md are updated for the window rule,
