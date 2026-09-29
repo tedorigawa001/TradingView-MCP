@@ -9263,3 +9263,110 @@ test('compute_realized_covariance: 8 series of maximal IDs, every weekday, 28 id
   assert.ok(bytes < 64 * 1024, `${bytes} bytes`);
   t.diagnostic(`response ${bytes} bytes`);
 });
+
+// compare_forecast_losses on proxy-set sources (docs/REALIZED_COVARIANCE_PLAN.md, step 7): the proxy set comes from
+// compute_realized_covariance and the forecast set from the --proxy-set join, end to end.
+async function joinedForecastSet(t) {
+  const stores = await rcStores(t);
+  const { ForecastSetStore } = await import('../../build/forecastSet.js');
+  const { ForecastLossJournalStore } = await import('../../build/forecastLossJournal.js');
+  const { importForecastSet } = await import('../../build/forecastSetCli.js');
+  stores.paths.sets = join(stores.dir, 'sets');
+  stores.paths.loss = join(stores.dir, 'loss.jsonl');
+  stores.forecastSets = new ForecastSetStore(stores.paths.sets);
+  stores.forecastLossJournal = new ForecastLossJournalStore(stores.paths.loss);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const rc = await rcClient(t, rcStoreDeps(stores));
+  const computed = await rc.call(args);
+  const proxy = await stores.proxySets.get(computed.proxy_set_id);
+  const input = join(stores.dir, 'forecasts.json');
+  await writeFile(input, JSON.stringify({ schema_version: '1.0', evidence_tier: 'historical_exploration',
+    from_date: proxy.dates[0], to_date: proxy.dates[8],   // 2026-01-06 to 2026-01-16, a sub-range
+    a: proxy.dates.slice(0, 9).map((_, i) => [[1e-3 * (1 + (i % 3)), 0], [0, 2e-3]]), b: proxy.dates.slice(0, 9).map(() => [[2e-3, 0], [0, 1e-3]]) }));
+  const { artifact_id } = await importForecastSet(['--proxy-set', computed.proxy_set_id, '--input', input, '--confirm-local-import'],
+    { store: stores.forecastSets, proxySets: stores.proxySets, journal: stores.realizedCovarianceJournal });
+  const deps = { forecastSets: stores.forecastSets, forecastLossJournal: stores.forecastLossJournal, researchPeriodUsage: stores.researchPeriodUsage,
+    proxySets: stores.proxySets, realizedCovarianceJournal: stores.realizedCovarianceJournal };
+  return { stores, args, rc, computed, proxy, artifact_id, deps };
+}
+
+test('compare_forecast_losses verifies a joined proxy set and counts its rule variants and bar versions, tracked and untracked', async (t) => {
+  const { stores, args, rc, computed, artifact_id, deps } = await joinedForecastSet(t);
+  await rc.call({ ...args, rules: { ...args.rules, max_missing_slots: 5 } });   // a rule variant on the same bars
+  // Another variant on a later, non-overlapping range is not counted (it reads from 2026-01-23 21:30Z).
+  await rc.call({ ...args, from_date: '2026-01-26', rules: { ...args.rules, max_missing_slots: 4 } });
+  const { call } = await forecastClient(t, deps);
+  const untracked = await call({ artifact_id, loss: 'mse' });
+  assert.deepEqual(untracked.search, { status: 'untracked', proxy_rule_variants: 2, proxy_bar_series_versions: 1,
+    limitations: ['search_count_is_not_tracked'] });
+  const tracked = await call({ artifact_id, loss: 'mse', research_id: 'study:joined' });
+  assert.deepEqual(Object.keys(tracked.search).slice(-3), ['proxy_rule_variants', 'proxy_bar_series_versions', 'period_usage_prior_overlap']);
+  assert.deepEqual([tracked.search.status, tracked.search.proxy_rule_variants, tracked.search.proxy_bar_series_versions], ['tracked', 2, 1]);
+  // The source record is forecast-set-source: + sha256("proxy-set:<hex>"), computable from the proxy-set ID.
+  const usage = await jsonLines(stores.paths.usage);
+  assert.equal(usage[0].series_id, `forecast-set-source:${(await rcSha(`proxy-set:${computed.proxy_set_id.slice(7)}`)).slice(7)}`);
+  assert.deepEqual(usage.slice(1).map((row) => row.series_id), ['fx:EURUSD', 'fx:USDJPY']);
+  // A re-imported bar series computed over the same data is another version.
+  const ref = await rcReference();
+  const reimported = (await stores.barSeries.register(rcBarInput(ref.bar_sets.A_100_shaped[1], 15, 'recleaned'))).artifact_id;
+  await rc.call({ ...args, series: [args.series[0], reimported] });
+  assert.equal((await call({ artifact_id, loss: 'mse' })).search.proxy_bar_series_versions, 2);
+  // The description says what the tool now does for these sources.
+  const client = await connectedClient(makeDeps());
+  t.after(() => client.close());
+  const description = (await client.listTools()).tools.find((tool) => tool.name === 'compare_forecast_losses').description;
+  for (const phrase of ['proxy-set:<hex>', '--proxy-set join', 'proxy_rule_variants and proxy_bar_series_versions']) {
+    assert.ok(description.includes(phrase), phrase);
+  }
+});
+
+test('compare_forecast_losses: a proxy-set source that fails verification writes nothing and returns no statistics', async (t) => {
+  const { stores, artifact_id, deps } = await joinedForecastSet(t);
+  const stored = await stores.forecastSets.get(artifact_id);
+  const { labels, ...plain } = stored;
+  // The store API admits proxy-set sources (only the entry points refuse them), so tampered sets can be placed directly.
+  const register = async (patch) => (await stores.forecastSets.register({ ...plain, ...patch })).artifact_id;
+  const kept = stored.primary.findIndex((v) => v !== null);
+  const emptyJournal = new (await import('../../build/realizedCovarianceJournal.js')).RealizedCovarianceJournalStore(join(stores.dir, 'empty.jsonl'));
+  const cases = [
+    ['edited primary', await register({ primary: stored.primary.map((v, i) => (i === kept ? [[v[0][0] * 2, v[0][1]], [v[1][0], v[1][1]]] : v)) }),
+      deps, /proxy_set_mismatch: the forecast set differs from its proxy set in primary/],
+    ['deleted date', await register(Object.fromEntries(['dates', 'windows', 'a', 'b', 'primary', 'secondary']
+      .map((k) => [k, stored[k].filter((_, i) => i !== 2)]))), deps, /proxy_set_mismatch: .*contiguous run/],
+    ['hex mismatch', await register({ source_sha256: 'sha256:' + 'e'.repeat(64) }), deps, /proxy_set_mismatch: source_id and source_sha256/],
+    ['not journaled', artifact_id, { ...deps, realizedCovarianceJournal: emptyJournal }, /proxy_set_not_journaled/],
+  ];
+  for (const [name, id, clientDeps, pattern] of cases) {
+    const { raw } = await forecastClient(t, clientDeps);
+    const response = await raw({ artifact_id: id, loss: 'mse', research_id: 'study:tamper' });
+    assert.equal(response.isError, true, name);
+    assert.match(response.content[0].text, pattern, name);
+    assert.doesNotMatch(response.content[0].text, /battery_outcome|dbar/, name);
+  }
+  // The injected resolver reaches the verification: tzdata drift that moves the boundaries fails closed (H4, H6).
+  const { intlZoneResolver } = await import('../../build/zonedTime.js');
+  const drifted = await forecastClient(t, { ...deps,
+    zoneResolver: { tzdata: 'test-2099z', formatAt: (zone, ms) => intlZoneResolver.formatAt(zone, ms + 3_600_000) } });
+  const drift = await drifted.raw({ artifact_id, loss: 'mse', research_id: 'study:tamper' });
+  assert.match(drift.content[0].text, /proxy_set_windows_changed_under_current_tzdata/);
+  assert.deepEqual([(await jsonLines(stores.paths.usage)).length, (await jsonLines(stores.paths.loss)).length], [0, 0], 'no record before verification');
+});
+
+test('compare_forecast_losses: a stored 0.1.14 set with a proxy-set: source fails closed with proxy_set_not_found (Q6)', async (t) => {
+  const stores = await rcStores(t);
+  const { ForecastSetStore } = await import('../../build/forecastSet.js');
+  const { ForecastLossJournalStore } = await import('../../build/forecastLossJournal.js');
+  const { mkdir } = await import('node:fs/promises');
+  const golden = JSON.parse(await readFile(new URL('../fixtures/forecast-set/format-0.1.14.json', import.meta.url), 'utf8'))
+    .goldens.find((g) => g.name === 'proxy_set_source');
+  const sets = join(stores.dir, 'sets');
+  await mkdir(sets, { mode: 0o700 });
+  await writeFile(join(sets, `${golden.artifact_id.slice(7)}.json`), golden.body, { mode: 0o600 });
+  const loss = join(stores.dir, 'loss.jsonl');
+  const { raw } = await forecastClient(t, { forecastSets: new ForecastSetStore(sets), forecastLossJournal: new ForecastLossJournalStore(loss),
+    researchPeriodUsage: stores.researchPeriodUsage, proxySets: stores.proxySets, realizedCovarianceJournal: stores.realizedCovarianceJournal });
+  const response = await raw({ artifact_id: golden.artifact_id, loss: 'mse', research_id: 'study:old' });
+  assert.equal(response.isError, true);
+  assert.match(response.content[0].text, /proxy_set_not_found/);
+  assert.deepEqual([(await jsonLines(stores.paths.usage)).length, (await jsonLines(loss)).length], [0, 0]);
+});

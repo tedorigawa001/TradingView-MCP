@@ -6,14 +6,14 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
-import { ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
+import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
 import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
 import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import { BarSeriesStore, type BarSeries } from "./barSeries.js";
-import { ProxySetStore, normalizeProxySet } from "./proxySet.js";
+import { ProxySetStore, normalizeProxySet, verifyForecastSetAgainstProxySet } from "./proxySet.js";
 import { REALIZED_COVARIANCE_SEARCH_LIMITATIONS, RealizedCovarianceJournalStore } from "./realizedCovarianceJournal.js";
 import { computeRealizedCovariance } from "./realizedCovariance.js";
 import { RealizedCovarianceError, canonicalizeRules, realizedCovarianceRulesSchema } from "./realizedCovarianceRules.js";
@@ -5623,6 +5623,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "the breakdown count k*, a secondary proxy and a centred stationary bootstrap. " +
         "battery_outcome no_listed_conflict means only that the listed sign checks did not flip; it is never evidence of superiority. " +
         "Pass exactly one of artifact_id (registered with tradingview-mcp-import-forecast-set) or inline_set (scalar, at most 2,000 dates, same schema). " +
+        "A set whose source_id is proxy-set:<hex> (written only by the import CLI's --proxy-set join) is first verified against its stored, " +
+        "journaled proxy set, and fails without statistics on any difference; its search adds proxy_rule_variants and proxy_bar_series_versions, " +
+        "the realized covariance rule variants and bar-series versions on overlapping data. " +
         "Optional research_id writes period usage for each underlying series and the set source, then an exploration journal entry, before returning; " +
         "search then counts calls under this research_id and calls under any research_id on overlapping data. " +
         "Without research_id the outcome is at most no_listed_conflict_untracked and nothing is written. " +
@@ -5645,9 +5648,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const loaded = artifact_id !== undefined
           ? { set: await forecastSets.get(artifact_id), artifact_id }
           : normalizeInlineForecastSet(inline_set);
+        // A proxy-set source is verified against its proxy set before anything else (realized covariance design F2,
+        // G6), and its search counts the rule variants and bar versions behind the proxies (G8). These are read-only
+        // counts, so they are reported untracked too. Other sources never touch the proxy-set store or the journal.
+        let proxyCounts: { proxy_rule_variants: number; proxy_bar_series_versions: number } | undefined;
+        if (loaded.set.source_id.startsWith(PROXY_SET_SOURCE_PREFIX)) {
+          await verifyForecastSetAgainstProxySet(loaded.set, { proxySets, journal: realizedCovarianceJournal, resolver: zoneResolver });
+          const counts = await realizedCovarianceJournal.search(loaded.set.underlying_series_ids, forecastSetEnvelope(loaded.set));
+          proxyCounts = { proxy_rule_variants: counts.distinct_rules, proxy_bar_series_versions: counts.distinct_bar_series_versions };
+        }
         const result = compareForecastLosses(loaded.set, { loss, tracked: research_id !== undefined });
         let period_usage: unknown = { status: "untracked", limitations: ["research_id_required_for_automatic_period_usage"] };
-        let search: unknown = { status: "untracked", limitations: ["search_count_is_not_tracked"] };
+        let search: unknown = { status: "untracked", ...proxyCounts, limitations: ["search_count_is_not_tracked"] };
         if (research_id !== undefined) {
           const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
           const base = usage_access_id ?? `forecast-access:${randomUUID()}`;
@@ -5671,7 +5683,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             throw new Error(`forecast loss journal write failed after period usage was recorded as ${base}:0-${series.length - 1}; ` +
               `no statistics returned: ${error instanceof Error ? error.message : String(error)}`);
           }
-          search = { ...journal, period_usage_prior_overlap: summarizePriorOverlap(recorded) };
+          search = { ...journal, ...proxyCounts, period_usage_prior_overlap: summarizePriorOverlap(recorded) };
         }
         const { contract, status, battery_outcome, robustness_conflicts, non_decisive_disagreements, withheld_reasons,
           withheld_reasons_scope, candidateEligible, statistical_calibration, limitations, ...statistics } = result;

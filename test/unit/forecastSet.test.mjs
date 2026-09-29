@@ -166,9 +166,9 @@ test('the import CLI requires both flags and registers the file', async (t) => {
   const { directory, store } = await tempStore(t);
   const input = join(directory, 'set.json');
   await writeFile(input, JSON.stringify(scalarSet()));
-  await assert.rejects(importForecastSet(['--input', input], store), /--confirm-local-import are required/);
-  await assert.rejects(importForecastSet(['--confirm-local-import'], store), /--input/);
-  const result = await importForecastSet(['--input', input, '--confirm-local-import'], store);
+  await assert.rejects(importForecastSet(['--input', input], { store }), /--confirm-local-import are required/);
+  await assert.rejects(importForecastSet(['--confirm-local-import'], { store }), /--input/);
+  const result = await importForecastSet(['--input', input, '--confirm-local-import'], { store });
   assert.equal(result.artifact_id, normalizeForecastSet(scalarSet()).artifact_id);
 });
 
@@ -252,7 +252,7 @@ test('the import CLI rejects a file that is not valid UTF-8 (external review nit
   const text = Buffer.from(JSON.stringify(scalarSet(5, { labels: ['a\uFFFD', 'b', 'a\uFFFD', 'b', 'b'] })));
   const at = text.indexOf(Buffer.from([0xef, 0xbf, 0xbd]));
   await writeFile(input, Buffer.concat([text.subarray(0, at), Buffer.from([0xff]), text.subarray(at + 3)]));
-  await assert.rejects(importForecastSet(['--input', input, '--confirm-local-import'], store), /not valid UTF-8/);
+  await assert.rejects(importForecastSet(['--input', input, '--confirm-local-import'], { store }), /not valid UTF-8/);
 });
 
 // Realized covariance plan, step 1: the released-tool changes, guarded by goldens from the 0.1.14 build.
@@ -315,11 +315,11 @@ test('the entry points reserve proxy-set: sources and proxy-set-source: series; 
   for (const [name, input] of [['source', proxySource], ['series', proxySeries]]) {
     const path = join(directory, `${name}.json`);
     await writeFile(path, JSON.stringify(input));
-    await assert.rejects(importForecastSet(['--input', path, '--confirm-local-import'], store), /reserved/);
+    await assert.rejects(importForecastSet(['--input', path, '--confirm-local-import'], { store }), /reserved/);
   }
   await assert.rejects(readdir(join(directory, 'sets')), { code: 'ENOENT' }, 'nothing was written');
   // An ordinary set still imports through the CLI.
   const ok = join(directory, 'ok.json');
   await writeFile(ok, JSON.stringify(scalarSet(5)));
-  assert.equal((await importForecastSet(['--input', ok, '--confirm-local-import'], store)).artifact_id, normalizeForecastSet(scalarSet(5)).artifact_id);
+  assert.equal((await importForecastSet(['--input', ok, '--confirm-local-import'], { store })).artifact_id, normalizeForecastSet(scalarSet(5)).artifact_id);
 });

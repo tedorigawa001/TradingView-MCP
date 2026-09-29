@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { openExclusiveFile, posixModeEnforced, syncDirectoryEntry } from "./fsDurability.js";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
+import { ENTRY_RESERVED_SERIES_PREFIXES, PROXY_SET_SOURCE_PREFIX, forecastSetInputSchema, type ForecastSet } from "./forecastSet.js";
 import { DROP_CAUSES, REALIZED_COVARIANCE_ALGORITHM, type ProxyValue } from "./realizedCovariance.js";
 import {
   RealizedCovarianceError, canonicalRulesForm, hashRules, planCalendar, producedLabels, realizedCovarianceRulesSchema,
@@ -198,4 +199,90 @@ export async function verifyProxySet(proxySetId: string, deps: {
     reject("proxy_set_rules_mismatch", "windows or expected slots do not match the rules under the tzdata the set was journaled with");
   }
   return set;
+}
+
+type VerificationDeps = Parameters<typeof verifyProxySet>[1];
+
+/** The join's own input (design "Export and join", G9): the caller supplies forecasts for a contiguous run of dates. */
+const joinInputSchema = z.object({
+  schema_version: z.literal("1.0"),
+  evidence_tier: forecastSetInputSchema.shape.evidence_tier,
+  from_date: forecastSetInputSchema.shape.dates.element,
+  to_date: forecastSetInputSchema.shape.dates.element,
+  a: forecastSetInputSchema.shape.a,
+  b: forecastSetInputSchema.shape.b,
+  labels: forecastSetInputSchema.shape.labels,
+}).strict();
+
+/**
+ * The `--proxy-set` join: verify the proxy set, then build a forecast-set input over [from_date, to_date], with
+ * dates, windows, n and series from the proxy set, rc as the primary and daily_outer as the secondary proxy.
+ * Dropped days stay as null proxies. The only path that writes a `proxy-set:` source (G3).
+ */
+export async function buildProxySetForecastSet(proxySetId: string, input: unknown, deps: VerificationDeps) {
+  const request = joinInputSchema.parse(input);
+  const proxy = await verifyProxySet(proxySetId, deps);
+  // H1: identical closes give exactly singular proxies on every day, which forecasts can only match through rounding.
+  if (proxy.identical_close_pairs.length) {
+    reject("proxy_set_has_identical_series", proxy.identical_close_pairs
+      .map(([i, j]) => `${proxy.underlying_series_ids[i]} and ${proxy.underlying_series_ids[j]}`).join("; "));
+  }
+  if (proxy.underlying_series_ids.some((id) => ENTRY_RESERVED_SERIES_PREFIXES.some((prefix) => id.startsWith(prefix)))) {
+    fail("underlying series ID uses a reserved prefix");
+  }
+  const start = proxy.dates.indexOf(request.from_date), end = proxy.dates.indexOf(request.to_date);
+  if (start < 0 || end < start) {
+    reject("join_range_not_contiguous", `from_date and to_date must be dates of the proxy set, in order (${proxy.dates[0]} to ${proxy.dates[proxy.dates.length - 1]})`);
+  }
+  const count = end - start + 1;
+  for (const [name, list] of [["a", request.a], ["b", request.b], ["labels", request.labels]] as const) {
+    if (list && list.length !== count) {
+      reject("join_length_mismatch", `${name} has ${list.length} entries for the ${count} dates from ${request.from_date} to ${request.to_date}`);
+    }
+  }
+  const run = <T>(list: T[]) => list.slice(start, end + 1);
+  return {
+    schema_version: "1.0" as const,
+    source_id: `${PROXY_SET_SOURCE_PREFIX}${proxySetId.slice(7)}`,
+    source_sha256: proxySetId,
+    evidence_tier: request.evidence_tier,
+    horizon: 1 as const,
+    n: proxy.bar_series.length,
+    underlying_series_ids: proxy.underlying_series_ids,
+    dates: run(proxy.dates),
+    windows: run(proxy.windows),
+    a: request.a,
+    b: request.b,
+    primary: run(proxy.rc),
+    secondary: run(proxy.daily_outer),
+    ...(request.labels ? { labels: request.labels } : {}),
+  };
+}
+
+/**
+ * compare_forecast_losses, for a `proxy-set:` source (design "Verification in compare_forecast_losses"): the
+ * source names the proxy set, which verifies, and the forecast set is a contiguous run of it with equal n,
+ * series, windows, primary (rc) and secondary (daily_outer). Runs before any record is written (G6).
+ */
+export async function verifyForecastSetAgainstProxySet(set: ForecastSet, deps: VerificationDeps): Promise<ProxySet> {
+  const hex = set.source_id.slice(PROXY_SET_SOURCE_PREFIX.length);
+  if (set.source_sha256 !== `sha256:${hex}`) reject("proxy_set_mismatch", "source_id and source_sha256 name different proxy sets");
+  const proxy = await verifyProxySet(set.source_sha256, deps);
+  const start = proxy.dates.indexOf(set.dates[0]);
+  const run = <T>(list: T[]) => list.slice(start, start + set.dates.length);
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  if (start < 0 || !same(run(proxy.dates), set.dates)) {
+    reject("proxy_set_mismatch", "the forecast set's dates are not a contiguous run of the proxy set's dates");
+  }
+  // n alone cannot differ once primary matches: only an all-null run would allow it, and the forecast set's copy
+  // rule already rejects a secondary equal to the primary. It stays because the design lists it.
+  const differing = ([
+    ["n", set.n === proxy.bar_series.length],
+    ["underlying_series_ids", same(set.underlying_series_ids, proxy.underlying_series_ids)],
+    ["windows", same(set.windows, run(proxy.windows))],
+    ["primary", same(set.primary, run(proxy.rc))],
+    ["secondary", same(set.secondary, run(proxy.daily_outer))],
+  ] as const).filter(([, equal]) => !equal).map(([name]) => name);
+  if (differing.length) reject("proxy_set_mismatch", `the forecast set differs from its proxy set in ${differing.join(", ")}`);
+  return proxy;
 }
