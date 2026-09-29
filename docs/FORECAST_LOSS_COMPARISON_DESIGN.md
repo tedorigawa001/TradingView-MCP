@@ -10,7 +10,8 @@ Backlog #101, item 2. Review history:
 - re-review: APPROVE WITH FINDINGS, 1 MEDIUM and 4 LOW on the fixes (R-M1, R-L1–R-L4);
 - diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1); final diff check: APPROVE;
 - external review (pasted by the user, 2026-09-29): 3 MEDIUM (EXT-1 to EXT-3), all fixed. Its
-  diff check: REQUEST CHANGES, 1 MEDIUM (EXT-2b) and 2 LOW, all fixed.
+  diff check: REQUEST CHANGES, 1 MEDIUM (EXT-2b) and 2 LOW, all fixed. Final diff check: APPROVE
+  WITH FINDINGS, LOW-A and a top-binade nit, both fixed before the release.
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
@@ -132,6 +133,10 @@ statement of superiority.
     - It also avoids the overflow of mean(d²) that made a strongly significant set
       `hac_variance_not_positive` (LOW-1).
     - An MSE scale sweep is the regression guard.
+  - A nonzero used-day loss below 2^-1022 makes the result `not_evaluable` with reason
+    `loss_below_normal_range`, checked after `non_finite_loss`. Such losses are quantized, so
+    rescaling d cannot help. On a secondary day, such a loss makes the day invalid (LOW-A,
+    found in the final diff check, where no pass could be constructed).
 - **Hard-day diagnostics:**
   - B's mean loss on `a_only_null` days is reported next to B's mean loss on used days.
   - A's mean loss on `b_only_null` days is reported next to A's mean loss on used days.

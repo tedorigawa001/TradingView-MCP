@@ -94,6 +94,9 @@ and each cause.
 The result is `not_evaluable`, with the first matching reason, if:
 - a loss on a used day is not finite (`non_finite_loss`). A loss can overflow even when the
   forecasts and proxies are valid, for example with a proxy of 1e155 under MSE;
+- a loss on a used day is nonzero but below the smallest normal double, 2^-1022
+  (`loss_below_normal_range`). Such losses are quantized to multiples of 2^-1074, so d and DM
+  carry no information; under MSE this happens for inputs of about 1e-154 and smaller;
 - more than 5% of dates are dropped (`more_than_5_percent_of_dates_dropped`);
 - fewer than 100 days are used (`fewer_than_100_used_days`);
 - d̄, the HAC variance or DM is not finite (`hac_variance_not_finite`). S is reported in the
@@ -127,9 +130,12 @@ d = loss(A) − loss(B); lower is better, so negative d favours A.
     range are bit-identical.
   - Without it, tiny losses let S underflow to a subnormal. Under MSE with inputs scaled by 5e-81,
     that gave DM = −∞ and a false pass. Huge losses overflowed in the squares.
-  - d̄ and S are reported in the input units, so for extremely small losses the reported S may
-    underflow to 0 while DM is exact.
-  - A test sweeps MSE inputs from 1e-150 to 1e77 and requires identical decisions.
+  - d̄ and S are reported in the input units, so for very small losses the reported S may
+    underflow to 0. DM is still computed on the rescaled d. DM is exact only while the losses
+    themselves are normal doubles; smaller losses are not evaluable (above).
+  - **Supported range:** losses from 2^-1022 up to where S overflows (d around 1e156).
+  - A test sweeps MSE inputs from 1e-150 to 1e77 and requires identical decisions. At 1e-160 the
+    result is `loss_below_normal_range`, and at 1e100 it is `hac_variance_not_finite`.
 - Φ uses Cody's erfc, which matches scipy to a relative 1e-12 in both tails.
 
 **Favoured side.** `mean_favours` is `A` if p_A < 0.05, `B` if p_B < 0.05, otherwise
@@ -163,7 +169,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 - It is null with `neither`.
 
 **Secondary proxy.**
-- It is evaluated on the used days where it is valid and its losses are finite. More than 5% of
+- It is evaluated on the used days where it is valid and its losses are finite and not below the
+  normal range. More than 5% of
   those dropped makes it `not_evaluable`, as does a mean that is not finite (finite days whose
   sum overflows).
 - `secondary.mean` is the mean d under it.

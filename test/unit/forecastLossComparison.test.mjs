@@ -557,7 +557,32 @@ test('scale sweep: MSE decisions are identical from 1e-150 to 1e77, and fail clo
     }
     assert.deepEqual(compareForecastLosses(scaleSet(set, 1e100), tracked).status,
       { evaluable: false, reason: 'hac_variance_not_finite' }, `${name} at 1e100`);
+    // Below about 1e-154 the losses themselves are subnormal and quantized, so DM is arbitrary (LOW-A).
+    assert.deepEqual(compareForecastLosses(scaleSet(set, 1e-160), tracked).status,
+      { evaluable: false, reason: 'loss_below_normal_range' }, `${name} at 1e-160`);
   }
+});
+
+test('a secondary day whose losses fall below the normal range is an invalid secondary day (LOW-A)', () => {
+  // Tiny forecasts against a tiny secondary on one day: (3e-160 − 2.5e-160)² is subnormal.
+  const base = setFromD(uniform(), { secondary: independentSecondary });
+  const set = { ...base, a: base.a.map((x, i) => (i === 7 ? 3e-160 : x)), b: base.b.map((x, i) => (i === 7 ? 2e-160 : x)),
+    secondary: base.secondary.map((x, i) => (i === 7 ? 2.5e-160 : x)) };
+  const r = compareForecastLosses(set, tracked);
+  assert.equal(r.status.evaluable, true, 'the primary losses on that day are normal');
+  assert.equal(r.secondary.dropped, 1);
+});
+
+test('the rescaling unit stays finite in the top binade (diff check nit)', () => {
+  // (√MAX)² is within 2^-43 of Number.MAX_VALUE, where log2 rounds to 1024; the hard-day mean must stay finite.
+  const base = setFromD(uniform(), { secondary: independentSecondary });
+  const top = Math.sqrt(Number.MAX_VALUE);
+  const days = [7, 8, 9];
+  const set = { ...base, a: base.a.map((x, i) => (days.includes(i) ? null : x)), b: base.b.map((x, i) => (days.includes(i) ? top : x)) };
+  const r = compareForecastLosses(set, tracked);
+  const loss = (top - base.primary[8]) ** 2;
+  assert.equal(Math.log2(loss), 1024);
+  close(r.hard_days.b_loss_on_a_only_null_days, loss, 1e-12, 'top-binade hard-day mean');
 });
 
 test('a strongly significant set with d near 2e154 evaluates, not hac_variance_not_positive (LOW-1)', () => {

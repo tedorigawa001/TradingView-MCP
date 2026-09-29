@@ -48,8 +48,14 @@ const meanOrNull = (values: number[]) => values.length ? mean(values) : null;
  */
 function powerOfTwoScale(values: number[]): number {
   const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
-  return largest > 0 && Number.isFinite(largest) ? 2 ** Math.floor(Math.log2(largest)) : 1;
+  // log2 rounds to 1024 in the top binade; 2^1024 would be Infinity (diff check nit).
+  return largest > 0 && Number.isFinite(largest) ? 2 ** Math.min(1023, Math.floor(Math.log2(largest))) : 1;
 }
+/**
+ * A nonzero loss below the smallest normal double is quantized to multiples of 2^-1074, so d and DM
+ * lose all meaning; rescaling d cannot recover it (diff check LOW-A).
+ */
+const belowNormalRange = (x: number) => x !== 0 && Math.abs(x) < 2 ** -1022;
 const scaledMeanOrNull = (values: number[]) => {
   if (!values.length) return null;
   const unit = powerOfTwoScale(values);
@@ -199,6 +205,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const drops = { N, used: 0, proxy_invalid: 0, both_null: 0, a_only_null: 0, b_only_null: 0 };
   const d: number[] = [], usedDates: string[] = [], usedLabels: string[] = [], lossA: number[] = [], lossB: number[] = [];
   const bOnANull: number[] = [], aOnBNull: number[] = [];
+  let subnormalLosses = 0;
   const secondary = { d: [] as number[], primaryD: [] as number[], partP: [] as number[], partP2: [] as number[],
     rawP: [] as ForecastValue[], rawP2: [] as ForecastValue[] };
   for (let t = 0; t < N; t++) {
@@ -210,14 +217,18 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     if (!a) { drops.a_only_null++; bOnANull.push(lossOf(b!, p, loss)); continue; }
     if (!b) { drops.b_only_null++; aOnBNull.push(lossOf(a, p, loss)); continue; }
     const la = lossOf(a, p, loss), lb = lossOf(b, p, loss);
+    if (belowNormalRange(la) || belowNormalRange(lb)) subnormalLosses++;
     lossA.push(la); lossB.push(lb); d.push(la - lb); usedDates.push(set.dates[t]);
     if (set.labels) usedLabels.push(set.labels[t]);
     if (set.secondary) {
       const p2 = proxy(set.secondary[t]);
-      const d2 = p2 ? lossOf(a, p2, loss) - lossOf(b, p2, loss) : NaN;
+      const l2a = p2 ? lossOf(a, p2, loss) : NaN, l2b = p2 ? lossOf(b, p2, loss) : NaN;
+      const d2 = l2a - l2b;
       const part = p2 ? proxyPart(a, b, p, loss) : NaN, part2 = p2 ? proxyPart(a, b, p2, loss) : NaN;
-      // A loss that overflows leaves the day without a secondary d, like an invalid proxy (code review M1).
-      if (p2 && Number.isFinite(d2) && Number.isFinite(part) && Number.isFinite(part2)) {
+      // A loss that overflows (code review M1) or falls below the normal range (LOW-A) leaves the day
+      // without a secondary d, like an invalid proxy.
+      if (p2 && Number.isFinite(d2) && Number.isFinite(part) && Number.isFinite(part2)
+        && !belowNormalRange(l2a) && !belowNormalRange(l2b)) {
         secondary.d.push(d2);
         secondary.primaryD.push(la - lb);
         secondary.partP.push(part);
@@ -280,6 +291,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   let reason: string | null = null;
   const finite = d.every(Number.isFinite);
   if (!finite) reason = "non_finite_loss";
+  else if (subnormalLosses) reason = "loss_below_normal_range";
   else if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
   else if (T < MIN_USED_DAYS) reason = "fewer_than_100_used_days";
   // HAC and DM on d divided by a power of two near max|d|: DM and the relative test are scale-invariant,
