@@ -124,15 +124,21 @@ d = loss(A) − loss(B); lower is better, so negative d favours A.
   γ_l have divisor T.
 - The lag is L = min(T − 1, ⌊4(T/100)^(2/9)⌋).
 - DM = d̄/√(S/T), with p_A = Φ(DM) and p_B = Φ(−DM). The upper tail is never computed as 1 − Φ.
-- **Rescaling:** HAC, DM and the relative variance test are computed on d divided by the power of
-  two at or below max|d|.
-  - They are scale-invariant, and dividing by a power of two is exact, so results in the normal
-    range are bit-identical.
+- **Rescaling:** every d-level statistic is computed on d divided by the power of two at or below
+  max|d|. That covers HAC, DM and the relative variance test; the sub-period, trimmed, both-tail
+  and caller-label means; k*; and the bootstrap. The secondary mean uses its own power of two, and
+  so do the hard-day means.
+  - All of these are scale-invariant, and dividing by a power of two is exact, so results in the
+    normal range are bit-identical.
   - Without it, tiny losses let S underflow to a subnormal. Under MSE with inputs scaled by 5e-81,
     that gave DM = −∞ and a false pass. Huge losses overflowed in the squares.
-  - d̄ and S are reported in the input units, so for very small losses the reported S may
-    underflow to 0. DM is still computed on the rescaled d. DM is exact only while the losses
-    themselves are normal doubles; smaller losses are not evaluable (above).
+  - Separately, normal losses can differ by only a few multiples of 2^-1074. Then the plain block,
+    trimmed, label and bootstrap means rounded to 0, which gave five false reversals and a
+    bootstrap p of 1 while DM was −57.7.
+  - Reversals and the bootstrap are decided on the rescaled values. The reported d̄, S and means
+    are in the input units, so in that regime they may round to 0 while the decisions stay exact.
+  - DM is exact only while the losses themselves are normal doubles; smaller losses are not
+    evaluable (above).
   - **Supported range:** losses from 2^-1022 up to where S overflows (d around 1e156).
   - A test sweeps MSE inputs from 1e-150 to 1e77 and requires identical decisions. At 1e-160 the
     result is `loss_below_normal_range`, and at 1e100 it is `hac_variance_not_finite`.
@@ -170,9 +176,9 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
 
 **Secondary proxy.**
 - It is evaluated on the used days where it is valid and its losses are finite and not below the
-  normal range. More than 5% of
-  those dropped makes it `not_evaluable`, as does a mean that is not finite (finite days whose
-  sum overflows).
+  normal range. More than 5% of those dropped makes it `not_evaluable`. Its mean is computed
+  rescaled, so finite days always give a finite mean; a non-finite mean would also make it
+  `not_evaluable`, as a backstop.
 - `secondary.mean` is the mean d under it.
 - Distinctness is the Spearman ρ between the proxy-dependent parts ⟨G, P⟩ and ⟨G, P₂⟩, where
   G = S_A⁻¹ − S_B⁻¹ for QLIKE and −2(S_A − S_B) for MSE. The forecast-only term of d is left

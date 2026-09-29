@@ -502,18 +502,17 @@ test('a genuinely different coarse-tick secondary shares one scale on some days 
   assert.equal(r.secondary.distinct, true);
 });
 
-test('a secondary mean that overflows makes the secondary not evaluable (R-L2)', () => {
-  // QLIKE: on two days A forecasts 1e-10 and the secondary is 1e298, so each secondary d is about 1e308,
-  // finite, while their sum is not.
+test('a secondary mean over days near the double limit is computed rescaled, so it stays finite and exact (R-L2, EXT-4)', () => {
+  // QLIKE: on two days A forecasts 1e-10 and the secondary is 1e298, so each secondary d is about 1e308.
+  // Their plain sum overflowed (R-L2 then made the secondary not evaluable); the rescaled mean is finite.
   const base = setFromD(uniform(), { secondary: independentSecondary });
   const set = { ...base, a: base.a.map((x, i) => (i === 3 || i === 4 ? 1e-10 : x)),
     secondary: base.secondary.map((x, i) => (i === 3 || i === 4 ? 1e298 : x)) };
   const r = compareForecastLosses(set, { loss: 'qlike', tracked: true });
   assert.equal(r.secondary.dropped, 0, 'every day is finite on its own');
-  assert.ok(!Number.isFinite(r.secondary.mean));
-  assert.equal(r.secondary.status, 'not_evaluable');
-  assert.ok(!r.robustness_conflicts.includes('secondary_proxy_reverses'));
-  assert.ok(r.withheld_reasons.includes('not_assessed_secondary_proxy_absent'));
+  const d2 = set.a.map((a, i) => evaluateLoss(a, set.secondary[i], 'qlike') - evaluateLoss(set.b[i], set.secondary[i], 'qlike'));
+  close(r.secondary.mean, d2.reduce((sum, x) => sum + x / 2 ** 1000, 0) / d2.length * 2 ** 1000, 1e-12, 'rescaled mean');
+  assert.equal(r.secondary.status, 'evaluable');
 });
 
 test('HAC runs on d rescaled by a power of two: huge losses evaluate exactly, overflowing S fails closed (EXT-2)', () => {
@@ -605,4 +604,37 @@ test('hard-day means use the rescaled mean, so finite losses near the double lim
   assert.equal(r.drops.a_only_null, 3);
   assert.ok(Number.isFinite(r.hard_days.b_loss_on_a_only_null_days));
   close(r.hard_days.b_loss_on_a_only_null_days, (1.18e154 - base.primary[8]) ** 2, 1e-12, 'hard-day mean');
+});
+
+test('the whole battery runs on rescaled d: tiny differences between normal losses give no false reversals (EXT-4)', () => {
+  // Proxy 0, B = 1.125, and A one ulp lower on every fifth day, so d ∈ {0, −2^-51} exactly. Scaled by
+  // 2^-511 the losses are still normal but d is 2 multiples of 2^-1074, and the plain block, trimmed, label
+  // and bootstrap means rounded to 0: five false conflicts and a bootstrap p of 1 while DM stayed −57.7.
+  const at = (s) => scalarSet({
+    a: Array.from({ length: 200 }, (_, i) => (i % 5 === 0 ? 1.125 - 2 ** -52 : 1.125) * s),
+    b: Array.from({ length: 200 }, () => 1.125 * s),
+    primary: Array.from({ length: 200 }, () => 0),
+    labels: Array.from({ length: 200 }, (_, i) => (i < 100 ? 'first' : 'second')),
+  });
+  const decision = (r) => JSON.stringify([r.status, r.mean_favours, r.battery_outcome, r.robustness_conflicts, r.withheld_reasons,
+    r.non_decisive_disagreements, r.breakdown.k_star, r.bootstrap.p, r.dm.DM]);
+  const normal = compareForecastLosses(at(1), tracked), tiny = compareForecastLosses(at(2 ** -511), tracked);
+  assert.deepEqual(normal.robustness_conflicts, []);
+  assert.ok(normal.bootstrap.p < 0.01);
+  assert.equal(decision(tiny), decision(normal));
+});
+
+test('reported means are converted back to the input units, bit for bit (EXT-4)', () => {
+  // Computed on rescaled d and multiplied back; dividing by a power of two is exact, so the reported values
+  // equal the plain computation on d exactly.
+  const labels = Array.from({ length: 2000 }, (_, i) => (i < 700 ? 'early' : 'late'));
+  const set = setFromD(fewDay(), { secondary: independentSecondary, labels });
+  const r = compareForecastLosses(set, tracked);
+  const d = set.a.map((a, i) => evaluateLoss(a, set.primary[i], 'mse') - evaluateLoss(set.b[i], set.primary[i], 'mse'));
+  const plainMean = (values) => values.reduce((sum, x) => sum + x, 0) / values.length;
+  assert.deepEqual(r.sub_periods.map((b) => b.mean), blockBounds(d.length).map(([from, to]) => plainMean(d.slice(from, to))));
+  assert.equal(r.trimmed.decisive.mean, trimFavourable(d, r.trimmed.k, 'A'));
+  assert.deepEqual(r.caller_label_means.map((l) => l.mean),
+    ['early', 'late'].map((label) => plainMean(d.filter((_, i) => labels[i] === label))));
+  // max|d| is 10, so the unit is 8: a missing conversion would be off by a factor of 8.
 });

@@ -11,7 +11,9 @@ Backlog #101, item 2. Review history:
 - diff check: APPROVE WITH FINDINGS, 1 MEDIUM and 1 LOW (R2-M1, R2-L1); final diff check: APPROVE;
 - external review (pasted by the user, 2026-09-29): 3 MEDIUM (EXT-1 to EXT-3), all fixed. Its
   diff check: REQUEST CHANGES, 1 MEDIUM (EXT-2b) and 2 LOW, all fixed. Final diff check: APPROVE
-  WITH FINDINGS, LOW-A and a top-binade nit, both fixed before the release.
+  WITH FINDINGS, LOW-A and a top-binade nit, both fixed before the release;
+- second external review (pasted by the user, 2026-09-29): 1 MEDIUM (EXT-4), fixed before the
+  release.
 
 Rev 4.1 folded in P1–P3 as clarifications. Rev 4.2 folds in the design-level code-review findings,
 approved by the user on 2026-09-28:
@@ -85,7 +87,7 @@ statement of superiority.
     - Norms use a scaled hypotenuse, so an extreme rescaling of a matrix set cannot evade this
       rule or the input rule (R-L3).
   - A secondary mean that is not finite, even when every day is, makes the secondary not
-    evaluable (R-L2).
+    evaluable (R-L2). Since the mean is now computed rescaled (EXT-4), this is a backstop.
   - Distinctness is judged whenever a secondary is present, even when it is not evaluable, so
     row 6 is listed alongside row 5 (CR-L2).
   - Both parts still share the sign and scale of G_t, so ρ remains biased upward. The bias is
@@ -126,8 +128,12 @@ statement of superiority.
     secondary day.
   - A non-finite d̄, HAC variance or DM makes the result `not_evaluable` with reason
     `hac_variance_not_finite`. S = ∞ had given DM = 0 and p = 0.5 as if evaluable (EXT-2).
-  - HAC, DM and the relative variance test run on d divided by the power of two at or below
-    max|d|, which is exact and scale-invariant.
+  - Every d-level statistic runs on d divided by the power of two at or below max|d|, which is
+    exact and scale-invariant: HAC, DM, the relative variance test, the block, trimmed, both-tail
+    and label means, k* and the bootstrap. Reported values are converted back to the input units.
+    - The first version rescaled only HAC. When normal losses differed by a few multiples of
+      2^-1074, the other means rounded to 0 and raised false reversals (EXT-4, a second external
+      review).
     - Without it, a subnormal S at tiny losses gave DM = −∞ and a false pass (EXT-2b, found in the
       diff check of the EXT fixes).
     - It also avoids the overflow of mean(d²) that made a strongly significant set

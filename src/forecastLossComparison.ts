@@ -240,6 +240,13 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   }
   const T = d.length;
   drops.used = T;
+  // Every d-level statistic runs on d divided by a power of two near max|d| and is reported back in the
+  // input units. The division is exact, so normal-range results are bit-identical. Unscaled, HAC
+  // underflowed for tiny losses (EXT-2b), and the block, trimmed, label and bootstrap means rounded to 0
+  // when d was within a few multiples of 2^-1074, raising false reversals (external review EXT-4).
+  const finite = d.every(Number.isFinite);
+  const unit = finite ? powerOfTwoScale(d) : 1;
+  const scaled = d.map((x) => x / unit);
   const hardDays = {
     b_loss_on_a_only_null_days: scaledMeanOrNull(bOnANull), b_loss_on_used_days: scaledMeanOrNull(lossB),
     a_loss_on_b_only_null_days: scaledMeanOrNull(aOnBNull), a_loss_on_used_days: scaledMeanOrNull(lossA),
@@ -247,8 +254,10 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
 
   // The secondary proxy: evaluated on used days where it is valid; > 5% of them dropped = not evaluable.
   const secondaryDropped = T - secondary.d.length;
-  const secondaryMean = meanOrNull(secondary.d);
-  // Finite days can still sum past the double range; such a mean cannot be read (code review R-L2).
+  const secondaryUnit = powerOfTwoScale(secondary.d);
+  const secondaryScaledMean = secondary.d.length ? mean(secondary.d.map((x) => x / secondaryUnit)) : null;
+  const secondaryMean = secondaryScaledMean === null ? null : secondaryScaledMean * secondaryUnit;
+  // Backstop (code review R-L2): with the rescaled mean, finite days cannot give a non-finite mean.
   const secondaryStatus: "absent" | "not_evaluable" | "evaluable" = !set.secondary ? "absent"
     : (T === 0 || secondary.d.length === 0 || secondaryDropped / T > MAX_DROPPED_SHARE || !Number.isFinite(secondaryMean)
       ? "not_evaluable" : "evaluable");
@@ -275,10 +284,11 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     ...(distinct === false ? ["not_assessed_secondary_proxy_not_distinct"] : []),
     ...(!tracked ? ["no_listed_conflict_untracked"] : []),
   ];
-  const labelMeans = set.labels ? [...new Set(usedLabels)].sort().map((label) => {
-    const values = d.filter((_, i) => usedLabels[i] === label);
-    return { label, days: values.length, mean: mean(values) };
+  const labelStats = set.labels ? [...new Set(usedLabels)].sort().map((label) => {
+    const values = scaled.filter((_, i) => usedLabels[i] === label);
+    return { label, days: values.length, scaledMean: mean(values) };
   }) : null;
+  const labelMeans = labelStats ? labelStats.map(({ label, days, scaledMean }) => ({ label, days, mean: scaledMean * unit })) : null;
   const base = {
     contract: FORECAST_LOSS_CONTRACT,
     loss,
@@ -289,16 +299,11 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
 
   // Evaluability of the primary. A loss that overflows makes d non-finite; nothing else is computable (code review M1).
   let reason: string | null = null;
-  const finite = d.every(Number.isFinite);
   if (!finite) reason = "non_finite_loss";
   else if (subnormalLosses) reason = "loss_below_normal_range";
   else if (N === 0 || (N - T) / N > MAX_DROPPED_SHARE) reason = "more_than_5_percent_of_dates_dropped";
   else if (T < MIN_USED_DAYS) reason = "fewer_than_100_used_days";
-  // HAC and DM on d divided by a power of two near max|d|: DM and the relative test are scale-invariant,
-  // and without it S underflowed to a subnormal for tiny losses, giving DM = -Infinity and a pass (EXT-2b).
-  // d̄ and S are reported in the input units.
-  const unit = finite ? powerOfTwoScale(d) : 1;
-  const scaled = d.map((x) => x / unit);
+  // HAC and DM on the rescaled d (EXT-2b); d̄ and S are reported in the input units.
   const scaledHac = finite && T >= 2 ? neweyWest(scaled) : null;
   const hac = scaledHac ? { ...scaledHac, dbar: scaledHac.dbar * unit, S: scaledHac.S * unit * unit } : null;
   const scaledDM = scaledHac ? scaledHac.dbar / Math.sqrt(scaledHac.S / T) : NaN;
@@ -332,11 +337,13 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const pA = normalCdf(DM), pB = normalCdf(-DM);
   const favours: Side | "neither" = pA < FAVOURED_P ? "A" : pB < FAVOURED_P ? "B" : "neither";
   const k = Math.floor((T + 99) / 100);   // ceil(T/100) in integers
-  const subPeriods = blockBounds(T).map(([from, to]) => ({
-    from_date: usedDates[from], to_date: usedDates[to - 1], days: to - from, mean: mean(d.slice(from, to)),
+  const blocks = blockBounds(T);
+  const blockMeans = blocks.map(([from, to]) => mean(scaled.slice(from, to)));   // rescaled
+  const subPeriods = blocks.map(([from, to], i) => ({
+    from_date: usedDates[from], to_date: usedDates[to - 1], days: to - from, mean: blockMeans[i] * unit,
   }));
-  const sorted = [...d].sort((x, y) => x - y);
-  const bothTails = mean(sorted.slice(k, T - k));
+  const sorted = [...scaled].sort((x, y) => x - y);
+  const bothTails = mean(sorted.slice(k, T - k));                                  // rescaled
   const dm = { dbar, S, L, DM, p_a: pA, p_b: pB, T };
 
   if (favours === "neither") {
@@ -352,11 +359,11 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
       non_decisive_disagreements: [] as string[],
       dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
       drops, hard_days: hardDays, sub_periods: subPeriods,
-      trimmed: { k, decisive: null, both_tails: bothTails,
-        a_tail_removed: trimFavourable(d, k, "A"), b_tail_removed: trimFavourable(d, k, "B") },
+      trimmed: { k, decisive: null, both_tails: bothTails * unit,
+        a_tail_removed: trimFavourable(scaled, k, "A") * unit, b_tail_removed: trimFavourable(scaled, k, "B") * unit },
       breakdown: null,
       secondary: secondaryResult,
-      bootstrap: s === 0 ? null : stationaryBootstrap(d, s as 1 | -1),
+      bootstrap: s === 0 ? null : stationaryBootstrap(scaled, s as 1 | -1),
       caller_label_means: labelMeans,
     };
   }
@@ -366,18 +373,18 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   // D′: used d plus m copies of the least favourable observed d (design M1).
   const m = side === "A" ? drops.a_only_null : drops.b_only_null;
   const worst = side === "A" ? sorted[T - 1] : sorted[0];
-  const means = trimmedMeans([...d, ...new Array<number>(m).fill(worst)], side);
+  const means = trimmedMeans([...scaled, ...new Array<number>(m).fill(worst)], side);   // rescaled
   const decisive = means[k];
   const found = means.findIndex(reverses);
   const kStar = found < 0 ? null : found;
-  const bootstrap = stationaryBootstrap(d, side === "A" ? 1 : -1);
+  const bootstrap = stationaryBootstrap(scaled, side === "A" ? 1 : -1);
 
   const conflicts = [
-    ...subPeriods.flatMap((block, i) => (reverses(block.mean) ? [`sub_period_${i + 1}_reverses`] : [])),
+    ...blockMeans.flatMap((blockMean, i) => (reverses(blockMean) ? [`sub_period_${i + 1}_reverses`] : [])),
     // Through k*, so the conflict and k* ≤ k are the same test (L1). Removing a most-favourable value
     // never moves the mean toward the favoured side, so this is the decisive trimmed mean reversing.
     ...(kStar !== null && kStar <= k ? ["trimmed_mean_reverses"] : []),
-    ...(secondaryStatus === "evaluable" && secondaryMean !== null && reverses(secondaryMean) ? ["secondary_proxy_reverses"] : []),
+    ...(secondaryStatus === "evaluable" && secondaryScaledMean !== null && reverses(secondaryScaledMean) ? ["secondary_proxy_reverses"] : []),
   ];
   const withheld = [
     ...(m > k ? ["blocked_by_dropped_days"] : []),
@@ -386,8 +393,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const nonDecisive = [
     ...(reverses(bothTails) ? ["both_tail_trimmed_mean_reverses"] : []),
     ...(bootstrap.p >= FAVOURED_P ? ["bootstrap_p_not_below_0.05_while_favoured_dm_p_is"] : []),
-    ...(labelMeans ?? []).filter((l) => reverses(l.mean)).map((l) => `caller_label_reverses:${l.label}`),
-    ...(secondaryStatus === "not_evaluable" && secondaryMean !== null && reverses(secondaryMean)
+    ...(labelStats ?? []).filter((l) => reverses(l.scaledMean)).map((l) => `caller_label_reverses:${l.label}`),
+    ...(secondaryStatus === "not_evaluable" && secondaryScaledMean !== null && reverses(secondaryScaledMean)
       ? ["non_evaluable_secondary_mean_reverses"] : []),
   ];
   const outcome: BatteryOutcome = conflicts.length ? "conflicts_found"
@@ -406,7 +413,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     non_decisive_disagreements: nonDecisive,
     dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
     drops, hard_days: hardDays, sub_periods: subPeriods,
-    trimmed: { k, decisive: { mean: decisive, own_nulls_imputed_worst_case: m }, both_tails: bothTails },
+    trimmed: { k, decisive: { mean: decisive * unit, own_nulls_imputed_worst_case: m }, both_tails: bothTails * unit },
     breakdown: { k_star: kStar, fraction: kStar === null ? null : kStar / (T + m),
       k_star_status: kStar === null ? "no_crossing" : "crossed" },
     secondary: secondaryResult,
