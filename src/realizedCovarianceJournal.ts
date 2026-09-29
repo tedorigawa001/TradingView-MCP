@@ -14,6 +14,12 @@ import { hashRules, realizedCovarianceRulesSchema } from "./realizedCovarianceRu
 export const REALIZED_COVARIANCE_JOURNAL_NAMESPACE = "realized_covariance_computation";
 /** Capped at the framing reader's limit, as in the forecast-loss journal (code review L6). */
 export const REALIZED_COVARIANCE_JOURNAL_MAX_BYTES = BACKTEST_LEDGER_MAX_BYTES;
+/** Returned with the search counts: what they cover and what they do not. */
+export const REALIZED_COVARIANCE_SEARCH_LIMITATIONS = [
+  "local_recorded_calls_only",
+  "overlap_key_is_importer_supplied_series_ids_and_read_spans",
+  "retries_increment_call_counts",
+] as const;
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const hash = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const timestamp = z.string().refine(isCanonicalTimestamp);

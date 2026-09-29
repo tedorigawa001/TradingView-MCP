@@ -540,6 +540,18 @@ function makeDeps(overrides = {}) {
     },
     forecastSets: overrides.forecastSets ?? { get: async () => { throw new Error('unexpected forecast set read'); } },
     forecastLossJournal: overrides.forecastLossJournal ?? { record: async () => { throw new Error('unexpected forecast loss journal write'); } },
+    // Every method of every realized covariance dependency throws unless injected: no test reads a default path.
+    barSeries: overrides.barSeries ?? { get: async () => { throw new Error('unexpected bar series read'); } },
+    proxySets: overrides.proxySets ?? {
+      get: async () => { throw new Error('unexpected proxy set read'); },
+      register: async () => { throw new Error('unexpected proxy set write'); },
+    },
+    realizedCovarianceJournal: overrides.realizedCovarianceJournal ?? {
+      record: async () => { throw new Error('unexpected realized covariance journal write'); },
+      findByProxySetId: async () => { throw new Error('unexpected realized covariance journal read'); },
+      search: async () => { throw new Error('unexpected realized covariance journal read'); },
+    },
+    zoneResolver: overrides.zoneResolver,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
         schema_version: "1.0",
@@ -1147,7 +1159,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred eight expected tools", async () => {
+test("exposes exactly the one hundred nine expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1169,6 +1181,7 @@ test("exposes exactly the one hundred eight expected tools", async () => {
       "compute_market_features",
       "compute_market_regimes",
       "compute_position_size",
+      "compute_realized_covariance",
       "compute_round_trip_cost",
       "compute_session_profile",
       "create_analysis_alerts",
@@ -8910,6 +8923,342 @@ test('compare_forecast_losses: 5,000 dates, 50 maximum-length labels and a satur
   assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids.length, 100);
   assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids_seen, 200);
   assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids_truncated, true);
+  const bytes = Buffer.byteLength(response.content[0].text, 'utf8');
+  assert.ok(bytes < 64 * 1024, `${bytes} bytes`);
+  t.diagnostic(`response ${bytes} bytes`);
+});
+
+// compute_realized_covariance (docs/REALIZED_COVARIANCE_PLAN.md, step 6). Synthetic bars only: the reference fixture's
+// bar sets, and generated bars for the size bound.
+let rcReferenceCache;
+async function rcReference() {
+  rcReferenceCache ??= JSON.parse(await readFile(new URL('../fixtures/realized-covariance/reference.json', import.meta.url), 'utf8'));
+  return rcReferenceCache;
+}
+async function rcStores(t) {
+  const { BarSeriesStore } = await import('../../build/barSeries.js');
+  const { ProxySetStore } = await import('../../build/proxySet.js');
+  const { RealizedCovarianceJournalStore } = await import('../../build/realizedCovarianceJournal.js');
+  const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+  const { rm } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'realized-covariance-tool-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const paths = { bars: join(dir, 'bars'), proxy: join(dir, 'proxy'), usage: join(dir, 'usage.jsonl'), journal: join(dir, 'journal.jsonl') };
+  return { dir, paths, barSeries: new BarSeriesStore(paths.bars), proxySets: new ProxySetStore(paths.proxy),
+    researchPeriodUsage: new ResearchPeriodUsageStore(paths.usage), realizedCovarianceJournal: new RealizedCovarianceJournalStore(paths.journal) };
+}
+const rcBarInput = (s, interval, source = 'reference') => ({ schema_version: '1.0', source_id: source, source_sha256: 'sha256:' + 'a'.repeat(64),
+  evidence_tier: 'synthetic_test', series_id: s.series_id, interval_minutes: interval, open_time: s.open_time, close: s.close });
+async function rcScenario(stores, name, { source } = {}) {
+  const ref = await rcReference();
+  const scenario = ref.scenarios.find((s) => s.name === name);
+  const series = [];
+  for (const s of ref.bar_sets[scenario.bars]) {
+    series.push((await stores.barSeries.register(rcBarInput(s, scenario.rules.interval_minutes, source))).artifact_id);
+  }
+  return { series, rules: scenario.rules, from_date: scenario.from_date, to_date: scenario.to_date };
+}
+/** The same computation run directly, for comparing the tool's summary and proxy-set ID. */
+async function rcDirect(stores, args, resolver) {
+  const { computeRealizedCovariance } = await import('../../build/realizedCovariance.js');
+  const { canonicalizeRules } = await import('../../build/realizedCovarianceRules.js');
+  const { normalizeProxySet } = await import('../../build/proxySet.js');
+  const { rules, rules_sha256 } = canonicalizeRules(args.rules);
+  const series = [];
+  for (const artifact_id of args.series) series.push({ artifact_id, bars: await stores.barSeries.get(artifact_id) });
+  const result = computeRealizedCovariance({ rules, rules_sha256, from_date: args.from_date, to_date: args.to_date, series, resolver });
+  return { ...result, proxy_set_id: normalizeProxySet(result.proxy).artifact_id };
+}
+async function rcClient(t, deps) {
+  const client = await connectedClient(makeDeps(deps));
+  t.after(() => client.close());
+  const raw = (args) => client.callTool({ name: 'compute_realized_covariance', arguments: args });
+  const call = async (args) => {
+    const response = await raw(args);
+    assert.ok(!response.isError, response.content[0].text);
+    return JSON.parse(response.content[0].text);
+  };
+  return { raw, call };
+}
+const rcStoreDeps = (stores) => ({ barSeries: stores.barSeries, proxySets: stores.proxySets,
+  researchPeriodUsage: stores.researchPeriodUsage, realizedCovarianceJournal: stores.realizedCovarianceJournal });
+const rcSha = async (value) => 'sha256:' + (await import('node:crypto')).createHash('sha256').update(value).digest('hex');
+
+test('compute_realized_covariance records period usage, then the journal, then the proxy set, then responds', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const order = [];
+  const { call } = await rcClient(t, { barSeries: stores.barSeries,
+    researchPeriodUsage: { recordToolAccessBatch: async (tool, inputs) => { order.push('period'); return stores.researchPeriodUsage.recordToolAccessBatch(tool, inputs); } },
+    realizedCovarianceJournal: { record: async (exposure) => { order.push('journal'); return stores.realizedCovarianceJournal.record(exposure); } },
+    proxySets: { register: async (set) => { order.push('store'); return stores.proxySets.register(set); } } });
+  const r = await call({ ...args, research_id: 'study:rc', usage_access_id: 'rc-run-1' });
+  assert.deepEqual(order, ['period', 'journal', 'store']);
+  assert.deepEqual(Object.keys(r), ['proxy_set_id', 'algorithm_version', 'rules_sha256', 'rules', 'tzdata', 'from_date', 'to_date',
+    'envelope', 'produced_days', 'kept_days', 'dropped', 'kept_by_weekday', 'missing_slots', 'diagnostics', 'search', 'period_usage',
+    'limitations']);
+  const direct = await rcDirect(stores, args);
+  assert.equal(r.proxy_set_id, direct.proxy_set_id);
+  assert.equal(r.algorithm_version, 'realized_covariance_v1');
+  assert.equal(r.tzdata, direct.tzdata);
+  assert.deepEqual(r.envelope, { from: '2026-01-05T21:30:00.000Z', to: '2026-01-30T21:45:00.000Z' },
+    'from the open of the previous endpoint bar to the last endpoint');
+  assert.deepEqual({ produced_days: r.produced_days, kept_days: r.kept_days, dropped: r.dropped, kept_by_weekday: r.kept_by_weekday,
+    missing_slots: r.missing_slots }, direct.summary);
+  assert.deepEqual(r.diagnostics, { series: direct.diagnostics, identical_close_pairs: [] });
+  assert.deepEqual(r.limitations, direct.limitations);
+  assert.ok(r.limitations.includes('first_interval_spans_non_slot_bars'));
+  // Never per-day arrays ("dates" appears only as a per-weekday count in the diagnostics).
+  assert.ok(!('dates' in r));
+  for (const key of ['windows', 'rc', 'daily_outer', 'drop_cause', 'common_slots', 'expected_slots']) {
+    assert.ok(!JSON.stringify(r).includes(`"${key}"`), key);
+  }
+  // Period usage: index 0 is the proxy-set source, then the bar series in axis order, over the span read.
+  const usage = await jsonLines(stores.paths.usage);
+  assert.deepEqual(usage.map((row) => [row.access_id, row.tool_name, row.scope, row.series_id, row.data_version, row.from, row.to, row.purpose]), [
+    ['rc-run-1:0', 'compute_realized_covariance', 'realized_covariance_bar_window_only', `proxy-set-source:${r.proxy_set_id.slice(7)}`, r.proxy_set_id, r.envelope.from, r.envelope.to, 'exploration'],
+    ['rc-run-1:1', 'compute_realized_covariance', 'realized_covariance_bar_window_only', 'fx:EURUSD', args.series[0], r.envelope.from, r.envelope.to, 'exploration'],
+    ['rc-run-1:2', 'compute_realized_covariance', 'realized_covariance_bar_window_only', 'fx:USDJPY', args.series[1], r.envelope.from, r.envelope.to, 'exploration'],
+  ]);
+  assert.ok(usage.every((row) => row.request_sha256 === usage[0].request_sha256));
+  assert.equal(usage[0].request_sha256, await rcSha(JSON.stringify({ contract: 'realized_covariance_v1', bar_series: args.series,
+    rules_sha256: r.rules_sha256, from_date: args.from_date, to_date: args.to_date })));
+  assert.deepEqual(r.period_usage.records.map((row) => [row.access_id, row.idempotent]), [0, 1, 2].map((i) => [`rc-run-1:${i}`, false]));
+  // The journal: one record naming the stored proxy set, which then verifies.
+  const journal = await jsonLines(stores.paths.journal);
+  assert.equal(journal.length, 1);
+  assert.deepEqual([journal[0].proxy_set_id, journal[0].research_id, journal[0].tzdata, journal[0].kept_days, journal[0].dropped_days],
+    [r.proxy_set_id, 'study:rc', r.tzdata, r.kept_days, r.produced_days - r.kept_days]);
+  assert.deepEqual(journal[0].envelope, r.envelope);
+  const { verifyProxySet } = await import('../../build/proxySet.js');
+  const stored = await verifyProxySet(r.proxy_set_id, { proxySets: stores.proxySets, journal: stores.realizedCovarianceJournal });
+  assert.equal(JSON.stringify(stored), JSON.stringify(direct.proxy));
+  assert.deepEqual([r.search.calls, r.search.distinct_rules, r.search.distinct_bar_series_versions], [1, 1, 1]);
+  assert.deepEqual(r.search.period_usage_prior_overlap.per_series.map((row) => row.overlapping_records), [0, 0, 0]);
+  assert.ok(r.search.limitations.includes('retries_increment_call_counts'));
+  assert.ok(!JSON.stringify(r.search).includes('"matches"'), 'the prior overlap is summarized, never listed');
+  // The request hash keeps the axis order: the same bars in the other order are another request.
+  const reversed = [...args.series].reverse();
+  await call({ ...args, series: reversed, research_id: 'study:rc', usage_access_id: 'rc-run-2' });
+  const second = (await jsonLines(stores.paths.usage)).filter((row) => row.access_id.startsWith('rc-run-2:'));
+  assert.deepEqual(second.map((row) => row.series_id.slice(0, 9)), ['proxy-set', 'fx:USDJPY', 'fx:EURUSD']);
+  assert.equal(second[0].request_sha256, await rcSha(JSON.stringify({ contract: 'realized_covariance_v1', bar_series: reversed,
+    rules_sha256: r.rules_sha256, from_date: args.from_date, to_date: args.to_date })));
+});
+
+test('compute_realized_covariance: untracked calls are still journaled and stored, with no period write', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'B_within_day_log');
+  // makeDeps keeps its throwing period stub.
+  const { call, raw } = await rcClient(t, { barSeries: stores.barSeries, proxySets: stores.proxySets,
+    realizedCovarianceJournal: stores.realizedCovarianceJournal });
+  // Rules in another key order with unsorted weekdays are canonicalized before anything is used or written.
+  const { canonicalizeRules } = await import('../../build/realizedCovarianceRules.js');
+  const canonical = canonicalizeRules(args.rules);
+  const shuffled = Object.fromEntries(Object.entries({ ...args.rules, day_weekdays: [5, 3, 1, 4, 2] }).reverse());
+  const r = await call({ ...args, rules: shuffled });
+  assert.equal(JSON.stringify(r.rules), JSON.stringify(canonical.rules));
+  assert.equal(r.rules_sha256, canonical.rules_sha256);
+  assert.equal(JSON.stringify((await jsonLines(stores.paths.journal))[0].rules), JSON.stringify(canonical.rules));
+  assert.equal(r.period_usage.status, 'untracked');
+  assert.ok(r.period_usage.limitations.includes('period_usage_checks_do_not_read_the_computation_journal'));
+  assert.ok(!('period_usage_prior_overlap' in r.search));
+  assert.deepEqual([r.search.calls, r.search.distinct_rules], [1, 1]);
+  const journal = await jsonLines(stores.paths.journal);
+  assert.deepEqual([journal.length, journal[0].research_id, journal[0].proxy_set_id], [1, null, r.proxy_set_id]);
+  await stores.proxySets.get(r.proxy_set_id);
+  // within_day reads from s(first): Monday's endpoint, with no endpoint bar before it, and has no first-interval limitation.
+  assert.deepEqual(r.envelope, { from: '2026-01-05T21:45:00.000Z', to: '2026-01-30T21:45:00.000Z' });
+  assert.ok(!r.limitations.includes('first_interval_spans_non_slot_bars'));
+  // A misspelled argument fails instead of running silently untracked; usage_access_id needs research_id.
+  const typo = await raw({ ...args, researchid: 'r' });
+  assert.equal(typo.isError, true);
+  const orphan = await raw({ ...args, usage_access_id: 'x' });
+  assert.equal(orphan.isError, true);
+  assert.match(orphan.content[0].text, /usage_access_id requires research_id/);
+  assert.equal((await jsonLines(stores.paths.journal)).length, 1);
+});
+
+test('compute_realized_covariance: search counts rule variants and bar versions across research IDs and untracked calls', async (t) => {
+  const stores = await rcStores(t);
+  const a = await rcScenario(stores, 'A_100_shaped');
+  const b = await rcScenario(stores, 'B_within_day_log');
+  const { call } = await rcClient(t, rcStoreDeps(stores));
+  const first = await call({ ...a, research_id: 'r1' });
+  assert.deepEqual([first.search.calls, first.search.distinct_rules, first.search.distinct_bar_series_versions], [1, 1, 1]);
+  const second = await call(b);
+  assert.deepEqual([second.search.calls, second.search.distinct_rules, second.search.distinct_bar_series_versions], [2, 2, 1]);
+  // EURUSD re-imported with other cleaning is another bar-series version of the same series_id.
+  const ref = await rcReference();
+  const reimported = (await stores.barSeries.register(rcBarInput(ref.bar_sets.A_100_shaped[0], 15, 'recleaned'))).artifact_id;
+  const third = await call({ ...a, series: [reimported, a.series[1]], research_id: 'r2' });
+  assert.deepEqual([third.search.calls, third.search.distinct_rules, third.search.distinct_bar_series_versions], [3, 2, 2]);
+  assert.notEqual(third.proxy_set_id, first.proxy_set_id);
+  // The period records carry the bar artifact actually read.
+  const usage = await jsonLines(stores.paths.usage);
+  assert.deepEqual(usage.filter((row) => row.research_id === 'r2').map((row) => row.data_version), [third.proxy_set_id, reimported, a.series[1]]);
+  // A series outside the overlap set is not counted.
+  const c = await rcScenario(stores, 'C_utc_midnight');
+  const other = await call(c);
+  assert.deepEqual([other.search.calls, other.search.distinct_rules, other.search.distinct_bar_series_versions], [1, 1, 1]);
+});
+
+test('compute_realized_covariance: a failure at any write returns no summary and names what was written', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const noSummary = (response) => {
+    assert.equal(response.isError, true);
+    assert.doesNotMatch(response.content[0].text, /kept_days|missing_slots|proxy_set_id/);
+  };
+  let journalCalls = 0, storeCalls = 0;
+  const countingJournal = { record: async (exposure) => { journalCalls++; return stores.realizedCovarianceJournal.record(exposure); } };
+  const countingStore = { register: async (set) => { storeCalls++; return stores.proxySets.register(set); } };
+  // The period write fails: nothing else is written.
+  const periodDown = await rcClient(t, { barSeries: stores.barSeries, proxySets: countingStore, realizedCovarianceJournal: countingJournal,
+    researchPeriodUsage: { recordToolAccessBatch: async () => { throw new Error('period store unavailable'); } } });
+  const first = await periodDown.raw({ ...args, research_id: 'r' });
+  noSummary(first);
+  assert.match(first.content[0].text, /period store unavailable/);
+  assert.deepEqual([journalCalls, storeCalls], [0, 0]);
+  // The journal write fails after the period write: the error names the period records, which stay.
+  const journalDown = await rcClient(t, { barSeries: stores.barSeries, proxySets: countingStore, researchPeriodUsage: stores.researchPeriodUsage,
+    realizedCovarianceJournal: { record: async () => { throw new Error('journal unavailable'); } } });
+  const second = await journalDown.raw({ ...args, research_id: 'r', usage_access_id: 'half' });
+  noSummary(second);
+  assert.match(second.content[0].text, /journal write failed after period usage was recorded as half:0-2; no summary returned: journal unavailable/);
+  assert.equal((await jsonLines(stores.paths.usage)).length, 3);
+  const untrackedJournal = await journalDown.raw(args);
+  noSummary(untrackedJournal);
+  assert.match(untrackedJournal.content[0].text, /journal write failed; no summary returned: journal unavailable/);
+  assert.equal(storeCalls, 0, 'the proxy set is never stored without its journal record');
+  // The store write fails after both: the error names both, and an identical retry completes it.
+  const storeDown = await rcClient(t, { barSeries: stores.barSeries, researchPeriodUsage: stores.researchPeriodUsage,
+    realizedCovarianceJournal: stores.realizedCovarianceJournal,
+    proxySets: { register: async () => { throw new Error('store unavailable'); } } });
+  const third = await storeDown.raw({ ...args, research_id: 'r', usage_access_id: 'late' });
+  noSummary(third);
+  assert.match(third.content[0].text,
+    /proxy set store write failed after period usage was recorded as late:0-2 and computation journal record 1 was appended; no summary returned: store unavailable/);
+  const untrackedStore = await storeDown.raw(args);
+  assert.match(untrackedStore.content[0].text, /proxy set store write failed after computation journal record 2 was appended; no summary/);
+  const { call } = await rcClient(t, rcStoreDeps(stores));
+  const retry = await call({ ...args, research_id: 'r', usage_access_id: 'late' });
+  assert.deepEqual(retry.period_usage.records.map((row) => row.idempotent), [true, true, true]);
+  assert.equal(retry.search.calls, 3, 'every journaled attempt counts');
+  const { verifyProxySet } = await import('../../build/proxySet.js');
+  await verifyProxySet(retry.proxy_set_id, { proxySets: stores.proxySets, journal: stores.realizedCovarianceJournal });
+});
+
+test('compute_realized_covariance: access IDs, retries, request conflicts and a journal identity conflict', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const { call, raw } = await rcClient(t, rcStoreDeps(stores));
+  const a = await call({ ...args, research_id: 'r' });
+  const b = await call({ ...args, research_id: 'r' });
+  assert.match(a.period_usage.access_id_base, /^rc-access:[a-f0-9-]{36}$/);
+  assert.notEqual(a.period_usage.access_id_base, b.period_usage.access_id_base);
+  const longest = 'x'.repeat(100);
+  await call({ ...args, research_id: 'r', usage_access_id: longest });
+  const retry = await call({ ...args, research_id: 'r', usage_access_id: longest });
+  assert.deepEqual(retry.period_usage.records.map((row) => row.idempotent), [true, true, true]);
+  assert.equal(retry.search.calls, 4, 'retries still count as calls');
+  const tooLong = await raw({ ...args, research_id: 'r', usage_access_id: 'x'.repeat(101) });
+  assert.equal(tooLong.isError, true);
+  // Rules and range are in request_sha256, so reusing the ID for another request conflicts instead of passing as a retry.
+  const journalBefore = (await jsonLines(stores.paths.journal)).length;
+  for (const other of [{ rules: { ...args.rules, max_missing_slots: 5 } }, { to_date: '2026-01-29' }, { series: [...args.series].reverse() }]) {
+    const response = await raw({ ...args, ...other, research_id: 'r', usage_access_id: longest });
+    assert.equal(response.isError, true, JSON.stringify(other));
+    assert.match(response.content[0].text, /conflicts with its original input/);
+  }
+  assert.equal((await jsonLines(stores.paths.journal)).length, journalBefore, 'a conflicting call adds no journal record');
+  // A journal record for the same proxy set with other content fails closed; the set is not stored.
+  const variant = { ...args, from_date: '2026-01-07' };
+  const direct = await rcDirect(stores, variant);
+  await stores.realizedCovarianceJournal.record({ rules: direct.proxy.rules, rules_sha256: direct.proxy.rules_sha256,
+    bar_series: direct.proxy.bar_series, underlying_series_ids: direct.proxy.underlying_series_ids, from_date: variant.from_date,
+    to_date: variant.to_date, proxy_set_id: direct.proxy_set_id, research_id: null, tzdata: direct.tzdata,
+    kept_days: direct.summary.kept_days - 1, dropped_days: direct.summary.produced_days - direct.summary.kept_days + 1, envelope: direct.envelope });
+  const conflict = await raw({ ...variant, research_id: 'r', usage_access_id: 'identity' });
+  assert.equal(conflict.isError, true);
+  assert.match(conflict.content[0].text, /journal write failed after period usage was recorded as identity:0-2; no summary returned: .*metadata mismatch/);
+  await assert.rejects(stores.proxySets.get(direct.proxy_set_id), { code: 'ENOENT' });
+});
+
+test('compute_realized_covariance: validation errors write nothing', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const { raw } = await rcClient(t, rcStoreDeps(stores));
+  const cases = [
+    [{ series: ['sha256:' + 'f'.repeat(64)] }, /^Error: bar_series_not_found: sha256:f{64}$/],
+    [{ series: [args.series[0], args.series[0]] }, /duplicate_series/],
+    [{ from_date: '2025-12-01' }, /range_outside_series_coverage/],
+    [{ from_date: '2026-01-31', to_date: '2026-01-06' }, /invalid_date_range/],
+    [{ from_date: '2026-01-31', to_date: '2026-02-01' }, /no_produced_days/],
+    [{ rules: { ...args.rules, day_weekdays: [1, 1, 2] } }, /invalid_rules/],
+    [{ rules: { ...args.rules, time_zone: 'Mars/Olympus_Mons' } }, /unknown_time_zone/],
+    [{ rules: { ...args.rules, time_zone: 'america/new_york' } }, /time_zone_case_variant/],
+    [{ rules: { ...args.rules, interval_minutes: 30 } }, /interval_mismatch/],
+    [{ rules: { ...args.rules, day_end_local: '16:50' } }, /boundary_not_on_grid/],
+    [{ rules: { ...args.rules, max_missing_slots: 95 } }, /too_few_slots_for_rule/],
+    [{ rules: { ...args.rules, colour: 'blue' } }, /colour|unrecognized/i],
+  ];
+  for (const [patch, pattern] of cases) {
+    const response = await raw({ ...args, ...patch, research_id: 'r' });
+    assert.equal(response.isError, true, JSON.stringify(patch));
+    assert.match(response.content[0].text, pattern, JSON.stringify(patch));
+  }
+  const { stat } = await import('node:fs/promises');
+  for (const path of [stores.paths.usage, stores.paths.journal, stores.paths.proxy]) {
+    await assert.rejects(stat(path), { code: 'ENOENT' }, path);
+  }
+});
+
+test('compute_realized_covariance: an injected zone resolver reports its tzdata; the same set recurs under it (H2, H6)', async (t) => {
+  const stores = await rcStores(t);
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const { intlZoneResolver } = await import('../../build/zonedTime.js');
+  const current = await rcClient(t, rcStoreDeps(stores));
+  const shifted = await rcClient(t, { ...rcStoreDeps(stores), zoneResolver: { tzdata: 'test-2099z', formatAt: intlZoneResolver.formatAt } });
+  const a = await current.call({ ...args, research_id: 'r' });
+  const b = await shifted.call({ ...args, research_id: 'other' });
+  assert.equal(b.tzdata, 'test-2099z');
+  assert.equal(b.proxy_set_id, a.proxy_set_id, 'tzdata is not part of the content');
+  assert.deepEqual((await jsonLines(stores.paths.journal)).map((row) => [row.research_id, row.tzdata]), [['r', a.tzdata], ['other', 'test-2099z']]);
+});
+
+test('compute_realized_covariance: 8 series of maximal IDs, every weekday, 28 identical pairs and a saturated union stay under 64 KiB', async (t) => {
+  const stores = await rcStores(t);
+  // Eight identical 24/7 M15 series: every local weekday has modal times and every pair is identical.
+  const start = Date.UTC(2026, 1, 27) / 1000, bars = 19 * 96;
+  const open_time = Array.from({ length: bars }, (_, k) => start + k * 900);
+  const close = open_time.map((_, k) => 100 * Math.exp(0.001 * Math.sin(k * 0.7)));
+  const seriesId = (i) => `${i}`.padEnd(120, 'S');
+  const series = [];
+  for (let i = 0; i < 8; i++) {
+    series.push((await stores.barSeries.register(rcBarInput({ series_id: seriesId(i), open_time, close }, 15))).artifact_id);
+  }
+  const researchId = (i) => `${String(i).padStart(4, '0')}`.padEnd(120, 'r');
+  let offset = 0;
+  const { raw } = await rcClient(t, { barSeries: stores.barSeries, proxySets: stores.proxySets,
+    realizedCovarianceJournal: stores.realizedCovarianceJournal,
+    researchPeriodUsage: { recordToolAccessBatch: async (tool, inputs) => inputs.map((input) => ({
+      ...input, source: 'tool_observed', tool_name: tool, idempotent: false,
+      prior_overlap: { status: 'recorded_overlap', overlapping_records: 5000, exploration_records: 5000, validation_records: 0,
+        truncated: true, limitations: ['prior_and_external_usage_may_be_missing'],
+        matches: Array.from({ length: 100 }, () => ({ research_id: researchId(offset++) })) },
+    })) } });
+  const response = await raw({ series, rules: { interval_minutes: 15, time_zone: 'America/Argentina/ComodRivadavia', day_end_local: '17:00',
+    day_weekdays: [1, 2, 3, 4, 5, 6, 7], max_missing_slots: 0, first_interval: 'from_previous_endpoint', return_unit: 'log_percent' },
+  from_date: '2026-03-02', to_date: '2026-03-15', research_id: researchId(9999), usage_access_id: 'u'.repeat(100) });
+  assert.ok(!response.isError, response.content[0].text);
+  const r = JSON.parse(response.content[0].text);
+  assert.equal(r.kept_days, 14);
+  assert.equal(r.diagnostics.identical_close_pairs.length, 28);
+  assert.ok(r.diagnostics.series.every((s) => s.modal_local_times.length === 7));
+  assert.equal(r.period_usage.records.length, 9);
+  assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids.length, 100);
+  assert.equal(r.search.period_usage_prior_overlap.overlapping_research_ids_seen, 900);
   const bytes = Buffer.byteLength(response.content[0].text, 'utf8');
   assert.ok(bytes < 64 * 1024, `${bytes} bytes`);
   t.diagnostic(`response ${bytes} bytes`);

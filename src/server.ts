@@ -12,6 +12,12 @@ import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } 
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
+import { BarSeriesStore, type BarSeries } from "./barSeries.js";
+import { ProxySetStore, normalizeProxySet } from "./proxySet.js";
+import { REALIZED_COVARIANCE_SEARCH_LIMITATIONS, RealizedCovarianceJournalStore } from "./realizedCovarianceJournal.js";
+import { computeRealizedCovariance } from "./realizedCovariance.js";
+import { RealizedCovarianceError, canonicalizeRules, realizedCovarianceRulesSchema } from "./realizedCovarianceRules.js";
+import type { ZoneResolver } from "./zonedTime.js";
 import {
   MAX_MTF_SYMBOLS,
   MTF_TIMEFRAMES,
@@ -210,6 +216,11 @@ export interface ServerDeps {
   researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos">;
   forecastSets?: Pick<ForecastSetStore, "get">;
   forecastLossJournal?: Pick<ForecastLossJournalStore, "record">;
+  barSeries?: Pick<BarSeriesStore, "get">;
+  proxySets?: Pick<ProxySetStore, "get" | "register">;
+  realizedCovarianceJournal?: Pick<RealizedCovarianceJournalStore, "record" | "findByProxySetId" | "search">;
+  /** Test seam for tzdata drift (design H6); production uses the runtime's Intl data. */
+  zoneResolver?: ZoneResolver;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -416,7 +427,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore() }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5669,6 +5680,106 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           input: inline ? "inline" : "artifact", artifact_id: loaded.artifact_id, ...statistics,
           candidateEligible, statistical_calibration,
           limitations: inline ? [...limitations, "inline_input_not_stored_hash_not_reverifiable"] : limitations });
+      }
+      catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "compute_realized_covariance",
+    {
+      description: "Compute a daily realized covariance proxy from 1-8 imported bar series (tradingview-mcp-import-bar-series) under " +
+        "caller-chosen rules: bar interval, IANA time zone, local day end, weekdays, a missing-slot limit, the first interval " +
+        "(from the previous day's endpoint or within the day) and log or log-percent returns. " +
+        "Each produced day gets the realized covariance and the daily return outer product, or a drop cause; missing bars widen " +
+        "intervals and are never filled. The per-day values are stored as a proxy set (export with tradingview-mcp-export-proxy-set); " +
+        "the response returns only its proxy_set_id, day counts, the missing-slot distribution, diagnostics (modal first and last bar " +
+        "times per weekday, non-slot bars, invalid closes, identical-close pairs) and search counts. " +
+        "Every call is appended to a local computation journal, with or without research_id, and search counts calls, rule variants " +
+        "and bar-series versions on overlapping data. Optional research_id first writes period usage for the proxy-set source and " +
+        "each bar series over the bars read; usage_access_id (1-100 characters) makes those records idempotent on retry. " +
+        "Any failure returns an error without a summary. A noisy proxy, not the true covariance, and not a trading or risk result. " +
+        "No chart access, orders or arbitrary file paths.",
+      // Strict: a misspelled research_id must fail, not run silently untracked.
+      inputSchema: z.object({
+        series: z.array(z.string().regex(/^sha256:[a-f0-9]{64}$/)).min(1).max(8),
+        rules: realizedCovarianceRulesSchema,
+        from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        to_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        research_id: backtestSliceResearchIdSchema.optional(),
+        usage_access_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(),
+      }).strict(),
+    },
+    async ({ series, rules: requestedRules, from_date, to_date, research_id, usage_access_id }) => {
+      try {
+        if (usage_access_id !== undefined && research_id === undefined) throw new Error("usage_access_id requires research_id");
+        // 1. Validate and compute (docs/REALIZED_COVARIANCE_DESIGN.md, "MCP tool"). The proxy-set ID is known
+        // before anything is written.
+        const { rules, rules_sha256 } = canonicalizeRules(requestedRules);
+        const loaded: { artifact_id: string; bars: BarSeries }[] = [];
+        for (const artifact_id of series) {
+          const bars = await barSeries.get(artifact_id).catch((error: NodeJS.ErrnoException): never => {
+            if (error?.code === "ENOENT") throw new RealizedCovarianceError("bar_series_not_found", artifact_id);
+            throw error;
+          });
+          loaded.push({ artifact_id, bars });
+        }
+        const computed = computeRealizedCovariance({ rules, rules_sha256, from_date, to_date, series: loaded, resolver: zoneResolver });
+        const { set, artifact_id: proxy_set_id } = normalizeProxySet(computed.proxy);
+        const underlying = set.underlying_series_ids;
+        const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+        // Names what was already written, for an error after a write (design G6).
+        const written: string[] = [];
+        // 2. Period usage, with research_id: index 0 is the proxy-set source, then each bar series in axis order,
+        // all over the span the call reads.
+        let period_usage: unknown = { status: "untracked", limitations: ["research_id_required_for_automatic_period_usage",
+          "period_usage_checks_do_not_read_the_computation_journal"] };
+        let prior_overlap: ReturnType<typeof summarizePriorOverlap> | undefined;
+        if (research_id !== undefined) {
+          const base = usage_access_id ?? `rc-access:${randomUUID()}`;
+          const request_sha256 = `sha256:${createHash("sha256").update(JSON.stringify({ contract: set.algorithm_version,
+            bar_series: series, rules_sha256, from_date, to_date })).digest("hex")}`;
+          const records = [{ series_id: `proxy-set-source:${proxy_set_id.slice(7)}`, data_version: proxy_set_id },
+            ...loaded.map((s) => ({ series_id: s.bars.series_id, data_version: s.artifact_id }))];
+          const recorded = await researchPeriodUsage.recordToolAccessBatch("compute_realized_covariance", records.map((record, index) => ({
+            access_id: `${base}:${index}`, research_id, ...record, from: computed.envelope.from, to: computed.envelope.to,
+            purpose: "exploration", request_sha256,
+          })));
+          written.push(`period usage was recorded as ${base}:0-${records.length - 1}`);
+          prior_overlap = summarizePriorOverlap(recorded);
+          period_usage = { status: "tracked", access_id_base: base,
+            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent })),
+            limitations: ["bar_window_read_not_later_forecast_use", "series_ids_are_importer_supplied",
+              "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
+        }
+        // 3. The computation journal, always: the proxy-set verification requires this record (D12).
+        const { summary } = computed;
+        let journal;
+        try {
+          journal = await realizedCovarianceJournal.record({ rules, rules_sha256, bar_series: series, underlying_series_ids: underlying,
+            from_date, to_date, proxy_set_id, research_id: research_id ?? null, tzdata: computed.tzdata,
+            kept_days: summary.kept_days, dropped_days: summary.produced_days - summary.kept_days, envelope: computed.envelope });
+        } catch (error) {
+          throw new Error(`realized covariance journal write failed${written.length ? ` after ${written.join(" and ")}` : ""}; ` +
+            `no summary returned: ${message(error)}`);
+        }
+        written.push(`computation journal record ${journal.sequence} was appended`);
+        // 4. The proxy set, idempotent: retrying the same call stores it.
+        try {
+          await proxySets.register(set);
+        } catch (error) {
+          throw new Error(`proxy set store write failed after ${written.join(" and ")}; no summary returned: ${message(error)}`);
+        }
+        return jsonResult({
+          proxy_set_id, algorithm_version: set.algorithm_version, rules_sha256, rules, tzdata: computed.tzdata,
+          from_date, to_date, envelope: computed.envelope,
+          ...summary,
+          diagnostics: { series: computed.diagnostics, identical_close_pairs: set.identical_close_pairs },
+          search: { ...journal.search, ...(prior_overlap ? { period_usage_prior_overlap: prior_overlap } : {}),
+            limitations: [...REALIZED_COVARIANCE_SEARCH_LIMITATIONS] },
+          period_usage,
+          limitations: computed.limitations,
+        });
       }
       catch (err) { return errorResult(err); }
     },

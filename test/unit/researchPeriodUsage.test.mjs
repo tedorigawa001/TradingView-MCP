@@ -642,7 +642,9 @@ test('records written in the 0.1.13 format still read, check and extend', async 
 
 test('a stored record whose tool and scope do not belong together is refused', async (t) => {
   for (const [tool, scope] of [['compare_forecast_losses', 'ledger_trade_envelope_only'],
-    ['summarize_backtest_ledger', 'forecast_evaluation_window_only']]) {
+    ['summarize_backtest_ledger', 'forecast_evaluation_window_only'],
+    ['compute_realized_covariance', 'forecast_evaluation_window_only'],
+    ['compare_forecast_losses', 'realized_covariance_bar_window_only']]) {
     const { store } = await fixtureStore(t, (lines) => lines.map((line) => {
       const record = JSON.parse(line);
       return JSON.stringify(record.source === 'tool_observed' ? { ...record, tool_name: tool, scope } : record);
@@ -691,4 +693,27 @@ test('recordToolAccessBatch binds the server-chosen tool to its scope and keeps 
     assert.ok(both.limitations.includes(l), l);
   }
   assert.equal(both.limitations.filter((l) => l === 'series_id_and_data_version_are_importer_supplied_metadata').length, 1);
+});
+
+test('compute_realized_covariance records its own scope, and check adds its limitations only when present', async (t) => {
+  const { path, store } = await setup(t);
+  const access = (i, patch = {}) => ({ ...query({ series_id: `S${i}` }), access_id: `rc-tool:${i}`,
+    research_id: 'research:rc', purpose: 'exploration', request_sha256: version('d'), ...patch });
+  await store.recordToolAccessBatch('compute_realized_covariance', [access(0), access(1, { series_id: 'S0' })]);
+  assert.deepEqual((await saved(path)).map((r) => [r.tool_name, r.scope]),
+    [0, 1].map(() => ['compute_realized_covariance', 'realized_covariance_bar_window_only']));
+  const own = ['tool_observed_usage_is_realized_covariance_bar_window_only', 'proxy_rules_are_caller_research_choices'];
+  const usage = await store.check(query({ series_id: 'S0' }));
+  for (const l of own) assert.ok(usage.limitations.includes(l), l);
+  assert.ok(!usage.limitations.includes('forecast_estimation_history_not_covered'));
+  assert.ok(!usage.limitations.includes('ledger_trade_envelope_does_not_include_indicator_lookbacks'));
+  // The limitations follow the tools present in the ledger, and the shared one appears once.
+  await store.recordToolAccessBatch('compare_forecast_losses', [access(2)]);
+  const mixed = await store.check(query({ series_id: 'S0' }));
+  for (const l of [...own, 'forecast_estimation_history_not_covered']) assert.ok(mixed.limitations.includes(l), l);
+  assert.equal(mixed.limitations.filter((l) => l === 'series_id_and_data_version_are_importer_supplied_metadata').length, 1);
+  const { store: other } = await setup(t);
+  await other.recordToolAccessBatch('compare_forecast_losses', [access(0)]);
+  const without = await other.check(query({ series_id: 'S0' }));
+  for (const l of own) assert.ok(!without.limitations.includes(l), l);
 });

@@ -59,6 +59,7 @@ const storedFields = {
 export const OBSERVING_TOOL_SCOPES = {
   summarize_backtest_ledger: "ledger_trade_envelope_only",
   compare_forecast_losses: "forecast_evaluation_window_only",
+  compute_realized_covariance: "realized_covariance_bar_window_only",
 } as const;
 export type ObservingTool = keyof typeof OBSERVING_TOOL_SCOPES;
 const observingTools = Object.keys(OBSERVING_TOOL_SCOPES) as [ObservingTool, ...ObservingTool[]];
@@ -136,6 +137,10 @@ function assess(records: ResearchPeriodUsageRecord[], query: z.infer<typeof rese
         ? ["tool_observed_usage_is_forecast_evaluation_window_only",
           "series_id_and_data_version_are_importer_supplied_metadata",
           "forecast_estimation_history_not_covered"] : []),
+      ...(observed(records, "compute_realized_covariance")
+        ? ["tool_observed_usage_is_realized_covariance_bar_window_only",
+          "series_id_and_data_version_are_importer_supplied_metadata",
+          "proxy_rules_are_caller_research_choices"] : []),
       ...(records.some((entry) => entry.source === "tool_observed") ? [] : ["user_reported_local_usage_only"]),
       ...(records.some((entry) => entry.source === "tool_observed")
         && records.some((entry) => entry.source === "user_reported") ? ["manual_usage_is_user_reported"] : []),
