@@ -1,4 +1,4 @@
-# declare_forward_period: design memo (rev 3.2, design review approved; not implemented)
+# declare_forward_period: design memo (rev 3.4, design review approved; not implemented)
 
 Backlog #101, item 5.
 
@@ -11,7 +11,10 @@ Review history:
 - rev 3.1 (diff check): APPROVE. LOW I1 and NITs I2–I5, folded in as rev 3.2.
 
 Rev 2 folded in F1–F15, and rev 3 folded in G1–G11, with the user's decisions of 2026-09-30 (section
-"Decisions"). Rev 3.1 folds in H1–H9 and the NITs, and rev 3.2 folds in I1–I5.
+"Decisions"). Rev 3.1 folds in H1–H9 and the NITs, and rev 3.2 folds in I1–I5. Rev 3.3 corrects
+the clock-seam test note after the plan review (P-Q1). Rev 3.4 records three additions from the
+plan's diff check (R2), described under "When the declarations journal cannot be read": the record
+paths' back-off, the journal clock check, and a second replay exception.
 
 ## Problem
 
@@ -283,9 +286,12 @@ current time:
   included; the existing `prior_overlap` keeps its "< s" meaning.
 
 An identical retry therefore returns the same content, as the ledger promises ("Retries preserve the
-original timestamp and period assessment"). The one exception: if the original response was
-`unavailable`, a retry returns the as-of content, which may now be available. The check and the
-preflight describe the current state.
+original timestamp and period assessment"). There are two exceptions:
+- if the original response was `unavailable`, a retry returns the as-of content, which may now be
+  available;
+- a retry whose own read is unavailable returns `unavailable` (R2).
+
+The check and the preflight describe the current state.
 
 **When the declarations journal cannot be read (G5).**
 - **Record paths:** they read it with the short wait. On any failure, whether a torn line, a stale
@@ -298,6 +304,18 @@ preflight describe the current state.
 
   The limitation `forward_period_declarations_unavailable` is added. A record is never refused
   because of a declaration or because of the declarations journal.
+- **Back-off (R2):**
+  - After a declarations-lock timeout on a path, record paths on that path skip the read for 30 s.
+    They return `unavailable` at once, with the reason `lock_timeout_backoff` and a `retry_after_ms`.
+  - This keeps a stale lock from adding 2 s to every queued ledger operation and pushing another
+    process past the ledger's 30 s wait.
+  - The check and the preflight always try, and fail closed.
+- **Journal clock check (R2, R3):** every path runs one read-time check under both locks, after the
+  ledger's own clock check. If `now` is earlier than the last declarations line:
+  - declare, shorten, the check and the preflight fail with `forward_period_clock_moved_backwards`;
+  - record paths return `unavailable` with the reason `clock_moved_backwards`.
+
+  So the lead is never evaluated against a backward clock.
 - **The check and the preflight:** they fail closed with an error, because they cannot give an
   accurate answer.
 
@@ -410,9 +428,10 @@ stays visible through `shortened_after_start`.
 
 - **Golden fixture:** freeze a 0.1.15-format ledger (records from all three observing tools plus
   manual ones) before any change, and require it to read.
-- **Clock:** the stores take an injectable clock, which also drives the ledger's `accessed_at`
-  refine (including the module-level schema the manual record tool uses) and its clock-backwards
-  check. It is used to test exactly:
+- **Clock:** the stores take an injectable clock. The store checks `accessed_at` against it, and it
+  drives `recorded_at`, the clock-backwards checks and `checked_at`, one reading per call. The
+  exported module-level record schema keeps the real clock, but the store and server paths parse with
+  a schema without the future-`accessed_at` refine (P-Q1). It is used to test exactly:
   - the 24 h lead against 24 h − 1 ms;
   - the 24 h minimum and 366-day maximum length;
   - shortening at and just past the boundary;
