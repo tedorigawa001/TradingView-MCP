@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
-import { ForecastSetStore } from "./forecastSet.js";
+import { ForecastSetStore, assertPlainForecastSetInput } from "./forecastSet.js";
 
 export async function importForecastSet(args: string[], store = new ForecastSetStore()) {
   const { values } = parseArgs({ args, options: {
@@ -15,7 +15,7 @@ export async function importForecastSet(args: string[], store = new ForecastSetS
   // Strict decoding: invalid UTF-8 is an error, not silently replaced by U+FFFD (external review nit).
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(body); }
   catch { throw new Error("input is not valid UTF-8"); }
-  return store.register(JSON.parse(text));
+  return store.register(JSON.parse(text), { admit: assertPlainForecastSetInput });
 }
 
 function isEntrypoint(): boolean {

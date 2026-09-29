@@ -1,0 +1,25 @@
+{
+ "produced_by": "bushido-tradingview-mcp 0.1.14 build (src identical to 6f87dfe)",
+ "goldens": [
+  {
+   "name": "plain_matrix_with_secondary_and_labels",
+   "artifact_id": "sha256:7a8687777744e58412e7df353c11994cbb6c39dd7109be5b6dc8acfe20e946cd",
+   "body": "{\"schema_version\":\"1.0\",\"source_id\":\"golden-source\",\"source_sha256\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evidence_tier\":\"synthetic_test\",\"horizon\":1,\"n\":2,\"underlying_series_ids\":[\"fxdata-m15:EURUSD\",\"fxdata-m15:USDJPY\"],\"dates\":[\"2024-01-01\",\"2024-01-02\",\"2024-01-03\",\"2024-01-04\"],\"windows\":[{\"from\":\"2023-12-31T21:45:00.000Z\",\"to\":\"2024-01-01T21:45:00.000Z\"},{\"from\":\"2024-01-01T21:45:00.000Z\",\"to\":\"2024-01-02T21:45:00.000Z\"},{\"from\":\"2024-01-02T21:45:00.000Z\",\"to\":\"2024-01-03T21:45:00.000Z\"},{\"from\":\"2024-01-03T21:45:00.000Z\",\"to\":\"2024-01-04T21:45:00.000Z\"}],\"a\":[[[1,0.1],[0.1,2]],[[2,0.1],[0.1,2]],[[3,0.1],[0.1,2]],[[4,0.1],[0.1,2]]],\"b\":[[[1.5,0.2],[0.2,2]],[[1.5,0.2],[0.2,3]],[[1.5,0.2],[0.2,4]],[[1.5,0.2],[0.2,5]]],\"primary\":[[[1,0.05],[0.05,1]],[[1,0.05],[0.05,1.5]],[[1,0.05],[0.05,2]],[[1,0.05],[0.05,2.5]]],\"secondary\":[[[0.5,-0.1],[-0.1,1]],[[1.5,-0.1],[-0.1,1]],[[2.5,-0.1],[-0.1,1]],[[3.5,-0.1],[-0.1,1]]],\"labels\":[\"even\",\"odd\",\"even\",\"odd\"]}"
+  },
+  {
+   "name": "window_starts_on_its_own_date",
+   "artifact_id": "sha256:95585ec479e0d2e50f77da6987c2005e89a45b8f92ff586c56b0c3f421eca257",
+   "body": "{\"schema_version\":\"1.0\",\"source_id\":\"golden-source\",\"source_sha256\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evidence_tier\":\"synthetic_test\",\"horizon\":1,\"n\":1,\"underlying_series_ids\":[\"fxdata-m15:EURUSD\"],\"dates\":[\"2024-01-01\",\"2024-01-02\",\"2024-01-03\"],\"windows\":[{\"from\":\"2024-01-01T01:00:00.000Z\",\"to\":\"2024-01-01T23:00:00.000Z\"},{\"from\":\"2024-01-02T01:00:00.000Z\",\"to\":\"2024-01-02T23:00:00.000Z\"},{\"from\":\"2024-01-03T01:00:00.000Z\",\"to\":\"2024-01-03T23:00:00.000Z\"}],\"a\":[1,1.1,1.2],\"b\":[1.2,1.25,1.3],\"primary\":[0.5,0.75,1],\"secondary\":null,\"labels\":null}"
+  },
+  {
+   "name": "proxy_set_source",
+   "artifact_id": "sha256:9bfb3b1da7a1b5ab340d8e57592af3f4114a309a35c405733ba1a0243ca6abc9",
+   "body": "{\"schema_version\":\"1.0\",\"source_id\":\"proxy-set:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_sha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"evidence_tier\":\"synthetic_test\",\"horizon\":1,\"n\":1,\"underlying_series_ids\":[\"fxdata-m15:EURUSD\"],\"dates\":[\"2024-01-01\",\"2024-01-02\",\"2024-01-03\"],\"windows\":[{\"from\":\"2023-12-31T21:45:00.000Z\",\"to\":\"2024-01-01T21:45:00.000Z\"},{\"from\":\"2024-01-01T21:45:00.000Z\",\"to\":\"2024-01-02T21:45:00.000Z\"},{\"from\":\"2024-01-02T21:45:00.000Z\",\"to\":\"2024-01-03T21:45:00.000Z\"}],\"a\":[1,1.1,1.2],\"b\":[1.2,1.25,1.3],\"primary\":[0.5,0.75,1],\"secondary\":null,\"labels\":null}"
+  },
+  {
+   "name": "proxy_set_source_series",
+   "artifact_id": "sha256:f5ca3c77c16297b9b16de7a6819cc2318e28772185e92b60f812f525857c5df5",
+   "body": "{\"schema_version\":\"1.0\",\"source_id\":\"golden-source\",\"source_sha256\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evidence_tier\":\"synthetic_test\",\"horizon\":1,\"n\":1,\"underlying_series_ids\":[\"proxy-set-source:x\"],\"dates\":[\"2024-01-01\",\"2024-01-02\",\"2024-01-03\"],\"windows\":[{\"from\":\"2023-12-31T21:45:00.000Z\",\"to\":\"2024-01-01T21:45:00.000Z\"},{\"from\":\"2024-01-01T21:45:00.000Z\",\"to\":\"2024-01-02T21:45:00.000Z\"},{\"from\":\"2024-01-02T21:45:00.000Z\",\"to\":\"2024-01-03T21:45:00.000Z\"}],\"a\":[1,1.1,1.2],\"b\":[1.2,1.25,1.3],\"primary\":[0.5,0.75,1],\"secondary\":null,\"labels\":null}"
+  }
+ ]
+}

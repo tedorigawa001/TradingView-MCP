@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import {
   ForecastSetStore, normalizeForecastSet, normalizeInlineForecastSet, forecastSetComponentHashes, secondaryCopyReason,
   FORECAST_SET_MAX_LABELS, largestCommonScaleGroup, forecastSetSourceDigest, NEAR_COPY_TOLERANCE,
+  PROXY_SET_SOURCE_PREFIX, ENTRY_RESERVED_SERIES_PREFIXES, RESERVED_SERIES_PREFIXES,
 } from '../../build/forecastSet.js';
 import { importForecastSet } from '../../build/forecastSetCli.js';
 
@@ -252,4 +253,73 @@ test('the import CLI rejects a file that is not valid UTF-8 (external review nit
   const at = text.indexOf(Buffer.from([0xef, 0xbf, 0xbd]));
   await writeFile(input, Buffer.concat([text.subarray(0, at), Buffer.from([0xff]), text.subarray(at + 3)]));
   await assert.rejects(importForecastSet(['--input', input, '--confirm-local-import'], store), /not valid UTF-8/);
+});
+
+// Realized covariance plan, step 1: the released-tool changes, guarded by goldens from the 0.1.14 build.
+
+const GOLDENS = JSON.parse(await readFile(new URL('../fixtures/forecast-set/format-0.1.14.json', import.meta.url), 'utf8')).goldens;
+
+test('every stored 0.1.14 golden still reads to identical bytes and artifact_id (G2, G3)', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'forecast-set-golden-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const sets = join(directory, 'sets');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(sets, { mode: 0o700 });
+  const store = new ForecastSetStore(sets);
+  assert.deepEqual(GOLDENS.map((g) => g.name), ['plain_matrix_with_secondary_and_labels', 'window_starts_on_its_own_date',
+    'proxy_set_source', 'proxy_set_source_series']);
+  for (const golden of GOLDENS) {
+    // Owner-only store rules: the file must be 0600 in an 0700 directory, as a real store writes it.
+    await writeFile(join(sets, `${golden.artifact_id.slice(7)}.json`), golden.body, { mode: 0o600 });
+    const set = await store.get(golden.artifact_id);
+    assert.equal(JSON.stringify(set), golden.body, golden.name);
+    // get() already re-normalized the set and checked it against its ID; the stored bytes hash to it too.
+    assert.equal('sha256:' + createHash('sha256').update(golden.body).digest('hex'), golden.artifact_id, golden.name);
+  }
+});
+
+test('the relaxed window bound applies to proxy-set sources only: D − 8 ≤ UTC date(from) ≤ D (D11)', () => {
+  const hex = 'c'.repeat(64);
+  const oneDay = (lagDays, source) => {
+    const from = new Date(Date.UTC(2024, 0, 20) - lagDays * 86_400_000).toISOString().slice(0, 10);
+    return { ...scalarSet(1), dates: ['2024-01-20'], windows: [{ from: `${from}T12:00:00.000Z`, to: '2024-01-20T23:00:00.000Z' }],
+      a: [1], b: [2], primary: [1], secondary: undefined, labels: undefined,
+      ...(source ? { source_id: `proxy-set:${hex}`, source_sha256: `sha256:${hex}` } : {}) };
+  };
+  const accepts = (lag, source) => { try { normalizeForecastSet(oneDay(lag, source)); return true; } catch { return false; } };
+  assert.equal(PROXY_SET_SOURCE_PREFIX, 'proxy-set:');
+  // Proxy-set sources: D − 9 rejected; D − 8 … D accepted. A from after its date fails the from < to rule anyway,
+  // so D + 1 is checked with a window that ends later.
+  assert.deepEqual([9, 8, 2, 1, 0].map((lag) => accepts(lag, true)), [false, true, true, true, true]);
+  // Plain sets keep the released rule: only D − 1 and D.
+  assert.deepEqual([8, 2, 1, 0].map((lag) => accepts(lag, false)), [false, false, true, true]);
+  const late = (source) => ({ ...oneDay(0, source), windows: [{ from: '2024-01-21T01:00:00.000Z', to: '2024-01-21T23:00:00.000Z' }] });
+  assert.throws(() => normalizeForecastSet(late(true)), /within the 8 days before its date/);
+  assert.throws(() => normalizeForecastSet(late(false)), /on its date or the day before/);
+});
+
+test('the entry points reserve proxy-set: sources and proxy-set-source: series; normalization does not (G3)', async (t) => {
+  assert.deepEqual(RESERVED_SERIES_PREFIXES, ['ledger-source:', 'forecast-set-source:'], 'the stored-set list is unchanged');
+  assert.deepEqual(ENTRY_RESERVED_SERIES_PREFIXES, ['ledger-source:', 'forecast-set-source:', 'proxy-set-source:']);
+  const hex = 'd'.repeat(64);
+  const proxySource = scalarSet(5, { source_id: `proxy-set:${hex}`, source_sha256: `sha256:${hex}` });
+  const proxySeries = scalarSet(5, { underlying_series_ids: ['proxy-set-source:x'] });
+  // Normalization accepts both, so stored sets read.
+  assert.doesNotThrow(() => normalizeForecastSet(proxySource));
+  assert.doesNotThrow(() => normalizeForecastSet(proxySeries));
+  // The inline path rejects both.
+  assert.throws(() => normalizeInlineForecastSet(proxySource), /reserved for the proxy-set join/);
+  assert.throws(() => normalizeInlineForecastSet(proxySeries), /reserved prefix/);
+  // The plain CLI rejects both, before writing anything.
+  const { directory, store } = await tempStore(t);
+  for (const [name, input] of [['source', proxySource], ['series', proxySeries]]) {
+    const path = join(directory, `${name}.json`);
+    await writeFile(path, JSON.stringify(input));
+    await assert.rejects(importForecastSet(['--input', path, '--confirm-local-import'], store), /reserved/);
+  }
+  await assert.rejects(readdir(join(directory, 'sets')), { code: 'ENOENT' }, 'nothing was written');
+  // An ordinary set still imports through the CLI.
+  const ok = join(directory, 'ok.json');
+  await writeFile(ok, JSON.stringify(scalarSet(5)));
+  assert.equal((await importForecastSet(['--input', ok, '--confirm-local-import'], store)).artifact_id, normalizeForecastSet(scalarSet(5)).artifact_id);
 });

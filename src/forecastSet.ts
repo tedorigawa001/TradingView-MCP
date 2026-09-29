@@ -16,7 +16,18 @@ export const FORECAST_SET_INLINE_MAX_DATES = 2_000;
 export const FORECAST_SET_MAX_BYTES = 24 * 1024 * 1024;
 export const FORECAST_SET_MAX_DIMENSION = 8;
 export const FORECAST_SET_MAX_LABELS = 50;
+/** Enforced in normalizeForecastSet, so every stored set is checked against it on every read. */
 export const RESERVED_SERIES_PREFIXES = ["ledger-source:", "forecast-set-source:"] as const;
+/**
+ * Reserved only where a set enters: the plain CLI, the inline path and the bar-series import. They
+ * are never checked in normalizeForecastSet, which get() re-runs on stored sets, so a stored 0.1.14
+ * set that already used one still reads (realized covariance design G3).
+ */
+export const ENTRY_RESERVED_SERIES_PREFIXES = [...RESERVED_SERIES_PREFIXES, "proxy-set-source:"] as const;
+/** Sources that only the proxy-set join writes; compare_forecast_losses verifies them against their proxy set. */
+export const PROXY_SET_SOURCE_PREFIX = "proxy-set:";
+/** A proxy-set source's window may start up to this many calendar days (UTC) before its date (D11). */
+export const PROXY_SET_WINDOW_MAX_LAG_DAYS = 8;
 
 const idSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -67,7 +78,8 @@ export interface ForecastSet {
 }
 
 const digest = (body: string | Buffer) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
-const previousDay = (date: string) => new Date(Date.parse(`${date}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
+const daysBefore = (date: string, days: number) =>
+  new Date(Date.parse(`${date}T00:00:00.000Z`) - days * 86_400_000).toISOString().slice(0, 10);
 
 function fail(message: string): never {
   throw new Error(`invalid forecast set: ${message}`);
@@ -163,12 +175,22 @@ export function normalizeForecastSet(input: unknown, options: { maxBytes?: numbe
   for (let i = 1; i < count; i++) {
     if (!(raw.dates[i - 1] < raw.dates[i])) fail("dates must be strictly increasing and unique");
   }
+  // Proxy-set sources report realized windows (a Monday window starts at Friday's endpoint) and are
+  // verified against their proxy set, so their bound is D − 8 ≤ UTC date(from) ≤ D. Every other set
+  // keeps the released rule, so stored sets normalize to the same bytes (D11).
+  const proxySetSource = raw.source_id.startsWith(PROXY_SET_SOURCE_PREFIX);
   for (let i = 0; i < count; i++) {
     const { from, to } = raw.windows[i];
     if (!(from < to)) fail(`window ${i} must have from before to`);
     if (i > 0 && !(raw.windows[i - 1].to <= from)) fail(`windows ${i - 1} and ${i} overlap or are out of order`);
     const day = from.slice(0, 10);
-    if (day !== raw.dates[i] && day !== previousDay(raw.dates[i])) fail(`window ${i} must start on its date or the day before`);
+    if (proxySetSource) {
+      if (!(day <= raw.dates[i] && day >= daysBefore(raw.dates[i], PROXY_SET_WINDOW_MAX_LAG_DAYS))) {
+        fail(`window ${i} must start within the ${PROXY_SET_WINDOW_MAX_LAG_DAYS} days before its date`);
+      }
+    } else if (day !== raw.dates[i] && day !== daysBefore(raw.dates[i], 1)) {
+      fail(`window ${i} must start on its date or the day before`);
+    }
   }
   const ids = raw.underlying_series_ids;
   if (ids.length > raw.n) fail("more underlying series than dimensions");
@@ -202,9 +224,23 @@ export function normalizeForecastSet(input: unknown, options: { maxBytes?: numbe
   return { set, artifact_id: digest(body), bytes };
 }
 
+/**
+ * The entry-point reservations (G3): only the proxy-set join may write a `proxy-set:` source, and no
+ * entering set may use an entry-reserved series prefix.
+ */
+export function assertPlainForecastSetInput(set: ForecastSet): void {
+  if (set.source_id.startsWith(PROXY_SET_SOURCE_PREFIX)) {
+    fail(`source_id prefix ${PROXY_SET_SOURCE_PREFIX} is reserved for the proxy-set join`);
+  }
+  if (set.underlying_series_ids.some((id) => ENTRY_RESERVED_SERIES_PREFIXES.some((prefix) => id.startsWith(prefix)))) {
+    fail("underlying series ID uses a reserved prefix");
+  }
+}
+
 /** The inline path: the same schema and hash, restricted to scalar sets of at most 2,000 dates. */
 export function normalizeInlineForecastSet(input: unknown) {
   const normalized = normalizeForecastSet(input);
+  assertPlainForecastSetInput(normalized.set);
   if (normalized.set.n !== 1) fail("inline sets must be scalar (n = 1); register matrices with the import CLI");
   if (normalized.set.dates.length > FORECAST_SET_INLINE_MAX_DATES) fail(`inline sets hold at most ${FORECAST_SET_INLINE_MAX_DATES} dates`);
   return normalized;
@@ -265,8 +301,10 @@ export class ForecastSetStore {
     return set;
   }
 
-  async register(input: unknown): Promise<{ artifact_id: string; dates: number; n: number }> {
+  /** `admit` runs on the normalized set before anything is written; each entry point passes its own check. */
+  async register(input: unknown, options: { admit?: (set: ForecastSet) => void } = {}): Promise<{ artifact_id: string; dates: number; n: number }> {
     const { set, artifact_id } = normalizeForecastSet(input);
+    options.admit?.(set);
     const body = Buffer.from(JSON.stringify(set));
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     await this.checkDirectory();
