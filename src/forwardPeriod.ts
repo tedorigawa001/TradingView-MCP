@@ -152,14 +152,20 @@ export function validateForwardPeriodLine(value: unknown): ForwardPeriodLine {
 /**
  * Whole-journal consistency, so a hand-edited line fails closed: unique declaration IDs, every shortening after
  * its own declaration with the same research ID, `new_end` strictly decreasing and either `from` or at least
- * `from` + 24 h, and anchors that never decrease.
+ * `from` + 24 h, and anchors that never decrease. Lines with the same count name the same ledger record, so a
+ * corrupted fingerprint reads as an unreadable journal rather than as a regressed ledger (R5).
  */
 export function validateJournal(lines: ForwardPeriodLine[]): void {
   const ends = new Map<string, { line: DeclarationLine; end: string }>();
-  let anchor = 0;
+  let previous: ForwardPeriodLine | undefined;
   for (const line of lines) {
+    const anchor = previous?.ledger_sequence_at_write ?? 0;
     if (line.ledger_sequence_at_write < anchor) throw new Error("forward period ledger anchors moved backwards");
-    anchor = line.ledger_sequence_at_write;
+    if (previous && line.ledger_sequence_at_write === anchor && line.ledger_anchor !== null
+      && (line.ledger_anchor.access_id !== previous.ledger_anchor?.access_id || line.ledger_anchor.recorded_at !== previous.ledger_anchor.recorded_at)) {
+      throw new Error("forward period ledger anchors at one count disagree");
+    }
+    previous = line;
     if (line.kind === "declaration") {
       if (ends.has(line.declaration_id)) throw new Error("duplicate forward period declaration_id");
       ends.set(line.declaration_id, { line, end: line.to });

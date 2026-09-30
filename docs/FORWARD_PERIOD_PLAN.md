@@ -1,8 +1,8 @@
 # declare_forward_period: implementation plan (rev 2.2, review approved)
 
-Implements docs/FORWARD_PERIOD_DESIGN.md rev 3.4. Rev 3.4 is rev 3.2 (commit 995c502) plus the P-Q1
+Implements docs/FORWARD_PERIOD_DESIGN.md rev 3.5. Rev 3.4 is rev 3.2 (commit 995c502) plus the P-Q1
 clock-seam note and the R2 additions: the back-off, the journal clock check, and a second replay
-exception. The design governs: where this plan and the design differ, the design wins and this
+exception. Rev 3.5 adds the ledger anchor after the code review (C1). The design governs: where this plan and the design differ, the design wins and this
 plan is corrected. Section 6 fixes the constants the design leaves open, before any code.
 
 Review history:

@@ -118,8 +118,10 @@ journal, when needed (D4), is read under its own lock and released first.
   current record count, or the ledger record at that count is not the line's `ledger_anchor`, the
   ledger was reset, truncated or replaced, for example to erase accesses inside a declared period.
   The ledger's sequences are contiguous, so record n is always the n-th line, and appends made since
-  never clear the condition. Only the records up to each line are covered: accesses recorded after
-  the last declarations line can still be erased undetected.
+  never clear the condition. It detects truncation or replacement of the ledger below each line, not
+  an earlier record rewritten in place, and not the loss of accesses recorded after the last
+  declarations line, which include a peek inside a declared period recorded after its declaration.
+  A crash that loses the ledger's last write while a line anchored to it survives also reports it.
   - Declare, shorten, the check and the preflight fail closed with
     `forward_period_ledger_regressed`.
   - Record paths return `unavailable` with that reason.

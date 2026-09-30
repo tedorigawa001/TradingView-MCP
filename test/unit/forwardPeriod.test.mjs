@@ -85,7 +85,12 @@ test('journal consistency: shortenings follow their declaration, shrink, respect
     [[declaration(1), shortening(2, { new_end: '2027-01-01T12:00:00.000Z' })], /new_end/],
     [[declaration(1), shortening(2, { new_end: '2026-12-31T00:00:00.000Z' })], /new_end/],
     [[declaration(1, { anchor: 5 }), shortening(2, { anchor: 4 })], /anchors moved backwards/],
+    // R5: one count names one ledger record, in either field of the fingerprint.
+    [[declaration(1, { anchor: 5 }), { ...shortening(2, { anchor: 5 }), ledger_anchor: { ...ledgerRecord(5), access_id: 'other' } }], /disagree/],
+    [[declaration(1, { anchor: 5 }), { ...shortening(2, { anchor: 5 }), ledger_anchor: { ...ledgerRecord(5), recorded_at: ledgerRecord(6).recorded_at } }], /disagree/],
   ];
+  assert.doesNotThrow(() => validateJournal([declaration(1, { anchor: 5 }), shortening(2, { anchor: 5 }), shortening(3, { anchor: 7,
+    new_end: '2027-02-01T00:00:00.000Z' })]), 'the same count with the same record, then a later one');
   for (const [lines, pattern] of cases) assert.throws(() => validateJournal(lines), pattern);
 });
 

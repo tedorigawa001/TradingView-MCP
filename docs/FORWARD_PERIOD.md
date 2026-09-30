@@ -370,9 +370,12 @@ first write can leave, holds no declarations, as a missing one does.
 
 **A regressed ledger.** Each declarations line records how many ledger records existed when it was
 written, and the access ID and time of the last of them. A ledger that is shorter than that count,
-or holds another record at that position, was reset, truncated, replaced or restored from an older
-copy, which could erase accesses inside a declared period. Record paths keep appending meanwhile,
-but regrowing past the count never clears the error: the record at that position stays wrong.
+or holds another record at that position, has lost records. It was reset, truncated, replaced or
+restored from an older copy, which could erase accesses inside a declared period. A crash can do
+the same without anyone resetting anything: on power loss, the ledger's last write can be lost
+while the declarations line written after it survives (on macOS, fsync does not flush the drive's
+cache). Record paths keep appending meanwhile, but regrowing past the count never clears the
+error: the record at that position stays wrong.
 - Restore the ledger that holds the anchored records. The error then clears.
 - Do not move or delete the declarations journal to clear it: that erases the declarations too, and
   is the kind of reset this check exists to catch.
@@ -380,9 +383,14 @@ but regrowing past the count never clears the error: the record at that position
   Moving both files aside together is then the only way to resume. Keep them, and treat every
   period they covered as used.
 
-The check covers the ledger up to each declarations line. Accesses recorded after the last line
-can still be erased undetected, like any deletion from the ledger
-(`local_journal_is_private_state_not_tamper_evidence`).
+The check detects a ledger truncated or replaced below any declarations line. It does not detect:
+- an earlier record rewritten in place, since only the record at each line's count is compared;
+- the loss of accesses recorded after the last declarations line. These include the ones that
+  matter most: a peek inside a declared period, recorded after its declaration, can be erased by
+  restoring a copy of the ledger taken after the declaration, as long as no later declarations
+  line exists.
+
+Both fall under `local_journal_is_private_state_not_tamper_evidence`.
 
 **A backward clock.** Correct the system clock. The error clears once the clock passes the last
 line's `recorded_at`. The ledger's own clock check runs first.
