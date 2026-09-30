@@ -1084,6 +1084,15 @@ test('research period usage batch and summary_only through the real MCP store', 
     assert.equal(r.isError,true);
   }
   assert.equal(await readFile(path,'utf8'),before,'a rejected batch writes nothing');
+  // A future accessed_at is checked by the store on its own clock, so it is a tool error, not an input error
+  // (docs/FORWARD_PERIOD_PLAN.md, P-Q1). Either way nothing is written.
+  for(const [name,args] of [['record_research_period_usage_batch',{records:[{...entry('future-1','FX.GBPUSD'),accessed_at:'2099-01-01T00:00:00.000Z'}],confirm:true}],
+    ['record_research_period_usage',{...entry('future-2','FX.GBPUSD'),accessed_at:'2099-01-01T00:00:00.000Z',confirm:true}]]) {
+    const r=await client.callTool({name,arguments:args});
+    assert.equal(r.isError,true,name);
+    assert.match(r.content[0].text,/^Error: accessed_at must not be in the future$/,name);
+  }
+  assert.equal(await readFile(path,'utf8'),before);
   const full=await call('check_research_period_usage',period('FX.EURUSD'));
   const brief=await call('check_research_period_usage',{...period('FX.EURUSD'),summary_only:true});
   assert.equal(full.matches.length,2);

@@ -20,6 +20,11 @@ const inputSchema = z.object({
   purpose: z.enum(["exploration", "validation"]),
 }).strict().refine(ordered, "from must be before to");
 
+/**
+ * The exported schemas keep the real-clock future check. The store and the server's record tools parse
+ * with the ones below, without it, and the store checks accessed_at against its own clock
+ * (docs/FORWARD_PERIOD_PLAN.md, P-Q1).
+ */
 export const researchPeriodUsageRecordSchema = inputSchema.refine(
   (value) => value.accessed_at <= new Date().toISOString(), "accessed_at must not be in the future",
 );
@@ -30,10 +35,15 @@ export const researchPeriodUsageCheckSchema = z.object({
 
 export type ResearchPeriodUsageInput = z.infer<typeof researchPeriodUsageRecordSchema>;
 export const RESEARCH_PERIOD_USAGE_BATCH_MAX = 20;
+const uniqueAccessIds = (records: { access_id: string }[]) => new Set(records.map((record) => record.access_id)).size === records.length;
 export const researchPeriodUsageBatchSchema = z.array(researchPeriodUsageRecordSchema)
   .min(1).max(RESEARCH_PERIOD_USAGE_BATCH_MAX)
-  .refine((records) => new Set(records.map((record) => record.access_id)).size === records.length,
-    "access_id must be unique within a batch");
+  .refine(uniqueAccessIds, "access_id must be unique within a batch");
+/** The record inputs without the future-accessed_at refine; `from < to`, the bounds and uniqueness stay. */
+export const researchPeriodUsageRecordInputSchema = inputSchema;
+export const researchPeriodUsageBatchInputSchema = z.array(inputSchema)
+  .min(1).max(RESEARCH_PERIOD_USAGE_BATCH_MAX)
+  .refine(uniqueAccessIds, "access_id must be unique within a batch");
 const toolAccessSchema = z.object({
   access_id: identifier,
   research_id: identifier,
@@ -175,15 +185,23 @@ type RecordRequest = (ResearchPeriodUsageInput & { source: "user_reported" })
     scope: (typeof OBSERVING_TOOL_SCOPES)[ObservingTool] });
 type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment };
 
+export interface ResearchPeriodUsageStoreOptions {
+  /** Test seam; one reading per call drives recorded_at, the accessed_at checks, the clock checks and checked_at. */
+  now?: () => Date;
+}
+
 export class ResearchPeriodUsageStore {
   private readonly log: AppendOnlyFirstSeenLog<ResearchPeriodUsageRecord>;
+  private readonly clock: () => Date;
 
   constructor(private readonly filePath = join(homedir(), ".tradingview-mcp", "research-period-usage.jsonl"),
-    private readonly limits = { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 }) {
+    private readonly limits = { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 },
+    options: ResearchPeriodUsageStoreOptions = {}) {
     this.log = new AppendOnlyFirstSeenLog(filePath, "research period usage", validateRecord, limits);
+    this.clock = options.now ?? (() => new Date());
   }
 
-  private async readUnlocked(): Promise<ResearchPeriodUsageRecord[]> {
+  private async readUnlocked(now: string): Promise<ResearchPeriodUsageRecord[]> {
     // The shared log accepts missing terminators and blank lines; this ledger must not.
     try {
       const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
@@ -200,7 +218,7 @@ export class ResearchPeriodUsageStore {
       if (ids.has(record.access_id)) throw new Error("duplicate research period usage access_id");
       ids.add(record.access_id);
     }
-    if (records.length && records[records.length - 1].recorded_at > new Date().toISOString()) {
+    if (records.length && records[records.length - 1].recorded_at > now) {
       throw new Error("research period usage clock moved backwards");
     }
     return records;
@@ -238,7 +256,7 @@ export class ResearchPeriodUsageStore {
 
   async record(input: unknown): Promise<RecordResult> {
     // Parse before queueing to detach the request from caller-owned mutable data.
-    const request = researchPeriodUsageRecordSchema.parse(input);
+    const request = researchPeriodUsageRecordInputSchema.parse(input);
     return (await this.recordBound([{ ...request, source: "user_reported" }]))[0];
   }
 
@@ -250,7 +268,7 @@ export class ResearchPeriodUsageStore {
    * is not resumable: the next read fails closed on JSONL framing until the file is repaired.
    */
   async recordBatch(input: unknown): Promise<RecordResult[]> {
-    const requests = researchPeriodUsageBatchSchema.parse(input);
+    const requests = researchPeriodUsageBatchInputSchema.parse(input);
     return this.recordBound(requests.map((request) => ({ ...request, source: "user_reported" as const })));
   }
 
@@ -273,8 +291,12 @@ export class ResearchPeriodUsageStore {
 
   private async recordBound(requests: RecordRequest[]): Promise<RecordResult[]> {
     return this.log.serialize(async () => {
-      const records = await this.readUnlocked();
-      const now = new Date().toISOString();
+      const now = this.clock().toISOString();
+      const records = await this.readUnlocked(now);
+      // The future check runs on the store's clock, before anything else, as the parse-time refine did.
+      if (requests.some((request) => request.source === "user_reported" && request.accessed_at > now)) {
+        throw new Error("accessed_at must not be in the future");
+      }
       const planned: ResearchPeriodUsageRecord[] = [];
       const results: RecordResult[] = [];
       let retried = false;
@@ -320,17 +342,18 @@ export class ResearchPeriodUsageStore {
 
   async check(input: unknown): Promise<ResearchPeriodUsageAssessment> {
     const query = researchPeriodUsageCheckSchema.parse(input);
-    return this.log.serialize(async () => assess(await this.readUnlocked(), query));
+    return this.log.serialize(async () => assess(await this.readUnlocked(this.clock().toISOString()), query));
   }
 
   async preflightOos(input: unknown) {
     const query = researchPeriodUsageCheckSchema.parse(input);
     return this.log.serialize(async () => {
-      const usage = assess(await this.readUnlocked(), query);
+      const now = this.clock().toISOString();
+      const usage = assess(await this.readUnlocked(now), query);
       const overlap = usage.overlapping_records > 0;
       return {
         contract: "recorded_usage_oos_preflight_v1",
-        checked_at: new Date().toISOString(),
+        checked_at: now,
         status: overlap ? "blocked" : "review_required",
         reason: overlap ? "evaluation_period_has_recorded_usage" : "absence_of_usage_records_is_not_unused_evidence",
         execution_allowed: false,

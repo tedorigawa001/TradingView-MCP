@@ -84,14 +84,15 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     }
   }
 
-  async acquireFileLock(): Promise<() => Promise<void>> {
+  /** `budgetMs` defaults to the process-wide wait; serializeWithin passes what is left of its budget. */
+  async acquireFileLock(budgetMs = this.lockWaitMs): Promise<() => Promise<void>> {
     await this.ensureDirectory();
     const lockPath = `${this.filePath}.lock`;
     const token = randomUUID();
     const started = performance.now();
-    const deadline = started + this.lockWaitMs;
+    const deadline = started + budgetMs;
     const timeout = () => Object.assign(new Error(
-      `timed out acquiring ${this.label} history lock after ${this.lockWaitMs}ms: ${lockPath}; ` +
+      `timed out acquiring ${this.label} history lock after ${budgetMs}ms: ${lockPath}; ` +
       "another process may still hold it; do not remove a live owner's lock",
     ), { code: "HISTORY_LOCK_TIMEOUT" });
     let attempted = false;
@@ -246,6 +247,46 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * serialize with one budget for both waits: the in-process queue and the file lock. The forward period
+   * declarations journal uses it, so a stale lock can never hold a caller for the process-wide 30 s
+   * (docs/FORWARD_PERIOD_DESIGN.md, H1). On timeout the call rejects with HISTORY_LOCK_TIMEOUT, and its
+   * operation never runs.
+   *
+   * The queue tail waits for both the predecessor and this call. So a caller that timed out never lets
+   * later callers skip ahead of a predecessor that is still running. Mutual exclusion itself rests on the
+   * exclusive-create file lock.
+   */
+  serializeWithin<R>(budgetMs: number, operation: () => Promise<R>): Promise<R> {
+    const started = performance.now();
+    const predecessor = pathQueues.get(this.queueKey) ?? Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const queueTimeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(
+        `timed out waiting for ${this.label} history queue after ${budgetMs}ms`), { code: "HISTORY_LOCK_TIMEOUT" })), budgetMs);
+      timer.unref?.();
+    });
+    const result = Promise.race([predecessor, queueTimeout]).then(async () => {
+      clearTimeout(timer);
+      const release = await this.acquireFileLock(Math.max(0, budgetMs - (performance.now() - started)));
+      try {
+        return await operation();
+      } finally {
+        await release();
+      }
+    }, (error: unknown) => {
+      clearTimeout(timer);
+      throw error;
+    });
+    const settled = result.then(() => undefined, () => undefined);
+    const tail = Promise.all([predecessor, settled]).then(() => undefined);
+    pathQueues.set(this.queueKey, tail);
+    void tail.then(() => {
+      if (pathQueues.get(this.queueKey) === tail) pathQueues.delete(this.queueKey);
+    });
+    return result;
   }
 
   serialize<R>(operation: () => Promise<R>): Promise<R> {

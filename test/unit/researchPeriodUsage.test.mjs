@@ -717,3 +717,53 @@ test('compute_realized_covariance records its own scope, and check adds its limi
   const without = await other.check(query({ series_id: 'S0' }));
   for (const l of own) assert.ok(!without.limitations.includes(l), l);
 });
+
+// docs/FORWARD_PERIOD_PLAN.md, step 1: a 0.1.15 golden written by make-format-0.1.15.mjs with the released build.
+const FIXTURE_015 = new URL('../fixtures/period-usage/format-0.1.15.jsonl', import.meta.url);
+test('records written in the 0.1.15 format, by every observing tool, still read, check and extend', async (t) => {
+  const { path } = await setup(t);
+  await writeFile(path, await readFile(FIXTURE_015, 'utf8'), { mode: 0o600 });
+  const store = new ResearchPeriodUsageStore(path);
+  const query015 = { series_id: 'fixture-series', data_version: 'sha256:' + 'a'.repeat(64),
+    from: '2024-01-10T00:00:00.000Z', to: '2024-01-20T00:00:00.000Z' };
+  const usage = await store.check(query015);
+  assert.deepEqual(usage.matches.map((m) => [m.access_id, m.source, m.tool_name ?? null, m.scope ?? null]), [
+    ['fixture15:manual', 'user_reported', null, null],
+    ['fixture15:forecast:1', 'tool_observed', 'compare_forecast_losses', 'forecast_evaluation_window_only'],
+    ['fixture15:rc:1', 'tool_observed', 'compute_realized_covariance', 'realized_covariance_bar_window_only'],
+  ]);
+  for (const l of ['tool_observed_usage_is_ledger_trade_envelope_only', 'tool_observed_usage_is_forecast_evaluation_window_only',
+    'tool_observed_usage_is_realized_covariance_bar_window_only']) assert.ok(usage.limitations.includes(l), l);
+  const [added] = await store.recordToolAccessBatch('compute_realized_covariance',
+    [{ ...query015, access_id: 'fixture15:rc:2', research_id: 'r', purpose: 'exploration', request_sha256: 'sha256:' + '6'.repeat(64) }]);
+  assert.deepEqual([added.sequence, added.prior_overlap.overlapping_records], [9, 3]);
+  const manual = await store.record({ ...query015, access_id: 'fixture15:manual:2', research_id: 'r', purpose: 'validation',
+    accessed_at: '2025-03-01T00:00:00.000Z' });
+  assert.equal(manual.sequence, 10);
+  assert.equal((await saved(path)).length, 10);
+});
+
+test('an injected clock drives recorded_at, the accessed_at check, the clock check and checked_at (plan P-Q1)', async (t) => {
+  const { path } = await setup(t);
+  const at = (iso) => () => new Date(iso);
+  // A clock ahead of real time: accesses that are future by the real clock are past by the store's.
+  const store = new ResearchPeriodUsageStore(path, undefined, { now: at('2030-01-01T00:00:00.000Z') });
+  const manual = await store.record(input({ access_id: 'clock:1', accessed_at: '2029-12-31T00:00:00.000Z' }));
+  assert.deepEqual([manual.recorded_at, manual.first_seen_at, manual.observation_date],
+    ['2030-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z', '2030-01-01']);
+  await assert.rejects(store.record(input({ access_id: 'clock:2', accessed_at: '2030-01-01T00:00:00.001Z' })), /accessed_at must not be in the future/);
+  const exact = await store.record(input({ access_id: 'clock:2b', accessed_at: '2030-01-01T00:00:00.000Z' }));
+  assert.equal(exact.accessed_at, exact.recorded_at, 'an access at exactly the store time is not in the future');
+  await assert.rejects(store.recordBatch([input({ access_id: 'clock:3', accessed_at: '2030-01-02T00:00:00.000Z' })]), /in the future/);
+  const tool = await store.recordToolAccess({ ...query(), access_id: 'clock:4', research_id: 'r', purpose: 'exploration',
+    request_sha256: version('d') });
+  assert.deepEqual([tool.accessed_at, tool.recorded_at], ['2030-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z']);
+  assert.equal((await store.preflightOos(query({ series_id: 'other' }))).checked_at, '2030-01-01T00:00:00.000Z');
+  // The same ledger read by a clock behind its last record fails closed on every path.
+  const behind = new ResearchPeriodUsageStore(path, undefined, { now: at('2029-06-01T00:00:00.000Z') });
+  await assert.rejects(behind.check(query()), /clock moved backwards/);
+  await assert.rejects(behind.preflightOos(query()), /clock moved backwards/);
+  await assert.rejects(behind.record(input({ access_id: 'clock:5', accessed_at: '2029-01-01T00:00:00.000Z' })), /clock moved backwards/);
+  // The exported schema keeps the real clock.
+  assert.equal(researchPeriodUsageRecordSchema.safeParse(input({ accessed_at: '2029-12-31T00:00:00.000Z' })).success, false);
+});

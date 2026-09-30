@@ -65,3 +65,46 @@ test('invalid lock wait configuration fails closed',async t=>{
   }
   for(const value of ['100','30000','120000']) {process.env[variable]=value; assert.doesNotThrow(()=>log(path));}
 });
+
+// serializeWithin (docs/FORWARD_PERIOD_PLAN.md, step 1): one budget covers the in-process queue and the file lock.
+test('serializeWithin times out on a held file lock within its budget, and the operation never runs',async t=>{
+  const path=await setup(t);
+  const release=await log(path).acquireFileLock();
+  let ran=false;
+  const started=performance.now();
+  try {
+    await assert.rejects(log(path).serializeWithin(200,async()=>{ran=true;}),{code:'HISTORY_LOCK_TIMEOUT'});
+    const elapsed=performance.now()-started;
+    assert.ok(elapsed>=190&&elapsed<1500,`${elapsed}ms`);
+    assert.equal(ran,false);
+    assert.equal(log(path).lockWaitMs,30000,'the process-wide wait is unchanged');
+  } finally {await release();}
+  assert.equal(await log(path).serializeWithin(200,async()=>'ok'),'ok','the lock is usable once released');
+});
+test('serializeWithin times out in the in-process queue, and later callers still wait for the running operation',async t=>{
+  const path=await setup(t);
+  const order=[];
+  let finish;
+  const long=log(path).serialize(async()=>{order.push('long:start');await new Promise(resolve=>{finish=resolve;});order.push('long:end');});
+  const started=performance.now();
+  await assert.rejects(log(path).serializeWithin(150,async()=>{order.push('short');}),{code:'HISTORY_LOCK_TIMEOUT'});
+  const elapsed=performance.now()-started;
+  assert.ok(elapsed>=140&&elapsed<1500,`${elapsed}ms`);
+  // A caller queued after the timed-out one must not skip ahead of the operation that still holds the queue.
+  const after=log(path).serialize(async()=>{order.push('after');});
+  await new Promise(resolve=>setTimeout(resolve,100));
+  assert.deepEqual(order,['long:start'],'nothing ran while the long operation held the queue');
+  finish();
+  await long;
+  await after;
+  assert.deepEqual(order,['long:start','long:end','after']);
+});
+test('serializeWithin runs operations in order when nothing blocks, and releases the lock after a failure',async t=>{
+  const path=await setup(t);
+  const order=[];
+  await Promise.all([1,2,3].map(i=>log(path).serializeWithin(2000,async()=>{order.push(i);})));
+  assert.deepEqual(order,[1,2,3]);
+  await assert.rejects(log(path).serializeWithin(2000,async()=>{throw new Error('boom');}),/boom/);
+  assert.equal(await log(path).serializeWithin(2000,async()=>'next'),'next');
+  await assert.rejects(readFile(path+'.lock','utf8'),{code:'ENOENT'},'no lock is left behind');
+});

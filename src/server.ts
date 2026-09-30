@@ -9,7 +9,7 @@ import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./back
 import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
 import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
 import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
-import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchSchema,
+import { ResearchPeriodUsageStore, researchPeriodUsageRecordInputSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchInputSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import { BarSeriesStore, type BarSeries } from "./barSeries.js";
@@ -5476,12 +5476,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Records the full inspected UTC interval [from,to), purpose and actual accessed_at. Retries with the same access_id are idempotent; conflicts fail. " +
         "No chart access, orders or file paths. Reporting use is not preregistration or proof of an unused OOS period. " +
         "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
-      inputSchema: {...researchPeriodUsageRecordSchema.shape, confirm: z.literal(true), summary_only: summaryOnlySchema},
+      inputSchema: {...researchPeriodUsageRecordInputSchema.shape, confirm: z.literal(true), summary_only: summaryOnlySchema},
     },
     async (request) => {
       try {
         const {confirm, summary_only, ...input} = request;
-        const result = await researchPeriodUsage.record(researchPeriodUsageRecordSchema.parse(input));
+        // Parsed without the future-accessed_at refine: the store checks that against its own clock
+        // (docs/FORWARD_PERIOD_PLAN.md, P-Q1). `from < to` and the formats are still checked here.
+        const result = await researchPeriodUsage.record(researchPeriodUsageRecordInputSchema.parse(input));
         return jsonResult(summary_only ? {...result, prior_overlap: summarizeAssessment(result.prior_overlap)} : result);
       } catch (err) { return errorResult(err); }
     },
@@ -5495,7 +5497,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "If an I/O failure stops the append after complete lines, an identical retry completes it; a torn partial line fails closed until the file is repaired. " +
         "Records are appended in order, so a later record's prior_overlap includes earlier ones. " +
         "summary_only:true replaces listed overlapping records with counts and distinct research IDs. Reporting use is not preregistration or proof of an unused OOS period.",
-      inputSchema: {records: researchPeriodUsageBatchSchema, confirm: z.literal(true), summary_only: summaryOnlySchema},
+      inputSchema: {records: researchPeriodUsageBatchInputSchema, confirm: z.literal(true), summary_only: summaryOnlySchema},
     },
     async ({records, summary_only}) => {
       try {
