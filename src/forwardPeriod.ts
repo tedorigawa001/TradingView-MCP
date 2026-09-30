@@ -9,7 +9,7 @@ import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./
  * recorded intent, never proof of unused data. This module holds the journal and the pure logic; the period
  * usage store orchestrates the two files under ledger → declarations locks.
  */
-export const FORWARD_PERIOD_NAMESPACE = "forward_period_declarations";
+export const FORWARD_PERIOD_NAMESPACE = "forward_period_declarations" as const;
 export const FORWARD_PERIOD_LEAD_MS = 86_400_000;
 export const FORWARD_PERIOD_MIN_LENGTH_MS = 86_400_000;
 export const FORWARD_PERIOD_MAX_LENGTH_MS = 31_622_400_000;   // 366 days

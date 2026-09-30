@@ -595,6 +595,24 @@ export class StrategyResearchJournalStore {
     });
   }
 
+  /**
+   * A registered hypothesis's identity, or null: for forward period declarations (docs/FORWARD_PERIOD_DESIGN.md,
+   * D4), which store its definition hash, journal sequence and population. Read under this journal's own lock.
+   */
+  async findHypothesis(kind: "strategy" | "event", hypothesisId: string): Promise<{
+    definition_hash: string; sequence: number; recorded_at: string; population: ResearchPopulation;
+  } | null> {
+    if (!ID_PATTERN.test(hypothesisId)) throw new Error("invalid hypothesis id");
+    const wanted = kind === "strategy" ? "hypothesis_registered" : "event_hypothesis_registered";
+    return this.serialize(async () => {
+      const entry = (await this.readUnlocked()).find((item) => item.kind === wanted && item.entity_id === hypothesisId);
+      if (!entry) return null;
+      const payload = entry.payload as { evaluationContract: { population: ResearchPopulation } };
+      return { definition_hash: entry.definition_hash, sequence: entry.sequence, recorded_at: entry.recorded_at,
+        population: payload.evaluationContract.population };
+    });
+  }
+
   async assertEventHypothesesRegistered(hypothesisIds: string[]): Promise<void> {
     if (hypothesisIds.length < 1 || hypothesisIds.some((id) => !ID_PATTERN.test(id)) ||
         new Set(hypothesisIds).size !== hypothesisIds.length) {

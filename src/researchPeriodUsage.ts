@@ -1,11 +1,18 @@
-import { constants } from "node:fs";
+import { constants, existsSync, realpathSync } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import {
+  FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_MAX_LENGTH_MS,
+  FORWARD_PERIOD_MIN_LENGTH_MS, FORWARD_PERIOD_NAMESPACE, AccessIndex, ForwardPeriodError, ForwardPeriodJournal, assertClockNotBehind,
+  buildViews, conflictingDeclarations, declareForwardPeriodInputSchema, ledgerRegressed, relatedDeclarations,
+  resolveForwardPeriodJournalPath, shortenForwardPeriodInputSchema, staticFields, stateOf, validNewEnd,
+  type DeclarationLine, type DeclarationView, type ForwardPeriodLine, type ShorteningLine,
+} from "./forwardPeriod.js";
 
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const hash = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -188,17 +195,60 @@ type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_ove
 export interface ResearchPeriodUsageStoreOptions {
   /** Test seam; one reading per call drives recorded_at, the accessed_at checks, the clock checks and checked_at. */
   now?: () => Date;
+  /** The forward period declarations journal (docs/FORWARD_PERIOD_PLAN.md, section 1). */
+  forwardPeriodPath?: string;
+  /** Checked against the declarations path at construction; createServer passes it. */
+  researchJournalPath?: string;
 }
 
+/** A registered hypothesis, as StrategyResearchJournalStore.findHypothesis returns it. */
+export type HypothesisLookup = (kind: "strategy" | "event", id: string) =>
+  Promise<{ definition_hash: string; sequence: number; population: "in_sample" | "out_of_sample" | "walk_forward" | "stress" | "live" } | null>;
+
+const DEFAULT_LEDGER_PATH = () => join(homedir(), ".tradingview-mcp", "research-period-usage.jsonl");
+/** Named after the ledger, so several ledgers in one directory never share a journal (plan P-Q11, R5). */
+const siblingJournalPath = (ledgerPath: string) =>
+  `${ledgerPath.endsWith(".jsonl") ? ledgerPath.slice(0, -".jsonl".length) : ledgerPath}.forward-period-declarations.jsonl`;
+/** The realpath of the nearest existing ancestor plus the rest, so /var and /private/var compare equal (P-Q3). */
+function comparablePath(path: string): string {
+  let existing = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    rest.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  return join(realpathSync(existing), ...rest);
+}
+const overlapping = (aFrom: string, aTo: string, bFrom: string, bTo: string) => aFrom < bTo && bFrom < aTo;
+const ms = (iso: string) => Date.parse(iso);
+
 export class ResearchPeriodUsageStore {
+  private readonly filePath: string;
   private readonly log: AppendOnlyFirstSeenLog<ResearchPeriodUsageRecord>;
   private readonly clock: () => Date;
+  private readonly forwardPeriods: ForwardPeriodJournal;
 
-  constructor(private readonly filePath = join(homedir(), ".tradingview-mcp", "research-period-usage.jsonl"),
+  /**
+   * Home defaults are resolved only when the ledger path is omitted (createServer's default). With an explicit
+   * ledger path the declarations journal is its sibling, so tests stay in their own directories (plan P1).
+   */
+  constructor(filePath?: string,
     private readonly limits = { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 },
     options: ResearchPeriodUsageStoreOptions = {}) {
-    this.log = new AppendOnlyFirstSeenLog(filePath, "research period usage", validateRecord, limits);
+    this.filePath = filePath ?? DEFAULT_LEDGER_PATH();
+    this.log = new AppendOnlyFirstSeenLog(this.filePath, "research period usage", validateRecord, limits);
     this.clock = options.now ?? (() => new Date());
+    const journalPath = options.forwardPeriodPath ?? (filePath === undefined
+      ? resolveForwardPeriodJournalPath() ?? join(homedir(), ".tradingview-mcp", "forward-period-declarations.jsonl")
+      : siblingJournalPath(filePath));
+    const journal = comparablePath(journalPath);
+    // A nested lock on one queue key would wait on itself forever (design G5).
+    for (const other of [this.filePath, options.researchJournalPath]) {
+      if (other !== undefined && comparablePath(other) === journal) {
+        throw new Error("forward period declarations journal must not share a path with the ledger or the research journal");
+      }
+    }
+    this.forwardPeriods = new ForwardPeriodJournal(journalPath);
   }
 
   private async readUnlocked(now: string): Promise<ResearchPeriodUsageRecord[]> {
@@ -370,4 +420,163 @@ export class ResearchPeriodUsageStore {
       };
     });
   }
+
+  // -------------------------------------------------------------------------------------------------------------
+  // Forward period declarations (docs/FORWARD_PERIOD_DESIGN.md rev 3.4; plan step 3)
+
+  /** Journal errors become forward_period_journal_unavailable; errors of the operation itself pass through. */
+  private async withJournal<R>(operation: (lines: ForwardPeriodLine[]) => Promise<R>): Promise<R> {
+    let lines: ForwardPeriodLine[];
+    try {
+      return await this.forwardPeriods.withLock(async () => {
+        try { lines = await this.forwardPeriods.readUnlocked(); }
+        catch (error) { throw new JournalFailure(error); }
+        return operation(lines);
+      });
+    } catch (error) {
+      if (error instanceof JournalFailure || (error as NodeJS.ErrnoException)?.code === "HISTORY_LOCK_TIMEOUT") {
+        const cause = error instanceof JournalFailure ? error.cause : error;
+        throw new ForwardPeriodError("forward_period_journal_unavailable", cause instanceof Error ? cause.message : String(cause));
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Ledger, then declarations, with one clock reading. The ledger's own clock check runs first, then the H7
+   * comparison and the journal clock check (design R3), before the operation.
+   */
+  private withBothLocks<R>(operation: (context: { now: string; ledger: ResearchPeriodUsageRecord[]; lines: ForwardPeriodLine[] }) => Promise<R>): Promise<R> {
+    return this.log.serialize(async () => {
+      const now = this.clock().toISOString();
+      const ledger = await this.readUnlocked(now);
+      return this.withJournal(async (lines) => {
+        if (ledgerRegressed(lines, ledger.length)) {
+          throw new ForwardPeriodError("forward_period_ledger_regressed",
+            "a forward period line was written after more ledger records than the ledger now holds; it was reset or replaced");
+        }
+        assertClockNotBehind(lines, now);
+        return operation({ now, ledger, lines });
+      });
+    });
+  }
+
+  private declarationResponse(declarationId: string, lines: ForwardPeriodLine[], ledger: ResearchPeriodUsageRecord[], now: string, idempotent: boolean) {
+    const views = buildViews(lines);
+    const view = views.get(declarationId) as DeclarationView;
+    return {
+      idempotent,
+      declaration: { ...staticFields(view.line), effective_to: view.effective_to, shortenings: view.shortenings.length,
+        shortened_after_start: view.shortened_after_start, late_shortening: view.late_shortening, state: stateOf(view, now) },
+      related_declarations: relatedDeclarations(view, views.values(), new AccessIndex(ledger), now),
+      limitations: [...FORWARD_PERIOD_LIMITATIONS],
+    };
+  }
+
+  /** declare_forward_period, in the design's step order (G11, H2). */
+  async declareForwardPeriod(input: unknown, deps: { findHypothesis?: HypothesisLookup } = {}) {
+    const request = declareForwardPeriodInputSchema.parse(input);
+    const seriesIds = [...request.series_ids].sort();
+    const hypothesisRef = request.hypothesis ?? null;
+    const same = (line: DeclarationLine) => line.research_id === request.research_id && line.from === request.from && line.to === request.to
+      && line.protocol_sha256 === request.protocol_sha256 && JSON.stringify(line.series_ids) === JSON.stringify(seriesIds)
+      && (line.hypothesis === null ? hypothesisRef === null
+        : hypothesisRef !== null && line.hypothesis.kind === hypothesisRef.kind && line.hypothesis.id === hypothesisRef.id);
+    const find = (lines: ForwardPeriodLine[]) =>
+      lines.find((line): line is DeclarationLine => line.kind === "declaration" && line.declaration_id === request.declaration_id);
+    const retry = (line: DeclarationLine) => {
+      if (!same(line)) throw new ForwardPeriodError("forward_period_declaration_id_conflict", `${request.declaration_id} exists with other content`);
+      return this.withBothLocks(async ({ now, ledger, lines }) => this.declarationResponse(line.declaration_id, lines, ledger, now, true));
+    };
+    // 1. Look up under the declarations lock alone, then release it.
+    const existing = await this.withJournal(async (lines) => find(lines));
+    if (existing) return retry(existing);
+    // 2. The hypothesis, read under the research journal's own lock, released before the ledger lock.
+    let hypothesis: DeclarationLine["hypothesis"] = null;
+    if (hypothesisRef) {
+      if (!deps.findHypothesis) throw new Error("hypothesis lookup is not available");
+      const found = await deps.findHypothesis(hypothesisRef.kind, hypothesisRef.id);
+      if (!found) throw new ForwardPeriodError("forward_period_hypothesis_not_registered", `${hypothesisRef.kind} hypothesis ${hypothesisRef.id}`);
+      hypothesis = { kind: hypothesisRef.kind, id: hypothesisRef.id, definition_hash: found.definition_hash,
+        journal_sequence: found.sequence, population: found.population };
+    }
+    // 3. Ledger, then declarations, with one clock reading.
+    return this.withBothLocks(async ({ now, ledger, lines }) => {
+      const raced = find(lines);
+      if (raced) {
+        if (!same(raced)) throw new ForwardPeriodError("forward_period_declaration_id_conflict", `${request.declaration_id} exists with other content`);
+        return this.declarationResponse(raced.declaration_id, lines, ledger, now, true);
+      }
+      if (ms(request.from) - ms(now) < FORWARD_PERIOD_LEAD_MS) {
+        throw new ForwardPeriodError("forward_period_lead_too_short", `from must be at least 24 h after ${now}`);
+      }
+      const length = ms(request.to) - ms(request.from);
+      if (length < FORWARD_PERIOD_MIN_LENGTH_MS) throw new ForwardPeriodError("forward_period_too_short", "the period must be at least 24 h long");
+      if (length > FORWARD_PERIOD_MAX_LENGTH_MS) throw new ForwardPeriodError("forward_period_too_long", "the period must be at most 366 days long");
+      const conflicts = conflictingDeclarations(buildViews(lines).values(), seriesIds, request.from, request.to);
+      if (conflicts.length) {
+        throw new ForwardPeriodError("forward_period_already_declared", conflicts.slice(0, FORWARD_PERIOD_CONFLICTS_NAMED_CAP)
+          .map((c) => `${c.series_id} by ${c.declaration_id}`).join(", ") + (conflicts.length > FORWARD_PERIOD_CONFLICTS_NAMED_CAP ? ", ..." : ""));
+      }
+      const used = ledger.filter((record) => seriesIds.includes(record.series_id) && overlapping(record.from, record.to, request.from, request.to));
+      if (used.length) {
+        throw new ForwardPeriodError("forward_period_has_recorded_usage", `${used.length} recorded access(es) already overlap the period`);
+      }
+      const line: DeclarationLine = { ...lineHeader(lines.length + 1, now, ledger.length), kind: "declaration",
+        declaration_id: request.declaration_id, research_id: request.research_id, series_ids: seriesIds, from: request.from, to: request.to,
+        protocol_sha256: request.protocol_sha256, hypothesis };
+      await this.forwardPeriods.appendUnlocked(lines, line);
+      return this.declarationResponse(line.declaration_id, [...lines, line], ledger, now, false);
+    });
+  }
+
+  /** shorten_forward_period, in the design's error order (I3). */
+  async shortenForwardPeriod(input: unknown) {
+    const request = shortenForwardPeriodInputSchema.parse(input);
+    const findShortening = (lines: ForwardPeriodLine[]) => lines.find((line): line is ShorteningLine =>
+      line.kind === "shortening" && line.declaration_id === request.declaration_id && line.new_end === request.new_end);
+    const matches = (line: ShorteningLine) => line.research_id === request.research_id && line.reason === request.reason;
+    const respond = (lines: ForwardPeriodLine[], ledger: ResearchPeriodUsageRecord[], now: string, shortening: ShorteningLine, idempotent: boolean) => ({
+      shortening: { declaration_id: shortening.declaration_id, new_end: shortening.new_end, recorded_at: shortening.recorded_at, reason: shortening.reason },
+      ...this.declarationResponse(request.declaration_id, lines, ledger, now, idempotent),
+    });
+    const precheck = (lines: ForwardPeriodLine[]) => {
+      const prior = findShortening(lines);
+      if (prior) {
+        if (!matches(prior)) throw new ForwardPeriodError("forward_period_shortening_conflict", `a shortening of ${request.declaration_id} to ${request.new_end} exists with another reason or research_id`);
+        return prior;
+      }
+      const view = buildViews(lines).get(request.declaration_id);
+      if (!view) throw new ForwardPeriodError("forward_period_declaration_not_found", request.declaration_id);
+      if (view.line.research_id !== request.research_id) throw new ForwardPeriodError("forward_period_research_id_mismatch", request.declaration_id);
+      return null;
+    };
+    // Step 1, under the declarations lock alone: an identical retry, then not-found and the research ID.
+    const prior = await this.withJournal(async (lines) => precheck(lines));
+    return this.withBothLocks(async ({ now, ledger, lines }) => {
+      const again = precheck(lines);
+      if (again || prior) return respond(lines, ledger, now, (again ?? prior) as ShorteningLine, true);
+      const view = buildViews(lines).get(request.declaration_id) as DeclarationView;
+      if (!validNewEnd(view.line, view.effective_to, request.new_end)) {
+        throw new ForwardPeriodError("forward_period_shortening_invalid",
+          "new_end must be below the current end and either from or at least 24 h after it");
+      }
+      if (ms(request.new_end) - ms(now) < FORWARD_PERIOD_LEAD_MS) {
+        throw new ForwardPeriodError("forward_period_lead_too_short", `new_end must be at least 24 h after ${now}`);
+      }
+      const line: ShorteningLine = { ...lineHeader(lines.length + 1, now, ledger.length), kind: "shortening",
+        declaration_id: request.declaration_id, research_id: request.research_id, new_end: request.new_end, reason: request.reason };
+      await this.forwardPeriods.appendUnlocked(lines, line);
+      return respond([...lines, line], ledger, now, line, false);
+    });
+  }
 }
+
+class JournalFailure extends Error {
+  constructor(readonly cause: unknown) { super("forward period declarations journal unreadable"); }
+}
+
+const lineHeader = (sequence: number, now: string, ledgerCount: number) => ({
+  schema_version: "1.0" as const, namespace: FORWARD_PERIOD_NAMESPACE, sequence, recorded_at: now, first_seen_at: now,
+  observation_date: now.slice(0, 10), ledger_sequence_at_write: ledgerCount,
+});
