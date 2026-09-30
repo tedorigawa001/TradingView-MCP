@@ -7,10 +7,10 @@ import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 import {
-  FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_MAX_LENGTH_MS,
+  FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_LISTED_CAP, FORWARD_PERIOD_MAX_LENGTH_MS,
   FORWARD_PERIOD_MIN_LENGTH_MS, FORWARD_PERIOD_NAMESPACE, AccessIndex, ForwardPeriodError, ForwardPeriodJournal, assertClockNotBehind,
-  buildViews, conflictingDeclarations, declareForwardPeriodInputSchema, ledgerRegressed, relatedDeclarations,
-  resolveForwardPeriodJournalPath, shortenForwardPeriodInputSchema, staticFields, stateOf, validNewEnd,
+  buildViews, conflictingDeclarations, declareForwardPeriodInputSchema, describeForQuery, hypothesisPopulationIsNotForward, isActiveFor,
+  ledgerRegressed, relatedDeclarations, resolveForwardPeriodJournalPath, shortenForwardPeriodInputSchema, staticFields, stateOf, validNewEnd,
   type DeclarationLine, type DeclarationView, type ForwardPeriodLine, type ShorteningLine,
 } from "./forwardPeriod.js";
 
@@ -38,6 +38,12 @@ export const researchPeriodUsageRecordSchema = inputSchema.refine(
 export const researchPeriodUsageCheckSchema = z.object({
   ...period,
   prior_usage_declaration: z.enum(["unknown", "declared_unused"]).default("unknown"),
+}).strict().refine(ordered, "from must be before to");
+/** The preflight also takes the evaluating study's research_id (docs/FORWARD_PERIOD_DESIGN.md, D5); the check does not. */
+export const researchPeriodUsagePreflightSchema = z.object({
+  ...period,
+  prior_usage_declaration: z.enum(["unknown", "declared_unused"]).default("unknown"),
+  research_id: identifier.optional(),
 }).strict().refine(ordered, "from must be before to");
 
 export type ResearchPeriodUsageInput = z.infer<typeof researchPeriodUsageRecordSchema>;
@@ -126,7 +132,27 @@ export interface ResearchPeriodUsageAssessment {
   validation_records: number;
   matches: (ResearchPeriodUsageRecord & { version_relation: "same" | "different" })[];
   truncated: boolean;
+  /** Declarations overlapping the query on its series (docs/FORWARD_PERIOD_DESIGN.md, "Reporting"). */
+  forward_period_declarations?: ForwardPeriodField;
   limitations: string[];
+}
+
+/** Never zero when unknown: a zero would read as "no declarations" (design H3). */
+export interface ForwardPeriodUnavailable { status: "unavailable"; reason: string; retry_after_ms?: number }
+export type ForwardPeriodField = ReturnType<typeof describeForQuery> | ForwardPeriodUnavailable;
+export type OverlappedForwardPeriodDeclarations = ForwardPeriodUnavailable | {
+  status: "available"; total: number;
+  by_relation: { other_research: number; declaring_research_exploration: number; declaring_research_validation: number };
+  truncated: boolean;
+  listed: { declaration_id: string; research_id: string; relation: "other_research" | "declaring_research_exploration" | "declaring_research_validation" }[];
+};
+
+/** Adds the declarations field, and the limitations it brings, to an assessment. */
+function withForward(assessment: ResearchPeriodUsageAssessment, field: ForwardPeriodField): ResearchPeriodUsageAssessment {
+  const { limitations, ...rest } = assessment;
+  return { ...rest, forward_period_declarations: field, limitations: [...new Set([...limitations,
+    ...(field.status === "available" && field.total > 0 ? FORWARD_PERIOD_LIMITATIONS : []),
+    ...(field.status === "unavailable" ? ["forward_period_declarations_unavailable"] : [])])] };
 }
 
 function assess(records: ResearchPeriodUsageRecord[], query: z.infer<typeof researchPeriodUsageCheckSchema>): ResearchPeriodUsageAssessment {
@@ -172,7 +198,9 @@ function observed(records: ResearchPeriodUsageRecord[], tool: ObservingTool): bo
   return records.some((entry) => entry.source === "tool_observed" && entry.tool_name === tool);
 }
 
-export type ResearchPeriodUsageSummary = Omit<ResearchPeriodUsageAssessment, "matches" | "truncated"> & {
+export type ResearchPeriodUsageSummary = Omit<ResearchPeriodUsageAssessment, "matches" | "truncated" | "forward_period_declarations"> & {
+  forward_period_declarations?: ForwardPeriodUnavailable | { status: "available"; total: number; active: number; withdrawn: number;
+    tail_only: number; listed_declaration_ids: string[]; truncated: boolean };
   matches_omitted: number;
   overlapping_research_ids: string[];
   overlapping_research_ids_truncated: boolean;
@@ -180,9 +208,15 @@ export type ResearchPeriodUsageSummary = Omit<ResearchPeriodUsageAssessment, "ma
 
 /** summary_only view: counts and distinct research IDs instead of every overlapping record. */
 export function summarizeAssessment(assessment: ResearchPeriodUsageAssessment): ResearchPeriodUsageSummary {
-  const { matches, truncated, ...rest } = assessment;
+  const { matches, truncated, forward_period_declarations: forward, ...rest } = assessment;
   const ids = [...new Set(matches.map((entry) => entry.research_id))].sort();
-  return { ...rest, matches_omitted: assessment.overlapping_records, overlapping_research_ids: ids,
+  return { ...rest,
+    // summary_only keeps the counts and the listed IDs, not the entries (plan section 6).
+    ...(forward === undefined ? {} : { forward_period_declarations: forward.status === "unavailable" ? forward : {
+      status: forward.status, total: forward.total, active: forward.active, withdrawn: forward.withdrawn, tail_only: forward.tail_only,
+      listed_declaration_ids: forward.listed.map((entry) => entry.declaration_id), truncated: forward.truncated,
+    } }),
+    matches_omitted: assessment.overlapping_records, overlapping_research_ids: ids,
     overlapping_research_ids_truncated: truncated,
     limitations: [...assessment.limitations, "summary_omits_matching_records_use_full_check_for_detail"] };
 }
@@ -190,7 +224,8 @@ export function summarizeAssessment(assessment: ResearchPeriodUsageAssessment): 
 type RecordRequest = (ResearchPeriodUsageInput & { source: "user_reported" })
   | (ResearchPeriodToolAccessInput & { source: "tool_observed"; tool_name: ObservingTool;
     scope: (typeof OBSERVING_TOOL_SCOPES)[ObservingTool] });
-type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment };
+type RecordResult = ResearchPeriodUsageRecord & { idempotent: boolean; prior_overlap: ResearchPeriodUsageAssessment;
+  overlapped_forward_period_declarations?: OverlappedForwardPeriodDeclarations };
 
 export interface ResearchPeriodUsageStoreOptions {
   /** Test seam; one reading per call drives recorded_at, the accessed_at checks, the clock checks and checked_at. */
@@ -199,7 +234,17 @@ export interface ResearchPeriodUsageStoreOptions {
   forwardPeriodPath?: string;
   /** Checked against the declarations path at construction; createServer passes it. */
   researchJournalPath?: string;
+  /** Test seam for the record paths' back-off, a monotonic clock in milliseconds. */
+  monotonicNow?: () => number;
 }
+
+/**
+ * Record paths skip the declarations read for 30 s after a declarations-lock timeout on the same journal, from any
+ * path (plan R1). Keyed by the resolved journal path, so separate test directories never share it and two stores on
+ * one ledger agree. Only lock timeouts start it.
+ */
+export const FORWARD_PERIOD_BACKOFF_MS = 30_000;
+const declarationsBackoff = new Map<string, number>();
 
 /** A registered hypothesis, as StrategyResearchJournalStore.findHypothesis returns it. */
 export type HypothesisLookup = (kind: "strategy" | "event", id: string) =>
@@ -227,6 +272,8 @@ export class ResearchPeriodUsageStore {
   private readonly log: AppendOnlyFirstSeenLog<ResearchPeriodUsageRecord>;
   private readonly clock: () => Date;
   private readonly forwardPeriods: ForwardPeriodJournal;
+  private readonly journalKey: string;
+  private readonly monotonic: () => number;
 
   /**
    * Home defaults are resolved only when the ledger path is omitted (createServer's default). With an explicit
@@ -249,6 +296,12 @@ export class ResearchPeriodUsageStore {
       }
     }
     this.forwardPeriods = new ForwardPeriodJournal(journalPath);
+    this.journalKey = journal;
+    this.monotonic = options.monotonicNow ?? (() => performance.now());
+  }
+
+  private noteLockTimeout(): void {
+    declarationsBackoff.set(this.journalKey, this.monotonic() + FORWARD_PERIOD_BACKOFF_MS);
   }
 
   private async readUnlocked(now: string): Promise<ResearchPeriodUsageRecord[]> {
@@ -385,40 +438,101 @@ export class ResearchPeriodUsageStore {
       // capacity check for the whole batch (per-record checks alone could stop part-way).
       if (planned.length) await this.log.assertAppendCapacityUnlocked(planned);
       if (retried) await this.syncRetryUnlocked();
+      // Declarations are read before any append and never make the record fail (design G5).
+      const forward = await this.readDeclarationsForRecords(records.length, now);
+      const withDeclarations = results.map((result) => this.attachDeclarations(result, forward, [...records, ...planned]));
       for (const record of planned) await this.log.appendUnlocked(record);
-      return results;
+      return withDeclarations;
     });
   }
 
+  /** Fails closed when the declarations journal cannot be read (docs/FORWARD_PERIOD_DESIGN.md, G5, I4). */
   async check(input: unknown): Promise<ResearchPeriodUsageAssessment> {
     const query = researchPeriodUsageCheckSchema.parse(input);
-    return this.log.serialize(async () => assess(await this.readUnlocked(this.clock().toISOString()), query));
+    return this.withBothLocks(async ({ now, ledger, lines }) => withForward(assess(ledger, query), describeForQuery(lines, ledger, query, now)));
   }
 
+  /**
+   * The preflight never allows execution. Contract v2 (docs/FORWARD_PERIOD_DESIGN.md, "Preflight"): the first
+   * matching rule gives the status, over every declaration active for the query on its series.
+   */
   async preflightOos(input: unknown) {
-    const query = researchPeriodUsageCheckSchema.parse(input);
-    return this.log.serialize(async () => {
-      const now = this.clock().toISOString();
-      const usage = assess(await this.readUnlocked(now), query);
-      const overlap = usage.overlapping_records > 0;
+    const { research_id: researchId, ...query } = researchPeriodUsagePreflightSchema.parse(input);
+    return this.withBothLocks(async ({ now, ledger, lines }) => {
+      const usage = withForward(assess(ledger, query), describeForQuery(lines, ledger, query, now));
+      const active = [...buildViews(lines).values()].filter((view) => view.line.series_ids.includes(query.series_id)
+        && isActiveFor(view, query.from, query.to));
+      const ruling = preflightRuling(usage.overlapping_records > 0, active, query, now, researchId);
+      const listed = usage.forward_period_declarations?.status === "available" && usage.forward_period_declarations.total > 0;
       return {
-        contract: "recorded_usage_oos_preflight_v1",
+        contract: "recorded_usage_oos_preflight_v2",
         checked_at: now,
-        status: overlap ? "blocked" : "review_required",
-        reason: overlap ? "evaluation_period_has_recorded_usage" : "absence_of_usage_records_is_not_unused_evidence",
+        status: ruling.status,
+        reason: ruling.reason,
         execution_allowed: false,
         candidateEligible: false,
         unused_proven: false,
+        ...(ruling.noActiveDeclaration ? { no_active_forward_period_declaration_for_research_id: true } : {}),
         usage,
-        required_actions: overlap
-          ? ["do_not_label_this_period_unused_oos", "choose_a_separate_uninspected_period_or_report_as_exploratory"]
-          : ["review_untracked_external_and_related_series_access", "verify_frozen_protocol_and_data_provenance"],
+        required_actions: ruling.requiredActions,
         limitations: ["read_only_snapshot_not_a_reservation_or_execution_token",
           "existing_backtest_tools_are_not_intercepted", "concurrent_or_later_access_may_change_readiness",
           "all_research_ids_versions_and_purposes_are_considered_for_exact_series_id",
-          "no_automatic_approval_path_in_v1"],
+          "no_automatic_approval_path", ...(listed ? FORWARD_PERIOD_LIMITATIONS : [])],
       };
     });
+  }
+
+  /** Reads the declarations for a record response; any failure is reported, never thrown (design G5, R1). */
+  private async readDeclarationsForRecords(ledgerCount: number, now: string): Promise<{ lines: ForwardPeriodLine[] } | ForwardPeriodUnavailable> {
+    const deadline = declarationsBackoff.get(this.journalKey);
+    const at = this.monotonic();
+    if (deadline !== undefined && at < deadline) {
+      return { status: "unavailable", reason: "lock_timeout_backoff", retry_after_ms: Math.ceil(deadline - at) };
+    }
+    try {
+      const lines = await this.forwardPeriods.withLock(() => this.forwardPeriods.readUnlocked());
+      if (ledgerRegressed(lines, ledgerCount)) return { status: "unavailable", reason: "ledger_regressed" };
+      if (lines.length && lines[lines.length - 1].recorded_at > now) return { status: "unavailable", reason: "clock_moved_backwards" };
+      return { lines };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "HISTORY_LOCK_TIMEOUT") {
+        this.noteLockTimeout();
+        return { status: "unavailable", reason: "lock_timeout" };
+      }
+      return { status: "unavailable", reason: "journal_unreadable" };
+    }
+  }
+
+  /**
+   * The record's declaration fields as of the record itself (design G4): lines anchored below its sequence, state
+   * at its recorded_at, and ledger records up to and including it. So an identical retry replays exactly.
+   */
+  private attachDeclarations(result: RecordResult, forward: { lines: ForwardPeriodLine[] } | ForwardPeriodUnavailable,
+    ledger: ResearchPeriodUsageRecord[]): RecordResult {
+    if (!("lines" in forward)) {
+      return { ...result, prior_overlap: withForward(result.prior_overlap, forward), overlapped_forward_period_declarations: forward };
+    }
+    const query = { series_id: result.series_id, from: result.from, to: result.to };
+    const accesses = ledger.filter((record) => record.sequence <= result.sequence);
+    const views = buildViews(forward.lines, result.sequence);
+    const active = [...views.values()].filter((view) => view.line.series_ids.includes(result.series_id) && isActiveFor(view, result.from, result.to))
+      .sort((a, b) => (a.line.from < b.line.from ? -1 : a.line.from > b.line.from ? 1 : a.line.declaration_id < b.line.declaration_id ? -1 : 1));
+    const relation = (view: DeclarationView) => (view.line.research_id !== result.research_id ? "other_research" as const
+      : result.purpose === "validation" ? "declaring_research_validation" as const : "declaring_research_exploration" as const);
+    const count = (name: string) => active.filter((view) => relation(view) === name).length;
+    return {
+      ...result,
+      prior_overlap: withForward(result.prior_overlap, describeForQuery(forward.lines, accesses, query, result.recorded_at, result.sequence)),
+      overlapped_forward_period_declarations: {
+        status: "available", total: active.length,
+        by_relation: { other_research: count("other_research"), declaring_research_exploration: count("declaring_research_exploration"),
+          declaring_research_validation: count("declaring_research_validation") },
+        truncated: active.length > FORWARD_PERIOD_LISTED_CAP,
+        listed: active.slice(0, FORWARD_PERIOD_LISTED_CAP).map((view) => ({ declaration_id: view.line.declaration_id,
+          research_id: view.line.research_id, relation: relation(view) })),
+      },
+    };
   }
 
   // -------------------------------------------------------------------------------------------------------------
@@ -434,6 +548,7 @@ export class ResearchPeriodUsageStore {
         return operation(lines);
       });
     } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "HISTORY_LOCK_TIMEOUT") this.noteLockTimeout();
       if (error instanceof JournalFailure || (error as NodeJS.ErrnoException)?.code === "HISTORY_LOCK_TIMEOUT") {
         const cause = error instanceof JournalFailure ? error.cause : error;
         throw new ForwardPeriodError("forward_period_journal_unavailable", cause instanceof Error ? cause.message : String(cause));
@@ -580,3 +695,39 @@ const lineHeader = (sequence: number, now: string, ledgerCount: number) => ({
   schema_version: "1.0" as const, namespace: FORWARD_PERIOD_NAMESPACE, sequence, recorded_at: now, first_seen_at: now,
   observation_date: now.slice(0, 10), ledger_sequence_at_write: ledgerCount,
 });
+
+/** The preflight rules, first match wins (docs/FORWARD_PERIOD_DESIGN.md rev 3.4, rules 1-5 and 4a-d). */
+function preflightRuling(hasUsage: boolean, active: DeclarationView[], query: { from: string; to: string }, now: string, researchId?: string): {
+  status: "blocked" | "review_required"; reason: string; requiredActions: string[]; noActiveDeclaration?: boolean;
+} {
+  const blocked = (reason: string, requiredActions: string[]) => ({ status: "blocked" as const, reason, requiredActions });
+  if (hasUsage) {
+    return blocked("evaluation_period_has_recorded_usage",
+      ["do_not_label_this_period_unused_oos", "choose_a_separate_uninspected_period_or_report_as_exploratory"]);
+  }
+  if (active.length && researchId === undefined) {
+    return blocked("evaluation_period_has_a_forward_period_declaration",
+      ["pass_the_declaring_research_id_if_this_is_its_declared_evaluation", "otherwise_do_not_label_this_period_unused_oos"]);
+  }
+  if (active.some((view) => view.line.research_id !== researchId)) {
+    return blocked("evaluation_period_declared_for_another_research",
+      ["do_not_label_this_period_unused_oos", "choose_a_separate_undeclared_period_or_report_as_exploratory"]);
+  }
+  if (active.length) {
+    const [view] = active;
+    if (active.length !== 1 || view.line.from !== query.from || view.effective_to !== query.to) {
+      return blocked("evaluation_period_differs_from_declared_forward_period", ["evaluate_exactly_the_declared_period_or_report_as_exploratory"]);
+    }
+    if (now < view.effective_to) return blocked("declared_forward_period_not_yet_ended", ["wait_until_the_declared_period_ends"]);
+    if (view.shortened_after_start) {
+      return blocked("declared_forward_period_shortened_after_start", ["report_as_exploratory_the_declaration_was_shortened_after_start"]);
+    }
+    return { status: "review_required", reason: "declared_intent_without_recorded_usage_is_not_unused_evidence", requiredActions: [
+      "confirm_the_evaluation_matches_protocol_sha256", "record_the_evaluation_under_this_research_id",
+      "review_untracked_external_and_related_series_access", "review_related_declarations", "report_the_result_whatever_it_is",
+      ...(hypothesisPopulationIsNotForward(view.line) ? ["report_under_the_registered_hypothesis_population_not_as_forward"] : [])] };
+  }
+  return { status: "review_required", reason: "absence_of_usage_records_is_not_unused_evidence",
+    requiredActions: ["review_untracked_external_and_related_series_access", "verify_frozen_protocol_and_data_provenance"],
+    ...(researchId !== undefined ? { noActiveDeclaration: true } : {}) };
+}

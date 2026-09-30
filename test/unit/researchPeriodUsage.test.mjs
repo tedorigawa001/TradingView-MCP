@@ -30,12 +30,12 @@ test('OOS preflight has no approval path, even with an unused declaration',async
     // the review case reads as caution or as clearance. Only the blocked reason was pinned:
     // rewriting this one to period_is_unused broke nothing.
     assert.equal(r.reason,'absence_of_usage_records_is_not_unused_evidence');
-    assert.equal(r.contract,'recorded_usage_oos_preflight_v1');
+    assert.equal(r.contract,'recorded_usage_oos_preflight_v2');   // v2 with forward period declarations
     assert.deepEqual(r.limitations,[
       'read_only_snapshot_not_a_reservation_or_execution_token',
       'existing_backtest_tools_are_not_intercepted','concurrent_or_later_access_may_change_readiness',
       'all_research_ids_versions_and_purposes_are_considered_for_exact_series_id',
-      'no_automatic_approval_path_in_v1']);
+      'no_automatic_approval_path']);
     assert.equal(r.execution_allowed,false);
     assert.equal(r.unused_proven,false);
     assert.equal(r.candidateEligible,false);
@@ -81,7 +81,10 @@ test('tool access persists internal metadata and replays its timestamp and origi
   assert.equal(first.request_sha256, version('c'));
   assert.equal(first.accessed_at, first.recorded_at);
   assert.ok(first.accessed_at >= before && first.accessed_at <= new Date().toISOString());
-  const { idempotent, prior_overlap, ...row } = first;
+  // The response-only fields are not stored.
+  const { idempotent, prior_overlap, overlapped_forward_period_declarations, ...row } = first;
+  assert.deepEqual(overlapped_forward_period_declarations, { status: 'available', total: 0,
+    by_relation: { other_research: 0, declaring_research_exploration: 0, declaring_research_validation: 0 }, truncated: false, listed: [] });
   assert.equal(idempotent, false);
   assert.deepEqual(await saved(path), [row]);
   await new Promise((resolve) => setTimeout(resolve, 20));
