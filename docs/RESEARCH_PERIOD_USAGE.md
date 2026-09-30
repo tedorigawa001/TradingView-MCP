@@ -35,6 +35,12 @@ content fails. A genuine repeated inspection needs a new access ID. Historical
 manual or external use can be reported with its actual access time. Manual reports
 are user supplied, not independently observed browsing telemetry.
 
+Every record response, from this tool, the batch tool and the observing tools
+below, also reports [forward period declarations](#forward-period-declarations)
+that the record overlaps: `overlapped_forward_period_declarations`, and
+`forward_period_declarations` inside `prior_overlap`. A declaration never makes a
+record fail.
+
 ### Batch
 
 `record_research_period_usage_batch` records 1-20 reports in one call:
@@ -175,11 +181,20 @@ this tool.
 
 ## Check
 
-`check_research_period_usage` accepts `series_id`, `data_version`, `from`, `to`
-and optional `prior_usage_declaration` (`unknown` or `declared_unused`). The
-declaration is a caller assertion, not proof or a way to override overlaps.
-No recorded overlap is not equivalent to unused: earlier, omitted, external,
-other-series and untracked accesses may exist. `unused_proven` remains false.
+`check_research_period_usage` accepts `series_id`, `data_version`, `from`, `to`,
+optional `prior_usage_declaration` (`unknown` or `declared_unused`) and
+`summary_only` (below), and rejects any other field. Since 0.1.16 that includes
+`research_id`, which earlier versions silently dropped: the check's report is the
+same whoever asks. The declaration is a caller assertion, not proof or a way to
+override overlaps. No recorded overlap is not equivalent to unused: earlier,
+omitted, external, other-series and untracked accesses may exist. `unused_proven`
+remains false.
+
+The assessment includes `forward_period_declarations`, the declarations listed
+for the interval as of the server's clock (see
+[forward period declarations](#forward-period-declarations)). When the
+declarations journal cannot be read, the check fails closed with an error instead
+of reporting no declarations.
 
 `summary_only: true` (also accepted by both record tools and the preflight)
 replaces the listed overlapping records with `matches_omitted`, the sorted
@@ -197,24 +212,38 @@ research workflow, but do not claim full coverage from this journal alone.
 
 ## OOS Preflight
 
-`preflight_research_oos` accepts the same strict input as the check tool.
-Supply the proposed evaluation interval, not a cherry-picked subset of trades.
+`preflight_research_oos` accepts the same strict input as the check tool, plus an
+optional `research_id`: the study whose evaluation this is. Its contract is
+`recorded_usage_oos_preflight_v2`. Supply the proposed evaluation interval, not a
+cherry-picked subset of trades.
 Use the stable identity returned by automatic tracking when checking its ledger
 or forecast-set history; price-series aliases and unrelated source IDs are not
 linked for you.
 
 Any recorded overlap, including validation use or another research/data version,
-returns `status: blocked`. No overlap returns `review_required`, even if the
-caller declares the period unused. Both return `execution_allowed: false`,
-`unused_proven: false` and `candidateEligible: false`. Version 1 intentionally
-has no automatic approval path: this journal does not establish complete access
-coverage. Review external/untracked usage, related series, frozen protocols and
-data provenance separately. A refusal can guide exploratory use instead, but
-must not be relabeled an unused OOS result.
+returns `status: blocked`. An active forward period declaration on the interval
+also blocks it, unless `research_id` is the declaring study's and the interval is
+exactly its ended declared period, not shortened after the start. That case, the
+best a declaration can give, still returns `review_required`, with its own reason
+and required actions. The rules are listed in
+[the forward period contract](FORWARD_PERIOD.md#preflight). No overlap and no
+declaration returns `review_required`, even if the caller declares the period
+unused; with a `research_id`, it adds
+`no_active_forward_period_declaration_for_research_id: true`.
 
-The full bounded usage assessment is returned with counts and truncated matches.
-`checked_at` labels the current check, not a historical as-of attestation. Reads
-are validated under the shared journal lock; storage failures return an error,
+Every answer has `execution_allowed: false`, `unused_proven: false` and
+`candidateEligible: false`. There is intentionally no automatic approval path
+(the limitation `no_automatic_approval_path`, named
+`no_automatic_approval_path_in_v1` before 0.1.16): this journal does not establish
+complete access coverage. Review external/untracked usage, related series, frozen
+protocols and data provenance separately. A refusal can guide exploratory use
+instead, but must not be relabeled an unused OOS result. The preflight checks one
+series; run it for every series the evaluation reads.
+
+The full bounded usage assessment is returned with counts and truncated matches,
+and its `forward_period_declarations`. `checked_at` labels the current check, not
+a historical as-of attestation. Reads are validated under the shared journal lock;
+storage failures, including an unreadable declarations journal, return an error,
 never a clean preflight. No access record is appended and no market data is read.
 
 This is an advisory pre-execution check, not enforcement inside existing
@@ -222,6 +251,41 @@ backtest tools. It neither reserves a period nor issues a reusable permission
 token. Concurrent or subsequent access may change the answer after the lock is
 released. Atomic check-and-execute integration is future work and must not rely
 on a previously returned snapshot as authorization.
+
+## Forward Period Declarations
+
+`declare_forward_period` records, at least 24 hours ahead by the local server
+clock, that one research ID intends to use a future period on some series only
+for one pre-registered evaluation. `shorten_forward_period` stops declaring a tail
+that starts at least 24 hours away, or withdraws a declaration until 24 hours
+before it starts. Declarations are kept in their own journal
+(`TRADINGVIEW_MCP_FORWARD_PERIOD_JOURNAL_PATH`, default
+`~/.tradingview-mcp/forward-period-declarations.jsonl`), never in this ledger, so
+they never count as accesses. A declaration is recorded intent, not proof that the
+data stayed unused. See [the contract](FORWARD_PERIOD.md).
+
+The fields they add here:
+- `forward_period_declarations` in the check, the preflight's `usage` and every
+  record's `prior_overlap`: counts (`total`, `active`, `withdrawn`, `tail_only`),
+  up to 20 listed declarations with their state, and the accesses overlapping each
+  one. Record responses describe the state as of their own record, so identical
+  retries still return identical content;
+- `overlapped_forward_period_declarations` in every record response: the
+  declarations active on the record's own interval, the record included, with
+  each one's relation to the recording study;
+- `forward_period_declarations_by_id` at the top of a batch response, holding each
+  declaration's stored fields once;
+- `active_forward_period_declarations` in each `per_series` row of the observing
+  tools' `prior_overlap` summaries.
+
+With `summary_only`, `forward_period_declarations` keeps the counts and the listed
+declaration IDs, and the batch map is omitted. When the check or the preflight
+lists a declaration, it adds the ten declaration limitations.
+
+When the declarations journal cannot be read, record paths still append the access
+and report `{status: "unavailable", reason}` in each declaration field, never zero
+counts, with the limitation `forward_period_declarations_unavailable`. The check
+and the preflight fail closed instead.
 
 ## Storage and Failure
 
@@ -233,11 +297,17 @@ does not replace frozen hypothesis contracts or first-seen market evidence.
 Identical retries re-sync the existing record and, where supported, its directory before success;
 readable bytes alone do not confirm a previously failed durable write. A crash
 can leave the shared lock behind. Recovery requires checking that no writer is
-active; this version does not automatically reclaim stale locks.
+active; this version does not automatically reclaim stale locks. Every period
+usage path also takes the declarations journal's lock, after this ledger's lock,
+and waits at most 2 seconds for it. A stale declarations lock makes the check and
+the preflight fail after that wait, but never fails a record; see
+[failures and recovery](FORWARD_PERIOD.md#failures-and-recovery).
 
 The journal is private local state. It does not detect same-user tampering,
 unreported access or deletion of the complete log. Do not reset or rename the
-log to claim that an explored period is unused.
+log to claim that an explored period is unused. Once declarations exist, a ledger
+with fewer records than a declaration was written after makes the check, the
+preflight, declare and shorten fail with `forward_period_ledger_regressed`.
 
 Default storage is `~/.tradingview-mcp/research-period-usage.jsonl`, capped at
 32 MiB per file and 16 KiB per record. Matches are capped at 100 per response,

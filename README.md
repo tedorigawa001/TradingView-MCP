@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (109 Total)
+## Tools (111 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -244,7 +244,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_cot_crowding_unwind_overlay_template` | Returns the audited Pine overlay for supplied COT crowding context and prior daily structure; it does not fetch or infer orders or stops |
 | `get_cot_crowding_unwind_context` | Describes a daily EURUSD/USDJPY leveraged-money crowding and price-break proxy without claiming observed execution flow |
 | `preflight_cross_asset_shock` | Verifies exact closed-bar coverage for an EURUSD/USDJPY, DXY, US10Y, and XAUUSD shock study while restoring the temporary auxiliary chart |
-| `preflight_research_oos` | Checks recorded usage before OOS evaluation. Overlap blocks; absent records require review, never automatic approval. No reservation or backtest interception. See [OOS preflight](docs/RESEARCH_PERIOD_USAGE.md#oos-preflight) |
+| `preflight_research_oos` | Checks recorded usage and forward period declarations before OOS evaluation. Overlap blocks, and so does a declaration unless `research_id` is the declaring study's and the interval is exactly its ended period; absent records require review, never automatic approval. No reservation or backtest interception. See [OOS preflight](docs/RESEARCH_PERIOD_USAGE.md#oos-preflight) |
 | `classify_cross_asset_shocks` | Classifies frozen same-UTC cross-asset shock states without producing outcomes, candidates, or trade instructions |
 | `evaluate_cross_asset_shock_outcomes` | Measures descriptive 15/30/60/120-minute outcomes for non-overlapping frozen shock states without producing a candidate |
 | `preflight_bookmap_flow_price_join` | Reads one bounded local Bookmap Collector JSONL and verifies conservative receipt-time coverage against active EURUSD M1/M5; CME flow remains a single-venue futures proxy |
@@ -383,7 +383,9 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `compute_realized_covariance` | Builds daily realized covariance and daily-return outer products from 1-8 imported bar series (`tradingview-mcp-import-bar-series`) under explicit rules: interval, IANA time zone, local day end, weekdays, a missing-slot limit, first interval and return unit. Missing bars widen intervals, never filled. Stores a content-addressed proxy set (export with `tradingview-mcp-export-proxy-set`, join with `tradingview-mcp-import-forecast-set --proxy-set`) and returns counts and diagnostics only. Every call is journaled so rule variants stay countable; optional `research_id` records period usage. A noisy proxy, not the true covariance. See [realized covariance contract](docs/REALIZED_COVARIANCE.md) |
 | `record_research_period_usage` | Records reported data access intervals with explicit confirmation; retries are idempotent, conflicting access IDs fail. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
 | `record_research_period_usage_batch` | Records 1-20 access reports in one call; the whole batch is validated and capacity-checked before any write; a retry resumes after complete lines, while a torn line fails closed. `summary_only` returns counts instead of every overlap. See [batch](docs/RESEARCH_PERIOD_USAGE.md#batch) |
-| `check_research_period_usage` | Finds prior interval use across research IDs and revisions of the same series; absence of records never proves unused OOS. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
+| `check_research_period_usage` | Finds prior interval use across research IDs and revisions of the same series, and the forward period declarations on it; absence of records never proves unused OOS. See [period usage contract](docs/RESEARCH_PERIOD_USAGE.md) |
+| `declare_forward_period` | Records, with confirmation and at least 24 h ahead by the local clock, that one research ID intends to use a future period (24 h to 366 days) on 1-20 series only for the evaluation its protocol hash names. It refuses only overlapping declarations and periods with recorded usage; the check, the preflight and every usage record report it. Intent, not proof of unused data, a reservation or an approval. Stored in `TRADINGVIEW_MCP_FORWARD_PERIOD_JOURNAL_PATH` (default `~/.tradingview-mcp/forward-period-declarations.jsonl`), which every MCP process must share. See [forward period contract](docs/FORWARD_PERIOD.md) |
+| `shorten_forward_period` | Stops declaring a tail that starts at least 24 h away, or withdraws a declaration until 24 h before it starts. A shortening recorded within 24 h of the start or later marks the declaration, and the preflight never reaches its review answer for it. See [shortening](docs/FORWARD_PERIOD.md#shortening) |
 | `compare_research_evidence` | Compares declared data/code/runner/rule/parameter/environment hashes; identifies missing evidence and revalidation checks without certifying compatibility. See [comparison contract](docs/RESEARCH_EVIDENCE_COMPARISON.md) |
 | `run_strategy_experiment` | Serially compares baseline and candidate on one chart; dry-run by default, then after confirmation reports exact Pine versions, ledger IDs, inputs, minimum trades, condition match, and metric deltas before removing both |
 | `run_backtest_matrix` | Runs up to 24 explicit symbol/timeframe/input combinations with a 30-minute soft deadline, per-row full-ledger IDs, insufficiency/failure reasons, and verified restoration; it does not rank results |
@@ -410,6 +412,13 @@ Stale-lock recovery remains manual after confirming no writer is active.
 The budget bounds contention retries, not an unresponsive filesystem syscall,
 whole collection run or time queued inside the same process. A longer wait does
 not guarantee fairness or cure sustained overload.
+
+One exception: the forward period declarations journal waits at most 2 seconds,
+in-process queue included, whatever this setting says. The period usage check,
+preflight and record paths take it while holding the ledger's lock, and a stale
+declarations lock must not hold the ledger for 30 seconds. A timeout there fails the check and
+the preflight, but a record is still appended. See
+[failures and recovery](docs/FORWARD_PERIOD.md#failures-and-recovery).
 
 | Symptom | Cause and resolution |
 |---|---|
