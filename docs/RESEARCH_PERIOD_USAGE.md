@@ -36,10 +36,11 @@ manual or external use can be reported with its actual access time. Manual repor
 are user supplied, not independently observed browsing telemetry.
 
 Every record response, from this tool, the batch tool and the observing tools
-below, also reports [forward period declarations](#forward-period-declarations)
-that the record overlaps: `overlapped_forward_period_declarations`, and
-`forward_period_declarations` inside `prior_overlap`. A declaration never makes a
-record fail.
+below, also reports the [forward period declarations](#forward-period-declarations)
+that the record overlaps, in `overlapped_forward_period_declarations`. The full
+record responses (this tool, the batch tool and `summarize_backtest_ledger`) also
+carry `forward_period_declarations` inside `prior_overlap`. A declaration never
+makes a record fail.
 
 ### Batch
 
@@ -265,18 +266,21 @@ they never count as accesses. A declaration is recorded intent, not proof that t
 data stayed unused. See [the contract](FORWARD_PERIOD.md).
 
 The fields they add here:
-- `forward_period_declarations` in the check, the preflight's `usage` and every
-  record's `prior_overlap`: counts (`total`, `active`, `withdrawn`, `tail_only`),
-  up to 20 listed declarations with their state, and the accesses overlapping each
-  one. Record responses describe the state as of their own record, so identical
-  retries still return identical content;
+- `forward_period_declarations` in the check, the preflight's `usage` and the
+  `prior_overlap` of full record responses (manual, batch and
+  `summarize_backtest_ledger`): counts (`total`, `active`, `withdrawn`,
+  `tail_only`), up to 20 listed declarations with their state, and the accesses
+  overlapping each one. Record responses describe the state as of their own
+  record, so identical retries still return identical content;
 - `overlapped_forward_period_declarations` in every record response: the
   declarations active on the record's own interval, the record included, with
   each one's relation to the recording study;
 - `forward_period_declarations_by_id` at the top of a batch response, holding each
   declaration's stored fields once;
-- `active_forward_period_declarations` in each `per_series` row of the observing
-  tools' `prior_overlap` summaries.
+- `active_forward_period_declarations` in each `per_series` row of the
+  `prior_overlap` summaries of `compare_forecast_losses` and
+  `compute_realized_covariance`, whose `records` carry only
+  `overlapped_forward_period_declarations`.
 
 With `summary_only`, `forward_period_declarations` keeps the counts and the listed
 declaration IDs, and the batch map is omitted. When the check or the preflight
@@ -306,8 +310,9 @@ the preflight fail after that wait, but never fails a record; see
 The journal is private local state. It does not detect same-user tampering,
 unreported access or deletion of the complete log. Do not reset or rename the
 log to claim that an explored period is unused. Once declarations exist, a ledger
-with fewer records than a declaration was written after makes the check, the
-preflight, declare and shorten fail with `forward_period_ledger_regressed`.
+that no longer holds the record a declaration was anchored to (shorter, or with
+another record there) makes the check, the preflight, declare and shorten fail
+with `forward_period_ledger_regressed`, until that ledger is restored.
 
 Default storage is `~/.tradingview-mcp/research-period-usage.jsonl`, capped at
 32 MiB per file and 16 KiB per record. Matches are capped at 100 per response,

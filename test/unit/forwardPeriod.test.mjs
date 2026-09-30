@@ -17,8 +17,12 @@ const iso = (ms) => new Date(ms).toISOString();
 const t = (s) => Date.parse(s);
 const FROM = '2027-01-01T00:00:00.000Z', TO = '2027-04-01T00:00:00.000Z';
 const hash = (c) => 'sha256:' + c.repeat(64);
+// Ledger record n, as a line anchored at count n records it (design rev 3.5, C1).
+const ledgerRecord = (n) => ({ access_id: `a${n}`, recorded_at: iso(t('2026-01-01T00:00:00.000Z') + n * 60_000) });
+const ledgerOf = (count) => Array.from({ length: count }, (_, i) => ledgerRecord(i + 1));
 const header = (sequence, recordedAt, anchor = 0) => ({ schema_version: '1.0', namespace: 'forward_period_declarations', sequence,
-  recorded_at: recordedAt, first_seen_at: recordedAt, observation_date: recordedAt.slice(0, 10), ledger_sequence_at_write: anchor });
+  recorded_at: recordedAt, first_seen_at: recordedAt, observation_date: recordedAt.slice(0, 10), ledger_sequence_at_write: anchor,
+  ledger_anchor: anchor ? ledgerRecord(anchor) : null });
 const declaration = (sequence, patch = {}) => {
   const { recorded_at = '2026-10-01T00:00:00.000Z', anchor = 0, ...rest } = patch;
   return { ...header(sequence, recorded_at, anchor), kind: 'declaration', declaration_id: 'd1', research_id: 'r1',
@@ -53,6 +57,10 @@ test('input schemas check format only: series, prefixes, bounds, identifiers (pl
 });
 
 test('line validation: dates, stored order of series, the lead, and inclusive length bounds', () => {
+  assert.throws(() => validateForwardPeriodLine({ ...declaration(1), ledger_anchor: ledgerRecord(1) }), /ledger anchor/);
+  assert.throws(() => validateForwardPeriodLine({ ...declaration(1, { anchor: 3 }), ledger_anchor: null }), /ledger anchor/);
+  assert.throws(() => validateForwardPeriodLine({ ...declaration(1), series_ids: ['proxy-set-source:ab'] }), /prefix rejected/,
+    'a hand-edited line cannot declare a content-addressed proxy set');
   const recordedAt = iso(t(FROM) - DAY);
   assert.doesNotThrow(() => validateForwardPeriodLine(declaration(1, { recorded_at: recordedAt })), 'a lead of exactly 24 h');
   assert.throws(() => validateForwardPeriodLine(declaration(1, { recorded_at: iso(t(FROM) - DAY + 1) })), /lead too short/);
@@ -90,6 +98,9 @@ async function journalIn(t) {
 
 test('the journal: a missing file is empty, appends are guarded, framing is strict', async (t) => {
   const { path, journal } = await journalIn(t);
+  assert.deepEqual(await journal.withLock(() => journal.readUnlocked()), []);
+  // An empty file, which a crash or a full disk during the first append can leave, holds no declarations either (N2).
+  await writeFile(path, '', { mode: 0o600 });
   assert.deepEqual(await journal.withLock(() => journal.readUnlocked()), []);
   await journal.withLock(async () => journal.appendUnlocked(await journal.readUnlocked(), declaration(1)));
   const lines = await journal.withLock(() => journal.readUnlocked());
@@ -236,8 +247,17 @@ test('exclusivity ignores parts no longer declared, and a ledger shorter than an
     [{ series_id: 'fx:USDJPY', declaration_id: 'd1' }]);
   assert.deepEqual(conflictingDeclarations(views.values(), ['fx:EURUSD'], '2027-03-01T00:00:00.000Z', '2027-04-01T00:00:00.000Z'), [],
     'the shortened tail may be declared by other studies');
-  assert.equal(ledgerRegressed(lines, 6), false);
-  assert.equal(ledgerRegressed(lines, 5), true);
+  assert.equal(ledgerRegressed(lines, ledgerOf(6)), false);
+  assert.equal(ledgerRegressed(lines, ledgerOf(9)), false, 'records appended since are fine');
+  assert.equal(ledgerRegressed(lines, ledgerOf(5)), true, 'shorter than an anchor');
+  // Rev 3.5 (C1): a replaced ledger that has regrown past every anchor is still detected, at either anchor.
+  const replacedAt = (n) => ledgerOf(9).map((record, i) => (i === n - 1 ? { ...record, access_id: 'other' } : record));
+  assert.equal(ledgerRegressed(lines, replacedAt(4)), true, 'a different record at the declaration anchor');
+  assert.equal(ledgerRegressed(lines, replacedAt(6)), true, 'a different record at the shortening anchor');
+  assert.equal(ledgerRegressed(lines, ledgerOf(9).map((record, i) => (i === 5 ? { ...record, recorded_at: iso(t(record.recorded_at) + 1) } : record))),
+    true, 'the same ID recorded at another time');
+  assert.equal(ledgerRegressed(lines, replacedAt(5)), false, 'records between anchors are not fingerprinted');
+  assert.equal(ledgerRegressed([declaration(1)], []), false, 'a line written on an empty ledger');
 });
 
 test('describeForQuery: static and variable fields, the hypothesis flag, and the limitations list', () => {

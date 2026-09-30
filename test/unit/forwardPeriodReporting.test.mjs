@@ -68,28 +68,34 @@ test('preflight v2: every rule in order, and the three flags stay false', async 
   const r2 = await expect({}, 'blocked', 'evaluation_period_has_a_forward_period_declaration');
   assert.deepEqual(r2.required_actions, ['pass_the_declaring_research_id_if_this_is_its_declared_evaluation', 'otherwise_do_not_label_this_period_unused_oos']);
   for (const l of FORWARD_PERIOD_LIMITATIONS) assert.ok(r2.limitations.includes(l), l);
-  await expect({ series_id: 'fx:GBPUSD', research_id: 'r1' }, 'blocked', 'evaluation_period_declared_for_another_research');
-  await expect({ research_id: 'r1', to: '2027-03-01T00:00:00.000Z' }, 'blocked', 'evaluation_period_differs_from_declared_forward_period');   // a subset
+  assert.deepEqual((await expect({ series_id: 'fx:GBPUSD', research_id: 'r1' }, 'blocked', 'evaluation_period_declared_for_another_research')).required_actions,
+    ['do_not_label_this_period_unused_oos', 'choose_a_separate_undeclared_period_or_report_as_exploratory']);
+  assert.deepEqual((await expect({ research_id: 'r1', to: '2027-03-01T00:00:00.000Z' }, 'blocked', 'evaluation_period_differs_from_declared_forward_period')).required_actions,
+    ['evaluate_exactly_the_declared_period_or_report_as_exploratory']);   // a subset
   await expect({ research_id: 'r1', from: '2026-12-01T00:00:00.000Z' }, 'blocked', 'evaluation_period_differs_from_declared_forward_period');   // a superset
   const r4d = await expect({ research_id: 'r1' }, 'review_required', 'declared_intent_without_recorded_usage_is_not_unused_evidence');
   assert.deepEqual(r4d.required_actions, ['confirm_the_evaluation_matches_protocol_sha256', 'record_the_evaluation_under_this_research_id',
     'review_untracked_external_and_related_series_access', 'review_related_declarations', 'report_the_result_whatever_it_is',
     'report_under_the_registered_hypothesis_population_not_as_forward']);
   assert.equal(r4d.usage.forward_period_declarations.listed[0].hypothesis.hypothesis_population_is_not_forward, true);
+  assert.equal(r4d.hypothesis_population_is_not_forward, true, 'a top-level flag, which summary_only keeps (H9, C4)');
   const d2 = { series_id: 'fx:USDJPY', research_id: 'r1', from: '2027-01-10T00:00:00.000Z', to: '2027-02-10T00:00:00.000Z' };
-  assert.deepEqual((await expect(d2, 'review_required', 'declared_intent_without_recorded_usage_is_not_unused_evidence')).required_actions.length, 5,
-    'no population action for a declaration without an in-sample hypothesis');
+  const plain = await expect(d2, 'review_required', 'declared_intent_without_recorded_usage_is_not_unused_evidence');
+  assert.deepEqual([plain.required_actions.length, 'hypothesis_population_is_not_forward' in plain], [5, false],
+    'no population action or flag for a declaration without an in-sample hypothesis');
   clock.now = TO;   // exactly the end: ended, so rule 4b no longer applies
   assert.equal((await pre({ research_id: 'r1' })).reason, 'declared_intent_without_recorded_usage_is_not_unused_evidence');
   clock.now = '2027-01-20T00:00:00.000Z';   // during the periods
-  await expect({ research_id: 'r1' }, 'blocked', 'declared_forward_period_not_yet_ended');
+  assert.deepEqual((await expect({ research_id: 'r1' }, 'blocked', 'declared_forward_period_not_yet_ended')).required_actions,
+    ['wait_until_the_declared_period_ends']);
   const r5 = await expect({ series_id: 'fx:CADJPY', research_id: 'r1' }, 'review_required', 'absence_of_usage_records_is_not_unused_evidence');
   assert.equal(r5.no_active_forward_period_declaration_for_research_id, true);
   assert.equal('no_active_forward_period_declaration_for_research_id' in await pre({ series_id: 'fx:CADJPY' }), false);
   assert.ok(!r5.limitations.includes(FORWARD_PERIOD_LIMITATIONS[0]), 'declaration limitations only when one is listed');
   // Rule 1 wins over everything: an access inside the declared period.
   await store.record(manual({ series_id: 'fx:EURUSD', accessed_at: '2027-01-20T00:00:00.000Z', from: '2027-01-02T00:00:00.000Z', to: '2027-01-03T00:00:00.000Z' }));
-  await expect({ research_id: 'r1' }, 'blocked', 'evaluation_period_has_recorded_usage');
+  assert.deepEqual((await expect({ research_id: 'r1' }, 'blocked', 'evaluation_period_has_recorded_usage')).required_actions,
+    ['do_not_label_this_period_unused_oos', 'choose_a_separate_uninspected_period_or_report_as_exploratory']);
 });
 
 test('preflight: a late shortening blocks 4d (4c); withdrawn and released parts never change the status', async (t) => {
@@ -134,6 +140,11 @@ test('preflight: two adjacent declarations of one study are not one (4a), and ru
   assert.deepEqual([r.usage.forward_period_declarations.total, r.usage.forward_period_declarations.listed.length, r.usage.forward_period_declarations.truncated], [22, 20, true]);
   assert.ok(!r.usage.forward_period_declarations.listed.some((e) => e.declaration_id === 'zz-other'), 'the other study is not listed');
   assert.equal(r.reason, 'evaluation_period_declared_for_another_research', 'but its declaration still decides');
+  // One record across all 22 active declarations: counted in full, listed up to 20.
+  const wide = await many.record(manual({ access_id: 'wide', from: FROM, to: '2027-03-05T00:00:00.000Z', accessed_at: '2027-04-30T00:00:00.000Z' }));
+  const overlapped = wide.overlapped_forward_period_declarations;
+  assert.deepEqual([overlapped.total, overlapped.listed.length, overlapped.truncated, overlapped.by_relation.other_research],
+    [22, 20, true, 22], 'r1 owns 21 and r9 one, none by the recording study r2');
 });
 
 test('record responses carry overlapped declarations and as-of counts that include the record (design G4)', async (t) => {

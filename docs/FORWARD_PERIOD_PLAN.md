@@ -1,4 +1,4 @@
-# declare_forward_period: implementation plan (rev 2.1, review approved)
+# declare_forward_period: implementation plan (rev 2.2, review approved)
 
 Implements docs/FORWARD_PERIOD_DESIGN.md rev 3.4. Rev 3.4 is rev 3.2 (commit 995c502) plus the P-Q1
 clock-seam note and the R2 additions: the back-off, the journal clock check, and a second replay
@@ -10,7 +10,8 @@ Review history:
 - rev 2 (diff check): APPROVE WITH FINDINGS. LOW R1–R2 and NITs R3–R6; no further round needed.
 
 Rev 2 folds in P-Q1 to P-Q14, with the user's decisions P1–P3 (section 5). Rev 2.1 folds in
-R1–R6.
+R1–R6. Rev 2.2 records the design's rev 3.5 after the code review (C1): every line also carries
+`ledger_anchor`, and H7 checks it.
 
 ## 1. Files
 
@@ -329,7 +330,7 @@ with fixes and re-review, and then release 0.1.16, which is the user's to publis
 | Errors | The design's thirteen: `forward_period_declaration_id_conflict`, `forward_period_hypothesis_not_registered`, `forward_period_lead_too_short`, `forward_period_too_short`, `forward_period_too_long`, `forward_period_already_declared`, `forward_period_has_recorded_usage`, `forward_period_journal_unavailable`, `forward_period_ledger_regressed`, `forward_period_declaration_not_found`, `forward_period_research_id_mismatch`, `forward_period_shortening_invalid`, `forward_period_shortening_conflict`; plus `forward_period_clock_moved_backwards` (P-Q4) |
 | Preflight | Contract `recorded_usage_oos_preflight_v2`, with the reasons and required actions in the table below |
 | Limitations | The design's ten go in the declare and shorten responses always, and in the check's and preflight's `limitations` when a declaration is listed. `forward_period_declarations_unavailable` goes in `prior_overlap.limitations`. `access_overlaps_a_declared_forward_period` goes in `summarizePriorOverlap`'s limitations. `hypothesis_population_is_not_forward` is a flag on the entry and in 4d. |
-| Response fields | `forward_period_declarations`, `overlapped_forward_period_declarations` (`{status, total, by_relation, truncated, listed}`), `active_forward_period_declarations`, `related_declarations`, `tail_only`, `late_shortening`, `ledger_sequence_at_write`, `forward_period_declarations_by_id` |
+| Response fields | `forward_period_declarations`, `overlapped_forward_period_declarations` (`{status, total, by_relation, truncated, listed}`), `active_forward_period_declarations`, `related_declarations`, `tail_only`, `late_shortening`, `ledger_sequence_at_write`, `ledger_anchor` (rev 2.2), `forward_period_declarations_by_id` |
 
 **Preflight reasons and required actions**
 

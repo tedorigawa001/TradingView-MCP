@@ -92,7 +92,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     const started = performance.now();
     const deadline = started + budgetMs;
     const timeout = () => Object.assign(new Error(
-      `timed out acquiring ${this.label} history lock after ${budgetMs}ms: ${lockPath}; ` +
+      `timed out acquiring ${this.label} history lock after ${Math.round(budgetMs)}ms: ${lockPath}; ` +
       "another process may still hold it; do not remove a live owner's lock",
     ), { code: "HISTORY_LOCK_TIMEOUT" });
     let attempted = false;
@@ -266,7 +266,8 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     const queueTimeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(Object.assign(new Error(
         `timed out waiting for ${this.label} history queue after ${budgetMs}ms`), { code: "HISTORY_LOCK_TIMEOUT" })), budgetMs);
-      timer.unref?.();
+      // Not unref'd: the timer is cleared as soon as the race settles, and an unref'd one would let a process with
+      // no other handles exit with this call still pending instead of timing out (F0).
     });
     const result = Promise.race([predecessor, queueTimeout]).then(async () => {
       clearTimeout(timer);

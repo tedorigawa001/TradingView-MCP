@@ -1,4 +1,4 @@
-# declare_forward_period: design memo (rev 3.4, design review approved; not implemented)
+# declare_forward_period: design memo (rev 3.5, design review approved; implemented)
 
 Backlog #101, item 5.
 
@@ -9,12 +9,17 @@ Review history:
 - rev 3: APPROVE WITH FINDINGS. MEDIUM H1–H2 (lock rules, to be written in before coding) and LOW
   H3–H9, plus NITs. No further review round needed.
 - rev 3.1 (diff check): APPROVE. LOW I1 and NITs I2–I5, folded in as rev 3.2.
+- code review of the implementation: APPROVE WITH FINDINGS. MEDIUM C1 was a gap in H7 itself, folded
+  in as rev 3.5.
 
 Rev 2 folded in F1–F15, and rev 3 folded in G1–G11, with the user's decisions of 2026-09-30 (section
 "Decisions"). Rev 3.1 folds in H1–H9 and the NITs, and rev 3.2 folds in I1–I5. Rev 3.3 corrects
 the clock-seam test note after the plan review (P-Q1). Rev 3.4 records three additions from the
 plan's diff check (R2), described under "When the declarations journal cannot be read": the record
-paths' back-off, the journal clock check, and a second replay exception.
+paths' back-off, the journal clock check, and a second replay exception. Rev 3.5 closes the code
+review's C1: H7 compared only record counts, so a regressed ledger stopped being detected once record
+paths, which keep appending, had regrown it past the largest anchor. Each line now also fingerprints
+the ledger record at its anchor (`ledger_anchor`).
 
 ## Problem
 
@@ -75,13 +80,15 @@ A `declaration` line holds:
   `recorded_at`, `first_seen_at`, `observation_date`;
 - `ledger_sequence_at_write`: the period usage ledger's record count when this line was written
   (G4);
+- `ledger_anchor`: `{access_id, recorded_at}` of the ledger record at that count, or null when the
+  count is 0 (rev 3.5);
 - `declaration_id`, `research_id`;
 - `series_ids`, sorted and unique, so their order never matters;
 - `from`, `to`, `protocol_sha256`;
 - `hypothesis`: `{kind, id, definition_hash, journal_sequence, population}` or null.
 
 A `shortening` line holds:
-- the same header fields and `ledger_sequence_at_write`;
+- the same header fields, `ledger_sequence_at_write` and `ledger_anchor`;
 - `declaration_id`, `research_id`, `new_end` and `reason`.
 
 A shortening is identified by (`declaration_id`, `new_end`).
@@ -107,9 +114,12 @@ journal, when needed (D4), is read under its own lock and released first.
 - **Same path refused:** the declarations store refuses to construct when its path resolves to the
   ledger's or the research journal's path. A nested `serialize` on the same queue key would wait on
   itself forever (G5).
-- **Ledger replacement (H7):** if any line's `ledger_sequence_at_write` exceeds the ledger's current
-  record count, the ledger was reset or replaced, for example to erase accesses inside a declared
-  period.
+- **Ledger replacement (H7, rev 3.5):** if any line's `ledger_sequence_at_write` exceeds the ledger's
+  current record count, or the ledger record at that count is not the line's `ledger_anchor`, the
+  ledger was reset, truncated or replaced, for example to erase accesses inside a declared period.
+  The ledger's sequences are contiguous, so record n is always the n-th line, and appends made since
+  never clear the condition. Only the records up to each line are covered: accesses recorded after
+  the last declarations line can still be erased undetected.
   - Declare, shorten, the check and the preflight fail closed with
     `forward_period_ledger_regressed`.
   - Record paths return `unavailable` with that reason.

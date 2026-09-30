@@ -1,9 +1,10 @@
+import { lstat } from "node:fs/promises";
 import { z } from "zod";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 
 /**
- * Forward period declarations (docs/FORWARD_PERIOD_DESIGN.md rev 3.4; plan section 6). A declaration records,
+ * Forward period declarations (docs/FORWARD_PERIOD_DESIGN.md rev 3.5; plan section 6). A declaration records,
  * by the local server clock and at least 24 hours before the period's start timestamp, that one research ID
  * intends to use [from, to) on some series only for the evaluation its protocol hash names. It is evidence of
  * recorded intent, never proof of unused data. This module holds the journal and the pure logic; the period
@@ -88,6 +89,11 @@ const header = {
   observation_date: z.string().refine(isCalendarDate),
   /** The period usage ledger's record count when the line was written (design G4). */
   ledger_sequence_at_write: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  /**
+   * The ledger record at that count, null when the count is 0 (design rev 3.5, C1). A ledger that no longer holds
+   * this record was reset, truncated or replaced, however many records it has since regained.
+   */
+  ledger_anchor: z.object({ access_id: identifier, recorded_at: timestamp }).strict().nullable(),
 };
 const storedHypothesis = z.object({
   kind: hypothesisKind, id: z.string().regex(/^[\w.:-]{1,80}$/), definition_hash: hash,
@@ -125,6 +131,9 @@ export function validateForwardPeriodLine(value: unknown): ForwardPeriodLine {
   const line = lineSchema.parse(value);
   if (line.recorded_at !== line.first_seen_at || line.observation_date !== line.recorded_at.slice(0, 10)) {
     throw new Error("invalid forward period line dates");
+  }
+  if ((line.ledger_sequence_at_write === 0) !== (line.ledger_anchor === null)) {
+    throw new Error("forward period ledger anchor must be null exactly when the ledger count is 0");
   }
   if (line.kind === "declaration") {
     if (!sortedUnique(line.series_ids)) throw new Error("forward period series_ids must be stored sorted and unique");
@@ -186,7 +195,11 @@ export class ForwardPeriodJournal {
     return this.log.serializeWithin(FORWARD_PERIOD_LOCK_BUDGET_MS, operation);
   }
 
-  /** Strict framing, as the period usage ledger requires; a missing file holds no declarations. */
+  /**
+   * Strict framing, as the period usage ledger requires. A missing file holds no declarations, and so does an
+   * empty one, which a crash or a full disk during the first append can leave (N2): removing the file entirely is
+   * no more detectable, so failing closed on it would only block every period usage path until it is deleted.
+   */
   async readUnlocked(): Promise<ForwardPeriodLine[]> {
     try {
       const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
@@ -196,6 +209,8 @@ export class ForwardPeriodJournal {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      const info = await lstat(this.filePath).catch(() => null);
+      if (info?.isFile() && info.size === 0) return [];
       throw error;
     }
     const lines = await this.log.readAllUnlocked();
@@ -220,9 +235,26 @@ export function assertClockNotBehind(lines: ForwardPeriodLine[], now: string): v
   }
 }
 
-/** H7: an anchor above the ledger's record count means the ledger was reset or replaced. */
-export const ledgerRegressed = (lines: ForwardPeriodLine[], ledgerCount: number) =>
-  lines.some((line) => line.ledger_sequence_at_write > ledgerCount);
+/** The fields of a ledger record that anchor a line. */
+export interface LedgerAnchorRecord { access_id: string; recorded_at: string }
+
+/** The anchor for a line written now: the ledger's last record, or null for an empty ledger. */
+export function ledgerAnchor(ledger: LedgerAnchorRecord[]): { ledger_sequence_at_write: number; ledger_anchor: LedgerAnchorRecord | null } {
+  const last = ledger[ledger.length - 1];
+  return { ledger_sequence_at_write: ledger.length, ledger_anchor: last ? { access_id: last.access_id, recorded_at: last.recorded_at } : null };
+}
+
+/**
+ * H7, rev 3.5: the ledger must still hold, at each line's anchor count, the record the line was anchored to. A
+ * shorter ledger, or a different record there, means it was reset, truncated or replaced. Appends made since then
+ * never clear this, because the ledger's sequences are contiguous (record n is ledger[n - 1]).
+ */
+export const ledgerRegressed = (lines: ForwardPeriodLine[], ledger: LedgerAnchorRecord[]) => lines.some((line) => {
+  if (line.ledger_sequence_at_write > ledger.length) return true;
+  if (line.ledger_anchor === null) return false;
+  const record = ledger[line.ledger_sequence_at_write - 1];
+  return record.access_id !== line.ledger_anchor.access_id || record.recorded_at !== line.ledger_anchor.recorded_at;
+});
 
 // ---------------------------------------------------------------------------------------------------------------
 // Views

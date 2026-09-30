@@ -10,7 +10,7 @@ import {
   FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_LISTED_CAP, FORWARD_PERIOD_MAX_LENGTH_MS,
   FORWARD_PERIOD_MIN_LENGTH_MS, FORWARD_PERIOD_NAMESPACE, AccessIndex, ForwardPeriodError, ForwardPeriodJournal, assertClockNotBehind,
   buildViews, conflictingDeclarations, declareForwardPeriodInputSchema, describeForQuery, hypothesisPopulationIsNotForward, isActiveFor,
-  ledgerRegressed, relatedDeclarations, resolveForwardPeriodJournalPath, shortenForwardPeriodInputSchema, staticFields, stateOf, validNewEnd,
+  ledgerAnchor, ledgerRegressed, relatedDeclarations, resolveForwardPeriodJournalPath, shortenForwardPeriodInputSchema, staticFields, stateOf, validNewEnd,
   type DeclarationLine, type DeclarationView, type ForwardPeriodLine, type ShorteningLine,
 } from "./forwardPeriod.js";
 
@@ -254,7 +254,14 @@ const DEFAULT_LEDGER_PATH = () => join(homedir(), ".tradingview-mcp", "research-
 /** Named after the ledger, so several ledgers in one directory never share a journal (plan P-Q11, R5). */
 const siblingJournalPath = (ledgerPath: string) =>
   `${ledgerPath.endsWith(".jsonl") ? ledgerPath.slice(0, -".jsonl".length) : ledgerPath}.forward-period-declarations.jsonl`;
-/** The realpath of the nearest existing ancestor plus the rest, so /var and /private/var compare equal (P-Q3). */
+/** macOS and Windows file systems are case-insensitive by default: usage.jsonl and USAGE.jsonl are one file (C2). */
+const CASE_INSENSITIVE_PATHS = process.platform === "darwin" || process.platform === "win32";
+/**
+ * The realpath of the nearest existing ancestor plus the rest, so /var and /private/var compare equal (P-Q3).
+ * Case-folded where paths are case-insensitive by default, since the parts that do not exist yet keep the case as
+ * typed. On a case-sensitive volume there, two names differing only in case are refused too, which only refuses an
+ * odd configuration.
+ */
 function comparablePath(path: string): string {
   let existing = resolve(path);
   const rest: string[] = [];
@@ -262,7 +269,8 @@ function comparablePath(path: string): string {
     rest.unshift(basename(existing));
     existing = dirname(existing);
   }
-  return join(realpathSync(existing), ...rest);
+  const comparable = join(realpathSync(existing), ...rest);
+  return CASE_INSENSITIVE_PATHS ? comparable.toLowerCase() : comparable;
 }
 const overlapping = (aFrom: string, aTo: string, bFrom: string, bTo: string) => aFrom < bTo && bFrom < aTo;
 const ms = (iso: string) => Date.parse(iso);
@@ -439,8 +447,8 @@ export class ResearchPeriodUsageStore {
       if (planned.length) await this.log.assertAppendCapacityUnlocked(planned);
       if (retried) await this.syncRetryUnlocked();
       // Declarations are read before any append and never make the record fail (design G5).
-      const forward = await this.readDeclarationsForRecords(records.length, now);
-      const withDeclarations = results.map((result) => this.attachDeclarations(result, forward, [...records, ...planned]));
+      const forward = await this.readDeclarationsForRecords(records, now);
+      const withDeclarations = results.map((result) => this.attachDeclarationsOrUnavailable(result, forward, [...records, ...planned]));
       for (const record of planned) await this.log.appendUnlocked(record);
       return withDeclarations;
     });
@@ -473,6 +481,8 @@ export class ResearchPeriodUsageStore {
         candidateEligible: false,
         unused_proven: false,
         ...(ruling.noActiveDeclaration ? { no_active_forward_period_declaration_for_research_id: true } : {}),
+        // Top level, so a summary_only response keeps it too (design H9, C4).
+        ...(ruling.notForward ? { hypothesis_population_is_not_forward: true } : {}),
         usage,
         required_actions: ruling.requiredActions,
         limitations: ["read_only_snapshot_not_a_reservation_or_execution_token",
@@ -484,7 +494,7 @@ export class ResearchPeriodUsageStore {
   }
 
   /** Reads the declarations for a record response; any failure is reported, never thrown (design G5, R1). */
-  private async readDeclarationsForRecords(ledgerCount: number, now: string): Promise<{ lines: ForwardPeriodLine[] } | ForwardPeriodUnavailable> {
+  private async readDeclarationsForRecords(ledger: ResearchPeriodUsageRecord[], now: string): Promise<{ lines: ForwardPeriodLine[] } | ForwardPeriodUnavailable> {
     const deadline = declarationsBackoff.get(this.journalKey);
     const at = this.monotonic();
     if (deadline !== undefined && at < deadline) {
@@ -492,7 +502,7 @@ export class ResearchPeriodUsageStore {
     }
     try {
       const lines = await this.forwardPeriods.withLock(() => this.forwardPeriods.readUnlocked());
-      if (ledgerRegressed(lines, ledgerCount)) return { status: "unavailable", reason: "ledger_regressed" };
+      if (ledgerRegressed(lines, ledger)) return { status: "unavailable", reason: "ledger_regressed" };
       if (lines.length && lines[lines.length - 1].recorded_at > now) return { status: "unavailable", reason: "clock_moved_backwards" };
       return { lines };
     } catch (error) {
@@ -501,6 +511,19 @@ export class ResearchPeriodUsageStore {
         return { status: "unavailable", reason: "lock_timeout" };
       }
       return { status: "unavailable", reason: "journal_unreadable" };
+    }
+  }
+
+  /**
+   * A record never fails because of declarations (design G5): even a report that cannot be built over validated
+   * lines becomes unavailable, so the guarantee holds by construction (N6).
+   */
+  private attachDeclarationsOrUnavailable(result: RecordResult, forward: { lines: ForwardPeriodLine[] } | ForwardPeriodUnavailable,
+    ledger: ResearchPeriodUsageRecord[]): RecordResult {
+    try {
+      return this.attachDeclarations(result, forward, ledger);
+    } catch {
+      return this.attachDeclarations(result, { status: "unavailable", reason: "journal_unreadable" }, ledger);
     }
   }
 
@@ -536,7 +559,7 @@ export class ResearchPeriodUsageStore {
   }
 
   // -------------------------------------------------------------------------------------------------------------
-  // Forward period declarations (docs/FORWARD_PERIOD_DESIGN.md rev 3.4; plan step 3)
+  // Forward period declarations (docs/FORWARD_PERIOD_DESIGN.md rev 3.5; plan step 3)
 
   /** Journal errors become forward_period_journal_unavailable; errors of the operation itself pass through. */
   private async withJournal<R>(operation: (lines: ForwardPeriodLine[]) => Promise<R>): Promise<R> {
@@ -566,9 +589,9 @@ export class ResearchPeriodUsageStore {
       const now = this.clock().toISOString();
       const ledger = await this.readUnlocked(now);
       return this.withJournal(async (lines) => {
-        if (ledgerRegressed(lines, ledger.length)) {
+        if (ledgerRegressed(lines, ledger)) {
           throw new ForwardPeriodError("forward_period_ledger_regressed",
-            "a forward period line was written after more ledger records than the ledger now holds; it was reset or replaced");
+            "the ledger no longer holds the record a forward period line was anchored to; it was reset, truncated or replaced");
         }
         assertClockNotBehind(lines, now);
         return operation({ now, ledger, lines });
@@ -637,7 +660,7 @@ export class ResearchPeriodUsageStore {
       if (used.length) {
         throw new ForwardPeriodError("forward_period_has_recorded_usage", `${used.length} recorded access(es) already overlap the period`);
       }
-      const line: DeclarationLine = { ...lineHeader(lines.length + 1, now, ledger.length), kind: "declaration",
+      const line: DeclarationLine = { ...lineHeader(lines.length + 1, now, ledger), kind: "declaration",
         declaration_id: request.declaration_id, research_id: request.research_id, series_ids: seriesIds, from: request.from, to: request.to,
         protocol_sha256: request.protocol_sha256, hypothesis };
       await this.forwardPeriods.appendUnlocked(lines, line);
@@ -679,7 +702,7 @@ export class ResearchPeriodUsageStore {
       if (ms(request.new_end) - ms(now) < FORWARD_PERIOD_LEAD_MS) {
         throw new ForwardPeriodError("forward_period_lead_too_short", `new_end must be at least 24 h after ${now}`);
       }
-      const line: ShorteningLine = { ...lineHeader(lines.length + 1, now, ledger.length), kind: "shortening",
+      const line: ShorteningLine = { ...lineHeader(lines.length + 1, now, ledger), kind: "shortening",
         declaration_id: request.declaration_id, research_id: request.research_id, new_end: request.new_end, reason: request.reason };
       await this.forwardPeriods.appendUnlocked(lines, line);
       return respond([...lines, line], ledger, now, line, false);
@@ -691,14 +714,14 @@ class JournalFailure extends Error {
   constructor(readonly cause: unknown) { super("forward period declarations journal unreadable"); }
 }
 
-const lineHeader = (sequence: number, now: string, ledgerCount: number) => ({
+const lineHeader = (sequence: number, now: string, ledger: ResearchPeriodUsageRecord[]) => ({
   schema_version: "1.0" as const, namespace: FORWARD_PERIOD_NAMESPACE, sequence, recorded_at: now, first_seen_at: now,
-  observation_date: now.slice(0, 10), ledger_sequence_at_write: ledgerCount,
+  observation_date: now.slice(0, 10), ...ledgerAnchor(ledger),
 });
 
-/** The preflight rules, first match wins (docs/FORWARD_PERIOD_DESIGN.md rev 3.4, rules 1-5 and 4a-d). */
+/** The preflight rules, first match wins (docs/FORWARD_PERIOD_DESIGN.md rev 3.5, rules 1-5 and 4a-d). */
 function preflightRuling(hasUsage: boolean, active: DeclarationView[], query: { from: string; to: string }, now: string, researchId?: string): {
-  status: "blocked" | "review_required"; reason: string; requiredActions: string[]; noActiveDeclaration?: boolean;
+  status: "blocked" | "review_required"; reason: string; requiredActions: string[]; noActiveDeclaration?: boolean; notForward?: boolean;
 } {
   const blocked = (reason: string, requiredActions: string[]) => ({ status: "blocked" as const, reason, requiredActions });
   if (hasUsage) {
@@ -722,10 +745,12 @@ function preflightRuling(hasUsage: boolean, active: DeclarationView[], query: { 
     if (view.shortened_after_start) {
       return blocked("declared_forward_period_shortened_after_start", ["report_as_exploratory_the_declaration_was_shortened_after_start"]);
     }
+    const notForward = hypothesisPopulationIsNotForward(view.line);
     return { status: "review_required", reason: "declared_intent_without_recorded_usage_is_not_unused_evidence", requiredActions: [
       "confirm_the_evaluation_matches_protocol_sha256", "record_the_evaluation_under_this_research_id",
       "review_untracked_external_and_related_series_access", "review_related_declarations", "report_the_result_whatever_it_is",
-      ...(hypothesisPopulationIsNotForward(view.line) ? ["report_under_the_registered_hypothesis_population_not_as_forward"] : [])] };
+      ...(notForward ? ["report_under_the_registered_hypothesis_population_not_as_forward"] : [])],
+      ...(notForward ? { notForward: true } : {}) };
   }
   return { status: "review_required", reason: "absence_of_usage_records_is_not_unused_evidence",
     requiredActions: ["review_untracked_external_and_related_series_access", "verify_frozen_protocol_and_data_provenance"],

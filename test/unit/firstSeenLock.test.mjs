@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { AppendOnlyFirstSeenLog } from '../../build/firstSeenStore.js';
 
 const variable='TV_MCP_HISTORY_LOCK_WAIT_MS';
@@ -73,13 +75,25 @@ test('serializeWithin times out on a held file lock within its budget, and the o
   let ran=false;
   const started=performance.now();
   try {
-    await assert.rejects(log(path).serializeWithin(200,async()=>{ran=true;}),{code:'HISTORY_LOCK_TIMEOUT'});
+    // The file lock gets what is left of the budget; the message rounds it (N1).
+    await assert.rejects(log(path).serializeWithin(200,async()=>{ran=true;}),
+      error=>error.code==='HISTORY_LOCK_TIMEOUT'&&/history lock after \d+ms: /.test(error.message));
     const elapsed=performance.now()-started;
     assert.ok(elapsed>=190&&elapsed<1500,`${elapsed}ms`);
     assert.equal(ran,false);
     assert.equal(log(path).lockWaitMs,30000,'the process-wide wait is unchanged');
   } finally {await release();}
   assert.equal(await log(path).serializeWithin(200,async()=>'ok'),'ok','the lock is usable once released');
+});
+test('serializeWithin times out even when nothing else keeps the process alive (F0)',async t=>{
+  const path=await setup(t);
+  // The predecessor never settles and holds no handle. An unref'd queue timer would let the child exit silently.
+  const script=`import {AppendOnlyFirstSeenLog} from ${JSON.stringify(new URL('../../build/firstSeenStore.js',import.meta.url).href)};
+const log=new AppendOnlyFirstSeenLog(${JSON.stringify(path)},'test',x=>x,{maxFileBytes:10000,maxRecordBytes:1000});
+log.serialize(()=>new Promise(()=>{}));
+log.serializeWithin(100,async()=>{}).catch(error=>console.log(error.code));`;
+  const {stdout}=await promisify(execFile)(process.execPath,['--input-type=module','-e',script]);
+  assert.equal(stdout.trim(),'HISTORY_LOCK_TIMEOUT');
 });
 test('serializeWithin times out in the in-process queue, and later callers still wait for the running operation',async t=>{
   const path=await setup(t);

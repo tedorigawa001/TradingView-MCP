@@ -1,6 +1,8 @@
 // Produces a period-usage ledger golden with the unedited 0.1.15 build (git diff c28819d -- src/researchPeriodUsage.ts
 // src/firstSeenStore.ts src/server.ts was empty). It holds a record from each observing tool, a manual record and a
 // manual batch, so later versions must keep reading all of them (docs/FORWARD_PERIOD_PLAN.md, step 1).
+// It imports the current build/, so re-running it on a later version would write that version's format under the
+// 0.1.15 name. It therefore refuses to overwrite the golden unless given --force, for use with a 0.1.15 build only.
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,7 +26,7 @@ try {
     access_id: `fixture15:rc:${i}`, research_id: 'fixture-research', purpose: 'exploration', request_sha256: version('4'),
     ...period(series_id, '2024-01-05T21:30:00.000Z', '2024-01-31T21:45:00.000Z', i === 0 ? version('3') : version('5')) })));
   const body = await readFile(join(directory, 'usage.jsonl'), 'utf8');
-  await writeFile(new URL('./format-0.1.15.jsonl', import.meta.url), body);
+  await writeFile(new URL('./format-0.1.15.jsonl', import.meta.url), body, { flag: process.argv.includes('--force') ? 'w' : 'wx' });
   console.log(body.trim().split('\n').map((line) => { const r = JSON.parse(line); return `${r.sequence} ${r.access_id} ${r.source} ${r.tool_name ?? ''}`; }).join('\n'));
 } finally {
   await rm(directory, { recursive: true, force: true });

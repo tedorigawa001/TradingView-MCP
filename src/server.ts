@@ -5520,7 +5520,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Any recorded exploration or validation across research IDs and versions of the exact series blocks it. " +
         "No overlap, including declared-unused input, requires external review and never authorizes execution. " +
         "This is a snapshot, not a reservation or execution token; existing backtest tools are not intercepted. No data/chart access or journal append. " +
-        "Forward period declarations (declare_forward_period) overlapping the interval block it unless research_id is the declaring study's and the interval is exactly its ended, unshortened declared period; even then it only requires review. " +
+        "Forward period declarations (declare_forward_period) overlapping the interval block it unless research_id is the declaring study's and the interval is exactly its ended declared period [from, effective_to), not shortened after the start; even then it only requires review. Run it once per series. " +
         "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
       inputSchema: z.object({...researchPeriodUsagePreflightSchema.shape, summary_only: summaryOnlySchema}).strict(),
     },
@@ -5588,6 +5588,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Finds overlapping use of the same stable series_id across ALL research IDs and data versions. " +
         "No recorded overlap means unknown outside this journal, never unused or approved OOS. " +
         "A declared-unused assertion is user supplied and cannot prove unused status. Does not record an access or reserve a period. " +
+        "Also lists forward period declarations (declare_forward_period) on the interval and the accesses overlapping them; fails closed when the declarations journal cannot be read. " +
+        "Unknown fields, including research_id, are rejected; pass research_id to preflight_research_oos instead. " +
         "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
       // Strict: research_id belongs to preflight_research_oos, and a check given one would silently ignore it
       // (docs/FORWARD_PERIOD_DESIGN.md, F9g).

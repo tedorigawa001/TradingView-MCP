@@ -43,13 +43,19 @@ declaration is never counted as an access.
 The period usage ledger itself is always `~/.tradingview-mcp/research-period-usage.jsonl`.
 
 **Every MCP server process must use the same journal value**, for example when both a desktop
-client and a CLI agent run the server. Leave it unset everywhere, or set it identically everywhere.
-Processes with different values share one ledger but not the declarations:
+client and a CLI agent run the server. Leave it unset everywhere, or set it identically everywhere,
+as an absolute path: a relative value, or one starting with `~`, is resolved against each process's
+working directory. Processes with different values share one ledger but not the declarations:
 - one process's check and preflight do not see the other's declarations;
 - exclusivity is enforced only within each journal.
 
+A journal belongs to one ledger. Share it only between processes that also share the ledger, that
+is, run under the same home directory. A process with another ledger reads the journal's anchors
+against the wrong records and reports `forward_period_ledger_regressed`.
+
 No CLI reads or writes the declarations journal. The server refuses to start when the journal
-path resolves to the ledger's or the research journal's path, symlinked directories included.
+path resolves to the ledger's or the research journal's path, symlinked directories included. On
+macOS and Windows the comparison ignores case, since their default file systems do.
 
 The journal is owner-only, capped at 32 MiB per file and 16 KiB per line, and fsynced like the
 ledger. Its lock is the file `<journal>.lock`.
@@ -198,16 +204,20 @@ Each entry holds:
 These are counts, not verdicts. They appear in:
 - **`check_research_period_usage`**, as of the server's clock;
 - **`preflight_research_oos`**, in `usage`;
-- **every usage record response** (manual, batch, `summarize_backtest_ledger`'s `period_usage`, and
-  the `records` of `compare_forecast_losses` and `compute_realized_covariance`):
-  - `prior_overlap.forward_period_declarations`, as of the record;
-  - `overlapped_forward_period_declarations: {status, total, by_relation, truncated, listed}`, the
-    declarations active on the record's own interval, the new record included. Each listed entry
-    has a `relation`: `other_research`, `declaring_research_exploration` or
-    `declaring_research_validation`;
-- **the observing tools' `prior_overlap` summaries**: each `per_series` row gains
+- **the full record responses** of `record_research_period_usage`,
+  `record_research_period_usage_batch` and `summarize_backtest_ledger` (its `period_usage.record`):
+  `prior_overlap.forward_period_declarations`, as of the record;
+- **every usage record response**, those three and each of the `records` of
+  `compare_forecast_losses` and `compute_realized_covariance`:
+  `overlapped_forward_period_declarations: {status, total, by_relation, truncated, listed}`, the
+  declarations active on the record's own interval, the new record included. Each listed entry has
+  a `relation`: `other_research`, `declaring_research_exploration` or
+  `declaring_research_validation`;
+- **the `prior_overlap` summaries of `compare_forecast_losses` and `compute_realized_covariance`**
+  (in their `search`): each `per_series` row gains
   `active_forward_period_declarations: {declared_by_this_research, declared_by_other_research}`,
   and the limitation `access_overlaps_a_declared_forward_period` is added when either is non-zero.
+  These two tools carry no `forward_period_declarations` entries.
 
 Whenever a declaration is listed, the ten limitations are added to that assessment's
 `limitations`, and to the preflight's own.
@@ -253,7 +263,8 @@ actions are:
 - `review_related_declarations`;
 - `report_the_result_whatever_it_is`;
 - when the hypothesis population is `in_sample` or `stress`,
-  `report_under_the_registered_hypothesis_population_not_as_forward`.
+  `report_under_the_registered_hypothesis_population_not_as_forward`. The response then also
+  carries `hypothesis_population_is_not_forward: true` at the top level, which `summary_only` keeps.
 
 Rule 5 with a `research_id` adds `no_active_forward_period_declaration_for_research_id: true`.
 Withdrawn declarations and parts no longer declared never change the status.
@@ -335,7 +346,7 @@ the preflight fail closed instead, with the error in the table.
 | `lock_timeout` | `forward_period_journal_unavailable` | The declarations lock was not acquired within 2 s |
 | `lock_timeout_backoff`, with `retry_after_ms` | (the check and the preflight always try) | A lock timeout on this journal within the last 30 s |
 | `journal_unreadable` | `forward_period_journal_unavailable` | A torn or invalid line, or an I/O error |
-| `ledger_regressed` | `forward_period_ledger_regressed` | The ledger holds fewer records than a declarations line was written after |
+| `ledger_regressed` | `forward_period_ledger_regressed` | The ledger no longer holds the record a declarations line was anchored to |
 | `clock_moved_backwards` | `forward_period_clock_moved_backwards` | The clock is earlier than the last declarations line |
 
 **A stale declarations lock.** A crash can leave `<journal>.lock` behind. It holds a random token
@@ -354,14 +365,24 @@ To recover, confirm that no TradingView-MCP process is running, or that the proc
 file is not one of them, then delete the lock file.
 
 **A torn line.** Reads require complete JSONL lines. Repair the file only after confirming that no
-writer is active, as for the ledger.
+writer is active, as for the ledger. An empty journal file, which a crash or a full disk during the
+first write can leave, holds no declarations, as a missing one does.
 
 **A regressed ledger.** Each declarations line records how many ledger records existed when it was
-written. A ledger with fewer records was reset, truncated, replaced or restored from an older copy,
-which could erase accesses inside a declared period. Restore the ledger that holds all its records.
-Do not move or delete the declarations journal to clear the error: that erases the declarations
-too, and is the kind of reset this check exists to catch. If the ledger cannot be restored, keep
-both files together, and treat every period they covered as used.
+written, and the access ID and time of the last of them. A ledger that is shorter than that count,
+or holds another record at that position, was reset, truncated, replaced or restored from an older
+copy, which could erase accesses inside a declared period. Record paths keep appending meanwhile,
+but regrowing past the count never clears the error: the record at that position stays wrong.
+- Restore the ledger that holds the anchored records. The error then clears.
+- Do not move or delete the declarations journal to clear it: that erases the declarations too, and
+  is the kind of reset this check exists to catch.
+- If the ledger cannot be restored, the check, the preflight, declare and shorten stay unavailable.
+  Moving both files aside together is then the only way to resume. Keep them, and treat every
+  period they covered as used.
+
+The check covers the ledger up to each declarations line. Accesses recorded after the last line
+can still be erased undetected, like any deletion from the ledger
+(`local_journal_is_private_state_not_tamper_evidence`).
 
 **A backward clock.** Correct the system clock. The error clears once the clock passes the last
 line's `recorded_at`. The ledger's own clock check runs first.
@@ -376,7 +397,9 @@ line's `recorded_at`. The ledger's own clock check runs first.
   lock round trip.
 
 The plan's targets are 200 ms for the check and the preflight, 300 ms for declaring, and 100 ms of
-added cost on a record. The benchmark is outside the unit suite, so tests never depend on timing.
+added cost on a record. The times depend on the machine and its load; a run beside other test
+processes took about 100–120 ms for the check, the preflight and declaring. The benchmark is
+outside the unit suite, so tests never depend on timing.
 
 ## Downgrading
 

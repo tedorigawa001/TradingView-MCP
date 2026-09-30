@@ -19,11 +19,11 @@ const iso = (ms) => new Date(ms).toISOString();
 const hash = (c) => 'sha256:' + c.repeat(64);
 const series = (i) => `bench:S${String(i).padStart(2, '0')}`;
 
+const LEDGER_BASE = Date.parse('2026-01-01T00:00:00.000Z');
 function ledgerLines() {
   const lines = [];
-  const base = Date.parse('2026-01-01T00:00:00.000Z');
   for (let i = 0; i < RECORDS; i++) {
-    const recorded = iso(base + i * 60_000);
+    const recorded = iso(LEDGER_BASE + i * 60_000);
     const from = iso(Date.parse('2020-01-01T00:00:00.000Z') + (i % 2000) * 86_400_000);
     lines.push(JSON.stringify({ access_id: `bench:${i}`, research_id: `research:${i % 40}`, series_id: series(i % SERIES), data_version: hash('a'),
       from, to: iso(Date.parse(from) + 5 * 86_400_000), accessed_at: recorded, purpose: i % 3 ? 'exploration' : 'validation',
@@ -41,7 +41,8 @@ function journalLines() {
       sequence++;
       const from = iso(Date.parse('2027-01-01T00:00:00.000Z') + p * 91 * 86_400_000);
       lines.push(JSON.stringify({ schema_version: '1.0', namespace: 'forward_period_declarations', sequence, recorded_at: recorded,
-        first_seen_at: recorded, observation_date: recorded.slice(0, 10), ledger_sequence_at_write: RECORDS, kind: 'declaration',
+        first_seen_at: recorded, observation_date: recorded.slice(0, 10), ledger_sequence_at_write: RECORDS,
+        ledger_anchor: { access_id: `bench:${RECORDS - 1}`, recorded_at: iso(LEDGER_BASE + (RECORDS - 1) * 60_000) }, kind: 'declaration',
         declaration_id: `bench-${s}-${p}`, research_id: `research:${s % 40}`, series_ids: [series(s)], from, to: iso(Date.parse(from) + 90 * 86_400_000),
         protocol_sha256: hash((p % 10).toString()), hypothesis: null }));
     }
