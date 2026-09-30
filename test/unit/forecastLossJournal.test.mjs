@@ -226,3 +226,26 @@ test('the journal cap equals the framing reader cap, and an oversized journal fa
   const after = await stat(path);
   assert.deepEqual([after.size, after.mtimeMs], [before.size, before.mtimeMs]);
 });
+
+test('summarizePriorOverlap: per-series forward period declarations from exact counts, unavailable kept, absent omitted (forward period D6)', () => {
+  const assessment = { status: 'no_recorded_overlap', overlapping_records: 0, exploration_records: 0, validation_records: 0, matches: [],
+    truncated: false, limitations: ['prior_and_external_usage_may_be_missing'] };
+  const overlapped = (other, exploration, validation) => ({ status: 'available', total: other + exploration + validation,
+    by_relation: { other_research: other, declaring_research_exploration: exploration, declaring_research_validation: validation }, truncated: false, listed: [] });
+  const summary = summarizePriorOverlap([
+    { series_id: 'fx:A', prior_overlap: assessment, overlapped_forward_period_declarations: overlapped(2, 1, 3) },
+    { series_id: 'fx:B', prior_overlap: assessment, overlapped_forward_period_declarations: { status: 'unavailable', reason: 'lock_timeout' } },
+    { series_id: 'fx:C', prior_overlap: assessment },
+    { series_id: 'fx:D', prior_overlap: assessment, overlapped_forward_period_declarations: overlapped(0, 0, 0) },
+  ]);
+  assert.deepEqual(summary.per_series.map((row) => row.active_forward_period_declarations), [
+    { declared_by_this_research: 4, declared_by_other_research: 2 },
+    { status: 'unavailable', reason: 'lock_timeout' },
+    undefined,
+    { declared_by_this_research: 0, declared_by_other_research: 0 },
+  ]);
+  assert.equal('active_forward_period_declarations' in summary.per_series[2], false, 'an absent field omits the column');
+  assert.ok(summary.limitations.includes('access_overlaps_a_declared_forward_period'));
+  const none = summarizePriorOverlap([{ series_id: 'fx:D', prior_overlap: assessment, overlapped_forward_period_declarations: overlapped(0, 0, 0) }]);
+  assert.ok(!none.limitations.includes('access_overlaps_a_declared_forward_period'), 'only when a count is non-zero');
+});

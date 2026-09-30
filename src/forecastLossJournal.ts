@@ -5,7 +5,7 @@ import { BACKTEST_LEDGER_MAX_BYTES, readBacktestLedgerFile } from "./backtestLed
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { BATTERY_OUTCOMES, FORECAST_LOSS_CONTRACT, type BatteryOutcome, type ForecastLoss } from "./forecastLossComparison.js";
 import { FORECAST_SET_MAX_DIMENSION, forecastSetComponentHashes, type ForecastSet } from "./forecastSet.js";
-import type { ResearchPeriodUsageAssessment } from "./researchPeriodUsage.js";
+import type { OverlappedForwardPeriodDeclarations, ResearchPeriodUsageAssessment } from "./researchPeriodUsage.js";
 
 export const FORECAST_LOSS_JOURNAL_NAMESPACE = "forecast_loss_comparison_exploration";
 /**
@@ -211,20 +211,37 @@ export const PRIOR_OVERLAP_RESEARCH_ID_CAP = 100;
  * Each assessment carries at most its first 100 matches, so the union is flagged truncated when any
  * record's matches were, and when the union itself exceeds the returned cap.
  */
-export function summarizePriorOverlap(records: { series_id: string; prior_overlap: ResearchPeriodUsageAssessment }[]) {
+/**
+ * Per series, the forward period declarations the record overlaps (docs/FORWARD_PERIOD_DESIGN.md, D6), from the
+ * record's exact counts, never from the listed entries. Unknown stays unavailable, and an absent field omits the
+ * column.
+ */
+function activeDeclarations(overlapped: OverlappedForwardPeriodDeclarations | undefined) {
+  if (overlapped === undefined) return {};
+  if (overlapped.status === "unavailable") return { active_forward_period_declarations: overlapped };
+  const { other_research, declaring_research_exploration, declaring_research_validation } = overlapped.by_relation;
+  return { active_forward_period_declarations: { declared_by_this_research: declaring_research_exploration + declaring_research_validation,
+    declared_by_other_research: other_research } };
+}
+
+export function summarizePriorOverlap(records: { series_id: string; prior_overlap: ResearchPeriodUsageAssessment;
+  overlapped_forward_period_declarations?: OverlappedForwardPeriodDeclarations }[]) {
   const union = new Set(records.flatMap((record) => record.prior_overlap.matches.map((match) => match.research_id)));
   const ids = [...union].sort();
+  const overlapsDeclaration = records.some((record) => record.overlapped_forward_period_declarations?.status === "available"
+    && record.overlapped_forward_period_declarations.total > 0);
   return {
     scope: "prior_recorded_access_reports" as const,
-    per_series: records.map(({ series_id, prior_overlap: p }) => ({
+    per_series: records.map(({ series_id, prior_overlap: p, overlapped_forward_period_declarations: overlapped }) => ({
       series_id, status: p.status, overlapping_records: p.overlapping_records,
-      exploration_records: p.exploration_records, validation_records: p.validation_records,
+      exploration_records: p.exploration_records, validation_records: p.validation_records, ...activeDeclarations(overlapped),
     })),
     overlapping_research_ids: ids.slice(0, PRIOR_OVERLAP_RESEARCH_ID_CAP),
     overlapping_research_ids_seen: ids.length,
     overlapping_research_ids_truncated: records.some((record) => record.prior_overlap.truncated)
       || ids.length > PRIOR_OVERLAP_RESEARCH_ID_CAP,
     limitations: [...new Set([...records.flatMap((record) => record.prior_overlap.limitations),
+      ...(overlapsDeclaration ? ["access_overlaps_a_declared_forward_period"] : []),
       "summary_omits_matching_records_use_full_check_for_detail"])],
   };
 }

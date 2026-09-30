@@ -397,6 +397,7 @@ function makeDeps(overrides = {}) {
       listEventStudies: async () => [],
       compareEventStudies: async (references) => ({ comparable: true, incompatibilities: [], studies: references }),
       compare: async (references) => ({ comparable: true, incompatibilities: [], experiments: references }),
+      findHypothesis: async () => { throw new Error('unexpected research journal hypothesis lookup'); },
       ...overrides.researchJournal,
     },
     // Collecting first-seen open interest is optional, so it is only present when a test asks for it.
@@ -537,6 +538,8 @@ function makeDeps(overrides = {}) {
       record: async () => {throw new Error('unexpected manual period write');},
       check: async () => {throw new Error('unexpected period check');},
       recordToolAccessBatch: async () => {throw new Error('unexpected forecast period write');},
+      declareForwardPeriod: async () => {throw new Error('unexpected forward period declaration');},
+      shortenForwardPeriod: async () => {throw new Error('unexpected forward period shortening');},
     },
     forecastSets: overrides.forecastSets ?? { get: async () => { throw new Error('unexpected forecast set read'); } },
     forecastLossJournal: overrides.forecastLossJournal ?? { record: async () => { throw new Error('unexpected forecast loss journal write'); } },
@@ -973,6 +976,10 @@ test('automatic usage preserves source identity across revisions and separates r
   assert.equal(first.exploration.call_count,1);
   assert.equal(retry.exploration.call_count,2);
   assert.equal(retry.period_usage.record.idempotent,true);
+  // The ledger summary returns the full record, so it carries the forward period fields too (plan P-Q10).
+  assert.equal(first.period_usage.record.overlapped_forward_period_declarations.status,'available');
+  assert.equal(first.period_usage.record.prior_overlap.forward_period_declarations.total,0);
+  assert.deepEqual(retry.period_usage.record.overlapped_forward_period_declarations,first.period_usage.record.overlapped_forward_period_declarations);
   assert.equal((await readFile(path,'utf8')).trim().split('\n').length,1);
   const other=await call({artifact_id:revised.artifact_id,usage_access_id:'revision'});
   assert.equal(other.period_usage.record.series_id,first.period_usage.record.series_id);
@@ -1168,7 +1175,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred nine expected tools", async () => {
+test("exposes exactly the one hundred eleven expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1194,6 +1201,7 @@ test("exposes exactly the one hundred nine expected tools", async () => {
       "compute_round_trip_cost",
       "compute_session_profile",
       "create_analysis_alerts",
+      "declare_forward_period",
       "ensure_analysis_overlay",
       "estimate_carry_panel_effective_sample",
       "evaluate_analysis_overlay_outcome",
@@ -1276,6 +1284,7 @@ test("exposes exactly the one hundred nine expected tools", async () => {
       "set_indicator_input",
       "set_symbol",
       "set_timeframe",
+      "shorten_forward_period",
       "start_chart_replay",
       "step_chart_replay",
       "stop_chart_replay",
@@ -9380,4 +9389,135 @@ test('compare_forecast_losses: a stored 0.1.14 set with a proxy-set: source fail
   assert.equal(response.isError, true);
   assert.match(response.content[0].text, /proxy_set_not_found/);
   assert.deepEqual([(await jsonLines(stores.paths.usage)).length, (await jsonLines(loss)).length], [0, 0]);
+});
+
+// declare_forward_period and shorten_forward_period (docs/FORWARD_PERIOD_PLAN.md, step 5). Real stores in mkdtemp,
+// with the period usage store's clock injected so historical spans can be declared before they "start".
+async function forwardStores(t, at) {
+  const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+  const { StrategyResearchJournalStore } = await import('../../build/strategyResearchJournal.js');
+  const { rm } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'forward-tool-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const clock = { now: at };
+  const usagePath = join(dir, 'usage.jsonl');
+  const research = new StrategyResearchJournalStore(join(dir, 'research.jsonl'));
+  const researchPeriodUsage = new ResearchPeriodUsageStore(usagePath, undefined, { now: () => new Date(clock.now), researchJournalPath: join(dir, 'research.jsonl') });
+  return { dir, clock, usagePath, research, researchPeriodUsage };
+}
+async function forwardClient(t, deps) {
+  const client = await connectedClient(makeDeps(deps));
+  t.after(() => client.close());
+  const raw = (name, args) => client.callTool({ name, arguments: args });
+  const call = async (name, args) => {
+    const response = await raw(name, args);
+    assert.ok(!response.isError, response.content[0].text);
+    return JSON.parse(response.content[0].text);
+  };
+  return { raw, call };
+}
+const fwd = (patch = {}) => ({ declaration_id: 'fwd-1', research_id: 'study:fwd', series_ids: ['fx:EURUSD'], from: '2027-01-01T00:00:00.000Z',
+  to: '2027-04-01T00:00:00.000Z', protocol_sha256: 'sha256:' + 'a'.repeat(64), ...patch });
+
+test('declare_forward_period and shorten_forward_period: confirm, strict inputs, hypotheses and intent-only answers', async (t) => {
+  const s = await forwardStores(t, '2026-10-01T00:00:00.000Z');
+  await s.research.registerHypothesis({ hypothesisId: 'h-fwd', title: 't', thesis: 'x', parentExperimentId: null, evaluationContract: {
+    population: 'out_of_sample', primaryMetric: 'profitFactor', minimumTrades: 30, symbols: ['OANDA:EURUSD'], timeframes: ['60'],
+    minimumProfitFactor: null, maximumDrawdownPercent: null } });
+  const { raw, call } = await forwardClient(t, { researchPeriodUsage: s.researchPeriodUsage,
+    researchJournal: { findHypothesis: (kind, id) => s.research.findHypothesis(kind, id) } });
+  for (const args of [fwd(), { ...fwd(), confirm: true, extra: 1 }, { ...fwd({ series_ids: ['proxy-set-source:x'] }), confirm: true }]) {
+    assert.equal((await raw('declare_forward_period', args)).isError, true, JSON.stringify(args).slice(0, 80));
+  }
+  const declared = await call('declare_forward_period', { ...fwd({ hypothesis: { kind: 'strategy', id: 'h-fwd' } }), confirm: true });
+  assert.deepEqual([declared.idempotent, declared.declaration.state, declared.declaration.hypothesis.population], [false, 'pending', 'out_of_sample']);
+  assert.equal(declared.limitations.length, 10);
+  const lead = await raw('declare_forward_period', { ...fwd({ declaration_id: 'fwd-2', series_ids: ['fx:USDJPY'], from: '2026-10-01T12:00:00.000Z',
+    to: '2026-11-01T00:00:00.000Z' }), confirm: true });
+  assert.match(lead.content[0].text, /^Error: forward_period_lead_too_short: /);
+  assert.equal((await raw('shorten_forward_period', { declaration_id: 'fwd-1', research_id: 'study:fwd', new_end: '2027-03-01T00:00:00.000Z', reason: 'narrower' })).isError, true,
+    'shortening needs confirm:true');
+  const mismatch = await raw('shorten_forward_period', { declaration_id: 'fwd-1', research_id: 'someone-else', new_end: '2027-03-01T00:00:00.000Z', reason: 'r', confirm: true });
+  assert.match(mismatch.content[0].text, /forward_period_research_id_mismatch/);
+  const shortened = await call('shorten_forward_period', { declaration_id: 'fwd-1', research_id: 'study:fwd', new_end: '2027-03-01T00:00:00.000Z', reason: 'narrower', confirm: true });
+  assert.deepEqual([shortened.shortening.new_end, shortened.declaration.effective_to, shortened.declaration.shortened_after_start],
+    ['2027-03-01T00:00:00.000Z', '2027-03-01T00:00:00.000Z', false]);
+});
+
+test('preflight_research_oos takes research_id; check_research_period_usage reports declarations and still rejects research_id', async (t) => {
+  const s = await forwardStores(t, '2026-10-01T00:00:00.000Z');
+  const { raw, call } = await forwardClient(t, { researchPeriodUsage: s.researchPeriodUsage });
+  await call('declare_forward_period', { ...fwd(), confirm: true });
+  const period = { series_id: 'fx:EURUSD', data_version: 'sha256:' + 'b'.repeat(64), from: '2027-01-01T00:00:00.000Z', to: '2027-04-01T00:00:00.000Z' };
+  const checked = await call('check_research_period_usage', period);
+  assert.deepEqual([checked.overlapping_records, checked.forward_period_declarations.total], [0, 1]);
+  assert.equal((await raw('check_research_period_usage', { ...period, research_id: 'study:fwd' })).isError, true);
+  const brief = await call('check_research_period_usage', { ...period, summary_only: true });
+  assert.deepEqual(brief.forward_period_declarations.listed_declaration_ids, ['fwd-1']);
+  s.clock.now = '2027-05-01T00:00:00.000Z';
+  const own = await call('preflight_research_oos', { ...period, research_id: 'study:fwd' });
+  assert.deepEqual([own.status, own.reason, own.execution_allowed, own.contract],
+    ['review_required', 'declared_intent_without_recorded_usage_is_not_unused_evidence', false, 'recorded_usage_oos_preflight_v2']);
+  const other = await call('preflight_research_oos', { ...period, research_id: 'study:other' });
+  assert.deepEqual([other.status, other.reason], ['blocked', 'evaluation_period_declared_for_another_research']);
+  const anonymous = await call('preflight_research_oos', { ...period, summary_only: true });
+  assert.deepEqual([anonymous.status, anonymous.reason], ['blocked', 'evaluation_period_has_a_forward_period_declaration']);
+  assert.deepEqual(anonymous.usage.forward_period_declarations.listed_declaration_ids, ['fwd-1']);
+});
+
+test('record_research_period_usage_batch shares declaration fields in one top-level map; summary_only keeps counts and IDs', async (t) => {
+  const s = await forwardStores(t, '2026-10-01T00:00:00.000Z');
+  const { call } = await forwardClient(t, { researchPeriodUsage: s.researchPeriodUsage });
+  await call('declare_forward_period', { ...fwd(), confirm: true });
+  s.clock.now = '2027-02-15T00:00:00.000Z';
+  const entry = (id, patch = {}) => ({ access_id: id, research_id: 'study:peek', series_id: 'fx:EURUSD', data_version: 'sha256:' + 'b'.repeat(64),
+    from: '2027-01-10T00:00:00.000Z', to: '2027-01-20T00:00:00.000Z', accessed_at: '2027-02-14T00:00:00.000Z', purpose: 'exploration', ...patch });
+  const full = await call('record_research_period_usage_batch', { records: [entry('p1'), entry('p2', { series_id: 'fx:USDJPY' })], confirm: true });
+  assert.deepEqual(Object.keys(full), ['recorded', 'idempotent', 'forward_period_declarations_by_id', 'results']);
+  assert.deepEqual(Object.keys(full.forward_period_declarations_by_id), ['fwd-1']);
+  assert.deepEqual(Object.keys(full.forward_period_declarations_by_id['fwd-1']), ['declaration_id', 'research_id', 'series_ids', 'from', 'to',
+    'protocol_sha256', 'hypothesis', 'recorded_at', 'lead_seconds']);
+  const listed = full.results[0].prior_overlap.forward_period_declarations.listed[0];
+  assert.equal(listed.declaration_id, 'fwd-1');
+  assert.equal('series_ids' in listed, false, 'static fields appear once, in the map');
+  assert.deepEqual([listed.state, listed.accesses.other_research], ['running', 1], 'as-of fields stay with the result');
+  assert.equal(full.results[0].overlapped_forward_period_declarations.by_relation.other_research, 1);
+  assert.equal(full.results[1].overlapped_forward_period_declarations.total, 0);
+  const brief = await call('record_research_period_usage_batch', { records: [entry('p3')], confirm: true, summary_only: true });
+  assert.equal('forward_period_declarations_by_id' in brief, false);
+  assert.deepEqual(brief.results[0].prior_overlap.forward_period_declarations.listed_declaration_ids, ['fwd-1']);
+});
+
+test('compare_forecast_losses reports overlapped declarations in its records and per-series columns', async (t) => {
+  const stores = await forecastStores(t);
+  const s = await forwardStores(t, '2019-06-01T00:00:00.000Z');
+  const { artifact_id } = await stores.forecastSets.register(forecastSetInput());
+  const tools = await forwardClient(t, { researchPeriodUsage: s.researchPeriodUsage });
+  await tools.call('declare_forward_period', { ...fwd({ research_id: 'study:other', from: '2020-02-01T00:00:00.000Z', to: '2020-03-01T00:00:00.000Z' }), confirm: true });
+  s.clock.now = '2026-09-30T00:00:00.000Z';
+  const { call } = await forecastClient(t, { forecastSets: stores.forecastSets, forecastLossJournal: stores.forecastLossJournal,
+    researchPeriodUsage: s.researchPeriodUsage });
+  const r = await call({ artifact_id, loss: 'mse', research_id: 'study:mine' });
+  const [source, eurusd] = r.period_usage.records;
+  assert.deepEqual(eurusd.overlapped_forward_period_declarations.by_relation, { other_research: 1, declaring_research_exploration: 0, declaring_research_validation: 0 });
+  assert.equal(source.overlapped_forward_period_declarations.total, 0, 'the source record is its own series');
+  assert.deepEqual(r.search.period_usage_prior_overlap.per_series.map((row) => row.active_forward_period_declarations),
+    [{ declared_by_this_research: 0, declared_by_other_research: 0 }, { declared_by_this_research: 0, declared_by_other_research: 1 }]);
+  assert.ok(r.search.period_usage_prior_overlap.limitations.includes('access_overlaps_a_declared_forward_period'));
+});
+
+test('compute_realized_covariance reports overlapped declarations in its records and per-series columns', async (t) => {
+  const stores = await rcStores(t);
+  const s = await forwardStores(t, '2025-12-01T00:00:00.000Z');
+  const args = await rcScenario(stores, 'A_100_shaped');
+  const tools = await forwardClient(t, { researchPeriodUsage: s.researchPeriodUsage });
+  await tools.call('declare_forward_period', { ...fwd({ research_id: 'study:rc', from: '2026-01-06T00:00:00.000Z', to: '2026-01-31T00:00:00.000Z' }), confirm: true });
+  s.clock.now = '2026-09-30T00:00:00.000Z';
+  const { call } = await rcClient(t, { ...rcStoreDeps(stores), researchPeriodUsage: s.researchPeriodUsage });
+  const r = await call({ ...args, research_id: 'study:rc' });
+  assert.deepEqual(r.period_usage.records.map((row) => row.overlapped_forward_period_declarations.total), [0, 1, 0]);
+  assert.equal(r.period_usage.records[1].overlapped_forward_period_declarations.listed[0].relation, 'declaring_research_exploration');
+  assert.deepEqual(r.search.period_usage_prior_overlap.per_series[1].active_forward_period_declarations,
+    { declared_by_this_research: 1, declared_by_other_research: 0 });
+  assert.ok(r.search.period_usage_prior_overlap.limitations.includes('access_overlaps_a_declared_forward_period'));
 });

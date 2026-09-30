@@ -9,7 +9,9 @@ import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./back
 import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
 import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
 import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
+import { declareForwardPeriodInputSchema, shortenForwardPeriodInputSchema } from "./forwardPeriod.js";
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordInputSchema, researchPeriodUsageCheckSchema, researchPeriodUsageBatchInputSchema,
+  researchPeriodUsagePreflightSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import { BarSeriesStore, type BarSeries } from "./barSeries.js";
@@ -52,7 +54,7 @@ import {
   compareStrategyMetrics,
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
-import type { EventStudyRecord, StrategyResearchJournalStore } from "./strategyResearchJournal.js";
+import { resolveStrategyResearchJournalPath, type EventStudyRecord, type StrategyResearchJournalStore } from "./strategyResearchJournal.js";
 import {
   evaluateStrategyWalkForward,
   validateStrategyWalkForwardFolds,
@@ -203,7 +205,7 @@ export interface ServerDeps {
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
-  researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies">;
+  researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies" | "findHypothesis">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
   policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf" | "getVersionsAsOf">;
   policyRateHeartbeats?: Pick<PolicyRateCollectionHeartbeatStore, "getRunsAsOf">;
@@ -213,7 +215,7 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos" | "declareForwardPeriod" | "shortenForwardPeriod">;
   forecastSets?: Pick<ForecastSetStore, "get">;
   forecastLossJournal?: Pick<ForecastLossJournalStore, "record">;
   barSeries?: Pick<BarSeriesStore, "get">;
@@ -427,7 +429,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5502,9 +5504,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({records, summary_only}) => {
       try {
         const results = await researchPeriodUsage.recordBatch(records);
-        return jsonResult({recorded: results.filter((result) => !result.idempotent).length,
-          idempotent: results.filter((result) => result.idempotent).length,
-          results: summary_only ? results.map((result) => ({...result, prior_overlap: summarizeAssessment(result.prior_overlap)})) : results});
+        const counts = {recorded: results.filter((result) => !result.idempotent).length,
+          idempotent: results.filter((result) => result.idempotent).length};
+        if (summary_only) return jsonResult({...counts, results: results.map((result) => ({...result, prior_overlap: summarizeAssessment(result.prior_overlap)}))});
+        const {byId, reshaped} = shareDeclarationFields(results);
+        return jsonResult({...counts, forward_period_declarations_by_id: byId, results: reshaped});
       } catch (err) { return errorResult(err); }
     },
   );
@@ -5516,8 +5520,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Any recorded exploration or validation across research IDs and versions of the exact series blocks it. " +
         "No overlap, including declared-unused input, requires external review and never authorizes execution. " +
         "This is a snapshot, not a reservation or execution token; existing backtest tools are not intercepted. No data/chart access or journal append. " +
+        "Forward period declarations (declare_forward_period) overlapping the interval block it unless research_id is the declaring study's and the interval is exactly its ended, unshortened declared period; even then it only requires review. " +
         "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
-      inputSchema: z.object({...researchPeriodUsageCheckSchema.shape, summary_only: summaryOnlySchema}).strict(),
+      inputSchema: z.object({...researchPeriodUsagePreflightSchema.shape, summary_only: summaryOnlySchema}).strict(),
     },
     async (request) => {
       try {
@@ -5525,6 +5530,40 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const result = await researchPeriodUsage.preflightOos(query);
         return jsonResult(summary_only ? {...result, usage: summarizeAssessment(result.usage)} : result);
       } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "declare_forward_period",
+    {
+      description: "Record, with confirm:true, that one research_id intends to use a future period [from,to) on 1-20 exact series only for the one evaluation " +
+        "whose frozen protocol protocol_sha256 names. The server clock must be at least 24 h before from; the period lasts 24 h to 366 days and may not " +
+        "overlap another active declaration on the same series. Optional hypothesis {kind: strategy|event, id} must be registered in the research journal. " +
+        "This is evidence of intent recorded by the local clock, never proof of unused data, a reservation or an approval: no access is refused, and " +
+        "check_research_period_usage and preflight_research_oos report declarations and the accesses that overlap them. Identical retries are idempotent. " +
+        "No chart access, orders or file paths.",
+      inputSchema: z.object({...declareForwardPeriodInputSchema.shape, confirm: z.literal(true)}).strict(),
+    },
+    async ({confirm, ...input}) => {
+      try {
+        return jsonResult(await researchPeriodUsage.declareForwardPeriod(input, {findHypothesis: (kind, id) => researchJournal.findHypothesis(kind, id)}));
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "shorten_forward_period",
+    {
+      description: "With confirm:true, stop declaring the part of a forward period declaration from new_end on. new_end must be at least 24 h after now, " +
+        "below the current end, and either the declared from (a full withdrawal) or at least 24 h after it. research_id must match the declaration. " +
+        "A shortening recorded within 24 h of the start or after it marks the declaration shortened_after_start, and preflight_research_oos then never " +
+        "reaches its review answer for it. The part no longer declared may be declared by other studies. Identical retries are idempotent. " +
+        "No chart access, orders or file paths.",
+      inputSchema: z.object({...shortenForwardPeriodInputSchema.shape, confirm: z.literal(true)}).strict(),
+    },
+    async ({confirm, ...input}) => {
+      try { return jsonResult(await researchPeriodUsage.shortenForwardPeriod(input)); }
+      catch (err) { return errorResult(err); }
     },
   );
 
@@ -5550,7 +5589,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "No recorded overlap means unknown outside this journal, never unused or approved OOS. " +
         "A declared-unused assertion is user supplied and cannot prove unused status. Does not record an access or reserve a period. " +
         "summary_only:true replaces the listed overlapping records with counts and distinct research IDs.",
-      inputSchema: {...researchPeriodUsageCheckSchema.shape, summary_only: summaryOnlySchema},
+      // Strict: research_id belongs to preflight_research_oos, and a check given one would silently ignore it
+      // (docs/FORWARD_PERIOD_DESIGN.md, F9g).
+      inputSchema: z.object({...researchPeriodUsageCheckSchema.shape, summary_only: summaryOnlySchema}).strict(),
     },
     async (request) => {
       try {
@@ -5674,7 +5715,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             purpose: "exploration", request_sha256,
           })));
           period_usage = { status: "tracked", access_id_base: base,
-            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent })),
+            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent,
+              overlapped_forward_period_declarations: record.overlapped_forward_period_declarations })),
             limitations: ["forecast_evaluation_window_not_estimation_history", "source_id_and_series_ids_are_importer_supplied",
               "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
           let journal;
@@ -5762,7 +5804,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           written.push(`period usage was recorded as ${base}:0-${records.length - 1}`);
           prior_overlap = summarizePriorOverlap(recorded);
           period_usage = { status: "tracked", access_id_base: base,
-            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent })),
+            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent,
+              overlapped_forward_period_declarations: record.overlapped_forward_period_declarations })),
             limitations: ["bar_window_read_not_later_forecast_use", "series_ids_are_importer_supplied",
               "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
         }
@@ -10053,4 +10096,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
   );
 
   return server;
+}
+
+/**
+ * A batch response carries each declaration's static fields once, keyed by ID (docs/FORWARD_PERIOD_DESIGN.md, I1).
+ * Everything that depends on the point of view stays with each result, which replays as of its own record (H4).
+ */
+const DECLARATION_STATIC_FIELDS = ["research_id", "series_ids", "from", "to", "protocol_sha256", "hypothesis", "recorded_at", "lead_seconds"] as const;
+function shareDeclarationFields<T extends { prior_overlap: { forward_period_declarations?: unknown } }>(results: T[]) {
+  const byId: Record<string, Record<string, unknown>> = {};
+  const reshaped = results.map((result) => {
+    const field = result.prior_overlap.forward_period_declarations as { status: string; listed?: Record<string, unknown>[] } | undefined;
+    if (!field || field.status !== "available" || !field.listed) return result;
+    const listed = field.listed.map((entry) => {
+      const id = entry.declaration_id as string;
+      byId[id] ??= { declaration_id: id, ...Object.fromEntries(DECLARATION_STATIC_FIELDS.map((key) => [key, entry[key]])) };
+      return Object.fromEntries(Object.entries(entry).filter(([key]) => !(DECLARATION_STATIC_FIELDS as readonly string[]).includes(key)));
+    });
+    return { ...result, prior_overlap: { ...result.prior_overlap, forward_period_declarations: { ...field, listed } } };
+  });
+  return { byId, reshaped };
 }
