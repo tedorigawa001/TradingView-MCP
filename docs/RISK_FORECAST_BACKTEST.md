@@ -166,15 +166,21 @@ Per evaluated forecast, `vol_target`:
   σ* = value/√P and the leverage is L = σ*/σ̂, **uncapped**, so the build-up is visible. On an own
   null the leverage of the most recent date with a valid forecast is carried, across missing returns
   too; before the first valid forecast the position is flat. `own_null_dates_with_carried_leverage`
-  counts the carried dates.
+  counts the carried dates. L is computed as σ*·(1/σ̂), and its statistics as σ* times those of
+  1/σ̂, so they are +∞ (null in JSON) only where the value itself is beyond the largest double.
 - **Realized volatility against the target** (`realized_to_target`), in log space with
   p_t = L_t·r_p,t:
   - from daily returns, √(P·mean(p_t²)), zero-mean like the VaR;
   - from the intraday proxy, √(P·mean(L_t²·w'RC_t w)), which is far less noisy.
 
-  Each is given annualized and as a ratio to the target.
+  Each is given annualized and as a ratio to the target. As σ*·√P = value, each ratio equals
+  √(mean((x_t/σ̂_t)²)) exactly, with x_t = r_p,t or √(w'RC_t w), and is computed that way, scaled
+  so that no square overflows: it is the same for every target. The annualized value is the ratio
+  times the target, again +∞ only beyond the largest double. w'RC w below 0, which rounding can leave on a hedged portfolio of series that
+  move together, counts as 0 here, in the scale check and in the regime view.
 - **Drawdown**, from compounded simple returns R_t = L_t·Σᵢ wᵢ·(exp(rᵢ/s) − 1), with s = 100 for
-  `log_percent` and 1 for `log`; wealth starts at 1.
+  `log_percent` and 1 for `log`; wealth starts at 1. It is held relative to its running peak, so a
+  run of gains at a large leverage cannot overflow it.
   - If 1 + R_t ≤ 0 the position is **ruined** on that date (`ruined_on`). Wealth stays 0, the
     maximum drawdown is 1, and it is underwater to the end.
   - Otherwise the report gives the maximum drawdown as a fraction of the running peak, its peak and

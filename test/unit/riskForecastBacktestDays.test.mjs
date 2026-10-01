@@ -191,6 +191,100 @@ test('ruin: 1 + R_t ≤ 0 ruins the position for good, with the drawdown fields 
   assert.ok(Math.abs(c.max - (1 - Math.exp(-0.5))) < 1e-3, String(c.max));
 });
 
+test('drawdown: wealth held relative to its peak survives an overflowing run of gains, and ruin after it is 1', () => {
+  const T = 300, dates = datesOf(T);
+  const overflowing = () => {
+    const base = flat(T);
+    for (let t = 10; t < 20; t++) { base.a[t] = 1e-300; base.returns[t] = [1]; }   // L = 1e150: +1% a day overflows absolute wealth
+    return base;
+  };
+  // Ruin at the same leverage: absolute wealth gave (∞ − 0)/∞ = NaN and kept the maximum at a 0.4% dip.
+  const ruin = overflowing();
+  ruin.a[30] = 1e-300; ruin.returns[30] = [-1];
+  const r = run({ ...ruin, targetValue: Math.sqrt(260) }).forecasts.a.vol_target.drawdown;
+  assert.deepEqual({ max: r.max, peak: r.peak_date, trough: r.trough_date, ruined: r.ruined_on },
+    { max: 1, peak: dates[28], trough: dates[30], ruined: dates[30] }, 'the running peak before the ruin, as on any path');
+  // A loss after the overflow is still measured: ∞·0.6 = ∞ would have hidden it.
+  const crash = overflowing();
+  crash.returns[29] = [0.5]; crash.returns[30] = [-50]; crash.returns[31] = [0.5];   // a peak the day before, at leverage 1
+  const c = run({ ...crash, targetValue: Math.sqrt(260) }).forecasts.a.vol_target.drawdown;
+  assert.ok(Math.abs(c.max - (1 - Math.exp(-0.5))) < 1e-12, String(c.max));
+  assert.deepEqual([c.peak_date, c.trough_date, c.ruined_on], [dates[29], dates[30], null]);
+});
+
+test('a PSD proxy whose w\'RC w rounds below 0 counts as 0: the intraday ratio is 0, not null, and no regime date is grouped', () => {
+  // Two series moving together (the second c times the first): Σ rr' is PSD with rank 1 and w = (c, −1)/(1 + c) hedges it,
+  // so w'RC w is 0 exactly; summed in floating point it lands below 0 here.
+  const random = createRandom(7);
+  let proxy, w;
+  do {
+    const c = 0.5 + random();
+    w = normalizeWeights([c, -1], 2);
+    proxy = [[0, 0], [0, 0]];
+    for (let k = 0; k < 24; k++) {
+      const r = [random() - 0.5, 0];
+      r[1] = c * r[0];
+      for (const i of [0, 1]) for (const j of [0, 1]) proxy[i][j] += r[i] * r[j];
+    }
+  } while (!(quadraticForm(w, proxy) < 0));
+  const T = 300, identity = Array.from({ length: T }, () => [[1, 0], [0, 1]]);
+  const out = run({ returns: Array.from({ length: T }, (_, t) => [0.5, t % 2 ? 0.1 : 0.3]), rc: Array.from({ length: T }, () => proxy),
+    a: identity, b: identity, weights: w });
+  const vt = out.forecasts.a.vol_target;
+  assert.deepEqual(vt.realized_to_target.intraday_proxy, { annualized: 0, ratio: 0 });
+  assert.ok(vt.realized_to_target.daily_returns.ratio > 0);
+  assert.deepEqual(vt.sub_periods.map((s) => s.realized_to_target.intraday_proxy), [0, 0, 0, 0]);
+  assert.equal(vt.regime_view.excluded_dates, T, 'every 60-date mean is 0');
+  assert.equal(vt.regime_view.groups.steady.dates, 0);
+  assert.ok(Number.isNaN(vt.regime_view.groups.steady.realized_to_target.intraday_proxy), 'an empty group has no ratio, as before');
+  assert.equal(out.scale_check.a, null, 'no date with w\'RC w > 0');
+});
+
+test('extreme finite targets: the ratios are the same bits for every target, and nothing overflows into ∞·0', () => {
+  const T = 300, dates = datesOf(T), base = flat(T, 0.01);   // σ̂ = 0.1: L = 10σ*, 0.62 of the largest double there
+  base.b = Array.from({ length: T }, () => 1e-4);   // σ̂ = 0.01: L = σ*·100 overflows at the largest target
+  base.b[5] = 1e-6;                                 // the largest leverage, also beyond the largest double there
+  base.returns[1] = [0];                            // a flat day at that leverage
+  const ratios = (vt) => [vt.realized_to_target.daily_returns.ratio, vt.realized_to_target.intraday_proxy.ratio,
+    ...Object.values(vt.regime_view.groups).concat(vt.sub_periods).flatMap((g) => [g.realized_to_target.daily_returns, g.realized_to_target.intraday_proxy])];
+  const worst = (vt) => vt.worst_days.days.map((d) => [d.date, d.leverage_percentile]);
+  const targets = [1e-300, Math.sqrt(260), 1e300, Number.MAX_VALUE];
+  const outs = targets.map((targetValue) => run({ ...base, targetValue }).forecasts);
+  for (const f of ['a', 'b']) {
+    const reference = ratios(outs[1][f].vol_target);
+    // √(P·mean(L²r²))/value at a plain target: the RMS of r/σ̂.
+    const z = base.returns.map((r, t) => r[0] / Math.sqrt(base[f][t]));
+    assert.ok(Math.abs(reference[0] / Math.sqrt(z.reduce((sum, x) => sum + x * x, 0) / T) - 1) < 1e-14, `${f} ${reference[0]}`);
+    outs.forEach((out, i) => {
+      const vt = out[f].vol_target;
+      assert.deepEqual(ratios(vt), reference, `${f} at ${targets[i]}`);
+      assert.deepEqual(worst(vt), worst(outs[1][f].vol_target), `${f} at ${targets[i]}: percentiles from 1/σ̂, never tied by L = ∞`);
+      assert.equal(vt.realized_to_target.daily_returns.annualized, vt.realized_to_target.daily_returns.ratio * targets[i]);
+    });
+  }
+  // At the smallest target wealth does not move in double precision: equal to its peak is not underwater.
+  const tiny = outs[0].a.vol_target.drawdown;
+  assert.deepEqual([tiny.max, tiny.longest_underwater_dates, tiny.underwater_at_end], [0, 0, false]);
+  assert.equal(outs[3].b.vol_target.leverage.max_date, dates[5], 'the largest 1/σ̂, not the first of the leverages that overflow');
+  // L = 10·MAX/√260 on A: the mean and the median are σ* times those of 1/σ̂, not sums of values near the largest double.
+  const largest = 10 * (Number.MAX_VALUE / Math.sqrt(260));
+  assert.ok(Number.isFinite(largest) && !Number.isFinite(largest + largest));
+  assert.deepEqual(outs[3].a.vol_target.leverage, { mean: largest, median: largest, p95: largest, max: largest, max_date: dates[0] });
+  // L = ∞ on b: the flat day 1 gives R = σ*·(u·0) = 0, a new peak, before the ruin on day 3 (∞·0 = NaN lost day 1's peak).
+  const b = outs[3].b.vol_target.drawdown;
+  assert.deepEqual([b.max, b.peak_date, b.trough_date, b.ruined_on], [1, dates[2], dates[3], dates[3]]);
+  assert.equal(outs[3].b.vol_target.leverage.max, Infinity, 'a leverage beyond the largest double, given as null in JSON');
+});
+
+test('the realized-to-target ratios are scaled so that no square overflows, for the smallest valid σ̂²', () => {
+  const T = 300, base = flat(T);
+  base.a[100] = 1e-320;   // σ̂ = 1e-160: u·r_p = 5e159, whose square overflows
+  const vt = run({ ...base, targetValue: Math.sqrt(260) }).forecasts.a.vol_target.realized_to_target;
+  const daily = 0.5 / Math.sqrt(1e-320) / Math.sqrt(T), intraday = 1 / Math.sqrt(1e-320) / Math.sqrt(T);   // the one large term dominates
+  assert.ok(Math.abs(vt.daily_returns.ratio / daily - 1) < 1e-12, String(vt.daily_returns.ratio));
+  assert.ok(Math.abs(vt.intraday_proxy.ratio / intraday - 1) < 1e-12, String(vt.intraday_proxy.ratio));
+});
+
 test('leverage statistics: ties keep the first maximum date, and constant leverage sits at percentile 0.5', () => {
   const out = run({ ...flat(300), targetValue: Math.sqrt(260) });
   const vt = out.forecasts.a.vol_target;

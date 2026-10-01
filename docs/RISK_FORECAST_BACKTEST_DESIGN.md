@@ -1,4 +1,4 @@
-# backtest_risk_forecast: design memo (rev 2.4, design review approved; implemented)
+# backtest_risk_forecast: design memo (rev 2.5, design review approved; implemented)
 
 Backlog #101, item 3.
 
@@ -12,6 +12,10 @@ Review history:
 - code review of the implementation: APPROVE WITH FINDINGS. MEDIUM C1 was this memo's own LR_cc
   rule, corrected as rev 2.4: indeterminate only when both cases reject with opposite directions.
   Rev 2.4 also corrects two counts (C6): the warm-up example and the one-bar difference.
+- numeric review after 0.1.17: three MEDIUM findings in volatility targeting, folded in as rev 2.5.
+  Wealth that overflowed lost the drawdown of a later ruin; w'RC w rounding below 0 on a correct
+  PSD proxy made the intraday ratio null; an extreme but finite target made the ratios, which do
+  not depend on it, null or 0.
 
 Rev 2 folds in F1–F12:
 - own nulls count as hits, with a cap (F1), so `forecasts` is no longer an input;
@@ -262,6 +266,20 @@ blocked forecast reduces the count.
   of capital. On an own-null date the leverage of the most recent date with a valid forecast is
   carried, across missing-return dates too; before the first valid forecast the position is flat
   (L = 0). `own_null_dates_with_carried_leverage` reports the count.
+- **Numerics (rev 2.5).** No finite input may turn a result into an overflow or rounding artefact:
+  - w'RC_t w below 0 counts as 0. The proxy is a sum of rr', so it is PSD and a negative value is
+    rounding, as on a hedged portfolio of series that move together;
+  - L_t = σ*·u_t with the unit leverage u_t = 1/σ̂_t, carried and flat as above. As σ*·√P = value,
+    each ratio below equals √(mean(u_t²·x_t²)) exactly, with x_t = r_p,t or √(w'RC_t w). It is
+    computed from u alone, scaled by max|u_t·x_t| so that no square overflows, so it is the same
+    for every target. The annualized values are the ratios times the target;
+  - the leverage statistics are σ* times those of u, and the ranks and the maximum's date use u. A
+    leverage beyond the largest double is +∞, null in JSON;
+  - R_t = σ*·(u_t·Σᵢ wᵢ·(exp(r_i,t/s) − 1)), so a flat day gives 0 even at such a leverage;
+  - wealth is held relative to its running peak, at most 1 before each day, so a run of gains
+    cannot overflow it, and ruin is a drawdown of 1 whatever came before. Without ruin, it can
+    reach 0 only after losing more than 1 − 2⁻¹⁰⁷⁴ of the peak; the drawdown is then 1 to double
+    precision, and a later recovery is not tracked.
 - **Realized volatility against the target**, in log space with p_t = L_t·r_p,t:
   - from daily returns: √(P·mean(p_t²)), zero-mean like the VaR, and its ratio to the target;
   - from the intraday proxy: √(P·mean(L_t²·w'RC_t w)), which is far less noisy, and its ratio.

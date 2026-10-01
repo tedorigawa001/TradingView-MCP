@@ -405,8 +405,9 @@ export function backtestRiskForecast(input: BacktestInput) {
   };
 
   // Per return date: the portfolio return, the unlevered realized variance, and each forecast's σ̂² (NaN on own nulls).
+  // The proxy is PSD (a sum of rr'), so w'RC w below 0 is rounding, as on a hedged portfolio, and counts as 0.
   const portfolio = index.map((d) => (returns[d] as readonly number[]).reduce((sum, r, i) => sum + weights[i] * r, 0));
-  const realized = index.map((d) => quadraticForm(weights, input.rc[d] as number | number[][]));
+  const realized = index.map((d) => Math.max(0, quadraticForm(weights, input.rc[d] as number | number[][])));
   const variances = input.forecasts.map((values) => index.map((d) => {
     const value = values[d];
     if (!isValidForecast(value)) return Number.NaN;
@@ -447,22 +448,23 @@ export function backtestRiskForecast(input: BacktestInput) {
       return evaluateLevel({ forecast: f, level, T, segments, hits, ownNull, coverage: nulls[level], draws });
     });
     const target = targetValue / Math.sqrt(periods);
-    // Leverage: on an own-null date that of the most recent return date with a valid forecast; flat before the first.
-    const leverage: number[] = [];
+    // Leverage L = σ*·u with the unit leverage u = 1/σ̂: on an own-null date that of the most recent return date with a
+    // valid forecast; flat (0) before the first. u is finite and positive for every valid σ̂², and holds no target.
+    const unit: number[] = [];
     let carried = 0, seenValid = false, carriedOwnNulls = 0;
     for (let k = 0; k < T; k++) {
-      if (!ownNull[k]) { carried = target / sigma[k]; seenValid = true; } else if (seenValid) carriedOwnNulls++;
-      leverage.push(seenValid ? carried : 0);
+      if (!ownNull[k]) { carried = 1 / sigma[k]; seenValid = true; } else if (seenValid) carriedOwnNulls++;
+      unit.push(seenValid ? carried : 0);
     }
     const hitSets = varEntries.map((_, level) => Uint8Array.from(portfolio, (r, k) => (!ownNull[k] && r < VAR_LEVELS[level].z * sigma[k] ? 1 : 0)));
-    const subset = (ks: number[]) => volatilityTargetSubset(ks, { portfolio, realized, leverage, ownNull, hitSets, periods, targetValue });
+    const subset = (ks: number[]) => volatilityTargetSubset(ks, { portfolio, realized, unit, target, ownNull, hitSets });
     return {
       status: "evaluated" as const,
       own_nulls: m,
       own_null_dates_with_carried_leverage: carriedOwnNulls,
       var: varEntries,
-      vol_target: volatilityTarget({ dates: index.map((d) => dates[d]), portfolio, realized, leverage, ownNull, hitSets, simpleReturns,
-        periods, targetValue, regime, subset }),
+      vol_target: volatilityTarget({ dates: index.map((d) => dates[d]), portfolio, realized, unit, target, ownNull, hitSets, simpleReturns,
+        targetValue, regime, subset }),
     };
   });
   return { days, scale_check, forecasts: { a: forecasts[0], b: forecasts[1] }, tests_reported: testsReported(evaluated) };
@@ -489,19 +491,33 @@ export function regimeGroups(realized: readonly number[]) {
 }
 
 interface SubsetInput {
-  portfolio: readonly number[]; realized: readonly number[]; leverage: readonly number[]; ownNull: Uint8Array;
-  hitSets: readonly Uint8Array[]; periods: number; targetValue: number;
+  portfolio: readonly number[]; realized: readonly number[];
+  /** The unit leverage 1/σ̂ per return date and the daily target σ*: the leverage is σ*·u. */
+  unit: readonly number[]; target: number;
+  ownNull: Uint8Array; hitSets: readonly Uint8Array[];
 }
 
-/** Realized-to-target ratios, mean leverage and descriptive hit rates (valid-forecast dates) over some return dates. */
+/** √(mean of xₖ²), scaled by max|xₖ| so that no square overflows; NaN for no values, like the mean. */
+function rootMeanSquare(values: readonly number[]): number {
+  const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
+  if (largest === 0) return values.length ? 0 : Number.NaN;
+  return largest * Math.sqrt(mean(values.map((x) => (x / largest) ** 2)));
+}
+
+/**
+ * Realized-to-target ratios, mean leverage and descriptive hit rates (valid-forecast dates) over some return dates. As
+ * L = σ*·u and σ*·√P = value, √(P·mean(L²x²))/value = √(mean(u²x²)) exactly: the ratios use u alone, so they are the
+ * same for every target, extreme ones included.
+ */
 export function volatilityTargetSubset(ks: readonly number[], s: SubsetInput) {
-  const daily = Math.sqrt(s.periods * mean(ks.map((k) => (s.leverage[k] * s.portfolio[k]) ** 2)));
-  const intraday = Math.sqrt(s.periods * mean(ks.map((k) => s.leverage[k] ** 2 * s.realized[k])));
   const valid = ks.filter((k) => !s.ownNull[k]);
   return {
     dates: ks.length,
-    mean_leverage: mean(ks.map((k) => s.leverage[k])),
-    realized_to_target: { daily_returns: daily / s.targetValue, intraday_proxy: intraday / s.targetValue },
+    mean_leverage: s.target * mean(ks.map((k) => s.unit[k])),
+    realized_to_target: {
+      daily_returns: rootMeanSquare(ks.map((k) => s.unit[k] * s.portfolio[k])),
+      intraday_proxy: rootMeanSquare(ks.map((k) => s.unit[k] * Math.sqrt(s.realized[k]))),
+    },
     hit_rates: s.hitSets.map((hits, level) => {
       const count = valid.reduce((sum, k) => sum + hits[k], 0);
       return { level: VAR_LEVELS[level].level, hits: count, valid_dates: valid.length, rate: valid.length ? count / valid.length : null };
@@ -513,6 +529,7 @@ export function volatilityTargetSubset(ks: readonly number[], s: SubsetInput) {
 interface VolatilityInput extends SubsetInput {
   dates: readonly string[];
   simpleReturns: readonly number[];
+  targetValue: number;
   regime: ReturnType<typeof regimeGroups>;
   subset: (ks: number[]) => ReturnType<typeof volatilityTargetSubset>;
 }
@@ -524,28 +541,33 @@ function volatilityTarget(v: VolatilityInput) {
   const daily = whole.realized_to_target.daily_returns * v.targetValue;
   const intraday = whole.realized_to_target.intraday_proxy * v.targetValue;
 
-  // Compounded wealth (design F11): R_t = L_t·Σ wᵢ(exp(rᵢ/s) − 1). Ruin when 1 + R_t ≤ 0.
-  const position = v.simpleReturns.map((r, k) => v.leverage[k] * r);
-  let wealth = 1, peak = 1, peakK = -1, maxDrawdown = 0, ddPeak = -1, ddTrough = -1, ruinedK = -1;
+  // Compounded wealth (design F11): R_t = L_t·Σ wᵢ(exp(rᵢ/s) − 1). Ruin when 1 + R_t ≤ 0. R_t is σ*·(u·Σ…), so a
+  // leverage beyond the largest double still gives 0 on a flat day, not ∞·0.
+  const leverage = v.unit.map((u) => v.target * u);
+  const position = v.simpleReturns.map((r, k) => v.target * (v.unit[k] * r));
+  // Wealth is held relative to its running peak, at most 1 before each day, so a long run of gains cannot overflow it
+  // and lose the peak. Ruin sets it to 0: a drawdown of 1.
+  let relative = 1, peakK = -1, maxDrawdown = 0, ddPeak = -1, ddTrough = -1, ruinedK = -1;
   let stretch = 0, longest = 0;
   for (let k = 0; k < T; k++) {
     if (ruinedK < 0) {
-      if (1 + position[k] <= 0) { wealth = 0; ruinedK = k; } else wealth *= 1 + position[k];
+      if (1 + position[k] <= 0) { relative = 0; ruinedK = k; } else relative *= 1 + position[k];
     }
-    if (wealth >= peak && ruinedK < 0) { peak = wealth; peakK = k; stretch = 0; continue; }
+    if (relative >= 1 && ruinedK < 0) { relative = 1; peakK = k; stretch = 0; continue; }
     stretch++;
     longest = Math.max(longest, stretch);
-    const drawdown = (peak - wealth) / peak;
+    const drawdown = 1 - relative;
     if (drawdown > maxDrawdown) { maxDrawdown = drawdown; ddPeak = peakK; ddTrough = k; }
   }
   let ownNullsInDrawdown = 0;
   if (ddTrough >= 0) for (let k = ddPeak + 1; k <= ddTrough; k++) ownNullsInDrawdown += v.ownNull[k];
 
-  const ranks = averageRanks([...v.leverage]);
+  // Ranks, the maximum and the percentiles from u: the same order as L, without ties from L overflowing or underflowing.
+  const ranks = averageRanks([...v.unit]);
   const order = all.slice().sort((x, y) => position[x] - position[y] || x - y).slice(0, WORST_DAYS);
-  const worst = order.map((k) => ({ date: v.dates[k], position_return: position[k], leverage: v.leverage[k], leverage_percentile: (ranks[k] - 0.5) / T }));
+  const worst = order.map((k) => ({ date: v.dates[k], position_return: position[k], leverage: leverage[k], leverage_percentile: (ranks[k] - 0.5) / T }));
   let maxK = 0;
-  for (let k = 1; k < T; k++) if (v.leverage[k] > v.leverage[maxK]) maxK = k;
+  for (let k = 1; k < T; k++) if (v.unit[k] > v.unit[maxK]) maxK = k;
 
   return {
     realized_to_target: {
@@ -557,12 +579,13 @@ function volatilityTarget(v: VolatilityInput) {
       peak_date: ddTrough >= 0 && ddPeak >= 0 ? v.dates[ddPeak] : null,
       trough_date: ddTrough >= 0 ? v.dates[ddTrough] : null,
       longest_underwater_dates: longest,
-      underwater_at_end: ruinedK >= 0 || wealth < peak,
+      underwater_at_end: ruinedK >= 0 || relative < 1,
       ruined_on: ruinedK >= 0 ? v.dates[ruinedK] : null,
       own_null_dates_in_peak_to_trough: ownNullsInDrawdown,
     },
     leverage: {
-      mean: whole.mean_leverage, median: median(v.leverage), p95: nearestRank(v.leverage, 0.95), max: v.leverage[maxK], max_date: v.dates[maxK],
+      mean: whole.mean_leverage, median: v.target * median(v.unit), p95: v.target * nearestRank(v.unit, 0.95), max: leverage[maxK],
+      max_date: v.dates[maxK],
     },
     regime_view: {
       excluded_dates: v.regime.excluded,
