@@ -746,6 +746,28 @@ test('records written in the 0.1.15 format, by every observing tool, still read,
   assert.equal((await saved(path)).length, 10);
 });
 
+// docs/RISK_FORECAST_BACKTEST_PLAN.md, step 5: the 0.1.17 golden, the first with backtest_risk_forecast records.
+const FIXTURE_017 = new URL('../fixtures/period-usage/format-0.1.17.jsonl', import.meta.url);
+test('records written in the 0.1.17 format, backtest_risk_forecast included, still read, check and extend', async (t) => {
+  const { path } = await setup(t);
+  await writeFile(path, await readFile(FIXTURE_017, 'utf8'), { mode: 0o600 });
+  const store = new ResearchPeriodUsageStore(path);
+  const query017 = { series_id: 'fixture-series', data_version: 'sha256:' + 'a'.repeat(64),
+    from: '2024-01-10T00:00:00.000Z', to: '2024-01-20T00:00:00.000Z' };
+  const usage = await store.check(query017);
+  assert.deepEqual(usage.matches.map((m) => [m.access_id, m.tool_name ?? null, m.scope ?? null]), [
+    ['fixture17:manual', null, null],
+    ['fixture17:forecast:1', 'compare_forecast_losses', 'forecast_evaluation_window_only'],
+    ['fixture17:rc:1', 'compute_realized_covariance', 'realized_covariance_bar_window_only'],
+    ['fixture17:risk:1', 'backtest_risk_forecast', 'risk_backtest_bar_window_only'],
+  ]);
+  assert.ok(usage.limitations.includes('tool_observed_usage_is_risk_backtest_bar_window_only'));
+  const [added] = await store.recordToolAccessBatch('backtest_risk_forecast',
+    [{ ...query017, access_id: 'fixture17:risk:2', research_id: 'r', purpose: 'exploration', request_sha256: 'sha256:' + '6'.repeat(64) }]);
+  assert.deepEqual([added.sequence, added.prior_overlap.overlapping_records], [11, 4]);
+  assert.equal((await saved(path)).length, 11);
+});
+
 test('an injected clock drives recorded_at, the accessed_at check, the clock check and checked_at (plan P-Q1)', async (t) => {
   const { path } = await setup(t);
   const at = (iso) => () => new Date(iso);
