@@ -180,6 +180,39 @@ entering forecast sets may not use it. Assessments add
 `proxy_rules_are_caller_research_choices` whenever the journal holds records from
 this tool.
 
+## Automatic Risk-Backtest Tracking
+
+`backtest_risk_forecast` with `research_id` records period usage before its search
+journal entry and its response; without it, nothing is written to this ledger,
+though the tool's own search journal still records the call. The records are
+`tool_observed` with the tool name `backtest_risk_forecast` and the scope
+`risk_backtest_bar_window_only`, validated as one batch like the forecast-loss
+records.
+
+One record covers the joined forecast set's source and one covers each underlying
+series:
+- index 0 is `forecast-set-source:` plus the hex digest of the set's `source_id`,
+  with the forecast-set ID as `data_version`;
+- the underlying series follow in set order, each with the bar-series artifact the
+  tool read as `data_version`. The tool re-derives the signed returns from those
+  bars, so they are the data actually read.
+
+Every record has the same interval: the span the re-derivation read, from the bar
+before the first date's previous endpoint (with `from_previous_endpoint`) or the
+first date's window start (with `within_day`) to the last date's endpoint. That is
+one bar wider than the forecast set's window envelope.
+
+Access IDs are `<base>:<index>`, where the base is `usage_access_id` or a
+generated `risk-access:<uuid>`. The request hash binds the set, the contract, the
+normalized weights and the target, so a retry is idempotent while another weight
+vector or target under the same base conflicts. A search-journal failure after the
+period write returns an error that names the records written. See
+[the contract](RISK_FORECAST_BACKTEST.md#records).
+
+Assessments add `tool_observed_usage_is_risk_backtest_bar_window_only` and
+`series_id_and_data_version_are_importer_supplied_metadata` whenever the journal
+holds records from this tool.
+
 ## Check
 
 `check_research_period_usage` accepts `series_id`, `data_version`, `from`, `to`,
@@ -207,7 +240,8 @@ full list.
 The check does not itself record an access, reserve the period, freeze a protocol
 or enforce a backtest gate. A later check can differ after additional reports.
 Automatic tracking currently covers only the opted-in ledger summary, forecast
-loss comparison and realized covariance computation above; other research tools
+loss comparison, realized covariance computation and risk forecast backtest above;
+other research tools
 do not automatically record all data they expose. Check and report use as part of the
 research workflow, but do not claim full coverage from this journal alone.
 
@@ -278,9 +312,9 @@ The fields they add here:
 - `forward_period_declarations_by_id` at the top of a batch response, holding each
   declaration's stored fields once;
 - `active_forward_period_declarations` in each `per_series` row of the
-  `prior_overlap` summaries of `compare_forecast_losses` and
-  `compute_realized_covariance`, whose `records` carry only
-  `overlapped_forward_period_declarations`.
+  `prior_overlap` summaries of `compare_forecast_losses`,
+  `compute_realized_covariance` and `backtest_risk_forecast`, whose `records` carry
+  only `overlapped_forward_period_declarations`.
 
 With `summary_only`, `forward_period_declarations` keeps the counts and the listed
 declaration IDs, and the batch map is omitted. When the check or the preflight

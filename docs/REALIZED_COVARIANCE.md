@@ -20,6 +20,9 @@ design and its review history are in [REALIZED_COVARIANCE_DESIGN.md](REALIZED_CO
 3. Optionally export the proxy set with `tradingview-mcp-export-proxy-set` to fit your forecasts.
 4. Join your forecasts to it with `tradingview-mcp-import-forecast-set --proxy-set`.
 5. Compare with `compare_forecast_losses`, which verifies the joined set against its proxy set.
+6. Optionally backtest the forecasts' VaR and volatility targeting with
+   [`backtest_risk_forecast`](RISK_FORECAST_BACKTEST.md), which verifies the joined set the same way
+   and re-derives the signed returns from the bars.
 
 **The CLIs and the MCP process must use the same paths.** The join and the comparison read the
 proxy-set store and the computation journal. Set every variable below identically for the CLIs
@@ -27,10 +30,10 @@ and the MCP server, or leave them all at their defaults:
 
 | Variable | Default | Used by |
 |---|---|---|
-| `TRADINGVIEW_MCP_BAR_SERIES_DIR` | `~/.tradingview-mcp/bar-series` | bar import, the tool |
-| `TRADINGVIEW_MCP_PROXY_SET_DIR` | `~/.tradingview-mcp/proxy-sets` | the tool, export, join, comparison |
-| `TRADINGVIEW_MCP_REALIZED_COVARIANCE_JOURNAL_PATH` | `~/.tradingview-mcp/realized-covariance-journal.jsonl` | the tool, join, comparison |
-| `TRADINGVIEW_MCP_FORECAST_SET_DIR` | `~/.tradingview-mcp/forecast-sets` | join, comparison |
+| `TRADINGVIEW_MCP_BAR_SERIES_DIR` | `~/.tradingview-mcp/bar-series` | bar import, the tool, risk backtest |
+| `TRADINGVIEW_MCP_PROXY_SET_DIR` | `~/.tradingview-mcp/proxy-sets` | the tool, export, join, comparison, risk backtest |
+| `TRADINGVIEW_MCP_REALIZED_COVARIANCE_JOURNAL_PATH` | `~/.tradingview-mcp/realized-covariance-journal.jsonl` | the tool, join, comparison, risk backtest |
+| `TRADINGVIEW_MCP_FORECAST_SET_DIR` | `~/.tradingview-mcp/forecast-sets` | join, comparison, risk backtest |
 
 A proxy set computed under one journal path and joined under another fails as
 `proxy_set_not_journaled`.

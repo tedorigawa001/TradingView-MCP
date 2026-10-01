@@ -208,16 +208,16 @@ These are counts, not verdicts. They appear in:
   `record_research_period_usage_batch` and `summarize_backtest_ledger` (its `period_usage.record`):
   `prior_overlap.forward_period_declarations`, as of the record;
 - **every usage record response**, those three and each of the `records` of
-  `compare_forecast_losses` and `compute_realized_covariance`:
+  `compare_forecast_losses`, `compute_realized_covariance` and `backtest_risk_forecast`:
   `overlapped_forward_period_declarations: {status, total, by_relation, truncated, listed}`, the
   declarations active on the record's own interval, the new record included. Each listed entry has
   a `relation`: `other_research`, `declaring_research_exploration` or
   `declaring_research_validation`;
-- **the `prior_overlap` summaries of `compare_forecast_losses` and `compute_realized_covariance`**
-  (in their `search`): each `per_series` row gains
+- **the `prior_overlap` summaries of `compare_forecast_losses`, `compute_realized_covariance` and
+  `backtest_risk_forecast`** (in their `search`): each `per_series` row gains
   `active_forward_period_declarations: {declared_by_this_research, declared_by_other_research}`,
   and the limitation `access_overlaps_a_declared_forward_period` is added when either is non-zero.
-  These two tools carry no `forward_period_declarations` entries.
+  These three tools carry no `forward_period_declarations` entries.
 
 Whenever a declaration is listed, the ten limitations are added to that assessment's
 `limitations`, and to the preflight's own.
@@ -283,13 +283,14 @@ limitation `no_automatic_approval_path` replaces v1's `no_automatic_approval_pat
 
 ## Observing tools
 
-`summarize_backtest_ledger`, `compare_forecast_losses` and `compute_realized_covariance` record the
-span they actually read, not the declared period:
+`summarize_backtest_ledger`, `compare_forecast_losses`, `compute_realized_covariance` and
+`backtest_risk_forecast` record the span they actually read, not the declared period:
 - the ledger summary records the ledger's trade envelope, from the earliest entry to the latest exit
   plus one millisecond;
 - the forecast-loss comparison records the evaluation window envelope;
 - realized covariance records the bars read, which with `from_previous_endpoint` start at the
-  previous day's endpoint bar.
+  previous day's endpoint bar;
+- the risk forecast backtest records the bars its re-derivation read, the same span for its run.
 
 So a declaring study's evaluation through these tools often extends outside the declared period,
 and `declaring_accesses_extending_outside_declared_period` counts it. The observing tools always
