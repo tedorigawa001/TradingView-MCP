@@ -166,23 +166,31 @@ Per evaluated forecast, `vol_target`:
   σ* = value/√P and the leverage is L = σ*/σ̂, **uncapped**, so the build-up is visible. On an own
   null the leverage of the most recent date with a valid forecast is carried, across missing returns
   too; before the first valid forecast the position is flat. `own_null_dates_with_carried_leverage`
-  counts the carried dates. L is computed as σ*·(1/σ̂), and its statistics as σ* times those of
-  1/σ̂, so they are +∞ (null in JSON) only where the value itself is beyond the largest double.
+  counts the carried dates. L is computed as value·((1/σ̂)/√P), and each of its statistics as value
+  times that statistic of (1/σ̂)/√P, so a tiny target cannot underflow σ* first, and they are +∞
+  (null in JSON) only where the value itself is beyond the largest double.
 - **Realized volatility against the target** (`realized_to_target`), in log space with
   p_t = L_t·r_p,t:
   - from daily returns, √(P·mean(p_t²)), zero-mean like the VaR;
   - from the intraday proxy, √(P·mean(L_t²·w'RC_t w)), which is far less noisy.
 
   Each is given annualized and as a ratio to the target. As σ*·√P = value, each ratio equals
-  √(mean((x_t/σ̂_t)²)) exactly, with x_t = r_p,t or √(w'RC_t w), and is computed that way, scaled
-  so that no square overflows: it is the same for every target. The annualized value is the ratio
-  times the target, again +∞ only beyond the largest double. w'RC w below 0, which rounding can leave on a hedged portfolio of series that
-  move together, counts as 0 here, in the scale check and in the regime view.
+  √(mean((x_t/σ̂_t)²)) exactly, with x_t = r_p,t or √(w'RC_t w) and 1/σ̂ carried and flat as for L.
+  It is computed that way, scaled so that no square overflows, so it is the same for every target.
+  The annualized value is the ratio times the target, again +∞ only beyond the largest double.
+  w'RC w below 0, which rounding can leave on a hedged portfolio of series that move together,
+  counts as 0 here, in the scale check and in the regime view.
 - **Drawdown**, from compounded simple returns R_t = L_t·Σᵢ wᵢ·(exp(rᵢ/s) − 1), with s = 100 for
-  `log_percent` and 1 for `log`; wealth starts at 1. It is held relative to its running peak, so a
-  run of gains at a large leverage cannot overflow it.
+  `log_percent` and 1 for `log`; wealth starts at 1. R_t is 0 on a flat date whatever the return,
+  and is computed so that neither a tiny target nor a leverage beyond the largest double turns a
+  representable R_t into 0 or ∞. Wealth is held relative to its running peak, so a run of gains at
+  a large leverage cannot overflow it.
   - If 1 + R_t ≤ 0 the position is **ruined** on that date (`ruined_on`). Wealth stays 0, the
-    maximum drawdown is 1, and it is underwater to the end.
+    maximum drawdown is 1 with that date as its trough (even after an earlier drawdown that
+    rounded to 1), and it is underwater to the end.
+  - Without ruin, wealth reaches 0 only after losing more than 1 − 2⁻¹⁰⁷⁴ of the peak; it then
+    stays at 0, so a later recovery is not tracked. A date on which two series with opposite
+    weights both rise more than e^709.78-fold leaves the drawdown undefined from that date on.
   - Otherwise the report gives the maximum drawdown as a fraction of the running peak, its peak and
     trough dates, the longest underwater stretch in dates with a return, and whether it is underwater
     at the end. The starting wealth counts as a peak: when the drawdown is measured from it,
@@ -202,11 +210,12 @@ Per evaluated forecast, `vol_target`:
     undershoots in `falling`. Mean leverage differs across groups for any forecast that tracks
     volatility, so it is no signature. Grouping by the same day's realized variance would show a
     false lag even for a perfect forecast, which is why the groups use earlier dates only.
-- **Worst days** (`worst_days`): the 10 most negative R_t (equal values in date order), each with its
-  date, position return, leverage, and the leverage's percentile (r − 0.5)/T among all dates with a
-  return, with ties at their mean rank. The mean percentile is about 0.5 for a forecast that carries
-  no unusual leverage into its worst days, and higher for one that lags. The own-null dates among the
-  10 are counted.
+- **Worst days** (`worst_days`): the 10 most negative R_t, in the order of R_t in exact arithmetic
+  but found without the target, so a tiny target that rounds every R_t to 0 still finds them (equal
+  values in date order). Each has its date, position return, leverage, and the leverage's
+  percentile (r − 0.5)/T among all dates with a return, with ties at their mean rank. The mean
+  percentile is about 0.5 for a forecast that carries no unusual leverage into its worst days, and
+  higher for one that lags. The own-null dates among the 10 are counted.
 - **Sub-periods:** 4 consecutive blocks of the dates with a return, each with its first and last
   date, the date count, mean leverage, both ratios, hit rates and own-null dates, in that order; the
   regime groups have the same fields without the first and last date.
