@@ -74,6 +74,9 @@ function forecast(value: ForecastValue): Forecast | null {
   return { s, inverse: inverseFromCholesky(l), logDet: logDeterminantFromCholesky(l) };
 }
 
+/** The forecast validity rule as a predicate, for backtest_risk_forecast's own nulls (its design, "Days"). */
+export const isValidForecast = (value: ForecastValue): boolean => forecast(value) !== null;
+
 /** Proxy validity: finite, symmetric within tolerance, PSD within 1e-12·max|P| (plan section 7). */
 function proxy(value: ForecastValue): Matrix | null {
   if (value === null) return null;

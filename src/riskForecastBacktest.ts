@@ -1,5 +1,7 @@
 import { fdlibmLog } from "./fdlibmLog.js";
-import { erfc } from "./numerics.js";
+import { blockBounds, isValidForecast } from "./forecastLossComparison.js";
+import type { ForecastValue } from "./forecastSet.js";
+import { averageRanks, erfc } from "./numerics.js";
 import { createRandom } from "./seededRandom.js";
 
 /**
@@ -258,3 +260,270 @@ export type VarEntry = ReturnType<typeof evaluateLevel>;
 
 /** The number of tests a response reports: 3 per level per evaluated forecast. */
 export const testsReported = (evaluatedForecasts: number) => evaluatedForecasts * VAR_LEVELS.length * 3;
+
+// ---------------------------------------------------------------------------------------------------------------
+// Days, weights and volatility targeting (design "Days", "Volatility targeting"; plan step 3)
+
+export const MAX_MISSING_RETURN_SHARE_TENTHS = 1;   // 10·missing > run dates is not evaluable
+export const MIN_RETURN_DATES = 250;
+export const REGIME_SHORT = 5;
+export const REGIME_LONG = 60;
+export const WORST_DAYS = 10;
+export const SCALE_CHECK_BOUNDS = [0.1, 10] as const;
+export const SCALE_FLAG = "forecast_scale_differs_from_proxy_by_over_10x";
+
+export class RiskBacktestError extends Error {
+  constructor(readonly code: string, detail: string) {
+    super(`${code}: ${detail}`);
+    this.name = "RiskBacktestError";
+  }
+}
+
+/** Divided by max|wᵢ|, then by Σ|wᵢ|, so huge or tiny values cannot overflow or vanish (design F12). */
+export function normalizeWeights(raw: readonly number[], n: number): number[] {
+  if (raw.length !== n || !raw.every(Number.isFinite) || raw.every((w) => w === 0)) {
+    throw new RiskBacktestError("weights_invalid", `${n} finite weights, not all zero, are required`);
+  }
+  const largest = raw.reduce((max, w) => Math.max(max, Math.abs(w)), 0);
+  const scaled = raw.map((w) => w / largest);
+  const gross = scaled.reduce((sum, w) => sum + Math.abs(w), 0);
+  return scaled.map((w) => w / gross);
+}
+
+/** w'Sw summed row-major over the stored value as it is, (wᵢ·Sᵢⱼ)·wⱼ; a scalar for n = 1. */
+export function quadraticForm(w: readonly number[], value: number | number[][]): number {
+  if (typeof value === "number") return w[0] * value * w[0];
+  let sum = 0;
+  for (let i = 0; i < w.length; i++) for (let j = 0; j < w.length; j++) sum += w[i] * value[i][j] * w[j];
+  return sum;
+}
+
+/** The middle value, or the mean of the two middle values for an even count. */
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((x, y) => x - y);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+const nearestRank = (values: readonly number[], q: number) => {
+  const sorted = [...values].sort((x, y) => x - y);
+  return sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)];
+};
+const mean = (values: readonly number[]) => values.reduce((sum, x) => sum + x, 0) / values.length;
+
+export interface BacktestInput {
+  /** The forecast set's run: every date, with the proxy set's drop cause (null when kept). */
+  dates: readonly string[];
+  dropCause: readonly (string | null)[];
+  /** The re-derived return vectors, null on dropped dates. */
+  returns: readonly (readonly number[] | null)[];
+  /** The primary proxy (realized covariance), null on dropped dates. */
+  rc: readonly ForecastValue[];
+  forecasts: readonly [readonly ForecastValue[], readonly ForecastValue[]];
+  /** Normalized by normalizeWeights. */
+  weights: readonly number[];
+  targetValue: number;
+  returnUnit: "log" | "log_percent";
+  /** |day_weekdays| of the proxy set's rules. */
+  weekdays: number;
+  draws?: number;
+}
+
+/**
+ * The whole evaluation over a run. Missing returns and own forecast nulls have separate budgets (design F4): more than
+ * 10% missing or fewer than 250 return dates is not evaluable; more than ⌈T/100⌉ own nulls blocks that forecast only.
+ */
+export function backtestRiskForecast(input: BacktestInput) {
+  const { dates, returns, weights, targetValue } = input;
+  const runDates = dates.length;
+  const index: number[] = [];
+  returns.forEach((value, d) => { if (value !== null) index.push(d); });
+  const T = index.length;
+  const missing = runDates - T;
+  const byCause: Record<string, number> = {};
+  input.dropCause.forEach((cause, d) => { if (returns[d] === null) byCause[cause ?? "unknown"] = (byCause[cause ?? "unknown"] ?? 0) + 1; });
+  const segments: number[] = [];
+  index.forEach((d, k) => { if (k === 0 || d !== index[k - 1] + 1) segments.push(1); else segments[segments.length - 1]++; });
+  const reason = 10 * missing > MAX_MISSING_RETURN_SHARE_TENTHS * runDates ? "more_than_10_percent_of_returns_missing"
+    : T < MIN_RETURN_DATES ? "fewer_than_250_return_days" : null;
+  const days = {
+    run_dates: runDates, missing_returns: { total: missing, by_cause: byCause }, return_dates: T,
+    chain_breaks: Math.max(0, segments.length - 1), outcome: reason === null ? "evaluated" as const : "not_evaluable" as const,
+    ...(reason === null ? {} : { reason }),
+  };
+
+  // Per return date: the portfolio return, the unlevered realized variance, and each forecast's σ̂² (NaN on own nulls).
+  const portfolio = index.map((d) => (returns[d] as readonly number[]).reduce((sum, r, i) => sum + weights[i] * r, 0));
+  const realized = index.map((d) => quadraticForm(weights, input.rc[d] as number | number[][]));
+  const variances = input.forecasts.map((values) => index.map((d) => {
+    const value = values[d];
+    if (!isValidForecast(value)) return Number.NaN;
+    const v = quadraticForm(weights, value as number | number[][]);
+    return Number.isFinite(v) && v > 0 ? v : Number.NaN;
+  }));
+  const scaleOf = (variance: number[]) => {
+    const ratios = variance.flatMap((v, k) => (Number.isNaN(v) || realized[k] === 0 ? [] : [v / realized[k]]));
+    return ratios.length ? { median_ratio: median(ratios), dates: ratios.length } : null;
+  };
+  const scales = variances.map(scaleOf);
+  const scale_check = {
+    a: scales[0], b: scales[1],
+    flags: scales.flatMap((scale, f) => (scale && (scale.median_ratio < SCALE_CHECK_BOUNDS[0] || scale.median_ratio > SCALE_CHECK_BOUNDS[1])
+      ? [{ forecast: f === 0 ? "a" : "b", flag: SCALE_FLAG }] : [])),
+  };
+  if (reason !== null) return { days, scale_check, forecasts: null, tests_reported: 0 };
+
+  const draws = input.draws ?? MONTE_CARLO_DRAWS;
+  const nulls = ([0, 1] as const).map((level) => coverageNull(level, T, segments, draws));
+  const cap = Math.floor((T + 99) / 100);
+  const periods = 52 * input.weekdays;
+  const scale = input.returnUnit === "log_percent" ? 100 : 1;
+  const simpleReturns = index.map((d) => (returns[d] as readonly number[]).reduce((sum, r, i) => sum + weights[i] * (Math.exp(r / scale) - 1), 0));
+  const regime = regimeGroups(realized);
+  let evaluated = 0;
+
+  const forecasts = ([0, 1] as const).map((f) => {
+    const variance = variances[f];
+    const ownNull = Uint8Array.from(variance, (v) => (Number.isNaN(v) ? 1 : 0));
+    const m = ownNull.reduce((sum, x) => sum + x, 0);
+    if (m > cap) return { status: "blocked_by_forecast_nulls" as const, own_nulls: m, cap };
+    evaluated++;
+    const sigma = variance.map((v) => Math.sqrt(v));
+    const varEntries = ([0, 1] as const).map((level) => {
+      const z = VAR_LEVELS[level].z;
+      const hits = Uint8Array.from(portfolio, (r, k) => (!ownNull[k] && r < z * sigma[k] ? 1 : 0));
+      return evaluateLevel({ forecast: f, level, T, segments, hits, ownNull, coverage: nulls[level], draws });
+    });
+    const target = targetValue / Math.sqrt(periods);
+    // Leverage: on an own-null date that of the most recent return date with a valid forecast; flat before the first.
+    const leverage: number[] = [];
+    let carried = 0, seenValid = false, carriedOwnNulls = 0;
+    for (let k = 0; k < T; k++) {
+      if (!ownNull[k]) { carried = target / sigma[k]; seenValid = true; } else if (seenValid) carriedOwnNulls++;
+      leverage.push(seenValid ? carried : 0);
+    }
+    const hitSets = varEntries.map((_, level) => Uint8Array.from(portfolio, (r, k) => (!ownNull[k] && r < VAR_LEVELS[level].z * sigma[k] ? 1 : 0)));
+    const subset = (ks: number[]) => volatilityTargetSubset(ks, { portfolio, realized, leverage, ownNull, hitSets, periods, targetValue });
+    return {
+      status: "evaluated" as const,
+      own_nulls: m,
+      own_null_dates_with_carried_leverage: carriedOwnNulls,
+      var: varEntries,
+      vol_target: volatilityTarget({ dates: index.map((d) => dates[d]), portfolio, realized, leverage, ownNull, hitSets, simpleReturns,
+        periods, targetValue, regime, subset }),
+    };
+  });
+  return { days, scale_check, forecasts: { a: forecasts[0], b: forecasts[1] }, tests_reported: testsReported(evaluated) };
+}
+
+/**
+ * The regime view's groups (design F3): g_t = mean of w'RC w over the 5 earlier return dates / over the 60 earlier
+ * return dates, known before t. Dates without 60 earlier return dates, or with a zero 60-date mean, are excluded. The
+ * rest are sorted by (g_t, date) and split by index into falling, steady and rising.
+ */
+export function regimeGroups(realized: readonly number[]) {
+  const included: { k: number; g: number }[] = [];
+  for (let k = REGIME_LONG; k < realized.length; k++) {
+    let short = 0, long = 0;
+    for (let j = k - REGIME_SHORT; j < k; j++) short += realized[j];
+    for (let j = k - REGIME_LONG; j < k; j++) long += realized[j];
+    if (long === 0) continue;
+    included.push({ k, g: (short / REGIME_SHORT) / (long / REGIME_LONG) });
+  }
+  included.sort((x, y) => x.g - y.g || x.k - y.k);
+  const n = included.length;
+  const slice = (g: number) => included.slice(Math.floor((g * n) / 3), Math.floor(((g + 1) * n) / 3)).map((e) => e.k).sort((x, y) => x - y);
+  return { excluded: realized.length - n, groups: { falling: slice(0), steady: slice(1), rising: slice(2) } };
+}
+
+interface SubsetInput {
+  portfolio: readonly number[]; realized: readonly number[]; leverage: readonly number[]; ownNull: Uint8Array;
+  hitSets: readonly Uint8Array[]; periods: number; targetValue: number;
+}
+
+/** Realized-to-target ratios, mean leverage and descriptive hit rates (valid-forecast dates) over some return dates. */
+export function volatilityTargetSubset(ks: readonly number[], s: SubsetInput) {
+  const daily = Math.sqrt(s.periods * mean(ks.map((k) => (s.leverage[k] * s.portfolio[k]) ** 2)));
+  const intraday = Math.sqrt(s.periods * mean(ks.map((k) => s.leverage[k] ** 2 * s.realized[k])));
+  const valid = ks.filter((k) => !s.ownNull[k]);
+  return {
+    dates: ks.length,
+    mean_leverage: mean(ks.map((k) => s.leverage[k])),
+    realized_to_target: { daily_returns: daily / s.targetValue, intraday_proxy: intraday / s.targetValue },
+    hit_rates: s.hitSets.map((hits, level) => {
+      const count = valid.reduce((sum, k) => sum + hits[k], 0);
+      return { level: VAR_LEVELS[level].level, hits: count, valid_dates: valid.length, rate: valid.length ? count / valid.length : null };
+    }),
+    own_null_dates: ks.length - valid.length,
+  };
+}
+
+interface VolatilityInput extends SubsetInput {
+  dates: readonly string[];
+  simpleReturns: readonly number[];
+  regime: ReturnType<typeof regimeGroups>;
+  subset: (ks: number[]) => ReturnType<typeof volatilityTargetSubset>;
+}
+
+function volatilityTarget(v: VolatilityInput) {
+  const T = v.dates.length;
+  const all = Array.from({ length: T }, (_, k) => k);
+  const whole = v.subset(all);
+  const daily = whole.realized_to_target.daily_returns * v.targetValue;
+  const intraday = whole.realized_to_target.intraday_proxy * v.targetValue;
+
+  // Compounded wealth (design F11): R_t = L_t·Σ wᵢ(exp(rᵢ/s) − 1). Ruin when 1 + R_t ≤ 0.
+  const position = v.simpleReturns.map((r, k) => v.leverage[k] * r);
+  let wealth = 1, peak = 1, peakK = -1, maxDrawdown = 0, ddPeak = -1, ddTrough = -1, ruinedK = -1;
+  let stretch = 0, longest = 0;
+  for (let k = 0; k < T; k++) {
+    if (ruinedK < 0) {
+      if (1 + position[k] <= 0) { wealth = 0; ruinedK = k; } else wealth *= 1 + position[k];
+    }
+    if (wealth >= peak && ruinedK < 0) { peak = wealth; peakK = k; stretch = 0; continue; }
+    stretch++;
+    longest = Math.max(longest, stretch);
+    const drawdown = (peak - wealth) / peak;
+    if (drawdown > maxDrawdown) { maxDrawdown = drawdown; ddPeak = peakK; ddTrough = k; }
+  }
+  let ownNullsInDrawdown = 0;
+  if (ddTrough >= 0) for (let k = ddPeak + 1; k <= ddTrough; k++) ownNullsInDrawdown += v.ownNull[k];
+
+  const ranks = averageRanks([...v.leverage]);
+  const order = all.slice().sort((x, y) => position[x] - position[y] || x - y).slice(0, WORST_DAYS);
+  const worst = order.map((k) => ({ date: v.dates[k], position_return: position[k], leverage: v.leverage[k], leverage_percentile: (ranks[k] - 0.5) / T }));
+  let maxK = 0;
+  for (let k = 1; k < T; k++) if (v.leverage[k] > v.leverage[maxK]) maxK = k;
+
+  return {
+    realized_to_target: {
+      daily_returns: { annualized: daily, ratio: whole.realized_to_target.daily_returns },
+      intraday_proxy: { annualized: intraday, ratio: whole.realized_to_target.intraday_proxy },
+    },
+    drawdown: {
+      max: maxDrawdown,
+      peak_date: ddTrough >= 0 && ddPeak >= 0 ? v.dates[ddPeak] : null,
+      trough_date: ddTrough >= 0 ? v.dates[ddTrough] : null,
+      longest_underwater_dates: longest,
+      underwater_at_end: ruinedK >= 0 || wealth < peak,
+      ruined_on: ruinedK >= 0 ? v.dates[ruinedK] : null,
+      own_null_dates_in_peak_to_trough: ownNullsInDrawdown,
+    },
+    leverage: {
+      mean: whole.mean_leverage, median: median(v.leverage), p95: nearestRank(v.leverage, 0.95), max: v.leverage[maxK], max_date: v.dates[maxK],
+    },
+    regime_view: {
+      excluded_dates: v.regime.excluded,
+      groups: {
+        falling: v.subset(v.regime.groups.falling), steady: v.subset(v.regime.groups.steady), rising: v.subset(v.regime.groups.rising),
+      },
+    },
+    worst_days: {
+      days: worst,
+      mean_leverage_percentile: mean(worst.map((w) => w.leverage_percentile)),
+      own_null_dates: order.reduce((sum, k) => sum + v.ownNull[k], 0),
+    },
+    sub_periods: blockBounds(T, 4).map(([from, to]) => ({
+      from_date: v.dates[from], to_date: v.dates[to - 1], ...v.subset(all.slice(from, to)),
+    })),
+  };
+}
