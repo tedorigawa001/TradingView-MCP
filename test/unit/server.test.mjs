@@ -554,6 +554,7 @@ function makeDeps(overrides = {}) {
       findByProxySetId: async () => { throw new Error('unexpected realized covariance journal read'); },
       search: async () => { throw new Error('unexpected realized covariance journal read'); },
     },
+    riskBacktestJournal: overrides.riskBacktestJournal ?? { record: async () => { throw new Error('unexpected risk backtest journal write'); } },
     zoneResolver: overrides.zoneResolver,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
@@ -1175,7 +1176,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred eleven expected tools", async () => {
+test("exposes exactly the one hundred twelve expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1184,6 +1185,7 @@ test("exposes exactly the one hundred eleven expected tools", async () => {
       "add_pine_to_chart",
       "apply_analysis_overlay",
       "audit_pine_indicator",
+      "backtest_risk_forecast",
       "carry_panel_preflight",
       "check_research_period_usage",
       "classify_cross_asset_shocks",
@@ -9520,4 +9522,221 @@ test('compute_realized_covariance reports overlapped declarations in its records
   assert.deepEqual(r.search.period_usage_prior_overlap.per_series[1].active_forward_period_declarations,
     { declared_by_this_research: 1, declared_by_other_research: 0 });
   assert.ok(r.search.period_usage_prior_overlap.limitations.includes('access_overlaps_a_declared_forward_period'));
+});
+
+
+// backtest_risk_forecast (docs/RISK_FORECAST_BACKTEST_PLAN.md, step 6), end to end with real stores in mkdtemp: synthetic
+// M15 bars over about 13 months, compute_realized_covariance through the tool, the --proxy-set join through the CLI.
+async function riskFixture(t, { firstInterval = 'from_previous_endpoint', zoneResolver } = {}) {
+  const stores = await rcStores(t);
+  const { ForecastSetStore } = await import('../../build/forecastSet.js');
+  const { RiskBacktestJournalStore } = await import('../../build/riskBacktestJournal.js');
+  const { importForecastSet } = await import('../../build/forecastSetCli.js');
+  const { createRandom } = await import('../../build/seededRandom.js');
+  stores.paths.sets = join(stores.dir, 'sets');
+  stores.paths.risk = join(stores.dir, 'risk.jsonl');
+  stores.forecastSets = new ForecastSetStore(stores.paths.sets);
+  stores.riskBacktestJournal = new RiskBacktestJournalStore(stores.paths.risk);
+  const start = Date.parse('2025-01-01T00:00:00.000Z') / 1000, end = Date.parse('2026-02-14T00:00:00.000Z') / 1000;
+  const random = createRandom(31);
+  const series = [];
+  for (const [i, name] of ['fx:RISKA', 'fx:RISKB'].entries()) {
+    const open_time = [], close = [];
+    let level = 1 + i;
+    for (let at = start; at < end; at += 900) { level *= 1 + 0.0004 * (random() - 0.5); open_time.push(at); close.push(level); }
+    series.push((await stores.barSeries.register(rcBarInput({ series_id: name, open_time, close }, 15, 'risk-synthetic'))).artifact_id);
+  }
+  const rules = { interval_minutes: 15, time_zone: 'America/New_York', day_end_local: '16:45', day_weekdays: [1, 2, 3, 4, 5],
+    max_missing_slots: 6, first_interval: firstInterval, return_unit: 'log_percent' };
+  const rc = await rcClient(t, { ...rcStoreDeps(stores), zoneResolver });
+  const computed = await rc.call({ series, rules, from_date: '2025-01-06', to_date: '2026-02-13' });
+  const proxy = await stores.proxySets.get(computed.proxy_set_id);
+  // A: yesterday's realized covariance plus a ridge; B: a constant matrix.
+  const ridge = (m) => [[m[0][0] + 1e-4, m[0][1]], [m[1][0], m[1][1] + 1e-4]];
+  const a = proxy.rc.map((_, d) => ridge(proxy.rc[Math.max(0, d - 1)] ?? proxy.rc[d]));
+  const b = proxy.rc.map(() => [[0.02, 0.001], [0.001, 0.02]]);
+  const input = join(stores.dir, 'risk-forecasts.json');
+  await writeFile(input, JSON.stringify({ schema_version: '1.0', evidence_tier: 'historical_exploration', from_date: proxy.dates[0],
+    to_date: proxy.dates[proxy.dates.length - 1], a, b }));
+  const { artifact_id } = await importForecastSet(['--proxy-set', computed.proxy_set_id, '--input', input, '--confirm-local-import'],
+    { store: stores.forecastSets, proxySets: stores.proxySets, journal: stores.realizedCovarianceJournal, resolver: zoneResolver });
+  const deps = { forecastSets: stores.forecastSets, researchPeriodUsage: stores.researchPeriodUsage, proxySets: stores.proxySets,
+    realizedCovarianceJournal: stores.realizedCovarianceJournal, barSeries: stores.barSeries, riskBacktestJournal: stores.riskBacktestJournal,
+    zoneResolver };
+  return { stores, proxy, artifact_id, deps, computed, series, a };
+}
+async function riskClient(t, deps) {
+  const client = await connectedClient(makeDeps(deps));
+  t.after(() => client.close());
+  const raw = (args) => client.callTool({ name: 'backtest_risk_forecast', arguments: args });
+  const call = async (args) => {
+    const response = await raw(args);
+    assert.ok(!response.isError, response.content[0].text);
+    return JSON.parse(response.content[0].text);
+  };
+  const error = async (args) => {
+    const response = await raw(args);
+    assert.ok(response.isError, response.content[0].text);
+    return response.content[0].text;
+  };
+  return { raw, call, error };
+}
+const riskArgs = (artifact_id, patch = {}) => ({ artifact_id, weights: [1, 1], target_annual_vol: { value: 10, unit: 'log_percent' }, ...patch });
+
+test('backtest_risk_forecast end to end, tracked: the response, period usage over the span read, the journal and search', async (t) => {
+  const { stores, proxy, artifact_id, deps, computed, series, a } = await riskFixture(t);
+  const { call } = await riskClient(t, deps);
+  const r = await call(riskArgs(artifact_id, { research_id: 'study:risk' }));
+  // Leverage is the daily target (value/√(52·5)) over σ̂ from the normalized weights, on each of the worst days.
+  for (const day of r.forecasts.a.vol_target.worst_days.days) {
+    const m = a[proxy.dates.indexOf(day.date)], w = [0.5, 0.5];
+    const sigma = Math.sqrt(w[0] * m[0][0] * w[0] + w[0] * m[0][1] * w[1] + w[1] * m[1][0] * w[0] + w[1] * m[1][1] * w[1]);
+    assert.ok(Math.abs(day.leverage - (10 / Math.sqrt(260)) / sigma) <= 1e-12 * day.leverage, `${day.date}: ${day.leverage}`);
+  }
+  assert.deepEqual(Object.keys(r), ['contract', 'candidateEligible', 'unused_proven', 'input', 'days', 'scale_check', 'forecasts',
+    'tests_reported', 'search', 'period_usage', 'limitations']);
+  assert.deepEqual([r.contract, r.candidateEligible, r.unused_proven], ['risk_forecast_backtest_v1', false, false]);
+  assert.deepEqual(r.input, { artifact_id, evidence_tier: 'historical_exploration', source_id: `proxy-set:${computed.proxy_set_id.slice(7)}`,
+    proxy_set_id: computed.proxy_set_id, series_ids: ['fx:RISKA', 'fx:RISKB'], run: { from_date: proxy.dates[0], to_date: proxy.dates[proxy.dates.length - 1] },
+    weights: [0.5, 0.5], target: { value: 10, unit: 'log_percent' }, periods_per_year: 260 });
+  assert.equal(r.days.outcome, 'evaluated');
+  assert.ok(r.days.return_dates >= 250, String(r.days.return_dates));
+  assert.deepEqual([r.forecasts.a.status, r.forecasts.b.status, r.tests_reported], ['evaluated', 'evaluated', 12]);
+  assert.equal(r.forecasts.a.var[0].T, r.days.return_dates);
+  assert.equal(r.limitations.length, 15);
+  assert.ok(!r.limitations.includes('within_day_returns_exclude_first_interval_and_gaps'));
+  // Period usage: the set source with the set's ID, then each bar series actually read, all over the span read.
+  const span = { from: new Date(Date.parse(proxy.windows[0].from) - 900_000).toISOString(), to: proxy.windows[proxy.windows.length - 1].to };
+  const usage = await jsonLines(stores.paths.usage);
+  const risk = usage.filter((row) => row.tool_name === 'backtest_risk_forecast');
+  assert.deepEqual(risk.map((row) => [row.series_id, row.data_version, row.from, row.to, row.scope]), [
+    [`forecast-set-source:${(await rcSha(`proxy-set:${computed.proxy_set_id.slice(7)}`)).slice(7)}`, artifact_id, span.from, span.to, 'risk_backtest_bar_window_only'],
+    ['fx:RISKA', series[0], span.from, span.to, 'risk_backtest_bar_window_only'],
+    ['fx:RISKB', series[1], span.from, span.to, 'risk_backtest_bar_window_only'],
+  ]);
+  assert.equal(r.period_usage.status, 'tracked');
+  assert.deepEqual(r.period_usage.records.map((record) => record.overlapped_forward_period_declarations.status), ['available', 'available', 'available']);
+  // The journal and search.
+  const [journal] = await jsonLines(stores.paths.risk);
+  assert.deepEqual([journal.research_id, journal.forecast_set_id, journal.proxy_set_id, journal.span, journal.outcome],
+    ['study:risk', artifact_id, computed.proxy_set_id, span, 'evaluated']);
+  assert.deepEqual(journal.forecasts.a.levels.map((level) => level.x), r.forecasts.a.var.map((entry) => entry.hits.without_own_nulls));
+  assert.deepEqual(Object.keys(r.search), ['this_research_id', 'overlapping_data', 'proxy_rule_variants', 'proxy_bar_series_versions',
+    'period_usage_prior_overlap', 'limitations']);
+  assert.deepEqual([r.search.this_research_id.calls, r.search.proxy_rule_variants, r.search.proxy_bar_series_versions], [1, 1, 1]);
+  assert.deepEqual(r.search.period_usage_prior_overlap.per_series.map((row) => row.series_id),
+    risk.map((row) => row.series_id));
+  // A second call with other weights is one more weight vector under this research ID.
+  const again = await call(riskArgs(artifact_id, { research_id: 'study:risk', weights: [1, -1] }));
+  assert.deepEqual([again.search.this_research_id.calls, again.search.this_research_id.distinct_weight_vectors], [2, 2]);
+  assert.deepEqual(again.input.weights, [0.5, -0.5]);
+});
+
+test('backtest_risk_forecast untracked: the journal still records the call, nothing is written to period usage', async (t) => {
+  const { stores, artifact_id, deps } = await riskFixture(t);
+  const before = (await jsonLines(stores.paths.usage)).length;
+  const { call } = await riskClient(t, deps);
+  const r = await call(riskArgs(artifact_id));
+  assert.deepEqual(r.period_usage, { status: 'untracked', limitations: ['research_id_required_for_automatic_period_usage'] });
+  assert.deepEqual(r.search.this_research_id, { status: 'untracked' });
+  assert.ok(!('period_usage_prior_overlap' in r.search));
+  assert.equal((await jsonLines(stores.paths.usage)).length, before);
+  const [journal] = await jsonLines(stores.paths.risk);
+  assert.equal(journal.research_id, null);
+});
+
+test('backtest_risk_forecast errors, in order, write nothing', async (t) => {
+  const { stores, artifact_id, deps, series } = await riskFixture(t);
+  const { error } = await riskClient(t, deps);
+  const usageBefore = (await jsonLines(stores.paths.usage)).length;
+  // A plain forecast set is refused before the weights are looked at.
+  const plain = await stores.forecastSets.register({ schema_version: '1.0', source_id: 'plain', source_sha256: 'sha256:' + 'c'.repeat(64),
+    evidence_tier: 'synthetic_test', horizon: 1, n: 1, underlying_series_ids: ['fx:PLAIN'], dates: ['2026-01-05'],
+    windows: [{ from: '2026-01-04T22:00:00.000Z', to: '2026-01-05T22:00:00.000Z' }], a: [1], b: [1], primary: [1] });
+  assert.match(await error(riskArgs(plain.artifact_id, { weights: [1, 2, 3] })), /risk_backtest_requires_proxy_set_source/);
+  // Then the weights, then the target unit.
+  assert.match(await error(riskArgs(artifact_id, { weights: [1], target_annual_vol: { value: 0.1, unit: 'log' } })), /weights_invalid/);
+  assert.match(await error(riskArgs(artifact_id, { weights: [0, 0] })), /weights_invalid/);
+  assert.match(await error(riskArgs(artifact_id, { target_annual_vol: { value: 0.1, unit: 'log' } })), /target_unit_mismatch/);
+  // A verification failure comes before the unit check and the bars.
+  const noProxy = await riskClient(t, { ...deps, proxySets: { get: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    register: async () => { throw new Error('unexpected'); } } });
+  assert.match(await noProxy.error(riskArgs(artifact_id, { target_annual_vol: { value: 0.1, unit: 'log' } })), /proxy_set_not_found/);
+  assert.match(await noProxy.error(riskArgs(artifact_id, { weights: [1] })), /weights_invalid/, 'the weights come before the verification');
+  // A missing or edited bar series.
+  const missing = await riskClient(t, { ...deps, barSeries: { get: async (id) => {
+    if (id === series[1]) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    return stores.barSeries.get(id);
+  } } });
+  assert.match(await missing.error(riskArgs(artifact_id, { research_id: 'study:risk' })), /bar_series_not_found/);
+  const edited = await riskClient(t, { ...deps, barSeries: { get: async (id) => {
+    const bars = await stores.barSeries.get(id);
+    return id === series[0] ? { ...bars, close: bars.close.map((c, i) => (i === 20_000 ? c * 1.01 : c)) } : bars;
+  } } });
+  assert.match(await edited.error(riskArgs(artifact_id, { research_id: 'study:risk' })), /returns_rederivation_mismatch: \d{4}-\d{2}-\d{2} rc/);
+  assert.equal((await jsonLines(stores.paths.usage)).length, usageBefore, 'no period usage on any error');
+  await assert.rejects(readFile(stores.paths.risk), { code: 'ENOENT' }, 'no journal entry on any error');
+  // Strict input, and usage_access_id needs research_id.
+  assert.match(await error({ ...riskArgs(artifact_id), reserch_id: 'typo' }), /reserch_id|unrecognized/i);
+  assert.match(await error(riskArgs(artifact_id, { usage_access_id: 'retry-1' })), /usage_access_id requires research_id/);
+});
+
+test('backtest_risk_forecast: usage_access_id retries are idempotent; another weight vector or target under it conflicts', async (t) => {
+  const { stores, artifact_id, deps } = await riskFixture(t);
+  const { call, error } = await riskClient(t, deps);
+  const first = await call(riskArgs(artifact_id, { research_id: 'study:risk', usage_access_id: 'risk-retry' }));
+  const retry = await call(riskArgs(artifact_id, { research_id: 'study:risk', usage_access_id: 'risk-retry', weights: [2, 2] }));
+  assert.deepEqual(first.period_usage.records.map((r) => r.idempotent), [false, false, false]);
+  assert.deepEqual(retry.period_usage.records.map((r) => r.idempotent), [true, true, true], 'the normalized weights are what the hash binds');
+  assert.deepEqual(retry.forecasts, first.forecasts, 'the scale of the weights changes nothing');
+  assert.match(await error(riskArgs(artifact_id, { research_id: 'study:risk', usage_access_id: 'risk-retry', weights: [1, 0] })), /conflicts/);
+  assert.match(await error(riskArgs(artifact_id, { research_id: 'study:risk', usage_access_id: 'risk-retry',
+    target_annual_vol: { value: 20, unit: 'log_percent' } })), /conflicts/);
+  assert.equal((await jsonLines(stores.paths.risk)).length, 2, 'the journal counts every successful call, retries included');
+});
+
+test('backtest_risk_forecast: a journal failure after the period write names the records, without statistics', async (t) => {
+  const { artifact_id, deps } = await riskFixture(t);
+  const { error } = await riskClient(t, { ...deps, riskBacktestJournal: { record: async () => { throw new Error('disk full'); } } });
+  const message = await error(riskArgs(artifact_id, { research_id: 'study:risk', usage_access_id: 'risk-retry' }));
+  assert.match(message, /risk backtest journal write failed after period usage was recorded as risk-retry:0-2; no statistics returned: disk full/);
+  const untracked = await error(riskArgs(artifact_id));
+  assert.match(untracked, /risk backtest journal write failed; no statistics returned/);
+});
+
+test('backtest_risk_forecast: a short joined set is not evaluable, and within_day rules add their limitation', async (t) => {
+  const { stores, artifact_id, deps } = await joinedForecastSet(t);
+  const { RiskBacktestJournalStore } = await import('../../build/riskBacktestJournal.js');
+  const riskPath = join(stores.dir, 'risk.jsonl');
+  const { call } = await riskClient(t, { ...deps, barSeries: stores.barSeries, riskBacktestJournal: new RiskBacktestJournalStore(riskPath) });
+  const r = await call(riskArgs(artifact_id));
+  // 2 of its 9 dates are dropped, and the missing-return budget is checked before the 250-date minimum.
+  assert.deepEqual([r.days.outcome, r.days.reason, r.forecasts, r.tests_reported], ['not_evaluable', 'more_than_10_percent_of_returns_missing', null, 0]);
+  assert.deepEqual(r.days.missing_returns, { total: 2, by_cause: { no_endpoint: 1, no_previous_endpoint: 1 } });
+  assert.ok(r.scale_check.a !== undefined);
+  const [journal] = await jsonLines(riskPath);
+  assert.deepEqual([journal.outcome, journal.forecasts], ['not_evaluable', null]);
+  const within = await riskFixture(t, { firstInterval: 'within_day' });
+  const w = await (await riskClient(t, within.deps)).call(riskArgs(within.artifact_id));
+  assert.equal(w.days.outcome, 'evaluated');
+  assert.ok(w.limitations.includes('within_day_returns_exclude_first_interval_and_gaps'));
+  assert.equal(w.limitations.length, 16);
+});
+
+test('backtest_risk_forecast re-derives under the zone resolver the verification used', async (t) => {
+  const { intlZoneResolver } = await import('../../build/zonedTime.js');
+  const shifted = { tzdata: 'test-shifted', formatAt: (zone, ms) => intlZoneResolver.formatAt(zone, ms + 3_600_000) };
+  const { artifact_id, deps } = await riskFixture(t, { zoneResolver: shifted });
+  const r = await (await riskClient(t, deps)).call(riskArgs(artifact_id));
+  assert.equal(r.days.outcome, 'evaluated');
+});
+
+test('backtest_risk_forecast: the description says what the tool does and does not claim', async (t) => {
+  const client = await connectedClient(makeDeps());
+  t.after(() => client.close());
+  const description = (await client.listTools()).tools.find((tool) => tool.name === 'backtest_risk_forecast').description;
+  for (const phrase of ['proxy-set:<hex>', 're-derived from the proxy set', 'indeterminate_due_to_own_nulls', 'not evidence of a correct risk model',
+    'Every call is journaled', 'candidateEligible is always false', 'No costs or execution']) {
+    assert.ok(description.includes(phrase), phrase);
+  }
 });

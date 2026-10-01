@@ -6,7 +6,10 @@ import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
-import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
+import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetComponentHashes, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
+import { RISK_BACKTEST_CONTRACT, RISK_BACKTEST_LIMITATIONS, RiskBacktestError, WITHIN_DAY_LIMITATION, backtestRiskForecast, normalizeWeights } from "./riskForecastBacktest.js";
+import { RiskBacktestJournalStore } from "./riskBacktestJournal.js";
+import { proxyRunOf, rederiveReturns } from "./riskReturnRederivation.js";
 import { FORECAST_LOSS_CONTRACT, compareForecastLosses } from "./forecastLossComparison.js";
 import { ForecastLossJournalStore, forecastSetEnvelope, summarizePriorOverlap } from "./forecastLossJournal.js";
 import { declareForwardPeriodInputSchema, shortenForwardPeriodInputSchema } from "./forwardPeriod.js";
@@ -221,6 +224,7 @@ export interface ServerDeps {
   barSeries?: Pick<BarSeriesStore, "get">;
   proxySets?: Pick<ProxySetStore, "get" | "register">;
   realizedCovarianceJournal?: Pick<RealizedCovarianceJournalStore, "record" | "findByProxySetId" | "search">;
+  riskBacktestJournal?: Pick<RiskBacktestJournalStore, "record">;
   /** Test seam for tzdata drift (design H6); production uses the runtime's Intl data. */
   zoneResolver?: ZoneResolver;
   /** Test seam; production uses the process-wide file lock by default. */
@@ -429,7 +433,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5838,6 +5842,112 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             limitations: [...REALIZED_COVARIANCE_SEARCH_LIMITATIONS] },
           period_usage,
           limitations: computed.limitations,
+        });
+      }
+      catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "backtest_risk_forecast",
+    {
+      description: "Backtest the VaR and volatility-targeting behaviour of forecasts A and B in a forecast set joined to a realized-covariance proxy set " +
+        "(source proxy-set:<hex>, from tradingview-mcp-import-forecast-set --proxy-set), for one portfolio weight vector. " +
+        "The signed daily returns are re-derived from the proxy set's own bar series and used only if the recomputation equals the stored proxy set; " +
+        "nothing the caller supplies enters them. VaR at fixed 1% and 5% levels from the forecast variance under a normal quantile with zero mean: " +
+        "Kupiec, Christoffersen independence and conditional coverage tests with Monte Carlo results (9,999 draws; a permutation null for independence) " +
+        "and asymptotic p-values beside them. Own forecast nulls are evaluated both as hits and as non-hits; a split is indeterminate_due_to_own_nulls, " +
+        "and more than ceil(T/100) blocks that forecast. A non-rejection is not evidence of a correct risk model. " +
+        "Ex-post volatility targeting at target_annual_vol (its unit must equal the proxy set's return_unit): realized-to-target ratios from daily returns " +
+        "and from the intraday proxy, compounded drawdown with ruin, uncapped leverage, groups by the 5/60-date realized-variance ratio known before each day, " +
+        "and the leverage carried into the 10 worst days. No costs or execution. Every call is journaled, with or without research_id; " +
+        "optional research_id first writes period usage for the set source and each bar series over the bars read. " +
+        "candidateEligible is always false. No chart access, orders or arbitrary file paths.",
+      // Strict: a misspelled research_id must fail, not run silently untracked.
+      inputSchema: z.object({
+        artifact_id: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        weights: z.array(z.number()).min(1).max(8),
+        target_annual_vol: z.object({ value: z.number().positive(), unit: z.enum(["log", "log_percent"]) }).strict(),
+        research_id: backtestSliceResearchIdSchema.optional(),
+        usage_access_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(),
+      }).strict(),
+    },
+    async ({ artifact_id, weights, target_annual_vol, research_id, usage_access_id }) => {
+      try {
+        if (usage_access_id !== undefined && research_id === undefined) throw new Error("usage_access_id requires research_id");
+        // The order fixes which error wins (docs/RISK_FORECAST_BACKTEST_PLAN.md, step 6).
+        const set = await forecastSets.get(artifact_id);
+        if (!set.source_id.startsWith(PROXY_SET_SOURCE_PREFIX)) {
+          throw new RiskBacktestError("risk_backtest_requires_proxy_set_source", `${artifact_id} has source ${set.source_id}`);
+        }
+        const normalized = normalizeWeights(weights, set.n);
+        const proxySet = await verifyForecastSetAgainstProxySet(set, { proxySets, journal: realizedCovarianceJournal, resolver: zoneResolver });
+        if (target_annual_vol.unit !== proxySet.rules.return_unit) {
+          throw new RiskBacktestError("target_unit_mismatch", `the proxy set's return unit is ${proxySet.rules.return_unit}`);
+        }
+        const { returns, span } = await rederiveReturns({ set, proxySet, barSeries, resolver: zoneResolver });
+        const result = backtestRiskForecast({ dates: set.dates, dropCause: proxyRunOf(proxySet, set).drop_cause, returns, rc: set.primary,
+          forecasts: [set.a, set.b], weights: normalized, targetValue: target_annual_vol.value, returnUnit: proxySet.rules.return_unit,
+          weekdays: proxySet.rules.day_weekdays.length });
+        const target = { value: target_annual_vol.value, unit: target_annual_vol.unit };
+        const proxy_set_id = set.source_sha256;
+
+        let period_usage: unknown = { status: "untracked", limitations: ["research_id_required_for_automatic_period_usage"] };
+        let prior_overlap: ReturnType<typeof summarizePriorOverlap> | undefined;
+        const written: string[] = [];
+        if (research_id !== undefined) {
+          const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+          const base = usage_access_id ?? `risk-access:${randomUUID()}`;
+          const request_sha256 = hash(JSON.stringify({ artifact: artifact_id, contract: RISK_BACKTEST_CONTRACT, weights: normalized, target }));
+          // Index 0 is the set's source with the set's ID; the underlying series follow with the bar series actually read.
+          const records = [{ series_id: `forecast-set-source:${forecastSetSourceDigest(set.source_id).slice(7)}`, data_version: artifact_id },
+            ...set.underlying_series_ids.map((series_id, i) => ({ series_id, data_version: proxySet.bar_series[i] }))];
+          const recorded = await researchPeriodUsage.recordToolAccessBatch("backtest_risk_forecast", records.map((record, index) => ({
+            access_id: `${base}:${index}`, research_id, ...record, from: span.from, to: span.to, purpose: "exploration", request_sha256,
+          })));
+          written.push(`period usage was recorded as ${base}:0-${records.length - 1}`);
+          prior_overlap = summarizePriorOverlap(recorded);
+          period_usage = { status: "tracked", access_id_base: base,
+            records: recorded.map((record) => ({ access_id: record.access_id, series_id: record.series_id, idempotent: record.idempotent,
+              overlapped_forward_period_declarations: record.overlapped_forward_period_declarations })),
+            limitations: ["bar_window_read_not_forecast_estimation_history", "series_ids_are_importer_supplied",
+              "different_source_ids_and_external_access_are_not_reconciled", "recorded_attempt_is_not_proof_of_result_delivery"] };
+        }
+        const journalForecast = (forecast: NonNullable<typeof result.forecasts>["a"]) => (forecast.status === "evaluated"
+          ? { status: "evaluated" as const, own_nulls: forecast.own_nulls, levels: forecast.var.map((entry) => ({ level: entry.level,
+            x: entry.hits.without_own_nulls, T: entry.T, results: { kupiec: entry.kupiec.result, independence: entry.independence.result,
+              conditional_coverage: entry.conditional_coverage.result } })) }
+          : { status: "blocked" as const, own_nulls: forecast.own_nulls });
+        let journal;
+        try {
+          const hashes = forecastSetComponentHashes(set);
+          journal = await riskBacktestJournal.record({ research_id: research_id ?? null, forecast_set_id: artifact_id, proxy_set_id,
+            rules_sha256: proxySet.rules_sha256, bar_series: proxySet.bar_series, underlying_series_ids: set.underlying_series_ids,
+            run: { from_date: set.dates[0], to_date: set.dates[set.dates.length - 1] }, span, a_sha256: hashes.a, b_sha256: hashes.b,
+            weights: normalized, target,
+            forecasts: result.forecasts === null ? null : { a: journalForecast(result.forecasts.a), b: journalForecast(result.forecasts.b) },
+            outcome: result.days.outcome });
+        } catch (error) {
+          throw new Error(`risk backtest journal write failed${written.length ? ` after ${written.join(" and ")}` : ""}; no statistics returned: ` +
+            (error instanceof Error ? error.message : String(error)));
+        }
+        const proxyCounts = await realizedCovarianceJournal.search(set.underlying_series_ids, span);
+        return jsonResult({
+          contract: RISK_BACKTEST_CONTRACT,
+          candidateEligible: false,
+          unused_proven: false,
+          input: { artifact_id, evidence_tier: set.evidence_tier, source_id: set.source_id, proxy_set_id, series_ids: set.underlying_series_ids,
+            run: { from_date: set.dates[0], to_date: set.dates[set.dates.length - 1] }, weights: normalized, target,
+            periods_per_year: 52 * proxySet.rules.day_weekdays.length },
+          days: result.days,
+          scale_check: result.scale_check,
+          forecasts: result.forecasts,
+          tests_reported: result.tests_reported,
+          search: { this_research_id: journal.search.this_research_id, overlapping_data: journal.search.overlapping_data,
+            proxy_rule_variants: proxyCounts.distinct_rules, proxy_bar_series_versions: proxyCounts.distinct_bar_series_versions,
+            ...(prior_overlap ? { period_usage_prior_overlap: prior_overlap } : {}), limitations: journal.search.limitations },
+          period_usage,
+          limitations: [...RISK_BACKTEST_LIMITATIONS, ...(proxySet.rules.first_interval === "within_day" ? [WITHIN_DAY_LIMITATION] : [])],
         });
       }
       catch (err) { return errorResult(err); }

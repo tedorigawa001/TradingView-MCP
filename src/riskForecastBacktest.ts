@@ -23,6 +23,27 @@ export const SEED_BASE = 20_261_001;
 /** Below this many expected hits a non-rejection says almost nothing (design F9). */
 export const UNDERPOWERED_EXPECTED_HITS = 10;
 
+/** Always returned (design "Limitations"). */
+export const RISK_BACKTEST_LIMITATIONS = [
+  "var_from_forecast_variance_under_normal_quantile_zero_mean",
+  "coverage_non_rejection_is_not_evidence_of_a_correct_risk_model",
+  "hit_tests_use_one_hit_sequence_of_this_length",
+  "one_realized_history_not_forward_evidence",
+  "tests_reported_without_multiplicity_correction",
+  "own_nulls_evaluated_both_as_hits_and_as_non_hits",
+  "series_returns_combined_without_currency_conversion",
+  "forecasts_and_their_timing_are_caller_supplied_and_unverified",
+  "forecast_units_and_variance_vs_volatility_are_caller_asserted",
+  "vol_targeting_is_ex_post_without_costs_or_execution",
+  "leverage_uncapped",
+  "position_pnl_on_return_missing_dates_omitted",
+  "returns_rederived_from_imported_bars_not_source_authenticated",
+  "search_counts_cover_this_journal_only",
+  "expected_shortfall_not_assessed",
+] as const;
+/** With within_day rules a day's return leaves out its first bar and the gap before it, where tail losses concentrate. */
+export const WITHIN_DAY_LIMITATION = "within_day_returns_exclude_first_interval_and_gaps";
+
 export type LevelIndex = 0 | 1;
 export type ForecastIndex = 0 | 1;
 /** 0: own nulls count as hits; 1: as non-hits (design N1). */
