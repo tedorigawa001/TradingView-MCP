@@ -1,4 +1,4 @@
-# backtest_risk_forecast: design memo (rev 2.2, design review approved; not implemented)
+# backtest_risk_forecast: design memo (rev 2.3, design review approved; not implemented)
 
 Backlog #101, item 3.
 
@@ -7,6 +7,8 @@ Review history:
 - rev 2: BLOCK, narrow. HIGH N1, LOW N2, NIT N3. F1–F12 were resolved, except that the F1 fix
   opened N1.
 - rev 2.1 (diff check): APPROVE WITH FINDINGS. LOW P1 and NITs P2–P3, folded in as rev 2.2.
+- plan review: one design gap (Q3), folded in as rev 2.3, and a corrected test statement from the
+  plan's diff check (R1).
 
 Rev 2 folds in F1–F12:
 - own nulls count as hits, with a cap (F1), so `forecasts` is no longer an input;
@@ -26,7 +28,8 @@ Rev 2.1 folds in N1–N3: every test is evaluated with own nulls both as hits an
 split is reported as `indeterminate_due_to_own_nulls` (N1); own nulls are counted where they could
 shape the volatility-targeting results (N2); and the remaining pins (N3). Rev 2.2 folds in P1–P3:
 an own-null interval that straddles the Kupiec non-rejection region is indeterminate, not rejected
-(P1), and two corrections of wording.
+(P1), and two corrections of wording. Rev 2.3 adds `period_usage_prior_overlap` to `search`, as the
+other observing tools return it (plan review Q3).
 
 ## Problem
 
@@ -366,6 +369,10 @@ strict framing, like the other journals.
   - `overlapping_data`, under any research ID: calls, distinct research IDs, distinct weight
     vectors, distinct forecast hashes (the union of the A and B hashes) and
     `earlier_no_rejection`;
+  - `period_usage_prior_overlap`, with `research_id`: the period records' `prior_overlap` in
+    summary form (`summarizePriorOverlap`), as `compare_forecast_losses` and
+    `compute_realized_covariance` return it. Its `per_series` rows carry
+    `active_forward_period_declarations` (FORWARD_PERIOD.md);
   - `proxy_rule_variants` and `proxy_bar_series_versions`: the distinct `rules_sha256` and the
     distinct bar-series tuples in the realized-covariance journal, over records that share a series
     and overlap the span read. That is one bar wider than `compare_forecast_losses`' window
@@ -455,7 +462,9 @@ as measured in the review. The plan sets thresholds.
 - **Days and inputs:**
   - own nulls in both cases: nulls on true-hit dates of a forecast with too many hits, and nulls on
     other dates of a forecast with too few (1.5 times the true σ, 19 nulls over 1,900 dates), each
-    giving `indeterminate_due_to_own_nulls` or `rejected`, never `not_rejected` (N1);
+    giving `indeterminate_due_to_own_nulls` or `rejected`, never `not_rejected`, for LR_uc and LR_cc
+    (N1). LR_ind can rightly be `not_rejected` in both cases there; for it, nulls on the hits of a
+    clustered sequence must give `indeterminate_due_to_own_nulls` or `rejected`;
   - an interval straddling the Kupiec region (T = 1,900 at 1%, region [11, 28], x₀ = 10, m = 19)
     giving `indeterminate_due_to_own_nulls` for LR_uc and LR_cc, not `rejected` (P1);
   - the cap, the independence of A from B, the 10% and 250-date budgets, carried leverage across
