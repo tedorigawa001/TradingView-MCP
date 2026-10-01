@@ -223,10 +223,11 @@ test('weights: normalized by max then sum, invalid ones refused; portfolio retur
 });
 
 test('the scale check flags a median ratio below 0.1 or above 10, exclusive, and skips zero realized variance', () => {
-  const scaled = (value) => run({ ...flat(300), rc: Array.from({ length: 300 }, (_, t) => (t === 7 ? 0 : 10)),
+  // Dates with w'RC w ≤ 0 are skipped: a zero, and a negative value such as rounding can leave (code review C6).
+  const scaled = (value) => run({ ...flat(300), rc: Array.from({ length: 300 }, (_, t) => (t === 7 ? 0 : t === 9 ? -1e-20 : 10)),
     a: Array.from({ length: 300 }, () => value), b: Array.from({ length: 300 }, () => 10) });
   const at = scaled(1);   // 1/10 = 0.1 exactly
-  assert.deepEqual(at.scale_check.a, { median_ratio: 0.1, dates: 299 });
+  assert.deepEqual(at.scale_check.a, { median_ratio: 0.1, dates: 298 });
   assert.deepEqual(at.scale_check.flags, []);
   assert.deepEqual(scaled(0.99).scale_check.flags, [{ forecast: 'a', flag: 'forecast_scale_differs_from_proxy_by_over_10x' }]);
   assert.deepEqual(scaled(100).scale_check.flags, []);

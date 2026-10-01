@@ -63,16 +63,40 @@ export interface TransitionCounts { n00: number; n01: number; n10: number; n11: 
  * not counted (design "Christoffersen independence").
  */
 export function transitionCounts(hits: ArrayLike<number>, segments: readonly number[]): TransitionCounts {
-  const counts = { n00: 0, n01: 0, n10: 0, n11: 0 };
+  let n00 = 0, n01 = 0, n10 = 0, n11 = 0;
   let start = 0;
   for (const length of segments) {
     for (let t = start + 1; t < start + length; t++) {
-      const key = hits[t - 1] ? (hits[t] ? "n11" : "n10") : (hits[t] ? "n01" : "n00");
-      counts[key]++;
+      if (hits[t - 1]) { if (hits[t]) n11++; else n10++; } else if (hits[t]) n01++; else n00++;
     }
     start += length;
   }
-  return counts;
+  return { n00, n01, n10, n11 };
+}
+
+/** 1 where date t + 1 is in the same segment as t, so the pair (t, t + 1) is a transition. */
+function continuesTo(T: number, segments: readonly number[]): Uint8Array {
+  const next = new Uint8Array(T);
+  let start = 0;
+  for (const length of segments) {
+    for (let t = start; t < start + length - 1; t++) next[t] = 1;
+    start += length;
+  }
+  return next;
+}
+
+/**
+ * The same counts as transitionCounts, from the hit positions alone (plan step 2 allows it because the counts, and so
+ * the statistic, are identical): every transition touching a hit is counted from that hit, and the rest are 0 → 0.
+ */
+function transitionCountsFromPositions(positions: ArrayLike<number>, x: number, hits: Uint8Array, next: Uint8Array, transitions: number): TransitionCounts {
+  let n01 = 0, n10 = 0, n11 = 0;
+  for (let i = 0; i < x; i++) {
+    const t = positions[i];
+    if (next[t]) { if (hits[t + 1]) n11++; else n10++; }
+    if (t > 0 && next[t - 1] && !hits[t - 1]) n01++;
+  }
+  return { n00: transitions - n01 - n10 - n11, n01, n10, n11 };
 }
 
 /** LR_uc = 2·[x·ln(π̂/α) + (T − x)·ln((1 − π̂)/(1 − α))], a term with a zero count being 0; clamped at 0. */
@@ -139,15 +163,18 @@ export function coverageNull(level: LevelIndex, T: number, segments: readonly nu
   const alpha = VAR_LEVELS[level].level;
   const random = createRandom(coverageSeed(level));
   const kupiec = new Float64Array(draws), conditional = new Float64Array(draws);
-  const hits = new Uint8Array(T);
+  const next = continuesTo(T, segments);
   for (let d = 0; d < draws; d++) {
-    let x = 0;
+    // Transitions are counted while drawing, with numeric counters: the same counts as transitionCounts.
+    let x = 0, n00 = 0, n01 = 0, n10 = 0, n11 = 0, previous = 0;
     for (let t = 0; t < T; t++) {
-      hits[t] = random() < alpha ? 1 : 0;
-      x += hits[t];
+      const hit = random() < alpha ? 1 : 0;
+      x += hit;
+      if (t > 0 && next[t - 1]) { if (previous) { if (hit) n11++; else n10++; } else if (hit) n01++; else n00++; }
+      previous = hit;
     }
     kupiec[d] = kupiecStatistic(x, T, alpha);
-    conditional[d] = kupiec[d] + independenceStatistic(transitionCounts(hits, segments));
+    conditional[d] = kupiec[d] + independenceStatistic({ n00, n01, n10, n11 });
   }
   kupiec.sort();
   conditional.sort();
@@ -172,6 +199,8 @@ export function independenceNull(T: number, segments: readonly number[], x: numb
   for (let t = 0; t < T; t++) index[t] = t;
   const swapped = new Int32Array(x);
   const hits = new Uint8Array(T);
+  const next = continuesTo(T, segments);
+  const transitions = T - segments.length;
   const statistics = new Float64Array(draws);
   for (let d = 0; d < draws; d++) {
     for (let i = 0; i < x; i++) {
@@ -180,7 +209,7 @@ export function independenceNull(T: number, segments: readonly number[], x: numb
       const held = index[i]; index[i] = index[j]; index[j] = held;
       hits[index[i]] = 1;
     }
-    statistics[d] = independenceStatistic(transitionCounts(hits, segments));
+    statistics[d] = independenceStatistic(transitionCountsFromPositions(index, x, hits, next, transitions));
     for (let i = x - 1; i >= 0; i--) {
       hits[index[i]] = 0;
       const j = swapped[i];
@@ -221,7 +250,7 @@ export interface LevelInput {
  *   indeterminate_due_to_own_nulls;
  * - LR_uc depends only on x, so it is decided against the region: rejected only if [x₀, x₀ + m] does not overlap it,
  *   not rejected only if it lies inside;
- * - LR_cc is indeterminate when the two cases have opposite directions, even if both reject.
+ * - LR_cc is indeterminate when both cases reject with opposite directions (design rev 2.4, code review C1).
  */
 export function evaluateLevel(input: LevelInput) {
   const { forecast, level, T, segments, hits, ownNull, coverage } = input;
@@ -255,7 +284,10 @@ export function evaluateLevel(input: LevelInput) {
     : xHits < region[0] || xNon > region[1] ? "rejected"
       : xNon >= region[0] && xHits <= region[1] ? notRejected : "indeterminate_due_to_own_nulls";
   const opposite = (direction[0] === "too_many" && direction[1] === "too_few") || (direction[0] === "too_few" && direction[1] === "too_many");
-  const conditionalResult: TestResult = opposite ? "indeterminate_due_to_own_nulls" : combine(conditional);
+  // Only when both cases reject (code review C1): with opposite directions some placement of the nulls in between
+  // could avoid the rejection. When neither rejects, LR_uc in between is lower still, by convexity.
+  const conditionalResult: TestResult = opposite && conditional[0].rejects && conditional[1].rejects
+    ? "indeterminate_due_to_own_nulls" : combine(conditional);
   const cases = (runs: CaseRun[]) => ({ as_hits: runs[0].values, as_non_hits: runs[1].values });
 
   return {
@@ -382,7 +414,7 @@ export function backtestRiskForecast(input: BacktestInput) {
     return Number.isFinite(v) && v > 0 ? v : Number.NaN;
   }));
   const scaleOf = (variance: number[]) => {
-    const ratios = variance.flatMap((v, k) => (Number.isNaN(v) || realized[k] === 0 ? [] : [v / realized[k]]));
+    const ratios = variance.flatMap((v, k) => (Number.isNaN(v) || !(realized[k] > 0) ? [] : [v / realized[k]]));
     return ratios.length ? { median_ratio: median(ratios), dates: ratios.length } : null;
   };
   const scales = variances.map(scaleOf);

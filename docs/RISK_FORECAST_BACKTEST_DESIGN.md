@@ -1,4 +1,4 @@
-# backtest_risk_forecast: design memo (rev 2.3, design review approved; not implemented)
+# backtest_risk_forecast: design memo (rev 2.4, design review approved; implemented)
 
 Backlog #101, item 3.
 
@@ -9,6 +9,9 @@ Review history:
 - rev 2.1 (diff check): APPROVE WITH FINDINGS. LOW P1 and NITs P2–P3, folded in as rev 2.2.
 - plan review: one design gap (Q3), folded in as rev 2.3, and a corrected test statement from the
   plan's diff check (R1).
+- code review of the implementation: APPROVE WITH FINDINGS. MEDIUM C1 was this memo's own LR_cc
+  rule, corrected as rev 2.4: indeterminate only when both cases reject with opposite directions.
+  Rev 2.4 also corrects two counts (C6): the warm-up example and the one-bar difference.
 
 Rev 2 folds in F1–F12:
 - own nulls count as hits, with a cap (F1), so `forecasts` is no longer an input;
@@ -156,8 +159,8 @@ Days are the dates of the forecast set's run. Two budgets are kept separate:
   - The other forecast's nulls never remove a date. A's results are the same whether B is null,
     valid or absent.
   - Nulls before a forecast's first value are own nulls too. A forecast with a warm-up period should
-    be joined from its first forecast date: about 22 warm-up dates would block any run shorter than
-    2,200 dates.
+    be joined from its first forecast date: about 22 warm-up dates would block any run of 2,100
+    return dates or fewer.
 
 `scale_check` reports, per forecast, the median over dates with a valid forecast and
 w'RC_t w > 0 of σ̂²_t/(w'RC_t w). The flag `forecast_scale_differs_from_proxy_by_over_10x` is set
@@ -232,7 +235,11 @@ cases; with no own nulls the two cases coincide:
   - **LR_uc** depends only on x, so its result is decided against the region directly: `rejected`
     only if [x₀, x₀ + m] does not overlap [x_lo, x_hi], which is exactly "rejected under every
     placement of the nulls"; `not_rejected` only if it lies inside; otherwise indeterminate.
-  - **LR_cc** is indeterminate when the two cases have opposite `direction`s, even if both reject.
+  - **LR_cc** is indeterminate when both cases reject with opposite `direction`s (rev 2.4). When
+    neither rejects, the general rule applies and gives `not_rejected`: a placement of the nulls in
+    between has a lower LR_uc still, by convexity. Rev 2.3 also called a pair of non-rejections with
+    opposite directions indeterminate, which made a calibrated forecast whose null interval contains
+    αT lose its LR_cc result (code review C1).
   - For LR_ind and LR_cc the two cases cover the two cheap attacks (nulls on true-hit dates and
     nulls on other dates), not every one of the 2^m placements.
 
@@ -375,8 +382,9 @@ strict framing, like the other journals.
     `active_forward_period_declarations` (FORWARD_PERIOD.md);
   - `proxy_rule_variants` and `proxy_bar_series_versions`: the distinct `rules_sha256` and the
     distinct bar-series tuples in the realized-covariance journal, over records that share a series
-    and overlap the span read. That is one bar wider than `compare_forecast_losses`' window
-    envelope, so it can admit one more adjacent record, the conservative direction. Here the rules
+    and overlap the span read. With `from_previous_endpoint` that is one bar wider than
+    `compare_forecast_losses`' window envelope, so it can admit one more adjacent record, the
+    conservative direction; with `within_day` the two are the same. Here the rules
     and bar versions decide the returns and the drops themselves.
 
   The target is recorded but not counted: hits, tests and every realized-to-target ratio are

@@ -9704,6 +9704,17 @@ test('backtest_risk_forecast: a journal failure after the period write names the
   assert.match(untracked, /risk backtest journal write failed; no statistics returned/);
 });
 
+test('backtest_risk_forecast reads the realized-covariance journal counts before writing anything (code review C2)', async (t) => {
+  const { stores, artifact_id, deps } = await riskFixture(t);
+  const before = (await jsonLines(stores.paths.usage)).length;
+  const failing = { ...deps, realizedCovarianceJournal: { findByProxySetId: (id) => stores.realizedCovarianceJournal.findByProxySetId(id),
+    search: async () => { throw new Error('realized covariance journal unreadable (simulated)'); } } };
+  const { error } = await riskClient(t, failing);
+  assert.match(await error(riskArgs(artifact_id, { research_id: 'study:risk' })), /unreadable \(simulated\)/);
+  assert.equal((await jsonLines(stores.paths.usage)).length, before, 'no period usage');
+  await assert.rejects(readFile(stores.paths.risk), { code: 'ENOENT' }, 'no journal entry');
+});
+
 test('backtest_risk_forecast: a short joined set is not evaluable, and within_day rules add their limitation', async (t) => {
   const { stores, artifact_id, deps } = await joinedForecastSet(t);
   const { RiskBacktestJournalStore } = await import('../../build/riskBacktestJournal.js');

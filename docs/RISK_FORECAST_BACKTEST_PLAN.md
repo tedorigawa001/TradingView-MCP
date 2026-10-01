@@ -1,7 +1,7 @@
-# backtest_risk_forecast: implementation plan (rev 2.1, review approved)
+# backtest_risk_forecast: implementation plan (rev 2.2, implemented)
 
-Implements docs/RISK_FORECAST_BACKTEST_DESIGN.md rev 2.3 (rev 2.2 is commit 2823fab; rev 2.3 adds
-`period_usage_prior_overlap` to `search`). The design governs: where this plan and the design
+Implements docs/RISK_FORECAST_BACKTEST_DESIGN.md rev 2.4 (rev 2.2 is commit 2823fab; rev 2.3 adds
+`period_usage_prior_overlap` to `search`; rev 2.4 corrects the LR_cc rule after the code review). The design governs: where this plan and the design
 differ, the design wins and this plan is corrected. Section 6 fixes the constants the design leaves
 open, before any code.
 
@@ -9,6 +9,9 @@ Review history:
 - rev 1: APPROVE WITH FINDINGS. LOW Q1–Q6 and NITs Q7–Q10; Q3 was a design gap, folded into the
   design as rev 2.3.
 - rev 2 (diff check): APPROVE WITH FINDINGS. LOW R1 and NITs R2–R4, folded in as rev 2.1.
+- code review of the implementation: rev 2.2 records two corrections to section 6. The LR_cc rule
+  follows design rev 2.4 (C1), and the regime-group and sub-period entries are given as implemented
+  (C7).
 
 Rev 2 folds in Q1–Q10: the reference tolerance and its case table (Q1), the re-derivation boundary
 (Q2), `period_usage_prior_overlap` (Q3), the constants an implementer would otherwise invent (Q4),
@@ -304,7 +307,7 @@ re-review, and then release 0.1.17, which is the user's to publish.
 | `search` limitations | `local_recorded_calls_only`, `overlap_key_is_importer_supplied_series_ids_and_read_spans`, `retries_increment_call_counts` |
 | Response skeleton | `contract`, `candidateEligible`, `unused_proven`; `input` {`artifact_id`, `evidence_tier`, `source_id`, `proxy_set_id`, `series_ids`, `run` {`from_date`, `to_date`}, `weights`, `target`, `periods_per_year`}; `days` {`run_dates`, `missing_returns` {`total`, `by_cause`}, `return_dates`, `chain_breaks`, `outcome`, `reason`?}; `scale_check` {`a`, `b`: {`median_ratio`, `dates`} or null, `flags`}; `forecasts` {`a`, `b`: {`status`, `own_nulls`, `own_null_dates_with_carried_leverage`, `var`, `vol_target`}}; `tests_reported`; `search`; `period_usage`; `limitations` |
 | `var` entry | an array with one entry per level: {`level`, `T`, `hits` {`without_own_nulls`, `with_own_nulls`}, `expected`, `expected_hits_below_10`, `direction` {`as_hits`, `as_non_hits`}, `kupiec`, `independence`, `conditional_coverage`: each {`result`, `as_hits`, `as_non_hits`: {`statistic`, `p_asymptotic`, `p_monte_carlo`}}, plus `independence_uninformative` {`as_hits`, `as_non_hits`} on `independence`; `kupiec_non_rejection_region` [x_lo, x_hi]} |
-| `vol_target` entry | `realized_to_target` {`daily_returns`, `intraday_proxy`: {`annualized`, `ratio`}}; `drawdown` {`max`, `peak_date`, `trough_date`, `longest_underwater_dates`, `underwater_at_end`, `ruined_on`, `own_null_dates_in_peak_to_trough`}; `leverage` {`mean`, `median`, `p95`, `max`, `max_date`}; `regime_view` {`excluded_dates`, `groups` {`falling`, `steady`, `rising`}: {`dates`, `mean_leverage`, `realized_to_target`, `hit_rates`, `own_null_dates`}}; `worst_days` {`days`: [{`date`, `position_return`, `leverage`, `leverage_percentile`}], `mean_leverage_percentile`, `own_null_dates`}; `sub_periods`: [{`from_date`, `to_date`, `realized_to_target`, `mean_leverage`, `hit_rates`, `own_null_dates`}] |
+| `vol_target` entry | `realized_to_target` {`daily_returns`, `intraday_proxy`: {`annualized`, `ratio`}}; `drawdown` {`max`, `peak_date`, `trough_date`, `longest_underwater_dates`, `underwater_at_end`, `ruined_on`, `own_null_dates_in_peak_to_trough`}; `leverage` {`mean`, `median`, `p95`, `max`, `max_date`}; `regime_view` {`excluded_dates`, `groups` {`falling`, `steady`, `rising`}: {`dates`, `mean_leverage`, `realized_to_target` {`daily_returns`, `intraday_proxy`}, `hit_rates`, `own_null_dates`}}; `worst_days` {`days`: [{`date`, `position_return`, `leverage`, `leverage_percentile`}], `mean_leverage_percentile`, `own_null_dates`}; `sub_periods`: [{`from_date`, `to_date`, `dates`, `mean_leverage`, `realized_to_target`, `hit_rates`, `own_null_dates`}] (rev 2.2, C7) |
 | Mismatch detail | `returns_rederivation_mismatch: <date> <field>`, the first differing date, then the first field in the order date, window, rc, daily_outer, common_slots, expected_slots, drop_cause, returns |
 | Errors | the forecast-set store errors, `risk_backtest_requires_proxy_set_source`, `weights_invalid`, the proxy-set verification errors and `proxy_set_mismatch`, `target_unit_mismatch`, `bar_series_not_found`, `returns_rederivation_mismatch`; in that order of precedence (step 6, R4) |
 | Limitations | the design's 15 always-returned items; `within_day_returns_exclude_first_interval_and_gaps` with `within_day` rules |

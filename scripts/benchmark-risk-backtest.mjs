@@ -4,7 +4,8 @@
 //   node scripts/benchmark-risk-backtest.mjs
 // 8 series of 24-hour M15 bars over about 4,000 Mon-Fri days, a proxy set, a joined forecast set of 8x8 matrices, then
 // the tool's stages timed one by one: the set read and its verification against the proxy set, the re-derivation of the
-// returns from the bars, the evaluation (Monte Carlo included) and the journal write. Synthetic data in mkdtemp only.
+// returns from the bars, the evaluation (Monte Carlo included) and the journal write. Both forecasts have 30 own nulls,
+// within the cap of 40, so all ten Monte Carlo streams are drawn: the worst case. Synthetic data in mkdtemp only.
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,7 +73,8 @@ try {
   const deps = { proxySets, journal: rcJournal };
   const joined = await buildProxySetForecastSet(proxySetId, { schema_version: '1.0', evidence_tier: 'synthetic_test',
     from_date: proxy.dates[0], to_date: proxy.dates[proxy.dates.length - 1],
-    a: proxy.rc.map((_, d) => ridge(proxy.rc[d - 1] ?? fallback)), b: proxy.rc.map(() => constant) }, deps);
+    a: proxy.rc.map((_, d) => (d % 131 === 7 ? null : ridge(proxy.rc[d - 1] ?? fallback))),
+    b: proxy.rc.map((_, d) => (d % 131 === 60 ? null : constant)) }, deps);
   const sets = new ForecastSetStore(join(directory, 'sets'));
   const { artifact_id } = await sets.register(joined);
 
@@ -93,7 +95,8 @@ try {
     span, a_sha256: hashes.a, b_sha256: hashes.b, weights, target: { value: 10, unit: 'log_percent' }, forecasts: null, outcome: 'not_evaluable' }));
   const total = rows.reduce((sum, [, ms]) => sum + ms, 0);
   console.log(`bars: ${N} series x ${open_time.length}; run: ${set.dates.length} dates, ${result.days.return_dates} with a return, ` +
-    `outcome ${result.days.outcome}; forecasts ${result.forecasts?.a.status}/${result.forecasts?.b.status}`);
+    `outcome ${result.days.outcome}; forecasts ${result.forecasts?.a.status}/${result.forecasts?.b.status}, ` +
+    `own nulls ${result.forecasts?.a.own_nulls}/${result.forecasts?.b.own_nulls}`);
   for (const [label, ms] of rows) console.log(`${label}: ${ms.toFixed(0)} ms`);
   console.log(`the whole call (target 8 s): ${total.toFixed(0)} ms`);
   const misses = [['re-derive', 3000], ['evaluate', 4000]].filter(([prefix, limit]) => rows.find(([label]) => label.startsWith(prefix))[1] >= limit);

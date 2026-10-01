@@ -117,14 +117,35 @@ test('the Kupiec region is an interval of counts that do not reject, and the cas
     const rejects = monteCarloP(kupiecStatistic(k, 1900, 0.01), null1900.kupiec).rejects;
     assert.equal(!rejects, k >= low && k <= high, `k = ${k}`);
   }
-  // m = 0: both cases coincide, the region decides as the case p-values do, and nothing is indeterminate.
+  // m = 0: both cases coincide (one independence stream, not two), the region decides as the case p-values do, and
+  // nothing is indeterminate.
   for (const x of [low - 1, low, 19, high, high + 1]) {
     const entry = evaluateLevel({ forecast: 0, level: 0, T: 1900, segments: [1900], hits: sequence(1900, spread(1900, x)),
       ownNull: new Uint8Array(1900), coverage: null1900 });
-    assert.deepEqual(entry.kupiec.as_hits, entry.kupiec.as_non_hits);
+    for (const name of ['kupiec', 'independence', 'conditional_coverage']) assert.deepEqual(entry[name].as_hits, entry[name].as_non_hits, name);
     assert.equal(entry.kupiec.result, x < low || x > high ? 'rejected' : 'not_rejected', `x = ${x}`);
     for (const name of ['independence', 'conditional_coverage']) assert.notEqual(entry[name].result, 'indeterminate_due_to_own_nulls');
   }
+});
+
+test('the production coverage draws: pinned Kupiec regions (code review C4)', () => {
+  // These depend on the coverage seeds, the draw order and N; a change to any of them moves them.
+  assert.deepEqual(coverage(0, 1900).region, [11, 28]);
+  assert.deepEqual(coverage(0, 3000).region, [20, 41]);
+  assert.deepEqual(coverage(0, 5000).region, [37, 64]);
+  assert.deepEqual(coverage(1, 1900).region, [77, 114]);
+});
+
+test('opposite directions with neither case rejecting are not indeterminate (design rev 2.4, code review C1)', () => {
+  // T = 2,000 at 1%: 19 hits and 2 own nulls straddle αT = 20, and neither case rejects LR_cc.
+  const T = 2000, positions = spread(T, 21, 13);
+  const entry = evaluateLevel({ forecast: 0, level: 0, T, segments: [T], hits: sequence(T, positions.slice(0, 19)),
+    ownNull: sequence(T, positions.slice(19)), coverage: coverage(0, T) });
+  assert.deepEqual(entry.direction, { as_hits: 'too_many', as_non_hits: 'too_few' });
+  assert.ok(!monteCarloP(entry.conditional_coverage.as_hits.statistic, coverage(0, T).conditional).rejects);
+  assert.ok(!monteCarloP(entry.conditional_coverage.as_non_hits.statistic, coverage(0, T).conditional).rejects);
+  assert.equal(entry.conditional_coverage.result, 'not_rejected');
+  assert.equal(entry.kupiec.result, 'not_rejected');
 });
 
 test('own nulls both ways: neither attack gets a coverage test to not_rejected (N1, R1)', () => {

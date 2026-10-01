@@ -199,8 +199,9 @@ series:
 
 Every record has the same interval: the span the re-derivation read, from the bar
 before the first date's previous endpoint (with `from_previous_endpoint`) or the
-first date's window start (with `within_day`) to the last date's endpoint. That is
-one bar wider than the forecast set's window envelope.
+first date's window start (with `within_day`) to the last date's endpoint. With
+`from_previous_endpoint` that is one bar wider than the forecast set's window
+envelope; with `within_day` they are the same.
 
 Access IDs are `<base>:<index>`, where the base is `usage_access_id` or a
 generated `risk-access:<uuid>`. The request hash binds the set, the contract, the

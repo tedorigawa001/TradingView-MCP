@@ -5886,6 +5886,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           throw new RiskBacktestError("target_unit_mismatch", `the proxy set's return unit is ${proxySet.rules.return_unit}`);
         }
         const { returns, span } = await rederiveReturns({ set, proxySet, barSeries, resolver: zoneResolver });
+        // Read before any write, so a failure here leaves nothing behind (code review C2).
+        const proxyCounts = await realizedCovarianceJournal.search(set.underlying_series_ids, span);
         const result = backtestRiskForecast({ dates: set.dates, dropCause: proxyRunOf(proxySet, set).drop_cause, returns, rc: set.primary,
           forecasts: [set.a, set.b], weights: normalized, targetValue: target_annual_vol.value, returnUnit: proxySet.rules.return_unit,
           weekdays: proxySet.rules.day_weekdays.length });
@@ -5931,7 +5933,6 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           throw new Error(`risk backtest journal write failed${written.length ? ` after ${written.join(" and ")}` : ""}; no statistics returned: ` +
             (error instanceof Error ? error.message : String(error)));
         }
-        const proxyCounts = await realizedCovarianceJournal.search(set.underlying_series_ids, span);
         return jsonResult({
           contract: RISK_BACKTEST_CONTRACT,
           candidateEligible: false,

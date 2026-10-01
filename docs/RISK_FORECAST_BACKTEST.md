@@ -26,7 +26,7 @@ are in [RISK_FORECAST_BACKTEST_DESIGN.md](RISK_FORECAST_BACKTEST_DESIGN.md).
 2. Call `compute_realized_covariance`; it stores a proxy set.
 3. Join your forecasts to it with `tradingview-mcp-import-forecast-set --proxy-set`. Join from the
    first date on which the forecasts exist: dates before it are own nulls, and a warm-up of about 22
-   dates blocks any run shorter than 2,200 dates (see [Days](#days)).
+   dates blocks any run of 2,100 return dates or fewer (see [Days](#days)).
 4. Call `backtest_risk_forecast` with the joined set's `artifact_id`, `weights` and
    `target_annual_vol`, and, to keep a record, `research_id`.
 
@@ -147,7 +147,8 @@ LR_cc) and a **Monte Carlo** p-value. Only the Monte Carlo p-value decides the r
 - Two refinements:
   - LR_uc is decided against the Kupiec non-rejection region: rejected only if [x₀, x₀ + m] lies
     wholly outside it, not rejected only if wholly inside, and otherwise indeterminate.
-  - LR_cc is indeterminate when the two cases have opposite directions, even if both reject.
+  - LR_cc is indeterminate when both cases reject with opposite directions. When neither rejects,
+    it is not rejected: any placement of the nulls in between has a lower LR_uc still.
 
 **The Kupiec non-rejection region**, `kupiec_non_rejection_region`, is the interval of hit counts
 whose Monte Carlo p for LR_uc exceeds 0.05. It shows how far from αT the count could have been without
@@ -176,7 +177,8 @@ Per evaluated forecast, `vol_target`:
     maximum drawdown is 1, and it is underwater to the end.
   - Otherwise the report gives the maximum drawdown as a fraction of the running peak, its peak and
     trough dates, the longest underwater stretch in dates with a return, and whether it is underwater
-    at the end.
+    at the end. The starting wealth counts as a peak: when the drawdown is measured from it,
+    `peak_date` is null.
   - It also gives the own-null dates within the peak-to-trough stretch.
 - **Leverage:** mean, median, nearest-rank 95th percentile, and maximum with its first date.
 - **Regime view** (`regime_view`), by a quantity known before each day:
@@ -197,8 +199,9 @@ Per evaluated forecast, `vol_target`:
   return, with ties at their mean rank. The mean percentile is about 0.5 for a forecast that carries
   no unusual leverage into its worst days, and higher for one that lags. The own-null dates among the
   10 are counted.
-- **Sub-periods:** 4 consecutive blocks of the dates with a return, each with both ratios, mean
-  leverage, hit rates and own-null dates.
+- **Sub-periods:** 4 consecutive blocks of the dates with a return, each with its first and last
+  date, the date count, mean leverage, both ratios, hit rates and own-null dates, in that order; the
+  regime groups have the same fields without the first and last date.
 
 ## Response
 
@@ -224,11 +227,13 @@ of `tool_observed` records with the tool name `backtest_risk_forecast` and the s
 - the underlying series follow, each with the bar-series artifact actually read as `data_version`;
 - every record carries the **span the re-derivation read**: from the bar opening one interval
   before the first date's previous endpoint (`from_previous_endpoint`), or from the first date's
-  window start (`within_day`), to the last date's endpoint. That is one bar wider than the forecast
-  set's window envelope;
+  window start (`within_day`), to the last date's endpoint. With `from_previous_endpoint` that is
+  one bar wider than the forecast set's window envelope; with `within_day` they are the same;
 - access IDs are `<base>:<index>`, with `usage_access_id` or a generated `risk-access:<uuid>` as the
   base. The request hash binds the set, the contract, the normalized weights and the target, so a
-  retry with weights of another scale is idempotent and another weight vector or target conflicts;
+  retry whose weights normalize to the same vector is idempotent, and another weight vector or
+  target conflicts. Weights that differ only in scale usually normalize to the same vector, but not
+  always to the last bit (`[0.1, 0.3]` against `[1, 3]`); such a retry conflicts, the safe direction;
 - each record carries `overlapped_forward_period_declarations`, and `search` adds
   `period_usage_prior_overlap`, the records' `prior_overlap` in summary form with
   `active_forward_period_declarations` per series ([FORWARD_PERIOD.md](FORWARD_PERIOD.md)).
@@ -236,8 +241,9 @@ of `tool_observed` records with the tool name `backtest_risk_forecast` and the s
 Without `research_id`, `period_usage` is `{status: "untracked"}` and nothing is written to the
 ledger.
 
-**The search journal** records **every** call that passes the checks above, evaluated or not,
-with or without `research_id`: the forecast-set, proxy-set and bar-series IDs, the rules hash, the run, the span read,
+**The search journal** records every call that reaches it, evaluated or not, with or without
+`research_id`. A call that fails before it, at any check above or at the period write (for example a
+`usage_access_id` conflict), is not journaled. Each record holds the forecast-set, proxy-set and bar-series IDs, the rules hash, the run, the span read,
 the hashes of A and B over the run, the normalized weights with their hash, the target, and per
 forecast its own nulls and each level's hits and three results. It is written after period usage
 and before the response; if it fails, the error returns no statistics and names any period records
@@ -299,11 +305,16 @@ one forward, declare the period first ([FORWARD_PERIOD.md](FORWARD_PERIOD.md)).
 ## Performance
 
 `node scripts/benchmark-risk-backtest.mjs` (after `npm run build`) uses 8 series of about 383,000
-M15 bars each and a joined set of 4,000 dates of 8×8 matrices. On the development machine:
+M15 bars each and a joined set of 4,000 dates of 8×8 matrices. Both forecasts have 31 own nulls,
+within the cap of 40, so all ten Monte Carlo streams are drawn: the worst case. On the development
+machine, at a load average of about 6 on 10 cores:
 - reading the set and verifying it against the proxy set took about 0.5 s;
 - re-deriving the returns from the bars about 1.8 s (target 3 s);
-- the evaluation, Monte Carlo included, about 3.3 s (target 4 s);
-- the journal write about 15 ms; the whole call about 5.6 s (target 8 s).
+- the evaluation, Monte Carlo included, about 1.5 s (target 4 s);
+- the journal write about 15 ms; the whole call about 3.8 s (target 8 s).
+
+Times depend on the machine and its load; a run beside other test processes took two to three times
+as long.
 
 The benchmark is outside the unit suite, so tests never depend on timing. The Monte Carlo sizes are
 checked by hand with `node scripts/check-risk-backtest-size.mjs` (about a minute).
