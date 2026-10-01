@@ -80,7 +80,7 @@ There is no release until after the code review.
     counting transitions from the sorted hit positions, are allowed optimizations because they give
     the same bits;
   - the two own-null cases and their combination into one result, with the P1 rules: LR_uc against
-    the region, LR_cc indeterminate on opposite directions;
+    the region, LR_cc indeterminate when both cases reject with opposite directions (rev 2.4);
   - the Kupiec region from the coverage draws;
   - `direction`, `independence_uninformative`, `expected_hits_below_10`,
     `not_rejected_underpowered`, `tests_reported`.

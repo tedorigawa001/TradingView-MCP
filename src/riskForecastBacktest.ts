@@ -285,7 +285,7 @@ export function evaluateLevel(input: LevelInput) {
       : xNon >= region[0] && xHits <= region[1] ? notRejected : "indeterminate_due_to_own_nulls";
   const opposite = (direction[0] === "too_many" && direction[1] === "too_few") || (direction[0] === "too_few" && direction[1] === "too_many");
   // Only when both cases reject (code review C1): with opposite directions some placement of the nulls in between
-  // could avoid the rejection. When neither rejects, LR_uc in between is lower still, by convexity.
+  // could avoid the rejection. When neither rejects, LR_uc in between is at most the larger of the two, by convexity.
   const conditionalResult: TestResult = opposite && conditional[0].rejects && conditional[1].rejects
     ? "indeterminate_due_to_own_nulls" : combine(conditional);
   const cases = (runs: CaseRun[]) => ({ as_hits: runs[0].values, as_non_hits: runs[1].values });

@@ -6,6 +6,7 @@ import {
   independenceStatistic, chiSquareSurvival, monteCarloP, coverageNull, independenceNull, evaluateLevel, testsReported,
 } from '../../build/riskForecastBacktest.js';
 import { createRandom } from '../../build/seededRandom.js';
+import { createHash } from 'node:crypto';
 
 // docs/RISK_FORECAST_BACKTEST_PLAN.md, step 2. Hit sequences are built directly as integer arrays, never from simulated
 // returns, so every count and result here is the same on every CPU (plan Q5).
@@ -146,6 +147,25 @@ test('opposite directions with neither case rejecting are not indeterminate (des
   assert.ok(!monteCarloP(entry.conditional_coverage.as_non_hits.statistic, coverage(0, T).conditional).rejects);
   assert.equal(entry.conditional_coverage.result, 'not_rejected');
   assert.equal(entry.kupiec.result, 'not_rejected');
+  // Exact Monte Carlo p-values, multiples of 1/10,000 from integer counts: the same on every CPU. They pin each
+  // stream's seed and draw order more finely than the regions do (re-review N1).
+  assert.deepEqual([entry.conditional_coverage.as_hits.p_monte_carlo, entry.conditional_coverage.as_non_hits.p_monte_carlo], [0.8484, 0.9238]);
+  assert.deepEqual([entry.kupiec.as_hits.p_monte_carlo, entry.kupiec.as_non_hits.p_monte_carlo], [0.9089, 0.8195]);
+  assert.deepEqual([entry.independence.as_hits.p_monte_carlo, entry.independence.as_non_hits.p_monte_carlo], [0.983, 0.9846]);
+});
+
+test('every production stream is pinned by the digest of its sorted draws (re-review N1)', () => {
+  // The draws are functions of integer counts through fdlibmLog, so their bytes are the same on every CPU.
+  const digest = (draws) => 'sha256:' + createHash('sha256').update(Buffer.from(draws.buffer, draws.byteOffset, draws.byteLength)).digest('hex');
+  const one = coverageNull(0, 300, [120, 180]), five = coverageNull(1, 300, [120, 180]);
+  assert.deepEqual([digest(one.kupiec), digest(one.conditional)], [
+    'sha256:856776c936aee8ba49bb573f9143ab8d4583fd98e9595acdd86bbe4986c6318d',
+    'sha256:d3779fb076a020e1d2e5165b5adc353e97c5bb76b1b22b3918681e94f0b4f107']);
+  assert.deepEqual([digest(five.kupiec), digest(five.conditional)], [
+    'sha256:64d0ba95b7a1d8fcbe325f2f713b4f632f2b19ca2e76967981775e6be289f47f',
+    'sha256:4f9f061b3617c53fd1520621e76fc9e233f316793bf7c6d2e12814562f8e9356']);
+  assert.equal(digest(independenceNull(300, [120, 180], 9, independenceSeed(1, 1, 1))),
+    'sha256:ef3dffe0523372c43a9b1396d90b0efa63940cf1d74f3d04cd22dd6f38b41bb3');
 });
 
 test('own nulls both ways: neither attack gets a coverage test to not_rejected (N1, R1)', () => {

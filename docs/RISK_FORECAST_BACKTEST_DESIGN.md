@@ -236,8 +236,9 @@ cases; with no own nulls the two cases coincide:
     only if [x₀, x₀ + m] does not overlap [x_lo, x_hi], which is exactly "rejected under every
     placement of the nulls"; `not_rejected` only if it lies inside; otherwise indeterminate.
   - **LR_cc** is indeterminate when both cases reject with opposite `direction`s (rev 2.4). When
-    neither rejects, the general rule applies and gives `not_rejected`: a placement of the nulls in
-    between has a lower LR_uc still, by convexity. Rev 2.3 also called a pair of non-rejections with
+    neither rejects, the general rule applies and gives `not_rejected` (or
+    `not_rejected_underpowered`): by convexity, LR_uc at any count in between is at most the larger
+    of the two cases' values. Rev 2.3 also called a pair of non-rejections with
     opposite directions indeterminate, which made a calibrated forecast whose null interval contains
     αT lose its LR_cc result (code review C1).
   - For LR_ind and LR_cc the two cases cover the two cheap attacks (nulls on true-hit dates and

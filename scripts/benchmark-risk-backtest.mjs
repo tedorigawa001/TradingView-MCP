@@ -4,7 +4,7 @@
 //   node scripts/benchmark-risk-backtest.mjs
 // 8 series of 24-hour M15 bars over about 4,000 Mon-Fri days, a proxy set, a joined forecast set of 8x8 matrices, then
 // the tool's stages timed one by one: the set read and its verification against the proxy set, the re-derivation of the
-// returns from the bars, the evaluation (Monte Carlo included) and the journal write. Both forecasts have 30 own nulls,
+// returns from the bars, the evaluation (Monte Carlo included) and the journal write. Both forecasts have 31 own nulls,
 // within the cap of 40, so all ten Monte Carlo streams are drawn: the worst case. Synthetic data in mkdtemp only.
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

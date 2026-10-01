@@ -148,7 +148,9 @@ LR_cc) and a **Monte Carlo** p-value. Only the Monte Carlo p-value decides the r
   - LR_uc is decided against the Kupiec non-rejection region: rejected only if [x₀, x₀ + m] lies
     wholly outside it, not rejected only if wholly inside, and otherwise indeterminate.
   - LR_cc is indeterminate when both cases reject with opposite directions. When neither rejects,
-    it is not rejected: any placement of the nulls in between has a lower LR_uc still.
+    the general rule gives `not_rejected` (or `not_rejected_underpowered`): by convexity, LR_uc at
+    any count in between is at most the larger of the two cases' values. As for LR_ind, the two
+    cases cover the two cheap attacks, not every placement of the nulls.
 
 **The Kupiec non-rejection region**, `kupiec_non_rejection_region`, is the interval of hit counts
 whose Monte Carlo p for LR_uc exceeds 0.05. It shows how far from αT the count could have been without
