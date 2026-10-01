@@ -16,11 +16,11 @@ function bars(spec, tier = 'synthetic_test') {
   return normalizeBarSeries({ schema_version: '1.0', source_id: 'reference', source_sha256: 'sha256:' + 'a'.repeat(64), evidence_tier: tier,
     series_id: spec.series_id, interval_minutes: spec.interval_minutes, open_time: spec.open_time, close: spec.close }).series;
 }
-function run(scenario, order) {
+function run(scenario, order, options) {
   const { rules, rules_sha256 } = canonicalizeRules(scenario.rules);
   const series = scenario.series.map((s, i) => ({ artifact_id: artifact(i), bars: bars({ ...s, interval_minutes: rules.interval_minutes }) }));
   return computeRealizedCovariance({ rules, rules_sha256, from_date: scenario.from_date, to_date: scenario.to_date,
-    series: order ? order.map((i) => series[i]) : series });
+    series: order ? order.map((i) => series[i]) : series }, options);
 }
 const close = (got, want, label) => {
   const scale = Math.max(1e-300, Math.abs(want));
@@ -237,14 +237,59 @@ test('regression goldens: rules hashes, proxy-set IDs and the bits of the first 
       'sha256:061258db362ac1b5a29aba69dbc1aa2147b3e82a5ce9c1fa8cbcdcd327e3f9c5',
       ['3fb5831b266f89bf', '3f6bc547576ee061', '3f6a2e3126e21e9a'], ['3fd22fffef9d8b4f', 'bfa1bf6ff91be0b8', '3f715198a879d8c2']],
   };
-  for (const [name, [rulesSha, proxySetId, rcBits, outerBits]] of Object.entries(GOLDEN)) {
-    const r = run(REFERENCE.scenarios.find((s) => s.name === name));
-    assert.equal(r.proxy.rules_sha256, rulesSha, `${name} rules_sha256`);
-    assert.equal(normalizeProxySet(r.proxy).artifact_id, proxySetId, `${name} proxy_set_id`);
-    assert.equal(r.proxy.drop_cause[0], null, `${name} keeps its first day`);
-    assert.deepEqual(pick(r.proxy.rc[0]), rcBits, `${name} rc bits`);
-    assert.deepEqual(pick(r.proxy.daily_outer[0]), outerBits, `${name} daily_outer bits`);
+  // With and without includeReturns (risk backtest plan, step 1): the option only adds an output.
+  for (const options of [undefined, { includeReturns: true }]) {
+    for (const [name, [rulesSha, proxySetId, rcBits, outerBits]] of Object.entries(GOLDEN)) {
+      const r = run(REFERENCE.scenarios.find((s) => s.name === name), undefined, options);
+      const label = `${name}${options ? ' with returns' : ''}`;
+      assert.equal(r.proxy.rules_sha256, rulesSha, `${label} rules_sha256`);
+      assert.equal(normalizeProxySet(r.proxy).artifact_id, proxySetId, `${label} proxy_set_id`);
+      assert.equal(r.proxy.drop_cause[0], null, `${label} keeps its first day`);
+      assert.deepEqual(pick(r.proxy.rc[0]), rcBits, `${label} rc bits`);
+      assert.deepEqual(pick(r.proxy.daily_outer[0]), outerBits, `${label} daily_outer bits`);
+      assert.equal('returns' in r, options !== undefined, `${label} returns only on request`);
+    }
   }
+});
+
+test('includeReturns: r_i·r_j is daily_outer on every kept date, null on dropped ones, n numbers even for n = 1', () => {
+  const json = (v) => JSON.stringify(v);
+  for (const scenario of REFERENCE.scenarios) {
+    const r = run(scenario, undefined, { includeReturns: true });
+    assert.equal(r.returns.length, r.proxy.dates.length, scenario.name);
+    r.returns.forEach((vector, d) => {
+      if (r.proxy.drop_cause[d] !== null) return assert.equal(vector, null, `${scenario.name} ${r.proxy.dates[d]}`);
+      assert.equal(vector.length, scenario.series.length);
+      const outer = vector.map((x) => vector.map((y) => x * y));
+      assert.equal(json(vector.length === 1 ? outer[0][0] : outer), json(r.proxy.daily_outer[d]), `${scenario.name} ${r.proxy.dates[d]}`);
+    });
+  }
+  const single = REFERENCE.scenarios.find((s) => s.name === 'A_100_shaped');
+  const one = run({ ...single, series: [single.series[0]] }, undefined, { includeReturns: true });
+  const kept = one.proxy.drop_cause.indexOf(null);
+  assert.equal(one.returns[kept].length, 1, 'an array for n = 1');
+  assert.equal(json(one.returns[kept][0] * one.returns[kept][0]), json(one.proxy.daily_outer[kept]));
+});
+
+test('includeReturns: the sign and the series order of r, and the vectors are copies', () => {
+  // Hourly UTC days [D 00:00, D+1 00:00) within the day: the first series rises 1.0 → 1.1 on Monday and falls back on
+  // Tuesday; the second does the opposite. r keeps each series' sign and the axis order.
+  const monday = Date.parse('2026-01-05T00:00:00.000Z') / 1000;
+  const open_time = Array.from({ length: 48 }, (_, k) => monday + k * 3600);
+  const path = (up) => open_time.map((_, k) => { const f = (k % 24) / 23; const rise = 1 + 0.1 * f, fall = 1.1 - 0.1 * f;
+    return k < 24 ? (up ? rise : fall) : (up ? fall : rise); });
+  const { rules, rules_sha256 } = canonicalizeRules({ interval_minutes: 60, time_zone: 'UTC', day_end_local: '00:00',
+    day_weekdays: [1, 2, 3, 4, 5], max_missing_slots: 0, first_interval: 'within_day', return_unit: 'log' });
+  const series = [true, false].map((up, i) => ({ artifact_id: artifact(i),
+    bars: bars({ series_id: `sign:${i}`, interval_minutes: 60, open_time, close: path(up) }) }));
+  const r = computeRealizedCovariance({ rules, rules_sha256, from_date: '2026-01-05', to_date: '2026-01-06', series }, { includeReturns: true });
+  assert.deepEqual(r.proxy.drop_cause, [null, null]);
+  const ln = Math.log(1.1);
+  assert.deepEqual(r.returns.map((v) => v.map((x) => Math.sign(x))), [[1, -1], [-1, 1]]);
+  r.returns.flat().forEach((x) => assert.ok(Math.abs(Math.abs(x) - ln) < 1e-12, String(x)));
+  const before = JSON.stringify(r.proxy);
+  r.returns[0][0] = 999;
+  assert.equal(JSON.stringify(r.proxy), before, 'changing a returned vector cannot reach the proxy');
 });
 
 test('a day lacking both its endpoint and the previous one is no_endpoint: the first cause wins', () => {

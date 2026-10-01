@@ -56,7 +56,12 @@ function lowerBound(sorted: ArrayLike<number>, target: number): number {
 /** Nearest-rank quantile of a sorted array. */
 const nearestRank = (sorted: number[], q: number) => sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)];
 
-export function computeRealizedCovariance(input: RealizedCovarianceInput) {
+/**
+ * `includeReturns` also returns each date's daily return vector r_D (a copy, an array of n numbers even for n = 1, or
+ * null on a dropped date) for backtest_risk_forecast's re-derivation (docs/RISK_FORECAST_BACKTEST_PLAN.md, step 1).
+ * It only adds an output: the proxy set, and so its ID, is the same with or without it.
+ */
+export function computeRealizedCovariance(input: RealizedCovarianceInput, options: { includeReturns?: boolean } = {}) {
   const { rules, rules_sha256 } = input;
   const resolver = input.resolver ?? intlZoneResolver;
   const n = input.series.length;
@@ -112,7 +117,7 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
   let keptAny = false;
 
   const dates: string[] = [], windows: { from: string; to: string }[] = [];
-  const rc: ProxyValue[] = [], dailyOuter: ProxyValue[] = [];
+  const rc: ProxyValue[] = [], dailyOuter: ProxyValue[] = [], returns: (number[] | null)[] = [];
   const commonSlots: number[] = [], expectedSlots: number[] = [], dropCause: (DropCause | null)[] = [];
   const missing: number[] = [];
 
@@ -133,7 +138,7 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
     else if (fromPrevious && !allValid(previousEndpoint)) cause = "no_previous_endpoint";
     else if (day.expected_slots - common.length > rules.max_missing_slots) cause = "too_many_missing_slots";
 
-    let value: { rc: ProxyValue; outer: ProxyValue } = { rc: null, outer: null };
+    let value: { rc: ProxyValue; outer: ProxyValue; r: number[] | null } = { rc: null, outer: null, r: null };
     let points: number[] = [];
     if (!cause) {
       // P₀ and P₁…P_m (design "Returns"): the previous produced endpoint, or the first common slot.
@@ -153,6 +158,7 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
     dropCause.push(cause);
     rc.push(value.rc);
     dailyOuter.push(value.outer);
+    returns.push(cause ? null : value.r);
   }
   const identicalClosePairs = keptAny ? [...identicalCandidates].map((pair) => pair.split(",").map(Number) as [number, number]) : [];
 
@@ -202,6 +208,7 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
     envelope: { from: iso(spanFrom), to: iso(spanTo) },
     tzdata,
     limitations: [...REALIZED_COVARIANCE_LIMITATIONS, ...(fromPrevious ? [FIRST_INTERVAL_LIMITATION] : [])],
+    ...(options.includeReturns ? { returns } : {}),
   };
 }
 
@@ -210,7 +217,7 @@ export function computeRealizedCovariance(input: RealizedCovarianceInput) {
  * y_k = L(P_k) − L(P₀), step_k = y_k − y_{k−1}, r_D = L(endpoint) − L(P₀), RC summed in time order for
  * i ≤ j and mirrored. Returns null when the consumer's own checks fail (numerically_not_psd).
  */
-function dayProxies(points: number[], n: number, level: (series: number, at: number) => number): { rc: ProxyValue; outer: ProxyValue } | null {
+function dayProxies(points: number[], n: number, level: (series: number, at: number) => number): { rc: ProxyValue; outer: ProxyValue; r: number[] } | null {
   const origin = Array.from({ length: n }, (_, i) => level(i, points[0]));
   const rcMatrix: Matrix = Array.from({ length: n }, () => new Array<number>(n).fill(0));
   const previous = new Array<number>(n).fill(0);
@@ -242,7 +249,8 @@ function dayProxies(points: number[], n: number, level: (series: number, at: num
   }
   const acceptable = (m: Matrix) => allFinite(m) && symmetricWithin(m, 1e-12) && positiveSemidefinite(m);
   if (!acceptable(rcMatrix) || !acceptable(outer)) return null;
-  return n === 1 ? { rc: rcMatrix[0][0], outer: outer[0][0] } : { rc: rcMatrix, outer };
+  // r is copied, so a caller changing it cannot reach the proxies.
+  return n === 1 ? { rc: rcMatrix[0][0], outer: outer[0][0], r: [...r] } : { rc: rcMatrix, outer, r: [...r] };
 }
 
 /** Diagnostics (design F14; plan section 7 "Diagnostics"). */
