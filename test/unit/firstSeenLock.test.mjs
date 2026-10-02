@@ -98,20 +98,28 @@ log.serializeWithin(100,async()=>{}).catch(error=>console.log(error.code));`;
 test('serializeWithin times out in the in-process queue, and later callers still wait for the running operation',async t=>{
   const path=await setup(t);
   const order=[];
-  let finish;
-  const long=log(path).serialize(async()=>{order.push('long:start');await new Promise(resolve=>{finish=resolve;});order.push('long:end');});
+  let finish,began;
+  const running=new Promise(resolve=>{began=resolve;});
+  const long=log(path).serialize(async()=>{order.push('long:start');began();await new Promise(resolve=>{finish=resolve;});order.push('long:end');});
+  // Wait until the long operation holds the queue and the file lock: on a slow runner taking the lock can outlast the
+  // timed call's budget and the later 100 ms pause together, and a check before it starts would race it.
+  await running;
   const started=performance.now();
   await assert.rejects(log(path).serializeWithin(150,async()=>{order.push('short');}),{code:'HISTORY_LOCK_TIMEOUT'});
   const elapsed=performance.now()-started;
   assert.ok(elapsed>=140&&elapsed<1500,`${elapsed}ms`);
-  // A caller queued after the timed-out one must not skip ahead of the operation that still holds the queue.
-  const after=log(path).serialize(async()=>{order.push('after');});
+  // A caller queued after the timed-out one must not skip ahead of the operation that still holds the queue. The file
+  // lock alone would also hold it back, so the check is that it does not even reach the file lock before then.
+  const later=log(path);
+  const take=later.acquireFileLock.bind(later);
+  later.acquireFileLock=(...args)=>{order.push('after:lock');return take(...args);};
+  const after=later.serialize(async()=>{order.push('after');});
   await new Promise(resolve=>setTimeout(resolve,100));
   assert.deepEqual(order,['long:start'],'nothing ran while the long operation held the queue');
   finish();
   await long;
   await after;
-  assert.deepEqual(order,['long:start','long:end','after']);
+  assert.deepEqual(order,['long:start','long:end','after:lock','after']);
 });
 test('serializeWithin runs operations in order when nothing blocks, and releases the lock after a failure',async t=>{
   const path=await setup(t);
