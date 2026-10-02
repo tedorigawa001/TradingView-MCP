@@ -8773,7 +8773,7 @@ test('compare_forecast_losses records period usage, then the journal, then respo
   // The design's field order, statistics included (code review L3).
   assert.deepEqual(Object.keys(r), ['contract', 'status', 'battery_outcome', 'robustness_conflicts',
     'non_decisive_disagreements', 'withheld_reasons', 'withheld_reasons_scope', 'search', 'period_usage', 'input',
-    'artifact_id', 'loss', 'dm', 'mean_favours', 'mean_favours_test', 'drops', 'hard_days', 'sub_periods', 'trimmed',
+    'artifact_id', 'loss', 'd_unit_log2', 'dm', 'mean_favours', 'mean_favours_test', 'drops', 'hard_days', 'sub_periods', 'trimmed',
     'breakdown', 'secondary', 'bootstrap', 'caller_label_means', 'candidateEligible', 'statistical_calibration', 'limitations']);
   assert.equal(r.battery_outcome, 'no_listed_conflict');
   assert.equal(r.mean_favours, 'A');

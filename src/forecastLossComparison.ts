@@ -42,15 +42,20 @@ const mean = (values: number[]) => values.reduce((sum, x) => sum + x, 0) / value
 const meanOrNull = (values: number[]) => values.length ? mean(values) : null;
 
 /**
- * The power of two at or below max|x| (1 for an all-zero series). Dividing by it is exact, so results
- * in the normal range are bit-identical, while sums and squares of very large or very small values
- * stay in range (external review EXT-2b, LOW-1, LOW-2).
+ * The exponent of the power of two at or below max|x| (0 for an empty or all-zero series). Dividing by
+ * that power is exact, so results in the normal range are bit-identical, while sums and squares of very
+ * large or very small values stay in range (external review EXT-2b, LOW-1, LOW-2). The response reports
+ * it as `d_unit_log2`, so a displayed mean or S that rounded to 0 at tiny scale can be read as such.
  */
-function powerOfTwoScale(values: number[]): number {
+export function powerOfTwoExponent(values: number[]): number {
   const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
-  // log2 rounds to 1024 in the top binade; 2^1024 would be Infinity (diff check nit).
-  return largest > 0 && Number.isFinite(largest) ? 2 ** Math.min(1023, Math.floor(Math.log2(largest))) : 1;
+  if (!(largest > 0 && Number.isFinite(largest))) return 0;
+  // log2 rounds up to the next integer at the top of a binade, and to 1024 in the top one, where 2^1024 is Infinity
+  // (diff check nit): step back so the power is at or below max|x|.
+  const exponent = Math.floor(Math.log2(largest));
+  return 2 ** exponent > largest ? exponent - 1 : exponent;
 }
+const powerOfTwoScale = (values: number[]) => 2 ** powerOfTwoExponent(values);
 /**
  * A nonzero loss below the smallest normal double is quantized to multiples of 2^-1074, so d and DM
  * lose all meaning; rescaling d cannot recover it (diff check LOW-A).
@@ -248,7 +253,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   // underflowed for tiny losses (EXT-2b), and the block, trimmed, label and bootstrap means rounded to 0
   // when d was within a few multiples of 2^-1074, raising false reversals (external review EXT-4).
   const finite = d.every(Number.isFinite);
-  const unit = finite ? powerOfTwoScale(d) : 1;
+  const dUnitLog2 = finite && T > 0 ? powerOfTwoExponent(d) : null;
+  const unit = 2 ** (dUnitLog2 ?? 0);
   const scaled = d.map((x) => x / unit);
   const hardDays = {
     b_loss_on_a_only_null_days: scaledMeanOrNull(bOnANull), b_loss_on_used_days: scaledMeanOrNull(lossB),
@@ -257,7 +263,8 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
 
   // The secondary proxy: evaluated on used days where it is valid; > 5% of them dropped = not evaluable.
   const secondaryDropped = T - secondary.d.length;
-  const secondaryUnit = powerOfTwoScale(secondary.d);
+  const secondaryUnitLog2 = secondary.d.length ? powerOfTwoExponent(secondary.d) : null;
+  const secondaryUnit = 2 ** (secondaryUnitLog2 ?? 0);
   const secondaryScaledMean = secondary.d.length ? mean(secondary.d.map((x) => x / secondaryUnit)) : null;
   const secondaryMean = secondaryScaledMean === null ? null : secondaryScaledMean * secondaryUnit;
   // Backstop (code review R-L2): with the rescaled mean, finite days cannot give a non-finite mean.
@@ -273,6 +280,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
   const secondaryResult = {
     status: secondaryStatus,
     mean: secondaryMean,
+    d_unit_log2: secondaryUnitLog2,
     used: secondary.d.length,
     dropped: set.secondary ? secondaryDropped : null,
     spearman_rho: rho,
@@ -327,6 +335,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
       withheld_reasons: sideIndependent,
       withheld_reasons_scope: "side_independent_only" as const,
       non_decisive_disagreements: [] as string[],
+      d_unit_log2: dUnitLog2,
       dm: hac ? { dbar: hac.dbar, S: hac.S, L: hac.L, DM: null, p_a: null, p_b: null, T } : null,
       mean_favours: null,
       mean_favours_test: "two_sided_10_percent" as const,
@@ -361,7 +370,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
       withheld_reasons: sideIndependent,
       withheld_reasons_scope: "side_independent_only" as const,
       non_decisive_disagreements: [] as string[],
-      dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
+      d_unit_log2: dUnitLog2, dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
       drops, hard_days: hardDays, sub_periods: subPeriods,
       trimmed: { k, decisive: null, both_tails: bothTails * unit,
         a_tail_removed: trimFavourable(scaled, k, "A") * unit, b_tail_removed: trimFavourable(scaled, k, "B") * unit },
@@ -415,7 +424,7 @@ export function compareForecastLosses(set: ForecastSet, options: { loss: Forecas
     withheld_reasons: withheld,
     withheld_reasons_scope: "all" as const,
     non_decisive_disagreements: nonDecisive,
-    dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
+    d_unit_log2: dUnitLog2, dm, mean_favours: favours, mean_favours_test: "two_sided_10_percent" as const,
     drops, hard_days: hardDays, sub_periods: subPeriods,
     trimmed: { k, decisive: { mean: decisive * unit, own_nulls_imputed_worst_case: m }, both_tails: bothTails * unit },
     breakdown: { k_star: kStar, fraction: kStar === null ? null : kStar / (T + m),

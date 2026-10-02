@@ -160,6 +160,13 @@ d = loss(A) − loss(B); lower is better, so negative d favours A.
     bootstrap p of 1 while DM was −57.7.
   - Reversals and the bootstrap are decided on the rescaled values. The reported d̄, S and means
     are in the input units, so in that regime they may round to 0 while the decisions stay exact.
+  - `d_unit_log2` is the exponent e of that power of two, so 2^e ≤ max|d| < 2^(e+1), and
+    `secondary.d_unit_log2` is the secondary mean's. Each reported mean and d̄ is its rescaled
+    value times 2^e, and S is times 2^(2e). A reported value below 2^-1022 in magnitude, 0
+    included, may therefore be rounding: S already from e < −511, a mean only within a few
+    multiples of 2^-1074 of 0. DM, the p-values, the favoured side, the reversals and the
+    bootstrap do not depend on it. `d_unit_log2` is null when d is not finite or no day is used,
+    and `secondary.d_unit_log2` when no secondary day is valid.
   - DM is exact only while the losses themselves are normal doubles; smaller losses are not
     evaluable (above).
   - **Supported range:** losses from 2^-1022 up to where S overflows (d around 1e156).
@@ -202,7 +209,8 @@ and mean d. Only these blocks can raise a conflict. `caller_label_means` are des
   normal range. More than 5% of those dropped makes it `not_evaluable`. Its mean is computed
   rescaled, so finite days always give a finite mean; a non-finite mean would also make it
   `not_evaluable`, as a backstop.
-- `secondary.mean` is the mean d under it.
+- `secondary.mean` is the mean d under it, and `secondary.d_unit_log2` the exponent of the power
+  of two it was rescaled by (see Rescaling).
 - Distinctness is the Spearman ρ between the proxy-dependent parts ⟨G, P⟩ and ⟨G, P₂⟩, where
   G = S_A⁻¹ − S_B⁻¹ for QLIKE and −2(S_A − S_B) for MSE. The forecast-only term of d is left
   out, because it inflates the correlation of the two d series.
@@ -286,7 +294,7 @@ Fields appear in this order:
    `withheld_reasons_scope`;
 3. `search` and `period_usage` (below);
 4. `input` (`artifact` or `inline`) and `artifact_id`;
-5. the statistics: `loss`, `dm {dbar, S, L, DM, p_a, p_b, T}`, `mean_favours`,
+5. the statistics: `loss`, `d_unit_log2`, `dm {dbar, S, L, DM, p_a, p_b, T}`, `mean_favours`,
    `mean_favours_test`, `drops`, `hard_days`, `sub_periods`, `trimmed`, `breakdown`, `secondary`,
    `bootstrap {p, mc_se, draws, mean_block, seed}`, `caller_label_means`;
 6. `candidateEligible: false`, `statistical_calibration: "not_assessed"`, `limitations`.

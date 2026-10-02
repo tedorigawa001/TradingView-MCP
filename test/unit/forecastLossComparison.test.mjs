@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   compareForecastLosses, evaluateLoss, neweyWest, blockBounds, trimFavourable, breakdownCount, stationaryBootstrap,
-  FORECAST_LOSS_CONTRACT, BOOTSTRAP_SEED, NEAR_COPY_SHARE,
+  powerOfTwoExponent, FORECAST_LOSS_CONTRACT, BOOTSTRAP_SEED, NEAR_COPY_SHARE,
 } from '../../build/forecastLossComparison.js';
 import { normalizeForecastSet } from '../../build/forecastSet.js';
 import { normalCdf, spearman } from '../../build/numerics.js';
@@ -559,6 +559,53 @@ test('scale sweep: MSE decisions are identical from 1e-150 to 1e77, and fail clo
     // Below about 1e-154 the losses themselves are subnormal and quantized, so DM is arbitrary (LOW-A).
     assert.deepEqual(compareForecastLosses(scaleSet(set, 1e-160), tracked).status,
       { evaluable: false, reason: 'loss_below_normal_range' }, `${name} at 1e-160`);
+  }
+});
+
+test('d_unit_log2 is the power of two d was rescaled by, so a displayed S of 0 at tiny scale reads as rounding', () => {
+  const base = setFromD(uniform(), { secondary: independentSecondary });
+  const scaleSet = (set, s) => ({ ...set, a: set.a.map((x) => x * s), b: set.b.map((x) => x * s),
+    primary: set.primary.map((x) => x * s), secondary: set.secondary.map((x) => x * s) });
+  const reference = compareForecastLosses(base, tracked);
+  assert.equal(reference.d_unit_log2, -4, 'max|d| is about 0.07, in [2^-4, 2^-3)');
+  // Each exponent brackets the largest |d| under its own proxy.
+  const largest = (proxy) => Math.max(...base.a.map((a, i) =>
+    Math.abs(evaluateLoss(a, proxy[i], 'mse') - evaluateLoss(base.b[i], proxy[i], 'mse'))));
+  for (const [e, proxy] of [[reference.d_unit_log2, base.primary], [reference.secondary.d_unit_log2, base.secondary]]) {
+    assert.ok(2 ** e <= largest(proxy) && largest(proxy) < 2 ** (e + 1), `${e}: ${largest(proxy)}`);
+  }
+  assert.notEqual(reference.secondary.d_unit_log2, reference.d_unit_log2, 'the secondary has its own scale here');
+  // Scaling everything by 2^-500 scales every MSE loss, and so d, by exactly 2^-1000.
+  const tiny = compareForecastLosses(scaleSet(base, 2 ** -500), tracked);
+  assert.deepEqual([tiny.d_unit_log2, tiny.secondary.d_unit_log2], [reference.d_unit_log2 - 1000, reference.secondary.d_unit_log2 - 1000]);
+  assert.deepEqual([tiny.mean_favours, tiny.battery_outcome, tiny.robustness_conflicts], [reference.mean_favours, reference.battery_outcome,
+    reference.robustness_conflicts]);
+  assert.equal(tiny.dm.DM, reference.dm.DM, 'the decisions run on rescaled d, bit for bit');
+  assert.ok(reference.dm.S > 0 && tiny.dm.S === 0, 'S in input units, about 2^-2000 times the reference, rounds to 0');
+  assert.equal(tiny.dm.dbar, reference.dm.dbar * 2 ** -1000);
+  // No secondary, or a non-finite d: nothing was rescaled.
+  assert.equal(compareForecastLosses(setFromD(uniform()), tracked).secondary.d_unit_log2, null);
+  const overflow = { ...base, a: base.a.map((x, i) => (i === 3 ? 1e200 : x)) };
+  const failed = compareForecastLosses(overflow, tracked);
+  assert.deepEqual([failed.status.reason, failed.d_unit_log2], ['non_finite_loss', null]);
+  const none = compareForecastLosses(setFromD(uniform(), { nullA: uniform().map((_, i) => i) }), tracked);
+  assert.deepEqual([none.drops.used, none.d_unit_log2], [0, null], 'no used day');
+});
+
+test('powerOfTwoExponent: the power of two at or below max|x|, also where log2 rounds up to the next integer', () => {
+  const below16 = 16 * (1 - 2 ** -53);   // the largest double below 16; log2 rounds it to exactly 4
+  assert.equal(Math.log2(below16), 4);
+  assert.equal(powerOfTwoExponent([below16]), 3);
+  assert.equal(powerOfTwoExponent([-below16 / 2 ** 100]), -97);
+  assert.equal(powerOfTwoExponent([16, -3]), 4);
+  assert.equal(powerOfTwoExponent([Number.MAX_VALUE]), 1023);
+  assert.equal(powerOfTwoExponent([5e-324]), -1074);
+  assert.equal(powerOfTwoExponent([3 * 2 ** -1074]), -1073);
+  for (const values of [[], [0, -0], [Infinity], [1, NaN]]) assert.equal(powerOfTwoExponent(values), 0, JSON.stringify(values));
+  const random = createRandom(3);
+  for (let i = 0; i < 2000; i++) {
+    const x = (random() + 0.5) * 2 ** Math.floor(random() * 2000 - 1000), e = powerOfTwoExponent([x]);
+    assert.ok(2 ** e <= x && x < 2 ** (e + 1), `${x}: ${e}`);
   }
 });
 

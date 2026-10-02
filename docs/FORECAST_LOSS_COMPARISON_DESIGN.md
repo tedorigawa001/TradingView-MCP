@@ -1,4 +1,4 @@
-# Forecast loss comparison: design memo (rev 4.2, implemented; code review folded in)
+# Forecast loss comparison: design memo (rev 4.3, implemented; code review folded in)
 
 Backlog #101, item 2. Review history:
 - rev 1: BLOCK, 14 findings (F1–F14);
@@ -28,6 +28,14 @@ approved by the user on 2026-09-28:
   EXT-2b).
 
 EXT-3, the store hashing its raw bytes, is an implementation fix.
+
+Rev 4.3 (2026-10-03) takes up the information-level finding of the 2026-09-29 diff check, kept in
+BACKLOG #101 item 2 for the next change to the tool. At tiny scale the decisions stay exact while
+the reported d̄, S and means can round to 0, and read with "a mean of 0 or more reverses" or
+"S ≤ 0 is not evaluable" they mislead. The response therefore reports the exponent of the
+rescaling power of two, `d_unit_log2`, and `secondary.d_unit_log2` for the secondary mean. The
+power is now at or below max|d| also where log2 rounds up at the top of a binade; that changes no
+result, since division by any power of two is exact.
 
 The implementation is in docs/FORECAST_LOSS_COMPARISON.md.
 
@@ -130,7 +138,8 @@ statement of superiority.
     `hac_variance_not_finite`. S = ∞ had given DM = 0 and p = 0.5 as if evaluable (EXT-2).
   - Every d-level statistic runs on d divided by the power of two at or below max|d|, which is
     exact and scale-invariant: HAC, DM, the relative variance test, the block, trimmed, both-tail
-    and label means, k* and the bootstrap. Reported values are converted back to the input units.
+    and label means, k* and the bootstrap. Reported values are converted back to the input units,
+    and the exponent is reported as `d_unit_log2` (rev 4.3).
     - The first version rescaled only HAC. When normal losses differed by a few multiples of
       2^-1074, the other means rounded to 0 and raised false reversals (EXT-4, a second external
       review).
@@ -271,11 +280,11 @@ An empty conflicts list therefore does not hide these.
 - **Field order:** `contract`, `status` (with a reason when `not_evaluable`), then:
   - `battery_outcome`, `robustness_conflicts[]`, `non_decisive_disagreements[]`;
   - `search` (below);
-  - the statistics: `dm {dbar, S, L, DM, p_a, p_b, T}`, `mean_favours`, `drops {…by cause, N}`,
-    hard-day diagnostics, `sub_periods[4]`, `trimmed_mean_decisive` (with
+  - the statistics: `d_unit_log2`, `dm {dbar, S, L, DM, p_a, p_b, T}`, `mean_favours`,
+    `drops {…by cause, N}`, hard-day diagnostics, `sub_periods[4]`, `trimmed_mean_decisive` (with
     `own_nulls_imputed_worst_case`), `trimmed_mean_both_tails`, `breakdown {k_star, fraction,
-    k_star_status}`, `secondary {status, mean, used, dropped, spearman_rho, near_copy_share,
-    sign_change_share, distinct}`,
+    k_star_status}`, `secondary {status, mean, d_unit_log2, used, dropped, spearman_rho,
+    near_copy_share, sign_change_share, distinct}`,
     `bootstrap {p, mc_se}`, and descriptive `caller_label_means`.
 - **Always the same:** `candidateEligible: false`, `statistical_calibration: "not_assessed"`.
 - **Limitations:**
