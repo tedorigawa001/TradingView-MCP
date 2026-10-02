@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { evaluateCollectionHealth } from "../../build/collectionHealth.js";
 import { parseCollectionHealthCliArguments, runCollectionHealthCli } from "../../build/collectionHealthCli.js";
@@ -163,6 +163,18 @@ test("launchd health monitors are repository-location independent and cover week
 
   assert.doesNotMatch(firstSeenCollector, /WorkingDirectory/);
   assert.match(firstSeenCollector, /node_modules\/bushido-tradingview-mcp\/build\/collectionCli\.js/);
+});
+
+test("launchd examples hold placeholders, not a real home directory, Node install or checkout", async () => {
+  const directory = new URL("../../docs/launchd/", import.meta.url);
+  const names = (await readdir(directory)).filter((name) => name.endsWith(".plist.example"));
+  assert.equal(names.length, 9);
+  for (const name of names) {
+    const text = await readFile(new URL(name, directory), "utf8");
+    const paths = [...text.matchAll(/<string>(\/[^<]*)<\/string>/g)].map((match) => match[1]);
+    assert.ok(paths.length > 0, name);
+    for (const path of paths) assert.match(path, /^\/(ABSOLUTE\/PATH\/TO|Users\/YOUR_USERNAME)\//, `${name}: ${path}`);
+  }
 });
 
 test("collection health CLI delivers stale and failure notifications but stays quiet when healthy", async () => {

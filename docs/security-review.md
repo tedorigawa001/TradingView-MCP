@@ -520,8 +520,9 @@ rejection, and size caps. No secret is hard-coded in a tracked file.
 Residual, accepted: the Federal Reserve statement parser
 (`officialMacroActualSources.ts`) backtracks quadratically — 64 KB in 4.0 s
 against an 8 MB cap — but only on a response from a TLS-protected official host,
-and only in a collection CLI. The `docs/launchd/*.example` files carry real
-absolute home paths and a username.
+and only in a collection CLI. The `docs/launchd/*.example` files carried real
+absolute home paths and a username until 2026-10-02; they now hold placeholders,
+and a test keeps them that way. The old paths remain in the git history.
 
 ## Handoff for Future Phases
 

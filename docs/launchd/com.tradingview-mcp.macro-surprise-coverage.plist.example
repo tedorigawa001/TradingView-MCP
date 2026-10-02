@@ -1,20 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Replace the placeholders before loading: launchd expands neither ~ nor environment variables.
+     /ABSOLUTE/PATH/TO/node is `command -v node`, /ABSOLUTE/PATH/TO/node_modules is `npm root -g`,
+     /ABSOLUTE/PATH/TO/TradingView-MCP is a built checkout, and YOUR_USERNAME is your macOS user. -->
 <dict>
   <key>Label</key>
   <string>com.tradingview-mcp.macro-surprise-coverage</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/bushidoyasu/.anyenv/envs/nodenv/versions/24.18.0/bin/node</string>
+    <string>/ABSOLUTE/PATH/TO/node</string>
     <string>build/macroSurpriseCoverageCli.js</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_cpi_2016_2026.json</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/us_nfp_2016_2026.json</string>
-    <string>--events</string><string>/Users/bushidoyasu/.tradingview-mcp/official-macro-events/fomc_statement_2016_2026.json</string>
+    <string>--events</string><string>/Users/YOUR_USERNAME/.tradingview-mcp/official-macro-events/us_cpi_2016_2026.json</string>
+    <string>--events</string><string>/Users/YOUR_USERNAME/.tradingview-mcp/official-macro-events/us_nfp_2016_2026.json</string>
+    <string>--events</string><string>/Users/YOUR_USERNAME/.tradingview-mcp/official-macro-events/fomc_statement_2016_2026.json</string>
     <string>--confirm-local-import</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP</string>
+  <string>/ABSOLUTE/PATH/TO/TradingView-MCP</string>
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>15</integer></dict>
@@ -24,8 +27,8 @@
     <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>15</integer></dict>
   </array>
   <key>StandardOutPath</key>
-  <string>/Users/bushidoyasu/.tradingview-mcp/macro-surprise-coverage.stdout.log</string>
+  <string>/Users/YOUR_USERNAME/.tradingview-mcp/macro-surprise-coverage.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/bushidoyasu/.tradingview-mcp/macro-surprise-coverage.stderr.log</string>
+  <string>/Users/YOUR_USERNAME/.tradingview-mcp/macro-surprise-coverage.stderr.log</string>
 </dict>
 </plist>
