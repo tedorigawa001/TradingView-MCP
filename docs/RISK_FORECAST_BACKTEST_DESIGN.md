@@ -327,12 +327,12 @@ blocked forecast reduces the count.
     α in every group. A forecast that lags shows ratios above 1 and excess hits in `rising`, and
     the reverse in `falling`. Leverage per group is reported but is not a signature, since any
     forecast that tracks volatility varies its leverage.
-- **Worst days:** the 10 most negative R_t (ordered by u_t·S_t, see Numerics; equal values in date
-  order), each with its date, L_t and L_t's percentile (r − 0.5)/T, where r is its rank by leverage
-  among all dates with a return (ties get the mean rank), and their mean percentile. 0.5 is the
-  mean under any ranking that is unrelated to the losses: a correct forecast does not carry unusual
-  leverage into its worst days, and a lagging one carries more (review simulation: 0.506 against
-  0.572 for EWMA).
+- **Worst days:** the 10 most negative R_t (ordered by u_t·S_t, then by the computed R_t and the
+  date; see Numerics), each with its date, L_t and L_t's percentile (r − 0.5)/T, where r is its
+  rank by leverage among all dates with a return (ties get the mean rank), and their mean
+  percentile. 0.5 is the mean under any ranking that is unrelated to the losses: a correct forecast
+  does not carry unusual leverage into its worst days, and a lagging one carries more (review
+  simulation: 0.506 against 0.572 for EWMA).
 - **Own nulls where they matter (N2).** Carried leverage lets nulls choose which earlier leverage
   stays in force: nulls just before a shock keep a lower leverage running into it. Each forecast
   therefore reports its own-null dates among the 10 worst days and within the maximum drawdown's

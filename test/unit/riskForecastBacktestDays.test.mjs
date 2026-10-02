@@ -358,6 +358,8 @@ test('leverage statistics: ties keep the first maximum date, and constant levera
   const vt = out.forecasts.a.vol_target;
   assert.deepEqual(vt.leverage, { mean: 1, median: 1, p95: 1, max: 1, max_date: datesOf(300)[0] });
   assert.equal(vt.worst_days.mean_leverage_percentile, 0.5, '(r − 0.5)/T with every rank tied at (T + 1)/2');
+  // Every −0.4% date ties on u·S and on R: the date decides, earliest first.
+  assert.deepEqual(vt.worst_days.days.map((d) => d.date), datesOf(300).filter((_, t) => t % 2).slice(0, 10));
 });
 
 test('a return exactly at the VaR threshold is not a hit', () => {
