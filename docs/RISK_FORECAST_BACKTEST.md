@@ -184,8 +184,8 @@ Per evaluated forecast, `vol_target`:
   `log_percent` and 1 for `log`; wealth starts at 1. R_t is 0 on a flat date whatever the return.
   Otherwise its factors (the target, (1/σ̂)/√P and Σᵢ wᵢ·(exp(rᵢ/s) − 1)) are multiplied in the
   order whose partial product stays a normal double, so for a finite sum no intermediate step turns
-  a representable R_t into 0 or ∞. Wealth is held relative to its running peak, so a run of gains
-  at a large leverage cannot overflow it.
+  a representable R_t into 0 or ∞ (up to rounding at the edges of the double range). Wealth is held
+  relative to its running peak, so a run of gains at a large leverage cannot overflow it.
   - If 1 + R_t ≤ 0 the position is **ruined** on that date (`ruined_on`). Wealth stays 0, the
     maximum drawdown is 1 with that date as its trough (even after an earlier drawdown that
     rounded to 1), and it is underwater to the end.
@@ -198,10 +198,10 @@ Per evaluated forecast, `vol_target`:
     defined.
   - The sum is itself a double. It can fall below the normal range only through a normalized
     weight below about 2e−276; it may then be rounded, and R_t with it.
-  - Otherwise the report gives the maximum drawdown as a fraction of the running peak, its peak and
-    trough dates, the longest underwater stretch in dates with a return, and whether it is underwater
-    at the end. The starting wealth counts as a peak: when the drawdown is measured from it,
-    `peak_date` is null.
+  - Without ruin, the report gives the maximum drawdown as a fraction of the running peak, its peak
+    and trough dates, the longest underwater stretch in dates with a return, and whether it is
+    underwater at the end. The starting wealth counts as a peak: when the drawdown is measured from
+    it, `peak_date` is null.
   - It also gives the own-null dates within the peak-to-trough stretch.
 - **Leverage:** mean, median, nearest-rank 95th percentile, and maximum with its first date.
 - **Regime view** (`regime_view`), by a quantity known before each day:

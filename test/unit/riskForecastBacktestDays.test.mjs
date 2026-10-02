@@ -372,6 +372,10 @@ test('position returns: value·(u/√P)·S is grouped so that its partial produc
   assert.ok(!Number.isFinite(unitScale * gain) && Math.abs(1e-320 * unitScale) < 2 ** -1022);
   assert.deepEqual([rise.drawdown.ruined_on, rise.worst_days.days[0].date, rise.worst_days.days[0].position_return],
     [null, dates[100], (1e-320 * gain) * unitScale]);
+  // On ordinary inputs the first grouping is 0.1.18's, bit for bit: here (value·(u/√P))·S would differ in the last bit.
+  const plainScale = 1 / Math.sqrt(0.5) / root, plainLoss = growth(-0.4);
+  assert.notEqual(10 * (plainScale * plainLoss), (10 * plainScale) * plainLoss);
+  assert.equal(run(flat(T, 0.5)).forecasts.a.vol_target.worst_days.days[0].position_return, 10 * (plainScale * plainLoss));
   // S = +∞ (design limit (b)) where L underflows to 0: R = +∞, a new peak, not 0·∞ = NaN for the rest of the run.
   const jump = flat(T);
   jump.returns[100] = [80000];
