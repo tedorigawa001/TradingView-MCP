@@ -543,8 +543,9 @@ function volatilityTarget(v: VolatilityInput) {
   const intraday = whole.realized_to_target.intraday_proxy * v.targetValue;
 
   // Compounded wealth (design F11): R_t = L_t·S_t with S_t = Σ wᵢ(exp(rᵢ/s) − 1). Ruin when 1 + R_t ≤ 0. R_t is
-  // value·((u/√P)·S_t), or L_t·S_t if that inner product overflows, so neither a tiny target nor a leverage beyond the
-  // largest double turns a representable R_t into 0 or ∞; a flat date (u = 0) is 0 whatever S_t is, never 0·∞.
+  // value·((u/√P)·S_t), or L_t·S_t if that inner product overflows, so for a finite S_t neither a tiny target nor a
+  // leverage beyond the largest double turns a representable R_t into 0 or ∞; a flat date (u = 0) is 0 whatever S_t is.
+  // An S_t beyond the largest double (a rise of more than e^709.78-fold in one day) is design limit (b).
   const leverage = v.unit.map((u) => v.targetValue * (u / v.rootPeriods));
   const position = v.simpleReturns.map((r, k) => {
     if (v.unit[k] === 0) return 0;
@@ -571,10 +572,10 @@ function volatilityTarget(v: VolatilityInput) {
 
   // Ranks, the maximum and the percentiles from u: the same order as L, without ties from L overflowing or underflowing.
   // The worst days are ordered by u·S_t, the order of R_t in exact arithmetic, so a target small enough for every R_t to
-  // underflow to 0 still finds them.
+  // underflow to 0 still finds them; where u·S_t ties, as at ±∞, by R_t, then by date.
   const ranks = averageRanks([...v.unit]);
   const severity = v.simpleReturns.map((r, k) => (v.unit[k] === 0 ? 0 : v.unit[k] * r));
-  const order = all.slice().sort((x, y) => severity[x] - severity[y] || x - y).slice(0, WORST_DAYS);
+  const order = all.slice().sort((x, y) => severity[x] - severity[y] || position[x] - position[y] || x - y).slice(0, WORST_DAYS);
   const worst = order.map((k) => ({ date: v.dates[k], position_return: position[k], leverage: leverage[k], leverage_percentile: (ranks[k] - 0.5) / T }));
   let maxK = 0;
   for (let k = 1; k < T; k++) if (v.unit[k] > v.unit[maxK]) maxK = k;

@@ -280,15 +280,18 @@ blocked forecast reduces the count.
   - with S_t = Σᵢ wᵢ·(exp(r_i,t/s) − 1), R_t = value·((u_t/√P)·S_t), or L_t·S_t when that inner
     product overflows. R_t is 0 on a flat date (u_t = 0), whatever S_t is;
   - the worst days are ordered by u_t·S_t, the order of R_t in exact arithmetic, so they are found
-    even when a tiny target rounds every R_t to 0;
+    even when a tiny target rounds every R_t to 0. Where u_t·S_t ties, as at ±∞, they are ordered
+    by the computed R_t, then by date;
   - wealth is held relative to its running peak, at most 1 before each day, so a run of gains
     cannot overflow it. Ruin is a drawdown of 1 with the ruin date as its trough, whatever came
     before, an earlier drawdown that rounded to 1 included;
   - limit (a): without ruin, wealth reaches 0 only after losing more than 1 − 2⁻¹⁰⁷⁴ of the peak,
     and precision falls once it is below 2⁻¹⁰²². The drawdown is then 1 to double precision, and
     wealth stays at 0: a later recovery is not tracked;
-  - limit (b): S_t is NaN when two series with opposite weights both rise more than e^709.78-fold
-    on one date (∞ − ∞). Real prices do not, and the drawdown is not defined from such a date on.
+  - limit (b): S_t is not finite when a series rises more than e^709.78-fold on one date: ±∞, or
+    NaN (∞ − ∞) when series with opposite weights both do. Real prices do not. R_t is then ±∞, a
+    new peak or a ruin even where the true R_t is representable at a tiny leverage, or NaN when
+    L_t underflows to 0 or S_t is NaN; after a NaN the drawdown and the worst days are not defined.
 - **Realized volatility against the target**, in log space with p_t = L_t·r_p,t:
   - from daily returns: √(P·mean(p_t²)), zero-mean like the VaR, and its ratio to the target;
   - from the intraday proxy: √(P·mean(L_t²·w'RC_t w)), which is far less noisy, and its ratio.
@@ -325,11 +328,11 @@ blocked forecast reduces the count.
     the reverse in `falling`. Leverage per group is reported but is not a signature, since any
     forecast that tracks volatility varies its leverage.
 - **Worst days:** the 10 most negative R_t (ordered by u_t·S_t, see Numerics; equal values in date
-  order), each with its date, L_t
-  and L_t's percentile (r − 0.5)/T, where r is its rank by leverage among all dates with a return
-  (ties get the mean rank), and their mean percentile. 0.5 is the mean under any ranking that is
-  unrelated to the losses: a correct forecast does not carry unusual leverage into its worst days,
-  and a lagging one carries more (review simulation: 0.506 against 0.572 for EWMA).
+  order), each with its date, L_t and L_t's percentile (r − 0.5)/T, where r is its rank by leverage
+  among all dates with a return (ties get the mean rank), and their mean percentile. 0.5 is the
+  mean under any ranking that is unrelated to the losses: a correct forecast does not carry unusual
+  leverage into its worst days, and a lagging one carries more (review simulation: 0.506 against
+  0.572 for EWMA).
 - **Own nulls where they matter (N2).** Carried leverage lets nulls choose which earlier leverage
   stays in force: nulls just before a shock keep a lower leverage running into it. Each forecast
   therefore reports its own-null dates among the 10 worst days and within the maximum drawdown's

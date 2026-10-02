@@ -222,7 +222,11 @@ test('drawdown edges: a flat date ignores its return, ruin is always the trough,
     base.returns[1] = [r];
     return base;
   };
-  assert.deepEqual(run(flatStart(80000)).forecasts.a.vol_target, run(flatStart(-0.4)).forecasts.a.vol_target, 'R = 0 and u·S = 0 either way');
+  // Also at the smallest target, where every R rounds to 0 and only u·S = 0 keeps the flat date out of the worst days.
+  for (const targetValue of [10, 5e-324]) {
+    assert.deepEqual(run({ ...flatStart(80000), targetValue }).forecasts.a.vol_target, run({ ...flatStart(-0.4), targetValue }).forecasts.a.vol_target,
+      `R = 0 and u·S = 0 either way, at ${targetValue}`);
+  }
   // Two days at 1 + R = e^−25 round the drawdown to 1. After a recovery, a ruin on day 200 is still the trough, from the
   // running peak on day 198 (design F11), not the earlier dip with the same rounded value.
   const deep = () => {
@@ -243,7 +247,7 @@ test('drawdown edges: a flat date ignores its return, ruin is always the trough,
   under.returns[100] = [80000];
   const u = run({ ...under, targetValue: plain }).forecasts.a.vol_target.drawdown;
   assert.deepEqual([u.max, u.ruined_on, u.underwater_at_end, u.longest_underwater_dates], [1, null, true, T - 49]);
-  // Wealth at 2e-175 of its peak, then a day where (u/√P)·S overflows but R = L·S ≈ 4e168 does not: still underwater, where
+  // Wealth at 2e-174 of its peak, then a day where (u/√P)·S overflows but R = L·S ≈ 4e168 does not: still underwater, where
   // value·∞ would have made a new peak. The target is 1e-140, and σ̂² = value²/P gives L = 1 on the other dates.
   const value = 1e-140, fallback = flat(T, value * value / 260);
   for (let t = 50; t < 66; t++) fallback.returns[t] = [-2500];
@@ -327,6 +331,17 @@ test('a target small enough for σ* = value/√P to underflow: the leverage and 
   assert.ok(Math.abs(vt.leverage.mean / expected - 1) < 1e-14, String(vt.leverage.mean));
   assert.ok(vt.sub_periods.every((s) => s.mean_leverage > 0));
   assert.ok(vt.worst_days.days.every((d) => d.position_return < 0), 'R = value·((u/√P)·S) is a normal double here');
+});
+
+test('worst days: where u·S ties at −∞, the more negative R comes first', () => {
+  // Short one series at σ̂ = 1e-150 (u = 1e150): rises of 1e159- and 2e159-fold give u·S = −∞ on both dates, while
+  // R = value·((u/√P)·S) is finite at a target of 1e-150: about −6.2e157 and −1.24e158.
+  const T = 300, dates = datesOf(T), base = flat(T, 1e-300);
+  base.returns[50] = [100 * Math.log(1e159)];
+  base.returns[60] = [100 * Math.log(2e159)];
+  const days = run({ ...base, weights: [-1], targetValue: 1e-150 }).forecasts.a.vol_target.worst_days.days;
+  assert.deepEqual(days.slice(0, 2).map((d) => d.date), [dates[60], dates[50]], 'by R where u·S ties, not by date');
+  assert.ok(days.every((d, i) => i === 0 || d.position_return >= days[i - 1].position_return), 'non-decreasing in R');
 });
 
 test('the realized-to-target ratios are scaled so that no square overflows, for the smallest valid σ̂²', () => {
