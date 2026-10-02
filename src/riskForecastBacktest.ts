@@ -499,6 +499,9 @@ interface SubsetInput {
   ownNull: Uint8Array; hitSets: readonly Uint8Array[];
 }
 
+/** A finite double whose magnitude is at least 2⁻¹⁰²²: no precision lost to underflow, and no overflow. */
+const isNormal = (x: number) => Math.abs(x) >= 2 ** -1022 && Math.abs(x) <= Number.MAX_VALUE;
+
 /** √(mean of xₖ²), scaled by max|xₖ| so that no square overflows; NaN for no values, like the mean. */
 function rootMeanSquare(values: readonly number[]): number {
   const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
@@ -543,14 +546,18 @@ function volatilityTarget(v: VolatilityInput) {
   const intraday = whole.realized_to_target.intraday_proxy * v.targetValue;
 
   // Compounded wealth (design F11): R_t = L_t·S_t with S_t = Σ wᵢ(exp(rᵢ/s) − 1). Ruin when 1 + R_t ≤ 0. R_t is
-  // value·((u/√P)·S_t), or L_t·S_t if that inner product overflows, so for a finite S_t neither a tiny target nor a
-  // leverage beyond the largest double turns a representable R_t into 0 or ∞; a flat date (u = 0) is 0 whatever S_t is.
-  // An S_t beyond the largest double (a rise of more than e^709.78-fold in one day) is design limit (b).
+  // value·(u/√P)·S_t grouped as value·((u/√P)·S_t), (value·(u/√P))·S_t or (value·S_t)·(u/√P), the first whose partial
+  // product is a normal double: when R_t itself is one, so is one of them (up to rounding at the range's edges), so no
+  // partial product over- or underflows a representable R_t into 0 or ∞. A flat date (u = 0) is 0 whatever S_t is, and
+  // an S_t of ±∞ (design limit (b)) gives ±∞, not NaN.
   const leverage = v.unit.map((u) => v.targetValue * (u / v.rootPeriods));
   const position = v.simpleReturns.map((r, k) => {
     if (v.unit[k] === 0) return 0;
-    const scaled = (v.unit[k] / v.rootPeriods) * r;
-    return Number.isFinite(scaled) ? v.targetValue * scaled : leverage[k] * r;
+    const scale = v.unit[k] / v.rootPeriods, inner = scale * r;
+    if (isNormal(inner)) return v.targetValue * inner;
+    if (isNormal(leverage[k])) return leverage[k] * r;
+    const valued = v.targetValue * r;
+    return isNormal(valued) ? valued * scale : v.targetValue * inner;
   });
   // Wealth is held relative to its running peak, at most 1 before each day, so a long run of gains cannot overflow it
   // and lose the peak. Ruin sets it to 0: a drawdown of 1, with the ruin date as its trough. Without ruin it reaches 0

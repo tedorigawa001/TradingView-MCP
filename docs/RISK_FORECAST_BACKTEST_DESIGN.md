@@ -16,6 +16,9 @@ Review history:
   Wealth that overflowed lost the drawdown of a later ruin; w'RC w rounding below 0 on a correct
   PSD proxy made the intraday ratio null; an extreme but finite target made the ratios, which do
   not depend on it, null or 0.
+- report after 0.1.18: MEDIUM. The partial product (u/√P)·S_t could underflow to 0 for a tiny
+  weight, a huge σ̂² and a huge target, which made R_t 0 and erased the drawdown. Folded into rev
+  2.5's numerics as the grouping rule, with limit (c).
 
 Rev 2 folds in F1–F12:
 - own nulls count as hits, with a cap (F1), so `forecasts` is no longer an input;
@@ -267,7 +270,7 @@ blocked forecast reduces the count.
   carried, across missing-return dates too; before the first valid forecast the position is flat
   (L = 0). `own_null_dates_with_carried_leverage` reports the count.
 - **Numerics (rev 2.5).** A finite input gives +∞, 0 or NaN only where the value itself is beyond
-  the range of a double, apart from the two limits at the end:
+  the range of a double, apart from the three limits at the end:
   - w'RC_t w below 0 counts as 0. The proxy is a sum of rr', so it is PSD and a negative value is
     rounding, as on a hedged portfolio of series that move together;
   - L_t = value·(u_t/√P) with the unit leverage u_t = 1/σ̂_t, carried and flat as above. The target
@@ -277,8 +280,11 @@ blocked forecast reduces the count.
     The annualized values are the ratios times the target;
   - each leverage statistic is value·(that statistic of u/√P), and the ranks and the maximum's date
     use u. A leverage beyond the largest double is +∞, null in JSON;
-  - with S_t = Σᵢ wᵢ·(exp(r_i,t/s) − 1), R_t = value·((u_t/√P)·S_t), or L_t·S_t when that inner
-    product overflows. R_t is 0 on a flat date (u_t = 0), whatever S_t is;
+  - with S_t = Σᵢ wᵢ·(exp(r_i,t/s) − 1), R_t = value·(u_t/√P)·S_t is grouped as
+    value·((u_t/√P)·S_t), (value·(u_t/√P))·S_t or (value·S_t)·(u_t/√P), the first whose partial
+    product is a normal double. When R_t itself is a normal double, one of them is (up to rounding
+    at the range's edges), so no partial product turns a representable R_t into 0 or ±∞. R_t is 0
+    on a flat date (u_t = 0), whatever S_t is;
   - the worst days are ordered by u_t·S_t, the order of R_t in exact arithmetic, so they are found
     even when a tiny target rounds every R_t to 0. Where u_t·S_t ties, as at ±∞, they are ordered
     by the computed R_t, then by date;
@@ -291,7 +297,11 @@ blocked forecast reduces the count.
   - limit (b): S_t is not finite when a series rises more than e^709.78-fold on one date: ±∞, or
     NaN (∞ − ∞) when series with opposite weights both do. Real prices do not. R_t is then ±∞, a
     new peak or a ruin even where the true R_t is representable at a tiny leverage, or NaN when
-    L_t underflows to 0 or S_t is NaN; after a NaN the drawdown and the worst days are not defined.
+    S_t is NaN; after a NaN the drawdown and the worst days are not defined;
+  - limit (c): S_t is itself a double. If every nonzero term wᵢ·(exp(r_i,t/s) − 1) is at least
+    2⁻⁹⁶⁹, all are multiples of 2⁻¹⁰²¹ and S_t is 0 or normal. A smaller term needs a normalized
+    weight below 2⁻⁹¹⁶ (about 2e−276), as a nonzero exp(r/s) − 1 is at least 2⁻⁵³; S_t may then
+    be rounded to a multiple of 2⁻¹⁰⁷⁴ or to 0, and R_t loses that precision too.
 - **Realized volatility against the target**, in log space with p_t = L_t·r_p,t:
   - from daily returns: √(P·mean(p_t²)), zero-mean like the VaR, and its ratio to the target;
   - from the intraday proxy: √(P·mean(L_t²·w'RC_t w)), which is far less noisy, and its ratio.

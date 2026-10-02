@@ -181,10 +181,11 @@ Per evaluated forecast, `vol_target`:
   w'RC w below 0, which rounding can leave on a hedged portfolio of series that move together,
   counts as 0 here, in the scale check and in the regime view.
 - **Drawdown**, from compounded simple returns R_t = L_t·Σᵢ wᵢ·(exp(rᵢ/s) − 1), with s = 100 for
-  `log_percent` and 1 for `log`; wealth starts at 1. R_t is 0 on a flat date whatever the return,
-  and, for a finite Σᵢ wᵢ·(exp(rᵢ/s) − 1), is computed so that neither a tiny target nor a leverage
-  beyond the largest double turns a representable R_t into 0 or ∞. Wealth is held relative to its
-  running peak, so a run of gains at a large leverage cannot overflow it.
+  `log_percent` and 1 for `log`; wealth starts at 1. R_t is 0 on a flat date whatever the return.
+  Otherwise its factors (the target, (1/σ̂)/√P and Σᵢ wᵢ·(exp(rᵢ/s) − 1)) are multiplied in the
+  order whose partial product stays a normal double, so for a finite sum no intermediate step turns
+  a representable R_t into 0 or ∞. Wealth is held relative to its running peak, so a run of gains
+  at a large leverage cannot overflow it.
   - If 1 + R_t ≤ 0 the position is **ruined** on that date (`ruined_on`). Wealth stays 0, the
     maximum drawdown is 1 with that date as its trough (even after an earlier drawdown that
     rounded to 1), and it is underwater to the end.
@@ -193,8 +194,10 @@ Per evaluated forecast, `vol_target`:
   - A date with a position on which a series rises more than e^709.78-fold (no real price does) is
     outside these guarantees: the sum is then ±∞, or NaN when series with opposite weights both
     do. R_t is ±∞, a new peak or a ruin even where the true R_t is representable at a tiny
-    leverage, or NaN when the leverage underflows to 0 or the sum is NaN; after a NaN the drawdown
-    and the worst days are not defined.
+    leverage, or NaN when the sum is NaN; after a NaN the drawdown and the worst days are not
+    defined.
+  - The sum is itself a double. It can fall below the normal range only through a normalized
+    weight below about 2e−276; it may then be rounded, and R_t with it.
   - Otherwise the report gives the maximum drawdown as a fraction of the running peak, its peak and
     trough dates, the longest underwater stretch in dates with a return, and whether it is underwater
     at the end. The starting wealth counts as a peak: when the drawdown is measured from it,

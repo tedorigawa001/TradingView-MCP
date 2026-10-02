@@ -344,6 +344,41 @@ test('worst days: where u·S ties at −∞, the more negative R comes first', (
   assert.ok(days.every((d, i) => i === 0 || d.position_return >= days[i - 1].position_return), 'non-decreasing in R');
 });
 
+test('position returns: value·(u/√P)·S is grouped so that its partial product stays a normal double', () => {
+  const T = 300, dates = datesOf(T), root = Math.sqrt(260);
+  const growth = (r) => Math.exp(r / 100) - 1;
+  // A tiny weight on the only series that moves, a huge σ̂² and target: (u/√P)·S underflows to −0, which gave R = 0 and no
+  // drawdown; (value·(u/√P))·S is the true R ≈ −9.4e−17.
+  const weights = normalizeWeights([2e-167, 1], 2);
+  const huge = Array.from({ length: T }, () => [[1, 0], [0, 8e307]]);
+  const tiny = run({ returns: Array.from({ length: T }, (_, t) => [t % 2 ? -0.4 : 0.5, 0]), rc: Array.from({ length: T }, () => [[1, 0], [0, 1]]),
+    a: huge, b: huge, weights, targetValue: 1.7e308 }).forecasts.a.vol_target;
+  const scale = 1 / Math.sqrt(quadraticForm(weights, huge[0])) / root, loss = weights[0] * growth(-0.4);
+  assert.ok(Math.abs(scale * loss) < 2 ** -1022, 'the first grouping underflows');
+  assert.equal(tiny.worst_days.days[0].position_return, (1.7e308 * scale) * loss);
+  assert.ok(tiny.worst_days.days[0].position_return < -9e-17 && tiny.drawdown.max > 0 && tiny.drawdown.longest_underwater_dates === 1);
+  // A weight of 2e−152: (u/√P)·S ≈ −5.5e−310 is subnormal, not 0, and would round R ≈ −0.094 to its fewer bits.
+  const subnormalWeights = normalizeWeights([2e-152, 1], 2), subnormalLoss = subnormalWeights[0] * growth(-0.4);
+  const coarse = run({ returns: Array.from({ length: T }, (_, t) => [t % 2 ? -0.4 : 0.5, 0]), rc: Array.from({ length: T }, () => [[1, 0], [0, 1]]),
+    a: huge, b: huge, weights: subnormalWeights, targetValue: 1.7e308 }).forecasts.a.vol_target;
+  assert.ok(scale * subnormalLoss !== 0 && Math.abs(scale * subnormalLoss) < 2 ** -1022);
+  assert.equal(coarse.worst_days.days[0].position_return, (1.7e308 * scale) * subnormalLoss);
+  // A subnormal target, u/√P = 1e6 and a short series rising e^705-fold: (u/√P)·S overflows and value·(u/√P) is
+  // subnormal, so only (value·S)·(u/√P) is exact; the fallback value·((u/√P)·S) = −∞ would be a ruin.
+  const variance = 1 / (1e12 * 260), short = flat(T, variance);
+  short.returns[100] = [70500];
+  const rise = run({ ...short, weights: [-1], targetValue: 1e-320 }).forecasts.a.vol_target;
+  const unitScale = 1 / Math.sqrt(variance) / root, gain = -growth(70500);
+  assert.ok(!Number.isFinite(unitScale * gain) && Math.abs(1e-320 * unitScale) < 2 ** -1022);
+  assert.deepEqual([rise.drawdown.ruined_on, rise.worst_days.days[0].date, rise.worst_days.days[0].position_return],
+    [null, dates[100], (1e-320 * gain) * unitScale]);
+  // S = +∞ (design limit (b)) where L underflows to 0: R = +∞, a new peak, not 0·∞ = NaN for the rest of the run.
+  const jump = flat(T);
+  jump.returns[100] = [80000];
+  const peak = run({ ...jump, targetValue: 5e-324 }).forecasts.a.vol_target.drawdown;
+  assert.deepEqual([peak.max, peak.longest_underwater_dates, peak.underwater_at_end], [0, 0, false]);
+});
+
 test('the realized-to-target ratios are scaled so that no square overflows, for the smallest valid σ̂²', () => {
   const T = 300, base = flat(T);
   base.a[100] = 1e-320;   // σ̂ = 1e-160: u·r_p = 5e159, whose square overflows
