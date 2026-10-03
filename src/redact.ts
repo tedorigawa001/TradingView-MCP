@@ -52,8 +52,26 @@ const AUTHORIZATION = new RegExp(String.raw`\b(authorization)(` +
 const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
   String.raw`(\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})[\w.~+/-]+=*`, "gi");
 
+/** What a message becomes when it cannot be redacted: nothing of it is passed on. */
+export const WITHHELD_MESSAGE = "[message withheld: it could not be redacted]";
+
 export function redactSecrets(text: string): string {
-  const redacted = text
+  let redacted: string;
+  try {
+    redacted = redactAll(text);
+  } catch {
+    // A quoted run pushes one backtracking entry per character, so a value of some 8 million characters (a page may
+    // send up to 256 MiB) overflows the regexp stack. Fail closed rather than throw from an error path (102-02 review).
+    return WITHHELD_MESSAGE;
+  }
+  // The marker sits on its own line, so redacting a truncated result again cannot run a value over it and drop it.
+  return redacted.length <= MAX_REDACTED_CHARS
+    ? redacted
+    : `${redacted.slice(0, MAX_REDACTED_CHARS)}\n… [truncated]`;
+}
+
+function redactAll(text: string): string {
+  return text
     .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
     // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
     .replace(AUTHORIZATION, (_, name: string, separator: string, escaped?: string, double?: string, single?: string) =>
@@ -63,8 +81,4 @@ export function redactSecrets(text: string): string {
     .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)(\?[^\s"'<>()[\]]*)?/gi,
       (match: string, url: string, query: string | undefined) => (query === undefined ? match : `${url}?***`))
     .replace(GENERIC, "$1$2***");
-  // The marker sits on its own line, so redacting a truncated result again cannot run a value over it and drop it.
-  return redacted.length <= MAX_REDACTED_CHARS
-    ? redacted
-    : `${redacted.slice(0, MAX_REDACTED_CHARS)}\n… [truncated]`;
 }

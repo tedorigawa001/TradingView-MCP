@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactSecrets, MAX_REDACTED_CHARS } from "../../build/redact.js";
+import { redactSecrets, MAX_REDACTED_CHARS, WITHHELD_MESSAGE } from "../../build/redact.js";
 
 test("redaction still removes userinfo, query strings and bearer tokens", () => {
   assert.equal(redactSecrets("connect http://user:hunter2@10.11.12.13:9222 failed"),
@@ -58,6 +58,8 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
     ["x-api-key:\r\n k-9", "x-api-key:\r\n ***"],
     ['"token":\n  "abc123"', '"token":\n  "***"'],
     ["'api_key' => 'k-9'", "'api_key' => '***'"],
+    ["{'Authorization': 'Digest u=\"a\", x=\\'k-9\\''}", "{'Authorization': '***'}"],
+    ["Bearer  \n  sk-live-123", "Bearer  \n  ***"],
     // Before the query rule, so a header inside a query string cannot leave its credential behind the "?***".
     ["GET https://api.example/v1?x=1,Authorization:Bearer sk-live-123", "GET https://api.example/v1?***"],
   ];
@@ -100,6 +102,17 @@ test("a long message cannot stall the thread that redacts it", () => {
     assert.ok(elapsedMs < 2_000,
       `redacting ${JSON.stringify(adversarial.slice(0, 20))}… (${adversarial.length} chars) took ${elapsedMs.toFixed(0)} ms`);
   }
+});
+
+test("a message that cannot be redacted is withheld whole instead of thrown or passed on", (t) => {
+  // A quoted value of some 8 million characters overflows the regexp stack; any such failure must fail closed.
+  t.mock.method(String.prototype, "replace", () => { throw new RangeError("Maximum call stack size exceeded"); });
+  assert.equal(redactSecrets("Authorization: Bearer sk-live-123"), WITHHELD_MESSAGE);
+  t.mock.restoreAll();
+  // The real input, 9 million characters in one quoted value: whichever way the engine goes, it neither throws nor
+  // passes the value on.
+  const result = redactSecrets(`{"Authorization":"Basic ${"a".repeat(9_000_000)}`);
+  assert.ok(result === WITHHELD_MESSAGE || result === '{"Authorization":"***', result.slice(0, 60));
 });
 
 test("the result is capped so a huge message cannot be relayed verbatim", () => {
