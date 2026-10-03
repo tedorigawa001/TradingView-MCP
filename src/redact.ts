@@ -21,15 +21,37 @@
  */
 export const MAX_REDACTED_CHARS = 4096;
 
+/** Authorization schemes that may follow the header name after a space alone, or stand alone before a folded value. */
+const SCHEME = String.raw`(?:bearer|basic|digest|negotiate|ntlm|aws4-hmac-sha256|oauth)`;
+
+/**
+ * A whole Authorization value, scheme and credentials (BACKLOG 102-02): masking only the first word left
+ * "Authorization: *** abc", and a multi-part value (Digest, AWS4-HMAC-SHA256, OAuth 1.0) kept everything after its
+ * first ", ". The value runs to its closing quote when quoted, else to the end of the line, and onto an indented
+ * next line only when its line holds just the scheme. It follows:
+ * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with an
+ *   indented next line as a fold unless it is a stack frame ("    at …"), and Proxy-Authorization included since \b
+ *   falls after its hyphen;
+ * - a name-value pair, `['Authorization', '…']` or HAR's `{"name":"Authorization","value":"…"}`;
+ * - a known scheme after a space alone.
+ * A null, true, false or undefined value is left as it is, so a JSON dump stays whole.
+ */
+const AUTHORIZATION = new RegExp(String.raw`\b(authorization)(` +
+  String.raw`\\?["']?[ \t]*(?:=>|[=:])[ \t]*(?:\r?\n[ \t]+(?![ \t]|at\s))?(?=\S)` +
+  String.raw`|\\?["'][ \t]*,[ \t]*(?:\\?["']value\\?["'][ \t]*:[ \t]*)?(?=\\?["'])` +
+  String.raw`|[ \t]+(?=${SCHEME}\b)` +
+  String.raw`)(?:(\\?["'])[^"'\\\r\n]*|(?!(?:null|true|false|undefined)\b)(?:${SCHEME}[ \t]*\r?\n[ \t]+(?![ \t]|at\s))?[^\r\n]+)`, "gi");
+
 export function redactSecrets(text: string): string {
   const redacted = text
     .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
-    .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)\?[^\s"'<>()[\]]*/gi, "$1?***")
-    // An Authorization value is a scheme and its credentials ("Bearer abc", "Basic dXNl…"). Both go: masking only the
-    // first word left "Authorization: *** abc" (BACKLOG 102-02). A quoted key, as in a JSON or Python dump of the
-    // headers, a value folded onto the next line, and Proxy-Authorization (\b falls after the hyphen) count too.
-    .replace(/\b(authorization)(["']?\s*[=:]\s*["']?)(?:[a-z][\w-]*[ \t]+)?[^\s"'<>]+/gi, "$1$2***")
-    .replace(/\b(bearer|token|api[_-]?key|authorization)(["']?\s*[=:]\s*["']?|\s+)[\w.~+/-]+=*/gi, "$1$2***");
+    // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
+    .replace(AUTHORIZATION, (_, name: string, separator: string, quote: string | undefined) => `${name}${separator}${quote ?? ""}***`)
+    // The query is optional so that a URL without one is consumed whole: requiring it made every later "x://" in the
+    // body rescan the rest of the message, which took 5 s on 200 KB of "x://" (code review of 102-02).
+    .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)(\?[^\s"'<>()[\]]*)?/gi,
+      (match: string, url: string, query: string | undefined) => (query === undefined ? match : `${url}?***`))
+    .replace(/\b(bearer|token|api[_-]?key)(\\?["']?[ \t]*(?:=>|[=:])[ \t]*\\?["']?|[ \t]+)[\w.~+/-]+=*/gi, "$1$2***");
   return redacted.length <= MAX_REDACTED_CHARS
     ? redacted
     : `${redacted.slice(0, MAX_REDACTED_CHARS)}… [truncated]`;
