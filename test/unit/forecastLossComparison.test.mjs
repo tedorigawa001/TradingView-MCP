@@ -590,6 +590,20 @@ test('d_unit_log2 is the power of two d was rescaled by, so a displayed S of 0 a
   assert.deepEqual([failed.status.reason, failed.d_unit_log2], ['non_finite_loss', null]);
   const none = compareForecastLosses(setFromD(uniform(), { nullA: uniform().map((_, i) => i) }), tracked);
   assert.deepEqual([none.drops.used, none.d_unit_log2], [0, null], 'no used day');
+  // Every branch reports it just before dm: favoured, neither, and not evaluable with used days.
+  const neither = compareForecastLosses(setFromD(Array.from({ length: 400 }, (_, i) => 0.02 * Math.sin(1.3 * i)),
+    { secondary: independentSecondary }), tracked);
+  const short = compareForecastLosses(setFromD(uniform(60), { secondary: independentSecondary }), tracked);
+  assert.deepEqual([neither.mean_favours, neither.d_unit_log2], ['neither', -6], 'max|d| is about 0.02, in [2^-6, 2^-5)');
+  assert.deepEqual([short.status.reason, short.d_unit_log2], ['fewer_than_100_used_days', -4]);
+  for (const r of [reference, neither, short]) {
+    const keys = Object.keys(r);
+    assert.equal(keys.indexOf('d_unit_log2'), keys.indexOf('dm') - 1, r.status.reason ?? r.mean_favours);
+    assert.deepEqual(Object.keys(r.secondary).slice(0, 4), ['status', 'mean', 'd_unit_log2', 'used']);
+  }
+  // A against itself: every d is 0, nothing to rescale, and the exponent used is 0.
+  const self = compareForecastLosses(setFromD(Array.from({ length: 200 }, () => 0)), tracked);
+  assert.deepEqual([self.status.reason, self.d_unit_log2, self.dm.dbar, self.dm.S], ['hac_variance_not_positive', 0, 0, 0]);
 });
 
 test('powerOfTwoExponent: the power of two at or below max|x|, also where log2 rounds up to the next integer', () => {
@@ -602,6 +616,14 @@ test('powerOfTwoExponent: the power of two at or below max|x|, also where log2 r
   assert.equal(powerOfTwoExponent([5e-324]), -1074);
   assert.equal(powerOfTwoExponent([3 * 2 ** -1074]), -1073);
   for (const values of [[], [0, -0], [Infinity], [1, NaN]]) assert.equal(powerOfTwoExponent(values), 0, JSON.stringify(values));
+  // log2 one too low at a power of two (allowed by ECMAScript, not seen in V8) is corrected upward.
+  const log2 = Math.log2;
+  try {
+    Math.log2 = (x) => log2(x) - 2 ** -40;
+    assert.deepEqual([powerOfTwoExponent([16]), powerOfTwoExponent([2 ** -1074]), powerOfTwoExponent([below16])], [4, -1074, 3]);
+  } finally {
+    Math.log2 = log2;
+  }
   const random = createRandom(3);
   for (let i = 0; i < 2000; i++) {
     const x = (random() + 0.5) * 2 ** Math.floor(random() * 2000 - 1000), e = powerOfTwoExponent([x]);

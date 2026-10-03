@@ -34,8 +34,10 @@ BACKLOG #101 item 2 for the next change to the tool. At tiny scale the decisions
 the reported d̄, S and means can round to 0, and read with "a mean of 0 or more reverses" or
 "S ≤ 0 is not evaluable" they mislead. The response therefore reports the exponent of the
 rescaling power of two, `d_unit_log2`, and `secondary.d_unit_log2` for the secondary mean. The
-power is now at or below max|d| also where log2 rounds up at the top of a binade; that changes no
-result, since division by any power of two is exact.
+power is now the largest at or below max|d| also where log2 rounds up at the top of a binade (or
+would round down at a power of two, which ECMAScript allows). No result in the normal range
+changes, since division by a power of two is exact there; where d divided by the old, larger power
+was subnormal, the smaller power keeps one more bit (diff check of rev 4.3, LOW-1).
 
 The implementation is in docs/FORECAST_LOSS_COMPARISON.md.
 

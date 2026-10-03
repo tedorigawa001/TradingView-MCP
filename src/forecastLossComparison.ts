@@ -51,9 +51,12 @@ export function powerOfTwoExponent(values: number[]): number {
   const largest = values.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
   if (!(largest > 0 && Number.isFinite(largest))) return 0;
   // log2 rounds up to the next integer at the top of a binade, and to 1024 in the top one, where 2^1024 is Infinity
-  // (diff check nit): step back so the power is at or below max|x|.
-  const exponent = Math.floor(Math.log2(largest));
-  return 2 ** exponent > largest ? exponent - 1 : exponent;
+  // (diff check nit). ECMAScript does not require it to be exact at powers of two either, so correct it both ways:
+  // the power is then the largest at or below max|x|.
+  let exponent = Math.floor(Math.log2(largest));
+  if (2 ** exponent > largest) exponent--;
+  else if (2 ** (exponent + 1) <= largest) exponent++;
+  return exponent;
 }
 const powerOfTwoScale = (values: number[]) => 2 ** powerOfTwoExponent(values);
 /**
