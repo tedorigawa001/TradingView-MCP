@@ -1,7 +1,7 @@
 import { openSync, closeSync, readFileSync, fstatSync, lstatSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { readdirSync } from 'node:fs';
+import { readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { artifacts, tools, run } from './build.mjs';
 
@@ -118,7 +118,14 @@ export function replayFile(path, config) {
     limitations: ['quote_endpoints_do_not_prove_continuous_feed_or_executable_fills','latest_bookmap_listener_clock_not_exchange_execution_timestamp','commission_not_configured_no_profit_verdict', ...(rows.at(-1).event_type === 'collector_stop' ? [] : ['missing_collector_stop'])], evidence };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** By real path, so a symlinked checkout or a Windows junction still runs it (BACKLOG 102-01). */
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntrypoint()) {
   const [configPath, ...paths] = process.argv.slice(2);
   if (!configPath || !paths.length) throw new Error('usage: node bookmap-addon/replay.mjs CONFIG.json RAW.jsonl [...]');
   const config = JSON.parse(readFileSync(configPath,'utf8'));

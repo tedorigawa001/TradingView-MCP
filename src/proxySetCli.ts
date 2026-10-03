@@ -20,7 +20,6 @@ export async function exportProxySet(args: string[], store: Pick<ProxySetStore, 
   return { artifact_id: values.artifact, output: values.output, dates: set.dates.length };
 }
 
-
 if (isCliEntrypoint(import.meta.url)) {
   exportProxySet(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

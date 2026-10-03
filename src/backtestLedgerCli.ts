@@ -12,7 +12,6 @@ export async function importBacktestLedger(args: string[]) {
   return new BacktestLedgerStore().register(JSON.parse(body.toString("utf8")));
 }
 
-
 if (isCliEntrypoint(import.meta.url)) {
   importBacktestLedger(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

@@ -38,7 +38,6 @@ export async function runResearchEvidenceCli(args: string[]) {
   return { written: true, manifest: report.manifest };
 }
 
-
 if (isCliEntrypoint(import.meta.url)) {
   runResearchEvidenceCli(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error) => {

@@ -17,7 +17,6 @@ export async function importBarSeries(args: string[], store = new BarSeriesStore
   return store.register(JSON.parse(text));
 }
 
-
 if (isCliEntrypoint(import.meta.url)) {
   importBarSeries(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

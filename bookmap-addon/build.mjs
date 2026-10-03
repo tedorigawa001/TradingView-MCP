@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync, mkdirSync } from "node:fs";
 import { dirname, delimiter, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -117,6 +117,13 @@ export function buildBookmapAddon() {
   return { sdkPresent, classpath: [CLASSES, simplifiedApi, l1Api].join(delimiter) };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** By real path, so a symlinked checkout or a Windows junction still runs it (BACKLOG 102-01). */
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isEntrypoint()) {
   buildBookmapAddon();
 }

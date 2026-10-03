@@ -40,7 +40,6 @@ export async function importForecastSet(args: string[], deps: ImportForecastSetD
   return store.register(joined);
 }
 
-
 if (isCliEntrypoint(import.meta.url)) {
   importForecastSet(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
