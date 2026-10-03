@@ -13,16 +13,42 @@ test("redaction still removes userinfo, query strings and bearer tokens", () => 
     "ordinary text must be left alone");
 });
 
+test("an Authorization value goes whole, scheme and credentials, also quoted, folded or redacted twice (BACKLOG 102-02)", () => {
+  // Masking only the first word left the credential: "Authorization: *** sk-live-123".
+  const cases = [
+    ["Authorization: Bearer sk-live-123", "Authorization: ***"],
+    ["Authorization: Basic dXNlcjpwYXNz", "Authorization: ***"],
+    ["Proxy-Authorization: Basic dXNlcjpwYXNz", "Proxy-Authorization: ***"],
+    ['{"Authorization":"Basic dXNlcjpwYXNz","Host":"x"}', '{"Authorization":"***","Host":"x"}'],
+    ["{'Authorization': 'Bearer sk-live-123'}", "{'Authorization': '***'}"],
+    ["Authorization:\n  Bearer sk-live-123", "Authorization:\n  ***"],
+    ["Authorization: Bearer abc\nthe next line stays", "Authorization: ***\nthe next line stays"],
+    ["Authorization: abc123\nthe next line stays", "Authorization: ***\nthe next line stays"],
+    ["Authorization: Digest k-9:abc123%3D, more", "Authorization: *** more"],
+    ['{"token":"abc123","api_key": "k-9"}', '{"token":"***","api_key": "***"}'],
+    ["Bearer sk-live-123", "Bearer ***"],
+  ];
+  for (const [input, expected] of cases) {
+    const once = redactSecrets(input);
+    assert.equal(once, expected, JSON.stringify(input));
+    assert.equal(redactSecrets(once), once, `redacting twice changes nothing: ${JSON.stringify(input)}`);
+    for (const secret of ["sk-live-123", "dXNlcjpwYXNz", "abc123", "k-9"]) assert.ok(!once.includes(secret), `${secret} in ${once}`);
+  }
+  assert.equal(redactSecrets("study st1 not found"), "study st1 not found");
+});
+
 test("a long message cannot stall the thread that redacts it", () => {
   // The unbounded scheme run made this quadratic: 40 KB took 2.9 s and 80 KB 11.7 s, so
   // 200 KB was over a minute of frozen event loop. redactSecrets runs on every tool error
   // and on every page exception, and a page chooses its own exception text.
-  const adversarial = `http://${"a".repeat(200_000)}`;
-  const started = process.hrtime.bigint();
-  redactSecrets(adversarial);
-  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(elapsedMs < 2_000,
-    `redacting a 200 KB message took ${elapsedMs.toFixed(0)} ms; the scheme run is unbounded again`);
+  for (const adversarial of [`http://${"a".repeat(200_000)}`, "authorization: ".repeat(15_000), `Authorization: Bearer ${"a".repeat(200_000)}`,
+    `"token"${" ".repeat(200_000)}`]) {
+    const started = process.hrtime.bigint();
+    redactSecrets(adversarial);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(elapsedMs < 2_000,
+      `redacting ${JSON.stringify(adversarial.slice(0, 20))}… (${adversarial.length} chars) took ${elapsedMs.toFixed(0)} ms`);
+  }
 });
 
 test("the result is capped so a huge message cannot be relayed verbatim", () => {

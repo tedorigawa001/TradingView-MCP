@@ -162,6 +162,28 @@ test("page exceptions are stripped of stack frames and URL secrets", async (t) =
   );
 });
 
+test("a page exception carrying an Authorization header reaches neither the error nor the log with its credential (102-02)", async (t) => {
+  const mock = await startMockCdp({
+    onCommand: () => ({
+      result: { exceptionDetails: { exception: { description:
+        "Error: request failed\nAuthorization: Bearer sk-live-123\n    at send (https://cdn.example/app.js?sid=s1:1:2)" } } },
+    }),
+  });
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl });
+  t.after(() => cdp.close());
+  const logged = t.mock.method(console, "error", () => {});
+  await assert.rejects(() => cdp.evaluate("x()"), (err) => {
+    assert.match(err.message, /request failed/);
+    assert.match(err.message, /Authorization: \*\*\*/);
+    assert.ok(!err.message.includes("sk-live-123"), err.message);
+    return true;
+  });
+  const lines = logged.mock.calls.map((call) => call.arguments.join(" "));
+  assert.ok(lines.length > 0, "the redacted detail is logged");
+  for (const line of lines) assert.ok(!line.includes("sk-live-123") && !line.includes("sid=s1"), line);
+});
+
 test("fails clearly when no chart page target exists", async (t) => {
   const mock = await startMockCdp({
     targets: [

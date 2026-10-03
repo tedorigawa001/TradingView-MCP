@@ -1,8 +1,9 @@
 /**
  * Strip likely secrets from text that travels to the MCP client or into
  * local logs: URL userinfo (user:pass@host), URL query strings (which may
- * carry session ids) and bearer/token values. Surrounding text is kept so
- * error messages stay actionable.
+ * carry session ids), whole Authorization values (scheme and credentials) and
+ * bearer/token/API-key values, quoted keys included. Surrounding text is kept
+ * so error messages stay actionable.
  *
  * The scheme runs are bounded rather than open-ended. An unbounded
  * `[\w+.-]*` before `://` costs one scan of the whole remaining string at
@@ -24,7 +25,11 @@ export function redactSecrets(text: string): string {
   const redacted = text
     .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
     .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)\?[^\s"'<>()[\]]*/gi, "$1?***")
-    .replace(/\b(bearer|token|api[_-]?key|authorization)([=:]\s*|\s+)[\w.~+/-]+=*/gi, "$1$2***");
+    // An Authorization value is a scheme and its credentials ("Bearer abc", "Basic dXNl…"). Both go: masking only the
+    // first word left "Authorization: *** abc" (BACKLOG 102-02). A quoted key, as in a JSON or Python dump of the
+    // headers, a value folded onto the next line, and Proxy-Authorization (\b falls after the hyphen) count too.
+    .replace(/\b(authorization)(["']?\s*[=:]\s*["']?)(?:[a-z][\w-]*[ \t]+)?[^\s"'<>]+/gi, "$1$2***")
+    .replace(/\b(bearer|token|api[_-]?key|authorization)(["']?\s*[=:]\s*["']?|\s+)[\w.~+/-]+=*/gi, "$1$2***");
   return redacted.length <= MAX_REDACTED_CHARS
     ? redacted
     : `${redacted.slice(0, MAX_REDACTED_CHARS)}… [truncated]`;

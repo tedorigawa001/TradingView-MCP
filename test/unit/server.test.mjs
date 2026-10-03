@@ -1498,6 +1498,22 @@ test("tool errors are redacted before reaching the MCP client", async () => {
   assert.ok(text.includes("while connecting"), "text after the URL must survive");
 });
 
+test("a tool error carrying Authorization headers reaches neither the client nor stderr with the credential (102-02)", async (t) => {
+  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => {
+    throw new Error('request failed with headers {"Authorization":"Basic dXNlcjpwYXNz"} and Authorization: Bearer sk-live-123');
+  } } }));
+  const logged = t.mock.method(console, "error", () => {});
+  const res = await client.callTool({ name: "get_ohlcv", arguments: {} });
+  assert.equal(res.isError, true);
+  const text = res.content[0].text;
+  assert.match(text, /request failed with headers/);
+  for (const secret of ["dXNlcjpwYXNz", "sk-live-123"]) {
+    assert.ok(!text.includes(secret), text);
+    for (const call of logged.mock.calls) assert.ok(!call.arguments.join(" ").includes(secret), "stderr must not carry it either");
+  }
+  assert.ok(logged.mock.calls.length > 0, "the redacted detail goes to stderr");
+});
+
 test("get_mtf_overview forwards symbols, timeframes and fields", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({
