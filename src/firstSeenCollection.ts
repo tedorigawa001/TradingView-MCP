@@ -8,6 +8,13 @@ import type { PolicyRateFirstSeenStore } from "./policyRateHistory.js";
 import type { PolicyRateCollectionHeartbeatStore } from "./policyRateCollectionHeartbeat.js";
 
 type CotCollector = Pick<CotClient, "getHistory">;
+
+/** The real-yield quality issues that mean a fetched value was not recorded, each with what to say about it. */
+const REAL_YIELD_PERSISTENCE_ISSUES = new Map<string, (date: string) => string>([
+  ["first_seen_persistence_failed", (date) => `real-yield ${date} was fetched but its first-seen record failed to save`],
+  ["first_seen_auxiliary_persistence_failed", () => "real-yield previous-year revision rows were fetched but failed to save"],
+  ["first_seen_persistence_disabled", () => "real-yield first-seen store is disabled"],
+]);
 type RealYieldCollector = Pick<TreasuryRealYieldClient, "getLatest">;
 type CmeGoldOpenInterestCollector = Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 
@@ -72,9 +79,11 @@ export async function collectFirstSeenSources(input: {
   };
   coverage: UnifiedFirstSeenCoverage;
 }> {
-  // The clients keep a fetched value usable when its first-seen store fails, leaving available_at null (COT) or adding a
-  // first_seen_* quality issue (real yield). For a collection run that is the failure that matters: a fetch that was not
-  // recorded is no evidence, so it is an error here, the run is partial, and the heartbeat says so (BACKLOG 102-07).
+  // The clients keep a fetched value usable when their first-seen store fails, leaving available_at null (COT) or adding
+  // a persistence quality issue (real yield). For a collection run that is the failure that matters: a fetch that was not
+  // recorded is no evidence, so it is an error here, the run is partial, and the heartbeat says so (BACKLOG 102-07). A
+  // latest real-yield value that is missing, invalid or future-dated is an error too, though nothing failed to write: no
+  // first-seen record was made, and a renamed or reformatted Treasury field shows up only this way.
   const cot = await Promise.all(input.cotSymbols.map(async (symbol) => {
     try {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
@@ -90,11 +99,13 @@ export async function collectFirstSeenSources(input: {
   let realYield: { status: "complete" | "error"; observation_date?: string; available_at?: string | null; error?: string };
   try {
     const latest = await input.realYield.getLatest();
-    const persistence = latest.quality_issues.filter((issue) => issue.startsWith("first_seen_"));
-    if (persistence.length > 0 || typeof latest.available_at !== "string") {
-      throw new Error(`real-yield ${latest.observation_date} was fetched but not recorded as first seen: ` +
-        (persistence.length > 0 ? persistence.join(", ") : `no first-seen time (value ${latest.value_status})`));
-    }
+    const problems = [
+      ...latest.quality_issues.flatMap((issue) => REAL_YIELD_PERSISTENCE_ISSUES.get(issue)?.(latest.observation_date) ?? []),
+      ...(typeof latest.available_at !== "string" && !latest.quality_issues.some((issue) => REAL_YIELD_PERSISTENCE_ISSUES.has(issue))
+        ? [`the latest Treasury 10-year value for ${latest.observation_date} is ${latest.value_status}, so no first-seen record was made; check the feed`]
+        : []),
+    ];
+    if (problems.length > 0) throw new Error(problems.join("; "));
     realYield = {
       status: "complete",
       observation_date: latest.observation_date,

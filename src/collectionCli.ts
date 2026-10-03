@@ -46,7 +46,10 @@ export function parseCollectionCliArguments(argv: string[], env = process.env): 
 }
 
 /** What a collection run records as its heartbeat: a partial run, such as one whose evidence was not saved, stays partial. */
-export function firstSeenHeartbeatRun(result: Awaited<ReturnType<typeof collectFirstSeenSources>>, cotSymbols: string[]) {
+export function firstSeenHeartbeatRun(
+  result: Awaited<ReturnType<typeof collectFirstSeenSources>>,
+  cotSymbols: string[],
+): Parameters<FirstSeenCollectionHeartbeatStore["recordRun"]>[0] {
   return {
     observed_at: result.observed_at,
     status: result.status,
@@ -80,7 +83,14 @@ async function main(): Promise<void> {
       cotWeeks: args.cotWeeks,
       coverage,
     });
-  const heartbeat = await firstSeenHeartbeats.recordRun(firstSeenHeartbeatRun(result, args.cotSymbols));
+  let heartbeat;
+  try {
+    heartbeat = await firstSeenHeartbeats.recordRun(firstSeenHeartbeatRun(result, args.cotSymbols));
+  } catch (error) {
+    // Keep the run's per-source results in the log; otherwise they are lost with the heartbeat (102-07 review).
+    process.stdout.write(`${JSON.stringify({ ...result, heartbeat: null })}\n`);
+    throw error;
+  }
   process.stdout.write(`${JSON.stringify({ ...result, heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
   if (result.status === "partial") process.exitCode = 1;
 }

@@ -10,6 +10,8 @@ import { CotClient } from "../../build/cot.js";
 import { CotFirstSeenStore } from "../../build/cotFirstSeenHistory.js";
 import { FirstSeenCollectionHeartbeatStore } from "../../build/firstSeenCollectionHeartbeat.js";
 import { runCollectionHealthCli } from "../../build/collectionHealthCli.js";
+import { TreasuryRealYieldClient } from "../../build/realYield.js";
+import { RealYieldFirstSeenStore } from "../../build/realYieldHistory.js";
 
 test("collection CLI parses explicit symbols, environment defaults, and bounded weeks", () => {
   assert.deepEqual(
@@ -113,16 +115,24 @@ test("a fetch that was not recorded as first seen is an error, not a complete so
   const cot = await run([{ available_at: "2026-07-26T00:00:00.000Z" }, { available_at: null }], recorded);
   assert.deepEqual([cot.status, cot.cot[0].status], ["partial", "error"]);
   assert.match(cot.cot[0].error, /1 of 2 COT observations were fetched but not recorded as first seen/);
-  // Real yield: the client reports its store failure as a first_seen_* quality issue.
-  for (const issue of ["first_seen_persistence_failed", "first_seen_auxiliary_persistence_failed", "first_seen_persistence_disabled"]) {
-    const result = await run([{ available_at: "2026-07-26T00:00:00.000Z" }], { ...recorded, quality_issues: ["stale_observation", issue] });
+  // Real yield: the client reports its store failure as a quality issue; each gets its own message.
+  for (const [issue, availableAt, message] of [
+    ["first_seen_persistence_failed", null, /^real-yield 2026-07-25 was fetched but its first-seen record failed to save$/],
+    ["first_seen_auxiliary_persistence_failed", "2026-07-26T00:00:00.000Z", /^real-yield previous-year revision rows were fetched but failed to save$/],
+    ["first_seen_persistence_disabled", null, /^real-yield first-seen store is disabled$/],
+  ]) {
+    const result = await run([{ available_at: "2026-07-26T00:00:00.000Z" }],
+      { ...recorded, available_at: availableAt, quality_issues: ["stale_observation", issue] });
     assert.deepEqual([result.status, result.real_yield.status], ["partial", "error"], issue);
-    assert.match(result.real_yield.error, new RegExp(`not recorded as first seen: ${issue}`));
+    assert.match(result.real_yield.error, message);
   }
-  // No first-seen time without a store failure (a missing latest value) is no new evidence either.
+  // A missing latest value is no new evidence either, though nothing failed to write; its message says to check the feed.
   const missing = await run([{ available_at: "2026-07-26T00:00:00.000Z" }], { ...recorded, available_at: null, value_status: "missing" });
   assert.deepEqual([missing.status, missing.real_yield.status], ["partial", "error"]);
-  assert.match(missing.real_yield.error, /no first-seen time \(value missing\)/);
+  assert.match(missing.real_yield.error, /^the latest Treasury 10-year value for 2026-07-25 is missing, so no first-seen record was made; check the feed$/);
+  // A quality issue that is not about persistence leaves a recorded value complete.
+  const stale = await run([{ available_at: "2026-07-26T00:00:00.000Z" }], { ...recorded, quality_issues: ["stale_observation", "publication_time_unavailable"] });
+  assert.deepEqual([stale.status, stale.real_yield.status], ["complete", "complete"]);
 });
 
 test("a real COT store that cannot write makes the run partial, its heartbeat partial, and the health check notify (102-07)", async (t) => {
@@ -147,7 +157,9 @@ test("a real COT store that cannot write makes the run partial, its heartbeat pa
   assert.deepEqual([result.status, result.cot[0].status], ["partial", "error"]);
   // The heartbeat the CLI records, and what the health check makes of it.
   const heartbeatPath = join(dir, "heartbeats.jsonl");
-  await new FirstSeenCollectionHeartbeatStore(heartbeatPath).recordRun(firstSeenHeartbeatRun(result, ["OANDA:EURUSD"]));
+  const heartbeat = await new FirstSeenCollectionHeartbeatStore(heartbeatPath).recordRun(firstSeenHeartbeatRun(result, ["OANDA:EURUSD"]));
+  assert.deepEqual([heartbeat.status, heartbeat.cot_complete, heartbeat.real_yield_status, heartbeat.cme_gold_open_interest_status],
+    ["partial", 0, "complete", "complete"]);
   const saved = process.env.TRADINGVIEW_MCP_FIRST_SEEN_COLLECTION_HEARTBEAT_PATH;
   process.env.TRADINGVIEW_MCP_FIRST_SEEN_COLLECTION_HEARTBEAT_PATH = heartbeatPath;
   t.after(() => { if (saved === undefined) delete process.env.TRADINGVIEW_MCP_FIRST_SEEN_COLLECTION_HEARTBEAT_PATH; else process.env.TRADINGVIEW_MCP_FIRST_SEEN_COLLECTION_HEARTBEAT_PATH = saved; });
@@ -160,4 +172,32 @@ test("a real COT store that cannot write makes the run partial, its heartbeat pa
   assert.equal(code, 1);
   assert.ok(health.issues.some((issue) => issue.code === "first_seen_collection_partial"), JSON.stringify(health.issues));
   assert.equal(notifications.length, 1, "the partial run is notified");
+});
+
+test("a real real-yield store that cannot write makes that source an error in the run and its heartbeat (102-07)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "first-seen-save-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // A Treasury stand-in with one valid row from three days ago, and a store under a regular file.
+  const date = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+  const xml = `<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"
+    xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+    <updated>${new Date().toISOString()}</updated><entry><updated>2099-01-01T00:00:00Z</updated><content type="application/xml"><m:properties>
+    <d:NEW_DATE m:type="Edm.DateTime">${date}T00:00:00</d:NEW_DATE><d:TC_10YEAR m:type="Edm.Double">2.01</d:TC_10YEAR>
+    </m:properties></content></entry></feed>`;
+  const server = http.createServer((_req, res) => res.end(xml));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  await writeFile(join(dir, "blocker"), "");
+  const realYield = new TreasuryRealYieldClient(`http://127.0.0.1:${server.address().port}`, 15_000,
+    new RealYieldFirstSeenStore(join(dir, "blocker", "real-yield.jsonl")));
+  const result = await collectFirstSeenSources({
+    cot: { getHistory: async () => ({ observations: [{ available_at: "2026-07-26T00:00:00.000Z" }] }) },
+    realYield, cmeGoldOpenInterest: goldOpenInterest, futuresOpenInterest: futuresStore,
+    cotSymbols: ["OANDA:XAUUSD"], cotWeeks: 52, coverage: async () => completeCoverage(),
+  });
+  assert.deepEqual([result.status, result.real_yield.status], ["partial", "error"]);
+  assert.equal(result.real_yield.error, `real-yield ${date} was fetched but its first-seen record failed to save`);
+  const heartbeat = await new FirstSeenCollectionHeartbeatStore(join(dir, "heartbeats.jsonl"))
+    .recordRun(firstSeenHeartbeatRun(result, ["OANDA:XAUUSD"]));
+  assert.deepEqual([heartbeat.status, heartbeat.cot_complete, heartbeat.real_yield_status], ["partial", 1, "error"]);
 });
