@@ -45,6 +45,19 @@ export function parseCollectionCliArguments(argv: string[], env = process.env): 
   return { command, cotSymbols: selected, cotWeeks };
 }
 
+/** What a collection run records as its heartbeat: a partial run, such as one whose evidence was not saved, stays partial. */
+export function firstSeenHeartbeatRun(result: Awaited<ReturnType<typeof collectFirstSeenSources>>, cotSymbols: string[]) {
+  return {
+    observed_at: result.observed_at,
+    status: result.status,
+    cot_symbols: cotSymbols,
+    cot_complete: result.cot.filter((item) => item.status === "complete").length,
+    real_yield_status: result.real_yield.status,
+    cme_gold_open_interest_status: result.cme_gold_open_interest.status,
+    coverage_status: result.coverage.status,
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseCollectionCliArguments(process.argv.slice(2));
   const cotStore = new CotFirstSeenStore(resolveCotFirstSeenHistoryPath());
@@ -67,15 +80,7 @@ async function main(): Promise<void> {
       cotWeeks: args.cotWeeks,
       coverage,
     });
-  const heartbeat = await firstSeenHeartbeats.recordRun({
-    observed_at: result.observed_at,
-    status: result.status,
-    cot_symbols: args.cotSymbols,
-    cot_complete: result.cot.filter((item) => item.status === "complete").length,
-    real_yield_status: result.real_yield.status,
-    cme_gold_open_interest_status: result.cme_gold_open_interest.status,
-    coverage_status: result.coverage.status,
-  });
+  const heartbeat = await firstSeenHeartbeats.recordRun(firstSeenHeartbeatRun(result, args.cotSymbols));
   process.stdout.write(`${JSON.stringify({ ...result, heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
   if (result.status === "partial") process.exitCode = 1;
 }

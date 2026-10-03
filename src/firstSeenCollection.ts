@@ -72,9 +72,16 @@ export async function collectFirstSeenSources(input: {
   };
   coverage: UnifiedFirstSeenCoverage;
 }> {
+  // The clients keep a fetched value usable when its first-seen store fails, leaving available_at null (COT) or adding a
+  // first_seen_* quality issue (real yield). For a collection run that is the failure that matters: a fetch that was not
+  // recorded is no evidence, so it is an error here, the run is partial, and the heartbeat says so (BACKLOG 102-07).
   const cot = await Promise.all(input.cotSymbols.map(async (symbol) => {
     try {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
+      const unrecorded = history.observations.filter((observation) => typeof observation.available_at !== "string").length;
+      if (unrecorded > 0) {
+        throw new Error(`${unrecorded} of ${history.observations.length} COT observations were fetched but not recorded as first seen`);
+      }
       return { symbol, status: "complete" as const, observations: history.observations.length };
     } catch (error) {
       return { symbol, status: "error" as const, error: errorMessage(error) };
@@ -83,6 +90,11 @@ export async function collectFirstSeenSources(input: {
   let realYield: { status: "complete" | "error"; observation_date?: string; available_at?: string | null; error?: string };
   try {
     const latest = await input.realYield.getLatest();
+    const persistence = latest.quality_issues.filter((issue) => issue.startsWith("first_seen_"));
+    if (persistence.length > 0 || typeof latest.available_at !== "string") {
+      throw new Error(`real-yield ${latest.observation_date} was fetched but not recorded as first seen: ` +
+        (persistence.length > 0 ? persistence.join(", ") : `no first-seen time (value ${latest.value_status})`));
+    }
     realYield = {
       status: "complete",
       observation_date: latest.observation_date,
