@@ -42,9 +42,29 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
     ['{\\"token\\":\\"abc123\\"}', '{\\"token\\":\\"***\\"}'],
     ["Bearer sk-live-123", "Bearer ***"],
     ["Authorization: Bearer sk-live-123\nProxy-Authorization: Basic dXNlcjpwYXNz", "Authorization: ***\nProxy-Authorization: ***"],
+    ["Authorization:\r\n  Basic dXNlcjpwYXNz", "Authorization:\r\n  ***"],
+    // A value that merely starts with a literal, as from `${scheme} ${token}` with no scheme, is masked.
+    ["Authorization: undefined sk-live-123", "Authorization: ***"],
+    ["Authorization: null sk-live-123", "Authorization: ***"],
+    // A quoted value runs to its own closing quote, past escaped quotes and other escapes inside it.
+    ['{"Authorization":"Digest username=\\"abc123\\", response=\\"k-9\\""}', '{"Authorization":"***"}'],
+    ["{'Authorization': 'Digest username=\"abc123\", response=\"k-9\"'}", "{'Authorization': '***'}"],
+    ['{"Authorization":"Basic dXNl\\/dXNlcjpwYXNz=="}', '{"Authorization":"***"}'],
+    ['[\\"Authorization\\", \\"Basic dXNlcjpwYXNz\\"]', '[\\"Authorization\\", \\"***\\"]'],
+    ["['Authorization' , 'Basic dXNlcjpwYXNz']", "['Authorization' , '***']"],
+    // Bearer, token and API-key values folded onto an indented next line.
+    ["Bearer\n  sk-live-123", "Bearer\n  ***"],
+    ["token:\n  abc123", "token:\n  ***"],
+    ["x-api-key:\r\n k-9", "x-api-key:\r\n ***"],
+    ['"token":\n  "abc123"', '"token":\n  "***"'],
+    ["'api_key' => 'k-9'", "'api_key' => '***'"],
     // Before the query rule, so a header inside a query string cannot leave its credential behind the "?***".
     ["GET https://api.example/v1?x=1,Authorization:Bearer sk-live-123", "GET https://api.example/v1?***"],
   ];
+  // Every known scheme after a bare space, and alone before a folded value.
+  for (const scheme of ["Bearer", "Basic", "Digest", "Negotiate", "NTLM", "AWS4-HMAC-SHA256", "OAuth"]) {
+    cases.push([`Authorization ${scheme} sk-live-123`, "Authorization ***"], [`Authorization: ${scheme}\n  sk-live-123`, "Authorization: ***"]);
+  }
   for (const [input, expected] of cases) {
     const once = redactSecrets(input);
     assert.equal(once, expected, JSON.stringify(input));
@@ -57,7 +77,8 @@ test("redaction keeps ordinary text: an empty value, a stack frame, a JSON liter
   for (const text of [
     "study st1 not found", "authorization failed", "Unexpected token '<'", "(reading 'authorization')",
     "Authorization:\nnext line text here", "no Authorization:\n    at foo (x.js:1:2)", '{"Authorization":null,"Host":"x"}',
-    "Authorization: true\n    at foo (x.js:1:2)", "token\nnext line here",
+    "Authorization: true\n    at foo (x.js:1:2)", "token\nnext line here", "Bearer\n    at foo (x.js:1:2)",
+    "Authorization: false, next: 1", "allowed headers: ['authorization', 'content-type']", "[ 'accept', 'authorization', 'host' ]",
   ]) assert.equal(redactSecrets(text), text, JSON.stringify(text));
   assert.equal(redactSecrets("Authorization: Bearer\n    at foo (x.js:1:2)"), "Authorization: ***\n    at foo (x.js:1:2)",
     "a scheme alone takes no stack frame as its folded value");
@@ -86,6 +107,14 @@ test("the result is capped so a huge message cannot be relayed verbatim", () => 
   assert.ok(result.length < 50_000, "an oversized message must not pass through whole");
   assert.ok(result.length <= MAX_REDACTED_CHARS + 16, `capped result was ${result.length} chars`);
   assert.match(result, /\[truncated\]$/, "truncation must be visible to the reader");
+});
+
+test("the truncation marker survives a second redaction, even right after a masked value", () => {
+  // Cut just after `"***`: a quoted value run went on through "… [truncated]" and dropped it under the cap.
+  const head = '{"Authorization":"***';
+  const once = redactSecrets(`${"x".repeat(MAX_REDACTED_CHARS - head.length)}{"Authorization":"Basic dXNlcjpwYXNz"} and more text`);
+  assert.ok(once.endsWith(`${head}\n… [truncated]`), once.slice(-40));
+  assert.equal(redactSecrets(once), once);
 });
 
 test("truncation happens after redaction, so no secret survives by straddling the cut", () => {

@@ -24,35 +24,47 @@ export const MAX_REDACTED_CHARS = 4096;
 /** Authorization schemes that may follow the header name after a space alone, or stand alone before a folded value. */
 const SCHEME = String.raw`(?:bearer|basic|digest|negotiate|ntlm|aws4-hmac-sha256|oauth)`;
 
+/** A value folded onto an indented next line; never a stack frame ("    at …"), and past the whole indent. */
+const FOLD = String.raw`(?:\r?\n[ \t]+(?![ \t]|at\s))`;
+
 /**
  * A whole Authorization value, scheme and credentials (BACKLOG 102-02): masking only the first word left
  * "Authorization: *** abc", and a multi-part value (Digest, AWS4-HMAC-SHA256, OAuth 1.0) kept everything after its
- * first ", ". The value runs to its closing quote when quoted, else to the end of the line, and onto an indented
- * next line only when its line holds just the scheme. It follows:
- * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with an
- *   indented next line as a fold unless it is a stack frame ("    at …"), and Proxy-Authorization included since \b
- *   falls after its hyphen;
- * - a name-value pair, `['Authorization', '…']` or HAR's `{"name":"Authorization","value":"…"}`;
+ * first ", ". A quoted value runs to its own unescaped closing quote, so quotes and escapes inside it stay masked; an
+ * unquoted one runs to the end of the line, and onto a folded next line only when its line holds just the scheme. It
+ * follows:
+ * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with a
+ *   fold before the value, and Proxy-Authorization included since \b falls after its hyphen;
+ * - a name-value pair with a scheme next, `['Authorization', 'Basic …']`, so a list of header names keeps its next
+ *   name; and HAR's `{"name":"Authorization","value":"…"}` whatever the value;
  * - a known scheme after a space alone.
- * A null, true, false or undefined value is left as it is, so a JSON dump stays whole.
+ * A value that is only null, true, false or undefined is left as it is, so a JSON dump stays whole; one that merely
+ * starts with such a word, as from a template with an undefined scheme, is masked.
  */
 const AUTHORIZATION = new RegExp(String.raw`\b(authorization)(` +
-  String.raw`\\?["']?[ \t]*(?:=>|[=:])[ \t]*(?:\r?\n[ \t]+(?![ \t]|at\s))?(?=\S)` +
-  String.raw`|\\?["'][ \t]*,[ \t]*(?:\\?["']value\\?["'][ \t]*:[ \t]*)?(?=\\?["'])` +
+  String.raw`\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?(?=\S)` +
+  String.raw`|\\?["'][ \t]*,[ \t]*(?:\\?["']value\\?["'][ \t]*:[ \t]*(?=\\?["'])|(?=\\?["']${SCHEME}\b))` +
   String.raw`|[ \t]+(?=${SCHEME}\b)` +
-  String.raw`)(?:(\\?["'])[^"'\\\r\n]*|(?!(?:null|true|false|undefined)\b)(?:${SCHEME}[ \t]*\r?\n[ \t]+(?![ \t]|at\s))?[^\r\n]+)`, "gi");
+  String.raw`)(?:(\\["'])[^"'\\\r\n]*|(")(?:[^"\\\r\n]|\\.)*|(')(?:[^'\\\r\n]|\\.)*` +
+  String.raw`|(?!(?:null|true|false|undefined)[ \t]*(?:[,;)\]}]|\r?\n|$))(?:${SCHEME}[ \t]*${FOLD})?[^\r\n]+)`, "gi");
+
+/** Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line. */
+const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
+  String.raw`(\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})[\w.~+/-]+=*`, "gi");
 
 export function redactSecrets(text: string): string {
   const redacted = text
     .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
     // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
-    .replace(AUTHORIZATION, (_, name: string, separator: string, quote: string | undefined) => `${name}${separator}${quote ?? ""}***`)
+    .replace(AUTHORIZATION, (_, name: string, separator: string, escaped?: string, double?: string, single?: string) =>
+      `${name}${separator}${escaped ?? double ?? single ?? ""}***`)
     // The query is optional so that a URL without one is consumed whole: requiring it made every later "x://" in the
     // body rescan the rest of the message, which took 5 s on 200 KB of "x://" (code review of 102-02).
     .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)(\?[^\s"'<>()[\]]*)?/gi,
       (match: string, url: string, query: string | undefined) => (query === undefined ? match : `${url}?***`))
-    .replace(/\b(bearer|token|api[_-]?key)(\\?["']?[ \t]*(?:=>|[=:])[ \t]*\\?["']?|[ \t]+)[\w.~+/-]+=*/gi, "$1$2***");
+    .replace(GENERIC, "$1$2***");
+  // The marker sits on its own line, so redacting a truncated result again cannot run a value over it and drop it.
   return redacted.length <= MAX_REDACTED_CHARS
     ? redacted
-    : `${redacted.slice(0, MAX_REDACTED_CHARS)}… [truncated]`;
+    : `${redacted.slice(0, MAX_REDACTED_CHARS)}\n… [truncated]`;
 }
