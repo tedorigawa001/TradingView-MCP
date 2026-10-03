@@ -1,12 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { MACRO_EVENT_60M_CONTRACTS, type MacroEvent60mContractId } from "./macroEvent60mStudy.js";
 import { preflightMacroEvent60mContract } from "./macroEvent60mPreflight.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import type { OfficialMacroEventArtifact } from "./officialMacroEventSources.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 type Args = { aggregate: string; events: string; out: string; contractId: MacroEvent60mContractId; confirm: boolean };
 
@@ -35,4 +35,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ contract_id: result.contract_id, event_kind: result.event_kind, potentially_evaluable_events: result.potentially_evaluable_events, output_path: args.out })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`macro event M60 preflight failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`macro event M60 preflight failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

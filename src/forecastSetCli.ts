@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { ForecastSetStore, assertPlainForecastSetInput } from "./forecastSet.js";
 import { ProxySetStore, buildProxySetForecastSet } from "./proxySet.js";
 import { RealizedCovarianceJournalStore } from "./realizedCovarianceJournal.js";
 import type { ZoneResolver } from "./zonedTime.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export interface ImportForecastSetDeps {
   store?: Pick<ForecastSetStore, "register">;
@@ -41,13 +40,8 @@ export async function importForecastSet(args: string[], deps: ImportForecastSetD
   return store.register(joined);
 }
 
-function isEntrypoint(): boolean {
-  if (!process.argv[1]) return false;
-  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
 
-if (isEntrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   importForecastSet(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 }

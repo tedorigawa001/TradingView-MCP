@@ -4,9 +4,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { aggregateFxCsvM1, type AggregatedBar, type FxCsvM1AggregationResult } from "./fxCsvM1Aggregation.js";
 import { canonicalDefinitionHash } from "./canonicalDefinition.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export type FxCsvM1AggregationCliArguments = {
   csvPath: string;
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify({ ...manifest, output_path: args.outputPath })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`FX CSV aggregation failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

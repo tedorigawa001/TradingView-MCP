@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { OhlcvBar } from "./tradingview.js";
 import {
   computeFeatureOutcomeRelationships,
@@ -12,6 +11,7 @@ import {
 import type { AggregatedBar, FxCsvM1AggregationResult } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import { canonicalDefinitionHash } from "./canonicalDefinition.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 /**
  * The one configuration this scan is allowed to run. The candidate rule's false-positive rates and
@@ -262,7 +262,7 @@ async function main(): Promise<void> {
   })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`FX CSV feature scan failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
 import { lstat, mkdtemp, link, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { openExclusiveFile, syncDirectoryEntry } from "./fsDurability.js";
 import { reproduceResearch } from "./researchReproduction.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export async function runResearchReproductionCli(args: string[]) {
   const { values } = parseArgs({ args, strict: true, allowPositionals: false, options: {
@@ -31,11 +30,7 @@ export async function runResearchReproductionCli(args: string[]) {
   return { written: true, status: report.status, actual_result_sha256: report.actual_result_sha256 };
 }
 
-function entrypoint() {
-  try { return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
-if (entrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   runResearchReproductionCli(process.argv.slice(2)).then(result => {
     console.log(JSON.stringify(result));
     if (result.status === "mismatch") process.exitCode = 2;

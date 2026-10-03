@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
 import { BacktestLedgerStore, readBacktestLedgerFile } from "./backtestLedger.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export async function importBacktestLedger(args: string[]) {
   const { values } = parseArgs({ args, options: {
@@ -13,13 +12,8 @@ export async function importBacktestLedger(args: string[]) {
   return new BacktestLedgerStore().register(JSON.parse(body.toString("utf8")));
 }
 
-function isEntrypoint(): boolean {
-  if (!process.argv[1]) return false;
-  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
 
-if (isEntrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   importBacktestLedger(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 }

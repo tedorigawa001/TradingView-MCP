@@ -1,10 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { runPriceActionTrapReproduction } from "./priceActionTrapReproduction.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 type AggregateFile = { manifest: FxCsvM1AggregationManifest; bars: AggregatedBar[] };
 
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`price-action trap reproduction failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

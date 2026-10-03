@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { AppendOnlyEvaluationLog } from "./evaluationLog.js";
 import { buildWalkForwardReport } from "./walkForwardReport.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export async function runWalkForward(logPath: string) {
   const records = await new AppendOnlyEvaluationLog(logPath).readAll();
@@ -18,7 +19,7 @@ export async function runWalkForward(logPath: string) {
   return buildWalkForwardReport(folds);
 }
 
-if (process.argv[1]?.endsWith("walkForwardCli.js")) {
+if (isCliEntrypoint(import.meta.url)) {
   const path = process.argv[2];
   if (!path) throw new Error("usage: walkForwardCli LOG_PATH");
   runWalkForward(path).then((report) => console.log(JSON.stringify(report, null, 2))).catch((err) => { console.error(`walk-forward CLI error: ${err.message}`); process.exitCode = 1; });

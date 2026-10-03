@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import {
   runStandardEventStudyFalsificationAudit,
   type StandardEventStudyFalsificationAuditInput,
 } from "./eventStudyFalsificationAudit.js";
 import type { SyntheticNullModel } from "./syntheticNullSeries.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const MODELS = new Set<SyntheticNullModel>(["white_noise", "regime_switching_volatility", "bid_ask_bounce"]);
 
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   if (result.runs.some((run) => run.audit.status !== "complete")) process.exitCode = 1;
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`event-study falsification audit failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

@@ -1,11 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { MACRO_EVENT_RESPONSE_CONTRACT, runMacroEventResponseStudy } from "./macroEventResponse.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import type { OfficialMacroEventArtifact, OfficialMacroEventKind } from "./officialMacroEventSources.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 type AggregateFile = { manifest: FxCsvM1AggregationManifest; bars: AggregatedBar[] };
 export type MacroEventResponseCliArguments = {
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify({ contract_id: result.contract.contract_id, contract_hash: result.contract_hash, event_kind: result.event_kind, status: result.status, events: result.source.valid_events, output_path: args.outputPath })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`macro event M15 response study failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

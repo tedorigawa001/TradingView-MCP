@@ -1,4 +1,3 @@
-import { pathToFileURL } from "node:url";
 import { CdpClient } from "./cdp.js";
 import { ChartOperationLock } from "./chartOperationLock.js";
 import { assertChartState, withTemporaryChartState } from "./chartTransaction.js";
@@ -6,6 +5,7 @@ import { latestPolicyRateDecision } from "./policyRateCollection.js";
 import { POLICY_RATE_SYMBOLS, PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath, type PolicyRateCurrency } from "./policyRateHistory.js";
 import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 import { TradingView } from "./tradingview.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const CURRENCIES = Object.keys(POLICY_RATE_SYMBOLS) as PolicyRateCurrency[];
 
@@ -70,6 +70,6 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => { process.stderr.write(`policy-rate collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 }

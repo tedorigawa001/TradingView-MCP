@@ -4,7 +4,6 @@ import { appendFile, lstat, mkdir, open } from "node:fs/promises";
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { CdpClient } from "./cdp.js";
 import { assertChartState, changeChartState, readChartState, restoreChartState } from "./chartTransaction.js";
 // Paging a chart back to a required bar count is shared with the server, so it lives on its own.
@@ -28,6 +27,7 @@ import { runYieldPriceNonconfirmationStudy } from "./yieldPriceNonconfirmation.j
 import { TradingView } from "./tradingview.js";
 import { ChartOperationLock } from "./chartOperationLock.js";
 import { resolveStrategyResearchJournalPath, StrategyResearchJournalStore } from "./strategyResearchJournal.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const DEFAULT_OUTPUT_PATH = join(homedir(), ".tradingview-mcp", "research-collection.jsonl");
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -238,4 +238,4 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`research collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`research collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

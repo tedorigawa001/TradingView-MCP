@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { CotClient } from "./cot.js";
 import { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
-import { pathToFileURL } from "node:url";
 import { CotFirstSeenStore, resolveCotFirstSeenHistoryPath } from "./cotFirstSeenHistory.js";
 import { collectFirstSeenSources, getUnifiedFirstSeenCoverage } from "./firstSeenCollection.js";
 import { FuturesOpenInterestFirstSeenStore, resolveFuturesOpenInterestHistoryPath } from "./futuresOpenInterestHistory.js";
@@ -10,6 +9,7 @@ import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYiel
 import { PolicyRateFirstSeenStore, resolvePolicyRateHistoryPath } from "./policyRateHistory.js";
 import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 import { FirstSeenCollectionHeartbeatStore, resolveFirstSeenCollectionHeartbeatPath } from "./firstSeenCollectionHeartbeat.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const DEFAULT_COT_SYMBOLS = ["OANDA:EURUSD", "OANDA:XAUUSD"];
 const MAX_COT_COLLECTION_WEEKS = 52;
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   if (result.status === "partial") process.exitCode = 1;
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`first-seen collection failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

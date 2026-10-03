@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { openExclusiveFile } from "./fsDurability.js";
 import { ProxySetStore } from "./proxySet.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 /** Writes a stored proxy set to a new file. Never overwrites; the output path must be absolute. */
 export async function exportProxySet(args: string[], store: Pick<ProxySetStore, "get"> = new ProxySetStore()) {
@@ -21,13 +20,8 @@ export async function exportProxySet(args: string[], store: Pick<ProxySetStore, 
   return { artifact_id: values.artifact, output: values.output, dates: set.dates.length };
 }
 
-function isEntrypoint(): boolean {
-  if (!process.argv[1]) return false;
-  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
 
-if (isEntrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   exportProxySet(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 }

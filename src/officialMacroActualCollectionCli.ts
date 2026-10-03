@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import { MacroSurpriseEvidenceStore, MacroSurpriseRawArchive, resolveMacroSurpriseEvidencePath, resolveMacroSurpriseRawArchivePath } from "./macroSurpriseEvidence.js";
 import { collectOfficialMacroActuals } from "./officialMacroActualSources.js";
 import type { OfficialMacroEvent, OfficialMacroEventArtifact } from "./officialMacroEventSources.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export function parseOfficialMacroActualCollectionCliArguments(argv: string[]) {
   const eventPaths: string[] = []; let confirmed = false;
@@ -26,4 +26,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`official macro actual collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`official macro actual collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

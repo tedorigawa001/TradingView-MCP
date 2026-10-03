@@ -1,6 +1,7 @@
 import { collectOfficialPolicyRateHistory, OFFICIAL_POLICY_RATE_SOURCES } from "./officialPolicyRateSources.js";
 import { collectBoJPolicyDecisionHistory } from "./bojPolicyDecisionCollection.js";
 import { OfficialPolicyRateHistoryStore, resolvePolicyRateOfficialHistoryPath } from "./policyRateOfficialHistory.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 type OfficialPolicyRateCollectionSource = keyof typeof OFFICIAL_POLICY_RATE_SOURCES | "boj_mpm_policy_decisions";
 
@@ -28,7 +29,7 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ ...result, evidence_tier: "exploratory_revised_history", eligibility: "exploratory_only" })}\n`);
 }
 
-if (process.argv[1]?.endsWith("officialPolicyRateCollectionCli.js")) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => {
     process.stderr.write(`official policy-rate collection failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

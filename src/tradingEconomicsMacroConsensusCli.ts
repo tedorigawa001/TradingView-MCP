@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import { MacroSurpriseEvidenceStore, MacroSurpriseRawArchive, resolveMacroSurpriseEvidencePath, resolveMacroSurpriseRawArchivePath } from "./macroSurpriseEvidence.js";
 import { collectTradingEconomicsMacroConsensus, validateTradingEconomicsMacroConsensusMappings, type TradingEconomicsMacroConsensusMapping } from "./tradingEconomicsMacroConsensus.js";
 import type { OfficialMacroEventArtifact } from "./officialMacroEventSources.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 type Config = { schema_version: "1.0"; provider: "trading_economics_calendar"; mappings: TradingEconomicsMacroConsensusMapping[] };
 
@@ -42,6 +42,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => { process.stderr.write(`Trading Economics macro-consensus collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 }

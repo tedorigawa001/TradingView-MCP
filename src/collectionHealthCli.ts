@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { collectionHealthNotification, evaluateCollectionHealth, type CollectionHealthResult, type CollectionHealthScope } from "./collectionHealth.js";
 import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbeatPath } from "./policyRateCollectionHeartbeat.js";
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
 import { FirstSeenCollectionHeartbeatStore, resolveFirstSeenCollectionHeartbeatPath } from "./firstSeenCollectionHeartbeat.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const DEFAULT_MAX_POLICY_RATE_AGE_BUSINESS_DAYS = 0;
 const DEFAULT_MAX_RESEARCH_AGE_HOURS = 2;
@@ -141,6 +141,6 @@ export async function runCollectionHealthCli(
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isCliEntrypoint(import.meta.url)) {
   process.exitCode = await runCollectionHealthCli(process.argv.slice(2));
 }

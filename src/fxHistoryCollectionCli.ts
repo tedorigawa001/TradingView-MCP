@@ -1,4 +1,5 @@
 import { collectOandaEurUsdM15History } from "./oandaHistoricalFx.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export function parseFxHistoryCollectionCliArguments(argv: string[]) {
   let from: string | undefined; let to: string | undefined; let confirmed = false; let environment: "practice" | "live" = "practice";
@@ -25,4 +26,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ ...summary, bars_collected: bars.length })}\n`);
 }
 
-if (process.argv[1]?.endsWith("fxHistoryCollectionCli.js")) main().catch((error) => { process.stderr.write(`FX history collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`FX history collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

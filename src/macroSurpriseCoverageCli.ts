@@ -1,10 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { MacroSurpriseEvidenceStore, resolveMacroSurpriseEvidencePath } from "./macroSurpriseEvidence.js";
 import { assessMacroSurpriseCoverage } from "./macroSurpriseCoverage.js";
 import type { OfficialMacroEventArtifact } from "./officialMacroEventSources.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export function parseMacroSurpriseCoverageCliArguments(argv: string[]) {
   const eventPaths: string[] = []; let out = ""; let confirmed = false;
@@ -28,4 +28,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ readiness: result.readiness, eligible_events: result.eligible_events, missing_forward_consensus: result.missing_forward_consensus, missing_forward_actual: result.missing_forward_actual, output_path: args.out })}\n`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`macro-surprise coverage failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`macro-surprise coverage failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

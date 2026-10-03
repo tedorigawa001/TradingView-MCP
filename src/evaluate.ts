@@ -4,6 +4,7 @@ import { AppendOnlyEvaluationLog } from "./evaluationLog.js";
 import { EvaluationPipeline } from "./evaluationPipeline.js";
 import { TreasuryRealYieldClient } from "./realYield.js";
 import { RealYieldFirstSeenStore, resolveRealYieldHistoryPath } from "./realYieldHistory.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 const USAGE = "usage: evaluate --log PATH --snapshot PATH [--features PATH] [--outcome PATH] [--as-of ISO_TIMESTAMP] [--real-yield-history PATH]";
 
@@ -47,6 +48,6 @@ export async function runEvaluate(args: string[]): Promise<void> {
   if (options.outcome) await pipeline.recordOutcome(snapshot.snapshot_id, await readJson(options.outcome));
 }
 
-if (process.argv[1]?.endsWith("evaluate.js")) {
+if (isCliEntrypoint(import.meta.url)) {
   runEvaluate(process.argv.slice(2)).catch((err) => { console.error(`evaluation CLI error: ${err.message}`); process.exitCode = 1; });
 }

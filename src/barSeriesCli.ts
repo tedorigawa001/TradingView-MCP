@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { BarSeriesStore } from "./barSeries.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export async function importBarSeries(args: string[], store = new BarSeriesStore()) {
   const { values } = parseArgs({ args, options: {
@@ -18,13 +17,8 @@ export async function importBarSeries(args: string[], store = new BarSeriesStore
   return store.register(JSON.parse(text));
 }
 
-function isEntrypoint(): boolean {
-  if (!process.argv[1]) return false;
-  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
 
-if (isEntrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   importBarSeries(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 }

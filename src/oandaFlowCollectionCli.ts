@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { collectOandaFlow, OANDA_FLOW_INSTRUMENTS, oandaFlowTokenConfigured, type OandaFlowInstrument } from "./oandaFlow.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export type OandaFlowCollectionCliArguments = { instrument: OandaFlowInstrument | null; outputPath: string | null; confirmExternalFetch: boolean; readiness: boolean };
 
@@ -42,6 +43,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ instrument: result.instrument, collected_at: result.collectedAt, order_book_snapshots: result.orderBook.snapshots.length, position_ratio_snapshots: result.positionRatios.snapshots.length, output_path: outputPath, evidence_tier: result.evidenceTier })}\n`);
 }
 
-if (process.argv[1]?.endsWith("oandaFlowCollectionCli.js")) {
+if (isCliEntrypoint(import.meta.url)) {
   main().catch((error) => { process.stderr.write(`OANDA flow collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 }

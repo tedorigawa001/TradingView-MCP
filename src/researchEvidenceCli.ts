@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readBacktestLedgerFile } from "./backtestLedger.js";
 import { openExclusiveFile, syncDirectoryEntry } from "./fsDurability.js";
 import { generateResearchEvidence } from "./researchEvidenceGeneration.js";
 import { researchEvidenceDiagnostic } from "./researchEvidenceErrors.js";
+import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export async function runResearchEvidenceCli(args: string[]) {
   const { values } = parseArgs({ args, options: {
@@ -39,13 +38,8 @@ export async function runResearchEvidenceCli(args: string[]) {
   return { written: true, manifest: report.manifest };
 }
 
-function isEntrypoint(): boolean {
-  if (!process.argv[1]) return false;
-  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
-  catch { return false; }
-}
 
-if (isEntrypoint()) {
+if (isCliEntrypoint(import.meta.url)) {
   runResearchEvidenceCli(process.argv.slice(2)).then((result) => console.log(JSON.stringify(result)))
     .catch((error) => {
       // Parser and schema errors may contain source text. Never echo them.
