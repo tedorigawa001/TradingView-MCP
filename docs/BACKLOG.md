@@ -1883,13 +1883,13 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 - **レビュー対象**: `6c110326602ff92d6a2a1910e81d6f89c6aa6996` (0.1.19)。MCP/CDP・保存/収集・研究統計・Bookmap/配布を5担当と主担当で分担し、静的確認とローカル反例によって以下を確認した。関連する複数経路を同一課題へまとめ、P1 6件・P2 18件・P3 2件の計26項目とする。全項目は未修正・未着手。
 - **検証の位置づけ**: レビュー時の `npm test` は単体1,289件、Java4クラス、Replayテストがすべて通過したが、以下の反例は既存テストで検出できていない。全行/全分岐の網羅、実機E2E、Windowsネイティブ実行、既存保存データの汚染有無の確認は未実施。レビューで本番データの破損や資格情報の実漏洩を確認したとはしない。
 - **範囲**: 汎用MCP・収集・保存・アドオン・配布の品質改善のみ。新手法や非公開の研究結果を公開対象へ移さない。今回のバックログ追記自体ではコード・ジョブ・チャート・保存台帳を変更しない。
-- **進捗**: 102-02 ✅ (2026-10-03、未配布)。Authorization の値を認証方式ごと伏せる専用規則を追加し、引用されたキー(JSON・Python・util.inspect・Map・エスケープ済みJSON)、名前と値の組・HAR、`=` と `=>`、既知の方式名の後の空白、次行への折り返し(字下げ行のみ、スタックフレームは除く)に対応。複数部分の値(Digest・AWS4-HMAC-SHA256・OAuth 1.0)は引用なら閉じ引用符まで、なければ行末まで伏せる。汎用規則から authorization を外し(「authorization failed」は残る)、Authorization 規則をクエリ規則より前に移した。既存のクエリ規則の二乗時間(200 KB の「x://」で5秒)を線形化し、伏せられない入力(約800万字の引用値で正規表現のスタックが溢れる)は固定文言に置き換えて例外を投げない。差分確認4回(最終 APPROVE)、変異テスト33件をすべて検出。残りは 102-27。
+- **進捗**: 102-01 ✅ (2026-10-03、未配布)。npm の bin はシンボリックリンクなので、`argv[1]` と `import.meta.url` の文字列比較ではリンク経由の収集・監視 CLI が何もせず終了0だった。実パスで比べる共通の `isCliEntrypoint`(`src/cliEntrypoint.ts`)を作り、全26 CLI を統一(文字列比較15・ファイル名一致5・個別の実パス判定6)。argv[1] は Node と同じ規則で解決するので拡張子なしの起動も通り、`-e`/`-p` の起動はスクリプトなしとして扱う。bookmap-addon の build.mjs・replay.mjs も実パス比較に。テストは直接・リンク・リンクしたディレクトリ(`--preserve-symlinks` 系)・import の各起動、監視 CLI の実処理(空のホームで stale・終了1)、すべての bin と `node build/X.js` 対象が判定を通す静的チェック。差分確認3回(いずれも APPROVE WITH FINDINGS、HIGH・MEDIUM なし、すべて反映)、変異テスト12件をすべて検出。102-02 ✅ (2026-10-03、未配布)。Authorization の値を認証方式ごと伏せる専用規則を追加し、引用されたキー(JSON・Python・util.inspect・Map・エスケープ済みJSON)、名前と値の組・HAR、`=` と `=>`、既知の方式名の後の空白、次行への折り返し(字下げ行のみ、スタックフレームは除く)に対応。複数部分の値(Digest・AWS4-HMAC-SHA256・OAuth 1.0)は引用なら閉じ引用符まで、なければ行末まで伏せる。汎用規則から authorization を外し(「authorization failed」は残る)、Authorization 規則をクエリ規則より前に移した。既存のクエリ規則の二乗時間(200 KB の「x://」で5秒)を線形化し、伏せられない入力(約800万字の引用値で正規表現のスタックが溢れる)は固定文言に置き換えて例外を投げない。差分確認4回(最終 APPROVE)、変異テスト33件をすべて検出。残りは 102-27。
 
 #### 優先度P1: 配布・資格情報・証跡・判定の重大問題
 
 | ID | 場所 (レビュー時の行) | 再現条件と影響 | 修正方針・固定する回帰テスト |
 |---|---|---|---|
-| 102-01 | `src/collectionCli.ts:83`, `src/collectionHealthCli.ts:144` | npmのシンボリックリンク経由では `import.meta.url` と `argv[1]` が一致せず、収集も監視も処理なしで終了0。直接実行で拒否される不正引数もリンク経由では無出力で成功する。 | 他の公開CLIと同じ実パスを使う入口判定へ統一。直接実行・npm形式のリンク・モジュールimportを分け、リンク経由の引数拒否と実処理の呼び出しをテストする。 |
+| 102-01 ✅ | `src/collectionCli.ts:83`, `src/collectionHealthCli.ts:144` | npmのシンボリックリンク経由では `import.meta.url` と `argv[1]` が一致せず、収集も監視も処理なしで終了0。直接実行で拒否される不正引数もリンク経由では無出力で成功する。 | 他の公開CLIと同じ実パスを使う入口判定へ統一。直接実行・npm形式のリンク・モジュールimportを分け、リンク経由の引数拒否と実処理の呼び出しをテストする。 |
 | 102-02 ✅ | `src/redact.ts:27` | `Authorization: Bearer TOKEN` が `Authorization: *** TOKEN` となり、資格情報が残る。Basicも同型。ページ例外からstderr/MCPエラー応答へ伝わる経路がある。 | 認証方式と資格情報を一緒に伏せる。Bearer/Basic、再度のredaction、複数行、CDP例外から応答/ログまでの統合テストを追加する。 |
 | 102-03 | `src/cmeDailyBulletin.ts:65` | TOTAL行の最大値をOIとするため、出来高500,000・OI376,079の行からOI500,000を返し、公式first-seen系列へ保存できる。 | 最大値ヒューリスティックを廃止し、列の意味・PDF配置に基づいて抽出する。出来高がOIより大きい行、空列、項目の並び、曖昧な抽出の拒否をテストする。 |
 | 102-04 | `src/analysisOutcome.ts:271`, `src/dueAnalyses.ts:40` | 期限経過だけで履歴不足の分析を `complete/no_terminal_event` にする。10:15までの履歴で完了、10:30の足追加で損切り到達へ変わる。完了記録は自動再評価から外れる。 | 期限までの評価証拠・欠損を確認し、証拠不足を完了にしない。短い履歴、途中欠損、期限境界、追加履歴での再評価とdue選出をテストする。 |
@@ -1926,6 +1926,7 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 |---|---|---|---|
 | 102-25 | `src/priceActionTrapReproductionCli.ts:30,39` | 既定出力名を再利用する `writeFile` が既存の再現証跡を無確認で上書きする。途中停止で以前の成果物を失う可能性もある。 | 成果物の不変性/再生成方針を明示し、他の証跡CLIに倣った排他的・耐久的publicationを検討。既存ファイル、同一定義再送、競合、書き込み失敗での旧証跡保持をテストする。 |
 | 102-26 | `bookmap-addon/build.sh:52`, `bookmap-addon/src/test/java/jp/bushido/bookmap/FlowSignalEngineTest.java:38` | SDKなしの旧shell buildはengine/markerだけをcompileするが、テストは `FlowSweepReplay` を参照するためコンパイル失敗。Node版buildは同クラスを含む。 | 旧shell経路をNode版へ委譲または同じsource集合に統一。SDKなしの旧wrapper実行を固定し、サポートしないなら廃止/文書化する。 |
+| 102-28 | `src/migrateFuturesOiDatesCli.ts`, `src/migrateFuturesOiCmeCleanupCli.ts` | 102-01 の差分確認で判明。2つの移行スクリプトには入口判定がなく、モジュールとして import するだけで移行が走る。現在は `npm run migrate:*` からしか起動されず、ほかのモジュールからの import もない。 | 他の CLI と同じく `if (isCliEntrypoint(import.meta.url))` で囲み、静的チェックの例外一覧から外す。import しても移行が走らないことと、直接起動で従来どおり動くことをテストで固定する。 |
 
 #### 対応順序と完了条件
 
