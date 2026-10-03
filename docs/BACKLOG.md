@@ -1878,6 +1878,60 @@ EURGBP, AUDNZD, XAUUSD, EURJPY, GBPJPY)、内包足→片側フェイクブレ�
 
 見送り: 承認・claim・監督の仕組みの MCP 化(研究ごとの個別性が高く、汎用化すると穴が出やすい。研究テンプレートで扱う)。予測・シグナル系ツールの追加(探索の経路を増やすだけになる)。
 
+### #102 全ソースレビューで確認した不具合の修正 (未着手, 2026-10-02)
+
+- **レビュー対象**: `6c110326602ff92d6a2a1910e81d6f89c6aa6996` (0.1.19)。MCP/CDP・保存/収集・研究統計・Bookmap/配布を5担当と主担当で分担し、静的確認とローカル反例によって以下を確認した。関連する複数経路を同一課題へまとめ、P1 6件・P2 18件・P3 2件の計26項目とする。全項目は未修正・未着手。
+- **検証の位置づけ**: レビュー時の `npm test` は単体1,289件、Java4クラス、Replayテストがすべて通過したが、以下の反例は既存テストで検出できていない。全行/全分岐の網羅、実機E2E、Windowsネイティブ実行、既存保存データの汚染有無の確認は未実施。レビューで本番データの破損や資格情報の実漏洩を確認したとはしない。
+- **範囲**: 汎用MCP・収集・保存・アドオン・配布の品質改善のみ。新手法や非公開の研究結果を公開対象へ移さない。今回のバックログ追記自体ではコード・ジョブ・チャート・保存台帳を変更しない。
+
+#### 優先度P1: 配布・資格情報・証跡・判定の重大問題
+
+| ID | 場所 (レビュー時の行) | 再現条件と影響 | 修正方針・固定する回帰テスト |
+|---|---|---|---|
+| 102-01 | `src/collectionCli.ts:83`, `src/collectionHealthCli.ts:144` | npmのシンボリックリンク経由では `import.meta.url` と `argv[1]` が一致せず、収集も監視も処理なしで終了0。直接実行で拒否される不正引数もリンク経由では無出力で成功する。 | 他の公開CLIと同じ実パスを使う入口判定へ統一。直接実行・npm形式のリンク・モジュールimportを分け、リンク経由の引数拒否と実処理の呼び出しをテストする。 |
+| 102-02 | `src/redact.ts:27` | `Authorization: Bearer TOKEN` が `Authorization: *** TOKEN` となり、資格情報が残る。Basicも同型。ページ例外からstderr/MCPエラー応答へ伝わる経路がある。 | 認証方式と資格情報を一緒に伏せる。Bearer/Basic、再度のredaction、複数行、CDP例外から応答/ログまでの統合テストを追加する。 |
+| 102-03 | `src/cmeDailyBulletin.ts:65` | TOTAL行の最大値をOIとするため、出来高500,000・OI376,079の行からOI500,000を返し、公式first-seen系列へ保存できる。 | 最大値ヒューリスティックを廃止し、列の意味・PDF配置に基づいて抽出する。出来高がOIより大きい行、空列、項目の並び、曖昧な抽出の拒否をテストする。 |
+| 102-04 | `src/analysisOutcome.ts:271`, `src/dueAnalyses.ts:40` | 期限経過だけで履歴不足の分析を `complete/no_terminal_event` にする。10:15までの履歴で完了、10:30の足追加で損切り到達へ変わる。完了記録は自動再評価から外れる。 | 期限までの評価証拠・欠損を確認し、証拠不足を完了にしない。短い履歴、途中欠損、期限境界、追加履歴での再評価とdue選出をテストする。 |
+| 102-05 | `src/futuresOpenInterestHistory.ts:192`, `src/firstSeenStore.ts:187` | OIが同値で速報から確報へ変わる場合、取得時刻の逆行が追記前検査を通る。追記成功後の全読み込みは `first_seen_at moved backwards` で失敗する。 | 数値またはpublication statusを変更して追記する全候補へ時刻不変条件を適用。状態だけの改訂、時刻逆行拒否、拒否後も既存台帳が読めることを実ストアでテストする。 |
+| 102-06 | `src/marketSnapshot.ts:185`, `src/calendar.ts:132`, `src/tradeDecisionContext.ts:410` | カレンダー取得が現在以降なので、5分前の重要指標が発表後30分のblackout判定へ入らず `trade_ready` になる。 | 設定された発表後禁止窓を含む取得期間を明示し、取得件数上限による欠落も考慮する。発表前/後と境界、ソース呼び出しのfrom、最終 `wait` 判定を統合テストする。 |
+
+#### 優先度P2: 保存・取得・研究契約・チャート操作の整合性
+
+| ID | 場所 (レビュー時の行) | 再現条件と影響 | 修正方針・固定する回帰テスト |
+|---|---|---|---|
+| 102-07 | `src/firstSeenCollection.ts:78,87`, `src/collectionCli.ts:69` | COT/実質金利の取得がresolveすれば、保存失敗・availabilityなしでも収集を成功扱いし、正常heartbeatを記録する。既存coverageが読めるだけでは新規追記失敗が見えない。 | 取得成功と証跡保存成功を分離。providerの保存結果を確認し、失敗をpartial/非0終了・異常heartbeatへ伝える。保存だけ失敗する実ストア/通知経路をテストする。 |
+| 102-08 | `src/firstSeenStore.ts:169,240`, `src/analysisJournal.ts:427`, `src/strategyResearchJournal.ts:460`, `src/evaluationLog.ts:92` | 完全なJSONでも末尾改行がない行を読み取り時に受理し、次の追記で `}{` に連結して台帳を壊す。追記は成功を返すが次回読み込みが失敗する。 | 追記前にJSONL framingを検証し、不完全な末尾を拒否する。無改行の最終行がある全該当ストアで、追記拒否と原本不変をテストする。 |
+| 102-09 | `src/officialPolicyRateSources.ts:273`, `src/policyRateOfficialHistory.ts:146` | 再取得時に変化点が消えると、古い変化点が更新されない。原典が4→5から4→4へ改訂されても `getRevisedSeries/getLatest` は5を残す。 | ダウンロード単位のsnapshot所属と消えた変化点を扱い、最新改訂系列を一貫して再構成する。変化点消失・再出現・取得範囲短縮を区別し、原本/旧vintageを保持するテストを追加する。 |
+| 102-10 | `src/officialPolicyRateSources.ts:240,268` | ECB CSV/BoC JSONの空欄を `Number("")` で0へ変換し、真のゼロ金利決定と同じ形で保存・coverage算入する。 | 空/空白を数値化前に拒否または明示的欠測へ分類。空欄、空白、実際の `0`、不正数値を分けるテストを追加する。 |
+| 102-11 | `src/futuresOpenInterestCmeCleanupMigration.ts:45`, `src/futuresOpenInterestMigration.ts:43` | 移行で `report_status` を渡さない。同値の速報/確報2版が状態nullの1件へ潰れ、publication vintageを失う。 | 状態を移送・重複判定へ含め、旧レコードの状態不明と既知状態を区別。両移行について同値2版の保持、再実行、意図した除去以外の記録不変をテストする。 |
+| 102-12 | `src/oandaHistoricalFx.ts:78,194,202` | 未確定足を除外したページを完了checkpointにする。同一範囲を後で再実行しても保存ページを再利用し、後に確定した足を取得しない。 | 未確定末尾を持つページを再取得対象として扱う契約を定め、確定済みのcheckpoint/raw証跡を保持。未確定→確定の再実行で末尾を回収し、他ページを重複取得しないことをテストする。 |
+| 102-13 | `src/macroSurpriseCoverage.ts:63,64` | `asOf=12:30` に対し12:31取得のactualを適格件数へ算入する。storeの `getEligible` とcoverage/readinessのPIT結果が不一致になる。 | `asOf` 時点で既知の記録だけで取得開始・適格・待機を評価する。境界と未来のconsensus/actual、storeとの一致をテストする。 |
+| 102-14 | `src/carryPanelPrimaryTest.ts:207,217` | 共通価格日の配列位置で20日を数え、欠損日を詰めるため固定営業日グリッドと窓が変わる。40営業日のリターンを20日として年率化する反例がある。 | 事前登録した `2026-07-28` 起点のグリッドと20営業日のendpointを守り、必要価格がなければ除外/不足を報告。欠損追加で他アンカーが動かないテストを追加。common-date方式を明記した依存診断を同じ不具合とは扱わない。 |
+| 102-15 | `src/eventStudyFalsificationAudit.ts:344`, `src/leadLagFalsificationAudit.ts:83` | Yield/priceとlead/lagの監査が評価不能な複製をfalseの棄却として数える。最小件数を満たせない3複製でもcomplete・evaluated=3・候補率0を返し、分母を水増しする。 | evaluabilityを候補判定と分離し、評価不能seed・失敗・評価済み分母を返す。全件不足/一部不足/真の棄却を区別する。修正後の校正値は旧率と別証跡で測定する。 |
+| 102-16 | `src/macroEvent60mStudy.ts:93`, `src/macroEvent60mPreflight.ts:38` | 保存済みcoverage要約を信頼し再計算しない。12か月の正常要約を残したままイベントを1件へ減らしても両経路が受理する。 | M15側と同様に実イベント/非公表免除からcoverageを再導出。要約と内容の不一致をstudy・preflight・CLI経由で拒否するテストを追加する。 |
+| 102-17 | `src/sessionHandoffStudy.ts:162` | candidateBarsが前日/当日だけのため、23:00〜02:00のhandoffで翌日の有効足が欠落する。同じ価格/時計を12時間ずらすとイベントが出る。 | prior/handoffの相対窓が必要とする日付を全て取得。日跨ぎhandoff、日跨ぎprior、複数priorの組み合わせと時刻平行移動をテストする。 |
+| 102-18 | `src/strategyRegimeEvaluation.ts:57`, `src/strategyStress.ts:61` | 閉じた取引のequity DDを決済順でなくentry/台帳順で計算。重複保有の反例で実際60に対し120を返す。 | 実現損益をexit時刻で順序化し、同時刻のtie規則を固定。重複保有、台帳の並べ替え、通常の非重複取引を両評価経路でテストする。 |
+| 102-19 | `src/pineAudit.ts:4`, `src/researchProtocol.ts:78` | 文字列内の `https://` をコメントとして削除し、その後の文字列除去が実コードまで飲み込む。後続の `request.security` 等が警告なしになる。 | 文字列/コメントを区別した走査へ変更。URL、quote/escape、行/ブロックコメント、複数危険構文、protocol側の警告伝播をテストする。 |
+| 102-20 | `src/cdp.ts:115,224,253`, `src/server.ts:317` | 指定timeoutがHTTP discovery/WS接続待ちには効かず、接続が停滞すると共有チャート操作キュー・ロックを保持する。 | 接続段階にも有限の期限・失敗後の再接続を設ける。HTTP/WS停滞、タイムアウト後のキュー回復とロック解放をローカルfakeでテストする。 |
+| 102-21 | `src/chartTransaction.ts:57`, `src/server.ts` の `set_symbol` | `EURUSD` が `OANDA:EURUSD` へ正常解決しても厳密な入力文字列比較で失敗し、元のチャートへ復元する。ツールはexchange prefix省略を許している。 | 変更要求の解決済みcanonical symbolと研究証拠の厳密束縛を区別する。prefix省略の正常切替、別銘柄への誤解決拒否、rollbackをテストし、研究束縛を緩めない。 |
+| 102-22 | `src/tradingview.ts:2472` の `runBacktest` | 一時strategy追加後のレポート取得/整形が例外になると削除処理へ到達しない。create成功・report getter例外でstudyが残る。上位実験処理もstudy IDを受け取れずcleanupできない。 | 成功時のkeep指定以外は例外でもcleanupするfinallyへ整理。取得/整形例外、timeout、削除自体の失敗と元原因保持をin-page fakeでテストする。 |
+| 102-23 | `bookmap-addon/src/main/java/jp/bushido/bookmap/{FlowSweepReplay.java:29,FlowSignalResearch.java:153,FlowSignalDisplay.java:128}` | 不正価格の正サイズ約定を飛ばす際、そのSELL/UNKNOWNによるSweep状態リセットも飛ばす。BUY100、BUY101、UNKNOWN/SELL101.5、BUY102で連続3約定Sweepを出せる。 | データ拒否をシーケンス継続と混同せず、正サイズの拒否約定で連続性を無効化する。Replay/表示/研究の各adapterで反対/不明方向と拒否価格をテストする。 |
+| 102-24 | `FlowCollector.java:45`, `src/platformSupport.ts:27,29` | macOS/WindowsでCollectorの `~/.tradingview-mcp/bookmap-data` とreader既定の `/Volumes/HD/bookmap_data` /LOCALAPPDATA側が一致せず、既定設定同士では保存セッションを発見できない。設定による明示整合は可能。 | 既定の場所を統一するか、初期設定で一致確認を必須にする。各OSの既定・環境変数override・実際の保存先からの発見と文書を対称に検証する。 |
+
+#### 優先度P3: 成果物保全・旧ビルド経路
+
+| ID | 場所 (レビュー時の行) | 再現条件と影響 | 修正方針・固定する回帰テスト |
+|---|---|---|---|
+| 102-25 | `src/priceActionTrapReproductionCli.ts:30,39` | 既定出力名を再利用する `writeFile` が既存の再現証跡を無確認で上書きする。途中停止で以前の成果物を失う可能性もある。 | 成果物の不変性/再生成方針を明示し、他の証跡CLIに倣った排他的・耐久的publicationを検討。既存ファイル、同一定義再送、競合、書き込み失敗での旧証跡保持をテストする。 |
+| 102-26 | `bookmap-addon/build.sh:52`, `bookmap-addon/src/test/java/jp/bushido/bookmap/FlowSignalEngineTest.java:38` | SDKなしの旧shell buildはengine/markerだけをcompileするが、テストは `FlowSweepReplay` を参照するためコンパイル失敗。Node版buildは同クラスを含む。 | 旧shell経路をNode版へ委譲または同じsource集合に統一。SDKなしの旧wrapper実行を固定し、サポートしないなら廃止/文書化する。 |
+
+#### 対応順序と完了条件
+
+- **最初の修正群**: 102-01/02/07 (実行・redaction・収集成功の整合) を先に回帰テストで固定し、続いて102-03〜06 (OI・分析完了・発表後blackout) と102-08/11 (台帳保全・移行) を扱う。コード修正と既存データ修復は別作業とする。
+- **保存データの影響確認**: 原本/旧artifactを読み取り専用で退避・ハッシュ保存したうえで、CME rawとのOI照合、状態改訂/逆行/JSONL framing、誤完了分析、公式政策金利のsnapshot整合を確認する。疑いのある範囲と確認済み範囲を区別し、自動的に旧台帳を修復・再取得・上書きしない。実際の漏洩が判明した資格情報だけは失効/交換を別途扱う。
+- **研究契約の扱い**: 窓・母集団・DD・evaluabilityを直す場合は、凍結済み契約/結果/runnerを黙って置換せず、変更点と影響範囲を記録する。必要な再評価/再校正は別版・別証跡とし、旧校正を修正後規則の保証に使わない。候補封鎖や研究打ち切りを今回の修正だけで解除しない。
+- **完了条件**: 各反例が修正前に失敗し修正後に通る回帰テスト、隣接経路・MCP/CLI/Java統合の検証、全体テスト、独立レビューを実施する。配布binはリンク経由、Windows差異はネイティブCI、チャートの復元/cleanupは必要な実機で確認し、未確認範囲を残す。項目ごとに状態を更新してから公開版・必要な再接続/ジョブ更新を扱う。
+
 ## 運用メモ
 
 - **MCP サーバーはビルド更新後に再接続が必要**: サーバープロセスは起動時の `build/` を使い続けるため、新ツールはセッション再接続まで見えない(実分析時に `get_indicator_graphics` が未露出で直接実行により回避)。README に記載する
