@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { isCliEntrypoint } from "../../build/cliEntrypoint.js";
+import { isEntrypoint as isAddonEntrypoint } from "../../bookmap-addon/entrypoint.mjs";
 
 // BACKLOG 102-01: npm installs a bin as a symlink, so argv[1] is the link while import.meta.url is the file it points
 // to. Comparing the strings made a linked CLI exit 0 without doing anything, even on an argument it rejects directly.
@@ -40,6 +41,7 @@ test("isCliEntrypoint compares real paths as node resolves the script: the scrip
   assert.equal(isCliEntrypoint(url, undefined), false, "node -e, or an import from another script");
   assert.equal(isCliEntrypoint(url, ""), false);
   assert.equal(isCliEntrypoint(url, "--bogus"), false);
+  assert.equal(isCliEntrypoint(url, "-"), false, "node - reads stdin: no script, whatever a file named - is");
   assert.equal(isCliEntrypoint(url, join(dir, "missing.js")), false);
   assert.throws(() => isCliEntrypoint(script, script), "a path passed as the module URL is a programming error, not a no");
   const link = await linkTo(script, join(dir, "tradingview-mcp-bin"));
@@ -87,6 +89,44 @@ test("the linked collection and health bins run: they reject a bad argument as d
   }
 });
 
+test("code from stdin (node -) that imports a CLI does not run it, even with a file named - linking to it", async (t) => {
+  const dir = await scratch(t);
+  const target = new URL("../../build/collectionCli.js", import.meta.url);
+  if (!(await linkTo(fileURLToPath(target), join(dir, "-")))) { t.diagnostic("symlinks unavailable on this Windows runner"); return; }
+  const child = execFile(process.execPath, ["--input-type=module", "-", "--bogus"], { cwd: dir, env: isolatedEnv(dir) });
+  child.stdin.end(`await import(${JSON.stringify(target.href)});`);
+  const result = await new Promise((done) => {
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (code) => done({ code, stdout, stderr }));
+  });
+  assert.deepEqual(result, { code: 0, stdout: "", stderr: "" });
+});
+
+test("bookmap-addon's isEntrypoint: by real path, and never for -e/-p code or stdin, which would start the build", async (t) => {
+  const dir = await scratch(t);
+  const script = join(dir, "build.mjs"), other = join(dir, "other.mjs");
+  await writeFile(script, ""); await writeFile(other, "");
+  const url = pathToFileURL(script).href;
+  assert.equal(isAddonEntrypoint(url, script, []), true);
+  assert.equal(isAddonEntrypoint(url, other, []), false);
+  assert.equal(isAddonEntrypoint(url, undefined, []), false);
+  assert.equal(isAddonEntrypoint(url, join(dir, "missing.mjs"), []), false);
+  for (const execArgv of [["-e", "code"], ["--input-type=module", "-e", "code"], ["-p", "code"], ["-pe", "code"], ["--eval=code"], ["--print", "code"]]) {
+    assert.equal(isAddonEntrypoint(url, script, execArgv), false, `${execArgv.join(" ")} with the script's own path after --`);
+  }
+  assert.equal(isAddonEntrypoint(url, "-", []), false, "node - reads stdin");
+  const link = await linkTo(script, join(dir, "build-link.mjs"));
+  if (!link) { t.diagnostic("symlinks unavailable on this Windows runner"); return; }
+  assert.equal(isAddonEntrypoint(url, link, []), true);
+  assert.equal(isAddonEntrypoint(url, link, ["-e", "code"]), false, "the reported case: a link to it after -e");
+  // node - with a file named - in the working directory that links to the script: still stdin, not the script.
+  await linkTo(script, join(dir, "-"));
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try { assert.equal(isAddonEntrypoint(url, "-", []), false); } finally { process.chdir(cwd); }
+});
+
 test("through a linked directory the bins run under --preserve-symlinks and --preserve-symlinks-main too", async (t) => {
   // Through a file link node cannot load a module whose path it preserves (its relative imports miss), so this uses a
   // link to the whole build directory: a junction on Windows, which needs no privilege.
@@ -122,12 +162,11 @@ test("every CLI decides its entry point through isCliEntrypoint, and none compar
     if (!/^if \(isCliEntrypoint\(import\.meta\.url\)\)/m.test(await readFile(new URL(`${name}.ts`, src), "utf8"))) unguarded.push(name);
   }
   assert.deepEqual(unguarded, []);
-  // The add-on's scripts compare real paths too.
+  // The add-on's scripts decide through their shared isEntrypoint, and read no argv[1] themselves.
   for (const name of ["build.mjs", "replay.mjs"]) {
     const text = await readFile(new URL(`bookmap-addon/${name}`, root), "utf8");
-    assert.match(text, /realpathSync\(resolve\(process\.argv\[1\]\)\) === realpathSync\(fileURLToPath\(import\.meta\.url\)\)/, name);
-    assert.match(text, /^if \(isEntrypoint\(\)\) \{/m, `${name} uses it`);
-    assert.doesNotMatch(text, /(?<!realpathSync\()resolve\(process\.argv\[1\]\) *===|=== *resolve\(process\.argv\[1\]\)/,
-      `${name} compares argv[1] only by real path`);
+    assert.match(text, /^import \{ isEntrypoint \} from ["']\.\/entrypoint\.mjs["'];$/m, name);
+    assert.match(text, /^if \(isEntrypoint\(import\.meta\.url\)\) \{/m, `${name} uses it`);
+    assert.doesNotMatch(text, /process\.argv(?!\.slice\(2\)|\[2\])/, `${name} reads argv[1] only through it`);
   }
 });

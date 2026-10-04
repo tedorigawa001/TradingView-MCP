@@ -58,6 +58,14 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
     ["x-api-key:\r\n k-9", "x-api-key:\r\n ***"],
     ['"token":\n  "abc123"', '"token":\n  "***"'],
     ["'api_key' => 'k-9'", "'api_key' => '***'"],
+    // An escaped JSON string runs to its real closing \" (one backslash, then the end of a JSON value): a ', an inner
+    // \\\" (a quote escaped twice) or \\/ inside it does not end it.
+    [String.raw`{\"Authorization\":\"Digest realm='r', response=\"abc123\"\"}`, String.raw`{\"Authorization\":\"***\"}`],
+    [String.raw`{\"Authorization\":\"Digest username=\\\"u\\\", qop='auth', response=\\\"abc123\\\"\",\"Host\":\"x\"}`,
+      String.raw`{\"Authorization\":\"***\",\"Host\":\"x\"}`],
+    [String.raw`{\"Authorization\":\"Digest qop='auth', response='abc123'\"}`, String.raw`{\"Authorization\":\"***\"}`],
+    [String.raw`{\"Authorization\":\"Basic dXNl\\/dXNlcjpwYXNz==\"}`, String.raw`{\"Authorization\":\"***\"}`],
+    [String.raw`{\'Authorization\': \'Digest qop="auth", response="abc123"\'}`, String.raw`{\'Authorization\': \'***\'}`],
     ["{'Authorization': 'Digest u=\"a\", x=\\'k-9\\''}", "{'Authorization': '***'}"],
     ["Bearer  \n  sk-live-123", "Bearer  \n  ***"],
     // Before the query rule, so a header inside a query string cannot leave its credential behind the "?***".

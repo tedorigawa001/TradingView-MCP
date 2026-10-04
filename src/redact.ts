@@ -30,9 +30,10 @@ const FOLD = String.raw`(?:\r?\n[ \t]+(?![ \t]|at\s))`;
 /**
  * A whole Authorization value, scheme and credentials (BACKLOG 102-02): masking only the first word left
  * "Authorization: *** abc", and a multi-part value (Digest, AWS4-HMAC-SHA256, OAuth 1.0) kept everything after its
- * first ", ". A quoted value runs to its own unescaped closing quote, so quotes and escapes inside it stay masked; an
- * unquoted one runs to the end of the line, and onto a folded next line only when its line holds just the scheme. It
- * follows:
+ * first ", ". A quoted value runs to its own unescaped closing quote, so quotes and escapes inside it stay masked. In
+ * an escaped JSON string the closing quote is a \" with a single backslash followed by `,`, `}`, `]` or the end of the
+ * line, so a ' or an inner \\\" (a quote escaped twice) or \\/ does not end it. An unquoted value runs to the end of
+ * the line, and onto a folded next line only when its line holds just the scheme. It follows:
  * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with a
  *   fold before the value, and Proxy-Authorization included since \b falls after its hyphen;
  * - a name-value pair with a scheme next, `['Authorization', 'Basic …']`, so a list of header names keeps its next
@@ -45,8 +46,13 @@ const AUTHORIZATION = new RegExp(String.raw`\b(authorization)(` +
   String.raw`\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?(?=\S)` +
   String.raw`|\\?["'][ \t]*,[ \t]*(?:\\?["']value\\?["'][ \t]*:[ \t]*(?=\\?["'])|(?=\\?["']${SCHEME}\b))` +
   String.raw`|[ \t]+(?=${SCHEME}\b)` +
-  String.raw`)(?:(\\["'])[^"'\\\r\n]*|(")(?:[^"\\\r\n]|\\.)*|(')(?:[^'\\\r\n]|\\.)*` +
+  String.raw`)(?:${escapedRun('"')}|${escapedRun("'")}|(")(?:[^"\\\r\n]|\\.)*|(')(?:[^'\\\r\n]|\\.)*` +
   String.raw`|(?!(?:null|true|false|undefined)[ \t]*(?:[,;)\]}]|\r?\n|$))(?:${SCHEME}[ \t]*${FOLD})?[^\r\n]+)`, "gi");
+
+/** A value opened by an escaped quote, up to the one that closes it (a single backslash, then the end of a JSON value). */
+function escapedRun(quote: string): string {
+  return String.raw`(\\${quote})[^\r\n]*?(?=(?<!\\)\\${quote}[ \t]*(?:[,}\]]|\r?\n|$))`;
+}
 
 /** Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line. */
 const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
@@ -74,8 +80,8 @@ function redactAll(text: string): string {
   return text
     .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
     // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
-    .replace(AUTHORIZATION, (_, name: string, separator: string, escaped?: string, double?: string, single?: string) =>
-      `${name}${separator}${escaped ?? double ?? single ?? ""}***`)
+    .replace(AUTHORIZATION, (_, name: string, separator: string, escapedDouble?: string, escapedSingle?: string, double?: string,
+      single?: string) => `${name}${separator}${escapedDouble ?? escapedSingle ?? double ?? single ?? ""}***`)
     // The query is optional so that a URL without one is consumed whole: requiring it made every later "x://" in the
     // body rescan the rest of the message, which took 5 s on 200 KB of "x://" (code review of 102-02).
     .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)(\?[^\s"'<>()[\]]*)?/gi,

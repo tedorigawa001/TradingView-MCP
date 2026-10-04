@@ -11,14 +11,14 @@ const EVAL = /^(?:-(?:e|p|pe|ep)|--eval|--print)(?:=|$)/;
  * a symlink, so process.argv[1] is the link while import.meta.url is the file it points to; comparing the two as
  * strings (or by file name) made a linked CLI exit 0 without doing anything, even on an argument it would reject
  * (BACKLOG 102-01). argv[1] is resolved as node resolved the main script, so `node build/x` (no extension) counts too.
- * Imported as a module, or with no script (node -e or -p, whose argv[1] is the first argument after the code), it is
- * not the entry point. A module URL that is not a file URL is a programming error and throws; only a script path that
+ * Imported as a module, or with no script (node -e or -p, whose argv[1] is the first argument after the code, or
+ * node - reading stdin, whose argv[1] is "-" even when a file of that name exists), it is not the entry point. A module URL that is not a file URL is a programming error and throws; only a script path that
  * does not resolve means "not the entry point".
  */
 export function isCliEntrypoint(moduleUrl: string, scriptPath?: string): boolean {
   const modulePath = fileURLToPath(moduleUrl);
   const path = scriptPath ?? (process.execArgv.some((arg) => EVAL.test(arg)) ? undefined : process.argv[1]);
-  if (!path) return false;
+  if (!path || path === "-") return false;
   let script: string;
   try {
     script = realpathSync(createRequire(moduleUrl).resolve(resolve(path)));
