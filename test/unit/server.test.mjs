@@ -3735,6 +3735,44 @@ test("evaluate_due_analyses previews, restores multiple symbols, records non-gue
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
 });
 
+test("evaluate_due_analyses names a gapped result with history through the expiry unless another timeframe is asked for (102-04)", async () => {
+  const gapped = {
+    schema_version: "1.0",
+    event_id: "outcome-EURUSD-gapped",
+    sequence: 2,
+    recorded_at: "2026-07-01T02:00:00.000Z",
+    kind: "outcome_evaluated",
+    analysis_id: "EURUSD-gapped",
+    definition_hash: "hash-EURUSD-gapped",
+    payload: {
+      status: "incomplete",
+      outcome: "gap_in_evaluation_window",
+      evaluatedAt: "2026-07-01T02:00:00.000Z",
+      evidenceTimeframe: "15",
+      evidenceThrough: "2026-07-01T00:45:00.000Z",
+      result: { evidence: { expiryCoveredBy: "closed_bar", gaps: [], gapCount: 1 } },
+    },
+  };
+  const records = [dueAnalysisRecord("EURUSD-gapped", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z", gapped)];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "batch",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+      }),
+    },
+    journal: { list: async () => ({ total: records.length, returned: records.length, analyses: records }) },
+  }));
+  const preview = async (args) => JSON.parse((await client.callTool({ name: "evaluate_due_analyses", arguments: args })).content[0].text).preview;
+  const plain = await preview({ chart_index: 0 });
+  assert.deepEqual([plain.selected, plain.skipped], [0, [{ analysisId: "EURUSD-gapped", reason: "open_result_fixed_for_timeframe" }]]);
+  assert.equal((await preview({ chart_index: 0, evaluation_timeframe: "15" })).selected, 0);
+  const longer = await preview({ chart_index: 0, evaluation_timeframe: "1H" });
+  assert.deepEqual([longer.selected, longer.candidates[0].evaluationTimeframe], [1, "60"]);
+});
+
 test("evaluate_due_analyses continues after one evaluation failure", async () => {
   const records = [
     dueAnalysisRecord("EURUSD-fails", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),

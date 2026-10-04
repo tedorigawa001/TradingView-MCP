@@ -173,11 +173,15 @@ export function evaluateAnalysisOverlayOutcome(
     if (startMs - dueAtMs >= gapMs) gaps.push({ from: new Date(dueAtMs).toISOString(), to: bar.timeIso });
     dueAtMs = startMs + barMs;
   }
-  // The window's tail runs to the expiry, or to the next bar (one past the expiry, or the forming bar that proves it).
+  // The window's tail runs to the next bar when it starts by the expiry (the forming bar that proves it, or a closed one
+  // past it), measured like the room between bars; otherwise to the expiry, with room for a whole window bar.
   const nextStartMs = bars.find((bar) => bar.time * 1000 >= dueAtMs)?.time;
-  const tailEndMs = expiresAtMs === null ? null : Math.min(expiresAtMs, nextStartMs === undefined ? expiresAtMs : nextStartMs * 1000);
-  if (tailEndMs !== null && expiryCoveredBy !== null && tailEndMs - dueAtMs >= barMs) {
-    gaps.push({ from: new Date(dueAtMs).toISOString(), to: new Date(tailEndMs).toISOString() });
+  if (expiresAtMs !== null && expiryCoveredBy !== null) {
+    const tailEndsAtBar = nextStartMs !== undefined && nextStartMs * 1000 <= expiresAtMs;
+    const tailEndMs = tailEndsAtBar ? nextStartMs * 1000 : expiresAtMs;
+    if (tailEndMs - dueAtMs >= (tailEndsAtBar ? gapMs : barMs)) {
+      gaps.push({ from: new Date(dueAtMs).toISOString(), to: new Date(tailEndMs).toISOString() });
+    }
   }
   const evidence = {
     ...evidenceBase,
@@ -188,11 +192,14 @@ export function evaluateAnalysisOverlayOutcome(
     gaps: gaps.slice(0, MAX_RECORDED_GAPS),
     gapCount: gaps.length,
   };
+  // An entry or confirmation found at or after the first gap may have come earlier, inside it, so only earlier ones are
+  // reported.
+  const beforeGap = (at: string | null) => at !== null && gaps.length > 0 && Date.parse(at) >= Date.parse(gaps[0].to) ? null : at;
   const gapOpen = (activation: { entryAt: string | null; confirmationAt: string | null }) => ({
     status: "incomplete",
     outcome: "gap_in_evaluation_window",
     analysisId: state.analysisId,
-    activation,
+    activation: { entryAt: beforeGap(activation.entryAt), confirmationAt: beforeGap(activation.confirmationAt) },
     terminal: null,
     qualityIssues: ["gap_in_evaluation_window"],
     evidence,
@@ -343,6 +350,8 @@ export function evaluateAnalysisOverlayOutcome(
     previousBar = bar;
   }
 
+  // A gap already found inside the window keeps the result open whatever later history shows, so it is reported first.
+  if (windowClosed && gaps.length > 0) return gapOpen({ entryAt, confirmationAt });
   // The clock passing the expiry is not enough to close a result with no terminal: until the history reaches the
   // expiry a later bar could still bring the entry, the confirmation or a terminal, so it stays incomplete and due
   // selection rechecks it. History up to 10:15 for an 11:00 expiry was "complete" with no terminal event, and a 10:30
@@ -358,7 +367,6 @@ export function evaluateAnalysisOverlayOutcome(
       evidence,
     };
   }
-  if (windowClosed && gaps.length > 0) return gapOpen({ entryAt, confirmationAt });
   return {
     status: windowClosed ? "complete" : "ongoing",
     outcome: active
@@ -410,6 +418,18 @@ export function computeAnalysisPathMetrics(
       excursion: null,
       grossRealizedR: null,
       measurement: "entry_midpoint_reference; no activated path available",
+    };
+  }
+  // The path has holes where bars are missing, so its excursions would be understated.
+  if (result.outcome === "gap_in_evaluation_window") {
+    return {
+      methodologyVersion: "1.0" as const,
+      referenceEntry,
+      structuralRiskPrice,
+      timing,
+      excursion: null,
+      grossRealizedR: null,
+      measurement: "entry_midpoint_reference; bars missing inside the window",
     };
   }
 

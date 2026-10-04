@@ -4776,7 +4776,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                     : result.outcome === "history_ends_before_expiry"
                       ? "evaluate again once the chart has closed bars through the expiry; evaluate_due_analyses rechecks it"
                       : result.outcome === "gap_in_evaluation_window"
-                        ? "closed bars are missing inside the window (evidence.gaps); bars alone cannot show a market closure, so the result stays open"
+                        ? "closed bars are missing inside the window (evidence.gaps) and bars alone cannot show a market closure, so the result stays open; a longer evaluation_timeframe may cover bars a thin symbol skipped without trades"
                         : "call load_more_history, then evaluate again",
               }
             : {}),
@@ -4900,7 +4900,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const journalView = await journal.list({ limit: 500 });
         const selection = selectDueAnalyses(
           journalView.analyses as JournalAnalysisRecord[],
-          { includeActive: include_active ?? false, limit: limit ?? 20 },
+          { includeActive: include_active ?? false, limit: limit ?? 20, evaluationTimeframe: evaluation_timeframe },
         );
         const requestedBars = count ?? 1000;
         const historyLoad = load_more_bars ?? 0;

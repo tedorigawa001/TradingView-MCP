@@ -3,6 +3,7 @@ import type {
   AnalysisJournalEntry,
   AnalysisJournalOutcome,
 } from "./analysisJournal.js";
+import { normalizeResolution } from "./analysisOverlay.js";
 import { historyCoversExpiry } from "./analysisOutcome.js";
 
 export type JournalAnalysisRecord = {
@@ -23,16 +24,24 @@ export type DueAnalysisCandidate = {
 const WITHOUT_TERMINAL = new Set(["no_terminal_event", "not_activated", "expired_without_confirmation"]);
 
 /**
- * Whether a recorded outcome's own evidence shows history through the expiry. A record from this version names the
- * proof the evaluation used (evidence.expiryCoveredBy: a closed bar or a forming bar past the expiry); an older one is
- * judged by its last closed bar (see historyCoversExpiry).
+ * The proof of reaching the expiry that a record from this version names (evidence.expiryCoveredBy: a closed bar, or a
+ * forming bar past the expiry), null when it names none, or undefined for a record from an earlier version.
+ */
+function recordedProof(outcome: AnalysisJournalOutcome): "closed_bar" | "forming_bar" | null | undefined {
+  const evidence = outcome.result.evidence;
+  if (typeof evidence !== "object" || evidence === null || !("expiryCoveredBy" in evidence)) return undefined;
+  const coveredBy = (evidence as { expiryCoveredBy: unknown }).expiryCoveredBy;
+  return coveredBy === "closed_bar" || coveredBy === "forming_bar" ? coveredBy : null;
+}
+
+/**
+ * Whether a recorded outcome's own evidence shows history through the expiry: the proof a record from this version
+ * names, or for an older one its last closed bar (see historyCoversExpiry).
  */
 function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string | null): boolean {
+  const proof = recordedProof(outcome);
+  if (proof !== undefined) return proof !== null;
   const evidence = outcome.result.evidence;
-  if (typeof evidence === "object" && evidence !== null && "expiryCoveredBy" in evidence) {
-    const coveredBy = (evidence as { expiryCoveredBy: unknown }).expiryCoveredBy;
-    return coveredBy === "closed_bar" || coveredBy === "forming_bar";
-  }
   const closedThrough = typeof evidence === "object" && evidence !== null && typeof (evidence as { closedThrough?: unknown }).closedThrough === "string"
     ? (evidence as { closedThrough: string }).closedThrough
     : null;
@@ -45,7 +54,7 @@ function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string |
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
-  options: { now?: Date; includeActive?: boolean; limit?: number } = {},
+  options: { now?: Date; includeActive?: boolean; limit?: number; evaluationTimeframe?: string } = {},
 ) {
   const nowMs = (options.now ?? new Date()).getTime();
   const limit = options.limit ?? 20;
@@ -72,6 +81,15 @@ export function selectDueAnalyses(
         reason: WITHOUT_TERMINAL.has(latest.outcome) && !recordCoversExpiry(latest, definition.expiresAt)
           ? "legacy_complete_without_coverage" : "terminal_evaluation_exists",
       });
+      continue;
+    }
+    // An ambiguous or gapped result whose history already reached the expiry comes out the same on every recheck with
+    // the same bars, so it is named instead of switching the chart for it on every call. Another evaluation timeframe
+    // can change it (shorter bars may order an ambiguous bar, longer ones may cover bars without trades).
+    if (latest !== null && (latest.status === "ambiguous" || latest.outcome === "gap_in_evaluation_window") &&
+      typeof recordedProof(latest) === "string" && (options.evaluationTimeframe === undefined ||
+        normalizeResolution(options.evaluationTimeframe) === normalizeResolution(latest.evidenceTimeframe))) {
+      skipped.push({ analysisId: definition.analysisId, reason: "open_result_fixed_for_timeframe" });
       continue;
     }
     const expiryMs = definition.expiresAt === null ? null : Date.parse(definition.expiresAt);
@@ -109,15 +127,15 @@ export function selectDueAnalyses(
     }
   }
 
-  // Results already evaluated after their expiry and still open (a gap, a short or stopped history, an ambiguous bar) go
-  // last, least recently evaluated first: they may stay open, and with the oldest expiries they would otherwise take
-  // every slot from the analyses that just became due (BACKLOG 102-04). The rest go by expiry, so an analysis whose
-  // window has closed but has no evaluation since comes before one still active.
-  const evaluatedAfterExpiry = (candidate: DueAnalysisCandidate) => candidate.latestOutcome !== null &&
-    candidate.definition.expiresAt !== null &&
-    Date.parse(candidate.latestOutcome.evaluatedAt) >= Date.parse(candidate.definition.expiresAt);
+  // Results that were evaluated and stayed open (ambiguous, a gap, a short or stopped history, history not reaching back)
+  // go last: they may never resolve, and with the oldest expiries they would otherwise take every slot from the analyses
+  // that just became due (BACKLOG 102-04). They go in the order their current result was first recorded, since a recheck
+  // that finds the same result records nothing (rotating them fairly is BACKLOG 102-34). The rest go by expiry, so an
+  // analysis whose window has closed but has no final evaluation comes before one still active.
+  const evaluatedOpen = (candidate: DueAnalysisCandidate) =>
+    candidate.latestOutcome !== null && candidate.latestOutcome.status !== "ongoing";
   candidates.sort((left, right) => {
-    const leftOpen = evaluatedAfterExpiry(left), rightOpen = evaluatedAfterExpiry(right);
+    const leftOpen = evaluatedOpen(left), rightOpen = evaluatedOpen(right);
     if (leftOpen !== rightOpen) return leftOpen ? 1 : -1;
     if (leftOpen) {
       const byEvaluation = Date.parse(left.latestOutcome!.evaluatedAt) - Date.parse(right.latestOutcome!.evaluatedAt);
