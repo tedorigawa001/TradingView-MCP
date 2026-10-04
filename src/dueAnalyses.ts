@@ -22,9 +22,17 @@ export type DueAnalysisCandidate = {
 /** The outcomes that close an analysis without a terminal event, final only once the history reached its expiry. */
 const WITHOUT_TERMINAL = new Set(["no_terminal_event", "not_activated", "expired_without_confirmation"]);
 
-/** Whether a recorded outcome's own evidence shows history through the expiry (see historyCoversExpiry). */
+/**
+ * Whether a recorded outcome's own evidence shows history through the expiry. A record from this version names the
+ * proof the evaluation used (evidence.expiryCoveredBy: a closed bar or a forming bar past the expiry); an older one is
+ * judged by its last closed bar (see historyCoversExpiry).
+ */
 function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string | null): boolean {
   const evidence = outcome.result.evidence;
+  if (typeof evidence === "object" && evidence !== null && "expiryCoveredBy" in evidence) {
+    const coveredBy = (evidence as { expiryCoveredBy: unknown }).expiryCoveredBy;
+    return coveredBy === "closed_bar" || coveredBy === "forming_bar";
+  }
   const closedThrough = typeof evidence === "object" && evidence !== null && typeof (evidence as { closedThrough?: unknown }).closedThrough === "string"
     ? (evidence as { closedThrough: string }).closedThrough
     : null;
@@ -101,7 +109,20 @@ export function selectDueAnalyses(
     }
   }
 
+  // Results already evaluated after their expiry and still open (a gap, a short or stopped history, an ambiguous bar) go
+  // last, least recently evaluated first: they may stay open, and with the oldest expiries they would otherwise take
+  // every slot from the analyses that just became due (BACKLOG 102-04). The rest go by expiry, so an analysis whose
+  // window has closed but has no evaluation since comes before one still active.
+  const evaluatedAfterExpiry = (candidate: DueAnalysisCandidate) => candidate.latestOutcome !== null &&
+    candidate.definition.expiresAt !== null &&
+    Date.parse(candidate.latestOutcome.evaluatedAt) >= Date.parse(candidate.definition.expiresAt);
   candidates.sort((left, right) => {
+    const leftOpen = evaluatedAfterExpiry(left), rightOpen = evaluatedAfterExpiry(right);
+    if (leftOpen !== rightOpen) return leftOpen ? 1 : -1;
+    if (leftOpen) {
+      const byEvaluation = Date.parse(left.latestOutcome!.evaluatedAt) - Date.parse(right.latestOutcome!.evaluatedAt);
+      if (byEvaluation !== 0) return byEvaluation;
+    }
     const leftExpiry = left.definition.expiresAt === null
       ? Number.POSITIVE_INFINITY
       : Date.parse(left.definition.expiresAt);

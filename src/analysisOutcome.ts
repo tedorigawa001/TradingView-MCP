@@ -8,6 +8,10 @@ type TerminalEvent = {
   barTime: string;
 };
 
+/** Gaps kept in an outcome's evidence; evidence.gapCount counts them all. */
+const MAX_RECORDED_GAPS = 10;
+const HOUR_MS = 3_600_000;
+
 function resolutionMilliseconds(resolution: string): number | null {
   const value = resolution.trim().toUpperCase();
   if (/^\d+$/.test(value)) return Number(value) * 60_000;
@@ -144,18 +148,57 @@ export function evaluateAnalysisOverlayOutcome(
     const end = start + barMs;
     return start >= analyzedAtMs && (expiresAtMs === null || end <= expiresAtMs);
   });
+  const windowClosed = expiresAtMs !== null && now.getTime() >= expiresAtMs;
+  // Whether the history reaches the expiry (historyCoversExpiry), or a forming bar already runs past it: then every bar
+  // inside the window has closed. A forming bar ending exactly at the expiry is still inside the window. Recorded as
+  // evidence.expiryCoveredBy, so due selection reads the same proof the evaluation used.
+  const latestBar = bars.at(-1);
+  const formingPastExpiry = expiresAtMs !== null && latestBar?.forming === true && Number.isFinite(latestBar.time) &&
+    latestBar.time * 1000 + barMs > expiresAtMs;
+  const closedCoversExpiry = expiresAtMs !== null && historyCoversExpiry(evidenceBase.closedThrough, resolution, state.expiresAt);
+  const expiryCoveredBy = closedCoversExpiry ? "closed_bar" as const : formingPastExpiry ? "forming_bar" as const : null;
+  const coversExpiry = expiresAtMs === null || expiryCoveredBy !== null;
+  // Bars missing inside the window (BACKLOG 102-04): room for a bar between where the next bar was due (the previous
+  // start plus one bar, from the bar the analysis fell in) and the next one, or for a whole window bar before the expiry
+  // once the history reaches it. Bars alone cannot show that a gap was a market closure, so a result decided after a
+  // gap, or one without a terminal over a window with a gap, stays open. Between bars the room is a bar less the hour a
+  // daylight-saving change moves a D or W bar (23 and 25 hour days), so the change is no gap but a day missing at it is.
+  const gaps: Array<{ from: string; to: string }> = [];
+  const gapMs = barMs - Math.min(HOUR_MS, barMs / 2);
+  const anchor = closed.filter((bar) => bar.time * 1000 < analyzedAtMs).at(-1);
+  let dueAtMs = anchor === undefined ? analyzedAtMs
+    : anchor.time * 1000 + Math.ceil((analyzedAtMs - anchor.time * 1000) / barMs) * barMs;
+  for (const bar of eligible) {
+    const startMs = bar.time * 1000;
+    if (startMs - dueAtMs >= gapMs) gaps.push({ from: new Date(dueAtMs).toISOString(), to: bar.timeIso });
+    dueAtMs = startMs + barMs;
+  }
+  // The window's tail runs to the expiry, or to the next bar (one past the expiry, or the forming bar that proves it).
+  const nextStartMs = bars.find((bar) => bar.time * 1000 >= dueAtMs)?.time;
+  const tailEndMs = expiresAtMs === null ? null : Math.min(expiresAtMs, nextStartMs === undefined ? expiresAtMs : nextStartMs * 1000);
+  if (tailEndMs !== null && expiryCoveredBy !== null && tailEndMs - dueAtMs >= barMs) {
+    gaps.push({ from: new Date(dueAtMs).toISOString(), to: new Date(tailEndMs).toISOString() });
+  }
   const evidence = {
     ...evidenceBase,
     evaluatedBars: eligible.length,
     evidenceThrough: eligible.at(-1)?.timeIso ?? null,
+    expiryCoveredBy,
+    // A thin symbol on a low timeframe skips every bar without a trade, so the journal keeps the first few and a count.
+    gaps: gaps.slice(0, MAX_RECORDED_GAPS),
+    gapCount: gaps.length,
   };
-  const windowClosed = expiresAtMs !== null && now.getTime() >= expiresAtMs;
-  // Whether the history reaches the expiry (historyCoversExpiry), or a forming bar already runs past it: then every bar
-  // inside the window has closed. A forming bar ending exactly at the expiry is still inside the window.
-  const latestBar = bars.at(-1);
-  const formingPastExpiry = expiresAtMs !== null && latestBar?.forming === true && Number.isFinite(latestBar.time) &&
-    latestBar.time * 1000 + barMs > expiresAtMs;
-  const coversExpiry = formingPastExpiry || historyCoversExpiry(evidenceBase.closedThrough, resolution, state.expiresAt);
+  const gapOpen = (activation: { entryAt: string | null; confirmationAt: string | null }) => ({
+    status: "incomplete",
+    outcome: "gap_in_evaluation_window",
+    analysisId: state.analysisId,
+    activation,
+    terminal: null,
+    qualityIssues: ["gap_in_evaluation_window"],
+    evidence,
+  });
+  /** A gap before this bar may hide an earlier entry, invalidation or terminal, so nothing decided here is final. */
+  const gapBefore = (bar: OhlcvBar) => gaps.length > 0 && Date.parse(gaps[0].to) <= bar.time * 1000;
   if (eligible.length === 0 && windowClosed && !coversExpiry) {
     return {
       status: "incomplete",
@@ -167,6 +210,7 @@ export function evaluateAnalysisOverlayOutcome(
       evidence,
     };
   }
+  if (eligible.length === 0 && windowClosed && gaps.length > 0) return gapOpen({ entryAt: null, confirmationAt: null });
   if (eligible.length === 0) {
     return {
       status: windowClosed ? "incomplete" : "ongoing",
@@ -185,7 +229,7 @@ export function evaluateAnalysisOverlayOutcome(
   let active = false;
   let previousBar: OhlcvBar | null = null;
 
-  const ambiguous = (outcome: string, bar: OhlcvBar, issue: string) => ({
+  const ambiguous = (outcome: string, bar: OhlcvBar, issue: string) => gapBefore(bar) ? gapOpen({ entryAt, confirmationAt }) : ({
     status: "ambiguous",
     outcome,
     analysisId: state.analysisId,
@@ -195,7 +239,7 @@ export function evaluateAnalysisOverlayOutcome(
     qualityIssues: [issue],
     evidence,
   });
-  const invalidated = (outcome: string, bar: OhlcvBar) => ({
+  const invalidated = (outcome: string, bar: OhlcvBar) => gapBefore(bar) ? gapOpen({ entryAt, confirmationAt }) : ({
     status: "complete",
     outcome,
     analysisId: state.analysisId,
@@ -284,6 +328,7 @@ export function evaluateAnalysisOverlayOutcome(
         if (openedBeyond && !previousBeyond) {
           return ambiguous("gap_across_terminal", bar, "bar_open_gapped_across_terminal_level");
         }
+        if (gapBefore(bar)) return gapOpen({ entryAt, confirmationAt });
         return {
           status: "complete",
           outcome: terminal.kind === "target" ? "target_before_stop" : "stop_before_target",
@@ -313,6 +358,7 @@ export function evaluateAnalysisOverlayOutcome(
       evidence,
     };
   }
+  if (windowClosed && gaps.length > 0) return gapOpen({ entryAt, confirmationAt });
   return {
     status: windowClosed ? "complete" : "ongoing",
     outcome: active

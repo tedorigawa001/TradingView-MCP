@@ -99,3 +99,31 @@ test("a terminal-less complete recorded without history through the expiry is na
     ["unknown", "legacy_complete_without_coverage"], ["unconfirmed", "legacy_complete_without_coverage"],
     ["garbled", "legacy_complete_without_coverage"], ["stopped", "terminal_evaluation_exists"]]);
 });
+
+test("a complete that names its proof of reaching the expiry is final, a forming bar included (102-04 follow-up)", () => {
+  // The last closed 15-minute bar ends at 02:00, before the 02:07 expiry: only the recorded proof can show coverage.
+  const proven = (id, coveredBy) => record(id, "2026-07-20T02:07:00.000Z", { ...outcome("complete", "no_terminal_event"),
+    result: { evidence: { closedThrough: "2026-07-20T01:45:00.000Z", expiryCoveredBy: coveredBy } } });
+  const selected = selectDueAnalyses([proven("forming", "forming_bar"), proven("closed", "closed_bar"), proven("none", null),
+    proven("garbled", "yes")], { now: new Date("2026-07-20T03:00:00.000Z") });
+  assert.deepEqual(selected.skipped.map((item) => [item.analysisId, item.reason]), [
+    ["forming", "terminal_evaluation_exists"], ["closed", "terminal_evaluation_exists"],
+    ["none", "legacy_complete_without_coverage"], ["garbled", "legacy_complete_without_coverage"]]);
+});
+
+test("results still open after their expiry go last, least recently evaluated first, so due analyses are not starved", () => {
+  const evaluated = (status, label, evaluatedAt) => ({ ...outcome(status, label), evaluatedAt });
+  const records = [
+    record("gapStale", "2026-07-20T00:15:00.000Z", evaluated("incomplete", "gap_in_evaluation_window", "2026-07-20T02:50:00.000Z")),
+    record("shortOld", "2026-07-20T00:30:00.000Z", evaluated("incomplete", "history_ends_before_expiry", "2026-07-20T02:10:00.000Z")),
+    record("fresh", "2026-07-20T02:30:00.000Z"),
+    record("checkedBefore", "2026-07-20T02:00:00.000Z", evaluated("ongoing", "awaiting_terminal", "2026-07-20T01:00:00.000Z")),
+    record("active", "2026-07-21T00:00:00.000Z", evaluated("ongoing", "awaiting_terminal", "2026-07-20T01:00:00.000Z")),
+    record("atExpiry", "2026-07-20T01:00:00.000Z", evaluated("ambiguous", "terminal_order_unknown", "2026-07-20T01:00:00.000Z")),
+  ];
+  const now = new Date("2026-07-20T03:00:00.000Z");
+  assert.deepEqual(selectDueAnalyses(records, { now }).candidates.map((candidate) => candidate.analysisId),
+    ["checkedBefore", "fresh", "active", "atExpiry", "shortOld", "gapStale"], "an evaluation at the expiry is after it");
+  assert.deepEqual(selectDueAnalyses(records, { now, limit: 2 }).candidates.map((candidate) => candidate.analysisId),
+    ["checkedBefore", "fresh"], "the oldest expiries no longer take every slot");
+});

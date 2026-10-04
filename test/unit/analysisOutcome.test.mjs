@@ -282,13 +282,17 @@ test("history that stops before the expiry leaves an active analysis incomplete,
   assert.deepEqual([longer.status, longer.outcome], ["complete", "stop_before_target"], "the reported case");
 });
 
-test("history reaching the expiry closes it without a terminal: a last bar ending at it, or one after it across a gap", () => {
+test("history reaching the expiry closes it without a terminal only when no bar is missing before it", () => {
   const atExpiry = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
     quiet("2026-07-15T10:45:00.000Z")], "15", after);
   assert.deepEqual([atExpiry.status, atExpiry.outcome], ["complete", "no_terminal_event"]);
-  // 10:30 and 10:45 were never printed (a closure), but the feed has a bar after the expiry, so nothing is missing.
+  assert.deepEqual([atExpiry.evidence.expiryCoveredBy, atExpiry.evidence.gaps, atExpiry.evidence.gapCount], ["closed_bar", [], 0]);
+  // 10:30 and 10:45 are missing and a bar after the expiry cannot show they were a closure: the tail runs to the expiry.
   const acrossGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T11:15:00.000Z")], "15", after);
-  assert.deepEqual([acrossGap.status, acrossGap.outcome], ["complete", "no_terminal_event"]);
+  assert.deepEqual([acrossGap.status, acrossGap.outcome, acrossGap.qualityIssues, acrossGap.terminal],
+    ["incomplete", "gap_in_evaluation_window", ["gap_in_evaluation_window"], null]);
+  assert.deepEqual(acrossGap.evidence.gaps, [{ from: "2026-07-15T10:30:00.000Z", to: "2026-07-15T11:00:00.000Z" }]);
+  assert.equal(acrossGap.activation.entryAt, "2026-07-15T10:15:00.000Z");
   // Before the expiry by the clock the window is simply still open.
   const open = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry], "15", new Date("2026-07-15T10:40:00.000Z"));
   assert.deepEqual([open.status, open.outcome], ["ongoing", "awaiting_terminal"]);
@@ -333,8 +337,104 @@ test("a forming bar running past the expiry proves the window closed; one ending
   const past = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
     bar("2026-07-15T10:55:00.000Z", { open: 162.3, high: 162.35, low: 162.25, close: 162.3 }, true)], "15", after);
   assert.deepEqual([past.status, past.outcome], ["complete", "no_terminal_event"], "10:55 + 15 minutes runs past 11:00");
+  assert.deepEqual([past.evidence.expiryCoveredBy, past.evidence.gapCount], ["forming_bar", 0], "the tail ends at the forming bar");
   const atExpiry = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
     bar("2026-07-15T10:45:00.000Z", { open: 162.3, high: 162.35, low: 161.5, close: 161.6 }, true)], "15", after);
   assert.deepEqual([atExpiry.status, atExpiry.outcome], ["incomplete", "history_ends_before_expiry"],
     "the last window bar is still forming and may yet reach the stop");
+});
+
+// BACKLOG 102-04 (follow-up): a bar missing inside the window may hide an entry, invalidation or terminal.
+const stopBar = (timeIso) => bar(timeIso, { open: 162.2, high: 162.25, low: 161.85, close: 161.9 });
+
+test("a bar missing inside the window keeps a result without a terminal open, and the gap is recorded", () => {
+  // The reported case: 10:30 is missing, 10:45 is there, so the history reaches the expiry.
+  const gapped = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([gapped.status, gapped.outcome, gapped.qualityIssues], ["incomplete", "gap_in_evaluation_window", ["gap_in_evaluation_window"]]);
+  assert.deepEqual([gapped.evidence.gaps, gapped.evidence.gapCount, gapped.evidence.expiryCoveredBy],
+    [[{ from: "2026-07-15T10:30:00.000Z", to: "2026-07-15T10:45:00.000Z" }], 1, "closed_bar"]);
+  // Without an entry, and with no window bar at all: the bar after the analysis is the one missing.
+  const noEntry = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T10:30:00.000Z"), quiet("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([noEntry.outcome, noEntry.evidence.gaps], ["gap_in_evaluation_window",
+    [{ from: "2026-07-15T10:15:00.000Z", to: "2026-07-15T10:30:00.000Z" }]]);
+  const empty = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T11:15:00.000Z")], "15", after);
+  assert.deepEqual([empty.status, empty.outcome, empty.activation, empty.evidence.gaps], ["incomplete", "gap_in_evaluation_window",
+    { entryAt: null, confirmationAt: null }, [{ from: "2026-07-15T10:15:00.000Z", to: "2026-07-15T11:00:00.000Z" }]]);
+  // A short history is reported as short first: the missing tail is not a gap until the history reaches the expiry.
+  const short = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry], "15", after);
+  assert.deepEqual([short.outcome, short.evidence.gaps, short.evidence.expiryCoveredBy], ["history_ends_before_expiry", [], null]);
+  const shortGapped = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T10:30:00.000Z")], "15", after);
+  assert.deepEqual([shortGapped.outcome, shortGapped.evidence.gapCount], ["history_ends_before_expiry", 1], "more history may still come");
+  // While the window is open, a gap before it changes nothing yet.
+  const open = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:45:00.000Z")], "15",
+    new Date("2026-07-15T10:59:00.000Z"));
+  assert.deepEqual([open.status, open.outcome], ["ongoing", "awaiting_terminal"]);
+});
+
+test("a result decided after a gap stays open; one decided before the gap stands", () => {
+  const afterGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, stopBar("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([afterGap.status, afterGap.outcome, afterGap.terminal], ["incomplete", "gap_in_evaluation_window", null],
+    "the target may have been hit at 10:30");
+  assert.equal(afterGap.activation.entryAt, "2026-07-15T10:15:00.000Z");
+  const beforeGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, stopBar("2026-07-15T10:30:00.000Z"),
+    quiet("2026-07-15T11:00:00.000Z")], "15", after);
+  assert.deepEqual([beforeGap.status, beforeGap.outcome], ["complete", "stop_before_target"]);
+  assert.equal(beforeGap.evidence.gapCount, 1, "the gap at 10:45 is still recorded");
+  // An entry after a gap may have followed an invalidation inside it.
+  const invalidation = bar("2026-07-15T10:30:00.000Z", { open: 162.05, high: 162.08, low: 161.92, close: 162 });
+  const invalidatedAfterGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, invalidation], "15", new Date("2026-07-15T10:50:00.000Z"));
+  assert.deepEqual([invalidatedAfterGap.status, invalidatedAfterGap.outcome], ["incomplete", "gap_in_evaluation_window"]);
+  const invalidatedFirst = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T10:15:00.000Z"), invalidation], "15",
+    new Date("2026-07-15T10:50:00.000Z"));
+  assert.deepEqual([invalidatedFirst.status, invalidatedFirst.outcome], ["complete", "invalidated_before_entry"]);
+  // A bar touching both levels after a gap is not ambiguous between them: an earlier bar may have settled it.
+  const both = bar("2026-07-15T10:45:00.000Z", { open: 162.3, high: 162.65, low: 161.85, close: 162.3 });
+  const bothAfterGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, both], "15", after);
+  assert.deepEqual([bothAfterGap.status, bothAfterGap.outcome], ["incomplete", "gap_in_evaluation_window"]);
+  const bothFirst = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"), both], "15", after);
+  assert.deepEqual([bothFirst.status, bothFirst.outcome], ["ambiguous", "terminal_order_unknown"]);
+});
+
+test("daily bars that shift an hour with daylight saving are not gaps; a missing day is", () => {
+  const daily = { ...state, analyzedAt: "2026-03-05T23:00:00.000Z", expiresAt: "2026-03-10T21:00:00.000Z" };
+  const day = (timeIso) => quiet(timeIso);
+  // New York moves to daylight time on 8 March 2026, so the 17:00 open moves from 22:00Z to 21:00Z (a 23-hour bar).
+  const bars = ["2026-03-05T22:00:00.000Z", "2026-03-06T22:00:00.000Z", "2026-03-07T22:00:00.000Z",
+    "2026-03-08T21:00:00.000Z", "2026-03-09T21:00:00.000Z"].map(day);
+  const spring = evaluateAnalysisOverlayOutcome(daily, bars, "D", new Date("2026-03-11T00:00:00.000Z"));
+  assert.deepEqual([spring.status, spring.outcome, spring.evidence.gapCount], ["complete", "not_activated", 0]);
+  const autumn = evaluateAnalysisOverlayOutcome({ ...daily, analyzedAt: "2026-10-30T22:00:00.000Z", expiresAt: "2026-11-03T22:00:00.000Z" },
+    ["2026-10-30T21:00:00.000Z", "2026-10-31T21:00:00.000Z", "2026-11-01T22:00:00.000Z", "2026-11-02T22:00:00.000Z"].map(day),
+    "D", new Date("2026-11-04T00:00:00.000Z"));
+  assert.deepEqual([autumn.status, autumn.outcome, autumn.evidence.gapCount], ["complete", "not_activated", 0], "a 25-hour bar");
+  const missingDay = evaluateAnalysisOverlayOutcome(daily, bars.filter((_, index) => index !== 2), "D", new Date("2026-03-11T00:00:00.000Z"));
+  assert.deepEqual([missingDay.outcome, missingDay.evidence.gaps], ["gap_in_evaluation_window",
+    [{ from: "2026-03-07T22:00:00.000Z", to: "2026-03-08T21:00:00.000Z" }]]);
+});
+
+test("the forming bar ends the tail: one bar missing before it is a gap, none is not", () => {
+  const offGrid = { ...state, expiresAt: "2026-07-15T11:07:00.000Z" };
+  const forming = bar("2026-07-15T11:00:00.000Z", { open: 162.3, high: 162.35, low: 162.25, close: 162.3 }, true);
+  const whole = evaluateAnalysisOverlayOutcome(offGrid, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
+    quiet("2026-07-15T10:45:00.000Z"), forming], "15", after);
+  assert.deepEqual([whole.status, whole.outcome, whole.evidence.expiryCoveredBy, whole.evidence.gapCount],
+    ["complete", "no_terminal_event", "forming_bar", 0]);
+  const missing = evaluateAnalysisOverlayOutcome(offGrid, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"), forming], "15", after);
+  assert.deepEqual([missing.outcome, missing.evidence.gaps], ["gap_in_evaluation_window",
+    [{ from: "2026-07-15T10:45:00.000Z", to: "2026-07-15T11:00:00.000Z" }]]);
+  // A missing 11:00 bar would have ended past the 11:10 expiry, so it was never part of the window.
+  const pastExpiry = evaluateAnalysisOverlayOutcome({ ...state, expiresAt: "2026-07-15T11:10:00.000Z" }, [analysisBar, entry,
+    quiet("2026-07-15T10:30:00.000Z"), quiet("2026-07-15T10:45:00.000Z"), quiet("2026-07-15T11:15:00.000Z")], "15", after);
+  assert.deepEqual([pastExpiry.status, pastExpiry.outcome, pastExpiry.evidence.gapCount], ["complete", "no_terminal_event", 0]);
+});
+
+test("the evidence keeps the first ten gaps and counts them all", () => {
+  const minutes = { ...state, analyzedAt: "2026-07-15T10:00:30.000Z", expiresAt: "2026-07-15T10:40:00.000Z" };
+  const sparse = [];
+  for (let minute = 0; minute <= 40; minute += 2) {
+    sparse.push(quiet(new Date(Date.parse("2026-07-15T10:00:00.000Z") + minute * 60_000).toISOString()));
+  }
+  const result = evaluateAnalysisOverlayOutcome(minutes, sparse, "1", after);
+  assert.deepEqual([result.outcome, result.evidence.gapCount, result.evidence.gaps.length], ["gap_in_evaluation_window", 20, 10], "19 between bars, and 10:39 before the expiry");
+  assert.deepEqual(result.evidence.gaps[0], { from: "2026-07-15T10:01:00.000Z", to: "2026-07-15T10:02:00.000Z" });
 });

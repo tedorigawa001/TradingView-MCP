@@ -3357,7 +3357,7 @@ test("evaluate_analysis_overlay_outcome returns first-hit evidence from closed b
   assert.equal(parsed.source.formingBarsExcluded, 1);
 });
 
-test("evaluate_analysis_overlay_outcome keeps a result open while closed bars stop before the expiry (102-04)", async () => {
+test("evaluate_analysis_overlay_outcome keeps a result open while closed bars stop before the expiry or miss a bar (102-04)", async () => {
   const pineId = "USER;8f868f366873411aa46bd30872711544";
   const analyzedAtMs = Date.now() - 60 * 60_000;
   const expiresAtMs = Date.now() - 5 * 60_000;
@@ -3391,6 +3391,11 @@ test("evaluate_analysis_overlay_outcome keeps a result open while closed bars st
     volume: null,
     ...(forming ? { forming: true } : {}),
   });
+  // The entry, then nothing past analyzedAt + 25 minutes, though the expiry was at + 55.
+  let bars = [
+    makeBar(analyzedAtMs - 5 * 60_000, 162.3, 162.7, 161.8, 162.3),
+    makeBar(analyzedAtMs + 10 * 60_000, 162.3, 162.35, 162.15, 162.25),
+  ];
   const client = await connectedClient(
     makeDeps({
       tv: {
@@ -3426,22 +3431,11 @@ test("evaluate_analysis_overlay_outcome keeps a result open while closed bars st
           source: ANALYSIS_OVERLAY_SOURCE,
         }),
         getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
-        getOhlcv: async () => {
-          return {
-            symbol: "OANDA:USDJPY",
-            resolution: "15",
-            count: 4,
-            // The entry, then nothing past analyzedAt + 25 minutes, though the expiry was at + 55.
-            bars: [
-              makeBar(analyzedAtMs - 5 * 60_000, 162.3, 162.7, 161.8, 162.3),
-              makeBar(analyzedAtMs + 10 * 60_000, 162.3, 162.35, 162.15, 162.25),
-            ],
-          };
-        },
+        getOhlcv: async () => ({ symbol: "OANDA:USDJPY", resolution: "15", count: bars.length, bars }),
       },
     }),
   );
-  const result = await client.callTool({
+  const evaluate = async () => JSON.parse((await client.callTool({
     name: "evaluate_analysis_overlay_outcome",
     arguments: {
       pine_id: pineId,
@@ -3449,11 +3443,16 @@ test("evaluate_analysis_overlay_outcome keeps a result open while closed bars st
       expected_timeframe: "15",
       count: 500,
     },
-  });
-  const parsed = JSON.parse(result.content[0].text);
+  })).content[0].text);
+  const parsed = await evaluate();
   assert.deepEqual([parsed.status, parsed.outcome], ["incomplete", "history_ends_before_expiry"]);
   assert.ok(parsed.qualityIssues.includes("history_ends_before_expiry"));
   assert.match(parsed.remediation, /closed bars through the expiry/, "older history from load_more_history would not help");
+  // Through the expiry, but the bar at + 25 is missing.
+  bars = [...bars, makeBar(analyzedAtMs + 40 * 60_000, 162.3, 162.35, 162.25, 162.3)];
+  const gapped = await evaluate();
+  assert.deepEqual([gapped.status, gapped.outcome, gapped.qualityIssues], ["incomplete", "gap_in_evaluation_window", ["gap_in_evaluation_window"]]);
+  assert.match(gapped.remediation, /missing inside the window \(evidence\.gaps\)/);
 });
 
 test("evaluate_analysis_overlay_outcome evaluates on a temporary timeframe and restores the selected chart", async () => {
