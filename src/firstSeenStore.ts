@@ -219,11 +219,13 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
   }
 
   /**
-   * Checks, before any write, that appending `additions` in order after `existing` (the log as read) keeps every
-   * invariant readAllUnlocked enforces: a contiguous sequence, a first-seen clock that never moves backwards, and no
-   * observation dated after it was seen; and that the batch fits the size limits. A record that broke one of these would
-   * be written and then make every later read of the log fail (BACKLOG 102-05), so a caller checks its whole batch here
-   * first and writes nothing when any of it fails.
+   * Checks, before any write, that appending `additions` in order after `existing` keeps the order readAllUnlocked
+   * enforces between records: a contiguous sequence, a first-seen clock that never moves backwards, and no observation
+   * dated after it was seen; and that the batch fits the size limits. A record that broke one of these would be written
+   * and then make every later read of the log fail (BACKLOG 102-05), so a caller checks its whole batch here first and
+   * writes nothing when any of it fails. `existing` must be the whole log as readAllUnlocked returned it, whose last
+   * record holds the highest sequence and the latest stamp. Each record's own validity and the file's line framing are
+   * not checked here.
    */
   async assertAppendableUnlocked(existing: T[], additions: T[]): Promise<void> {
     let previous = existing[existing.length - 1];

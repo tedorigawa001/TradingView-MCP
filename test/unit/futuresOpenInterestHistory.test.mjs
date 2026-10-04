@@ -173,6 +173,13 @@ test("futures open interest checks a batch in the order it would be written, bef
     observation({ observation_date: "2026-07-23", observed_at: "2026-07-24T06:00:00.000Z" }),
   ]), /first-seen clock moved backwards/);
   assert.equal((await store.records()).length, 1, "nothing of the batch was written");
+  // The same on an empty log, which has no latest stamp to compare with.
+  const { store: empty } = await newStore();
+  await assert.rejects(() => empty.observeMany([
+    observation({ observation_date: "2026-07-22", observed_at: "2026-07-24T12:00:00.000Z" }),
+    observation({ observation_date: "2026-07-23", observed_at: "2026-07-24T06:00:00.000Z" }),
+  ]), /first-seen clock moved backwards/);
+  assert.deepEqual(await empty.records(), []);
   // An unchanged observation is not written, so an earlier stamp on it is no conflict.
   const unchanged = await store.observeMany([observation({ observed_at: "2026-07-22T12:00:00.000Z" })]);
   assert.deepEqual([unchanged.recorded.length, unchanged.unchanged], [0, 1]);

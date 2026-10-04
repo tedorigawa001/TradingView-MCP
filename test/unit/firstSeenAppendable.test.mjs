@@ -30,6 +30,8 @@ test("an append that would leave the log unreadable is refused", async (t) => {
     /test first-seen clock moved backwards/, "before the last record held");
   await assert.rejects(() => log.assertAppendableUnlocked(existing,
     [record(3, "2026-07-23T12:00:00.000Z"), record(4, "2026-07-23T06:00:00.000Z")]), /clock moved backwards/, "within the batch");
+  await assert.rejects(() => log.assertAppendableUnlocked([],
+    [record(1, "2026-07-24T12:00:00.000Z"), record(2, "2026-07-24T06:00:00.000Z")]), /clock moved backwards/, "on an empty log");
   await assert.rejects(() => log.assertAppendableUnlocked(existing, [record(4, "2026-07-23T00:00:00.000Z")]), /break the sequence at 4/);
   await assert.rejects(() => log.assertAppendableUnlocked([], [record(2, "2026-07-23T00:00:00.000Z")]), /break the sequence at 2/);
   await assert.rejects(() => log.assertAppendableUnlocked(existing, [record(3, "2026-07-23T00:00:00.000Z", "2026-07-24")]),
