@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -125,6 +125,47 @@ test("bookmap-addon's isEntrypoint: by real path, and never for -e/-p code or st
   const cwd = process.cwd();
   process.chdir(dir);
   try { assert.equal(isAddonEntrypoint(url, "-", []), false); } finally { process.chdir(cwd); }
+});
+
+test("the add-on scripts' own entry checks (the defaults): replay runs directly and through a link, build stays put on import", async (t) => {
+  const dir = await scratch(t);
+  const env = isolatedEnv(dir);
+  const run = (args, options = {}) => new Promise((done) => {
+    const child = execFile(process.execPath, args, { env, ...options }, (error, stdout, stderr) =>
+      done({ code: error ? error.code : 0, stdout, stderr }));
+    if (options.stdin !== undefined) child.stdin.end(options.stdin);
+  });
+  // replay.mjs reads argv itself; with no arguments it stops at its usage error, before reading or building anything.
+  const replay = fileURLToPath(new URL("../../bookmap-addon/replay.mjs", import.meta.url));
+  const usage = /usage: node bookmap-addon\/replay\.mjs CONFIG\.json RAW\.jsonl/;
+  const direct = await run([replay]);
+  assert.deepEqual([direct.code, usage.test(direct.stderr)], [1, true], direct.stderr);
+  const linkedReplay = await linkTo(replay, join(dir, "replay-link.mjs"));
+  if (linkedReplay) {
+    const linked = await run([linkedReplay]);
+    assert.deepEqual([linked.code, usage.test(linked.stderr)], [1, true], linked.stderr);
+  }
+  // build.mjs deletes and rebuilds bookmap-addon/dist under its own root, so a copy works only inside the scratch
+  // directory. Imported from -e code given a link to it, or from stdin with a - link in the working directory, it must
+  // not build: nothing is printed and nothing appears beside it.
+  const copy = join(dir, "x", "bookmap-addon");
+  await mkdir(copy, { recursive: true });
+  for (const name of ["build.mjs", "entrypoint.mjs"]) {
+    await copyFile(fileURLToPath(new URL(`../../bookmap-addon/${name}`, import.meta.url)), join(copy, name));
+  }
+  const build = join(copy, "build.mjs");
+  const importBuild = `await import(${JSON.stringify(pathToFileURL(build).href)});`;
+  const link = await linkTo(build, join(dir, "build-link.mjs"));
+  if (link) {
+    const evaluated = await run(["--input-type=module", "-e", importBuild, "--", link]);
+    assert.deepEqual([evaluated.code, evaluated.stdout, evaluated.stderr], [0, "", ""], "-e with a link to build.mjs");
+    const work = join(dir, "work");
+    await mkdir(work);
+    await linkTo(build, join(work, "-"));
+    const piped = await run(["--input-type=module", "-"], { cwd: work, stdin: importBuild });
+    assert.deepEqual([piped.code, piped.stdout, piped.stderr], [0, "", ""], "stdin with a - link to build.mjs");
+  }
+  assert.deepEqual((await readdir(copy)).sort(), ["build.mjs", "entrypoint.mjs"], "no dist was made beside the copy");
 });
 
 test("through a linked directory the bins run under --preserve-symlinks and --preserve-symlinks-main too", async (t) => {

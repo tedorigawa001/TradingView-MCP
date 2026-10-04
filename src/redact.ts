@@ -31,8 +31,8 @@ const FOLD = String.raw`(?:\r?\n[ \t]+(?![ \t]|at\s))`;
  * A whole Authorization value, scheme and credentials (BACKLOG 102-02): masking only the first word left
  * "Authorization: *** abc", and a multi-part value (Digest, AWS4-HMAC-SHA256, OAuth 1.0) kept everything after its
  * first ", ". A quoted value runs to its own unescaped closing quote, so quotes and escapes inside it stay masked. In
- * an escaped JSON string the closing quote is a \" with a single backslash followed by `,`, `}`, `]` or the end of the
- * line, so a ' or an inner \\\" (a quote escaped twice) or \\/ does not end it. An unquoted value runs to the end of
+ * an escaped JSON string the closing quote is the \" that ends the JSON value (see escapedRun), so a ', an inner \\\"
+ * (a quote escaped twice) or a \\/ does not end it. An unquoted value runs to the end of
  * the line, and onto a folded next line only when its line holds just the scheme. It follows:
  * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with a
  *   fold before the value, and Proxy-Authorization included since \b falls after its hyphen;
@@ -49,9 +49,14 @@ const AUTHORIZATION = new RegExp(String.raw`\b(authorization)(` +
   String.raw`)(?:${escapedRun('"')}|${escapedRun("'")}|(")(?:[^"\\\r\n]|\\.)*|(')(?:[^'\\\r\n]|\\.)*` +
   String.raw`|(?!(?:null|true|false|undefined)[ \t]*(?:[,;)\]}]|\r?\n|$))(?:${SCHEME}[ \t]*${FOLD})?[^\r\n]+)`, "gi");
 
-/** A value opened by an escaped quote, up to the one that closes it (a single backslash, then the end of a JSON value). */
+/**
+ * A value opened by an escaped quote, up to the one that closes it: a run of 4k + 1 backslashes (one escaping the quote,
+ * the rest pairs of escaped backslashes) then the quote, followed by the end of a JSON value (`,`, `}`, `]`, an escaped
+ * \n, \r or \t of pretty-printed JSON, or the end of the line). With no such quote on its line the value runs to the end
+ * of the line, keeping its opening quote.
+ */
 function escapedRun(quote: string): string {
-  return String.raw`(\\${quote})[^\r\n]*?(?=(?<!\\)\\${quote}[ \t]*(?:[,}\]]|\r?\n|$))`;
+  return String.raw`(\\${quote})(?:[^\r\n]*?(?=(?<!\\)(?:\\\\\\\\)*\\${quote}[ \t]*(?:[,}\]]|\\[nrt]|\r?\n|$))|[^\r\n]*)`;
 }
 
 /** Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line. */
@@ -61,19 +66,25 @@ const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
 /** What a message becomes when it cannot be redacted: nothing of it is passed on. */
 export const WITHHELD_MESSAGE = "[message withheld: it could not be redacted]";
 
+/** Appended to a result cut at MAX_REDACTED_CHARS, on its own line. */
+const TRUNCATED = "\n… [truncated]";
+
 export function redactSecrets(text: string): string {
+  // A result that was already cut is redacted again without its marker and gets it back, so no rule can reach the
+  // marker, nor shorten a value at the cut and so pull the marker's start back under the cap (102 follow-up review).
+  const truncated = text.endsWith(TRUNCATED);
   let redacted: string;
   try {
-    redacted = redactAll(text);
+    redacted = redactAll(truncated ? text.slice(0, -TRUNCATED.length) : text);
   } catch {
     // A quoted run pushes one backtracking entry per character, so a value of some 8 million characters (a page may
     // send up to 256 MiB) overflows the regexp stack. Fail closed rather than throw from an error path (102-02 review).
     return WITHHELD_MESSAGE;
   }
-  // The marker sits on its own line, so redacting a truncated result again cannot run a value over it and drop it.
-  return redacted.length <= MAX_REDACTED_CHARS
+  // A cut inside an escape leaves a dangling backslash, which a second pass would read as a value; drop it.
+  return redacted.length <= MAX_REDACTED_CHARS && !truncated
     ? redacted
-    : `${redacted.slice(0, MAX_REDACTED_CHARS)}\n… [truncated]`;
+    : `${redacted.slice(0, MAX_REDACTED_CHARS).replace(/\\+$/, "")}${TRUNCATED}`;
 }
 
 function redactAll(text: string): string {

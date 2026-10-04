@@ -66,6 +66,13 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
     [String.raw`{\"Authorization\":\"Digest qop='auth', response='abc123'\"}`, String.raw`{\"Authorization\":\"***\"}`],
     [String.raw`{\"Authorization\":\"Basic dXNl\\/dXNlcjpwYXNz==\"}`, String.raw`{\"Authorization\":\"***\"}`],
     [String.raw`{\'Authorization\': \'Digest qop="auth", response="abc123"\'}`, String.raw`{\'Authorization\': \'***\'}`],
+    // The closing \" may follow 4k + 1 backslashes (a value ending in an escaped backslash), and precede an escaped \n of
+    // pretty-printed JSON, blanks or a real line end; with none on its line the value runs to the end of the line.
+    [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz\\\\\",\"Host\":\"keep-host\"}`, String.raw`{\"Authorization\":\"***\\\\\",\"Host\":\"keep-host\"}`],
+    [String.raw`{\n  \"Authorization\": \"Basic dXNlcjpwYXNz\"\n}, keep`, String.raw`{\n  \"Authorization\": \"***\"\n}, keep`],
+    [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz\"  }`, String.raw`{\"Authorization\":\"***\"  }`],
+    [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz\"` + "\nnext line", String.raw`{\"Authorization\":\"***\"` + "\nnext line"],
+    [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz` + "\n" + String.raw`\"}`, String.raw`{\"Authorization\":\"***` + "\n" + String.raw`\"}`],
     ["{'Authorization': 'Digest u=\"a\", x=\\'k-9\\''}", "{'Authorization': '***'}"],
     ["Bearer  \n  sk-live-123", "Bearer  \n  ***"],
     // Before the query rule, so a header inside a query string cannot leave its credential behind the "?***".
@@ -136,6 +143,20 @@ test("the truncation marker survives a second redaction, even right after a mask
   const once = redactSecrets(`${"x".repeat(MAX_REDACTED_CHARS - head.length)}{"Authorization":"Basic dXNlcjpwYXNz"} and more text`);
   assert.ok(once.endsWith(`${head}\n… [truncated]`), once.slice(-40));
   assert.equal(redactSecrets(once), once);
+});
+
+test("a second redaction of a cut result changes nothing, wherever the cut falls in an escaped value", () => {
+  // The marker is set aside before a second pass and a dangling backslash at the cut is dropped, so neither a value
+  // shortened at the cut nor a lone backslash read as a value can move or drop the marker.
+  for (const tail of [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz\"}`, `{"Authorization":"Basic dXNlcjpwYXNz"}`,
+    String.raw`{\"Authorization\":\"Digest username=\\\"u\\\", response=\\\"dXNlcjpwYXNz\\\"\"}`, String.raw`{\"token\":\"dXNlcjpwYXNz\"}`]) {
+    for (let offset = MAX_REDACTED_CHARS - 80; offset <= MAX_REDACTED_CHARS + 20; offset++) {
+      const once = redactSecrets(`${"x".repeat(offset)}${tail} and more`);
+      assert.equal(redactSecrets(once), once, `${tail} at ${offset}`);
+      assert.ok(!once.includes("dXNlcjpwYXNz"), `${tail} at ${offset}`);
+      if (once.length > MAX_REDACTED_CHARS) assert.equal(once.split("[truncated]").length, 2, `one marker at ${offset}`);
+    }
+  }
 });
 
 test("truncation happens after redaction, so no secret survives by straddling the cut", () => {
