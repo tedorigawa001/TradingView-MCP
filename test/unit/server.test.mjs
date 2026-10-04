@@ -3357,6 +3357,105 @@ test("evaluate_analysis_overlay_outcome returns first-hit evidence from closed b
   assert.equal(parsed.source.formingBarsExcluded, 1);
 });
 
+test("evaluate_analysis_overlay_outcome keeps a result open while closed bars stop before the expiry (102-04)", async () => {
+  const pineId = "USER;8f868f366873411aa46bd30872711544";
+  const analyzedAtMs = Date.now() - 60 * 60_000;
+  const expiresAtMs = Date.now() - 5 * 60_000;
+  const values = {
+    in_0: "USDJPY-outcome",
+    in_1: analyzedAtMs,
+    in_2: "bullish",
+    in_3: 162.1,
+    in_4: 162.2,
+    in_5: 0,
+    in_6: 161.95,
+    in_7: 161.9,
+    in_8: 162.6,
+    in_9: 162.8,
+    in_10: 0,
+    in_11: 0.6,
+    in_12: expiresAtMs,
+    in_13: "",
+    in_14: "OANDA:USDJPY",
+    in_15: "15",
+    in_16: "",
+    in_17: "",
+  };
+  const makeBar = (timeMs, open, high, low, close, forming = false) => ({
+    time: timeMs / 1000,
+    timeIso: new Date(timeMs).toISOString(),
+    open,
+    high,
+    low,
+    close,
+    volume: null,
+    ...(forming ? { forming: true } : {}),
+  });
+  const client = await connectedClient(
+    makeDeps({
+      tv: {
+        getChartContext: async () => ({
+          layoutName: "FX",
+          activeChartIndex: 0,
+          chartsCount: 1,
+          charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "15", studies: [] }],
+        }),
+        listPineScripts: async () => [
+          {
+            pineId,
+            name: ANALYSIS_OVERLAY_NAME,
+            kind: "study",
+            version: "2.0",
+            usedBy: [
+              {
+                chartIndex: 0,
+                studyId: "overlay2",
+                name: ANALYSIS_OVERLAY_NAME,
+                version: "2.0",
+              },
+            ],
+          },
+        ],
+        getPineSource: async () => ({
+          pineId,
+          name: ANALYSIS_OVERLAY_NAME,
+          kind: "study",
+          version: "2.0",
+          updated: null,
+          sourceLength: ANALYSIS_OVERLAY_SOURCE.length,
+          source: ANALYSIS_OVERLAY_SOURCE,
+        }),
+        getIndicatorInputs: async () => [overlayStudy("overlay2", values)],
+        getOhlcv: async () => {
+          return {
+            symbol: "OANDA:USDJPY",
+            resolution: "15",
+            count: 4,
+            // The entry, then nothing past analyzedAt + 25 minutes, though the expiry was at + 55.
+            bars: [
+              makeBar(analyzedAtMs - 5 * 60_000, 162.3, 162.7, 161.8, 162.3),
+              makeBar(analyzedAtMs + 10 * 60_000, 162.3, 162.35, 162.15, 162.25),
+            ],
+          };
+        },
+      },
+    }),
+  );
+  const result = await client.callTool({
+    name: "evaluate_analysis_overlay_outcome",
+    arguments: {
+      pine_id: pineId,
+      expected_symbol: "OANDA:USDJPY",
+      expected_timeframe: "15",
+      count: 500,
+    },
+  });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.deepEqual([parsed.status, parsed.outcome], ["incomplete", "history_ends_before_expiry"]);
+  assert.ok(parsed.qualityIssues.includes("history_ends_before_expiry"));
+  assert.match(parsed.remediation, /closed bars through the expiry/, "older history from load_more_history would not help");
+});
+
 test("evaluate_analysis_overlay_outcome evaluates on a temporary timeframe and restores the selected chart", async () => {
   const state = { resolution: "240", calls: [] };
   const client = await connectedClient(outcomeTimeframeDeps(state));

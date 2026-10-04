@@ -79,3 +79,18 @@ test("selectDueAnalyses can include active analyses and applies a deterministic 
   assert.equal(selected.eligible, 2);
   assert.equal(selected.truncated, true);
 });
+
+test("a terminal-less complete recorded without history through the expiry is rechecked; covered ones and terminals are not (102-04)", () => {
+  const withEvidence = (label, closedThrough) => ({ ...outcome("complete", label), result: { evidence: { closedThrough } } });
+  const selected = selectDueAnalyses([
+    record("short", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:00:00.000Z")),
+    record("covered", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:45:00.000Z")),
+    record("unknown", "2026-07-20T02:00:00.000Z", outcome("complete", "not_activated")),
+    record("unconfirmed", "2026-07-20T02:00:00.000Z", withEvidence("expired_without_confirmation", "2026-07-20T01:30:00.000Z")),
+    record("stopped", "2026-07-20T02:00:00.000Z", outcome("complete", "stop_before_target")),
+  ], { now: new Date("2026-07-20T03:00:00.000Z") });
+  assert.deepEqual(selected.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [
+    ["short", "complete_without_coverage"], ["unconfirmed", "complete_without_coverage"], ["unknown", "complete_without_coverage"]]);
+  assert.deepEqual(selected.skipped.map((item) => [item.analysisId, item.reason]), [
+    ["covered", "terminal_evaluation_exists"], ["stopped", "terminal_evaluation_exists"]]);
+});

@@ -26,6 +26,20 @@ function resolutionMilliseconds(resolution: string): number | null {
   return count * unit;
 }
 
+/**
+ * Whether the history reaches an analysis's expiry: its last closed bar (starting at `closedThrough`) ends at or after
+ * it. Then any bar missing inside the window is one the feed never printed, such as a market closure; before it, the
+ * history may simply stop short (BACKLOG 102-04). With no expiry there is nothing to reach.
+ */
+export function historyCoversExpiry(closedThrough: string | null, resolution: string, expiresAt: string | null): boolean {
+  if (expiresAt === null) return true;
+  if (closedThrough === null) return false;
+  const barMs = resolutionMilliseconds(resolution);
+  if (barMs === null) return false;
+  const end = Date.parse(closedThrough) + barMs;
+  return Number.isFinite(end) && end >= Date.parse(expiresAt);
+}
+
 function atOrBeyond(state: AnalysisOverlayState, value: number, level: number, favorable: boolean) {
   if (favorable) return state.bias === "bullish" ? value >= level : value <= level;
   return state.bias === "bullish" ? value <= level : value >= level;
@@ -267,6 +281,21 @@ export function evaluateAnalysisOverlayOutcome(
     previousBar = bar;
   }
 
+  // The clock passing the expiry is not enough to close a result with no terminal: until the history reaches the
+  // expiry a later bar could still bring the entry, the confirmation or a terminal, so it stays incomplete and due
+  // selection rechecks it. History up to 10:15 for an 11:00 expiry was "complete" with no terminal event, and a 10:30
+  // bar added later reached the stop (BACKLOG 102-04).
+  if (windowClosed && !historyCoversExpiry(evidence.closedThrough, resolution, state.expiresAt)) {
+    return {
+      status: "incomplete",
+      outcome: "history_ends_before_expiry",
+      analysisId: state.analysisId,
+      activation: { entryAt, confirmationAt },
+      terminal: null,
+      qualityIssues: ["history_ends_before_expiry"],
+      evidence,
+    };
+  }
   return {
     status: windowClosed ? "complete" : "ongoing",
     outcome: active

@@ -3,6 +3,7 @@ import type {
   AnalysisJournalEntry,
   AnalysisJournalOutcome,
 } from "./analysisJournal.js";
+import { historyCoversExpiry } from "./analysisOutcome.js";
 
 export type JournalAnalysisRecord = {
   definition: AnalysisJournalEntry & { payload: AnalysisJournalDefinition };
@@ -15,8 +16,24 @@ export type DueAnalysisCandidate = {
   definitionHash: string;
   definition: AnalysisJournalDefinition;
   latestOutcome: AnalysisJournalOutcome | null;
-  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation";
+  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "complete_without_coverage";
 };
+
+/** The outcomes that close an analysis without a terminal event, final only once the history reached its expiry. */
+const WITHOUT_TERMINAL = new Set(["no_terminal_event", "not_activated", "expired_without_confirmation"]);
+
+/** Whether a recorded outcome's own evidence shows history through the expiry (see historyCoversExpiry). */
+function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string | null): boolean {
+  const evidence = outcome.result.evidence;
+  const closedThrough = typeof evidence === "object" && evidence !== null && typeof (evidence as { closedThrough?: unknown }).closedThrough === "string"
+    ? (evidence as { closedThrough: string }).closedThrough
+    : null;
+  try {
+    return historyCoversExpiry(closedThrough, outcome.evidenceTimeframe, expiresAt);
+  } catch {
+    return false;
+  }
+}
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
@@ -38,6 +55,18 @@ export function selectDueAnalyses(
       continue;
     }
     if (latest?.status === "complete") {
+      // An earlier version closed a result with no terminal by the clock alone, even when its history stopped short of
+      // the expiry; such a record is rechecked, as an appended evaluation (BACKLOG 102-04). A target or stop is final.
+      if (WITHOUT_TERMINAL.has(latest.outcome) && !recordCoversExpiry(latest, definition.expiresAt)) {
+        candidates.push({
+          analysisId: definition.analysisId,
+          definitionHash: item.definition.definition_hash,
+          definition,
+          latestOutcome: latest,
+          reason: "complete_without_coverage",
+        });
+        continue;
+      }
       skipped.push({ analysisId: definition.analysisId, reason: "terminal_evaluation_exists" });
       continue;
     }

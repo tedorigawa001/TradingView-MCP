@@ -4773,7 +4773,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 remediation:
                   result.outcome === "no_closed_bars_in_evaluation_window"
                     ? "set evaluation_timeframe to a shorter interval with closed bars inside the analysis window"
-                    : "call load_more_history, then evaluate again",
+                    : result.outcome === "history_ends_before_expiry"
+                      ? "evaluate again once the chart has closed bars through the expiry; evaluate_due_analyses rechecks it"
+                      : "call load_more_history, then evaluate again",
               }
             : {}),
           ...(result.outcome === "calendar_month_resolution_unsupported"

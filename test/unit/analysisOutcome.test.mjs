@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   computeAnalysisPathMetrics,
   evaluateAnalysisOverlayOutcome,
+  historyCoversExpiry,
 } from "../../build/analysisOutcome.js";
 
 const state = {
@@ -264,4 +265,54 @@ test("path metrics use entry geometry and exclude activation and terminal bar OH
   assert.ok(Math.abs(metrics.grossRealizedR - 1.8) < 1e-9);
   assert.equal(metrics.excursion.interiorBars, 1);
   assert.equal(metrics.timing.activationToTerminalMs, 30 * 60_000);
+});
+
+// BACKLOG 102-04: a result without a terminal is final only once the history reaches the expiry (11:00 here).
+const quiet = (timeIso) => bar(timeIso, { open: 162.3, high: 162.35, low: 162.25, close: 162.3 });
+const entry = bar("2026-07-15T10:15:00.000Z", { open: 162.3, high: 162.35, low: 162.15, close: 162.25 });
+const analysisBar = bar("2026-07-15T10:00:00.000Z", { open: 162.4, high: 162.45, low: 162.3, close: 162.4 });
+const after = new Date("2026-07-15T12:00:00.000Z");
+
+test("history that stops before the expiry leaves an active analysis incomplete, and a later bar can still reach the stop", () => {
+  const short = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry], "15", after);
+  assert.deepEqual([short.status, short.outcome, short.qualityIssues], ["incomplete", "history_ends_before_expiry", ["history_ends_before_expiry"]]);
+  assert.equal(short.activation.entryAt, "2026-07-15T10:15:00.000Z", "what the history shows is kept");
+  const longer = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry,
+    bar("2026-07-15T10:30:00.000Z", { open: 162.2, high: 162.25, low: 161.85, close: 161.9 })], "15", after);
+  assert.deepEqual([longer.status, longer.outcome], ["complete", "stop_before_target"], "the reported case");
+});
+
+test("history reaching the expiry closes it without a terminal: a last bar ending at it, or one after it across a gap", () => {
+  const atExpiry = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
+    quiet("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([atExpiry.status, atExpiry.outcome], ["complete", "no_terminal_event"]);
+  // 10:30 and 10:45 were never printed (a closure), but the feed has a bar after the expiry, so nothing is missing.
+  const acrossGap = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T11:15:00.000Z")], "15", after);
+  assert.deepEqual([acrossGap.status, acrossGap.outcome], ["complete", "no_terminal_event"]);
+  // Before the expiry by the clock the window is simply still open.
+  const open = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry], "15", new Date("2026-07-15T10:40:00.000Z"));
+  assert.deepEqual([open.status, open.outcome], ["ongoing", "awaiting_terminal"]);
+});
+
+test("no entry, or an entry without confirmation, is not final while the history stops before the expiry", () => {
+  const noEntry = [analysisBar, quiet("2026-07-15T10:15:00.000Z")];
+  const shortNoEntry = evaluateAnalysisOverlayOutcome(state, noEntry, "15", after);
+  assert.deepEqual([shortNoEntry.status, shortNoEntry.outcome], ["incomplete", "history_ends_before_expiry"]);
+  const fullNoEntry = evaluateAnalysisOverlayOutcome(state, [...noEntry, quiet("2026-07-15T10:30:00.000Z"), quiet("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([fullNoEntry.status, fullNoEntry.outcome], ["complete", "not_activated"]);
+  const confirming = { ...state, confirmation: 162.5 };
+  const unconfirmed = evaluateAnalysisOverlayOutcome(confirming, [analysisBar, entry], "15", after);
+  assert.deepEqual([unconfirmed.status, unconfirmed.outcome], ["incomplete", "history_ends_before_expiry"]);
+  const fullUnconfirmed = evaluateAnalysisOverlayOutcome(confirming, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
+    quiet("2026-07-15T10:45:00.000Z")], "15", after);
+  assert.deepEqual([fullUnconfirmed.status, fullUnconfirmed.outcome], ["complete", "expired_without_confirmation"]);
+});
+
+test("historyCoversExpiry: the last closed bar must end at or after the expiry", () => {
+  assert.equal(historyCoversExpiry("2026-07-15T10:45:00.000Z", "15", "2026-07-15T11:00:00.000Z"), true);
+  assert.equal(historyCoversExpiry("2026-07-15T10:30:00.000Z", "15", "2026-07-15T11:00:00.000Z"), false);
+  assert.equal(historyCoversExpiry("2026-07-15T10:00:00.000Z", "60", "2026-07-15T11:00:00.000Z"), true);
+  assert.equal(historyCoversExpiry(null, "15", "2026-07-15T11:00:00.000Z"), false);
+  assert.equal(historyCoversExpiry(null, "15", null), true, "no expiry, nothing to reach");
+  assert.equal(historyCoversExpiry("2026-07-15T10:45:00.000Z", "1M", "2026-07-15T11:00:00.000Z"), false, "no fixed bar length");
 });
