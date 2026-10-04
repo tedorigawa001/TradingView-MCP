@@ -59,15 +59,19 @@ test("CME Bulletin parser takes the open interest before its change, even below 
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 UNCH"), 376079, "no change");
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 -12136"), 376079, "the sign joined to the change");
   assert.equal(withTotal("TOTAL GC FUT 165,346 13,123 376,079 - 12,136"), 376079, "thousands separators");
-  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 ----"), 376079, "a dashed change column");
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 NEW"), 376079);
+  // A column without a figure prints dashes, as on the bulletin's contract-month rows.
+  assert.equal(withTotal("TOTAL GC FUT 184541 ---- 395508 + 1442"), 395508, "no PNT volume");
+  assert.equal(withTotal("TOTAL GC FUT 500000 ---- 376079 - 12136"), 376079);
+  assert.equal(withTotal("TOTAL GC FUT ---- ---- 376079 UNCH"), 376079);
+  assert.equal(withTotal("TOTAL GC FUT 184541 2885 395508 + 1442 ----"), 395508, "an empty column after the change ends the row");
   // The row is its line, and in text without line breaks it ends at a word after the change.
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 - 12136\n2000 3000"), 376079);
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 - 12136 MGC FUT 5 6"), 376079);
 });
 
 test("CME Bulletin parser refuses a total row whose fields cannot be told apart", () => {
-  const refused = /cannot be told apart|unsigned numbers before its open interest change/;
+  const refused = /cannot be told apart|columns before its open interest change/;
   // The change before a number: in text alone either could be the open interest (the extractor orders by position).
   assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 - 12136 376079"), refused);
   // However the change is written, a volume above 100,000 would otherwise be taken for the open interest.
@@ -83,11 +87,13 @@ test("CME Bulletin parser refuses a total row whose fields cannot be told apart"
   for (const row of ["500000 376079* - 12136", "500000 376079- 12136", "500000 376079.0 - 12136", "500000 376,07 - 12136"]) {
     assert.throws(() => withTotal(`TOTAL GC FUT ${row}`), unreadable, row);
   }
-  assert.throws(() => withTotal("TOTAL GC FUT 500000 ---- 376079 - 12136"), refused, "a dashed volume reads as the change");
+  assert.throws(() => withTotal("TOTAL GC FUT 184541 2885 ---- + 1442"), /the last empty/, "no open interest");
+  assert.throws(() => withTotal("TOTAL GC FUT ---- 184541 2885 395508 + 1442"), /4 columns/);
   // Without a change the open interest cannot be told from a volume, nor a row wrapped onto two lines.
   const noChange = /has no open interest change/;
   assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 376079\n2000 3000"), noChange);
   assert.throws(() => withTotal("TOTAL GC FUT 165346\n376079 - 12136"), noChange);
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 376079 ----"), noChange, "dashes are an empty column, not the change");
 });
 
 test("CME Bulletin parser takes the trade date from the BULLETIN # line when the bulletin shows several dates", () => {
@@ -201,4 +207,24 @@ test("pdf.js text of a landscape bulletin made as a rotated portrait page keeps 
   ]));
   assert.equal(stamped.split("\n").at(-1), "TOTAL GC FUT 500000 376079 - 12136");
   assert.equal(parseCmeGoldOpenInterestBulletin({ text: stamped, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }).open_interest, 376079);
+});
+
+test("pdf.js text of the bulletin of 2026-10-02, drawn in its own order, yields its open interest", async () => {
+  // The TOTAL GC FUT row of that bulletin as pdf.js returned it: in drawing order, at its shown positions (from the top
+  // of a 612 x 1008 page), with its text heights. The Globex volume comes before the label and the sign after the change.
+  const shown = (text, x, top, height) => {
+    const scale = height / 8;
+    return [text, x, 1008 - top, `${scale} 0 0 ${scale}`];
+  };
+  const text = await extractPdfTextWithPdfJs(onePagePdf([
+    shown("PG62 BULLETIN # 190@ METAL FUTURES PRODUCTS Fri, Oct 02, 2026 PG62", 18, 40, 7.5), shown("PRELIMINARY", 18, 52, 7.5),
+    shown("DEC29", 18, 266, 6.5), shown("----", 414.6, 266, 6.5), shown("53", 534.6, 266, 6.5), shown("UNCH", 565.2, 266, 6.5),
+    shown("184541", 414.6, 273.5, 6.5), shown("TOTAL", 18, 275, 7.5), shown("GC", 49.66, 275, 7.5), shown("FUT", 63.23, 275, 7.5),
+    shown("395508", 534.6, 273.5, 6.5), shown("2885", 476.42, 273.5, 6.5), shown("1442", 578.4, 273.5, 6.5), shown("+", 565.2, 273.1, 6),
+    shown("HDG FUT U.S. MIDWEST DOM STEEL PREM(CRU)FUT", 18, 283, 7.5),
+  ], { mediaBox: "0 0 612 1008" }));
+  assert.ok(text.split("\n").includes("TOTAL GC FUT 184541 2885 395508 + 1442"));
+  const result = parseCmeGoldOpenInterestBulletin({ text, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-10-04T13:00:00.000Z" });
+  assert.deepEqual([result.open_interest, result.observation_date, result.bulletin_number, result.report_status],
+    [395508, "2026-10-02", 190, "preliminary"]);
 });

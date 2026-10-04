@@ -29,31 +29,31 @@ export type PdfTextExtractor = (data: Uint8Array) => Promise<string>;
 const WHOLE_NUMBER = /^(?:\d{1,3}(?:,\d{3})+|\d+)$/;
 
 /**
- * The open interest of the TOTAL GC FUT row, read by the meaning of its fields (BACKLOG 102-03): up to two volume
- * columns (either may be empty), the open interest, then its change, which carries a sign ("+ 120", "-120") or reads
- * UNCH, NEW or a run of dashes. The open interest is the last unsigned number before the change. Taking the largest
- * number returned a volume above the open interest, and an earlier reading took the change itself, so a row without
- * this shape is refused rather than guessed: anything else before the change ("376079*", "376079-", a decimal), no
- * change, a number or a second change after it, or no or more than three unsigned numbers. A word after the change ends
- * the row (text without line breaks); otherwise the row is its line.
+ * The open interest of the TOTAL GC FUT row, read by the meaning of its fields (BACKLOG 102-03): the Globex and PNT
+ * volumes, the open interest, then its change. A column without a figure prints a run of dashes ("----", as on the
+ * bulletin's contract-month rows) or may be left out, and the change carries a sign ("+ 1442", "-120") or reads UNCH
+ * or NEW. The open interest is the last column before the change. Taking the largest number returned a volume above
+ * the open interest, and an earlier reading took the change itself, so a row without this shape is refused rather than
+ * guessed: anything else before the change ("376079*", "376079-", a decimal), no change, a number or a second change
+ * after it, more than three columns, or an empty last column. A word after the change ends the row (text without line
+ * breaks); otherwise the row is its line.
  */
 function totalOpenInterest(fields: string[]): number {
-  const unsigned: number[] = [];
+  const columns: Array<number | null> = [];
   let changed = false;
   for (let index = 0; index < fields.length; index += 1) {
     const field = fields[index];
     const number = WHOLE_NUMBER.test(field);
     const separateSign = (field === "+" || field === "-") && WHOLE_NUMBER.test(fields[index + 1] ?? "");
-    const change = field === "UNCH" || field === "NEW" || /^-{2,}$/.test(field) ||
-      (/^[+-]/.test(field) && WHOLE_NUMBER.test(field.slice(1))) || separateSign;
+    const change = field === "UNCH" || field === "NEW" || (/^[+-]/.test(field) && WHOLE_NUMBER.test(field.slice(1))) || separateSign;
     if (changed) {
       if (number || change) {
         throw new Error("CME TOTAL GC FUT row has a number after its open interest change, so its fields cannot be told apart");
       }
       break;
     }
-    if (number) {
-      unsigned.push(Number(field.replace(/,/g, "")));
+    if (number || /^-{2,}$/.test(field)) {
+      columns.push(number ? Number(field.replace(/,/g, "")) : null);
       continue;
     }
     if (!change) {
@@ -63,10 +63,11 @@ function totalOpenInterest(fields: string[]): number {
     if (separateSign) index += 1;
   }
   if (!changed) throw new Error("CME TOTAL GC FUT row has no open interest change, so its open interest cannot be told from a volume");
-  if (unsigned.length === 0 || unsigned.length > 3) {
-    throw new Error(`CME TOTAL GC FUT row has ${unsigned.length} unsigned numbers before its open interest change; expected the open interest after at most two volumes`);
+  const openInterest = columns[columns.length - 1];
+  if (columns.length > 3 || openInterest === undefined || openInterest === null) {
+    throw new Error(`CME TOTAL GC FUT row has ${columns.length} columns before its open interest change, the last ${openInterest === null ? "empty" : "missing"}; expected at most two volumes and the open interest`);
   }
-  return unsigned[unsigned.length - 1];
+  return openInterest;
 }
 
 /** A piece of PDF text with its position on the page as shown: x from the left, y from the top, in PDF units. */
@@ -186,9 +187,10 @@ export async function extractPdfTextWithPdfJs(data: Uint8Array): Promise<string>
     const pages = await Promise.all(Array.from({ length: pdf.numPages }, async (_, index) => {
       const page = await pdf.getPage(index + 1);
       const content = await page.getTextContent();
-      // pdf.js returns text in the order the PDF draws it, which can differ from the order of the columns. Rebuild each
-      // row from the pieces' positions on the shown page, so the TOTAL GC FUT numbers read left to right; the printed
-      // TOTAL label is one contiguous text run, so it stays searchable.
+      // pdf.js returns text in the order the PDF draws it, which differs from the order of the columns: on the bulletin of
+      // 2026-10-02 the Globex volume came before the TOTAL label and the change's sign after its figure. Rebuild each row
+      // from the pieces' positions on the shown page, so the TOTAL GC FUT figures read left to right; the label's three
+      // pieces sit 1.5 units off the figures' baseline, well inside a line's room.
       const viewport = page.getViewport({ scale: 1 }).transform;
       const texts = content.items.flatMap((item) => "str" in item ? [item] : []);
       return pdfTextLines(shownText(texts, viewport, (left, right) => Util.transform(left, right))).join("\n");
