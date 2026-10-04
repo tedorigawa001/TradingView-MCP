@@ -4864,6 +4864,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Maximum analyses to evaluate. Default: 20"),
         include_active: z.boolean().optional()
           .describe("Include active analyses with no prior evaluation. Default: false"),
+        include_fixed: z.boolean().optional()
+          .describe("Also recheck ambiguous or gapped results whose history reached the expiry on the same timeframe; they come out the same unless the chart's bars changed (session or adjustment settings, a backfill). Default: false"),
         confirm: z.boolean().optional()
           .describe("Must be true to change the chart and append outcomes. Default: false"),
       },
@@ -4875,6 +4877,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       load_more_bars,
       limit,
       include_active,
+      include_fixed,
       confirm,
     }) => chartOperations.run(async () => {
       try {
@@ -4900,7 +4903,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const journalView = await journal.list({ limit: 500 });
         const selection = selectDueAnalyses(
           journalView.analyses as JournalAnalysisRecord[],
-          { includeActive: include_active ?? false, limit: limit ?? 20, evaluationTimeframe: evaluation_timeframe },
+          {
+            includeActive: include_active ?? false,
+            limit: limit ?? 20,
+            evaluationTimeframe: evaluation_timeframe,
+            includeFixed: include_fixed ?? false,
+          },
         );
         const requestedBars = count ?? 1000;
         const historyLoad = load_more_bars ?? 0;
@@ -4933,6 +4941,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           requestedBars,
           loadMoreBars: historyLoad,
           includeActive: include_active ?? false,
+          includeFixed: include_fixed ?? false,
           journalPopulation: journalView.total,
           journalScanned: journalView.returned,
           journalScanTruncated: journalView.total > journalView.returned,

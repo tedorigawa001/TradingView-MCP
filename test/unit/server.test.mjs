@@ -3735,7 +3735,7 @@ test("evaluate_due_analyses previews, restores multiple symbols, records non-gue
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
 });
 
-test("evaluate_due_analyses names a gapped result with history through the expiry unless another timeframe is asked for (102-04)", async () => {
+test("evaluate_due_analyses names a gapped result with history through the expiry unless rechecked otherwise (102-04)", async () => {
   const gapped = {
     schema_version: "1.0",
     event_id: "outcome-EURUSD-gapped",
@@ -3771,6 +3771,8 @@ test("evaluate_due_analyses names a gapped result with history through the expir
   assert.equal((await preview({ chart_index: 0, evaluation_timeframe: "15" })).selected, 0);
   const longer = await preview({ chart_index: 0, evaluation_timeframe: "1H" });
   assert.deepEqual([longer.selected, longer.candidates[0].evaluationTimeframe], [1, "60"]);
+  const forced = await preview({ chart_index: 0, include_fixed: true });
+  assert.deepEqual([forced.selected, forced.includeFixed, forced.candidates[0].evaluationTimeframe], [1, true, "15"]);
 });
 
 test("evaluate_due_analyses continues after one evaluation failure", async () => {

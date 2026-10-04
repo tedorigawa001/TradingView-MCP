@@ -131,27 +131,28 @@ test("evaluated results that stayed open go last in the order they were recorded
     ["ongoingAtExpiry", "checkedBefore", "fresh"], "the oldest expiries no longer take every slot");
 });
 
-test("an ambiguous or gapped result with history through the expiry is named, unless another timeframe is asked for", () => {
-  const settled = (id, status, label, coveredBy, evidenceTimeframe = "15") => record(id, "2026-07-20T02:00:00.000Z",
+test("an ambiguous or gapped result with history through the expiry is named unless rechecked on another timeframe", () => {
+  // The analysis timeframe is 60, so a run without evaluation_timeframe evaluates on 60.
+  const settled = (id, status, label, coveredBy, evidenceTimeframe = "60") => record(id, "2026-07-20T02:00:00.000Z",
     { ...outcome(status, label), evidenceTimeframe, result: { evidence: { expiryCoveredBy: coveredBy } } });
   const records = [
     settled("gap", "incomplete", "gap_in_evaluation_window", "closed_bar"),
     settled("ambiguous", "ambiguous", "terminal_order_unknown", "forming_bar"),
-    settled("hourly", "ambiguous", "activation_order_unknown", "closed_bar", "60"),
+    settled("fiveMinute", "incomplete", "gap_in_evaluation_window", "closed_bar", "5"),
     settled("gapEarly", "incomplete", "gap_in_evaluation_window", null),
     settled("short", "incomplete", "history_ends_before_expiry", null),
-    // An earlier version's ambiguous result is checked once more, now with the gap rules.
+    // An earlier version's ambiguous record names no proof, so it stays a recheck (in the open group).
     record("legacy", "2026-07-20T02:00:00.000Z", outcome("ambiguous", "terminal_order_unknown")),
   ];
   const now = new Date("2026-07-20T03:00:00.000Z");
+  const ids = (selection) => selection.candidates.map((candidate) => candidate.analysisId);
   const plain = selectDueAnalyses(records, { now });
-  // Equal expiries and evaluation times: by id.
-  assert.deepEqual(plain.candidates.map((candidate) => candidate.analysisId), ["gapEarly", "legacy", "short"]);
-  assert.deepEqual(plain.skipped.map((item) => [item.analysisId, item.reason]), [["gap", "open_result_fixed_for_timeframe"],
-    ["ambiguous", "open_result_fixed_for_timeframe"], ["hourly", "open_result_fixed_for_timeframe"]]);
-  const sameTimeframe = selectDueAnalyses(records, { now, evaluationTimeframe: "1h" });
-  assert.deepEqual(sameTimeframe.candidates.map((candidate) => candidate.analysisId), ["ambiguous", "gap", "gapEarly", "legacy", "short"],
-    "1h is the hourly record's own timeframe");
-  const shorter = selectDueAnalyses(records, { now, evaluationTimeframe: "5" });
-  assert.deepEqual(shorter.candidates.map((candidate) => candidate.analysisId), ["ambiguous", "gap", "gapEarly", "hourly", "legacy", "short"]);
+  // Equal expiries and evaluation times: by id. The 5-minute record may come out otherwise on 60.
+  assert.deepEqual(ids(plain), ["fiveMinute", "gapEarly", "legacy", "short"]);
+  assert.deepEqual(plain.skipped.map((item) => [item.analysisId, item.reason]),
+    [["gap", "open_result_fixed_for_timeframe"], ["ambiguous", "open_result_fixed_for_timeframe"]]);
+  assert.deepEqual(ids(selectDueAnalyses(records, { now, evaluationTimeframe: "1h" })), ids(plain), "1h is 60, the same run");
+  assert.deepEqual(ids(selectDueAnalyses(records, { now, evaluationTimeframe: "5" })), ["ambiguous", "gap", "gapEarly", "legacy", "short"]);
+  assert.deepEqual(ids(selectDueAnalyses(records, { now, includeFixed: true })),
+    ["ambiguous", "fiveMinute", "gap", "gapEarly", "legacy", "short"]);
 });

@@ -174,12 +174,13 @@ export function evaluateAnalysisOverlayOutcome(
     dueAtMs = startMs + barMs;
   }
   // The window's tail runs to the next bar when it starts by the expiry (the forming bar that proves it, or a closed one
-  // past it), measured like the room between bars; otherwise to the expiry, with room for a whole window bar.
+  // past it), measured like the room between bars; otherwise to the expiry, with room for a window bar: a whole one for
+  // bars of up to two hours, and for longer ones a bar less the hour daylight saving may have moved it.
   const nextStartMs = bars.find((bar) => bar.time * 1000 >= dueAtMs)?.time;
   if (expiresAtMs !== null && expiryCoveredBy !== null) {
     const tailEndsAtBar = nextStartMs !== undefined && nextStartMs * 1000 <= expiresAtMs;
     const tailEndMs = tailEndsAtBar ? nextStartMs * 1000 : expiresAtMs;
-    if (tailEndMs - dueAtMs >= (tailEndsAtBar ? gapMs : barMs)) {
+    if (tailEndMs - dueAtMs >= (tailEndsAtBar || barMs > 2 * HOUR_MS ? gapMs : barMs)) {
       gaps.push({ from: new Date(dueAtMs).toISOString(), to: new Date(tailEndMs).toISOString() });
     }
   }
@@ -367,6 +368,7 @@ export function evaluateAnalysisOverlayOutcome(
       evidence,
     };
   }
+  // Still open: a gap so far keeps only what came before it, and the result is flagged.
   return {
     status: windowClosed ? "complete" : "ongoing",
     outcome: active
@@ -381,9 +383,9 @@ export function evaluateAnalysisOverlayOutcome(
           ? "expired_without_confirmation"
           : "awaiting_confirmation",
     analysisId: state.analysisId,
-    activation: { entryAt, confirmationAt },
+    activation: { entryAt: beforeGap(entryAt), confirmationAt: beforeGap(confirmationAt) },
     terminal: null,
-    qualityIssues: [],
+    qualityIssues: gaps.length > 0 ? ["gap_in_evaluation_window"] : [],
     evidence,
   };
 }
@@ -420,8 +422,8 @@ export function computeAnalysisPathMetrics(
       measurement: "entry_midpoint_reference; no activated path available",
     };
   }
-  // The path has holes where bars are missing, so its excursions would be understated.
-  if (result.outcome === "gap_in_evaluation_window") {
+  // A path without a terminal runs to the last bar, across any gap, so its excursions would be understated.
+  if (result.terminal === null && "gapCount" in result.evidence && result.evidence.gapCount > 0) {
     return {
       methodologyVersion: "1.0" as const,
       referenceEntry,

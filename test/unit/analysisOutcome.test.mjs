@@ -344,6 +344,11 @@ test("a forming bar running past the expiry proves the window closed; one ending
     bar("2026-07-15T10:55:00.000Z", { open: 162.3, high: 162.35, low: 162.25, close: 162.3 }, true)], "15", after);
   assert.deepEqual([offGrid.outcome, offGrid.evidence.expiryCoveredBy, offGrid.evidence.gaps], ["gap_in_evaluation_window", "forming_bar",
     [{ from: "2026-07-15T10:45:00.000Z", to: "2026-07-15T10:55:00.000Z" }]]);
+  // The same when that bar starts exactly at the expiry: the tail ends at a bar, not at the expiry.
+  const atExpiryBar = evaluateAnalysisOverlayOutcome({ ...state, expiresAt: "2026-07-15T10:55:00.000Z" }, [analysisBar, entry,
+    quiet("2026-07-15T10:30:00.000Z"), bar("2026-07-15T10:55:00.000Z", { open: 162.3, high: 162.35, low: 162.25, close: 162.3 }, true)],
+    "15", after);
+  assert.deepEqual([atExpiryBar.outcome, atExpiryBar.evidence.gapCount], ["gap_in_evaluation_window", 1]);
   const atExpiry = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
     bar("2026-07-15T10:45:00.000Z", { open: 162.3, high: 162.35, low: 161.5, close: 161.6 }, true)], "15", after);
   assert.deepEqual([atExpiry.status, atExpiry.outcome], ["incomplete", "history_ends_before_expiry"],
@@ -372,10 +377,11 @@ test("a bar missing inside the window keeps a result without a terminal open, an
   const shortGapped = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T10:30:00.000Z")], "15", after);
   assert.deepEqual([shortGapped.outcome, shortGapped.evidence.gapCount, shortGapped.evidence.expiryCoveredBy],
     ["gap_in_evaluation_window", 1, null], "a gap already found stays whatever later history shows");
-  // While the window is open, a gap before it changes nothing yet.
+  // While the window is open the result stays ongoing, flagged.
   const open = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:45:00.000Z")], "15",
     new Date("2026-07-15T10:59:00.000Z"));
-  assert.deepEqual([open.status, open.outcome], ["ongoing", "awaiting_terminal"]);
+  assert.deepEqual([open.status, open.outcome, open.qualityIssues, open.activation.entryAt],
+    ["ongoing", "awaiting_terminal", ["gap_in_evaluation_window"], "2026-07-15T10:15:00.000Z"]);
 });
 
 test("a result decided after a gap stays open; one decided before the gap stands", () => {
@@ -421,6 +427,11 @@ test("daily bars that shift an hour with daylight saving are not gaps; a missing
   const missingLast = evaluateAnalysisOverlayOutcome({ ...daily, expiresAt: "2026-03-09T21:00:00.000Z" },
     bars.filter((_, index) => index !== 3), "D", new Date("2026-03-11T00:00:00.000Z"));
   assert.deepEqual([missingLast.outcome, missingLast.evidence.gaps], ["gap_in_evaluation_window",
+    [{ from: "2026-03-08T22:00:00.000Z", to: "2026-03-09T21:00:00.000Z" }]]);
+  // With no bar by the expiry the tail runs to it, and a daily bar's room there allows the same hour.
+  const missingTail = evaluateAnalysisOverlayOutcome({ ...daily, expiresAt: "2026-03-09T21:00:00.000Z" },
+    [...bars.slice(0, 3), day("2026-03-10T21:00:00.000Z")], "D", new Date("2026-03-11T00:00:00.000Z"));
+  assert.deepEqual([missingTail.outcome, missingTail.evidence.gaps], ["gap_in_evaluation_window",
     [{ from: "2026-03-08T22:00:00.000Z", to: "2026-03-09T21:00:00.000Z" }]]);
   // Weekly bars move the same hour.
   const weeklyState = { ...daily, analyzedAt: "2026-03-01T23:00:00.000Z", expiresAt: "2026-03-15T21:00:00.000Z" };
@@ -475,6 +486,18 @@ test("a gap result reports only the entry and confirmation found before the gap,
   assert.deepEqual([metrics.excursion, metrics.grossRealizedR, metrics.measurement],
     [null, null, "entry_midpoint_reference; bars missing inside the window"]);
   assert.equal(metrics.timing.analyzedToEntryMs, 10 * 60_000, "the entry before the gap is known");
+  // Still open, the same holds: the entry after the gap is left out, and an earlier one's path crosses the gap.
+  const early = new Date("2026-07-15T10:59:00.000Z");
+  const lateOpen = evaluateAnalysisOverlayOutcome(state, [analysisBar, quiet("2026-07-15T10:15:00.000Z"),
+    bar("2026-07-15T10:45:00.000Z", { open: 162.3, high: 162.35, low: 162.15, close: 162.25 })], "15", early);
+  assert.deepEqual([lateOpen.status, lateOpen.activation.entryAt], ["ongoing", null]);
+  const openBars = [analysisBar, entry, quiet("2026-07-15T10:45:00.000Z")];
+  const openMetrics = computeAnalysisPathMetrics(state, openBars, evaluateAnalysisOverlayOutcome(state, openBars, "15", early));
+  assert.deepEqual([openMetrics.excursion, openMetrics.timing.analyzedToEntryMs], [null, 10 * 60_000]);
+  // A result decided before the gap keeps its path.
+  const decidedBars = [analysisBar, entry, stopBar("2026-07-15T10:30:00.000Z"), quiet("2026-07-15T11:00:00.000Z")];
+  const decided = computeAnalysisPathMetrics(state, decidedBars, evaluateAnalysisOverlayOutcome(state, decidedBars, "15", after));
+  assert.notEqual(decided.excursion, null);
 });
 
 test("without an expiry a result decided after a gap stays open, and seconds bars are checked too", () => {

@@ -54,7 +54,7 @@ function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string |
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
-  options: { now?: Date; includeActive?: boolean; limit?: number; evaluationTimeframe?: string } = {},
+  options: { now?: Date; includeActive?: boolean; limit?: number; evaluationTimeframe?: string; includeFixed?: boolean } = {},
 ) {
   const nowMs = (options.now ?? new Date()).getTime();
   const limit = options.limit ?? 20;
@@ -84,11 +84,14 @@ export function selectDueAnalyses(
       continue;
     }
     // An ambiguous or gapped result whose history already reached the expiry comes out the same on every recheck with
-    // the same bars, so it is named instead of switching the chart for it on every call. Another evaluation timeframe
-    // can change it (shorter bars may order an ambiguous bar, longer ones may cover bars without trades).
-    if (latest !== null && (latest.status === "ambiguous" || latest.outcome === "gap_in_evaluation_window") &&
-      typeof recordedProof(latest) === "string" && (options.evaluationTimeframe === undefined ||
-        normalizeResolution(options.evaluationTimeframe) === normalizeResolution(latest.evidenceTimeframe))) {
+    // the same bars, so it is named instead of switching the chart for it on every call. A recheck on another timeframe
+    // than its record (evaluation_timeframe, or else the analysis timeframe) can change it: shorter bars may order an
+    // ambiguous bar, longer ones may cover bars without trades. includeFixed rechecks it anyway, for bars that changed
+    // with the chart's session or adjustment settings or a backfill.
+    if (options.includeFixed !== true && latest !== null &&
+      (latest.status === "ambiguous" || latest.outcome === "gap_in_evaluation_window") &&
+      typeof recordedProof(latest) === "string" &&
+      normalizeResolution(options.evaluationTimeframe ?? definition.timeframe) === normalizeResolution(latest.evidenceTimeframe)) {
       skipped.push({ analysisId: definition.analysisId, reason: "open_result_fixed_for_timeframe" });
       continue;
     }
