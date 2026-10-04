@@ -36,7 +36,7 @@ const event = (date, importance = "high", title = "CPI YoY") => ({
   period: null, actual: null, forecast: null, previous: null, unit: null,
 });
 
-function deps(calendar, { ohlcvDelayMs = 0, onOhlcv = () => {} } = {}) {
+function deps(calendar, { onOhlcv = () => {} } = {}) {
   let quoteCalls = 0;
   return {
     tv: {
@@ -47,7 +47,6 @@ function deps(calendar, { ohlcvDelayMs = 0, onOhlcv = () => {} } = {}) {
       getReplayStatus: async () => ({ available: true, toolbarVisible: false, started: false, ready: true, autoplay: false, currentTimeIso: null }),
       getExecutionQuotes: async () => [],
       getOhlcv: async () => {
-        if (ohlcvDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, ohlcvDelayMs));
         onOhlcv();
         return {
           symbol: "OANDA:EURUSD", resolution: "60", count: 1,
@@ -131,11 +130,12 @@ test("the blackout window includes both ends and nothing beyond them", async (t)
   assert.equal(upcoming.evidence.market_snapshot.data.economic_events.events.length, 1);
 });
 
-test("the end of the window is measured when the request completes", async () => {
-  // The chart read takes 300 ms, so a release 30 minutes and 100 ms after the request is within 30 minutes at the end.
-  const slow = await decide([event("2026-07-15T12:30:00.100Z")], { executionWaitForUpdateMs: 0 }, [], { ohlcvDelayMs: 300 });
-  assert.equal(slow.event_gate.status, "blackout");
-  assert.ok(Date.parse(slow.event_gate.window.to) >= Date.parse("2026-07-15T12:30:00.300Z"));
+test("the end of the window is measured when the request completes", async (t) => {
+  // The chart read takes 300 ms by a clock the test drives, so a release 30 minutes and 100 ms after the request is
+  // within 30 minutes at the end.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const slow = await decide([event("2026-07-15T12:30:00.100Z")], { executionWaitForUpdateMs: 0 }, [], { onOhlcv: () => t.mock.timers.tick(300) });
+  assert.deepEqual([slow.event_gate.status, slow.event_gate.window.to], ["blackout", "2026-07-15T12:30:00.300Z"]);
 });
 
 test("a request that outlasts the fetch's minute of slack leaves the gate incomplete", async (t) => {
