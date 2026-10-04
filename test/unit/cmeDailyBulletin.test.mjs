@@ -59,9 +59,10 @@ test("CME Bulletin parser takes the open interest before its change, even below 
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 UNCH"), 376079, "no change");
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 -12136"), 376079, "the sign joined to the change");
   assert.equal(withTotal("TOTAL GC FUT 165,346 13,123 376,079 - 12,136"), 376079, "thousands separators");
-  // An empty change column: the open interest is the last field, and the next line is another row.
-  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079\n2000 3000"), 376079);
-  // In text without line breaks the row ends at the next word.
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 ----"), 376079, "a dashed change column");
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 NEW"), 376079);
+  // The row is its line, and in text without line breaks it ends at a word after the change.
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 - 12136\n2000 3000"), 376079);
   assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 - 12136 MGC FUT 5 6"), 376079);
 });
 
@@ -77,26 +78,53 @@ test("CME Bulletin parser refuses a total row whose fields cannot be told apart"
   assert.throws(() => withTotal("TOTAL GC FUT 1 165346 13123 376079 - 12136"), refused, "more than two volumes");
   assert.throws(() => withTotal("TOTAL GC FUT UNCH"), refused);
   assert.throws(() => withTotal("TOTAL GC FUT 4070.80 + 20.60"), refused);
+  // Anything else before the change, where the old reading and a cut-short row both returned the volume 500000.
+  const unreadable = /before its open interest change, so its fields cannot be told apart/;
+  for (const row of ["500000 376079* - 12136", "500000 376079- 12136", "500000 376079.0 - 12136", "500000 376,07 - 12136"]) {
+    assert.throws(() => withTotal(`TOTAL GC FUT ${row}`), unreadable, row);
+  }
+  assert.throws(() => withTotal("TOTAL GC FUT 500000 ---- 376079 - 12136"), refused, "a dashed volume reads as the change");
+  // Without a change the open interest cannot be told from a volume, nor a row wrapped onto two lines.
+  const noChange = /has no open interest change/;
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 376079\n2000 3000"), noChange);
+  assert.throws(() => withTotal("TOTAL GC FUT 165346\n376079 - 12136"), noChange);
+});
+
+test("CME Bulletin parser takes the trade date from the BULLETIN # line when the bulletin shows several dates", () => {
+  const dated = (text) => parseCmeGoldOpenInterestBulletin({ text, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }).observation_date;
+  assert.equal(dated(`Printed Mon, Jul 27, 2026\n${bulletin}`), "2026-07-24", "a later date above the header");
+  assert.equal(dated(`${bulletin}\nPG62 BULLETIN # 141@ Fri, Jul 24, 2026 PG62`), "2026-07-24", "the same date again");
+  assert.throws(() => dated(bulletin.replace("PG62 BULLETIN # 141@ Fri, Jul 24, 2026 PG62", "PG62 BULLETIN # 141@\nFri, Jul 24, 2026\nMon, Jul 27, 2026")),
+    /more than one date and none on its BULLETIN # line/);
 });
 
 test("PDF text lines are rebuilt from positions: one baseline per line, left to right, top to bottom", () => {
+  // y runs down the shown page.
   const piece = (str, x, y, height = 8) => ({ str, x, y, height });
   assert.deepEqual(pdfTextLines([
-    piece("- 12136", 520, 500), piece("TOTAL GC FUT", 40, 500.8), piece("376079", 440, 500), piece("165346", 300, 499.5),
-    piece("139888", 440, 510), piece("AUG26", 40, 510), piece(" ", 600, 505), piece("13123", 370, 500),
+    piece("- 12136", 520, 112), piece("TOTAL GC FUT", 40, 111.2), piece("376079", 440, 112), piece("165346", 300, 112.5),
+    piece("139888", 440, 102), piece("AUG26", 40, 102), piece(" ", 600, 107), piece("13123", 370, 112),
   ]), ["AUG26 139888", "TOTAL GC FUT 165346 13123 376079 - 12136"]);
-  // Rows closer than the tolerance merge, so it stays below half a row: 40% of an 8-unit text is 3.2 units.
-  assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 0, 96.7)]), ["A", "B"]);
+  // A piece continues the line of the one above it, so a sign set 3 units high stays in the row.
+  assert.deepEqual(pdfTextLines([piece("- 12136", 520, 109), piece("TOTAL GC FUT", 40, 112), piece("500000", 300, 112),
+    piece("376079", 440, 112.3)]), ["TOTAL GC FUT 500000 376079 - 12136"]);
+  // The room is 40% of the taller text: 2.5 units joins and 3.3 parts 8-unit text, and a label of no height joins.
+  assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 10, 102.5)]), ["A B"]);
+  assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 0, 103.3)]), ["A", "B"]);
+  assert.deepEqual(pdfTextLines([piece("TOTAL GC FUT", 0, 100, 0), piece("376079", 50, 101.2)]), ["TOTAL GC FUT 376079"]);
 });
 
-/** A one-page PDF drawing each piece at its position, in the order given. */
-function onePagePdf(pieces) {
+/**
+ * A one-page PDF drawing each piece at its position, in the order given. A piece may carry its text matrix (default
+ * upright), and the page a /Rotate.
+ */
+function onePagePdf(pieces, { rotate = 0, mediaBox = "0 0 792 612" } = {}) {
   const escape = (text) => text.replace(/[\\()]/g, (character) => `\\${character}`);
-  const stream = pieces.map(([text, x, y]) => `BT /F1 8 Tf 1 0 0 1 ${x} ${y} Tm (${escape(text)}) Tj ET`).join("\n");
+  const stream = pieces.map(([text, x, y, matrix = "1 0 0 1"]) => `BT /F1 8 Tf ${matrix} ${x} ${y} Tm (${escape(text)}) Tj ET`).join("\n");
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox}] /Rotate ${rotate} /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
@@ -156,4 +184,21 @@ test("CME Bulletin client rejects an oversized PDF before parsing", async () => 
   );
   await assert.rejects(() => client.getLatestGoldOpenInterest(), /CME metals bulletin response is too large/);
   assert.equal(extracted, false);
+});
+
+test("pdf.js text of a landscape bulletin made as a rotated portrait page keeps its rows; rotated stamps are left out", async () => {
+  // Shown landscape: a piece shown at (x, y from the top) sits at (y, x) on the portrait page, drawn turned a quarter.
+  const turned = (text, shownX, shownTop) => [text, shownTop, shownX, "0 1 -1 0"];
+  const rotated = await extractPdfTextWithPdfJs(onePagePdf([
+    turned("PG62 BULLETIN # 141@ Fri, Jul 24, 2026", 40, 32), turned("FINAL", 40, 52),
+    turned("- 12136", 520, 112), turned("376079", 440, 112), turned("TOTAL GC FUT", 40, 112), turned("500000", 300, 112), turned("13123", 370, 112),
+  ], { rotate: 90, mediaBox: "0 0 612 792" }));
+  assert.equal(rotated.split("\n").at(-1), "TOTAL GC FUT 500000 13123 376079 - 12136");
+  // A stamp turned on an upright page, level with the total row, would otherwise join it.
+  const stamped = await extractPdfTextWithPdfJs(onePagePdf([
+    ["PG62 BULLETIN # 141@ Fri, Jul 24, 2026", 40, 580], ["FINAL", 40, 560],
+    ["TOTAL GC FUT", 40, 500], ["500000", 300, 500], ["999999", 400, 500, "0 1 -1 0"], ["376079", 440, 500], ["- 12136", 520, 500],
+  ]));
+  assert.equal(stamped.split("\n").at(-1), "TOTAL GC FUT 500000 376079 - 12136");
+  assert.equal(parseCmeGoldOpenInterestBulletin({ text: stamped, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }).open_interest, 376079);
 });
