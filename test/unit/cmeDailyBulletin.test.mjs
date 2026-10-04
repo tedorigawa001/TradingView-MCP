@@ -320,6 +320,16 @@ test("the figure columns need five contract-month rows, four in five agreeing, r
   assert.throws(() => fromPages(page(...months(3), monthRow("NOV26", [400, 492, 520]), monthRow("DEC26", [400, 492, 520]), goodTotal)), notLocated);
   assert.throws(() => fromPages(page(...months(5), ...months(5, [438, 492, 520]), goodTotal)), notLocated);
   assert.throws(() => fromPages(page(...months(5, [492, 438, 558]), goodTotal)), /do not run left to right/);
+  // Six in eight (75%) is not four in five.
+  assert.throws(() => fromPages(page(...months(6), monthRow("NOV26", [400, 492, 520]), monthRow("DEC26", [400, 492, 520]), goodTotal)), notLocated);
+  // Figures drifting 0.02 a digit across x.25, which split half-unit bins, still make one column.
+  const drifting = Array.from({ length: 10 }, (_, index) => monthRow(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT"][index] + "27",
+    index % 2 === 0 ? [438.22, 492.22, 558.22] : [438.28, 492.28, 558.28]));
+  assert.equal(fromPages(page(...drifting, totalRow(["165346", 410, 438.3], ["13123", 470, 492.3], ["376079", 530, 558.3]))).open_interest, 376079);
+  // The column sits in the middle of its run: edges spread from 557.1 to 558.9 put it at 558, so 558.9 is in it.
+  const spread = Array.from({ length: 10 }, (_, index) => monthRow(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT"][index] + "28",
+    [438, 492, index < 5 ? 557.1 : 558.9]));
+  assert.equal(fromPages(page(...spread, totalRow(["165346", 410, 438], ["13123", 470, 492], ["376079", 530, 558.9]))).open_interest, 376079);
   // A row whose column words share a piece cannot place them, so it casts no votes.
   const joined = line([["MAR27", 18, 40], ["113747 6325", 380, 492], ["139888", 530, 558], ["-", 565, 568], ["34103", 570, 594]]);
   assert.equal(fromPages(page(...months(5), joined, joined, goodTotal)).open_interest, 376079);
@@ -330,6 +340,10 @@ test("the figure columns need five contract-month rows, four in five agreeing, r
 test("a TOTAL GC FUT figure must end within a unit of its column, in its own piece, each column at most once", () => {
   const volumes = [["165346", 410, 438], ["13123", 470, 492]];
   assert.throws(() => fromPages(page(...months(5), totalRow(...volumes, ["376079", 533, 561]))), /376079 is in none of the bulletin's figure columns/);
+  // The tolerance is one unit: 0.9 off is in the column, 1.2 off is not.
+  assert.equal(fromPages(page(...months(5), totalRow(...volumes, ["376079", 530, 558.9]))).open_interest, 376079);
+  assert.equal(fromPages(page(...months(5), totalRow(...volumes, ["376079", 530, 557.1]))).open_interest, 376079);
+  assert.throws(() => fromPages(page(...months(5), totalRow(...volumes, ["376079", 530, 559.2]))), /376079 is in none/);
   assert.throws(() => fromPages(page(...months(5), totalRow(["165346 376079", 410, 558]))), /165346 is in none/, "a piece of two figures");
   assert.throws(() => fromPages(page(...months(5), totalRow(["13123", 470, 492], ["2885", 470, 492], ["376079", 530, 558]))), /repeats or reverses/);
   assert.throws(() => fromPages(page(...months(5), totalRow(["376079", 530, 558], ["165346", 410, 438]))), /repeats or reverses/);
@@ -356,4 +370,11 @@ test("with a layout every page needs one dated BULLETIN # header, all of them ag
   assert.throws(() => fromPages(page(...months(5)), [headerLine("PG62 BULLETIN # 141@ METAL"), line([["Fri, Jul 24, 2026", 18, 80]]), goodTotal]),
     /page 2 has an undated BULLETIN # header/, "a header split across two lines");
   assert.throws(() => fromPages(page(...months(5)), [headerLine("PG62 BULLETIN # 141@ Mon, Jul 27, 2026 PG62"), goodTotal]), /disagree on its date/);
+  // A page without table rows, such as an appended page of notes, need not carry the header; a page of month rows must.
+  assert.equal(fromPages(page(...months(5), goodTotal), [line([["Copyright CME Group", 18, 100]])]).open_interest, 376079);
+  assert.throws(() => fromPages(page(goodTotal), [...months(5)]), /page 2 has 0 BULLETIN # headers/);
+  // A date before the header on its line is not its date; a header showing two dates is refused.
+  const dated = (header) => fromPages([headerLine(header), line([["FINAL", 18, 40]]), ...months(5), goodTotal]).observation_date;
+  assert.equal(dated("Mon, Jul 27, 2026 PG62 BULLETIN # 141@ Fri, Jul 24, 2026"), "2026-07-24");
+  assert.throws(() => dated("PG62 BULLETIN # 141@ Fri, Jul 24, 2026 Mon, Jul 27, 2026"), /header shows more than one date/);
 });

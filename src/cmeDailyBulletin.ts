@@ -36,15 +36,15 @@ export type PdfTextExtractor = (data: Uint8Array) => Promise<string | PdfLayout>
 const WHOLE_NUMBER = /^(?:\d{1,3}(?:,\d{3})+|\d+)$/;
 
 /**
- * The open interest of the TOTAL GC FUT row, read by the meaning of its fields (BACKLOG 102-03): the Globex and PNT
- * volumes, the open interest, then its change. A column without a figure prints a run of dashes ("----", as on the
- * bulletin's contract-month rows) or may be left out, and the change carries a sign ("+ 1442", "-120") or reads UNCH
- * or NEW. The open interest is the last column before the change. Taking the largest number returned a volume above
- * the open interest, and an earlier reading took the change itself, so a row without this shape is refused rather than
- * guessed: anything else before the change ("376079*", "376079-", a decimal), no change, a number or a second change
- * after it, more than three columns, or an empty last column. A word after the change ends the row (text without line
- * breaks); otherwise the row is its line. Returns the figure, its field's index and how many columns came before the
- * change; whether that field really is in the open interest column is for the caller to show.
+ * The open interest of the TOTAL GC FUT row read from text alone, by the meaning of its fields (BACKLOG 102-03): the
+ * Globex and PNT volumes, the open interest, then its change. A column without a figure prints a run of dashes ("----")
+ * or is left out, and the change carries a sign ("+ 1442", "-120") or reads UNCH or NEW. The open interest is the last
+ * column before the change. Taking the largest number returned a volume above the open interest, and an earlier reading
+ * took the change itself, so a row without this shape is refused rather than guessed: anything else before the change
+ * ("376079*", "376079-", a decimal), no change, a number or a second change after it, more than three columns, or an
+ * empty last column. A word after the change ends the row (text without line breaks); otherwise the row is its line.
+ * Returns the figure, its field's index and how many columns came before the change. Text cannot show which column a
+ * figure is in, so its caller also needs all three; a layout is read by placedOpenInterest instead.
  */
 function totalOpenInterest(fields: string[]): { value: number; index: number; columns: number } {
   const columns: Array<number | null> = [];
@@ -81,6 +81,8 @@ function totalOpenInterest(fields: string[]): { value: number; index: number; co
 
 /** A month code at the start of a contract-month row, as AUG26. */
 const MONTH_CODE = /^(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}$/;
+/** A line that opens with a month code. */
+const MONTH_ROW = /^(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}\b/;
 
 /** A line's words, each with where it ends when it is its piece's only word (a piece of several cannot place one). */
 function lineWords(line: PdfLine): Array<{ str: string; right: number | null }> {
@@ -104,17 +106,37 @@ const FIGURE_COLUMNS = ["Globex volume", "PNT volume", "open interest"] as const
 /** Votes a column needs, and the share one edge must take, before the bulletin's layout is trusted to place a figure. */
 const MIN_COLUMN_VOTES = 5;
 const MIN_COLUMN_SHARE = 0.8;
+/** How far a figure may end from its column, in PDF units; columns are 54 to 66 units apart on the bulletin. */
+const PLACEMENT_TOLERANCE = 1;
+
+/**
+ * The largest run of edges that fits within the placement tolerance either side of its middle, and that middle. Fixed
+ * bins would split a column whose figures straddle a bin's boundary (the bulletin's drift 0.02 a digit, so an edge near
+ * x.25 split between two half-unit bins and the bulletin was refused); a run is counted the way a figure is placed.
+ */
+function densestEdge(edges: number[]): { edge: number; count: number } {
+  const sorted = [...edges].sort((left, right) => left - right);
+  let best = { start: 0, end: 0 };
+  let start = 0;
+  for (let end = 0; end < sorted.length; end += 1) {
+    while (sorted[end] - sorted[start] > 2 * PLACEMENT_TOLERANCE) start += 1;
+    if (end + 1 - start > best.end - best.start) best = { start, end: end + 1 };
+  }
+  if (best.end === 0) return { edge: 0, count: 0 };
+  return { edge: (sorted[best.start] + sorted[best.end - 1]) / 2, count: best.end - best.start };
+}
 
 /**
  * Where the Globex volume, PNT volume and open interest columns end. The bulletin right-aligns its figures, and a
  * contract-month row prints all three before its change, a figure or "----" each, so on every contract-month row the
- * right edges of those three words vote for the columns (to half a unit). Each column needs five votes, four in five of
- * them for one edge, and the three must run left to right; otherwise the bulletin is refused rather than read against a
- * column a few odd rows made up. On the bulletin of 2026-10-02 all 421 contract-month rows on pages 1 to 5 agree: the
- * columns end at 438, 492 and 558 (the figures between 558.0 and 558.1, a monospaced font drifting 0.02 a digit).
+ * right edges of those three words vote for the columns. Each column needs five votes, four in five of them within the
+ * placement tolerance of one edge, and the three must run left to right; otherwise the bulletin is refused rather than
+ * read against a column a few odd rows made up. On the bulletin of 2026-10-02 all 421 contract-month rows on pages 1 to
+ * 5 agree: the columns end at 438, 492 and 558 (the figures between 558.02 and 558.12, a monospaced font drifting 0.02
+ * a digit).
  */
 function figureColumnEdges(layout: PdfLayout): [number, number, number] {
-  const votes = FIGURE_COLUMNS.map(() => new Map<number, number>());
+  const votes: number[][] = FIGURE_COLUMNS.map(() => []);
   for (const line of layout.flat()) {
     const words = lineWords(line);
     if (!MONTH_CODE.test(words[0]?.str ?? "")) continue;
@@ -122,14 +144,11 @@ function figureColumnEdges(layout: PdfLayout): [number, number, number] {
     if (start < FIGURE_COLUMNS.length) continue;
     const figures = words.slice(start - FIGURE_COLUMNS.length, start);
     if (figures.some((figure) => figure.right === null || !(WHOLE_NUMBER.test(figure.str) || /^-{2,}$/.test(figure.str)))) continue;
-    figures.forEach((figure, column) => {
-      const edge = Math.round(figure.right! * 2) / 2;
-      votes[column].set(edge, (votes[column].get(edge) ?? 0) + 1);
-    });
+    figures.forEach((figure, column) => votes[column].push(figure.right!));
   }
-  const edges = votes.map((map, column) => {
-    const total = [...map.values()].reduce((sum, count) => sum + count, 0);
-    const [edge, count] = [...map.entries()].sort((left, right) => right[1] - left[1])[0] ?? [0, 0];
+  const edges = votes.map((rights, column) => {
+    const total = rights.length;
+    const { edge, count } = densestEdge(rights);
     if (total < MIN_COLUMN_VOTES || count / total < MIN_COLUMN_SHARE) {
       throw new Error(`CME metals bulletin ${FIGURE_COLUMNS[column]} column could not be located from its contract-month rows ` +
         `(${count} of ${total} agreeing)`);
@@ -172,7 +191,7 @@ function placedOpenInterest(layout: PdfLayout): number {
         break;
       }
       if (number || dashes) {
-        const column = right === null ? -1 : edges.findIndex((edge) => Math.abs(right - edge) <= 1);
+        const column = right === null ? -1 : edges.findIndex((edge) => Math.abs(right - edge) <= PLACEMENT_TOLERANCE);
         if (column < 0) throw new Error(`CME TOTAL GC FUT figure ${str} is in none of the bulletin's figure columns (ending at ${edges.join(", ")})`);
         if (column <= lastColumn) throw new Error(`CME TOTAL GC FUT figure ${str} repeats or reverses its ${FIGURE_COLUMNS[column]} column`);
         lastColumn = column;
@@ -266,17 +285,19 @@ const asCalendarDate = (match: RegExpMatchArray): string => {
 };
 
 /**
- * The BULLETIN # headers on some lines: each header's number, and the date after it on its line up to the next header
- * (the whole line when it holds one header, as the bulletin's do). Numbers need their "#" and are read on the header's
- * own line, so neither a figure that follows on the next line nor one after a bare BULLETIN is taken for one.
+ * The BULLETIN # headers on some lines: each header's number, and the date after it on its line up to the next header.
+ * Numbers need their "#" and are read on the header's own line, so neither a figure that follows on the next line nor
+ * one after a bare BULLETIN is taken for one; a date before the header (a print date, say) is not its date, and a
+ * header showing two different dates is refused.
  */
 function bulletinHeaders(lines: string[]): Array<{ number: number; date: string | null }> {
   return lines.flatMap((line) => {
     const matches = [...line.matchAll(BULLETIN_NUMBER)];
     return matches.map((match, index) => {
-      const segment = matches.length === 1 ? line : line.slice(match.index, matches[index + 1]?.index ?? line.length);
-      const date = segment.match(new RegExp(BULLETIN_DATE.source, "i"));
-      return { number: Number(match[1]), date: date === null ? null : asCalendarDate(date) };
+      const segment = line.slice(match.index, matches[index + 1]?.index ?? line.length);
+      const dates = new Set([...segment.matchAll(BULLETIN_DATE)].map(asCalendarDate));
+      if (dates.size > 1) throw new Error(`CME metals bulletin header shows more than one date (${[...dates].join(", ")})`);
+      return { number: Number(match[1]), date: [...dates][0] ?? null };
     });
   });
 }
@@ -284,14 +305,17 @@ function bulletinHeaders(lines: string[]): Array<{ number: number; date: string 
 /**
  * The bulletin's number and trade date from its BULLETIN # headers. Every header must agree on the number and, where it
  * carries one, the date (a header repeated as it stands is fine); a disagreement is refused rather than resolved by
- * taking the first. Given the bulletin's pages, each must carry exactly one header, and it must be dated, so a page
- * whose header is split or missing is refused too. The date is the headers' own, or, when no header carries one, the
+ * taking the first. Given the bulletin's pages, each page of the table must carry exactly one header, and it must be
+ * dated, so a page whose header is split or missing is refused too. The date is the headers' own, or, when no header carries one, the
  * one date the bulletin shows; another date elsewhere (such as a print date above the header) is not the trade date.
  */
 function bulletinHeader(lines: string[], normalized: string, pages?: string[][]): { number: number; date: string } {
   const headers = bulletinHeaders(lines);
   if (pages !== undefined) {
     pages.forEach((page, index) => {
+      // A page of the table, holding contract-month or total rows, carries the header; another, such as an appended
+      // blank or a page of notes, need not.
+      if (!page.some((line) => MONTH_ROW.test(line) || /\bTOTAL\s+\S+\s+FUT\b/.test(line))) return;
       const own = bulletinHeaders(page);
       if (own.length !== 1 || own[0].date === null) {
         throw new Error(`CME metals bulletin page ${index + 1} has ${own.length === 1 ? "an undated" : own.length} BULLETIN # header${own.length === 1 ? "" : "s"}; expected one, dated`);
