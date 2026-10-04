@@ -5,6 +5,7 @@ import {
   extractPdfLayoutWithPdfJs,
   extractPdfTextWithPdfJs,
   parseCmeGoldOpenInterestBulletin,
+  pdfLines,
   pdfTextLines,
 } from "../../build/cmeDailyBulletin.js";
 
@@ -117,6 +118,12 @@ test("CME Bulletin parser refuses headers that disagree, and accepts one repeate
   // Only "BULLETIN #" and its number on one line count: not a figure on the next line, nor one after a bare BULLETIN.
   assert.equal(headed(page, "AEP FUT ALUMINIUM EURO PREM METAL BULLETIN\n1234 ----").bulletin_number, 141);
   assert.equal(headed(page, "METAL BULLETIN 2026 EDITION").bulletin_number, 141);
+  // Two headers on one line (text without line breaks) are both read.
+  assert.throws(() => headed(`${page} PG62 BULLETIN # 142@ Mon, Jul 27, 2026 PG62`), /disagree on its number \(141, 142\)/);
+  // A date is compared as a date, whatever its case or padding, and must name its own weekday.
+  assert.equal(headed(page, "PG62 BULLETIN # 141@ FRI, JUL 24, 2026 PG62").observation_date, "2026-07-24");
+  assert.equal(headed("PG62 BULLETIN # 190@ Fri, Oct 2, 2026", "PG62 BULLETIN # 190@ Fri, Oct 02, 2026").observation_date, "2026-10-02");
+  assert.throws(() => headed("PG62 BULLETIN # 141@ Mon, Jul 24, 2026 PG62"), /names the wrong weekday/);
 });
 
 test("PDF text lines are rebuilt from positions: one baseline per line, left to right, top to bottom", () => {
@@ -133,6 +140,8 @@ test("PDF text lines are rebuilt from positions: one baseline per line, left to 
   assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 10, 102.5)]), ["A B"]);
   assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 0, 103.3)]), ["A", "B"]);
   assert.deepEqual(pdfTextLines([piece("TOTAL GC FUT", 0, 100, 0), piece("376079", 50, 101.2)]), ["TOTAL GC FUT 376079"]);
+  // A piece's end is its start plus its width; without a width it has none, so it can place nothing.
+  assert.deepEqual(pdfLines([{ ...piece("376079", 530, 100), width: 28 }, piece("+", 565, 100)])[0].pieces.map((item) => item.right), [558, null]);
 });
 
 /**
@@ -225,77 +234,126 @@ test("pdf.js text of a landscape bulletin made as a rotated portrait page keeps 
   assert.equal(parseCmeGoldOpenInterestBulletin({ text: stamped, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }).open_interest, 376079);
 });
 
-test("pdf.js text of the bulletin of 2026-10-02, drawn in its own order, yields its open interest", async () => {
-  // The TOTAL GC FUT row of that bulletin as pdf.js returned it: in drawing order, at its shown positions (from the top
-  // of a 612 x 1008 page), with its text heights. The Globex volume comes before the label and the sign after the change.
-  const shown = (text, x, top, height) => {
-    const scale = height / 8;
-    return [text, x, 1008 - top, `${scale} 0 0 ${scale}`];
-  };
-  const page = (totalPieces) => onePagePdf([
-    shown("PG62 BULLETIN # 190@ METAL FUTURES PRODUCTS Fri, Oct 02, 2026 PG62", 18, 40, 7.5), shown("PRELIMINARY", 18, 52, 7.5),
-    // DEC29's row, whose open interest 53 ends where the total's does (558.0).
-    shown("DEC29", 18, 266, 6.5), shown("----", 126, 266, 6.5), shown("----", 198, 266, 6.5), shown("4818.50", 284.7, 266, 6.5),
-    shown("-", 315.9, 266, 6.5), shown("44.40", 328.5, 266, 6.5), shown("----", 422.4, 266, 6.5), shown("----", 477.6, 265.5, 6.5),
-    shown("53", 550.2, 266, 6.5), shown("UNCH", 578.4, 266, 6.5),
-    ...totalPieces,
-    shown("HDG FUT U.S. MIDWEST DOM STEEL PREM(CRU)FUT", 18, 283, 7.5),
+// The layout of the bulletin of 2026-10-02 (612 x 1008, positions from the top): right-aligned figures in a monospaced
+// font, the Globex volume, PNT volume and open interest columns ending at 438, 492 and 558, the change at 594.
+const COLUMN_ENDS = { globex: 438, pnt: 492, interest: 558, change: 594 };
+/** A piece drawn so it ends at `right`, `top` from the page's top, in Courier `height` units tall. */
+const ending = (text, right, top, height = 6.5) => [text, right - text.length * 0.6 * height, 1008 - top, `${height / 8} 0 0 ${height / 8}`];
+const at = (text, x, top, height = 6.5) => [text, x, 1008 - top, `${height / 8} 0 0 ${height / 8}`];
+/** A contract-month row: its code, a price, then the three figure columns (a figure or dashes) and its change. */
+const monthPieces = (month, top, [globex, pnt, interest], change = ["+", "488"]) => [
+  at(month, 18, top), ending("4162.25", 312, top), ending(globex, COLUMN_ENDS.globex, top), ending(pnt, COLUMN_ENDS.pnt, top),
+  ending(interest, COLUMN_ENDS.interest, top), ...(change.length === 2 ? [at(change[0], 565.2, top)] : []), ending(change.at(-1), COLUMN_ENDS.change, top),
+];
+const FIVE_MONTHS = [["DEC26", ["64298", "----", "83129"]], ["FEB27", ["1885", "----", "3184"]], ["APR27", ["86", "----", "136"]],
+  ["JUN27", ["----", "----", "131"], ["UNCH"]], ["DEC29", ["----", "----", "53"], ["UNCH"]]];
+/** One page of the bulletin with five contract-month rows and the given TOTAL GC FUT figures and change. */
+const bulletinPage = (figures, change = ["+", "1442"], { months = FIVE_MONTHS, header = "PG62 BULLETIN # 190@ METAL FUTURES PRODUCTS Fri, Oct 02, 2026 PG62" } = {}) =>
+  onePagePdf([
+    at(header, 18, 40, 7.5), at("PRELIMINARY", 18, 52, 7.5),
+    ...months.flatMap(([month, columns, monthChange], index) => monthPieces(month, 200 + index * 8, columns, monthChange)),
+    // The TOTAL row as pdf.js draws it on that bulletin: the Globex volume first, the label 1.5 units higher, the sign last.
+    ...figures.filter(([, column]) => column === "globex").map(([text]) => ending(text, COLUMN_ENDS.globex, 273.5)),
+    at("TOTAL", 18, 275, 7.5), at("GC", 49.66, 275, 7.5), at("FUT", 63.23, 275, 7.5),
+    ...figures.filter(([, column]) => column !== "globex").map(([text, column]) =>
+      typeof column === "number" ? ending(text, column, 273.5) : ending(text, COLUMN_ENDS[column], 273.5)),
+    ...(change.length === 2 ? [ending(change[1], COLUMN_ENDS.change, 273.5), at(change[0], 565.2, 273.1, 6)] : change.map((word) => ending(word, COLUMN_ENDS.change, 273.5))),
+    at("HDG FUT U.S. MIDWEST DOM STEEL PREM(CRU)FUT", 18, 283, 7.5),
   ], { mediaBox: "0 0 612 1008" });
-  const label = [shown("TOTAL", 18, 275, 7.5), shown("GC", 49.66, 275, 7.5), shown("FUT", 63.23, 275, 7.5)];
-  const change = [shown("1442", 578.4, 273.5, 6.5), shown("+", 565.2, 273.1, 6)];
-  const read = async (totalPieces) => parseCmeGoldOpenInterestBulletin({ layout: await extractPdfLayoutWithPdfJs(page(totalPieces)),
-    sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-10-04T13:00:00.000Z" });
-  const full = [shown("184541", 414.6, 273.5, 6.5), ...label, shown("395508", 534.6, 273.5, 6.5), shown("2885", 476.42, 273.5, 6.5), ...change];
-  assert.ok((await extractPdfTextWithPdfJs(page(full))).split("\n").includes("TOTAL GC FUT 184541 2885 395508 + 1442"));
-  const result = await read(full);
+const readPage = async (pdf) => parseCmeGoldOpenInterestBulletin({ layout: await extractPdfLayoutWithPdfJs(pdf),
+  sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-10-04T13:00:00.000Z" });
+
+test("pdf.js text of the bulletin of 2026-10-02, drawn in its own order, yields its open interest", async () => {
+  const full = bulletinPage([["184541", "globex"], ["2885", "pnt"], ["395508", "interest"]]);
+  // pdf.js takes the bytes it is given, so each read gets its own copy.
+  assert.ok((await extractPdfTextWithPdfJs(full.slice())).split("\n").includes("TOTAL GC FUT 184541 2885 395508 + 1442"));
+  const result = await readPage(full);
   assert.deepEqual([result.open_interest, result.observation_date, result.bulletin_number, result.report_status],
     [395508, "2026-10-02", 190, "preliminary"]);
-  // With positions a column left out is no ambiguity: an empty Globex column still leaves the open interest in its own.
-  assert.equal((await read([...label, shown("395508", 534.6, 273.5, 6.5), shown("2885", 476.42, 273.5, 6.5), ...change])).open_interest, 395508);
-  // An empty open interest column: the lone figure is the Globex volume and is refused, not read as the open interest.
-  await assert.rejects(() => read([shown("500000", 414.6, 273.5, 6.5), ...label, ...change]), /figure 500000 is not in the open interest column/);
-  await assert.rejects(() => read([shown("500000", 414.6, 273.5, 6.5), ...label, shown("2885", 476.42, 273.5, 6.5), ...change]),
-    /figure 2885 is not in the open interest column/);
 });
 
-test("without contract-month rows to place it, the open interest column cannot be found and the bulletin is refused", async () => {
-  const layout = await extractPdfLayoutWithPdfJs(onePagePdf([
-    ["PG62 BULLETIN # 141@ Fri, Jul 24, 2026", 40, 580], ["FINAL", 40, 560],
-    ["TOTAL GC FUT", 40, 500], ["500000", 300, 500], ["13123", 360, 500], ["376079", 440, 500], ["- 12136", 520, 500],
-  ]));
-  assert.throws(() => parseCmeGoldOpenInterestBulletin({ layout, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }),
-    /open interest column could not be located/);
+test("each TOTAL GC FUT figure is placed in its column, as the bulletin's total rows leave a column blank", async () => {
+  // As "TOTAL 1OZ FUT 66269 86609" (no PNT volume), "TOTAL COB FUT 263 16854" (no Globex volume) and
+  // "TOTAL ALA FUT 2315" (open interest alone, unchanged, so no change printed) on that bulletin.
+  assert.equal((await readPage(bulletinPage([["184541", "globex"], ["395508", "interest"]]))).open_interest, 395508);
+  assert.equal((await readPage(bulletinPage([["2885", "pnt"], ["395508", "interest"]]))).open_interest, 395508);
+  assert.equal((await readPage(bulletinPage([["395508", "interest"]], []))).open_interest, 395508);
+  assert.equal((await readPage(bulletinPage([["184541", "globex"], ["2885", "pnt"], ["395508", "interest"]], ["UNCH"]))).open_interest, 395508);
+});
+
+test("a TOTAL GC FUT row without an open interest in its column is refused, not read from a volume", async () => {
+  const empty = /open interest column is empty/;
+  await assert.rejects(() => readPage(bulletinPage([["500000", "globex"]])), empty, "the reported case: 500000 in the volume column");
+  await assert.rejects(() => readPage(bulletinPage([["500000", "globex"], ["213123", "pnt"]])), empty);
+  await assert.rejects(() => readPage(bulletinPage([["500000", "globex"], ["2885", "pnt"], ["----", "interest"]])), empty);
+  // A figure between columns is refused.
+  await assert.rejects(() => readPage(bulletinPage([["184541", "globex"], ["395508", 561]])), /395508 is in none of the bulletin's figure columns/);
 });
 
 // A layout as the default extractor returns it: lines of pieces with where each ends.
 const line = (pieces) => ({ text: pieces.map(([str]) => str).join(" "), pieces: pieces.map(([str, x, right]) => ({ str, x, right })) });
-const headerLines = [line([["PG62 BULLETIN # 141@ Fri, Jul 24, 2026 PG62", 18, 200]]), line([["FINAL", 18, 40]])];
-const monthRow = (month, interestEnd) =>
-  line([[month, 18, 40], ["113747", 410, 438], ["6325", 470, 492], ["139888", interestEnd - 28, interestEnd], ["-", 565, 568], ["34103", 570, 594]]);
+const headerLine = (header = "PG62 BULLETIN # 141@ Fri, Jul 24, 2026 PG62") => line([[header, 18, 200]]);
+const monthRow = (month, [globex, pnt, interest] = [438, 492, 558]) => line([[month, 18, 40], ["113747", globex - 28, globex],
+  ["6325", pnt - 22, pnt], ["139888", interest - 28, interest], ["-", 565, 568], ["34103", 570, 594]]);
+const months = (count, ends) => Array.from({ length: count }, (_, index) => monthRow(`M${String(index).padStart(2, "0")}`.replace(/^M/, ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT"][index % 10]), ends));
 const totalRow = (...figures) => line([["TOTAL", 18, 40], ["GC", 49, 58], ["FUT", 63, 77], ...figures, ["-", 565, 568], ["12136", 570, 594]]);
-const fromLayout = (page) => parseCmeGoldOpenInterestBulletin({ layout: [page], sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" });
+const goodTotal = totalRow(["165346", 410, 438], ["13123", 470, 492], ["376079", 530, 558.4]);
+const fromPages = (...pages) => parseCmeGoldOpenInterestBulletin({ layout: pages, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" });
+const page = (...lines) => [headerLine(), line([["FINAL", 18, 40]]), ...lines];
 
 test("CME Bulletin client reads the open interest from the extractor's lines and positions", async () => {
-  const layout = [[...headerLines, monthRow("AUG26", 558),
-    totalRow(["165346", 410, 438], ["13123", 470, 492], ["376079", 530, 558.4])]];
   const client = new CmeDailyBulletinClient(
     async () => new Response("%PDF", { status: 200, headers: { "content-type": "application/pdf" } }),
-    async () => layout,
+    async () => [page(...months(5), goodTotal)],
     () => new Date("2026-07-25T15:00:00.000Z"),
     "https://example.test/Section62.pdf",
   );
   assert.equal((await client.getLatestGoldOpenInterest()).open_interest, 376079);
 });
 
-test("the open interest column is the commonest edge of the month rows, and a figure must end within a unit of it", () => {
+test("the figure columns need five contract-month rows, four in five agreeing, running left to right", () => {
+  const notLocated = /column could not be located from its contract-month rows/;
+  assert.throws(() => fromPages(page(goodTotal)), notLocated, "no contract-month rows");
+  assert.throws(() => fromPages(page(...months(4), goodTotal)), notLocated, "four rows");
+  // Odd rows: one in six leaves the columns where they are, two in five is too many, a tie is refused.
+  assert.equal(fromPages(page(...months(5), monthRow("NOV26", [400, 492, 520]), goodTotal)).open_interest, 376079);
+  assert.throws(() => fromPages(page(...months(3), monthRow("NOV26", [400, 492, 520]), monthRow("DEC26", [400, 492, 520]), goodTotal)), notLocated);
+  assert.throws(() => fromPages(page(...months(5), ...months(5, [438, 492, 520]), goodTotal)), notLocated);
+  assert.throws(() => fromPages(page(...months(5, [492, 438, 558]), goodTotal)), /do not run left to right/);
+  // A row whose column words share a piece cannot place them, so it casts no votes.
+  const joined = line([["MAR27", 18, 40], ["113747 6325", 380, 492], ["139888", 530, 558], ["-", 565, 568], ["34103", 570, 594]]);
+  assert.equal(fromPages(page(...months(5), joined, joined, goodTotal)).open_interest, 376079);
+  // The rows can be on another page than the total, as GC's run onto the page before its TOTAL on that bulletin.
+  assert.equal(fromPages(page(...months(5)), page(goodTotal)).open_interest, 376079);
+});
+
+test("a TOTAL GC FUT figure must end within a unit of its column, in its own piece, each column at most once", () => {
   const volumes = [["165346", 410, 438], ["13123", 470, 492]];
-  // One month row set off its column does not move it.
-  assert.equal(fromLayout([...headerLines, monthRow("AUG26", 520), monthRow("OCT26", 558), monthRow("DEC26", 558),
-    totalRow(...volumes, ["376079", 530, 558.2])]).open_interest, 376079);
-  // A figure three units off the column is not taken as its open interest.
-  assert.throws(() => fromLayout([...headerLines, monthRow("AUG26", 558), totalRow(...volumes, ["376079", 533, 561])]),
-    /figure 376079 is not in the open interest column/);
-  // A figure that shares its piece with another cannot be placed, even when the piece ends at the column.
-  assert.throws(() => fromLayout([...headerLines, monthRow("AUG26", 558), totalRow(["165346 376079", 410, 558])]),
-    /figure 376079 is not in the open interest column/);
+  assert.throws(() => fromPages(page(...months(5), totalRow(...volumes, ["376079", 533, 561]))), /376079 is in none of the bulletin's figure columns/);
+  assert.throws(() => fromPages(page(...months(5), totalRow(["165346 376079", 410, 558]))), /165346 is in none/, "a piece of two figures");
+  assert.throws(() => fromPages(page(...months(5), totalRow(["13123", 470, 492], ["2885", 470, 492], ["376079", 530, 558]))), /repeats or reverses/);
+  assert.throws(() => fromPages(page(...months(5), totalRow(["376079", 530, 558], ["165346", 410, 438]))), /repeats or reverses/);
+  // A seven-digit open interest in two pieces: the first lands in no column, so the bulletin is refused rather than
+  // read as 395508. (Drawn touching, pdf.js joins such runs into one figure.)
+  assert.throws(() => fromPages(page(...months(5), totalRow(["165346", 410, 438], ["1", 530, 534.6], ["395508", 534.6, 558]))), /figure 1 is in none/);
+  // After the change a figure is refused.
+  assert.throws(() => fromPages(page(...months(5), line([["TOTAL", 18, 40], ["GC", 49, 58], ["FUT", 63, 77], ...volumes,
+    ["376079", 530, 558], ["-", 565, 568], ["12136", 570, 594], ["99", 600, 610]]))), /number after its open interest change/);
+  // A piece with no width cannot be placed.
+  assert.throws(() => fromPages(page(...months(5), totalRow(...volumes, ["376079", 530, null]))), /376079 is in none/);
+});
+
+test("given text and a layout, the layout is what the open interest is read from", () => {
+  // A total row with its PNT column blank, which only positions can read.
+  const layout = [page(...months(5), totalRow(["165346", 410, 438], ["376079", 530, 558]))];
+  const text = `${bulletin.replace("TOTAL GC FUT 165346 13123 376079 - 12136", "TOTAL GC FUT 500000 + 1442")}`;
+  assert.equal(parseCmeGoldOpenInterestBulletin({ text, layout, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" }).open_interest, 376079);
+});
+
+test("with a layout every page needs one dated BULLETIN # header, all of them agreeing", () => {
+  assert.equal(fromPages(page(...months(5)), page(goodTotal)).bulletin_number, 141);
+  assert.throws(() => fromPages(page(...months(5)), [line([["FINAL", 18, 40]]), goodTotal]), /page 2 has 0 BULLETIN # headers/);
+  assert.throws(() => fromPages(page(...months(5)), [headerLine("PG62 BULLETIN # 141@ METAL"), line([["Fri, Jul 24, 2026", 18, 80]]), goodTotal]),
+    /page 2 has an undated BULLETIN # header/, "a header split across two lines");
+  assert.throws(() => fromPages(page(...months(5)), [headerLine("PG62 BULLETIN # 141@ Mon, Jul 27, 2026 PG62"), goodTotal]), /disagree on its date/);
 });

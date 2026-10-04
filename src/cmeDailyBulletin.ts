@@ -24,7 +24,7 @@ export type CmeGoldOpenInterest = {
 };
 
 /** A rebuilt line of a page: its text, and the pieces it was built from, left to right, with where each ends. */
-export type PdfLine = { text: string; pieces: Array<{ str: string; x: number; right: number }> };
+export type PdfLine = { text: string; pieces: Array<{ str: string; x: number; right: number | null }> };
 
 /** A PDF's pages as rebuilt lines. */
 export type PdfLayout = PdfLine[][];
@@ -99,48 +99,94 @@ function changeStart(words: string[]): number {
   return -1;
 }
 
+/** The three figure columns a row prints before its change, left to right. */
+const FIGURE_COLUMNS = ["Globex volume", "PNT volume", "open interest"] as const;
+/** Votes a column needs, and the share one edge must take, before the bulletin's layout is trusted to place a figure. */
+const MIN_COLUMN_VOTES = 5;
+const MIN_COLUMN_SHARE = 0.8;
+
 /**
- * Where the open interest column ends on a page: the bulletin right-aligns its figures, and on a contract-month row the
- * figure before the closing change is the open interest, so the commonest right edge of those figures (to half a unit)
- * marks the column. On the bulletin of 2026-10-02 they end at 558.1, as the TOTAL GC FUT open interest does, while its
- * Globex and PNT volumes end at 438.1 and 492.1.
+ * Where the Globex volume, PNT volume and open interest columns end. The bulletin right-aligns its figures, and a
+ * contract-month row prints all three before its change, a figure or "----" each, so on every contract-month row the
+ * right edges of those three words vote for the columns (to half a unit). Each column needs five votes, four in five of
+ * them for one edge, and the three must run left to right; otherwise the bulletin is refused rather than read against a
+ * column a few odd rows made up. On the bulletin of 2026-10-02 all 421 contract-month rows on pages 1 to 5 agree: the
+ * columns end at 438, 492 and 558 (the figures between 558.0 and 558.1, a monospaced font drifting 0.02 a digit).
  */
-function openInterestColumnEdge(page: PdfLine[]): number | undefined {
-  const votes = new Map<number, number>();
-  for (const line of page) {
+function figureColumnEdges(layout: PdfLayout): [number, number, number] {
+  const votes = FIGURE_COLUMNS.map(() => new Map<number, number>());
+  for (const line of layout.flat()) {
     const words = lineWords(line);
     if (!MONTH_CODE.test(words[0]?.str ?? "")) continue;
-    const field = words[changeStart(words.map((word) => word.str)) - 1];
-    if (field === undefined || field.right === null || !WHOLE_NUMBER.test(field.str)) continue;
-    const edge = Math.round(field.right * 2) / 2;
-    votes.set(edge, (votes.get(edge) ?? 0) + 1);
+    const start = changeStart(words.map((word) => word.str));
+    if (start < FIGURE_COLUMNS.length) continue;
+    const figures = words.slice(start - FIGURE_COLUMNS.length, start);
+    if (figures.some((figure) => figure.right === null || !(WHOLE_NUMBER.test(figure.str) || /^-{2,}$/.test(figure.str)))) continue;
+    figures.forEach((figure, column) => {
+      const edge = Math.round(figure.right! * 2) / 2;
+      votes[column].set(edge, (votes[column].get(edge) ?? 0) + 1);
+    });
   }
-  return [...votes.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0];
+  const edges = votes.map((map, column) => {
+    const total = [...map.values()].reduce((sum, count) => sum + count, 0);
+    const [edge, count] = [...map.entries()].sort((left, right) => right[1] - left[1])[0] ?? [0, 0];
+    if (total < MIN_COLUMN_VOTES || count / total < MIN_COLUMN_SHARE) {
+      throw new Error(`CME metals bulletin ${FIGURE_COLUMNS[column]} column could not be located from its contract-month rows ` +
+        `(${count} of ${total} agreeing)`);
+    }
+    return edge;
+  });
+  if (!(edges[0] < edges[1] && edges[1] < edges[2])) {
+    throw new Error(`CME metals bulletin figure columns do not run left to right (${edges.join(", ")})`);
+  }
+  return edges as [number, number, number];
 }
 
 /**
- * The open interest of the TOTAL GC FUT row, shown to sit in the open interest column. Rebuilt text keeps the order of
- * the columns but not which column a figure is in, so a row whose open interest column was empty read its volume as
- * the open interest; here the figure must end where the page's contract-month rows end theirs, within a unit.
+ * The open interest of the TOTAL GC FUT row, read by where its figures sit. Rebuilt text keeps the order of the columns
+ * but not which column a figure is in, and a total row leaves an empty column blank (as "TOTAL 1OZ FUT 66269 86609"
+ * does for its PNT volume), so a row whose open interest column was empty read its Globex volume as the open interest.
+ * Here every figure before the change must end within a unit of one of the three columns, each column at most once and
+ * left to right, and the open interest is the figure in its column: none there refuses the bulletin. A total row whose
+ * open interest did not change prints no change at all (as "TOTAL ALA FUT 2315"), which is read as such. After the
+ * change, a word ends the row and another figure or change refuses it.
  */
 function placedOpenInterest(layout: PdfLayout): number {
-  for (const page of layout) {
-    for (const line of page) {
-      const words = lineWords(line);
-      const label = words.findIndex((word, index) => word.str === "TOTAL" && words[index + 1]?.str === "GC" && words[index + 2]?.str === "FUT");
-      if (label < 0) continue;
-      const fields = words.slice(label + 3);
-      const { value, index } = totalOpenInterest(fields.map((field) => field.str));
-      const edge = openInterestColumnEdge(page);
-      if (edge === undefined) {
-        throw new Error("CME metals bulletin open interest column could not be located from its contract-month rows");
+  const edges = figureColumnEdges(layout);
+  for (const line of layout.flat()) {
+    const words = lineWords(line);
+    const label = words.findIndex((word, index) => word.str === "TOTAL" && words[index + 1]?.str === "GC" && words[index + 2]?.str === "FUT");
+    if (label < 0) continue;
+    const fields = words.slice(label + 3);
+    let lastColumn = -1;
+    let openInterest: number | null = null;
+    let changed = false;
+    for (let index = 0; index < fields.length; index += 1) {
+      const { str, right } = fields[index];
+      const number = WHOLE_NUMBER.test(str);
+      const dashes = /^-{2,}$/.test(str);
+      const separateSign = (str === "+" || str === "-") && WHOLE_NUMBER.test(fields[index + 1]?.str ?? "");
+      const change = str === "UNCH" || str === "NEW" || (/^[+-]/.test(str) && WHOLE_NUMBER.test(str.slice(1))) || separateSign;
+      if (changed) {
+        if (number || change) throw new Error("CME TOTAL GC FUT row has a number after its open interest change, so its fields cannot be told apart");
+        break;
       }
-      const right = fields[index].right;
-      if (right === null || Math.abs(right - edge) > 1) {
-        throw new Error(`CME TOTAL GC FUT figure ${value} is not in the open interest column (ending at ${edge}), so it may be a volume`);
+      if (number || dashes) {
+        const column = right === null ? -1 : edges.findIndex((edge) => Math.abs(right - edge) <= 1);
+        if (column < 0) throw new Error(`CME TOTAL GC FUT figure ${str} is in none of the bulletin's figure columns (ending at ${edges.join(", ")})`);
+        if (column <= lastColumn) throw new Error(`CME TOTAL GC FUT figure ${str} repeats or reverses its ${FIGURE_COLUMNS[column]} column`);
+        lastColumn = column;
+        if (column === FIGURE_COLUMNS.length - 1 && number) openInterest = Number(str.replace(/,/g, ""));
+        continue;
       }
-      return value;
+      if (!change) throw new Error(`CME TOTAL GC FUT row has ${JSON.stringify(str)} before its open interest change, so its fields cannot be told apart`);
+      changed = true;
+      if (separateSign) index += 1;
     }
+    if (openInterest === null) {
+      throw new Error("CME TOTAL GC FUT open interest column is empty, so the row's figures are only volumes");
+    }
+    return openInterest;
   }
   throw new Error("CME TOTAL GC FUT row was not found on one line of the bulletin");
 }
@@ -171,7 +217,7 @@ export function pdfLines(items: PositionedText[]): PdfLine[] {
   }
   return lines.map((line) => {
     const pieces = line.sort((left, right) => left.x - right.x)
-      .map((item) => ({ str: item.str.trim(), x: item.x, right: item.x + (item.width ?? 0) }));
+      .map((item) => ({ str: item.str.trim(), x: item.x, right: item.width === undefined ? null : item.x + item.width }));
     return { text: pieces.map((piece) => piece.str).join(" "), pieces };
   });
 }
@@ -199,50 +245,75 @@ function shownText(
 }
 
 const BULLETIN_DATE = /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})\b/gi;
-const BULLETIN_NUMBER = /\bBULLETIN\s*#\s*(\d+)/i;
+const BULLETIN_NUMBER = /\bBULLETIN\s*#\s*(\d+)/gi;
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-/**
- * The bulletin's number and trade date from its BULLETIN # headers, one on every page. A header repeated as it stands is
- * fine; headers that disagree on the number or the date are refused rather than resolved by taking the first. The date
- * is the headers' own, or, when no header carries one, the one date the bulletin shows; another date elsewhere (such as
- * a print date above the header) is not the trade date. Numbers are read on the header's line, so a figure that follows
- * on the next line is never taken for one.
- */
-function bulletinHeader(lines: string[], normalized: string): { number: number; date: RegExpMatchArray } {
-  const headers = lines.flatMap((line) => {
-    const number = line.match(BULLETIN_NUMBER);
-    return number === null ? [] : [{ number: Number(number[1]), date: line.match(new RegExp(BULLETIN_DATE.source, "i")) }];
-  });
-  const numbers = new Set(headers.map((header) => header.number));
-  if (numbers.size === 0) throw new Error("CME metals bulletin number or trade date was not found");
-  if (numbers.size > 1) throw new Error(`CME metals bulletin headers disagree on its number (${[...numbers].join(", ")})`);
-  const key = (date: RegExpMatchArray) => date.slice(1, 5).join(" ").toLowerCase();
-  const headerDates = headers.flatMap((header) => header.date === null ? [] : [header.date]);
-  if (new Set(headerDates.map(key)).size > 1) {
-    throw new Error(`CME metals bulletin headers disagree on its date (${[...new Set(headerDates.map((date) => date[0]))].join(", ")})`);
-  }
-  const dates = headerDates.length > 0 ? headerDates : [...normalized.matchAll(BULLETIN_DATE)];
-  if (dates.length === 0) throw new Error("CME metals bulletin number or trade date was not found");
-  if (new Set(dates.map(key)).size > 1) throw new Error("CME metals bulletin shows more than one date and none on its BULLETIN # line");
-  return { number: [...numbers][0], date: dates[0] };
-}
+/** A three-letter English name as the bulletin writes it, whatever its case. */
+const titleCase = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
 
-const asCalendarDate = (weekday: string, monthName: string, dayText: string, yearText: string): string => {
-  if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$/.test(weekday)) throw new Error("CME bulletin has an invalid weekday");
-  const month = MONTHS[monthName];
-  const day = Number(dayText);
-  const year = Number(yearText);
+/** A matched bulletin date as YYYY-MM-DD, refused when it is no calendar date or its weekday is not that date's. */
+const asCalendarDate = (match: RegExpMatchArray): string => {
+  const weekday = titleCase(match[1]);
+  const month = MONTHS[titleCase(match[2])];
+  const day = Number(match[3]);
+  const year = Number(match[4]);
   const date = new Date(Date.UTC(year, month, day));
   if (!Number.isInteger(month) || date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) {
     throw new Error("CME bulletin has an invalid trade date");
   }
+  if (WEEKDAYS[date.getUTCDay()] !== weekday) throw new Error(`CME bulletin date ${match[0]} names the wrong weekday`);
   return date.toISOString().slice(0, 10);
 };
 
 /**
+ * The BULLETIN # headers on some lines: each header's number, and the date after it on its line up to the next header
+ * (the whole line when it holds one header, as the bulletin's do). Numbers need their "#" and are read on the header's
+ * own line, so neither a figure that follows on the next line nor one after a bare BULLETIN is taken for one.
+ */
+function bulletinHeaders(lines: string[]): Array<{ number: number; date: string | null }> {
+  return lines.flatMap((line) => {
+    const matches = [...line.matchAll(BULLETIN_NUMBER)];
+    return matches.map((match, index) => {
+      const segment = matches.length === 1 ? line : line.slice(match.index, matches[index + 1]?.index ?? line.length);
+      const date = segment.match(new RegExp(BULLETIN_DATE.source, "i"));
+      return { number: Number(match[1]), date: date === null ? null : asCalendarDate(date) };
+    });
+  });
+}
+
+/**
+ * The bulletin's number and trade date from its BULLETIN # headers. Every header must agree on the number and, where it
+ * carries one, the date (a header repeated as it stands is fine); a disagreement is refused rather than resolved by
+ * taking the first. Given the bulletin's pages, each must carry exactly one header, and it must be dated, so a page
+ * whose header is split or missing is refused too. The date is the headers' own, or, when no header carries one, the
+ * one date the bulletin shows; another date elsewhere (such as a print date above the header) is not the trade date.
+ */
+function bulletinHeader(lines: string[], normalized: string, pages?: string[][]): { number: number; date: string } {
+  const headers = bulletinHeaders(lines);
+  if (pages !== undefined) {
+    pages.forEach((page, index) => {
+      const own = bulletinHeaders(page);
+      if (own.length !== 1 || own[0].date === null) {
+        throw new Error(`CME metals bulletin page ${index + 1} has ${own.length === 1 ? "an undated" : own.length} BULLETIN # header${own.length === 1 ? "" : "s"}; expected one, dated`);
+      }
+    });
+  }
+  const numbers = new Set(headers.map((header) => header.number));
+  if (numbers.size === 0) throw new Error("CME metals bulletin number or trade date was not found");
+  if (numbers.size > 1) throw new Error(`CME metals bulletin headers disagree on its number (${[...numbers].join(", ")})`);
+  const headerDates = new Set(headers.flatMap((header) => header.date === null ? [] : [header.date]));
+  if (headerDates.size > 1) throw new Error(`CME metals bulletin headers disagree on its date (${[...headerDates].join(", ")})`);
+  const dates = headerDates.size > 0 ? headerDates : new Set([...normalized.matchAll(BULLETIN_DATE)].map(asCalendarDate));
+  if (dates.size === 0) throw new Error("CME metals bulletin number or trade date was not found");
+  if (dates.size > 1) throw new Error("CME metals bulletin shows more than one date and none on its BULLETIN # line");
+  return { number: [...numbers][0], date: [...dates][0] };
+}
+
+/**
  * Parse only the unambiguous aggregate GC futures row, never a contract-month row or options total. Given the
- * bulletin's lines with their positions (the client's default), the open interest must sit in the open interest column;
- * given text alone, which cannot show that, the row must show all three columns (volumes as figures or dashes).
+ * bulletin's lines with their positions (the client's default, and used whenever given), the open interest must sit in
+ * its column; given text alone, which cannot show that, the row must show all three columns (volumes as figures or
+ * dashes), which a real total row leaving a column blank does not.
  */
 export function parseCmeGoldOpenInterestBulletin(input: {
   text?: string;
@@ -250,12 +321,12 @@ export function parseCmeGoldOpenInterestBulletin(input: {
   sourceUrl: string;
   observedAt: string;
 }): CmeGoldOpenInterest {
-  const source = input.text ?? input.layout?.map((page) => page.map((line) => line.text).join("\n")).join("\n");
+  const pages = input.layout?.map((page) => page.map((line) => line.text.replace(/\u00a0/g, " ")));
+  const source = pages?.map((page) => page.join("\n")).join("\n") ?? input.text;
   if (source === undefined) throw new Error("CME bulletin text or layout is required");
   const text = source.replace(/\u00a0/g, " ");
   const normalized = text.replace(/\s+/g, " ").trim();
-  const header = bulletinHeader(text.split(/\r?\n/), normalized);
-  const date = header.date;
+  const header = bulletinHeader(text.split(/\r?\n/), normalized, pages);
   const bulletinNumber = header.number;
   const statusMatches = [...normalized.matchAll(/\b(PRELIMINARY|FINAL)\b/g)].map((match) => match[1].toLowerCase());
   const reportStatus = statusMatches.includes("final") ? "final" : statusMatches.includes("preliminary") ? "preliminary" : null;
@@ -265,7 +336,7 @@ export function parseCmeGoldOpenInterestBulletin(input: {
   // The Bulletin row exposes Globex volume, PNT volume, total OI, then OI change. The extractor puts each row on its
   // own line in the order of its columns on the page (pdfLines), so the row is the rest of the label's line.
   let openInterest: number;
-  if (input.text === undefined && input.layout !== undefined) {
+  if (input.layout !== undefined) {
     openInterest = placedOpenInterest(input.layout);
   } else {
     const totalRow = text.slice(totalLabels[0].index + totalLabels[0][0].length).split(/\r?\n/)[0].trim();
@@ -283,7 +354,7 @@ export function parseCmeGoldOpenInterestBulletin(input: {
   return {
     schema_version: "1.0",
     status: "complete",
-    observation_date: asCalendarDate(date[1], date[2], date[3], date[4]),
+    observation_date: header.date,
     open_interest: openInterest,
     report_status: reportStatus,
     bulletin_number: bulletinNumber,
@@ -324,7 +395,7 @@ export async function extractPdfLayoutWithPdfJs(data: Uint8Array): Promise<PdfLa
 export class CmeDailyBulletinClient {
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly extractPdfText: PdfTextExtractor = extractPdfLayoutWithPdfJs,
+    private readonly extractPdf: PdfTextExtractor = extractPdfLayoutWithPdfJs,
     private readonly now: () => Date = () => new Date(),
     private readonly sourceUrl = CURRENT_METALS_BULLETIN_URL,
   ) {}
@@ -335,7 +406,7 @@ export class CmeDailyBulletinClient {
     assertExpectedResponseHost(response, this.sourceUrl, "CME metals bulletin");
     const contentType = response.headers.get("content-type") ?? "";
     if (!/application\/pdf/i.test(contentType)) throw new Error("CME metals bulletin response was not a PDF");
-    const extracted = await this.extractPdfText(await readLimitedResponseBytes(response, MAX_BULLETIN_PDF_BYTES, "CME metals bulletin"));
+    const extracted = await this.extractPdf(await readLimitedResponseBytes(response, MAX_BULLETIN_PDF_BYTES, "CME metals bulletin"));
     const observedAt = this.now().toISOString();
     return parseCmeGoldOpenInterestBulletin(typeof extracted === "string"
       ? { text: extracted, sourceUrl: this.sourceUrl, observedAt }
