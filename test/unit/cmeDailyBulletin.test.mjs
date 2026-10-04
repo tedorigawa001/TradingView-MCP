@@ -124,6 +124,12 @@ test("CME Bulletin parser refuses headers that disagree, and accepts one repeate
   assert.equal(headed(page, "PG62 BULLETIN # 141@ FRI, JUL 24, 2026 PG62").observation_date, "2026-07-24");
   assert.equal(headed("PG62 BULLETIN # 190@ Fri, Oct 2, 2026", "PG62 BULLETIN # 190@ Fri, Oct 02, 2026").observation_date, "2026-10-02");
   assert.throws(() => headed("PG62 BULLETIN # 141@ Mon, Jul 24, 2026 PG62"), /names the wrong weekday/);
+  // Numbers beyond the safe integers are refused before they are compared: these two differ but round to one value,
+  // and a 400-digit one would be Infinity.
+  assert.throws(() => headed("PG62 BULLETIN # 9007199254740993@ Fri, Jul 24, 2026", "PG62 BULLETIN # 9007199254740992@ Fri, Jul 24, 2026"),
+    /9007199254740993 is not a safe integer/);
+  assert.throws(() => headed(`PG62 BULLETIN # ${"9".repeat(400)}@ Fri, Jul 24, 2026`), /is not a safe integer/);
+  assert.equal(headed("PG62 BULLETIN # 9007199254740991@ Fri, Jul 24, 2026").bulletin_number, Number.MAX_SAFE_INTEGER);
 });
 
 test("PDF text lines are rebuilt from positions: one baseline per line, left to right, top to bottom", () => {

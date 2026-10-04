@@ -297,7 +297,11 @@ function bulletinHeaders(lines: string[]): Array<{ number: number; date: string 
       const segment = line.slice(match.index, matches[index + 1]?.index ?? line.length);
       const dates = new Set([...segment.matchAll(BULLETIN_DATE)].map(asCalendarDate));
       if (dates.size > 1) throw new Error(`CME metals bulletin header shows more than one date (${[...dates].join(", ")})`);
-      return { number: Number(match[1]), date: [...dates][0] ?? null };
+      // Each number is checked before headers are compared: beyond the safe integers two different numbers can round to
+      // one value, hiding a disagreement, and a long one becomes Infinity, which JSON writes as null.
+      const number = Number(match[1]);
+      if (!Number.isSafeInteger(number)) throw new Error(`CME metals bulletin number ${match[1].slice(0, 20)}${match[1].length > 20 ? "…" : ""} is not a safe integer`);
+      return { number, date: [...dates][0] ?? null };
     });
   });
 }
