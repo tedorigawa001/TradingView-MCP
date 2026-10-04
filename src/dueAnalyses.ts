@@ -16,7 +16,7 @@ export type DueAnalysisCandidate = {
   definitionHash: string;
   definition: AnalysisJournalDefinition;
   latestOutcome: AnalysisJournalOutcome | null;
-  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "complete_without_coverage";
+  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation";
 };
 
 /** The outcomes that close an analysis without a terminal event, final only once the history reached its expiry. */
@@ -56,18 +56,14 @@ export function selectDueAnalyses(
     }
     if (latest?.status === "complete") {
       // An earlier version closed a result with no terminal by the clock alone, even when its history stopped short of
-      // the expiry; such a record is rechecked, as an appended evaluation (BACKLOG 102-04). A target or stop is final.
-      if (WITHOUT_TERMINAL.has(latest.outcome) && !recordCoversExpiry(latest, definition.expiresAt)) {
-        candidates.push({
-          analysisId: definition.analysisId,
-          definitionHash: item.definition.definition_hash,
-          definition,
-          latestOutcome: latest,
-          reason: "complete_without_coverage",
-        });
-        continue;
-      }
-      skipped.push({ analysisId: definition.analysisId, reason: "terminal_evaluation_exists" });
+      // the expiry (BACKLOG 102-04). Such a record is named, not rechecked: the append-only journal cannot replace it (a
+      // terminal found later conflicts, an equal result is a duplicate, an incomplete one ranks below it), so it would be
+      // selected on every call and crowd out the analyses that are due. Repairing them is BACKLOG 102-32.
+      skipped.push({
+        analysisId: definition.analysisId,
+        reason: WITHOUT_TERMINAL.has(latest.outcome) && !recordCoversExpiry(latest, definition.expiresAt)
+          ? "legacy_complete_without_coverage" : "terminal_evaluation_exists",
+      });
       continue;
     }
     const expiryMs = definition.expiresAt === null ? null : Date.parse(definition.expiresAt);

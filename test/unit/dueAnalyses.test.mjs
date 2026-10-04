@@ -80,17 +80,22 @@ test("selectDueAnalyses can include active analyses and applies a deterministic 
   assert.equal(selected.truncated, true);
 });
 
-test("a terminal-less complete recorded without history through the expiry is rechecked; covered ones and terminals are not (102-04)", () => {
-  const withEvidence = (label, closedThrough) => ({ ...outcome("complete", label), result: { evidence: { closedThrough } } });
+test("a terminal-less complete recorded without history through the expiry is named but not reselected (102-04)", () => {
+  // The append-only journal cannot replace such a record, so reselecting it would loop and crowd out due analyses.
+  const withEvidence = (label, closedThrough, evidenceTimeframe = "15") =>
+    ({ ...outcome("complete", label), evidenceTimeframe, result: { evidence: { closedThrough } } });
   const selected = selectDueAnalyses([
     record("short", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:00:00.000Z")),
     record("covered", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:45:00.000Z")),
     record("unknown", "2026-07-20T02:00:00.000Z", outcome("complete", "not_activated")),
     record("unconfirmed", "2026-07-20T02:00:00.000Z", withEvidence("expired_without_confirmation", "2026-07-20T01:30:00.000Z")),
+    record("garbled", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:45:00.000Z", "fortnight")),
     record("stopped", "2026-07-20T02:00:00.000Z", outcome("complete", "stop_before_target")),
-  ], { now: new Date("2026-07-20T03:00:00.000Z") });
-  assert.deepEqual(selected.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [
-    ["short", "complete_without_coverage"], ["unconfirmed", "complete_without_coverage"], ["unknown", "complete_without_coverage"]]);
+    record("due", "2026-07-20T02:30:00.000Z"),
+  ], { now: new Date("2026-07-20T03:00:00.000Z"), limit: 1 });
+  assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["due"], "the due analysis is not crowded out");
   assert.deepEqual(selected.skipped.map((item) => [item.analysisId, item.reason]), [
-    ["covered", "terminal_evaluation_exists"], ["stopped", "terminal_evaluation_exists"]]);
+    ["short", "legacy_complete_without_coverage"], ["covered", "terminal_evaluation_exists"],
+    ["unknown", "legacy_complete_without_coverage"], ["unconfirmed", "legacy_complete_without_coverage"],
+    ["garbled", "legacy_complete_without_coverage"], ["stopped", "terminal_evaluation_exists"]]);
 });

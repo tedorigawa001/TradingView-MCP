@@ -316,3 +316,25 @@ test("historyCoversExpiry: the last closed bar must end at or after the expiry",
   assert.equal(historyCoversExpiry(null, "15", null), true, "no expiry, nothing to reach");
   assert.equal(historyCoversExpiry("2026-07-15T10:45:00.000Z", "1M", "2026-07-15T11:00:00.000Z"), false, "no fixed bar length");
 });
+
+test("the open result keeps a confirmation and its evidence, and an empty window after the expiry says the history is short", () => {
+  const confirming = { ...state, confirmation: 162.5 };
+  const confirmed = evaluateAnalysisOverlayOutcome(confirming, [analysisBar, entry,
+    bar("2026-07-15T10:30:00.000Z", { open: 162.3, high: 162.55, low: 162.28, close: 162.5 })], "15", after);
+  assert.deepEqual([confirmed.status, confirmed.outcome, confirmed.activation],
+    ["incomplete", "history_ends_before_expiry", { entryAt: "2026-07-15T10:15:00.000Z", confirmationAt: "2026-07-15T10:30:00.000Z" }]);
+  assert.deepEqual([confirmed.evidence.evaluatedBars, confirmed.evidence.evidenceThrough], [2, "2026-07-15T10:30:00.000Z"]);
+  // Only the analysis bar after the expiry: no window bar yet because the history stops, not because the timeframe is long.
+  const empty = evaluateAnalysisOverlayOutcome(state, [analysisBar], "15", after);
+  assert.deepEqual([empty.status, empty.outcome], ["incomplete", "history_ends_before_expiry"]);
+});
+
+test("a forming bar running past the expiry proves the window closed; one ending at the expiry does not", () => {
+  const past = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
+    bar("2026-07-15T10:55:00.000Z", { open: 162.3, high: 162.35, low: 162.25, close: 162.3 }, true)], "15", after);
+  assert.deepEqual([past.status, past.outcome], ["complete", "no_terminal_event"], "10:55 + 15 minutes runs past 11:00");
+  const atExpiry = evaluateAnalysisOverlayOutcome(state, [analysisBar, entry, quiet("2026-07-15T10:30:00.000Z"),
+    bar("2026-07-15T10:45:00.000Z", { open: 162.3, high: 162.35, low: 161.5, close: 161.6 }, true)], "15", after);
+  assert.deepEqual([atExpiry.status, atExpiry.outcome], ["incomplete", "history_ends_before_expiry"],
+    "the last window bar is still forming and may yet reach the stop");
+});

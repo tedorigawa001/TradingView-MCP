@@ -150,6 +150,23 @@ export function evaluateAnalysisOverlayOutcome(
     evidenceThrough: eligible.at(-1)?.timeIso ?? null,
   };
   const windowClosed = expiresAtMs !== null && now.getTime() >= expiresAtMs;
+  // Whether the history reaches the expiry (historyCoversExpiry), or a forming bar already runs past it: then every bar
+  // inside the window has closed. A forming bar ending exactly at the expiry is still inside the window.
+  const latestBar = bars.at(-1);
+  const formingPastExpiry = expiresAtMs !== null && latestBar?.forming === true && Number.isFinite(latestBar.time) &&
+    latestBar.time * 1000 + barMs > expiresAtMs;
+  const coversExpiry = formingPastExpiry || historyCoversExpiry(evidenceBase.closedThrough, resolution, state.expiresAt);
+  if (eligible.length === 0 && windowClosed && !coversExpiry) {
+    return {
+      status: "incomplete",
+      outcome: "history_ends_before_expiry",
+      analysisId: state.analysisId,
+      activation: { entryAt: null, confirmationAt: null },
+      terminal: null,
+      qualityIssues: ["history_ends_before_expiry"],
+      evidence,
+    };
+  }
   if (eligible.length === 0) {
     return {
       status: windowClosed ? "incomplete" : "ongoing",
@@ -285,7 +302,7 @@ export function evaluateAnalysisOverlayOutcome(
   // expiry a later bar could still bring the entry, the confirmation or a terminal, so it stays incomplete and due
   // selection rechecks it. History up to 10:15 for an 11:00 expiry was "complete" with no terminal event, and a 10:30
   // bar added later reached the stop (BACKLOG 102-04).
-  if (windowClosed && !historyCoversExpiry(evidence.closedThrough, resolution, state.expiresAt)) {
+  if (windowClosed && !coversExpiry) {
     return {
       status: "incomplete",
       outcome: "history_ends_before_expiry",
