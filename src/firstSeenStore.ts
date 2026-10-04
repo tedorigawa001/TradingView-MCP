@@ -218,6 +218,30 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     if (size + total > this.limits.maxFileBytes) throw new Error(`${this.label} history file is too large`);
   }
 
+  /**
+   * Checks, before any write, that appending `additions` in order after `existing` (the log as read) keeps every
+   * invariant readAllUnlocked enforces: a contiguous sequence, a first-seen clock that never moves backwards, and no
+   * observation dated after it was seen; and that the batch fits the size limits. A record that broke one of these would
+   * be written and then make every later read of the log fail (BACKLOG 102-05), so a caller checks its whole batch here
+   * first and writes nothing when any of it fails.
+   */
+  async assertAppendableUnlocked(existing: T[], additions: T[]): Promise<void> {
+    let previous = existing[existing.length - 1];
+    for (const record of additions) {
+      if (record.sequence !== (previous?.sequence ?? 0) + 1) {
+        throw new Error(`${this.label} append would break the sequence at ${record.sequence}`);
+      }
+      if (previous !== undefined && record.first_seen_at < previous.first_seen_at) {
+        throw new Error(`${this.label} first-seen clock moved backwards`);
+      }
+      if (record.observation_date > record.first_seen_at.slice(0, 10)) {
+        throw new Error(`${this.label} observation_date is after first_seen_at`);
+      }
+      previous = record;
+    }
+    await this.assertAppendCapacityUnlocked(additions);
+  }
+
   async appendUnlocked(record: T): Promise<void> {
     await this.ensureDirectory();
     const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");

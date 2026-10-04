@@ -149,6 +149,35 @@ test("futures open interest refuses a backwards first-seen clock and duplicate b
     /duplicate futures open interest observation/);
 });
 
+// BACKLOG 102-05: every record the store appends, a status-only revision included, keeps the log readable.
+test("futures open interest refuses a status-only revision seen earlier, and the log still reads", async () => {
+  const { store } = await newStore();
+  await store.observeMany([observation({ report_status: "preliminary", observed_at: "2026-07-23T12:00:00.000Z" })]);
+  // The same value turning final, but stamped before the preliminary was seen.
+  await assert.rejects(() => store.observeMany([observation({ report_status: "final", observed_at: "2026-07-23T06:00:00.000Z" })]),
+    /futures open interest first-seen clock moved backwards/);
+  const records = await store.records();
+  assert.deepEqual(records.map((record) => [record.sequence, record.report_status]), [[1, "preliminary"]]);
+  // Seen at the same moment or later, the status revision is kept.
+  const final = await store.observeMany([observation({ report_status: "final", observed_at: "2026-07-23T12:00:00.000Z" })]);
+  assert.deepEqual([final.recorded.length, final.revisions], [1, 1]);
+  assert.equal((await store.records()).length, 2);
+});
+
+test("futures open interest checks a batch in the order it would be written, before writing any of it", async () => {
+  const { store } = await newStore();
+  await store.observeMany([observation({ observed_at: "2026-07-23T00:00:00.000Z" })]);
+  // Both new and both after the log's latest, but the second was seen before the first.
+  await assert.rejects(() => store.observeMany([
+    observation({ observation_date: "2026-07-22", observed_at: "2026-07-24T12:00:00.000Z" }),
+    observation({ observation_date: "2026-07-23", observed_at: "2026-07-24T06:00:00.000Z" }),
+  ]), /first-seen clock moved backwards/);
+  assert.equal((await store.records()).length, 1, "nothing of the batch was written");
+  // An unchanged observation is not written, so an earlier stamp on it is no conflict.
+  const unchanged = await store.observeMany([observation({ observed_at: "2026-07-22T12:00:00.000Z" })]);
+  assert.deepEqual([unchanged.recorded.length, unchanged.unchanged], [0, 1]);
+});
+
 test("futures open interest rejects corrupt lines and a rewritten sequence", async () => {
   const { store, path } = await newStore();
   await store.observeMany([observation()]);

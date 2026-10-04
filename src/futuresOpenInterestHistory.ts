@@ -177,7 +177,6 @@ export class FuturesOpenInterestFirstSeenStore {
       });
 
       const records = await this.log.readAllUnlocked();
-      const latestFirstSeen = records.map((record) => record.first_seen_at).sort().at(-1);
       const latestFor = (candidate: FuturesOpenInterestRecord) => records
         .filter((record) => record.futures_symbol === candidate.futures_symbol &&
           record.scope === candidate.scope &&
@@ -185,14 +184,6 @@ export class FuturesOpenInterestFirstSeenStore {
           record.source_detail === candidate.source_detail &&
           record.observation_date === candidate.observation_date)
         .sort((a, b) => b.sequence - a.sequence)[0];
-
-      // Writing a new value with a first-seen earlier than one already recorded would make the log
-      // claim we knew something before we did.
-      if (latestFirstSeen !== undefined && candidates.some((candidate) =>
-        latestFor(candidate)?.open_interest !== candidate.open_interest &&
-        candidate.first_seen_at < latestFirstSeen)) {
-        throw new Error("futures open interest first-seen clock moved backwards");
-      }
 
       const recorded: FuturesOpenInterestRecord[] = [];
       let unchanged = 0;
@@ -202,11 +193,15 @@ export class FuturesOpenInterestFirstSeenStore {
         const current = latestFor(candidate);
         if (current?.open_interest === candidate.open_interest && current.report_status === candidate.report_status) { unchanged += 1; continue; }
         if (current !== undefined) revisions += 1;
-        const version = { ...candidate, sequence: ++nextSequence };
-        await this.log.appendUnlocked(version);
-        records.push(version);
-        recorded.push(version);
+        recorded.push({ ...candidate, sequence: ++nextSequence });
       }
+      // Every record written, a status-only revision as much as a new value, must keep the first-seen clock moving
+      // forward: one stamped before a record already held would claim it was known earlier than it was, and the log would
+      // no longer read. Only the value was checked before, so a preliminary value turning final with an earlier stamp was
+      // written and every later read failed (BACKLOG 102-05). The batch is checked in the order it is written, before
+      // any of it is.
+      await this.log.assertAppendableUnlocked(records, recorded);
+      for (const version of recorded) await this.log.appendUnlocked(version);
       return { recorded, unchanged, revisions };
     });
   }
