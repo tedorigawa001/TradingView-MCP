@@ -87,6 +87,8 @@ export async function buildTradeDecisionContext(
   now = new Date(),
 ) {
   const requestedAt = now.toISOString();
+  // Wall-clock start, so the event gate can tell how long the request took from the given now.
+  const startedMs = Date.now();
   const issues: ContextIssue[] = [];
   let replayStatus: Awaited<ReturnType<typeof dependencies.tv.getReplayStatus>> | null = null;
   try {
@@ -177,16 +179,17 @@ export async function buildTradeDecisionContext(
   // The event gate reads its own calendar window (BACKLOG 102-06): the snapshot's events start at the request, so an
   // event released a few minutes ago never reached the after-release blackout and the request could be trade_ready.
   // The window runs from the after-release minutes before the request to the before-release minutes after it, with a
-  // minute either side for the source's boundary handling; the gate applies the exact window below.
+  // minute either side for the source's boundary handling and the time the request takes; the gate applies the exact
+  // window below.
   const blackoutFrom = new Date(now.getTime() - options.eventBlackoutAfterMinutes * 60_000);
-  const blackoutTo = new Date(now.getTime() + options.eventBlackoutBeforeMinutes * 60_000);
-  const eventGatePromise = dependencies.calendar.getEvents({
+  const eventGateThroughMs = now.getTime() + options.eventBlackoutBeforeMinutes * 60_000 + 60_000;
+  const eventGatePromise = Promise.resolve().then(() => dependencies.calendar.getEvents({
     countries: options.countries,
     from: new Date(blackoutFrom.getTime() - 60_000).toISOString(),
-    to: new Date(blackoutTo.getTime() + 60_000).toISOString(),
+    to: new Date(eventGateThroughMs).toISOString(),
     minImportance: options.minimumEventImportance,
     limit: EVENT_GATE_LIMIT,
-  }).then(
+  })).then(
     (value) => ({ status: "fulfilled" as const, value }),
     () => ({ status: "rejected" as const }),
   );
@@ -424,19 +427,39 @@ export async function buildTradeDecisionContext(
 
   const importanceRank = { low: 0, medium: 1, high: 2 } as const;
   const eventThreshold = importanceRank[options.minimumEventImportance];
-  const activeEvents = (eventGateResult.status === "fulfilled" ? eventGateResult.value.events : []).filter((event) => {
-    if (importanceRank[event.importance] < eventThreshold) return false;
-    const minutesUntil = (Date.parse(event.date) - now.getTime()) / 60_000;
-    return minutesUntil >= -options.eventBlackoutAfterMinutes
-      && minutesUntil <= options.eventBlackoutBeforeMinutes;
+  // The window opens at the after-release minutes before the request and closes at the before-release minutes after
+  // it completes, so an event that came within reach while the sources were read still counts.
+  const blackoutToMs = now.getTime() + Math.max(0, Date.now() - startedMs) + options.eventBlackoutBeforeMinutes * 60_000;
+  const gateEvents = eventGateResult.status === "fulfilled" ? eventGateResult.value.events : [];
+  // The snapshot's events (from the request on) are checked too, so the gate is never weaker than what it shows.
+  const seen = new Set<string>();
+  const candidateEvents = [...gateEvents, ...(market.economic_events?.events ?? [])].filter((event) => {
+    const key = `${event.id}|${event.date}|${event.title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return importanceRank[event.importance] >= eventThreshold;
   });
-  // Without the calendar, or with as many events as the gate asked for and none inside the window (the source returns
-  // the earliest first, so later ones may have been cut), the window cannot be shown to be clear.
+  const activeEvents = candidateEvents.filter((event) => {
+    const eventMs = Date.parse(event.date);
+    return eventMs >= blackoutFrom.getTime() && eventMs <= blackoutToMs;
+  });
+  // The window cannot be shown clear without the calendar, or when the gate's own read may lack an event inside it:
+  // the source returns the earliest first up to the limit, so a full answer ending inside the window may have cut later
+  // ones; an event the gate asked for whose time cannot be read may be inside it; and a request that outlasted the
+  // fetch's minute of slack left the end of the window unread.
+  const gateDates = gateEvents.map((event) => Date.parse(event.date));
+  const incompleteReasons = eventGateResult.status !== "fulfilled" ? [] : [
+    ...(Math.max(eventGateResult.value.returned || 0, gateEvents.length) >= EVENT_GATE_LIMIT &&
+      !(Math.max(...gateDates) > blackoutToMs) ? ["limit_reached"] : []),
+    ...(gateEvents.some((event, index) => importanceRank[event.importance] >= eventThreshold && Number.isNaN(gateDates[index]))
+      ? ["unreadable_event_time"] : []),
+    ...(blackoutToMs > eventGateThroughMs ? ["request_outlasted_window"] : []),
+  ];
   const eventGateStatus = activeEvents.length > 0
     ? "blackout"
     : eventGateResult.status === "rejected"
       ? "unavailable"
-      : eventGateResult.value.returned >= EVENT_GATE_LIMIT
+      : incompleteReasons.length > 0
         ? "incomplete"
         : "clear";
   if (eventGateStatus === "unavailable") {
@@ -451,8 +474,8 @@ export async function buildTradeDecisionContext(
       code: "event_gate_incomplete",
       severity: "warning",
       component: "economic_events",
-      message: "The economic calendar returned as many events as the gate requested, so events in the blackout window may be missing.",
-      details: { limit: EVENT_GATE_LIMIT },
+      message: "The economic calendar read for the blackout window may lack events inside it, so the event gate is not clear.",
+      details: { reasons: incompleteReasons, limit: EVENT_GATE_LIMIT },
     });
   }
   if (activeEvents.length > 0) {
@@ -517,7 +540,7 @@ export async function buildTradeDecisionContext(
       status: eventGateStatus,
       before_minutes: options.eventBlackoutBeforeMinutes,
       after_minutes: options.eventBlackoutAfterMinutes,
-      window: { from: blackoutFrom.toISOString(), to: blackoutTo.toISOString() },
+      window: { from: blackoutFrom.toISOString(), to: new Date(blackoutToMs).toISOString() },
       minimum_importance: options.minimumEventImportance,
       active_events: activeEvents,
     },
