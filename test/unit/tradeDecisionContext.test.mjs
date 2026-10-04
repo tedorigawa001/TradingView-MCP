@@ -138,11 +138,13 @@ test("the end of the window is measured when the request completes", async (t) =
   assert.deepEqual([slow.event_gate.status, slow.event_gate.window.to], ["blackout", "2026-07-15T12:30:00.300Z"]);
 });
 
-test("a request that outlasts the fetch's minute of slack leaves the gate incomplete", async (t) => {
+test("a request that outlasts the fetch's minute of slack leaves the gate incomplete and the decision wait", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
-  const result = await decide([], { executionWaitForUpdateMs: 0 }, [], { onOhlcv: () => t.mock.timers.tick(61_000) });
+  const result = await decide([], {}, [], { onOhlcv: () => t.mock.timers.tick(61_000) });
   assert.equal(result.event_gate.status, "incomplete");
   assert.deepEqual(result.quality_issues.find((issue) => issue.code === "event_gate_incomplete").details.reasons, ["request_outlasted_window"]);
+  // The execution evidence is ready, so the wait comes from the event gate alone.
+  assert.deepEqual([result.evidence.execution.status, result.decision_status], ["available", "wait"]);
 });
 
 test("the gate reads events at its own importance, and also checks what the snapshot shows", async () => {
