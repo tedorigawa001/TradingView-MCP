@@ -2,10 +2,12 @@ import test from "node:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import http from "node:http";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../build/server.js";
+import { EconomicCalendar } from "../../build/calendar.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
   ANALYSIS_OVERLAY_LEGACY_INPUTS,
@@ -5545,6 +5547,81 @@ test("get_trade_decision_context waits during an important-event blackout", asyn
   assert.equal(parsed.decision_status, "wait");
   assert.equal(parsed.event_gate.status, "blackout");
   assert.ok(parsed.quality_issues.some((issue) => issue.code === "event_blackout_active"));
+});
+
+test("get_trade_decision_context waits after a release minutes ago, read from the calendar's own window (102-06)", async (t) => {
+  // A local calendar answering like the real one: only events between from and to.
+  let calendarEvents = [];
+  const requests = [];
+  const calendarServer = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://calendar");
+    requests.push(url);
+    if (calendarEvents === null) {
+      res.statusCode = 503;
+      res.end("unavailable");
+      return;
+    }
+    const from = Date.parse(url.searchParams.get("from"));
+    const to = Date.parse(url.searchParams.get("to"));
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ status: "ok", result: calendarEvents.filter((item) => Date.parse(item.date) >= from && Date.parse(item.date) <= to) }));
+  });
+  await new Promise((resolve) => calendarServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => calendarServer.close(resolve)));
+  const calendar = new EconomicCalendar(`http://127.0.0.1:${calendarServer.address().port}`);
+  let quoteCalls = 0;
+  const client = await connectedClient(makeDeps({
+    // makeDeps spreads the override, which would drop the class's methods.
+    calendar: { getEvents: (options) => calendar.getEvents(options) },
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "FX",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }],
+      }),
+      getOhlcv: async () => ({
+        symbol: "OANDA:EURUSD",
+        resolution: "60",
+        count: 1,
+        bars: [{ time: Date.now() / 1000 - 3600, timeIso: new Date(Date.now() - 3600_000).toISOString(), open: 1.1, high: 1.2, low: 1, close: 1.1, volume: 1 }],
+      }),
+      getKeyLevels: async () => ({ symbol: "OANDA:EURUSD", resolution: "60", price: 1.1, rangePercent: 3, count: 0, levels: [] }),
+    },
+    scanner: {
+      // Every read moves bid/ask, so the execution gate clears and only the event gate decides.
+      getQuotes: async (symbols) => {
+        quoteCalls += 1;
+        const offset = (quoteCalls % 2) * 0.0001;
+        return {
+          totalCount: symbols.length,
+          returned: symbols.length,
+          rows: symbols.map((symbol) => ({ symbol, values: { close: 1.1015, bid: 1.1014 + offset, ask: 1.1016 + offset, update_mode: "streaming", pricescale: 100000, minmov: 1 } })),
+        };
+      },
+    },
+  }));
+  const decide = async () => JSON.parse((await client.callTool({
+    name: "get_trade_decision_context",
+    arguments: { symbol: "OANDA:EURUSD", chart_index: 0, expected_timeframe: "60", execution_wait_for_update_ms: 100, execution_sample_interval_ms: 100 },
+  })).content[0].text);
+  const release = (minutesAgo) => ({ id: 1, title: "CPI YoY", country: "US", currency: "USD", importance: 1, date: new Date(Date.now() - minutesAgo * 60_000).toISOString() });
+
+  calendarEvents = [release(5)];
+  const recent = await decide();
+  assert.deepEqual([recent.decision_status, recent.event_gate.status], ["wait", "blackout"]);
+  assert.equal(recent.event_gate.active_events[0].title, "CPI YoY");
+  const gateRequest = requests.find((url) => Date.parse(url.searchParams.get("to")) - Date.parse(url.searchParams.get("from")) < 86_400_000);
+  assert.ok(Date.now() - Date.parse(gateRequest.searchParams.get("from")) >= 15 * 60_000, "the request reaches back past the after-release window");
+
+  calendarEvents = [release(20)];
+  const past = await decide();
+  assert.deepEqual([past.decision_status, past.event_gate.status], ["trade_ready", "clear"], "past the default 15 minutes");
+
+  calendarEvents = null;
+  const down = await decide();
+  assert.deepEqual([down.decision_status, down.event_gate.status], ["wait", "unavailable"]);
+  assert.ok(down.quality_issues.some((issue) => issue.code === "event_gate_unavailable"));
 });
 
 test("get_trade_decision_context blocks a failed required positioning source", async () => {

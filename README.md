@@ -196,7 +196,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 |---|---|
 | `get_market_snapshot` | Combines multiple markets, timeframes, and events in one acquisition window with explicit quality status |
 | `get_execution_snapshot` | Normalizes bid/ask, spread, pip/tick, and feed mode; reports ready only after observing a post-request price update |
-| `get_trade_decision_context` | Binds chart, OHLC, levels, MTF, events, COT, real yield, and bid/ask to one `snapshot_id`; blocks live execution evidence during Replay |
+| `get_trade_decision_context` | Binds chart, OHLC, levels, MTF, events, COT, real yield, and bid/ask to one `snapshot_id`; blocks live execution evidence during Replay; the event gate reads the calendar around the request (releases within the after/before blackout minutes) and waits when the calendar cannot be read |
 | `get_aligned_history` | Strictly aligns closed bars from multiple charts by UTC timestamp without forward filling |
 | `compute_market_features` | Deterministically computes returns, ATR, volatility, and correlation from aligned history |
 | `compute_market_regimes` | Classifies closed OHLC as trend/range/transition and low/normal/high volatility using only prior evidence and explicit thresholds; it does not optimize or recommend trades |

@@ -32,6 +32,9 @@ export type TradeDecisionContextOptions = {
   executionMaxQuoteAgeMs: number;
 };
 
+/** Events the gate reads for its window: the calendar's maximum. */
+const EVENT_GATE_LIMIT = 200;
+
 type ContextIssue = {
   code: string;
   severity: "warning" | "error";
@@ -171,6 +174,22 @@ export async function buildTradeDecisionContext(
       minImportance: options.minImportance,
     },
   );
+  // The event gate reads its own calendar window (BACKLOG 102-06): the snapshot's events start at the request, so an
+  // event released a few minutes ago never reached the after-release blackout and the request could be trade_ready.
+  // The window runs from the after-release minutes before the request to the before-release minutes after it, with a
+  // minute either side for the source's boundary handling; the gate applies the exact window below.
+  const blackoutFrom = new Date(now.getTime() - options.eventBlackoutAfterMinutes * 60_000);
+  const blackoutTo = new Date(now.getTime() + options.eventBlackoutBeforeMinutes * 60_000);
+  const eventGatePromise = dependencies.calendar.getEvents({
+    countries: options.countries,
+    from: new Date(blackoutFrom.getTime() - 60_000).toISOString(),
+    to: new Date(blackoutTo.getTime() + 60_000).toISOString(),
+    minImportance: options.minimumEventImportance,
+    limit: EVENT_GATE_LIMIT,
+  }).then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    () => ({ status: "rejected" as const }),
+  );
   const chartEvidencePromise = chartMatches
     ? Promise.allSettled([
         dependencies.tv.getOhlcv(options.ohlcvCount, chartIndex!),
@@ -195,11 +214,12 @@ export async function buildTradeDecisionContext(
       )
     : Promise.resolve(null);
 
-  const [market, initialChartResults, positioningResult, realYieldResult] = await Promise.all([
+  const [market, initialChartResults, positioningResult, realYieldResult, eventGateResult] = await Promise.all([
     marketPromise,
     chartEvidencePromise,
     positioningPromise,
     realYieldPromise,
+    eventGatePromise,
   ]);
   let chartResults = initialChartResults;
   try {
@@ -404,12 +424,37 @@ export async function buildTradeDecisionContext(
 
   const importanceRank = { low: 0, medium: 1, high: 2 } as const;
   const eventThreshold = importanceRank[options.minimumEventImportance];
-  const activeEvents = (market.economic_events?.events ?? []).filter((event) => {
+  const activeEvents = (eventGateResult.status === "fulfilled" ? eventGateResult.value.events : []).filter((event) => {
     if (importanceRank[event.importance] < eventThreshold) return false;
     const minutesUntil = (Date.parse(event.date) - now.getTime()) / 60_000;
     return minutesUntil >= -options.eventBlackoutAfterMinutes
       && minutesUntil <= options.eventBlackoutBeforeMinutes;
   });
+  // Without the calendar, or with as many events as the gate asked for and none inside the window (the source returns
+  // the earliest first, so later ones may have been cut), the window cannot be shown to be clear.
+  const eventGateStatus = activeEvents.length > 0
+    ? "blackout"
+    : eventGateResult.status === "rejected"
+      ? "unavailable"
+      : eventGateResult.value.returned >= EVENT_GATE_LIMIT
+        ? "incomplete"
+        : "clear";
+  if (eventGateStatus === "unavailable") {
+    issues.push({
+      code: "event_gate_unavailable",
+      severity: "warning",
+      component: "economic_events",
+      message: "The economic calendar could not be read for the blackout window, so the event gate is not clear.",
+    });
+  } else if (eventGateStatus === "incomplete") {
+    issues.push({
+      code: "event_gate_incomplete",
+      severity: "warning",
+      component: "economic_events",
+      message: "The economic calendar returned as many events as the gate requested, so events in the blackout window may be missing.",
+      details: { limit: EVENT_GATE_LIMIT },
+    });
+  }
   if (activeEvents.length > 0) {
     issues.push({
       code: "event_blackout_active",
@@ -423,7 +468,7 @@ export async function buildTradeDecisionContext(
   const hasErrors = issues.some((issue) => issue.severity === "error");
   const decisionStatus = hasErrors
     ? "blocked"
-    : activeEvents.length > 0 || !executionReady
+    : eventGateStatus !== "clear" || !executionReady
       ? "wait"
       : "trade_ready";
   return {
@@ -469,9 +514,10 @@ export async function buildTradeDecisionContext(
       ),
     },
     event_gate: {
-      status: activeEvents.length > 0 ? "blackout" : "clear",
+      status: eventGateStatus,
       before_minutes: options.eventBlackoutBeforeMinutes,
       after_minutes: options.eventBlackoutAfterMinutes,
+      window: { from: blackoutFrom.toISOString(), to: blackoutTo.toISOString() },
       minimum_importance: options.minimumEventImportance,
       active_events: activeEvents,
     },
