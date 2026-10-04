@@ -25,6 +25,20 @@ test('the hono override keeps its advisory floor', async () => {
     `hono override floor ${overrides.hono} is below the first patched version 4.13.5`);
 });
 
+test('the fast-uri and ip-address overrides keep their advisory floors', async () => {
+  // Both reach this tree through the MCP SDK: fast-uri through ajv (^3.0.1), ip-address through express-rate-limit
+  // (^10.2.0), and both ranges admit the versions the advisories apply to. fast-uri < 3.1.8 normalizes a host's case
+  // inconsistently through percent-encoded octets (GHSA-hrr3-gc8f-f4qj). ip-address <= 10.7.0 compares addresses of
+  // different families in subnet checks, builds an unbounded parse diagnostic, and misclassifies link-local and NAT64
+  // ranges (GHSA-j6r3-76f7-8jcv, GHSA-h3mg-xc3c-68pw, GHSA-rpw4-54j3-4h4q, GHSA-2vr4-cq9g-pvrc).
+  const { overrides } = await manifest();
+  for (const [name, floor, patched] of [['fast-uri', [3, 1, 8], '3.1.8'], ['ip-address', [10, 7, 1], '10.7.1']]) {
+    assert.ok(overrides?.[name], `the ${name} override was removed`);
+    assert.ok(atLeast(floorOf(overrides[name]), floor),
+      `${name} override floor ${overrides[name]} is below the first patched version ${patched}`);
+  }
+});
+
 test('every override still resolves to something at or above its floor', async () => {
   const { overrides } = await manifest();
   const lock = JSON.parse(await readFile(new URL('../../package-lock.json', import.meta.url), 'utf8'));
