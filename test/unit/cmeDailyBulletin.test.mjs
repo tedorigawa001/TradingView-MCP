@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CmeDailyBulletinClient, parseCmeGoldOpenInterestBulletin } from "../../build/cmeDailyBulletin.js";
+import {
+  CmeDailyBulletinClient,
+  extractPdfTextWithPdfJs,
+  parseCmeGoldOpenInterestBulletin,
+  pdfTextLines,
+} from "../../build/cmeDailyBulletin.js";
 
 const bulletin = `
 METAL FUTURES PRODUCTS
@@ -42,12 +47,81 @@ test("CME Bulletin parser fails closed for a missing or ambiguous GC total", () 
   }), /expected one TOTAL GC FUT row/);
 });
 
-test("CME Bulletin parser does not mistake a reordered OI change for total open interest", () => {
-  const result = parseCmeGoldOpenInterestBulletin({
-    text: bulletin.replace("TOTAL GC FUT 165346 13123 376079 - 12136", "TOTAL GC FUT 165346 13123 - 12136 376079"),
-    sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z",
+// BACKLOG 102-03: the open interest is read by the meaning of the row's fields, not as its largest number.
+const withTotal = (row) => parseCmeGoldOpenInterestBulletin({
+  text: bulletin.replace("TOTAL GC FUT 165346 13123 376079 - 12136", row),
+  sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z",
+}).open_interest;
+
+test("CME Bulletin parser takes the open interest before its change, even below a volume", () => {
+  assert.equal(withTotal("TOTAL GC FUT 500000 13123 376079 - 12136"), 376079, "the largest number is a volume");
+  assert.equal(withTotal("TOTAL GC FUT 500000 376079 + 120"), 376079, "one volume column empty");
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 UNCH"), 376079, "no change");
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 -12136"), 376079, "the sign joined to the change");
+  assert.equal(withTotal("TOTAL GC FUT 165,346 13,123 376,079 - 12,136"), 376079, "thousands separators");
+  // An empty change column: the open interest is the last field, and the next line is another row.
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079\n2000 3000"), 376079);
+  // In text without line breaks the row ends at the next word.
+  assert.equal(withTotal("TOTAL GC FUT 165346 13123 376079 - 12136 MGC FUT 5 6"), 376079);
+});
+
+test("CME Bulletin parser refuses a total row whose fields cannot be told apart", () => {
+  const refused = /cannot be told apart|unsigned numbers before its open interest change/;
+  // The change before a number: in text alone either could be the open interest (the extractor orders by position).
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 - 12136 376079"), refused);
+  // However the change is written, a volume above 100,000 would otherwise be taken for the open interest.
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 213123 -12136 376079"), refused);
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 213123 UNCH 376079"), refused);
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 376079 - 12136 99"), refused);
+  assert.throws(() => withTotal("TOTAL GC FUT 165346 13123 376079 - 12136 + 5"), refused, "a second change");
+  assert.throws(() => withTotal("TOTAL GC FUT 1 165346 13123 376079 - 12136"), refused, "more than two volumes");
+  assert.throws(() => withTotal("TOTAL GC FUT UNCH"), refused);
+  assert.throws(() => withTotal("TOTAL GC FUT 4070.80 + 20.60"), refused);
+});
+
+test("PDF text lines are rebuilt from positions: one baseline per line, left to right, top to bottom", () => {
+  const piece = (str, x, y, height = 8) => ({ str, x, y, height });
+  assert.deepEqual(pdfTextLines([
+    piece("- 12136", 520, 500), piece("TOTAL GC FUT", 40, 500.8), piece("376079", 440, 500), piece("165346", 300, 499.5),
+    piece("139888", 440, 510), piece("AUG26", 40, 510), piece(" ", 600, 505), piece("13123", 370, 500),
+  ]), ["AUG26 139888", "TOTAL GC FUT 165346 13123 376079 - 12136"]);
+  // Rows closer than the tolerance merge, so it stays below half a row: 40% of an 8-unit text is 3.2 units.
+  assert.deepEqual(pdfTextLines([piece("A", 0, 100), piece("B", 0, 96.7)]), ["A", "B"]);
+});
+
+/** A one-page PDF drawing each piece at its position, in the order given. */
+function onePagePdf(pieces) {
+  const escape = (text) => text.replace(/[\\()]/g, (character) => `\\${character}`);
+  const stream = pieces.map(([text, x, y]) => `BT /F1 8 Tf 1 0 0 1 ${x} ${y} Tm (${escape(text)}) Tj ET`).join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets = [];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
   });
-  assert.equal(result.open_interest, 376079);
+  const xref = Buffer.byteLength(body);
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}`;
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new Uint8Array(Buffer.from(body, "latin1"));
+}
+
+test("pdf.js text of a bulletin drawn out of column order still yields the open interest", async () => {
+  // The TOTAL row is drawn change first and volumes last, with a volume above the open interest; the header is split.
+  const text = await extractPdfTextWithPdfJs(onePagePdf([
+    ["FINAL", 40, 560], ["2026", 330, 580], ["PG62 BULLETIN # 141@", 40, 580], ["Fri, Jul 24,", 250, 580],
+    ["TOTAL GC FUT", 40, 500], ["- 12136", 520, 500], ["376079", 440, 500], ["500000", 300, 500], ["13123", 370, 500],
+    ["AUG26", 40, 510], ["139888", 440, 510],
+  ]));
+  assert.equal(text.split("\n").at(-1), "TOTAL GC FUT 500000 13123 376079 - 12136");
+  const result = parseCmeGoldOpenInterestBulletin({ text, sourceUrl: "https://example.test/Section62.pdf", observedAt: "2026-07-25T15:00:00.000Z" });
+  assert.deepEqual([result.open_interest, result.observation_date, result.bulletin_number, result.report_status], [376079, "2026-07-24", 141, "final"]);
 });
 
 test("CME Bulletin parser accepts a total row with omitted empty volume columns", () => {
