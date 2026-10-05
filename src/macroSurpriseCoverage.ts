@@ -28,6 +28,8 @@ function assertArtifacts(artifacts: readonly OfficialMacroEventArtifact[]): Map<
  * Separates releases that predate local collection from releases missed after collection began.
  * A historical official artifact never upgrades an unobserved historical forecast into forward
  * evidence; this report is only a readiness and operations view of the first-seen store.
+ * It is a view as of `asOf`: only records first seen by then count, as in the store's getEligible
+ * (BACKLOG 102-13), so collection starts, eligibility and waiting are what was known at that moment.
  */
 export function assessMacroSurpriseCoverage(input: {
   artifacts: readonly OfficialMacroEventArtifact[];
@@ -44,8 +46,11 @@ export function assessMacroSurpriseCoverage(input: {
     rows.push(record);
     byEvent.set(record.event_id, rows);
   }
-  const collectionStartedAt = input.records.map((record) => record.first_seen_at).sort()[0] ?? null;
   const asOfMs = input.asOf.getTime();
+  const asOfIso = input.asOf.toISOString();
+  // Every record is checked against the official events above; only those first seen by asOf are known then.
+  for (const [eventId, rows] of byEvent) byEvent.set(eventId, rows.filter((record) => record.first_seen_at <= asOfIso));
+  const collectionStartedAt = input.records.map((record) => record.first_seen_at).filter((firstSeenAt) => firstSeenAt <= asOfIso).sort()[0] ?? null;
   const byEventKind = Object.fromEntries(EVENT_KINDS.map((kind) => [kind, emptyBucket()])) as Record<MacroSurpriseEventKind, CoverageBucket>;
   let eligibleEvents = 0;
   let missingForwardConsensus = 0;
