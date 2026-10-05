@@ -1,7 +1,7 @@
 import { posixModeEnforced } from "../../build/fsDurability.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lstat, mkdtemp, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -264,6 +264,85 @@ test("futures OI CME cleanup migration removes only the known malformed parser r
     asOf: new Date("2026-07-27T00:00:00.000Z"),
   });
   assert.deepEqual(official, [{ observation_date: "2026-07-24", open_interest: 376079, report_status: null, first_seen_at: "2026-07-26T22:50:20.177Z" }]);
+});
+
+// BACKLOG 102-11: both migrations carry each version's publication status, so a preliminary and a final with the same
+// value stay two versions, and a rerun or the cleanup changes nothing it is not meant to.
+const versions = async (store) => (await store.records()).map((record) => [record.observation_date, record.open_interest,
+  record.report_status, record.source, record.source_detail, record.first_seen_at]);
+const cme = (overrides) => observation({ source: "cme_daily_bulletin", source_detail: "GC_FUT", ...overrides });
+
+test("the date migration keeps a preliminary and a final of one value as two versions, and reruns as unchanged", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-migration-status-"));
+  const source = new FuturesOpenInterestFirstSeenStore(join(directory, "legacy.jsonl"));
+  const destinationPath = join(directory, "v2.jsonl");
+  const destination = new FuturesOpenInterestFirstSeenStore(destinationPath);
+  await source.observeMany([cme({ observation_date: "2026-07-19", open_interest: 376079, report_status: "preliminary", observed_at: "2026-07-21T00:00:00.000Z" })]);
+  await source.observeMany([cme({ observation_date: "2026-07-19", open_interest: 376079, report_status: "final", observed_at: "2026-07-22T00:00:00.000Z" })]);
+  // A status the source does not know (null, as records before the field) stays unknown, apart from a known one.
+  await source.observeMany([observation({ observation_date: "2026-07-19", open_interest: 383317, observed_at: "2026-07-22T06:00:00.000Z" })]);
+  assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination }), { source_records: 3, migrated: 3, unchanged: 0, revisions: 1 });
+  assert.deepEqual(await versions(destination), [
+    ["2026-07-20", 376079, "preliminary", "cme_daily_bulletin", "GC_FUT", "2026-07-21T00:00:00.000Z"],
+    ["2026-07-20", 376079, "final", "cme_daily_bulletin", "GC_FUT", "2026-07-22T00:00:00.000Z"],
+    ["2026-07-20", 383317, null, "tradingview_chart_indicator", null, "2026-07-22T06:00:00.000Z"],
+  ]);
+  const asOf = (at) => destination.getSeriesAsOf({ futuresSymbol: "COMEX_DL:GC1!", scope: "all_months_aggregated", source: "cme_daily_bulletin",
+    sourceDetail: "GC_FUT", asOf: new Date(at) });
+  assert.equal((await asOf("2026-07-21T12:00:00.000Z"))[0].report_status, "preliminary");
+  assert.equal((await asOf("2026-07-23T00:00:00.000Z"))[0].report_status, "final");
+  const before = await readFile(destinationPath);
+  assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination }), { source_records: 3, migrated: 0, unchanged: 3, revisions: 0 });
+  assert.deepEqual(await readFile(destinationPath), before, "a rerun writes nothing");
+});
+
+test("the migrations tell versions apart that share a value and a stamp", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-migration-sources-"));
+  const source = new FuturesOpenInterestFirstSeenStore(join(directory, "legacy.jsonl"));
+  // Four series with one value, status and stamp: sources and details differ.
+  const at = "2026-07-21T00:00:00.000Z";
+  await source.observeMany([
+    observation({ observation_date: "2026-07-19", open_interest: 376079, observed_at: at }),
+    observation({ observation_date: "2026-07-19", open_interest: 376079, source: "other_feed", observed_at: at }),
+    observation({ observation_date: "2026-07-19", open_interest: 376079, source_detail: "basket", observed_at: at }),
+    cme({ observation_date: "2026-07-19", open_interest: 376079, report_status: null, observed_at: at }),
+  ]);
+  // A status change recorded in the same moment as the version it revises.
+  await source.observeMany([cme({ observation_date: "2026-07-18", open_interest: 370000, report_status: "preliminary", observed_at: at })]);
+  await source.observeMany([cme({ observation_date: "2026-07-18", open_interest: 370000, report_status: "final", observed_at: at })]);
+  const dated = new FuturesOpenInterestFirstSeenStore(join(directory, "v2.jsonl"));
+  assert.deepEqual(await migrateFuturesOpenInterestDates({ source, destination: dated }), { source_records: 6, migrated: 6, unchanged: 0, revisions: 1 });
+  assert.deepEqual((await versions(dated)).map(([date, , status, src, detail]) => [date, src, detail, status]), [
+    ["2026-07-20", "tradingview_chart_indicator", null, null], ["2026-07-20", "other_feed", null, null],
+    ["2026-07-20", "tradingview_chart_indicator", "basket", null],
+    ["2026-07-20", "cme_daily_bulletin", "GC_FUT", null], ["2026-07-19", "cme_daily_bulletin", "GC_FUT", "preliminary"],
+    ["2026-07-19", "cme_daily_bulletin", "GC_FUT", "final"]]);
+  const cleaned = new FuturesOpenInterestFirstSeenStore(join(directory, "v3.jsonl"));
+  assert.deepEqual(await migrateFuturesOpenInterestCmeCleanup({ source, destination: cleaned }), {
+    source_records: 6, migrated: 6, unchanged: 0, revisions: 1, discarded_malformed_cme_records: 0,
+  });
+  assert.deepEqual(await versions(cleaned), await versions(source));
+});
+
+test("the CME cleanup migration keeps every status and removes only the known malformed record, rerun or not", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-futures-oi-cme-cleanup-status-"));
+  const source = new FuturesOpenInterestFirstSeenStore(join(directory, "v2.jsonl"));
+  const destinationPath = join(directory, "v3.jsonl");
+  const destination = new FuturesOpenInterestFirstSeenStore(destinationPath);
+  await source.observeMany([cme({ observation_date: "2026-07-24", open_interest: 12136, report_status: "preliminary", observed_at: "2026-07-26T22:43:36.668Z" })]);
+  await source.observeMany([cme({ observation_date: "2026-07-24", open_interest: 376079, report_status: "preliminary", observed_at: "2026-07-26T22:50:20.177Z" })]);
+  await source.observeMany([cme({ observation_date: "2026-07-24", open_interest: 376079, report_status: "final", observed_at: "2026-07-27T22:30:00.000Z" })]);
+  await source.observeMany([observation({ observation_date: "2026-07-24", open_interest: 379963, observed_at: "2026-07-28T00:00:00.000Z" })]);
+  assert.deepEqual(await migrateFuturesOpenInterestCmeCleanup({ source, destination }), {
+    source_records: 4, migrated: 3, unchanged: 0, revisions: 1, discarded_malformed_cme_records: 1,
+  });
+  // Everything but the malformed record, exactly as it was.
+  assert.deepEqual(await versions(destination), (await versions(source)).filter(([, value]) => value !== 12136));
+  const before = await readFile(destinationPath);
+  assert.deepEqual(await migrateFuturesOpenInterestCmeCleanup({ source, destination }), {
+    source_records: 4, migrated: 0, unchanged: 3, revisions: 0, discarded_malformed_cme_records: 1,
+  });
+  assert.deepEqual(await readFile(destinationPath), before);
 });
 
 test("futures open interest history path falls back to the per-user directory", () => {

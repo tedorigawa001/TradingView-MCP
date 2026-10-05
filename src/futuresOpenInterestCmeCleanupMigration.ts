@@ -9,6 +9,8 @@ const isMalformedCmeGoldRecord = (record: FuturesOpenInterestRecord): boolean =>
 /**
  * Replays v2 into v3 while omitting the single known parser defect. The original append-only log
  * remains untouched for audit, while v3 never claims that the OI change was an observed OI level.
+ * Every other version is carried as it stands, its publication status included (BACKLOG 102-11), so
+ * a preliminary and a final of one value stay two versions.
  */
 export async function migrateFuturesOpenInterestCmeCleanup(input: {
   source: Pick<FuturesOpenInterestFirstSeenStore, "records">;
@@ -32,6 +34,7 @@ export async function migrateFuturesOpenInterestCmeCleanup(input: {
       candidate.source_detail === record.source_detail &&
       candidate.observation_date === record.observation_date &&
       candidate.open_interest === record.open_interest &&
+      candidate.report_status === record.report_status &&
       candidate.first_seen_at === record.first_seen_at)) {
       unchanged += 1;
       continue;
@@ -43,6 +46,7 @@ export async function migrateFuturesOpenInterestCmeCleanup(input: {
       open_interest: record.open_interest,
       source: record.source,
       source_detail: record.source_detail,
+      report_status: record.report_status,
       observed_at: record.first_seen_at,
     }]);
     migrated += result.recorded.length;

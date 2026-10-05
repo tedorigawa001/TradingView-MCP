@@ -8,8 +8,10 @@ const nextCalendarDate = (value: string): string => {
 
 /**
  * Replays the original v1 log into a new v2 file with the exchange trading date. The v1 file is
- * retained unchanged as an audit trail; every original first-seen timestamp and revision ordering
- * is preserved in v2.
+ * retained unchanged as an audit trail; every original first-seen timestamp, publication status and
+ * revision ordering is preserved in v2. The status is carried as it stands (BACKLOG 102-11): without
+ * it a preliminary and a final of one value reached the store alike and the final was dropped as
+ * unchanged, and a null (unknown, as records from before the field) stays null, apart from a known one.
  */
 export async function migrateFuturesOpenInterestDates(input: {
   source: Pick<FuturesOpenInterestFirstSeenStore, "records">;
@@ -24,12 +26,16 @@ export async function migrateFuturesOpenInterestDates(input: {
     const observationDate = nextCalendarDate(record.observation_date);
     // The destination store protects its first-seen clock from moving backwards. A rerun reaches
     // older original versions after a later revision, so recognise an already migrated version
-    // before asking the store to append it again.
+    // before asking the store to append it again: the same series (source and detail included), date,
+    // value, status and first-seen.
     if (destinationRecords.some((candidate) =>
       candidate.futures_symbol === record.futures_symbol &&
       candidate.scope === record.scope &&
+      candidate.source === record.source &&
+      candidate.source_detail === record.source_detail &&
       candidate.observation_date === observationDate &&
       candidate.open_interest === record.open_interest &&
+      candidate.report_status === record.report_status &&
       candidate.first_seen_at === record.first_seen_at)) {
       unchanged += 1;
       continue;
@@ -41,6 +47,7 @@ export async function migrateFuturesOpenInterestDates(input: {
       open_interest: record.open_interest,
       source: record.source,
       source_detail: record.source_detail,
+      report_status: record.report_status,
       observed_at: record.first_seen_at,
     }]);
     migrated += result.recorded.length;
