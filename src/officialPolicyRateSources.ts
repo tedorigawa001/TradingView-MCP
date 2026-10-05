@@ -220,6 +220,22 @@ async function collectFredFedTargetHistory(input: {
   return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
 }
 
+/** A rate as the sources write it: "4.00", "-0.75", ".25". */
+const DECIMAL_RATE = /^-?(?:\d+(?:\.\d+)?|\.\d+)$/;
+
+/**
+ * A rate cell read strictly (BACKLOG 102-10): blank or only whitespace is null, a plain decimal is its number, and
+ * anything else throws `invalid`. Number() reads "" and " " as 0, the same as a real zero-rate decision, so a blank
+ * ECB or BoC cell was stored and counted as one; it also reads "0x10" as 16 and "1e1" as 10. Each parser decides what
+ * a null means for its source.
+ */
+function rateCell(value: string | undefined, invalid: string): number | null {
+  const text = (value ?? "").trim();
+  if (text === "") return null;
+  if (!DECIMAL_RATE.test(text)) throw new Error(invalid);
+  return Number(text);
+}
+
 export function parseEcbDepositFacilityCsv(raw: string): ParsedOfficialPolicyRateSeries {
   const lines = raw.replace(/^\uFEFF/, "").trim().split(/\r?\n/);
   if (lines.length < 2) throw new Error("ECB deposit facility CSV has no data rows");
@@ -237,8 +253,9 @@ export function parseEcbDepositFacilityCsv(raw: string): ParsedOfficialPolicyRat
     const cells = parseCsvLine(line);
     if (cells[seriesIndex] !== "FM.D.U2.EUR.4F.KR.DFR.LEV") throw new Error("ECB deposit facility CSV returned an unexpected series");
     const date = cells[dateIndex];
-    const value = Number(cells[valueIndex]);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(value)) throw new Error("ECB deposit facility CSV contains an invalid observation");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("ECB deposit facility CSV contains an invalid observation");
+    const value = rateCell(cells[valueIndex], "ECB deposit facility CSV contains an invalid observation");
+    if (value === null) throw new Error(`ECB deposit facility CSV contains a blank rate on ${date}`);
     if (lastDate !== null && date <= lastDate) throw new Error("ECB deposit facility CSV observations are not strictly ordered");
     sourceCount += 1;
     firstDate ??= date;
@@ -265,8 +282,11 @@ export function parseBocTargetOvernightRateJson(raw: string): ParsedOfficialPoli
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("BoC target overnight rate response contains an invalid observation");
     const row = item as { d?: unknown; V39079?: { v?: unknown } };
     const date = row.d;
-    const value = typeof row.V39079?.v === "string" ? Number(row.V39079.v) : NaN;
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(value)) throw new Error("BoC target overnight rate response contains an invalid value");
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || typeof row.V39079?.v !== "string") {
+      throw new Error("BoC target overnight rate response contains an invalid value");
+    }
+    const value = rateCell(row.V39079.v, "BoC target overnight rate response contains an invalid value");
+    if (value === null) throw new Error(`BoC target overnight rate response contains a blank rate on ${date}`);
     if (lastDate !== null && date <= lastDate) throw new Error("BoC target overnight rate observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
@@ -304,8 +324,8 @@ export function parseBoeBankRateCsv(raw: string): ParsedOfficialPolicyRateSeries
     if (new Date(`${date}T12:00:00.000Z`).toISOString().slice(0, 10) !== date) {
       throw new Error(`BoE Bank Rate response contains a date the calendar does not have: ${cells[0]}`);
     }
-    const value = Number(cells[1]);
-    if (cells[1] === "" || !Number.isFinite(value)) throw new Error("BoE Bank Rate response contains a non-finite rate");
+    const value = rateCell(cells[1], "BoE Bank Rate response contains a non-finite rate");
+    if (value === null) throw new Error("BoE Bank Rate response contains a non-finite rate");
     if (lastDate !== null && date <= lastDate) throw new Error("BoE Bank Rate observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
@@ -332,9 +352,9 @@ export function parseFredFedTargetRangeCsv(raw: string): ParsedOfficialPolicyRat
   for (const line of lines.slice(1)) {
     const cells = parseCsvLine(line);
     const date = cells[dateIndex];
-    const lower = Number(cells[lowerIndex]);
-    const upper = Number(cells[upperIndex]);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(lower) || !Number.isFinite(upper) || lower > upper || lower < -10 || upper > 100) throw new Error("FRED Fed target range CSV contains an invalid observation");
+    const lower = rateCell(cells[lowerIndex], "FRED Fed target range CSV contains an invalid observation");
+    const upper = rateCell(cells[upperIndex], "FRED Fed target range CSV contains an invalid observation");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || lower === null || upper === null || lower > upper || lower < -10 || upper > 100) throw new Error("FRED Fed target range CSV contains an invalid observation");
     if (lastDate !== null && date <= lastDate) throw new Error("FRED Fed target range CSV observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
@@ -368,8 +388,12 @@ export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTar
     const lower = cells[lowerIndex]?.trim() ?? "";
     const upper = cells[upperIndex]?.trim() ?? "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || (single === "" && (lower === "" || upper === "")) || (single !== "" && (lower !== "" || upper !== ""))) throw new Error("FRED Fed target history CSV contains an ambiguous observation");
-    const value = single === "" ? (Number(lower) + Number(upper)) / 2 : Number(single);
-    if (!Number.isFinite(value) || value < -10 || value > 100 || (single === "" && Number(lower) > Number(upper))) throw new Error("FRED Fed target history CSV contains an invalid observation");
+    const invalid = "FRED Fed target history CSV contains an invalid observation";
+    const singleRate = rateCell(single, invalid);
+    const lowerRate = rateCell(lower, invalid);
+    const upperRate = rateCell(upper, invalid);
+    const value = singleRate ?? ((lowerRate ?? NaN) + (upperRate ?? NaN)) / 2;
+    if (!Number.isFinite(value) || value < -10 || value > 100 || (singleRate === null && lowerRate! > upperRate!)) throw new Error(invalid);
     if (lastDate !== null && date <= lastDate) throw new Error("FRED Fed target history CSV observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
@@ -401,9 +425,9 @@ export function parseRbaCashRateTargetCsv(raw: string): ParsedOfficialPolicyRate
     const rawDate = cells[0];
     const rawValue = cells[targetIndex]?.trim();
     // The live F1 file includes the current incomplete trading day with no target value.
-    if (rawValue === "") continue;
-    const value = Number(rawValue);
-    if (!/^\d{2}-[A-Za-z]{3}-\d{4}$/.test(rawDate) || !Number.isFinite(value) || value < -10 || value > 100) throw new Error("RBA cash rate target CSV contains an invalid observation");
+    const value = rateCell(rawValue, "RBA cash rate target CSV contains an invalid observation");
+    if (value === null) continue;
+    if (!/^\d{2}-[A-Za-z]{3}-\d{4}$/.test(rawDate) || value < -10 || value > 100) throw new Error("RBA cash rate target CSV contains an invalid observation");
     const date = parseRbaDate(rawDate);
     if (lastDate !== null && date <= lastDate) throw new Error("RBA cash rate target CSV observations are not strictly ordered");
     firstDate ??= date;
@@ -428,8 +452,8 @@ export function parseSnbOfficialInterestRatesCsv(raw: string): ParsedOfficialPol
     const [month, code, rawValue] = parseDelimitedLine(line, ";", "SNB official interest rates CSV");
     if (!/^\d{4}-\d{2}$/.test(month) || !["LZ", "UG0", "OG0"].includes(code)) continue;
     const row = months.get(month) ?? { policy: null, lower: null, upper: null };
-    const value = rawValue === "" ? null : Number(rawValue);
-    if (value !== null && (!Number.isFinite(value) || value < -10 || value > 100)) throw new Error("SNB official interest rates CSV contains an invalid observation");
+    const value = rateCell(rawValue, "SNB official interest rates CSV contains an invalid observation");
+    if (value !== null && (value < -10 || value > 100)) throw new Error("SNB official interest rates CSV contains an invalid observation");
     if (code === "LZ") row.policy = value;
     else if (code === "UG0") row.lower = value;
     else row.upper = value;

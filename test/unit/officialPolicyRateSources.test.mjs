@@ -212,3 +212,48 @@ test("BoE Bank Rate parser refuses a substituted series, an unreadable date, and
   assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n02 Jan 1975,\n03 Jan 1975,11.5"), /non-finite rate/);
   assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n03 Jan 1975,11.5\n02 Jan 1975,11.25"), /not strictly ordered/);
 });
+
+// BACKLOG 102-10: Number() read a blank or whitespace rate as 0, the same as a real zero-rate decision, and "0x10" as 16.
+// Each parser reads a rate cell strictly: blank is no value, a plain decimal is its number, anything else is refused.
+test("ECB and BoC refuse a blank or whitespace rate, read a real 0, and refuse what is no decimal", async () => {
+  const { parseBocTargetOvernightRateJson } = await import("../../build/officialPolicyRateSources.js");
+  const ecb = (value) => parseEcbDepositFacilityCsv(["KEY,TIME_PERIOD,OBS_VALUE,TITLE",
+    "FM.D.U2.EUR.4F.KR.DFR.LEV,2025-01-01,3,Deposit facility", `FM.D.U2.EUR.4F.KR.DFR.LEV,2025-02-05,${value},Deposit facility`].join("\n"));
+  const boc = (value) => parseBocTargetOvernightRateJson(JSON.stringify({ observations: [
+    { d: "2025-01-01", V39079: { v: "3.25" } }, { d: "2025-01-30", V39079: { v: value } }] }));
+  for (const parse of [ecb, boc]) {
+    assert.throws(() => parse(""), /blank rate on 2025-0/);
+    assert.throws(() => parse("   "), /blank rate on 2025-0/);
+    assert.deepEqual(parse("0").changes.at(-1).value, 0, "a real zero-rate decision");
+    assert.deepEqual(parse("-0.50").changes.at(-1).value, -0.5);
+    for (const garbage of ["0x10", "1e1", "abc", "3.0.0", "Infinity"]) assert.throws(() => parse(garbage), /invalid|unexpected/, garbage);
+  }
+});
+
+test("FRED, BoE and RBA refuse what is no decimal, and FRED refuses a blank bound", async () => {
+  const { parseFredFedTargetRangeCsv, parseFredFedTargetHistoryCsv, parseRbaCashRateTargetCsv } = await import("../../build/officialPolicyRateSources.js");
+  const range = (lower, upper) => parseFredFedTargetRangeCsv(["observation_date,DFEDTARL,DFEDTARU", "2025-01-01,4.25,4.50", `2025-09-18,${lower},${upper}`].join("\n"));
+  assert.throws(() => range("", "0.25"), /invalid observation/, "a blank lower bound is no 0");
+  assert.throws(() => range(" ", "0.25"), /invalid observation/);
+  assert.equal(range("0", "0.25").changes.at(-1).value, 0.125);
+  assert.throws(() => range("0x10", "0x20"), /invalid observation/);
+  assert.throws(() => parseFredFedTargetHistoryCsv(["observation_date,DFEDTAR,DFEDTARL,DFEDTARU", "2008-12-15,1e0,,"].join("\n")), /invalid observation/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n02 Jan 1975,1e1"), /non-finite rate/);
+  assert.throws(() => parseBoeBankRateCsv("DATE,IUDBEDR\n02 Jan 1975,0x10"), /non-finite rate/);
+  assert.equal(parseBoeBankRateCsv("DATE,IUDBEDR\n02 Jan 1975,0").changes[0].value, 0);
+  const rba = (value) => parseRbaCashRateTargetCsv(["Title,Cash Rate Target", "Series ID,FIRMMCRTD", "04-Jan-2025,4.35", `18-Feb-2025,${value}`].join("\n"));
+  assert.throws(() => rba("0x10"), /invalid observation/);
+  // The live file's incomplete day has no target and is still left out, whitespace or not.
+  assert.equal(rba("  ").source_last_observation_date, "2025-01-04");
+});
+
+test("SNB reads a whitespace rate as missing, not 0, and refuses what is no decimal", async () => {
+  const { parseSnbOfficialInterestRatesCsv } = await import("../../build/officialPolicyRateSources.js");
+  const snb = (policy) => parseSnbOfficialInterestRatesCsv(['"CubeId";"snboffzisa"', '"Date";"D0";"Value"',
+    `"2019-05";"LZ";"${policy}"`, '"2019-05";"UG0";"-1.25"', '"2019-05";"OG0";"-0.25"'].join("\n"));
+  // With no policy rate the month falls back to the Libor target range's middle, as for a blank one.
+  assert.equal(snb("  ").changes[0].value, -0.75);
+  assert.equal(snb("").changes[0].value, -0.75);
+  assert.equal(snb("0").changes[0].value, 0);
+  assert.throws(() => snb("0x10"), /invalid observation/);
+});
