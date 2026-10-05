@@ -191,8 +191,12 @@ test("a page's checkpoints form a chain, and another raw response must name the 
   await assert.rejects(store.append(row(hash("3"), { supersedes_sequence: 1 }), at), /conflicts with a prior raw response/);
   assert.deepEqual(await store.append(row(hash("2")), at), { recorded: false, sequence: 2 });
   assert.deepEqual(await store.append(row(hash("3"), { supersedes_sequence: 2 }), at), { recorded: true, sequence: 3 });
+  // A second run that replaced the same checkpoint with the same raw response finds it recorded; another raw response
+  // replacing an earlier checkpoint still conflicts, as does the same hash at another size.
+  assert.deepEqual(await store.append(row(hash("3"), { supersedes_sequence: 2 }), at), { recorded: false, sequence: 3 });
+  await assert.rejects(store.append(row(hash("4"), { supersedes_sequence: 2 }), at), /conflicts with a prior raw response/);
+  await assert.rejects(store.append({ ...row(hash("3")), raw_bytes: 11 }, at), /conflicts with a prior raw response/);
   // The same raw response read again once the page is final replaces the latest checkpoint when it says so.
-  await assert.rejects(store.append(row(hash("3"), { supersedes_sequence: 2 }), at), /conflicts with a prior raw response/);
   assert.deepEqual(await store.append(row(hash("3"), { supersedes_sequence: 3 }), at), { recorded: true, sequence: 4 });
   assert.deepEqual((await store.completed(hash("a"))).map((item) => item.supersedes_sequence), [undefined, 1, 2, 3]);
   // A chain broken in the file is refused, as is a checkpoint that names itself or a later one.
@@ -201,4 +205,48 @@ test("a page's checkpoints form a chain, and another raw response must name the 
   await assert.rejects(store.append(row(hash("4"), { supersedes_sequence: 3 }), at), /do not form a chain/);
   await writeFile(path, `${[lines[0], { ...lines[1], supersedes_sequence: 2 }].map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
   await assert.rejects(store.completed(hash("a")), /invalid FX history page checkpoint supersedes_sequence/);
+});
+
+test("the page's time is judged when it was requested, not when the answer came", async () => {
+  // The request goes out at 00:10 and the answer arrives at 00:20: the page ending at midnight was asked for before its
+  // last candle could have closed, so it is not final.
+  const checkpoints = checkpointStore();
+  let clock = "2026-02-12T00:10:00.000Z";
+  const result = await collectOandaEurUsdM15History({
+    accountId: "001-001-1234567-001", token: "a-made-up-token-for-tests-only", from: SECOND_PAGE, to: TO, archive: memoryArchive(), checkpoints,
+    store: { append: async () => ({ recorded: true, sequence: 1 }) }, sleep: async () => {}, now: () => new Date(clock),
+    fetch: async () => { clock = "2026-02-12T00:20:00.000Z"; return response([candle(SECOND_PAGE), candle("2026-02-11T23:45:00.000Z")]); },
+  });
+  assert.deepEqual([result.unfinished_pages, (await checkpoints.completed(result.collection_key)).length], [1, 0]);
+});
+
+test("an early checkpoint fetched again but still not final stays, and two runs replacing it at once both succeed", async () => {
+  const { path, checkpoints } = await freshCheckpoints();
+  const archive = memoryArchive();
+  const common = { accountId: "001-001-1234567-001", token: "a-made-up-token-for-tests-only", from: FROM, to: TO, archive, checkpoints,
+    store: { append: async () => ({ recorded: true, sequence: 1 }) }, sleep: async () => {} };
+  const first = await run(common, "2026-02-11T23:50:00.000Z", { [FROM]: firstPage, [SECOND_PAGE]: [candle(SECOND_PAGE)] });
+  const earlyBody = Buffer.from(JSON.stringify({ candles: [candle(SECOND_PAGE)] }));
+  const earlyHash = `sha256:${createHash("sha256").update(earlyBody).digest("hex")}`;
+  await archive.store(earlyHash, earlyBody);
+  await checkpoints.append({ collection_key: first.collection_key, requested_from: SECOND_PAGE, requested_to: TO, raw_sha256: earlyHash, raw_bytes: earlyBody.byteLength }, "2026-02-11T23:55:00.000Z");
+  // At 00:12 the page is still open: it is fetched, nothing is checkpointed, and the early checkpoint stays the latest.
+  const open = await run(common, "2026-02-12T00:12:00.000Z", { [SECOND_PAGE]: [candle(SECOND_PAGE), candle("2026-02-11T23:45:00.000Z")] });
+  assert.deepEqual([open.unfinished_pages, (await readFile(path, "utf8")).trim().split("\n").length], [1, 2]);
+  // Two runs at 01:00 both find the early checkpoint, both fetch the same answer, and both replace it: one writes the
+  // replacement and the other finds it written.
+  let arrived = 0;
+  let release;
+  const bothFetched = new Promise((resolve) => { release = resolve; });
+  const concurrent = () => collectOandaEurUsdM15History({ ...common, now: () => new Date("2026-02-12T01:00:00.000Z"),
+    fetch: async () => { arrived += 1; if (arrived === 2) release(); await bothFetched; return response([candle(SECOND_PAGE), candle("2026-02-11T23:45:00.000Z")]); } });
+  const results = await Promise.all([concurrent(), concurrent()]);
+  assert.deepEqual(results.map((result) => [result.resumed_pages, result.unfinished_pages, result.bars.length]), [[1, 0, 3], [1, 0, 3]]);
+  const lines = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((row) => row.supersedes_sequence), [undefined, undefined, 2]);
+  // A port that lists checkpoints out of order still yields each page's latest.
+  const reversed = { completed: async (key) => (await checkpoints.completed(key)).reverse(), append: (row, at) => checkpoints.append(row, at) };
+  const requested = [];
+  await run({ ...common, checkpoints: reversed }, "2026-02-13T00:00:00.000Z", {}, requested);
+  assert.deepEqual(requested, []);
 });

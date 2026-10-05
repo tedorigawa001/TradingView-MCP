@@ -160,7 +160,9 @@ export class FxHistoricalCheckpointStore {
       if (matching.some((record, index) => record.supersedes_sequence !== (index === 0 ? undefined : matching[index - 1].sequence))) throw new Error("FX history page checkpoints do not form a chain");
       const latest = matching.at(-1);
       // The same raw response again is no new checkpoint, unless it replaces the latest one, read once the page was final.
-      if (latest && latest.raw_sha256 === row.raw_sha256 && latest.raw_bytes === row.raw_bytes && row.supersedes_sequence === undefined) return { recorded: false, sequence: latest.sequence };
+      // Replacing the same earlier checkpoint as the latest does is a second run that already found the page final.
+      if (latest && latest.raw_sha256 === row.raw_sha256 && latest.raw_bytes === row.raw_bytes
+        && (row.supersedes_sequence === undefined || row.supersedes_sequence === latest.supersedes_sequence)) return { recorded: false, sequence: latest.sequence };
       // Otherwise a checkpoint must name the page's latest one as the one it replaces, or be the page's first.
       if (row.supersedes_sequence !== latest?.sequence) throw new Error("FX history page checkpoint conflicts with a prior raw response");
       const candidate = validateCheckpoint({ ...row, schema_version: "1.0", sequence: records.length + 1, series: "fx_historical_m15_page_checkpoint", first_seen_at: now, observation_date: now.slice(0, 10) });
