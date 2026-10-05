@@ -88,6 +88,7 @@ const freshStore = async () => {
   return { path, store: new OfficialPolicyRateHistoryStore(path) };
 };
 const lines = async (path) => (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+const withdrawalsIn = async (path) => (await lines(path)).filter((record) => record.rate_status === "withdrawn").map((record) => [record.observation_date, record.raw_sha256]);
 
 test("a change point a later download no longer lists is withdrawn, and comes back as a new version when it reappears", async () => {
   const { path, store } = await freshStore();
@@ -164,4 +165,86 @@ test("a withdrawal touches only the batch's currency, and a malformed span write
   const { path: brokenPath } = await freshStore();
   await writeFile(brokenPath, `${JSON.stringify({ ...JSON.parse(before.trim().split("\n").at(-1)), sequence: 1, value: 5 })}\n`, { mode: 0o600 });
   await assert.rejects(new OfficialPolicyRateHistoryStore(brokenPath).getRevisedSeries("EUR"), /withdrawal must have null value/);
+});
+
+test("a download's first row is a new change point only when the series held before it says otherwise", async () => {
+  const { path, store } = await freshStore();
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-31")]);
+  const before = await readFile(path, "utf8");
+  // The export now starts on 2025-01-10, where the series already holds 4: no new change point, so nothing to withdraw
+  // once the full export is back.
+  const later = await store.observeMany([ecb("2025-01-10", 4, HASH_2, DAY_2), ecb("2025-02-01", 5, HASH_2, DAY_2)], [span(HASH_2, "2025-01-10", "2025-03-31")]);
+  assert.deepEqual([later.recorded.length, later.unchanged, later.withdrawn], [0, 2, 0]);
+  assert.equal(await readFile(path, "utf8"), before);
+  const full = await store.observeMany([ecb("2025-01-01", 4, HASH_3, DAY_3), ecb("2025-02-01", 5, HASH_3, DAY_3)], [span(HASH_3, "2025-01-01", "2025-03-31")]);
+  assert.deepEqual([full.recorded.length, full.withdrawn, (await store.coverage()).currencies.EUR.withdrawals], [0, 0, 0]);
+  // At a rate the series did not hold there, the first row is a change.
+  const day4 = "2026-08-01T12:00:00.000Z";
+  const changed = await store.observeMany([ecb("2025-01-10", 3.5, HASH_1, day4), ecb("2025-02-01", 5, HASH_1, day4)], [span(HASH_1, "2025-01-10", "2025-03-31")]);
+  assert.deepEqual([changed.recorded.length, changed.revisions], [1, 0]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-01-10", 3.5], ["2025-02-01", 5]]);
+});
+
+test("what a span start is held against counts the batch's own changes and not the stored ones it withdraws", async () => {
+  const { store } = await freshStore();
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-01-03", 6, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-01-05")]);
+  // Two files: the first now changes to 5 on 2025-01-02 and drops the 6 on 2025-01-03; the second starts at 6.
+  const result = await store.observeMany(
+    [ecb("2025-01-01", 4, HASH_2, DAY_2), ecb("2025-01-02", 5, HASH_2, DAY_2), ecb("2025-01-10", 6, HASH_3, DAY_2)],
+    [span(HASH_2, "2025-01-01", "2025-01-05"), span(HASH_3, "2025-01-10", "2025-03-31")],
+  );
+  // Against the stored 6 the second file's first row would look held and be lost; against the batch's 5 it is a change.
+  assert.deepEqual([result.recorded.length, result.withdrawn], [3, 1]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-01-02", 5], ["2025-01-10", 6]]);
+  // And when the batch's own last change matches, the second file's first row is held.
+  const { store: other } = await freshStore();
+  const held = await other.observeMany(
+    [ecb("2025-01-01", 4, HASH_2, DAY_2), ecb("2025-01-02", 5, HASH_2, DAY_2), ecb("2025-01-10", 5, HASH_3, DAY_2)],
+    [span(HASH_2, "2025-01-01", "2025-01-05"), span(HASH_3, "2025-01-10", "2025-03-31")],
+  );
+  assert.deepEqual([held.recorded.length, held.unchanged], [2, 1]);
+  assert.deepEqual(await series(other), [["2025-01-01", 4], ["2025-01-02", 5]]);
+});
+
+test("coverage dates leave out a withdrawn first date, and withdrawals and reappearances repeat", async () => {
+  const { store } = await freshStore();
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-01")]);
+  // A span that begins before the first change and no longer lists it.
+  await store.observeMany([ecb("2025-02-01", 5, HASH_2, DAY_2)], [span(HASH_2, "2024-12-01", "2025-03-01")]);
+  let coverage = (await store.coverage()).currencies.EUR;
+  assert.deepEqual([coverage.dates, coverage.withdrawn_dates, coverage.earliest_date, coverage.latest_date], [1, 1, "2025-02-01", "2025-02-01"]);
+  // It comes back at another rate, is withdrawn again, and comes back once more.
+  const back = await store.observeMany([ecb("2025-01-01", 4.5, HASH_3, DAY_3), ecb("2025-02-01", 5, HASH_3, DAY_3)], [span(HASH_3, "2025-01-01", "2025-03-01")]);
+  assert.deepEqual([back.reappeared, back.revisions], [1, 0]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4.5], ["2025-02-01", 5]]);
+  const day4 = "2026-08-01T12:00:00.000Z";
+  const day5 = "2026-08-02T12:00:00.000Z";
+  await store.observeMany([ecb("2025-02-01", 5, HASH_1, day4)], [span(HASH_1, "2024-12-01", "2025-03-01")]);
+  await store.observeMany([ecb("2025-01-01", 4.5, HASH_2, day5), ecb("2025-02-01", 5, HASH_2, day5)], [span(HASH_2, "2025-01-01", "2025-03-01")]);
+  coverage = (await store.coverage()).currencies.EUR;
+  assert.deepEqual([coverage.records, coverage.withdrawals, coverage.reappearances, coverage.revisions, coverage.metadata_only_versions, coverage.withdrawn_dates, coverage.earliest_date],
+    [6, 2, 2, 0, 0, 0, "2025-01-01"]);
+});
+
+test("a row at the rate held before it is no change point, and a stored change on its date is withdrawn", async () => {
+  // The export now starts on 2025-02-01, the day of the stored rise to 5, and shows 4 there: the rise is gone.
+  const { path, store } = await freshStore();
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-31")]);
+  const start = await store.observeMany([ecb("2025-02-01", 4, HASH_2, DAY_2)], [span(HASH_2, "2025-02-01", "2025-03-31")]);
+  assert.deepEqual([start.recorded.length, start.unchanged, start.revisions, start.withdrawn], [1, 0, 0, 1]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4]]);
+  assert.deepEqual(await withdrawalsIn(path), [["2025-02-01", HASH_2]]);
+  // On a withdrawn date the same export start leaves it withdrawn, and nothing is written.
+  const again = await store.observeMany([ecb("2025-02-01", 4, HASH_3, DAY_3)], [span(HASH_3, "2025-02-01", "2025-03-31")]);
+  assert.deepEqual([again.recorded.length, again.unchanged, again.reappeared], [0, 1, 0]);
+  // The rate is what counts, not the file it came from.
+  const day4 = "2026-08-01T12:00:00.000Z";
+  const moved = await store.observeMany([{ ...ecb("2025-02-10", 4, HASH_1, day4), source_url: "https://data-api.ecb.europa.eu/service/data/FM/other" }],
+    [span(HASH_1, "2025-02-10", "2025-03-31", "https://data-api.ecb.europa.eu/service/data/FM/other")]);
+  assert.deepEqual([moved.recorded.length, moved.unchanged], [0, 1]);
+  // Within one batch, a row that repeats the batch's previous rate is no change point either.
+  const { store: fresh } = await freshStore();
+  const repeated = await fresh.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-01-10", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-31")]);
+  assert.deepEqual([repeated.recorded.length, repeated.unchanged], [2, 1]);
+  assert.deepEqual(await series(fresh), [["2025-01-01", 4], ["2025-02-01", 5]]);
 });

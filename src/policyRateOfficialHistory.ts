@@ -210,6 +210,22 @@ export class OfficialPolicyRateHistoryStore {
       if (latestFirstSeen && candidates.some((candidate) => candidate.first_seen_at < latestFirstSeen)) throw new Error("official policy-rate retrieval clock moved backwards");
       const latest = new Map<string, OfficialPolicyRateHistoryRecord>();
       for (const record of records) latest.set(`${record.currency}:${record.observation_date}`, record);
+      const live = downloadSpans.length === 0 ? [] : latestRevisedSeries(records.filter((record) => record.currency === candidates[0].currency));
+      const inSpan = (date: string) => downloadSpans.find((span) => span.first_observation_date <= date && date <= span.last_observation_date);
+      // A parser lists a download's first row as a change, having nothing before it, so when a download starts later
+      // than before, that row may only repeat the rate the series already holds. Against the series as it stands once
+      // this batch is in (the batch's rows and the stored change points outside its spans), a row at the rate before it
+      // is no change point: it is not recorded, and a stored change point on its date is withdrawn. Otherwise a shorter
+      // download would leave a change point behind, withdrawn once the full download is back as if the source had
+      // revised it.
+      // The value alone tells a held rate: withdrawals are neither batch rows nor live, so a null is always the
+      // no-single-target state. Only batch dates are looked up in `held`, so marking a stored date does nothing.
+      const held = new Set<string>();
+      if (downloadSpans.length > 0) {
+        const series = [...candidates, ...live.filter((record) => inSpan(record.observation_date) === undefined)]
+          .sort((left, right) => left.observation_date.localeCompare(right.observation_date));
+        series.forEach((row, index) => { if (index > 0 && series[index - 1].value === row.value) held.add(row.observation_date); });
+      }
       const recorded: OfficialPolicyRateHistoryRecord[] = [];
       let unchanged = 0;
       let revisions = 0;
@@ -217,6 +233,11 @@ export class OfficialPolicyRateHistoryStore {
       let sequence = records.length;
       for (const candidate of candidates) {
         const current = latest.get(`${candidate.currency}:${candidate.observation_date}`);
+        if (held.has(candidate.observation_date)) {
+          // No change point; a stored one on this date is withdrawn below.
+          if (current === undefined || withdrawn(current)) unchanged += 1;
+          continue;
+        }
         // source_vintage_at is a response-level retrieval hint. Raw snapshots retain it without
         // turning an unchanged historical observation into a spurious value revision.
         if (current?.value === candidate.value && (current.rate_status ?? "numeric") === (candidate.rate_status ?? "numeric") && current.source_url === candidate.source_url) { unchanged += 1; continue; }
@@ -227,11 +248,11 @@ export class OfficialPolicyRateHistoryStore {
       let withdrawals = 0;
       if (downloadSpans.length > 0) {
         const [{ currency, retrieved_at: retrievedAt, first_seen_at: firstSeenAt }] = candidates;
-        const listed = new Set(candidates.map((candidate) => candidate.observation_date));
-        const live = latestRevisedSeries(records.filter((record) => record.currency === currency));
+        const listed = new Set(candidates.map((candidate) => candidate.observation_date).filter((date) => !held.has(date)));
         for (const record of live) {
           if (listed.has(record.observation_date)) continue;
-          const span = downloadSpans.find((item) => item.first_observation_date <= record.observation_date && record.observation_date <= item.last_observation_date);
+          // The withdrawal names the file whose span holds the date.
+          const span = inSpan(record.observation_date);
           if (span === undefined) continue;
           recorded.push(validateRecord({
             schema_version: "1.0", sequence: ++sequence, series: "policy_rate_official_history", evidence_tier: POLICY_RATE_OFFICIAL_HISTORY_EVIDENCE_TIER,

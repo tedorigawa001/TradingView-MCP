@@ -163,7 +163,9 @@ async function collectRbaCashRateTargetHistory(input: {
     ...current.changes.map((row) => ({ ...row, source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt })),
   ]);
   const observations: OfficialPolicyRateObservation[] = merged.map((row) => ({ currency: input.source.currency, source_symbol: input.source.sourceSymbol, observation_date: row.observation_date, value: row.value, source_url: row.source_url, source_vintage_at: row.source_vintage_at, raw_sha256: row.raw_sha256, retrieved_at: retrievedAt }));
-  // One span per file, so a change point the workbook or the CSV no longer has is withdrawn on that file's word.
+  // One span per file, so a change point the workbook or the CSV no longer has is withdrawn on that file's word. The
+  // join is the exception: the CSV's first day is a change only while the workbook ends on another rate, so when the
+  // workbook's last rate comes to match it, that day is withdrawn under the CSV, whose span holds it.
   const persisted = await input.store.observeMany(observations, [
     { source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: historicalVintageAt, first_observation_date: historical.source_first_observation_date, last_observation_date: historical.source_last_observation_date },
     { source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt, first_observation_date: current.source_first_observation_date, last_observation_date: current.source_last_observation_date },

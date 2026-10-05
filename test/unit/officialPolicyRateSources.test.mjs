@@ -310,27 +310,35 @@ test("an ECB revision that removes a change withdraws it, and every download's r
   const { path, store } = await historyStore();
   const archived = [];
   const ecbCsv = (rows) => ["KEY,TIME_PERIOD,OBS_VALUE,TITLE", ...rows.map(([date, value]) => `FM.D.U2.EUR.4F.KR.DFR.LEV,${date},${value},Deposit facility`)].join("\n");
-  const run = (raw, now) => collectOfficialPolicyRateHistory({
+  const run = (raw, now, lastModified) => collectOfficialPolicyRateHistory({
     sourceId: "ecb_deposit_facility", store,
     archive: { store: async (hash, body) => { archived.push({ hash, body }); return { stored: true, bytes: Buffer.byteLength(body) }; } },
-    fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: () => null } }),
+    fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: (name) => name === "last-modified" ? lastModified : null } }),
     now: new Date(now),
   });
   const firstRaw = ecbCsv([["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 5]]);
   const secondRaw = ecbCsv([["2025-01-01", 4], ["2025-02-01", 4], ["2025-03-01", 4]]);
-  const first = await run(firstRaw, "2026-07-29T12:00:00.000Z");
-  const second = await run(secondRaw, "2026-07-30T12:00:00.000Z");
+  const first = await run(firstRaw, "2026-07-29T12:00:00.000Z", "Mon, 27 Jul 2026 15:00:00 GMT");
+  const second = await run(secondRaw, "2026-07-30T12:00:00.000Z", "Wed, 29 Jul 2026 15:00:00 GMT");
   assert.deepEqual(second.first_seen, { recorded: 1, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 1 });
   assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4]]);
   assert.deepEqual(await withdrawalsIn(path), [["2025-02-01", second.source_url, second.raw_sha256]]);
+  // The withdrawal carries the second download's vintage; the version it withdrew keeps the first's.
+  const logged = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(logged.map((record) => [record.observation_date, record.rate_status ?? "numeric", record.source_vintage_at]), [
+    ["2025-01-01", "numeric", "2026-07-27T15:00:00.000Z"],
+    ["2025-02-01", "numeric", "2026-07-27T15:00:00.000Z"],
+    ["2025-02-01", "withdrawn", "2026-07-29T15:00:00.000Z"],
+  ]);
   assert.equal((await store.getLatest("EUR")).value, 4);
   const coverage = await store.coverage();
   assert.deepEqual([coverage.currencies.EUR.withdrawals, coverage.raw_snapshots, coverage.source_coverage.ecb_deposit_facility.latest_raw_sha256], [1, 2, second.raw_sha256]);
   assert.deepEqual(archived.map(({ hash, body }) => [hash, body]), [[first.raw_sha256, firstRaw], [second.raw_sha256, secondRaw]]);
-  // A shorter export that starts later is no word on the earlier change, which stays.
-  const third = await run(ecbCsv([["2025-03-01", 4]]), "2026-07-31T12:00:00.000Z");
-  assert.equal(third.first_seen.withdrawn, 0);
-  assert.deepEqual((await revisedOf(store, "EUR"))[0], ["2025-01-01", 4]);
+  // A shorter export that starts later is no word on the earlier change, which stays, and its first row, at the rate
+  // the series already holds, is no new change point.
+  const third = await run(ecbCsv([["2025-03-01", 4]]), "2026-07-31T12:00:00.000Z", null);
+  assert.deepEqual(third.first_seen, { recorded: 0, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 0 });
+  assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4]]);
 });
 
 test("a FRED revision withdraws on the word of the joined download", async () => {
@@ -378,9 +386,44 @@ test("an RBA revision withdraws a change from the workbook or the CSV on that fi
   const second = await run(8, [{ observation_date: "1990-08-02", value: 14 }], currentSecond, "2026-07-30T12:00:00.000Z");
   assert.deepEqual([second.first_seen.recorded, second.first_seen.withdrawn], [3, 2]);
   assert.deepEqual(await revisedOf(store, "AUD"), [["1990-08-02", 14], ["2011-01-04", 4.75]]);
+  // The withdrawn dates hold no record of the first run anymore; later the workbook's 2010 change comes back, so the
+  // CSV's first day is no change again and is withdrawn under the CSV, which still lists it unchanged.
+  const third = await run(9, [{ observation_date: "1990-08-02", value: 14 }, { observation_date: "2010-11-03", value: 4.75 }],
+    currentSecond, "2026-07-31T12:00:00.000Z");
+  assert.deepEqual([third.first_seen.reappeared, third.first_seen.withdrawn], [1, 1]);
+  assert.deepEqual(await revisedOf(store, "AUD"), [["1990-08-02", 14], ["2010-11-03", 4.75]]);
   const sha256 = (body) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
   assert.deepEqual(await withdrawalsIn(path), [
     ["2010-11-03", "https://www.rba.gov.au/statistics/tables/xls-hist/f01dhist.xls", sha256(Buffer.alloc(4_096, 8))],
     ["2011-11-01", "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv", sha256(currentSecond)],
+    ["2011-01-04", "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv", sha256(currentSecond)],
   ]);
+});
+
+test("BoC, BoE and SNB revisions withdraw on the span of their own export", async () => {
+  const boc = (rows) => JSON.stringify({ observations: rows.map(([d, v]) => ({ d, V39079: { v } })) });
+  const boe = (rows) => ["DATE,IUDBEDR", ...rows.map(([date, value]) => `${date},${value}`)].join("\n");
+  const snb = (rows) => ['"CubeId";"snboffzisa"', '"PublishingDate";"2026-07-21 09:00"', "", '"Date";"D0";"Value"',
+    ...rows.map(([month, value]) => `"${month}";"LZ";"${value}"`)].join("\n");
+  const cases = [
+    ["boc_target_overnight_rate", "CAD", boc([["2025-01-01", "3.25"], ["2025-01-30", "3.00"], ["2025-02-03", "3.00"]]),
+      boc([["2025-01-01", "3.25"], ["2025-01-30", "3.25"], ["2025-02-03", "3.25"]]), [["2025-01-01", 3.25]], "2025-01-30"],
+    ["boe_bank_rate", "GBP", boe([["01 Jan 2025", "4.75"], ["06 Feb 2025", "4.50"], ["07 Feb 2025", "4.50"]]),
+      boe([["01 Jan 2025", "4.75"], ["06 Feb 2025", "4.75"], ["07 Feb 2025", "4.75"]]), [["2025-01-01", 4.75]], "2025-02-06"],
+    // SNB dates are month ends; the last month of the span is a change in the first export only.
+    ["snb_policy_rate_or_libor_target_midpoint", "CHF", snb([["2025-04", "0.25"], ["2025-05", "0.25"], ["2025-06", "0"]]),
+      snb([["2025-04", "0.25"], ["2025-05", "0.25"], ["2025-06", "0.25"]]), [["2025-04-30", 0.25]], "2025-06-30"],
+  ];
+  for (const [sourceId, currency, firstRaw, secondRaw, revised, withdrawnDate] of cases) {
+    const { path, store } = await historyStore();
+    const run = (raw, now) => collectOfficialPolicyRateHistory({
+      sourceId, store, archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+      fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: () => null } }), now: new Date(now),
+    });
+    await run(firstRaw, "2026-07-29T12:00:00.000Z");
+    const second = await run(secondRaw, "2026-07-30T12:00:00.000Z");
+    assert.equal(second.first_seen.withdrawn, 1, sourceId);
+    assert.deepEqual(await revisedOf(store, currency), revised, sourceId);
+    assert.deepEqual(await withdrawalsIn(path), [[withdrawnDate, second.source_url, second.raw_sha256]], sourceId);
+  }
 });
