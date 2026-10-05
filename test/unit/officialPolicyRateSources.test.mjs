@@ -257,3 +257,35 @@ test("SNB reads a whitespace rate as missing, not 0, and refuses what is no deci
   assert.equal(snb("0").changes[0].value, 0);
   assert.throws(() => snb("0x10"), /invalid observation/);
 });
+
+test("a decimal too long to be finite is no rate for any source", async () => {
+  const { parseBocTargetOvernightRateJson, parseFredFedTargetRangeCsv, parseRbaCashRateTargetCsv, parseSnbOfficialInterestRatesCsv } =
+    await import("../../build/officialPolicyRateSources.js");
+  // 400 digits match a decimal but read as Infinity, which JSON writes as null.
+  const huge = "9".repeat(400);
+  assert.throws(() => parseEcbDepositFacilityCsv(["KEY,TIME_PERIOD,OBS_VALUE,TITLE", `FM.D.U2.EUR.4F.KR.DFR.LEV,2025-01-01,${huge},x`].join("\n")), /invalid observation/);
+  assert.throws(() => parseBocTargetOvernightRateJson(JSON.stringify({ observations: [{ d: "2025-01-01", V39079: { v: huge } }] })), /invalid value/);
+  assert.throws(() => parseBoeBankRateCsv(`DATE,IUDBEDR\n02 Jan 1975,${huge}`), /non-finite rate/);
+  assert.throws(() => parseFredFedTargetRangeCsv(`observation_date,DFEDTARL,DFEDTARU\n2025-01-01,0,${huge}`), /invalid observation/);
+  assert.throws(() => parseRbaCashRateTargetCsv(["Title,Cash Rate Target", "Series ID,FIRMMCRTD", `04-Jan-2025,${huge}`].join("\n")), /invalid observation/);
+  assert.throws(() => parseSnbOfficialInterestRatesCsv(['"CubeId";"snboffzisa"', '"Date";"D0";"Value"', `"2019-06";"LZ";"${huge}"`].join("\n")), /invalid observation/);
+});
+
+test("a row missing its value column is refused, apart from a blank value", async () => {
+  const { parseFredFedTargetHistoryCsv, parseRbaCashRateTargetCsv, parseSnbOfficialInterestRatesCsv } = await import("../../build/officialPolicyRateSources.js");
+  const missing = /missing its value column/;
+  // RBA: a blank target is the live incomplete day and left out; no target column at all is refused, not left out.
+  const rba = (row) => parseRbaCashRateTargetCsv(["Title,Cash Rate Target", "Series ID,FIRMMCRTD", "04-Jan-2025,4.35", row].join("\n"));
+  assert.equal(rba("18-Feb-2025,").source_last_observation_date, "2025-01-04");
+  assert.throws(() => rba("18-Feb-2025"), missing);
+  // SNB: a blank policy rate is missing and falls back to the range; a row without the value column is refused.
+  const snb = (row) => parseSnbOfficialInterestRatesCsv(['"CubeId";"snboffzisa"', '"Date";"D0";"Value"', row,
+    '"2019-05";"UG0";"-1.25"', '"2019-05";"OG0";"-0.25"'].join("\n"));
+  assert.equal(snb('"2019-05";"LZ";""').changes[0].value, -0.75);
+  assert.throws(() => snb('"2019-05";"LZ"'), missing);
+  // ECB and the FRED history: a short row is refused as malformed.
+  assert.throws(() => parseEcbDepositFacilityCsv("KEY,TIME_PERIOD,OBS_VALUE,TITLE\nFM.D.U2.EUR.4F.KR.DFR.LEV,2025-01-01"), missing);
+  assert.throws(() => parseFredFedTargetHistoryCsv("observation_date,DFEDTAR,DFEDTARL,DFEDTARU\n2008-12-15,1.00"), missing);
+  assert.equal(parseFredFedTargetHistoryCsv("observation_date,DFEDTAR,DFEDTARL,DFEDTARU\n2008-12-15,1.00,,").changes[0].value, 1,
+    "a single target with blank range columns is still read");
+});

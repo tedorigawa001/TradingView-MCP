@@ -226,14 +226,18 @@ const DECIMAL_RATE = /^-?(?:\d+(?:\.\d+)?|\.\d+)$/;
 /**
  * A rate cell read strictly (BACKLOG 102-10): blank or only whitespace is null, a plain decimal is its number, and
  * anything else throws `invalid`. Number() reads "" and " " as 0, the same as a real zero-rate decision, so a blank
- * ECB or BoC cell was stored and counted as one; it also reads "0x10" as 16 and "1e1" as 10. Each parser decides what
- * a null means for its source.
+ * ECB or BoC cell was stored and counted as one; it also reads "0x10" as 16 and "1e1" as 10. A row without the cell
+ * (`undefined`) is no blank but a malformed row, and a decimal too long to be finite (400 digits read as Infinity) is
+ * no rate; both throw. Each parser decides what a null means for its source.
  */
 function rateCell(value: string | undefined, invalid: string): number | null {
-  const text = (value ?? "").trim();
+  if (value === undefined) throw new Error(`${invalid} (a row is missing its value column)`);
+  const text = value.trim();
   if (text === "") return null;
   if (!DECIMAL_RATE.test(text)) throw new Error(invalid);
-  return Number(text);
+  const rate = Number(text);
+  if (!Number.isFinite(rate)) throw new Error(invalid);
+  return rate;
 }
 
 export function parseEcbDepositFacilityCsv(raw: string): ParsedOfficialPolicyRateSeries {
@@ -384,14 +388,15 @@ export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTar
   for (const line of lines.slice(1)) {
     const cells = parseCsvLine(line);
     const date = cells[dateIndex];
-    const single = cells[singleIndex]?.trim() ?? "";
-    const lower = cells[lowerIndex]?.trim() ?? "";
-    const upper = cells[upperIndex]?.trim() ?? "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || (single === "" && (lower === "" || upper === "")) || (single !== "" && (lower !== "" || upper !== ""))) throw new Error("FRED Fed target history CSV contains an ambiguous observation");
     const invalid = "FRED Fed target history CSV contains an invalid observation";
-    const singleRate = rateCell(single, invalid);
-    const lowerRate = rateCell(lower, invalid);
-    const upperRate = rateCell(upper, invalid);
+    // Read first, so a row missing a column is refused rather than taken for a blank one.
+    const singleRate = rateCell(cells[singleIndex], invalid);
+    const lowerRate = rateCell(cells[lowerIndex], invalid);
+    const upperRate = rateCell(cells[upperIndex], invalid);
+    const single = cells[singleIndex].trim();
+    const lower = cells[lowerIndex].trim();
+    const upper = cells[upperIndex].trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || (single === "" && (lower === "" || upper === "")) || (single !== "" && (lower !== "" || upper !== ""))) throw new Error("FRED Fed target history CSV contains an ambiguous observation");
     const value = singleRate ?? ((lowerRate ?? NaN) + (upperRate ?? NaN)) / 2;
     if (!Number.isFinite(value) || value < -10 || value > 100 || (singleRate === null && lowerRate! > upperRate!)) throw new Error(invalid);
     if (lastDate !== null && date <= lastDate) throw new Error("FRED Fed target history CSV observations are not strictly ordered");
@@ -423,9 +428,9 @@ export function parseRbaCashRateTargetCsv(raw: string): ParsedOfficialPolicyRate
   for (const line of lines.slice(seriesIndex + 1)) {
     const cells = parseCsvLine(line);
     const rawDate = cells[0];
-    const rawValue = cells[targetIndex]?.trim();
-    // The live F1 file includes the current incomplete trading day with no target value.
-    const value = rateCell(rawValue, "RBA cash rate target CSV contains an invalid observation");
+    // The live F1 file includes the current incomplete trading day with a blank target, which is left out; a row
+    // without the target column at all is malformed and refused rather than left out the same way.
+    const value = rateCell(cells[targetIndex], "RBA cash rate target CSV contains an invalid observation");
     if (value === null) continue;
     if (!/^\d{2}-[A-Za-z]{3}-\d{4}$/.test(rawDate) || value < -10 || value > 100) throw new Error("RBA cash rate target CSV contains an invalid observation");
     const date = parseRbaDate(rawDate);
