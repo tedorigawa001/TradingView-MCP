@@ -43,9 +43,10 @@ export type OfficialPolicyRateObservation = Omit<OfficialPolicyRateHistoryRecord
 
 /**
  * One downloaded file and every date it gives a valid rate for, in order (BACKLOG 102-09). The sources keep only their
- * change points, so on an observed date the download does not list there is no change: a change point stored from an
- * earlier download on that date has been withdrawn by the source. A date the file leaves out or blank is not judged,
- * nor is any date outside it, so a missing row or a shorter download leaves what is stored there as it was.
+ * change points, so each observed date has the rate of the download's last change on or before it, and a change point
+ * stored on an observed date where that rate no longer changes has been withdrawn by the source. A date the file leaves
+ * out or blank is not judged, nor is any date outside it or after the retrieval day, so a missing row or a shorter
+ * download leaves what is stored there as it was.
  */
 export type OfficialPolicyRateDownloadSpan = {
   source_url: string;
@@ -162,14 +163,18 @@ function observedDates(spans: OfficialPolicyRateDownloadSpan[], candidates: Offi
     if (!validUrl(span.source_url) || typeof span.raw_sha256 !== "string" || !/^sha256:[a-f0-9]{64}$/.test(span.raw_sha256)
       || (span.source_vintage_at !== null && (typeof span.source_vintage_at !== "string" || !isCanonicalTimestamp(span.source_vintage_at)))
       || !Array.isArray(dates) || dates.length < 1 || dates.length > MAX_OBSERVED_DATES
-      || dates.some((date, index) => typeof date !== "string" || !isCalendarDate(date) || (index > 0 && date <= dates[index - 1]))) {
+      // Array.from reads a hole as undefined, which `some` alone would skip.
+      || Array.from(dates).some((date, index) => typeof date !== "string" || !isCalendarDate(date) || (index > 0 && date <= dates[index - 1]))) {
       throw new Error("invalid official policy-rate download span");
     }
   }
   const sorted = [...spans].sort((left, right) => left.observed_dates[0].localeCompare(right.observed_dates[0]));
+  // A date after the retrieval day is no observation yet: SNB dates a month by its last day, so the current month would
+  // otherwise turn a change found there into a record dated after it was seen.
+  const retrievalDay = first.retrieved_at.slice(0, 10);
   sorted.forEach((span, index) => {
     if (index > 0 && span.observed_dates[0] <= sorted[index - 1].observed_dates.at(-1)!) throw new Error("official policy-rate download spans overlap");
-    for (const date of span.observed_dates) observed.set(date, span);
+    for (const date of span.observed_dates) if (date <= retrievalDay) observed.set(date, span);
   });
   for (const candidate of candidates) {
     const span = observed.get(candidate.observation_date);
@@ -199,7 +204,7 @@ export class OfficialPolicyRateHistoryStore {
    * a missing row, or that a download starting later only repeats. Every record is checked before the first is written.
    */
   async observeMany(observations: OfficialPolicyRateObservation[], spans: OfficialPolicyRateDownloadSpan[] = []): Promise<{
-    recorded: OfficialPolicyRateHistoryRecord[]; unchanged: number; revisions: number; reappeared: number; withdrawn: number;
+    recorded: OfficialPolicyRateHistoryRecord[]; unchanged: number; revisions: number; reappeared: number; withdrawn: number; derived: number;
   }> {
     if (observations.length < 1 || observations.length > 10_000) throw new Error("official policy-rate batch must contain 1 to 10000 observations");
     if (observations.some((observation) => observation.rate_status === "withdrawn")) throw new Error("an official policy-rate observation cannot be a withdrawal");
@@ -229,6 +234,7 @@ export class OfficialPolicyRateHistoryStore {
       let revisions = 0;
       let reappeared = 0;
       let withdrawals = 0;
+      let derived = 0;
       let sequence = records.length;
       // source_vintage_at is a response-level retrieval hint. Raw snapshots retain it without
       // turning an unchanged historical observation into a spurious value revision.
@@ -288,12 +294,13 @@ export class OfficialPolicyRateHistoryStore {
             source_vintage_at: entry.span.source_vintage_at, raw_sha256: entry.span.raw_sha256,
           };
           if (same(current, point)) { if (candidate !== undefined) unchanged += 1; return; }
+          if (candidate === undefined) derived += 1;
           record(current, point);
         });
       }
       await this.log.assertAppendableUnlocked(records, recorded);
       for (const item of recorded) await this.log.appendUnlocked(item);
-      return { recorded, unchanged, revisions, reappeared, withdrawn: withdrawals };
+      return { recorded, unchanged, revisions, reappeared, withdrawn: withdrawals, derived };
     });
   }
 

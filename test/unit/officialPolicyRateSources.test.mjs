@@ -328,7 +328,7 @@ test("an ECB revision that removes a change withdraws it, and every download's r
   const secondRaw = ecbCsv([["2025-01-01", 4], ["2025-02-01", 4], ["2025-03-01", 4]]);
   const first = await run(firstRaw, "2026-07-29T12:00:00.000Z", "Mon, 27 Jul 2026 15:00:00 GMT");
   const second = await run(secondRaw, "2026-07-30T12:00:00.000Z", "Wed, 29 Jul 2026 15:00:00 GMT");
-  assert.deepEqual(second.first_seen, { recorded: 1, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 1 });
+  assert.deepEqual(second.first_seen, { recorded: 1, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 1, derived: 0 });
   assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4]]);
   assert.deepEqual(await withdrawalsIn(path), [["2025-02-01", second.source_url, second.raw_sha256]]);
   // The withdrawal carries the second download's vintage; the version it withdrew keeps the first's.
@@ -345,7 +345,7 @@ test("an ECB revision that removes a change withdraws it, and every download's r
   // A shorter export that starts later is no word on the earlier change, which stays, and its first row, at the rate
   // the series already holds, is no new change point.
   const third = await run(ecbCsv([["2025-03-01", 4]]), "2026-07-31T12:00:00.000Z", null);
-  assert.deepEqual(third.first_seen, { recorded: 0, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 0 });
+  assert.deepEqual(third.first_seen, { recorded: 0, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 0, derived: 0 });
   assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4]]);
 });
 
@@ -445,7 +445,7 @@ test("a row missing from an ECB re-download or blank in the RBA CSV withdraws no
   });
   await ecbRun(ecbCsv([["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 5]]), "2026-07-29T12:00:00.000Z");
   const missing = await ecbRun(ecbCsv([["2025-01-01", 4], ["2025-03-01", 5]]), "2026-07-30T12:00:00.000Z");
-  assert.deepEqual(missing.first_seen, { recorded: 0, unchanged: 2, revisions: 0, reappeared: 0, withdrawn: 0 });
+  assert.deepEqual(missing.first_seen, { recorded: 0, unchanged: 2, revisions: 0, reappeared: 0, withdrawn: 0, derived: 0 });
   assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4], ["2025-02-01", 5]]);
 
   const current = (rows) => ["F1 INTEREST RATES AND YIELDS - MONEY MARKET", "Title,Cash Rate Target,Interbank Overnight Cash Rate",
@@ -464,4 +464,20 @@ test("a row missing from an ECB re-download or blank in the RBA CSV withdraws no
   const blank = await rbaRun(current(["04-Jan-2011,4.75,4.75", "01-Nov-2011,,4.49", "02-Nov-2011,4.50,4.49"]), "2026-07-30T12:00:00.000Z");
   assert.deepEqual([blank.first_seen.recorded, blank.first_seen.withdrawn], [0, 0]);
   assert.deepEqual(await revisedOf(rba, "AUD"), [["1990-08-02", 14], ["2011-01-04", 4.75], ["2011-11-01", 4.5]]);
+});
+
+test("an SNB month-end after the retrieval day is no observation yet (102-09)", async () => {
+  // The September row is missing from the second export and October repeats 0.25; October's month end is after the
+  // retrieval day, so it is no observation, and nothing is derived there.
+  const snb = (rows) => ['"CubeId";"snboffzisa"', '"PublishingDate";"2026-10-01 09:00"', "", '"Date";"D0";"Value"',
+    ...rows.map(([month, value]) => `"${month}";"LZ";"${value}"`)].join("\n");
+  const { store } = await historyStore();
+  const run = (raw, now) => collectOfficialPolicyRateHistory({
+    sourceId: "snb_policy_rate_or_libor_target_midpoint", store, archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+    fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: () => null } }), now: new Date(now),
+  });
+  await run(snb([["2026-08", "0.25"], ["2026-09", "0"]]), "2026-10-01T12:00:00.000Z");
+  const second = await run(snb([["2026-08", "0.25"], ["2026-10", "0.25"]]), "2026-10-05T12:00:00.000Z");
+  assert.deepEqual(second.first_seen, { recorded: 0, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 0, derived: 0 });
+  assert.deepEqual(await revisedOf(store, "CHF"), [["2026-08-31", 0.25], ["2026-09-30", 0]]);
 });

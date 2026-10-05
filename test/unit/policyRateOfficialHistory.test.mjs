@@ -158,6 +158,8 @@ test("a withdrawal touches only the batch's currency, and a malformed span write
     [[span(HASH_2, "2025-01-01", "2025-03-01")], /2025-01-01 was not read from the file that observed it/],
     [[observedIn(HASH_3, ["2024-12-31", "2025-01-01"])], /first observed date of an official policy-rate download must be a change/],
     [[observedIn(HASH_3, [])], /invalid official policy-rate download span/],
+    // A hole, which `some` alone would skip.
+    [[observedIn(HASH_3, ["2025-01-01", , "2025-03-01"])], /invalid official policy-rate download span/],
     [[observedIn(HASH_3, days("1750-01-01", "2025-01-01"))], /invalid official policy-rate download span/],
     [[observedIn(HASH_3, ["2025-01-01", "2025-02-30"])], /invalid official policy-rate download span/],
     [[observedIn(HASH_3, ["2025-01-01", "2025-03-01", "2025-02-01"])], /invalid official policy-rate download span/],
@@ -263,20 +265,20 @@ test("a date a download leaves out is not judged, and a change across the gap is
   const { store } = await freshStore();
   await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [observedIn(HASH_1, ["2025-01-01", "2025-02-01", "2025-03-01"])]);
   const gap = await store.observeMany([ecb("2025-01-01", 4, HASH_2, DAY_2), ecb("2025-03-01", 5, HASH_2, DAY_2)], [observedIn(HASH_2, ["2025-01-01", "2025-03-01"])]);
-  assert.deepEqual([gap.recorded.length, gap.unchanged, gap.withdrawn], [0, 2, 0]);
+  assert.deepEqual([gap.recorded.length, gap.unchanged, gap.withdrawn, gap.derived], [0, 2, 0, 0]);
   assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-02-01", 5]]);
   // The parser compacts across the gap, so a fall back to 4 on 2025-03-01 is no change it lists; against the kept 5 it is
   // one. It is read from the file that observed it, under the address of the row whose rate it carries.
   const { path, store: other } = await freshStore();
   await other.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [observedIn(HASH_1, ["2025-01-01", "2025-02-01"])]);
   const hidden = await other.observeMany([ecb("2025-01-01", 4, HASH_2, DAY_2)], [observedIn(HASH_2, ["2025-01-01", "2025-03-01"], "https://data-api.ecb.europa.eu/service/data/FM/export")]);
-  assert.deepEqual([hidden.recorded.length, hidden.unchanged, hidden.revisions, hidden.withdrawn], [1, 1, 0, 0]);
+  assert.deepEqual([hidden.recorded.length, hidden.unchanged, hidden.revisions, hidden.withdrawn, hidden.derived], [1, 1, 0, 0, 1]);
   assert.deepEqual(await series(other), [["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 4]]);
   const found = (await lines(path)).at(-1);
   assert.deepEqual([found.observation_date, found.value, found.source_url, found.raw_sha256, found.retrieved_at], ["2025-03-01", 4, ECB_URL, HASH_2, DAY_2]);
   // When that change is stored already, the batch writes nothing, and only its own listed row counts as unchanged.
   const again = await other.observeMany([ecb("2025-01-01", 4, HASH_3, DAY_3)], [observedIn(HASH_3, ["2025-01-01", "2025-03-01"])]);
-  assert.deepEqual([again.recorded.length, again.unchanged], [0, 1]);
+  assert.deepEqual([again.recorded.length, again.unchanged, again.derived], [0, 1, 0]);
 });
 
 test("a change found on another file's first day is read from that file", async () => {
@@ -293,8 +295,27 @@ test("a change found on another file's first day is read from that file", async 
     [aud("1990-08-02", 14, HASH_1, XLS), aud("2010-11-03", 4.75, HASH_1, XLS), aud("2011-11-01", 4.5, HASH_2, CSV)],
     [observedIn(HASH_1, ["1990-08-02", "2010-11-03", "2010-12-31"], XLS), { ...observedIn(HASH_2, ["2011-01-04", "2011-11-01"], CSV), source_vintage_at: "2026-07-29T00:00:00.000Z" }],
   );
-  assert.deepEqual([joined.recorded.length, joined.withdrawn], [4, 0]);
+  assert.deepEqual([joined.recorded.length, joined.withdrawn, joined.derived], [4, 0, 1]);
   assert.deepEqual(await series(store, "AUD"), [["1990-08-02", 14], ["2010-11-03", 4.75], ["2011-01-02", 5], ["2011-01-04", 4.75], ["2011-11-01", 4.5]]);
   const found = (await lines(path)).find((record) => record.observation_date === "2011-01-04");
   assert.deepEqual([found.value, found.source_url, found.raw_sha256, found.source_vintage_at], [4.75, CSV, HASH_2, "2026-07-29T00:00:00.000Z"]);
+});
+
+test("a date after the retrieval day is not judged, so no change is derived there", async () => {
+  const chf = (observation_date, value, raw_sha256, retrieved_at) => observation({
+    currency: "CHF", source_symbol: "ECONOMICS:CHINTR", observation_date, value, raw_sha256, retrieved_at, source_url: "https://data.snb.ch/api/cube/snboffzisa/data/csv/en",
+  });
+  const { store } = await freshStore();
+  await store.observeMany([chf("2026-08-31", 0.25, HASH_1, "2026-10-01T12:00:00.000Z"), chf("2026-09-30", 0, HASH_1, "2026-10-01T12:00:00.000Z")],
+    [observedIn(HASH_1, ["2026-08-31", "2026-09-30"], "https://data.snb.ch/api/cube/snboffzisa/data/csv/en")]);
+  // September is missing and October, dated 2026-10-31, repeats 0.25: against the kept 0 it would be a change.
+  const early = await store.observeMany([chf("2026-08-31", 0.25, HASH_2, "2026-10-05T12:00:00.000Z")],
+    [observedIn(HASH_2, ["2026-08-31", "2026-10-31"], "https://data.snb.ch/api/cube/snboffzisa/data/csv/en")]);
+  assert.deepEqual([early.recorded.length, early.derived], [0, 0]);
+  assert.deepEqual(await series(store, "CHF"), [["2026-08-31", 0.25], ["2026-09-30", 0]]);
+  // Retrieved on 2026-10-31 itself, the month end is observed, and the change back to 0.25 is derived there.
+  const due = await store.observeMany([chf("2026-08-31", 0.25, HASH_3, "2026-10-31T12:00:00.000Z")],
+    [observedIn(HASH_3, ["2026-08-31", "2026-10-31"], "https://data.snb.ch/api/cube/snboffzisa/data/csv/en")]);
+  assert.deepEqual([due.recorded.length, due.derived], [1, 1]);
+  assert.deepEqual(await series(store, "CHF"), [["2026-08-31", 0.25], ["2026-09-30", 0], ["2026-10-31", 0.25]]);
 });

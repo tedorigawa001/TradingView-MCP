@@ -177,9 +177,12 @@ async function collectRbaCashRateTargetHistory(input: {
   return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: input.source.sourceUrl, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: historical.source_observation_count + current.source_observation_count, source_first_observation_date: historical.source_first_observation_date, source_last_observation_date: current.source_last_observation_date }, raw_archives: { historical: historicalArchive, current: currentArchive }, raw_snapshots: { historical: historicalSnapshot, current: currentSnapshot }, first_seen: firstSeen(persisted) };
 }
 
-/** What one batch wrote, withdrawals and reappearances included (BACKLOG 102-09). */
+/**
+ * What one batch wrote (BACKLOG 102-09): withdrawals, reappearances, and the changes derived on observed dates the
+ * source does not list as changes (after a stored change kept on a date the download left out), all included.
+ */
 function firstSeen(persisted: Awaited<ReturnType<OfficialPolicyRateHistoryStore["observeMany"]>>) {
-  return { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions, reappeared: persisted.reappeared, withdrawn: persisted.withdrawn };
+  return { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions, reappeared: persisted.reappeared, withdrawn: persisted.withdrawn, derived: persisted.derived };
 }
 
 function compactRbaChanges<T extends { observation_date: string; value: number }>(rows: T[]): T[] {
