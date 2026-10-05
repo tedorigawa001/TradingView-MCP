@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
@@ -467,7 +467,7 @@ export class AnalysisJournalStore {
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("analysis journal record is too large");
     const handle = await open(
       this.filePath,
-      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
+      constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(),
       0o600,
     );
     try {
@@ -476,6 +476,7 @@ export class AnalysisJournalStore {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error("analysis journal file must be owned by the current user");
       }
+      await assertAppendableJsonl(handle, stat.size, "analysis journal");
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > MAX_JOURNAL_BYTES) throw new Error("analysis journal file is too large");
       const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);

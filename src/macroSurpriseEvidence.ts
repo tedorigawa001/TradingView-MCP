@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -175,8 +175,8 @@ export class MacroSurpriseEvidenceStore {
     await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
     const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("macro-surprise evidence record is too large");
-    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(), 0o600);
-    try { await handle.chmod(0o600); const written = await handle.write(line); if (written.bytesWritten !== line.byteLength) throw new Error("short write to macro-surprise evidence"); await handle.sync(); } finally { await handle.close(); }
+    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600);
+    try { await assertAppendableJsonl(handle, (await handle.stat()).size, "macro-surprise evidence"); await handle.chmod(0o600); const written = await handle.write(line); if (written.bytesWritten !== line.byteLength) throw new Error("short write to macro-surprise evidence"); await handle.sync(); } finally { await handle.close(); }
   }
 
   private async acquireLock(): Promise<() => Promise<void>> {

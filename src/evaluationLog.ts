@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertNotSymbolicLink, noFollowFlag, openExclusiveFile } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -120,12 +120,13 @@ export class AppendOnlyEvaluationLog {
       }
       const handle = await open(
         this.filePath,
-        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
+        constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(),
         0o600,
       );
       try {
         const stat = await handle.stat();
         if (!stat.isFile()) throw new Error("evaluation log path must be a regular file");
+        await assertAppendableJsonl(handle, stat.size, "evaluation log");
         await handle.chmod(0o600);
         await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
         await handle.sync();

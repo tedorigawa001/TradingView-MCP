@@ -83,3 +83,19 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
     await handle.close();
   }
 }
+
+/**
+ * Refuses to append to a JSONL file whose last line has no newline (BACKLOG 102-08). A reader that trims the text takes
+ * such a line as a whole record, but an append joins the next record onto it ("}{") and every later read of the file
+ * fails, while the append itself reported success. The line may also be the cut-off end of an earlier write, which
+ * only someone looking at the file can settle, so nothing is written and the file is left as it is. `handle` must be
+ * open for reading as well as appending (O_RDWR | O_APPEND, or "a+"), and `size` is its size from fstat.
+ */
+export async function assertAppendableJsonl(handle: FileHandle, size: number, label: string): Promise<void> {
+  if (size === 0) return;
+  const last = Buffer.alloc(1);
+  const { bytesRead } = await handle.read(last, 0, 1, size - 1);
+  if (bytesRead !== 1 || last[0] !== 0x0a) {
+    throw new Error(`${label} file does not end with a newline, so its last line may be incomplete; nothing was appended`);
+  }
+}

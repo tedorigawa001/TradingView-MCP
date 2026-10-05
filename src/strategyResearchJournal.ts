@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -526,11 +526,12 @@ export class StrategyResearchJournalStore {
     await this.ensureDirectory();
     const line = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("strategy research journal record is too large");
-    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(), 0o600);
+    const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600);
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("strategy research journal path must be a regular file");
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("strategy research journal file must be owned by the current user");
+      await assertAppendableJsonl(handle, stat.size, "strategy research journal");
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > MAX_FILE_BYTES) throw new Error("strategy research journal file is too large");
       const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);

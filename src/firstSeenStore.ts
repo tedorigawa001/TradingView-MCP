@@ -3,7 +3,7 @@ import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { dirname, resolve } from "node:path";
-import { assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const DEFAULT_LOCK_WAIT_MS = 30_000;
 function lockWaitMilliseconds(): number {
@@ -250,7 +250,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     if (line.byteLength > this.limits.maxRecordBytes) throw new Error(`${this.label} history record is too large`);
     const handle = await open(
       this.filePath,
-      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollowFlag(),
+      constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(),
       0o600,
     );
     try {
@@ -259,6 +259,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error(`${this.label} history file must be owned by the current user`);
       }
+      await assertAppendableJsonl(handle, stat.size, `${this.label} history`);
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > this.limits.maxFileBytes) {
         throw new Error(`${this.label} history file is too large`);
