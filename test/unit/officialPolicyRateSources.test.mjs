@@ -18,6 +18,7 @@ test("ECB source parser keeps only policy-rate change dates", () => {
   assert.deepEqual(parseEcbDepositFacilityCsv(csv), {
     changes: [{ observation_date: "2025-01-01", value: 3 }, { observation_date: "2025-02-05", value: 2.75 }],
     source_observation_count: 3, source_first_observation_date: "2025-01-01", source_last_observation_date: "2025-02-05",
+    observed_dates: ["2025-01-01", "2025-01-02", "2025-02-05"],
   });
 });
 
@@ -54,6 +55,7 @@ test("BoC source parser verifies V39079 and retains only change dates", async ()
   assert.deepEqual(parseBocTargetOvernightRateJson(raw), {
     changes: [{ observation_date: "2025-01-01", value: 3.25 }, { observation_date: "2025-01-30", value: 3 }],
     source_observation_count: 3, source_first_observation_date: "2025-01-01", source_last_observation_date: "2025-01-30",
+    observed_dates: ["2025-01-01", "2025-01-02", "2025-01-30"],
   });
   assert.throws(() => parseBocTargetOvernightRateJson(raw.replaceAll("V39079", "V39078")), /invalid value/);
 });
@@ -64,6 +66,7 @@ test("FRED Fed target range parser fixes the policy-rate definition to the midpo
   assert.deepEqual(parseFredFedTargetRangeCsv(raw), {
     changes: [{ observation_date: "2025-01-01", value: 4.375 }, { observation_date: "2025-09-18", value: 4.125 }],
     source_observation_count: 3, source_first_observation_date: "2025-01-01", source_last_observation_date: "2025-09-18",
+    observed_dates: ["2025-01-01", "2025-01-02", "2025-09-18"],
   });
   assert.throws(() => parseFredFedTargetRangeCsv(raw.replace("4.00,4.25", "4.50,4.25")), /invalid observation/);
 });
@@ -81,6 +84,7 @@ test("FRED Fed target history joins the former single target to the later range 
     { observation_date: "2008-12-15", value: 1 },
     { observation_date: "2008-12-16", value: 0.125 },
   ]);
+  assert.deepEqual(result.observed_dates, ["2008-12-15", "2008-12-16", "2008-12-17"]);
   assert.throws(() => parseFredFedTargetHistoryCsv(raw.replace("2008-12-16,,0.00,0.25", "2008-12-16,0.25,0.00,0.25")), /ambiguous observation/);
 });
 
@@ -118,6 +122,8 @@ test("RBA F1 parser uses the daily cash-rate target rather than the realised ove
   assert.deepEqual(parseRbaCashRateTargetCsv(raw), {
     changes: [{ observation_date: "2025-01-04", value: 4.35 }, { observation_date: "2025-02-18", value: 4.1 }],
     source_observation_count: 3, source_first_observation_date: "2025-01-04", source_last_observation_date: "2025-02-18",
+    // The blank target of the live incomplete day is no observation.
+    observed_dates: ["2025-01-04", "2025-01-05", "2025-02-18"],
   });
   assert.throws(() => parseRbaCashRateTargetCsv(raw.replace("FIRMMCRTD", "FIRMMCRID")), /unexpected series/);
 });
@@ -140,7 +146,7 @@ test("RBA collection joins its reviewed historical F1 workbook to the current CS
     sourceId: "rba_cash_rate_target",
     store: { observeRawSnapshot: async (snapshot) => { snapshots.push(snapshot); return { recorded: true, sequence: snapshots.length }; }, observeMany: async (rows) => { persisted = rows; return { recorded: rows, unchanged: 0, revisions: 0 }; } },
     archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
-    historicalRbaParser: () => ({ changes: [{ observation_date: "1990-08-02", value: 14 }, { observation_date: "2010-11-03", value: 4.75 }], source_observation_count: 5_171, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31" }),
+    historicalRbaParser: () => ({ changes: [{ observation_date: "1990-08-02", value: 14 }, { observation_date: "2010-11-03", value: 4.75 }], source_observation_count: 5_171, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31", observed_dates: ["1990-08-02", "2010-11-03", "2010-12-31"] }),
     fetch: async (url) => url.includes("f01dhist.xls")
       ? { ok: true, status: 200, text: async () => "", arrayBuffer: async () => historicalRaw.buffer.slice(historicalRaw.byteOffset, historicalRaw.byteOffset + historicalRaw.byteLength), headers: { get: () => null } }
       : { ok: true, status: 200, text: async () => currentRaw, headers: { get: () => null } },
@@ -178,6 +184,7 @@ test("SNB parser uses its policy rate and the historical Libor target-range midp
   assert.deepEqual(parseSnbOfficialInterestRatesCsv(raw), {
     changes: [{ observation_date: "2019-05-31", value: -0.75 }],
     source_observation_count: 3, source_first_observation_date: "2019-05-31", source_last_observation_date: "2019-07-31",
+    observed_dates: ["2019-05-31", "2019-06-30", "2019-07-31"],
   });
   assert.throws(() => parseSnbOfficialInterestRatesCsv(raw.replace('"OG0";"-0.25"', '"OG0";""')), /incomplete Libor target range/);
 });
@@ -204,6 +211,7 @@ test("BoE Bank Rate parser reduces the daily carry-forward export to its change 
   assert.equal(parsed.source_observation_count, 5);
   assert.equal(parsed.source_first_observation_date, "1975-01-02");
   assert.equal(parsed.source_last_observation_date, "2025-12-18");
+  assert.deepEqual(parsed.observed_dates, ["1975-01-02", "1975-01-03", "1975-01-20", "1975-01-21", "2025-12-18"]);
 });
 
 test("BoE Bank Rate parser refuses a substituted series, an unreadable date, and unordered rows", () => {
@@ -372,7 +380,7 @@ test("an RBA revision withdraws a change from the workbook or the CSV on that fi
     return collectOfficialPolicyRateHistory({
       sourceId: "rba_cash_rate_target", store,
       archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
-      historicalRbaParser: () => ({ changes: historicalChanges, source_observation_count: 5_171, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31" }),
+      historicalRbaParser: () => ({ changes: historicalChanges, source_observation_count: 5_171, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31", observed_dates: ["1990-08-02", "2010-11-03", "2010-12-31"] }),
       fetch: async (url) => url.includes("f01dhist.xls")
         ? { ok: true, status: 200, text: async () => "", arrayBuffer: async () => historicalRaw.buffer.slice(historicalRaw.byteOffset, historicalRaw.byteOffset + historicalRaw.byteLength), headers: { get: () => null } }
         : { ok: true, status: 200, text: async () => currentRaw, headers: { get: () => null } },
@@ -426,4 +434,34 @@ test("BoC, BoE and SNB revisions withdraw on the span of their own export", asyn
     assert.deepEqual(await revisedOf(store, currency), revised, sourceId);
     assert.deepEqual(await withdrawalsIn(path), [[withdrawnDate, second.source_url, second.raw_sha256]], sourceId);
   }
+});
+
+test("a row missing from an ECB re-download or blank in the RBA CSV withdraws nothing (102-09)", async () => {
+  const ecbCsv = (rows) => ["KEY,TIME_PERIOD,OBS_VALUE,TITLE", ...rows.map(([date, value]) => `FM.D.U2.EUR.4F.KR.DFR.LEV,${date},${value},Deposit facility`)].join("\n");
+  const { store } = await historyStore();
+  const ecbRun = (raw, now) => collectOfficialPolicyRateHistory({
+    sourceId: "ecb_deposit_facility", store, archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+    fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: () => null } }), now: new Date(now),
+  });
+  await ecbRun(ecbCsv([["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 5]]), "2026-07-29T12:00:00.000Z");
+  const missing = await ecbRun(ecbCsv([["2025-01-01", 4], ["2025-03-01", 5]]), "2026-07-30T12:00:00.000Z");
+  assert.deepEqual(missing.first_seen, { recorded: 0, unchanged: 2, revisions: 0, reappeared: 0, withdrawn: 0 });
+  assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4], ["2025-02-01", 5]]);
+
+  const current = (rows) => ["F1 INTEREST RATES AND YIELDS - MONEY MARKET", "Title,Cash Rate Target,Interbank Overnight Cash Rate",
+    "Description,Cash Rate Target on date,Interbank Overnight Cash Rate on date", "Frequency,Daily,Daily", "Series ID,FIRMMCRTD,FIRMMCRID", ...rows].join("\n");
+  const { store: rba } = await historyStore();
+  const historicalRaw = Buffer.alloc(4_096, 7);
+  const rbaRun = (raw, now) => collectOfficialPolicyRateHistory({
+    sourceId: "rba_cash_rate_target", store: rba, archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+    historicalRbaParser: () => ({ changes: [{ observation_date: "1990-08-02", value: 14 }], source_observation_count: 2, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31", observed_dates: ["1990-08-02", "2010-12-31"] }),
+    fetch: async (url) => url.includes("f01dhist.xls")
+      ? { ok: true, status: 200, arrayBuffer: async () => historicalRaw.buffer.slice(historicalRaw.byteOffset, historicalRaw.byteOffset + historicalRaw.byteLength), headers: { get: () => null } }
+      : { ok: true, status: 200, text: async () => raw, headers: { get: () => null } },
+    now: new Date(now),
+  });
+  await rbaRun(current(["04-Jan-2011,4.75,4.75", "01-Nov-2011,4.50,4.49", "02-Nov-2011,4.50,4.49"]), "2026-07-29T12:00:00.000Z");
+  const blank = await rbaRun(current(["04-Jan-2011,4.75,4.75", "01-Nov-2011,,4.49", "02-Nov-2011,4.50,4.49"]), "2026-07-30T12:00:00.000Z");
+  assert.deepEqual([blank.first_seen.recorded, blank.first_seen.withdrawn], [0, 0]);
+  assert.deepEqual(await revisedOf(rba, "AUD"), [["1990-08-02", 14], ["2011-01-04", 4.75], ["2011-11-01", 4.5]]);
 });

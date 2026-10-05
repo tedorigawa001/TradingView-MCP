@@ -5,7 +5,11 @@ import type { PolicyRateCurrency } from "./policyRateHistory.js";
 import { OfficialPolicyRateRawArchive, resolvePolicyRateOfficialRawArchivePath } from "./policyRateOfficialRawArchive.js";
 import { parseRbaHistoricalF1Xls } from "./rbaHistoricalF1Xls.js";
 
-type ParsedOfficialPolicyRateSeries = { changes: Array<{ observation_date: string; value: number }>; source_observation_count: number; source_first_observation_date: string; source_last_observation_date: string };
+/**
+ * `observed_dates` is every date the file gives a valid rate for, in order, so the store can tell a date the file leaves
+ * out or blank from one without a change (BACKLOG 102-09).
+ */
+type ParsedOfficialPolicyRateSeries = { changes: Array<{ observation_date: string; value: number }>; source_observation_count: number; source_first_observation_date: string; source_last_observation_date: string; observed_dates: string[] };
 
 type OfficialSource = {
   id: "ecb_deposit_facility" | "boc_target_overnight_rate" | "fred_fed_target_range_midpoint" | "rba_cash_rate_target" | "snb_policy_rate_or_libor_target_midpoint" | "boe_bank_rate";
@@ -119,8 +123,8 @@ export async function collectOfficialPolicyRateHistory(input: {
     raw_sha256: rawSha256,
     retrieved_at: retrievedAt,
   }));
-  // The download's span lets the store withdraw a stored change point the source no longer has (BACKLOG 102-09).
-  const persisted = await input.store.observeMany(observations, [{ source_url: source.sourceUrl, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, first_observation_date: parsed.source_first_observation_date, last_observation_date: parsed.source_last_observation_date }]);
+  // The dates the download observed let the store withdraw a stored change point the source no longer has (BACKLOG 102-09).
+  const persisted = await input.store.observeMany(observations, [{ source_url: source.sourceUrl, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, observed_dates: parsed.observed_dates }]);
   return { source_id: source.id, currency: source.currency as PolicyRateCurrency, source_url: source.sourceUrl, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: firstSeen(persisted) };
 }
 
@@ -165,10 +169,10 @@ async function collectRbaCashRateTargetHistory(input: {
   const observations: OfficialPolicyRateObservation[] = merged.map((row) => ({ currency: input.source.currency, source_symbol: input.source.sourceSymbol, observation_date: row.observation_date, value: row.value, source_url: row.source_url, source_vintage_at: row.source_vintage_at, raw_sha256: row.raw_sha256, retrieved_at: retrievedAt }));
   // One span per file, so a change point the workbook or the CSV no longer has is withdrawn on that file's word. The
   // join is the exception: the CSV's first day is a change only while the workbook ends on another rate, so when the
-  // workbook's last rate comes to match it, that day is withdrawn under the CSV, whose span holds it.
+  // workbook's last rate comes to match it, that day is withdrawn under the CSV, which observed it.
   const persisted = await input.store.observeMany(observations, [
-    { source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: historicalVintageAt, first_observation_date: historical.source_first_observation_date, last_observation_date: historical.source_last_observation_date },
-    { source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt, first_observation_date: current.source_first_observation_date, last_observation_date: current.source_last_observation_date },
+    { source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: historicalVintageAt, observed_dates: historical.observed_dates },
+    { source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt, observed_dates: current.observed_dates },
   ]);
   return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: input.source.sourceUrl, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: historical.source_observation_count + current.source_observation_count, source_first_observation_date: historical.source_first_observation_date, source_last_observation_date: current.source_last_observation_date }, raw_archives: { historical: historicalArchive, current: currentArchive }, raw_snapshots: { historical: historicalSnapshot, current: currentSnapshot }, first_seen: firstSeen(persisted) };
 }
@@ -231,7 +235,7 @@ async function collectFredFedTargetHistory(input: {
     retrieved_at: retrievedAt,
   }));
   // One download holds both the single target and the range, so one span covers both.
-  const persisted = await input.store.observeMany(observations, [{ source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, first_observation_date: parsed.source_first_observation_date, last_observation_date: parsed.source_last_observation_date }]);
+  const persisted = await input.store.observeMany(observations, [{ source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, observed_dates: parsed.observed_dates }]);
   return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: firstSeen(persisted) };
 }
 
@@ -264,6 +268,7 @@ export function parseEcbDepositFacilityCsv(raw: string): ParsedOfficialPolicyRat
   const seriesIndex = headers.indexOf("KEY");
   if (dateIndex < 0 || valueIndex < 0 || seriesIndex < 0) throw new Error("ECB deposit facility CSV is missing required columns");
   const observations: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let sourceCount = 0;
   let firstDate: string | null = null;
   let lastDate: string | null = null;
@@ -279,12 +284,13 @@ export function parseEcbDepositFacilityCsv(raw: string): ParsedOfficialPolicyRat
     sourceCount += 1;
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     if (prior === value) continue;
     observations.push({ observation_date: date, value });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("ECB deposit facility CSV has no valid observations");
-  return { changes: observations, source_observation_count: sourceCount, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes: observations, source_observation_count: sourceCount, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 export function parseBocTargetOvernightRateJson(raw: string): ParsedOfficialPolicyRateSeries {
@@ -294,6 +300,7 @@ export function parseBocTargetOvernightRateJson(raw: string): ParsedOfficialPoli
   const observations = (parsed as { observations?: unknown }).observations;
   if (!Array.isArray(observations) || observations.length < 1) throw new Error("BoC target overnight rate response has no observations");
   const changes: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let prior: number | null = null;
@@ -309,12 +316,13 @@ export function parseBocTargetOvernightRateJson(raw: string): ParsedOfficialPoli
     if (lastDate !== null && date <= lastDate) throw new Error("BoC target overnight rate observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     if (prior === value) continue;
     changes.push({ observation_date: date, value });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("BoC target overnight rate response has no valid observations");
-  return { changes, source_observation_count: observations.length, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: observations.length, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 /**
@@ -330,6 +338,7 @@ export function parseBoeBankRateCsv(raw: string): ParsedOfficialPolicyRateSeries
     throw new Error("BoE Bank Rate response does not carry the expected DATE and IUDBEDR columns");
   }
   const changes: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let prior: number | null = null;
@@ -348,12 +357,13 @@ export function parseBoeBankRateCsv(raw: string): ParsedOfficialPolicyRateSeries
     if (lastDate !== null && date <= lastDate) throw new Error("BoE Bank Rate observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     if (prior === value) continue;
     changes.push({ observation_date: date, value });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("BoE Bank Rate response has no valid observations");
-  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 export function parseFredFedTargetRangeCsv(raw: string): ParsedOfficialPolicyRateSeries {
@@ -365,6 +375,7 @@ export function parseFredFedTargetRangeCsv(raw: string): ParsedOfficialPolicyRat
   const upperIndex = headers.indexOf("DFEDTARU");
   if (dateIndex < 0 || lowerIndex < 0 || upperIndex < 0) throw new Error("FRED Fed target range CSV is missing required columns");
   const changes: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let prior: number | null = null;
@@ -377,17 +388,18 @@ export function parseFredFedTargetRangeCsv(raw: string): ParsedOfficialPolicyRat
     if (lastDate !== null && date <= lastDate) throw new Error("FRED Fed target range CSV observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     const midpoint = (lower + upper) / 2;
     if (prior === midpoint) continue;
     changes.push({ observation_date: date, value: midpoint });
     prior = midpoint;
   }
   if (firstDate === null || lastDate === null) throw new Error("FRED Fed target range CSV has no valid observations");
-  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 /** Preserve the former single target before the range was introduced on 2008-12-16. */
-export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTargetHistoryRow[]; source_observation_count: number; source_first_observation_date: string; source_last_observation_date: string } {
+export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTargetHistoryRow[]; source_observation_count: number; source_first_observation_date: string; source_last_observation_date: string; observed_dates: string[] } {
   const lines = raw.replace(/^\uFEFF/, "").trim().split(/\r?\n/);
   if (lines.length < 2) throw new Error("FRED Fed target history CSV has no data rows");
   const headers = parseCsvLine(lines[0]);
@@ -397,6 +409,7 @@ export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTar
   const upperIndex = headers.indexOf("DFEDTARU");
   if (dateIndex < 0 || singleIndex < 0 || lowerIndex < 0 || upperIndex < 0) throw new Error("FRED Fed target history CSV is missing required columns");
   const changes: FredFedTargetHistoryRow[] = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let prior: number | null = null;
@@ -417,12 +430,13 @@ export function parseFredFedTargetHistoryCsv(raw: string): { changes: FredFedTar
     if (lastDate !== null && date <= lastDate) throw new Error("FRED Fed target history CSV observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     if (prior === value) continue;
     changes.push({ observation_date: date, value, source_url: single === "" ? FRED_FED_TARGET_RANGE_URL : FRED_FED_TARGET_SINGLE_URL });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("FRED Fed target history CSV has no valid observations");
-  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: lines.length - 1, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 /** RBA F1 is a metadata-prefixed daily CSV; FIRMMCRTD is the target, not the realised cash rate. */
@@ -436,6 +450,7 @@ export function parseRbaCashRateTargetCsv(raw: string): ParsedOfficialPolicyRate
   const targetIndex = seriesIds.indexOf("FIRMMCRTD");
   if (targetIndex < 1 || titles[targetIndex] !== "Cash Rate Target") throw new Error("RBA cash rate target CSV returned an unexpected series");
   const changes: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let sourceCount = 0;
@@ -452,13 +467,14 @@ export function parseRbaCashRateTargetCsv(raw: string): ParsedOfficialPolicyRate
     if (lastDate !== null && date <= lastDate) throw new Error("RBA cash rate target CSV observations are not strictly ordered");
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     sourceCount += 1;
     if (prior === value) continue;
     changes.push({ observation_date: date, value });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("RBA cash rate target CSV has no valid observations");
-  return { changes, source_observation_count: sourceCount, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: sourceCount, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 /** SNB publishes the policy rate from June 2019 and the 3-month Libor target range before then. */
@@ -480,6 +496,7 @@ export function parseSnbOfficialInterestRatesCsv(raw: string): ParsedOfficialPol
     months.set(month, row);
   }
   const changes: Array<{ observation_date: string; value: number }> = [];
+  const observed: string[] = [];
   let firstDate: string | null = null;
   let lastDate: string | null = null;
   let prior: number | null = null;
@@ -494,12 +511,13 @@ export function parseSnbOfficialInterestRatesCsv(raw: string): ParsedOfficialPol
     }
     firstDate ??= date;
     lastDate = date;
+    observed.push(date);
     if (prior === value) continue;
     changes.push({ observation_date: date, value });
     prior = value;
   }
   if (firstDate === null || lastDate === null) throw new Error("SNB official interest rates CSV has no valid observations");
-  return { changes, source_observation_count: months.size, source_first_observation_date: firstDate, source_last_observation_date: lastDate };
+  return { changes, source_observation_count: months.size, source_first_observation_date: firstDate, source_last_observation_date: lastDate, observed_dates: observed };
 }
 
 function parseRbaDate(value: string): string {

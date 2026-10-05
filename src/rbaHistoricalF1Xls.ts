@@ -11,6 +11,8 @@ export type RbaHistoricalF1Series = {
   source_observation_count: number;
   source_first_observation_date: string;
   source_last_observation_date: string;
+  /** Every date with a cash-rate target, in order (BACKLOG 102-09). */
+  observed_dates: string[];
 };
 
 export function parseRbaHistoricalF1Xls(raw: Buffer): RbaHistoricalF1Series {
@@ -57,7 +59,7 @@ export function parseRbaHistoricalF1Xls(raw: Buffer): RbaHistoricalF1Series {
   const first = observations[0];
   const last = observations.at(-1);
   if (first === undefined || last === undefined) throw new Error("RBA historical F1 workbook has no observations");
-  return { changes, source_observation_count: observations.length, source_first_observation_date: first.observation_date, source_last_observation_date: last.observation_date };
+  return { changes, source_observation_count: observations.length, source_first_observation_date: first.observation_date, source_last_observation_date: last.observation_date, observed_dates: observations.map((observation) => observation.observation_date) };
 }
 
 function readSharedStrings(workbook: Buffer): string[] {

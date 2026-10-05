@@ -42,18 +42,19 @@ export type OfficialPolicyRateObservation = Omit<OfficialPolicyRateHistoryRecord
   "schema_version" | "sequence" | "series" | "evidence_tier" | "first_seen_at">;
 
 /**
- * The dates one downloaded file covers, from its first observation to its last (BACKLOG 102-09). The sources keep only
- * their change points, so inside the span a date the download does not list is no change: a change point stored from
- * an earlier download on that date has been withdrawn by the source. Outside the span the download says nothing, so a
- * shorter download leaves the dates it no longer reaches as they were.
+ * One downloaded file and every date it gives a valid rate for, in order (BACKLOG 102-09). The sources keep only their
+ * change points, so on an observed date the download does not list there is no change: a change point stored from an
+ * earlier download on that date has been withdrawn by the source. A date the file leaves out or blank is not judged,
+ * nor is any date outside it, so a missing row or a shorter download leaves what is stored there as it was.
  */
 export type OfficialPolicyRateDownloadSpan = {
   source_url: string;
   raw_sha256: string;
   source_vintage_at: string | null;
-  first_observation_date: string;
-  last_observation_date: string;
+  observed_dates: string[];
 };
+
+const MAX_OBSERVED_DATES = 100_000;
 
 export type OfficialPolicyRateRawSnapshot = {
   schema_version: "1.0";
@@ -143,31 +144,40 @@ export function latestRevisedSeries(records: OfficialPolicyRateHistoryRecord[]):
     .sort((left, right) => left.observation_date.localeCompare(right.observation_date));
 }
 
-/** Spans in date order, after checking them and that each observation lies in one, read from that span's file. */
-function checkedSpans(spans: OfficialPolicyRateDownloadSpan[], candidates: OfficialPolicyRateHistoryRecord[]): OfficialPolicyRateDownloadSpan[] {
-  if (spans.length === 0) return [];
+/**
+ * The span of each observed date, after checking the spans, that they do not overlap, that each observation is an
+ * observed date of the file it was read from, and that the first observed date is a change, which gives every later
+ * observed date its rate.
+ */
+function observedDates(spans: OfficialPolicyRateDownloadSpan[], candidates: OfficialPolicyRateHistoryRecord[]): Map<string, OfficialPolicyRateDownloadSpan> {
+  const observed = new Map<string, OfficialPolicyRateDownloadSpan>();
+  if (spans.length === 0) return observed;
   if (spans.length > 8) throw new Error("official policy-rate batch must name at most 8 download spans");
   const [first] = candidates;
   if (candidates.some((candidate) => candidate.currency !== first.currency || candidate.retrieved_at !== first.retrieved_at)) {
     throw new Error("official policy-rate batch with download spans must hold one currency retrieved at one time");
   }
-  const sorted = [...spans].sort((left, right) => left.first_observation_date.localeCompare(right.first_observation_date));
-  let priorLast: string | null = null;
-  for (const span of sorted) {
+  for (const span of spans) {
+    const dates: unknown = span.observed_dates;
     if (!validUrl(span.source_url) || typeof span.raw_sha256 !== "string" || !/^sha256:[a-f0-9]{64}$/.test(span.raw_sha256)
       || (span.source_vintage_at !== null && (typeof span.source_vintage_at !== "string" || !isCanonicalTimestamp(span.source_vintage_at)))
-      || typeof span.first_observation_date !== "string" || !isCalendarDate(span.first_observation_date)
-      || typeof span.last_observation_date !== "string" || !isCalendarDate(span.last_observation_date)
-      || span.first_observation_date > span.last_observation_date) throw new Error("invalid official policy-rate download span");
-    if (priorLast !== null && span.first_observation_date <= priorLast) throw new Error("official policy-rate download spans overlap");
-    priorLast = span.last_observation_date;
+      || !Array.isArray(dates) || dates.length < 1 || dates.length > MAX_OBSERVED_DATES
+      || dates.some((date, index) => typeof date !== "string" || !isCalendarDate(date) || (index > 0 && date <= dates[index - 1]))) {
+      throw new Error("invalid official policy-rate download span");
+    }
   }
+  const sorted = [...spans].sort((left, right) => left.observed_dates[0].localeCompare(right.observed_dates[0]));
+  sorted.forEach((span, index) => {
+    if (index > 0 && span.observed_dates[0] <= sorted[index - 1].observed_dates.at(-1)!) throw new Error("official policy-rate download spans overlap");
+    for (const date of span.observed_dates) observed.set(date, span);
+  });
   for (const candidate of candidates) {
-    const span = sorted.find((item) => item.first_observation_date <= candidate.observation_date && candidate.observation_date <= item.last_observation_date);
-    if (span === undefined) throw new Error(`official policy-rate observation ${candidate.observation_date} lies outside every download span`);
-    if (span.raw_sha256 !== candidate.raw_sha256) throw new Error(`official policy-rate observation ${candidate.observation_date} was not read from its download span`);
+    const span = observed.get(candidate.observation_date);
+    if (span === undefined) throw new Error(`official policy-rate observation ${candidate.observation_date} is no observed date of its download`);
+    if (span.raw_sha256 !== candidate.raw_sha256) throw new Error(`official policy-rate observation ${candidate.observation_date} was not read from the file that observed it`);
   }
-  return sorted;
+  if (!candidates.some((candidate) => candidate.observation_date === sorted[0].observed_dates[0])) throw new Error("the first observed date of an official policy-rate download must be a change");
+  return observed;
 }
 
 export class OfficialPolicyRateHistoryStore {
@@ -180,9 +190,13 @@ export class OfficialPolicyRateHistoryStore {
   }
 
   /**
-   * Records the change points of one download. With the download's spans, a change point stored earlier on a date
-   * inside a span that the download no longer lists is recorded as withdrawn (BACKLOG 102-09); without spans nothing is
-   * withdrawn. Every record of the batch is checked before the first is written.
+   * Records the change points of one download. Without spans each observation is recorded unless its date already holds
+   * it, and nothing is withdrawn. With the download's spans (BACKLOG 102-09) the store rebuilds the series as it stands
+   * once the download is in: on each date the download observed, the rate of its last change on or before that date;
+   * on every other date, the stored change points, which the download cannot judge and so are kept. The change points of
+   * that series on observed dates are recorded where they differ from what is stored, and a stored change point on an
+   * observed date that is no change any more is withdrawn. This also catches a change the parser compacted away across
+   * a missing row, or that a download starting later only repeats. Every record is checked before the first is written.
    */
   async observeMany(observations: OfficialPolicyRateObservation[], spans: OfficialPolicyRateDownloadSpan[] = []): Promise<{
     recorded: OfficialPolicyRateHistoryRecord[]; unchanged: number; revisions: number; reappeared: number; withdrawn: number;
@@ -204,66 +218,81 @@ export class OfficialPolicyRateHistoryStore {
         if (duplicate.has(key)) throw new Error(`duplicate official policy-rate observation in batch ${key}`);
         duplicate.add(key);
       }
-      const downloadSpans = checkedSpans(spans, candidates);
+      const observed = observedDates(spans, candidates);
       const records = await this.log.readAllUnlocked();
       const latestFirstSeen = records.at(-1)?.first_seen_at;
       if (latestFirstSeen && candidates.some((candidate) => candidate.first_seen_at < latestFirstSeen)) throw new Error("official policy-rate retrieval clock moved backwards");
       const latest = new Map<string, OfficialPolicyRateHistoryRecord>();
       for (const record of records) latest.set(`${record.currency}:${record.observation_date}`, record);
-      const live = downloadSpans.length === 0 ? [] : latestRevisedSeries(records.filter((record) => record.currency === candidates[0].currency));
-      const inSpan = (date: string) => downloadSpans.find((span) => span.first_observation_date <= date && date <= span.last_observation_date);
-      // A parser lists a download's first row as a change, having nothing before it, so when a download starts later
-      // than before, that row may only repeat the rate the series already holds. Against the series as it stands once
-      // this batch is in (the batch's rows and the stored change points outside its spans), a row at the rate before it
-      // is no change point: it is not recorded, and a stored change point on its date is withdrawn. Otherwise a shorter
-      // download would leave a change point behind, withdrawn once the full download is back as if the source had
-      // revised it.
-      // The value alone tells a held rate: withdrawals are neither batch rows nor live, so a null is always the
-      // no-single-target state. Only batch dates are looked up in `held`, so marking a stored date does nothing.
-      const held = new Set<string>();
-      if (downloadSpans.length > 0) {
-        const series = [...candidates, ...live.filter((record) => inSpan(record.observation_date) === undefined)]
-          .sort((left, right) => left.observation_date.localeCompare(right.observation_date));
-        series.forEach((row, index) => { if (index > 0 && series[index - 1].value === row.value) held.add(row.observation_date); });
-      }
       const recorded: OfficialPolicyRateHistoryRecord[] = [];
       let unchanged = 0;
       let revisions = 0;
       let reappeared = 0;
+      let withdrawals = 0;
       let sequence = records.length;
-      for (const candidate of candidates) {
-        const current = latest.get(`${candidate.currency}:${candidate.observation_date}`);
-        if (held.has(candidate.observation_date)) {
-          // No change point; a stored one on this date is withdrawn below.
-          if (current === undefined || withdrawn(current)) unchanged += 1;
-          continue;
-        }
-        // source_vintage_at is a response-level retrieval hint. Raw snapshots retain it without
-        // turning an unchanged historical observation into a spurious value revision.
-        if (current?.value === candidate.value && (current.rate_status ?? "numeric") === (candidate.rate_status ?? "numeric") && current.source_url === candidate.source_url) { unchanged += 1; continue; }
+      // source_vintage_at is a response-level retrieval hint. Raw snapshots retain it without
+      // turning an unchanged historical observation into a spurious value revision.
+      const same = (current: OfficialPolicyRateHistoryRecord | undefined, row: OfficialPolicyRateHistoryRecord) => current?.value === row.value
+        && (current.rate_status ?? "numeric") === (row.rate_status ?? "numeric") && current.source_url === row.source_url;
+      const record = (current: OfficialPolicyRateHistoryRecord | undefined, row: OfficialPolicyRateHistoryRecord) => {
         if (current !== undefined && withdrawn(current)) reappeared += 1;
         else if (current !== undefined) revisions += 1;
-        recorded.push({ ...candidate, sequence: ++sequence });
-      }
-      let withdrawals = 0;
-      if (downloadSpans.length > 0) {
-        const [{ currency, retrieved_at: retrievedAt, first_seen_at: firstSeenAt }] = candidates;
-        const listed = new Set(candidates.map((candidate) => candidate.observation_date).filter((date) => !held.has(date)));
-        for (const record of live) {
-          if (listed.has(record.observation_date)) continue;
-          // The withdrawal names the file whose span holds the date.
-          const span = inSpan(record.observation_date);
-          if (span === undefined) continue;
-          recorded.push(validateRecord({
-            schema_version: "1.0", sequence: ++sequence, series: "policy_rate_official_history", evidence_tier: POLICY_RATE_OFFICIAL_HISTORY_EVIDENCE_TIER,
-            currency, source_symbol: record.source_symbol, observation_date: record.observation_date, value: null, rate_status: "withdrawn",
-            source_url: span.source_url, source_vintage_at: span.source_vintage_at, raw_sha256: span.raw_sha256, retrieved_at: retrievedAt, first_seen_at: firstSeenAt,
-          }));
-          withdrawals += 1;
+        recorded.push(validateRecord({ ...row, sequence: ++sequence }));
+      };
+      if (observed.size === 0) {
+        for (const candidate of candidates) {
+          const current = latest.get(`${candidate.currency}:${candidate.observation_date}`);
+          if (same(current, candidate)) unchanged += 1;
+          else record(current, candidate);
         }
+      } else {
+        const [{ currency, retrieved_at: retrievedAt, first_seen_at: firstSeenAt }] = candidates;
+        const listed = new Map(candidates.map((candidate) => [candidate.observation_date, candidate]));
+        type Entry = { date: string; value: number | null; row: OfficialPolicyRateHistoryRecord | null; span: OfficialPolicyRateDownloadSpan | null };
+        const entries: Entry[] = [];
+        let row: OfficialPolicyRateHistoryRecord | undefined;
+        for (const [date, span] of [...observed].sort(([left], [right]) => left.localeCompare(right))) {
+          // The first observed date is a change (checked), so every observed date has the rate of a change.
+          row = listed.get(date) ?? row!;
+          entries.push({ date, value: row.value, row, span });
+        }
+        for (const stored of latestRevisedSeries(records.filter((item) => item.currency === currency))) {
+          if (!observed.has(stored.observation_date)) entries.push({ date: stored.observation_date, value: stored.value, row: null, span: null });
+        }
+        entries.sort((left, right) => left.date.localeCompare(right.date));
+        // The value alone tells a change: withdrawals are neither batch rows nor live, so a null is always the
+        // no-single-target state.
+        entries.forEach((entry, index) => {
+          if (entry.row === null || entry.span === null) return;
+          const change = index === 0 || entries[index - 1].value !== entry.value;
+          const current = latest.get(`${currency}:${entry.date}`);
+          const live = current !== undefined && !withdrawn(current);
+          const candidate = listed.get(entry.date);
+          if (!change) {
+            if (live) {
+              // The withdrawal names the file that observed the date.
+              recorded.push(validateRecord({
+                schema_version: "1.0", sequence: ++sequence, series: "policy_rate_official_history", evidence_tier: POLICY_RATE_OFFICIAL_HISTORY_EVIDENCE_TIER,
+                currency, source_symbol: current.source_symbol, observation_date: entry.date, value: null, rate_status: "withdrawn",
+                source_url: entry.span.source_url, source_vintage_at: entry.span.source_vintage_at, raw_sha256: entry.span.raw_sha256, retrieved_at: retrievedAt, first_seen_at: firstSeenAt,
+              }));
+              withdrawals += 1;
+            } else if (candidate !== undefined) unchanged += 1;
+            return;
+          }
+          // A change the download does not list follows a stored change it kept: it carries the rate of the download's
+          // last change, read from the file that observed this date.
+          const point = candidate ?? {
+            ...entry.row, observation_date: entry.date,
+            source_url: entry.row.raw_sha256 === entry.span.raw_sha256 ? entry.row.source_url : entry.span.source_url,
+            source_vintage_at: entry.span.source_vintage_at, raw_sha256: entry.span.raw_sha256,
+          };
+          if (same(current, point)) { if (candidate !== undefined) unchanged += 1; return; }
+          record(current, point);
+        });
       }
       await this.log.assertAppendableUnlocked(records, recorded);
-      for (const record of recorded) await this.log.appendUnlocked(record);
+      for (const item of recorded) await this.log.appendUnlocked(item);
       return { recorded, unchanged, revisions, reappeared, withdrawn: withdrawals };
     });
   }

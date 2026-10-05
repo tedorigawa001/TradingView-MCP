@@ -76,9 +76,16 @@ const ECB_URL = "https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.D
 const ecb = (observation_date, value, raw_sha256, retrieved_at) => observation({
   currency: "EUR", source_symbol: "ECONOMICS:EUINTR", observation_date, value, source_url: ECB_URL, raw_sha256, retrieved_at,
 });
-const span = (raw_sha256, first_observation_date, last_observation_date, source_url = ECB_URL) => ({
-  source_url, raw_sha256, source_vintage_at: null, first_observation_date, last_observation_date,
-});
+/** Every calendar day from `first` to `last`, as a daily export observes them. */
+const days = (first, last) => {
+  const dates = [];
+  for (let time = Date.parse(`${first}T00:00:00Z`); time <= Date.parse(`${last}T00:00:00Z`); time += 86_400_000) dates.push(new Date(time).toISOString().slice(0, 10));
+  return dates;
+};
+/** A file observing the given dates. */
+const observedIn = (raw_sha256, observed_dates, source_url = ECB_URL) => ({ source_url, raw_sha256, source_vintage_at: null, observed_dates });
+/** A daily file observing every day from `first` to `last`. */
+const span = (raw_sha256, first, last, source_url = ECB_URL) => observedIn(raw_sha256, days(first, last), source_url);
 const DAY_1 = "2026-07-29T12:00:00.000Z";
 const DAY_2 = "2026-07-30T12:00:00.000Z";
 const DAY_3 = "2026-07-31T12:00:00.000Z";
@@ -126,9 +133,9 @@ test("a shorter download withdraws nothing outside its span, and a batch without
   const shorter = await store.observeMany([ecb("2025-02-01", 5, HASH_2, DAY_2)], [span(HASH_2, "2025-02-01", "2025-02-28")]);
   assert.deepEqual([shorter.recorded.length, shorter.withdrawn], [0, 0]);
   assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-03", 6]]);
-  // Both ends of a span are inside it.
-  const ends = await store.observeMany([ecb("2025-02-02", 5, HASH_3, DAY_3)], [span(HASH_3, "2025-02-01", "2025-03-03")]);
-  assert.deepEqual([ends.withdrawn, (await series(store)).map(([date]) => date)], [2, ["2025-01-01", "2025-02-02"]]);
+  // Both ends of a download are judged: from 2025-02-01 to 2025-03-03 it now shows 4 throughout.
+  const ends = await store.observeMany([ecb("2025-02-01", 4, HASH_3, DAY_3)], [span(HASH_3, "2025-02-01", "2025-03-03")]);
+  assert.deepEqual([ends.withdrawn, await series(store)], [2, [["2025-01-01", 4]]]);
   // Without a span (the reviewed BoJ manifest), a date the batch leaves out keeps its change point.
   const { store: manifest } = await freshStore();
   await manifest.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)]);
@@ -147,10 +154,15 @@ test("a withdrawal touches only the batch's currency, and a malformed span write
   const batch = [ecb("2025-01-01", 3, HASH_3, DAY_3)];
   const refusals = [
     [[span(HASH_3, "2025-01-01", "2025-01-31"), span(HASH_3, "2025-01-31", "2025-03-01")], /download spans overlap/],
-    [[span(HASH_3, "2025-01-02", "2025-03-01")], /2025-01-01 lies outside every download span/],
-    [[span(HASH_2, "2025-01-01", "2025-03-01")], /2025-01-01 was not read from its download span/],
-    [[span(HASH_3, "2025-03-01", "2025-01-01")], /invalid official policy-rate download span/],
-    [[span(HASH_3, "2025-01-01", "2025-02-30")], /invalid official policy-rate download span/],
+    [[span(HASH_3, "2025-01-02", "2025-03-01")], /2025-01-01 is no observed date of its download/],
+    [[span(HASH_2, "2025-01-01", "2025-03-01")], /2025-01-01 was not read from the file that observed it/],
+    [[observedIn(HASH_3, ["2024-12-31", "2025-01-01"])], /first observed date of an official policy-rate download must be a change/],
+    [[observedIn(HASH_3, [])], /invalid official policy-rate download span/],
+    [[observedIn(HASH_3, days("1750-01-01", "2025-01-01"))], /invalid official policy-rate download span/],
+    [[observedIn(HASH_3, ["2025-01-01", "2025-02-30"])], /invalid official policy-rate download span/],
+    [[observedIn(HASH_3, ["2025-01-01", "2025-03-01", "2025-02-01"])], /invalid official policy-rate download span/],
+    [[observedIn(HASH_3, ["2025-01-01", "2025-01-01"])], /invalid official policy-rate download span/],
+    [[{ ...observedIn(HASH_3, ["2025-01-01"]), observed_dates: "2025-01-01" }], /invalid official policy-rate download span/],
     [[span(HASH_3, "2025-01-01", "2025-03-01", "http://data-api.ecb.europa.eu/service/data")], /invalid official policy-rate download span/],
     [[{ ...span(HASH_3, "2025-01-01", "2025-03-01"), raw_sha256: "sha256:abc" }], /invalid official policy-rate download span/],
     [[{ ...span(HASH_3, "2025-01-01", "2025-03-01"), source_vintage_at: "yesterday" }], /invalid official policy-rate download span/],
@@ -206,24 +218,21 @@ test("what a span start is held against counts the batch's own changes and not t
   assert.deepEqual(await series(other), [["2025-01-01", 4], ["2025-01-02", 5]]);
 });
 
-test("coverage dates leave out a withdrawn first date, and withdrawals and reappearances repeat", async () => {
+test("withdrawals and reappearances repeat, and a change can come back at another rate", async () => {
   const { store } = await freshStore();
-  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-01")]);
-  // A span that begins before the first change and no longer lists it.
-  await store.observeMany([ecb("2025-02-01", 5, HASH_2, DAY_2)], [span(HASH_2, "2024-12-01", "2025-03-01")]);
-  let coverage = (await store.coverage()).currencies.EUR;
-  assert.deepEqual([coverage.dates, coverage.withdrawn_dates, coverage.earliest_date, coverage.latest_date], [1, 1, "2025-02-01", "2025-02-01"]);
-  // It comes back at another rate, is withdrawn again, and comes back once more.
-  const back = await store.observeMany([ecb("2025-01-01", 4.5, HASH_3, DAY_3), ecb("2025-02-01", 5, HASH_3, DAY_3)], [span(HASH_3, "2025-01-01", "2025-03-01")]);
-  assert.deepEqual([back.reappeared, back.revisions], [1, 0]);
-  assert.deepEqual(await series(store), [["2025-01-01", 4.5], ["2025-02-01", 5]]);
   const day4 = "2026-08-01T12:00:00.000Z";
   const day5 = "2026-08-02T12:00:00.000Z";
-  await store.observeMany([ecb("2025-02-01", 5, HASH_1, day4)], [span(HASH_1, "2024-12-01", "2025-03-01")]);
-  await store.observeMany([ecb("2025-01-01", 4.5, HASH_2, day5), ecb("2025-02-01", 5, HASH_2, day5)], [span(HASH_2, "2025-01-01", "2025-03-01")]);
-  coverage = (await store.coverage()).currencies.EUR;
-  assert.deepEqual([coverage.records, coverage.withdrawals, coverage.reappearances, coverage.revisions, coverage.metadata_only_versions, coverage.withdrawn_dates, coverage.earliest_date],
-    [6, 2, 2, 0, 0, 0, "2025-01-01"]);
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-01")]);
+  await store.observeMany([ecb("2025-01-01", 4, HASH_2, DAY_2)], [span(HASH_2, "2025-01-01", "2025-03-01")]);
+  // It comes back at another rate, is withdrawn again, and comes back once more.
+  const back = await store.observeMany([ecb("2025-01-01", 4, HASH_3, DAY_3), ecb("2025-02-01", 4.5, HASH_3, DAY_3)], [span(HASH_3, "2025-01-01", "2025-03-01")]);
+  assert.deepEqual([back.reappeared, back.revisions], [1, 0]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-02-01", 4.5]]);
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, day4)], [span(HASH_1, "2025-01-01", "2025-03-01")]);
+  await store.observeMany([ecb("2025-01-01", 4, HASH_2, day5), ecb("2025-02-01", 4.5, HASH_2, day5)], [span(HASH_2, "2025-01-01", "2025-03-01")]);
+  const coverage = (await store.coverage()).currencies.EUR;
+  assert.deepEqual([coverage.records, coverage.withdrawals, coverage.reappearances, coverage.revisions, coverage.metadata_only_versions, coverage.withdrawn_dates, coverage.earliest_date, coverage.latest_date],
+    [6, 2, 2, 0, 0, 0, "2025-01-01", "2025-02-01"]);
 });
 
 test("a row at the rate held before it is no change point, and a stored change on its date is withdrawn", async () => {
@@ -247,4 +256,45 @@ test("a row at the rate held before it is no change point, and a stored change o
   const repeated = await fresh.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-01-10", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [span(HASH_1, "2025-01-01", "2025-03-31")]);
   assert.deepEqual([repeated.recorded.length, repeated.unchanged], [2, 1]);
   assert.deepEqual(await series(fresh), [["2025-01-01", 4], ["2025-02-01", 5]]);
+});
+
+test("a date a download leaves out is not judged, and a change across the gap is still found", async () => {
+  // The re-download misses the February row: the stored rise to 5 on 2025-02-01 is kept, and 2025-03-01 at 5 is no change.
+  const { store } = await freshStore();
+  await store.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [observedIn(HASH_1, ["2025-01-01", "2025-02-01", "2025-03-01"])]);
+  const gap = await store.observeMany([ecb("2025-01-01", 4, HASH_2, DAY_2), ecb("2025-03-01", 5, HASH_2, DAY_2)], [observedIn(HASH_2, ["2025-01-01", "2025-03-01"])]);
+  assert.deepEqual([gap.recorded.length, gap.unchanged, gap.withdrawn], [0, 2, 0]);
+  assert.deepEqual(await series(store), [["2025-01-01", 4], ["2025-02-01", 5]]);
+  // The parser compacts across the gap, so a fall back to 4 on 2025-03-01 is no change it lists; against the kept 5 it is
+  // one. It is read from the file that observed it, under the address of the row whose rate it carries.
+  const { path, store: other } = await freshStore();
+  await other.observeMany([ecb("2025-01-01", 4, HASH_1, DAY_1), ecb("2025-02-01", 5, HASH_1, DAY_1)], [observedIn(HASH_1, ["2025-01-01", "2025-02-01"])]);
+  const hidden = await other.observeMany([ecb("2025-01-01", 4, HASH_2, DAY_2)], [observedIn(HASH_2, ["2025-01-01", "2025-03-01"], "https://data-api.ecb.europa.eu/service/data/FM/export")]);
+  assert.deepEqual([hidden.recorded.length, hidden.unchanged, hidden.revisions, hidden.withdrawn], [1, 1, 0, 0]);
+  assert.deepEqual(await series(other), [["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 4]]);
+  const found = (await lines(path)).at(-1);
+  assert.deepEqual([found.observation_date, found.value, found.source_url, found.raw_sha256, found.retrieved_at], ["2025-03-01", 4, ECB_URL, HASH_2, DAY_2]);
+  // When that change is stored already, the batch writes nothing, and only its own listed row counts as unchanged.
+  const again = await other.observeMany([ecb("2025-01-01", 4, HASH_3, DAY_3)], [observedIn(HASH_3, ["2025-01-01", "2025-03-01"])]);
+  assert.deepEqual([again.recorded.length, again.unchanged], [0, 1]);
+});
+
+test("a change found on another file's first day is read from that file", async () => {
+  const aud = (observation_date, value, raw_sha256, source_url) => observation({
+    currency: "AUD", source_symbol: "ECONOMICS:AUINTR", observation_date, value, raw_sha256, source_url, retrieved_at: DAY_2,
+  });
+  const XLS = "https://www.rba.gov.au/statistics/tables/xls-hist/f01dhist.xls";
+  const CSV = "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv";
+  const { path, store } = await freshStore();
+  // A change stored, without a span, between the workbook's last day and the CSV's first.
+  await store.observeMany([observation({ currency: "AUD", source_symbol: "ECONOMICS:AUINTR", observation_date: "2011-01-02", value: 5, source_url: CSV })]);
+  // The join compacted the CSV's first day away (4.75, as the workbook ends), but against the stored 5 it is a change.
+  const joined = await store.observeMany(
+    [aud("1990-08-02", 14, HASH_1, XLS), aud("2010-11-03", 4.75, HASH_1, XLS), aud("2011-11-01", 4.5, HASH_2, CSV)],
+    [observedIn(HASH_1, ["1990-08-02", "2010-11-03", "2010-12-31"], XLS), { ...observedIn(HASH_2, ["2011-01-04", "2011-11-01"], CSV), source_vintage_at: "2026-07-29T00:00:00.000Z" }],
+  );
+  assert.deepEqual([joined.recorded.length, joined.withdrawn], [4, 0]);
+  assert.deepEqual(await series(store, "AUD"), [["1990-08-02", 14], ["2010-11-03", 4.75], ["2011-01-02", 5], ["2011-01-04", 4.75], ["2011-11-01", 4.5]]);
+  const found = (await lines(path)).find((record) => record.observation_date === "2011-01-04");
+  assert.deepEqual([found.value, found.source_url, found.raw_sha256, found.source_vintage_at], [4.75, CSV, HASH_2, "2026-07-29T00:00:00.000Z"]);
 });
