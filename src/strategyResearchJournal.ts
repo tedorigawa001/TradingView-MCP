@@ -531,7 +531,7 @@ export class StrategyResearchJournalStore {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("strategy research journal path must be a regular file");
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("strategy research journal file must be owned by the current user");
-      await assertAppendableJsonl(handle, stat.size, "strategy research journal");
+      await assertAppendableJsonl(handle, stat.size, "strategy research journal", this.filePath);
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > MAX_FILE_BYTES) throw new Error("strategy research journal file is too large");
       const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);

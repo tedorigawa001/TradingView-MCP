@@ -476,7 +476,7 @@ export class AnalysisJournalStore {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error("analysis journal file must be owned by the current user");
       }
-      await assertAppendableJsonl(handle, stat.size, "analysis journal");
+      await assertAppendableJsonl(handle, stat.size, "analysis journal", this.filePath);
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > MAX_JOURNAL_BYTES) throw new Error("analysis journal file is too large");
       const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);

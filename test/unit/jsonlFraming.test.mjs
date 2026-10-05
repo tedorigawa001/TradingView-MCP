@@ -34,8 +34,10 @@ test("the shared first-seen log, and a store on it, refuse to append after a lin
   const log = new AppendOnlyFirstSeenLog(join(directory, "log.jsonl"), "test", (value) => value, { maxFileBytes: 10_000, maxRecordBytes: 1_000 });
   await log.appendUnlocked({ sequence: 1, observation_date: "2026-07-20", first_seen_at: "2026-07-21T00:00:00.000Z" });
   const before = await dropFinalNewline(join(directory, "log.jsonl"));
+  // The refusal names the file and how to settle it.
   await assert.rejects(() => log.appendUnlocked({ sequence: 2, observation_date: "2026-07-21", first_seen_at: "2026-07-22T00:00:00.000Z" }),
-    /test history file does not end with a newline/);
+    (error) => error.message.startsWith("test history file does not end with a newline") &&
+      error.message.includes(join(directory, "log.jsonl")) && /end it with a newline; if it was cut off, remove it/.test(error.message));
   assert.deepEqual(await readFile(join(directory, "log.jsonl")), before);
   assert.equal((await log.readAllUnlocked()).length, 1, "the file still reads");
 
@@ -111,4 +113,26 @@ test("the research collection output refuses to append after a line without its 
   const before = await dropFinalNewline(path);
   await assert.rejects(() => appendOwnerOnly(path, { hypothesis_id: "framing", primary_available_events: 2 }), unframed);
   assert.deepEqual(await readFile(path), before);
+});
+
+test("an append goes on after a file that ends in a newline, a CRLF one, or only a newline", async (t) => {
+  // Without these the check could refuse every non-empty file and the refusal tests would still pass.
+  const directory = await scratch(t);
+  const record = (sequence) => ({ sequence, observation_date: "2026-07-20", first_seen_at: `2026-07-2${sequence}T00:00:00.000Z` });
+  const log = (name) => new AppendOnlyFirstSeenLog(join(directory, name), "test", (value) => value, { maxFileBytes: 10_000, maxRecordBytes: 1_000 });
+  const healthy = log("healthy.jsonl");
+  await healthy.appendUnlocked(record(1));
+  await healthy.appendUnlocked(record(2));
+  assert.equal((await healthy.readAllUnlocked()).length, 2);
+  await writeFile(join(directory, "crlf.jsonl"), `${JSON.stringify(record(1))}\r\n`, { mode: 0o600 });
+  await log("crlf.jsonl").appendUnlocked(record(2));
+  assert.equal((await readFile(join(directory, "crlf.jsonl"), "utf8")).split("\n").length, 3);
+  await writeFile(join(directory, "newline.jsonl"), "\n", { mode: 0o600 });
+  await log("newline.jsonl").appendUnlocked(record(1));
+  assert.equal(await readFile(join(directory, "newline.jsonl"), "utf8"), `\n${JSON.stringify(record(1))}\n`);
+  // The research collection output, which no other test appends to twice, takes a second, larger row.
+  const output = join(directory, "collection.jsonl");
+  assert.equal(await appendOwnerOnly(output, { hypothesis_id: "framing", primary_available_events: 1 }), true);
+  assert.equal(await appendOwnerOnly(output, { hypothesis_id: "framing", primary_available_events: 2 }), true);
+  assert.equal((await readFile(output, "utf8")).trim().split("\n").length, 2);
 });

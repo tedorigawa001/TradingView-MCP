@@ -176,7 +176,7 @@ export class MacroSurpriseEvidenceStore {
     const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
     if (line.byteLength > MAX_RECORD_BYTES) throw new Error("macro-surprise evidence record is too large");
     const handle = await open(this.filePath, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600);
-    try { await assertAppendableJsonl(handle, (await handle.stat()).size, "macro-surprise evidence"); await handle.chmod(0o600); const written = await handle.write(line); if (written.bytesWritten !== line.byteLength) throw new Error("short write to macro-surprise evidence"); await handle.sync(); } finally { await handle.close(); }
+    try { await assertAppendableJsonl(handle, (await handle.stat()).size, "macro-surprise evidence", this.filePath); await handle.chmod(0o600); const written = await handle.write(line); if (written.bytesWritten !== line.byteLength) throw new Error("short write to macro-surprise evidence"); await handle.sync(); } finally { await handle.close(); }
   }
 
   private async acquireLock(): Promise<() => Promise<void>> {

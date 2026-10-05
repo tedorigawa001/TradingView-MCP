@@ -126,7 +126,7 @@ export class AppendOnlyEvaluationLog {
       try {
         const stat = await handle.stat();
         if (!stat.isFile()) throw new Error("evaluation log path must be a regular file");
-        await assertAppendableJsonl(handle, stat.size, "evaluation log");
+        await assertAppendableJsonl(handle, stat.size, "evaluation log", this.filePath);
         await handle.chmod(0o600);
         await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
         await handle.sync();

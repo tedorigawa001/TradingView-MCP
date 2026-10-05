@@ -177,7 +177,7 @@ export async function appendOwnerOnly(path: string, row: { hypothesis_id: string
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) throw new Error("research collection output is unsafe");
-    await assertAppendableJsonl(handle, stat.size, "research collection output");
+    await assertAppendableJsonl(handle, stat.size, "research collection output", path);
     await handle.chmod(0o600);
     await appendFile(handle, `${JSON.stringify(row)}\n`, "utf8");
   } finally { await handle.close(); }

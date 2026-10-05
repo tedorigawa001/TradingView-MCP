@@ -259,7 +259,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error(`${this.label} history file must be owned by the current user`);
       }
-      await assertAppendableJsonl(handle, stat.size, `${this.label} history`);
+      await assertAppendableJsonl(handle, stat.size, `${this.label} history`, this.filePath);
       await handle.chmod(0o600);
       if (stat.size + line.byteLength > this.limits.maxFileBytes) {
         throw new Error(`${this.label} history file is too large`);
