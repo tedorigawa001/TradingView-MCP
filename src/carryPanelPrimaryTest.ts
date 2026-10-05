@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { PolicyRateCurrency, PolicyRateFirstSeenRecord } from "./policyRateHistory.js";
-import { businessDaysSince } from "./businessDays.js";
+import { addBusinessDays, businessDaysSince } from "./businessDays.js";
 
 export const CARRY_CORE_PRIMARY_TEST_V1 = {
   id: "carry_core_primary_v1",
@@ -183,6 +183,8 @@ export function runCarryPanelPrimaryTest(input: {
   const from = calendarDate(input.from, "from");
   const to = calendarDate(input.to, "to");
   if (from >= to) throw new Error("from must be before to");
+  const fromDay = new Date(`${from}T00:00:00.000Z`).getUTCDay();
+  if (fromDay === 0 || fromDay === 6) throw new Error("from must be a Monday-to-Friday business day, where the anchor grid starts");
   const horizonBusinessDays = input.horizonBusinessDays ?? CARRY_CORE_PRIMARY_TEST_V1.horizon_business_days;
   const minimumAnchorClusters = input.minimumAnchorClusters ?? CARRY_CORE_PRIMARY_TEST_V1.minimum_anchor_clusters;
   const blockLengthAnchors = input.blockLengthAnchors ?? CARRY_CORE_PRIMARY_TEST_V1.block_length_anchors;
@@ -205,7 +207,15 @@ export function runCarryPanelPrimaryTest(input: {
     return closes;
   });
   const commonDates = [...closesByPair[0].keys()].filter((date) => date >= from && date <= to && closesByPair.every((closes) => closes.has(date))).sort();
-  const candidates = commonDates.filter((_, index) => index + horizonBusinessDays < commonDates.length).filter((_, index) => index % horizonBusinessDays === 0);
+  // The anchors sit on the pre-registered grid (BACKLOG 102-14): `from`, then every horizonBusinessDays Monday-to-Friday
+  // business days, each window ending at the next anchor. Counting positions in the list of common price dates instead
+  // let a missing close move every later anchor and stretch a window past its horizon, so a 40-business-day return was
+  // annualized as a 20-business-day one. An anchor whose own or endpoint close is missing for any pair is excluded and
+  // counted, never moved.
+  const candidates: Array<{ anchor: string; end: string }> = [];
+  for (let anchor = from, end = addBusinessDays(from, horizonBusinessDays); end <= to; anchor = end, end = addBusinessDays(end, horizonBusinessDays)) {
+    candidates.push({ anchor, end });
+  }
   const heartbeats = input.collectionHeartbeats.map((heartbeat) => {
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(heartbeat.first_seen_at) || new Date(heartbeat.first_seen_at).toISOString() !== heartbeat.first_seen_at) throw new Error("heartbeat first_seen_at must be a canonical ISO timestamp");
     return heartbeat;
@@ -213,8 +223,12 @@ export function runCarryPanelPrimaryTest(input: {
   const observations: RegressionObservation[] = [];
   let unavailablePolicyAnchors = 0;
   let collectionGapAnchors = 0;
-  for (const anchorDate of candidates) {
-    const endDate = commonDates[commonDates.indexOf(anchorDate) + horizonBusinessDays];
+  let missingPriceAnchors = 0;
+  for (const { anchor: anchorDate, end: endDate } of candidates) {
+    if (closesByPair.some((closes) => !closes.has(anchorDate) || !closes.has(endDate))) {
+      missingPriceAnchors += 1;
+      continue;
+    }
     const heartbeat = heartbeats.filter((item) => item.first_seen_at <= `${anchorDate}T23:59:59.999Z`).at(-1);
     if (heartbeat === undefined || businessDaysSince(heartbeat.first_seen_at.slice(0, 10), anchorDate) > CARRY_CORE_PRIMARY_TEST_V1.max_heartbeat_gap_business_days) {
       collectionGapAnchors += 1;
@@ -240,6 +254,7 @@ export function runCarryPanelPrimaryTest(input: {
       model: "forward_pair_return = pair_fixed_effect + beta * policy_rate_differential + residual",
       regime_condition: "none; the unconditional fixed-pair panel is the pre-registered baseline",
       policy_rate_timing: "latest first-seen version with available_at and first_seen_at no later than the anchor-date close",
+      anchor_grid: "anchors on a fixed Monday-to-Friday business-day grid starting at sample_start, one every horizon_business_days, each window ending at the next grid date; an anchor whose anchor or endpoint close is missing for any pair is excluded, never moved",
       collection_continuity: "a complete policy-rate collection heartbeat must be no more than five business days before the anchor-date close; this deliberately permits up to five business days of stale policy-rate evidence, while any rate change first seen after the anchor remains unavailable to that anchor",
     },
     status: anchorClusters >= minimumAnchorClusters ? "complete" as const : "not_evaluable" as const,
@@ -251,6 +266,7 @@ export function runCarryPanelPrimaryTest(input: {
     observations: observations.length,
     anchors_excluded_for_unavailable_or_zero_policy_difference: unavailablePolicyAnchors,
     anchors_excluded_for_collection_gap: collectionGapAnchors,
+    anchors_excluded_for_missing_price: missingPriceAnchors,
     pair_ids: input.pairs.map((pair) => pair.pair_id),
     evidence_tier: "prospective_first_seen" as const,
     point_in_time_status: "available" as const,

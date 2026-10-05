@@ -46,8 +46,9 @@ test("carry primary test fits pair fixed effects and refits them in anchor-date 
   assert.equal(result.status, "complete");
   assert.equal(result.evidence_tier, "prospective_first_seen");
   assert.equal(result.contract.regime_condition, "none; the unconditional fixed-pair panel is the pre-registered baseline");
-  assert.equal(result.anchor_clusters, 23);
-  assert.equal(result.observations, 46);
+  // Thursdays from 2026-01-01, every five business days, the last ending by 2026-04-30.
+  assert.equal(result.anchor_clusters, 17);
+  assert.equal(result.observations, 34);
   assert.ok(Number.isFinite(result.model.beta));
   assert.equal(result.bootstrap.iterations, 100);
   assert.equal(result.bootstrap.block_length_anchors, 2);
@@ -93,6 +94,50 @@ test("carry primary test excludes an entire anchor cluster after the fixed heart
     seed: "carry-primary-heartbeat-gap",
   });
   assert.equal(result.anchor_clusters, 2);
-  assert.equal(result.anchors_excluded_for_collection_gap, 21);
+  assert.equal(result.anchors_excluded_for_collection_gap, 15);
   assert.equal(result.status, "not_evaluable");
+});
+
+// BACKLOG 102-14: anchors sit on the fixed business-day grid, so a missing close never moves another anchor.
+// Rates that change often enough for every bootstrap sample of a dozen anchors to vary within each pair.
+const changing = (currency, values, first) => values.map(([date, value], index) => record(currency, date, value, `${date}T00:00:00.000Z`, first + index));
+const baseInput = (pairList) => ({
+  pairs: pairList,
+  policyRateVersions: {
+    EUR: changing("EUR", [["2025-12-31", 1], ["2026-01-20", 2], ["2026-02-15", 1.5], ["2026-03-10", 2.5], ["2026-04-05", 1]], 1),
+    AUD: changing("AUD", [["2025-12-31", 2], ["2026-01-25", 3], ["2026-02-20", 2.5], ["2026-03-15", 3.5], ["2026-04-10", 2]], 6),
+    USD: changing("USD", [["2025-12-31", 0]], 11),
+  },
+  collectionHeartbeats: pairs[0].bars.map((bar) => ({ first_seen_at: bar.timeIso })),
+  from: "2026-01-01", to: "2026-04-30", horizonBusinessDays: 5, minimumAnchorClusters: 6, blockLengthAnchors: 2, iterations: 100, seed: "carry-primary-grid",
+});
+const without = (pair, dates) => ({ ...pair, bars: pair.bars.filter((bar) => !dates.includes(bar.timeIso.slice(0, 10))) });
+const summary = (result) => [result.anchor_clusters, result.observations, result.anchors_excluded_for_missing_price, result.model?.beta];
+
+test("a close missing off the grid moves no anchor, and one missing on it drops the two windows that use it", () => {
+  const baseline = runCarryPanelPrimaryTest(baseInput(pairs));
+  assert.deepEqual(summary(baseline).slice(0, 3), [17, 34, 0]);
+  // A Tuesday is neither an anchor nor an endpoint: nothing changes but the count of common price dates.
+  const offGrid = runCarryPanelPrimaryTest(baseInput([without(pairs[0], ["2026-02-10"]), pairs[1]]));
+  assert.deepEqual(summary(offGrid), summary(baseline));
+  assert.equal(offGrid.common_price_dates, baseline.common_price_dates - 1);
+  // Thursday 2026-02-12 ends one window and starts the next; both are excluded, and every other anchor stays.
+  const onGrid = runCarryPanelPrimaryTest(baseInput([pairs[0], without(pairs[1], ["2026-02-12"])]));
+  assert.deepEqual(summary(onGrid).slice(0, 3), [15, 30, 2]);
+  assert.equal(onGrid.candidate_anchor_clusters, 17);
+});
+
+test("a stretch of missing closes never stretches a window past its horizon", () => {
+  // Prices grow with the calendar day, so every five-business-day window returns the same; a window stretched over the
+  // missing February weeks would return more, and with the February rate change that would show as a slope.
+  const gap = Array.from({ length: 26 }, (_, index) => new Date(Date.UTC(2026, 1, 2 + index)).toISOString().slice(0, 10));
+  const result = runCarryPanelPrimaryTest(baseInput(pairs.map((pair) => without(pair, gap))));
+  // Thursdays 2026-01-29 (its endpoint is missing) through 2026-02-26 are excluded; twelve anchors remain.
+  assert.deepEqual(summary(result).slice(0, 3), [12, 24, 5]);
+  assert.ok(Math.abs(result.model.beta) < 1e-9, `beta ${result.model.beta}`);
+});
+
+test("the anchor grid starts on a business day", () => {
+  assert.throws(() => runCarryPanelPrimaryTest({ ...baseInput(pairs), from: "2026-01-03" }), /Monday-to-Friday business day/);
+  assert.throws(() => runCarryPanelPrimaryTest({ ...baseInput(pairs), from: "2026-01-04" }), /Monday-to-Friday business day/);
 });
