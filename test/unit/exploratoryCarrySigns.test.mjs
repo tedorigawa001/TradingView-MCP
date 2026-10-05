@@ -48,3 +48,17 @@ test("exploratory carry signs normalize unsorted downloaded versions by observat
   });
   assert.deepEqual(result.signs.EURUSD, { "2020-03-01": -1 });
 });
+
+test("exploratory carry signs carry the earlier rate across a withdrawn change point (102-09)", () => {
+  // USD's 2020-02-01 cut to 0.5 was withdrawn by a later download, so 1 still holds after it.
+  const result = buildExploratoryCarrySigns({
+    pairs: [{ pair_id: "EURUSD", base_currency: "EUR", quote_currency: "USD" }], dates: ["2020-01-15", "2020-02-15"],
+    histories: {
+      USD: [record("USD", "2019-01-01", 1), { ...record("USD", "2020-02-01", 0.5), sequence: 2 }, { ...record("USD", "2020-02-01", null), rate_status: "withdrawn", sequence: 3 }],
+      EUR: [record("EUR", "2019-01-01", 0.75)],
+      JPY: [], GBP: [], AUD: [], NZD: [], CAD: [], CHF: [],
+    },
+  });
+  assert.deepEqual(result.signs.EURUSD, { "2020-01-15": -1, "2020-02-15": -1 });
+  assert.equal(result.unavailable_dates_by_pair.EURUSD, 0);
+});

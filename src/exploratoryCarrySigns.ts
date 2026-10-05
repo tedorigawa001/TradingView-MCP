@@ -1,4 +1,4 @@
-import type { OfficialPolicyRateHistoryRecord } from "./policyRateOfficialHistory.js";
+import { latestRevisedSeries, type OfficialPolicyRateHistoryRecord } from "./policyRateOfficialHistory.js";
 import type { PolicyRateCurrency } from "./policyRateHistory.js";
 
 export type ExploratoryCarryPair = { pair_id: string; base_currency: PolicyRateCurrency; quote_currency: PolicyRateCurrency };
@@ -12,14 +12,9 @@ export function buildExploratoryCarrySigns(input: {
   dates: string[];
   histories: Record<PolicyRateCurrency, OfficialPolicyRateHistoryRecord[]>;
 }) {
-  const normalizedHistories = Object.fromEntries(Object.entries(input.histories).map(([currency, records]) => {
-    const latestByDate = new Map<string, OfficialPolicyRateHistoryRecord>();
-    for (const record of records) {
-      const current = latestByDate.get(record.observation_date);
-      if (current === undefined || record.sequence > current.sequence) latestByDate.set(record.observation_date, record);
-    }
-    return [currency, [...latestByDate.values()].sort((left, right) => left.observation_date.localeCompare(right.observation_date))];
-  })) as Record<PolicyRateCurrency, OfficialPolicyRateHistoryRecord[]>;
+  // A withdrawn date is no change point, so the rate before it carries on (BACKLOG 102-09).
+  const normalizedHistories = Object.fromEntries(Object.entries(input.histories)
+    .map(([currency, records]) => [currency, latestRevisedSeries(records)])) as Record<PolicyRateCurrency, OfficialPolicyRateHistoryRecord[]>;
   const latestAt = (currency: PolicyRateCurrency, date: string) => {
     const rows = normalizedHistories[currency] ?? [];
     let latest: OfficialPolicyRateHistoryRecord | null = null;

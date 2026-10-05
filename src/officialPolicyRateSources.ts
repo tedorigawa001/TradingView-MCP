@@ -108,19 +108,20 @@ export async function collectOfficialPolicyRateHistory(input: {
   const rawSha256 = `sha256:${createHash("sha256").update(raw, "utf8").digest("hex")}`;
   const archive = await (input.archive ?? new OfficialPolicyRateRawArchive(resolvePolicyRateOfficialRawArchivePath())).store(rawSha256, raw);
   const rawSnapshot = await input.store.observeRawSnapshot({ source_id: source.id, source_url: source.sourceUrl, raw_sha256: rawSha256, source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date, raw_bytes: Buffer.byteLength(raw, "utf8"), retrieved_at: retrievedAt });
-  const sourceVintageAt = response.headers.get("last-modified");
+  const sourceVintageAt = toCanonicalTimestamp(response.headers.get("last-modified"));
   const observations: OfficialPolicyRateObservation[] = parsed.changes.map((row) => ({
     currency: source.currency,
     source_symbol: source.sourceSymbol,
     observation_date: row.observation_date,
     value: row.value,
     source_url: source.sourceUrl,
-    source_vintage_at: toCanonicalTimestamp(sourceVintageAt),
+    source_vintage_at: sourceVintageAt,
     raw_sha256: rawSha256,
     retrieved_at: retrievedAt,
   }));
-  const persisted = await input.store.observeMany(observations);
-  return { source_id: source.id, currency: source.currency as PolicyRateCurrency, source_url: source.sourceUrl, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
+  // The download's span lets the store withdraw a stored change point the source no longer has (BACKLOG 102-09).
+  const persisted = await input.store.observeMany(observations, [{ source_url: source.sourceUrl, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, first_observation_date: parsed.source_first_observation_date, last_observation_date: parsed.source_last_observation_date }]);
+  return { source_id: source.id, currency: source.currency as PolicyRateCurrency, source_url: source.sourceUrl, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: firstSeen(persisted) };
 }
 
 async function collectRbaCashRateTargetHistory(input: {
@@ -155,13 +156,24 @@ async function collectRbaCashRateTargetHistory(input: {
   const currentArchive = await archiveStore.store(currentSha256, currentRaw);
   const historicalSnapshot = await input.store.observeRawSnapshot({ source_id: "rba_cash_rate_target_historical_f1", source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_observation_count: historical.source_observation_count, source_first_observation_date: historical.source_first_observation_date, source_last_observation_date: historical.source_last_observation_date, raw_bytes: historicalRaw.length, retrieved_at: retrievedAt });
   const currentSnapshot = await input.store.observeRawSnapshot({ source_id: input.source.id, source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_observation_count: current.source_observation_count, source_first_observation_date: current.source_first_observation_date, source_last_observation_date: current.source_last_observation_date, raw_bytes: Buffer.byteLength(currentRaw, "utf8"), retrieved_at: retrievedAt });
+  const historicalVintageAt = toCanonicalTimestamp(historicalResponse.headers.get("last-modified"));
+  const currentVintageAt = toCanonicalTimestamp(currentResponse.headers.get("last-modified"));
   const merged = compactRbaChanges([
-    ...historical.changes.map((row) => ({ ...row, source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: toCanonicalTimestamp(historicalResponse.headers.get("last-modified")) })),
-    ...current.changes.map((row) => ({ ...row, source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: toCanonicalTimestamp(currentResponse.headers.get("last-modified")) })),
+    ...historical.changes.map((row) => ({ ...row, source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: historicalVintageAt })),
+    ...current.changes.map((row) => ({ ...row, source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt })),
   ]);
   const observations: OfficialPolicyRateObservation[] = merged.map((row) => ({ currency: input.source.currency, source_symbol: input.source.sourceSymbol, observation_date: row.observation_date, value: row.value, source_url: row.source_url, source_vintage_at: row.source_vintage_at, raw_sha256: row.raw_sha256, retrieved_at: retrievedAt }));
-  const persisted = await input.store.observeMany(observations);
-  return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: input.source.sourceUrl, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: historical.source_observation_count + current.source_observation_count, source_first_observation_date: historical.source_first_observation_date, source_last_observation_date: current.source_last_observation_date }, raw_archives: { historical: historicalArchive, current: currentArchive }, raw_snapshots: { historical: historicalSnapshot, current: currentSnapshot }, first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
+  // One span per file, so a change point the workbook or the CSV no longer has is withdrawn on that file's word.
+  const persisted = await input.store.observeMany(observations, [
+    { source_url: RBA_CASH_RATE_TARGET_HISTORICAL_URL, raw_sha256: historicalSha256, source_vintage_at: historicalVintageAt, first_observation_date: historical.source_first_observation_date, last_observation_date: historical.source_last_observation_date },
+    { source_url: input.source.sourceUrl, raw_sha256: currentSha256, source_vintage_at: currentVintageAt, first_observation_date: current.source_first_observation_date, last_observation_date: current.source_last_observation_date },
+  ]);
+  return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: input.source.sourceUrl, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: historical.source_observation_count + current.source_observation_count, source_first_observation_date: historical.source_first_observation_date, source_last_observation_date: current.source_last_observation_date }, raw_archives: { historical: historicalArchive, current: currentArchive }, raw_snapshots: { historical: historicalSnapshot, current: currentSnapshot }, first_seen: firstSeen(persisted) };
+}
+
+/** What one batch wrote, withdrawals and reappearances included (BACKLOG 102-09). */
+function firstSeen(persisted: Awaited<ReturnType<OfficialPolicyRateHistoryStore["observeMany"]>>) {
+  return { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions, reappeared: persisted.reappeared, withdrawn: persisted.withdrawn };
 }
 
 function compactRbaChanges<T extends { observation_date: string; value: number }>(rows: T[]): T[] {
@@ -216,8 +228,9 @@ async function collectFredFedTargetHistory(input: {
     raw_sha256: rawSha256,
     retrieved_at: retrievedAt,
   }));
-  const persisted = await input.store.observeMany(observations);
-  return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
+  // One download holds both the single target and the range, so one span covers both.
+  const persisted = await input.store.observeMany(observations, [{ source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, source_vintage_at: sourceVintageAt, first_observation_date: parsed.source_first_observation_date, last_observation_date: parsed.source_last_observation_date }]);
+  return { source_id: input.source.id, currency: input.source.currency as PolicyRateCurrency, source_url: FRED_FED_TARGET_HISTORY_URL, raw_sha256: rawSha256, raw_archive: archive, raw_snapshot: rawSnapshot, retrieved_at: retrievedAt, observations: observations.length, source_coverage: { source_observation_count: parsed.source_observation_count, source_first_observation_date: parsed.source_first_observation_date, source_last_observation_date: parsed.source_last_observation_date }, first_seen: firstSeen(persisted) };
 }
 
 /** A rate as the sources write it: "4.00", "-0.75", ".25". */

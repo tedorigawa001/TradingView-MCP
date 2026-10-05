@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { collectOfficialPolicyRateHistory, parseBoeBankRateCsv, parseEcbDepositFacilityCsv } from "../../build/officialPolicyRateSources.js";
+import { OfficialPolicyRateHistoryStore } from "../../build/policyRateOfficialHistory.js";
 
 const csv = [
   "KEY,TIME_PERIOD,OBS_VALUE,TITLE",
@@ -288,4 +293,94 @@ test("a row missing its value column is refused, apart from a blank value", asyn
   assert.throws(() => parseFredFedTargetHistoryCsv("observation_date,DFEDTAR,DFEDTARL,DFEDTARU\n2008-12-15,1.00"), missing);
   assert.equal(parseFredFedTargetHistoryCsv("observation_date,DFEDTAR,DFEDTARL,DFEDTARU\n2008-12-15,1.00,,").changes[0].value, 1,
     "a single target with blank range columns is still read");
+});
+
+// BACKLOG 102-09: each collector hands the store the span of every file it read, so a revision that removes a change
+// point withdraws it rather than leaving the old one in the revised series.
+const historyStore = async () => {
+  const path = join(await mkdtemp(join(tmpdir(), "tv-mcp-official-policy-rate-")), "history.jsonl");
+  return { path, store: new OfficialPolicyRateHistoryStore(path) };
+};
+const revisedOf = async (store, currency) => (await store.getRevisedSeries(currency)).map((row) => [row.observation_date, row.value]);
+/** The withdrawal records in the log, as [date, source_url, raw_sha256]. */
+const withdrawalsIn = async (path) => (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+  .filter((record) => record.rate_status === "withdrawn").map((record) => [record.observation_date, record.source_url, record.raw_sha256]);
+
+test("an ECB revision that removes a change withdraws it, and every download's raw and snapshot are kept", async () => {
+  const { path, store } = await historyStore();
+  const archived = [];
+  const ecbCsv = (rows) => ["KEY,TIME_PERIOD,OBS_VALUE,TITLE", ...rows.map(([date, value]) => `FM.D.U2.EUR.4F.KR.DFR.LEV,${date},${value},Deposit facility`)].join("\n");
+  const run = (raw, now) => collectOfficialPolicyRateHistory({
+    sourceId: "ecb_deposit_facility", store,
+    archive: { store: async (hash, body) => { archived.push({ hash, body }); return { stored: true, bytes: Buffer.byteLength(body) }; } },
+    fetch: async () => ({ ok: true, status: 200, text: async () => raw, headers: { get: () => null } }),
+    now: new Date(now),
+  });
+  const firstRaw = ecbCsv([["2025-01-01", 4], ["2025-02-01", 5], ["2025-03-01", 5]]);
+  const secondRaw = ecbCsv([["2025-01-01", 4], ["2025-02-01", 4], ["2025-03-01", 4]]);
+  const first = await run(firstRaw, "2026-07-29T12:00:00.000Z");
+  const second = await run(secondRaw, "2026-07-30T12:00:00.000Z");
+  assert.deepEqual(second.first_seen, { recorded: 1, unchanged: 1, revisions: 0, reappeared: 0, withdrawn: 1 });
+  assert.deepEqual(await revisedOf(store, "EUR"), [["2025-01-01", 4]]);
+  assert.deepEqual(await withdrawalsIn(path), [["2025-02-01", second.source_url, second.raw_sha256]]);
+  assert.equal((await store.getLatest("EUR")).value, 4);
+  const coverage = await store.coverage();
+  assert.deepEqual([coverage.currencies.EUR.withdrawals, coverage.raw_snapshots, coverage.source_coverage.ecb_deposit_facility.latest_raw_sha256], [1, 2, second.raw_sha256]);
+  assert.deepEqual(archived.map(({ hash, body }) => [hash, body]), [[first.raw_sha256, firstRaw], [second.raw_sha256, secondRaw]]);
+  // A shorter export that starts later is no word on the earlier change, which stays.
+  const third = await run(ecbCsv([["2025-03-01", 4]]), "2026-07-31T12:00:00.000Z");
+  assert.equal(third.first_seen.withdrawn, 0);
+  assert.deepEqual((await revisedOf(store, "EUR"))[0], ["2025-01-01", 4]);
+});
+
+test("a FRED revision withdraws on the word of the joined download", async () => {
+  const { path, store } = await historyStore();
+  const run = (rows, now) => collectOfficialPolicyRateHistory({
+    sourceId: "fred_fed_target_range_midpoint", store,
+    archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+    fetch: async () => ({ ok: true, status: 200, text: async () => ["observation_date,DFEDTAR,DFEDTARL,DFEDTARU", ...rows].join("\n"), headers: { get: () => null } }),
+    now: new Date(now),
+  });
+  await run(["2008-12-15,1.0000,,", "2008-12-16,,0.00,0.25", "2015-12-17,,0.25,0.50"], "2026-07-29T12:00:00.000Z");
+  const second = await run(["2008-12-15,1.0000,,", "2008-12-16,,0.00,0.25", "2015-12-17,,0.00,0.25"], "2026-07-30T12:00:00.000Z");
+  assert.equal(second.first_seen.withdrawn, 1);
+  assert.deepEqual(await revisedOf(store, "USD"), [["2008-12-15", 1], ["2008-12-16", 0.125]]);
+  assert.deepEqual(await withdrawalsIn(path), [["2015-12-17", second.source_url, second.raw_sha256]]);
+  assert.match(second.source_url, /id=DFEDTAR,DFEDTARL,DFEDTARU$/);
+});
+
+test("an RBA revision withdraws a change from the workbook or the CSV on that file's word", async () => {
+  const { path, store } = await historyStore();
+  const current = (rows) => [
+    "F1 INTEREST RATES AND YIELDS - MONEY MARKET",
+    "Title,Cash Rate Target,Interbank Overnight Cash Rate",
+    "Description,Cash Rate Target on date,Interbank Overnight Cash Rate on date",
+    "Frequency,Daily,Daily",
+    "Series ID,FIRMMCRTD,FIRMMCRID",
+    ...rows,
+  ].join("\n");
+  const run = (fill, historicalChanges, currentRaw, now) => {
+    const historicalRaw = Buffer.alloc(4_096, fill);
+    return collectOfficialPolicyRateHistory({
+      sourceId: "rba_cash_rate_target", store,
+      archive: { store: async (_hash, body) => ({ stored: true, bytes: Buffer.byteLength(body) }) },
+      historicalRbaParser: () => ({ changes: historicalChanges, source_observation_count: 5_171, source_first_observation_date: "1990-08-02", source_last_observation_date: "2010-12-31" }),
+      fetch: async (url) => url.includes("f01dhist.xls")
+        ? { ok: true, status: 200, text: async () => "", arrayBuffer: async () => historicalRaw.buffer.slice(historicalRaw.byteOffset, historicalRaw.byteOffset + historicalRaw.byteLength), headers: { get: () => null } }
+        : { ok: true, status: 200, text: async () => currentRaw, headers: { get: () => null } },
+      now: new Date(now),
+    });
+  };
+  await run(7, [{ observation_date: "1990-08-02", value: 14 }, { observation_date: "2010-11-03", value: 4.75 }],
+    current(["04-Jan-2011,4.75,4.75", "01-Nov-2011,4.50,4.49"]), "2026-07-29T12:00:00.000Z");
+  // The workbook no longer has the 2010 change, so 2011-01-04 is now one; the CSV no longer has the November cut.
+  const currentSecond = current(["04-Jan-2011,4.75,4.75", "01-Nov-2011,4.75,4.74"]);
+  const second = await run(8, [{ observation_date: "1990-08-02", value: 14 }], currentSecond, "2026-07-30T12:00:00.000Z");
+  assert.deepEqual([second.first_seen.recorded, second.first_seen.withdrawn], [3, 2]);
+  assert.deepEqual(await revisedOf(store, "AUD"), [["1990-08-02", 14], ["2011-01-04", 4.75]]);
+  const sha256 = (body) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
+  assert.deepEqual(await withdrawalsIn(path), [
+    ["2010-11-03", "https://www.rba.gov.au/statistics/tables/xls-hist/f01dhist.xls", sha256(Buffer.alloc(4_096, 8))],
+    ["2011-11-01", "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv", sha256(currentSecond)],
+  ]);
 });
