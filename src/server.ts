@@ -901,9 +901,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "run_event_study_falsification_audit",
     {
       description:
-        "Calibrate one frozen FVG-retest or session-auction event-study decision rule against deterministic, " +
+        "Calibrate one frozen FVG-retest, session-auction or event-aftershock event-study decision rule against deterministic, " +
         "predictability-free synthetic OHLC. It runs each selected null model separately and returns the " +
-        "candidate rate, Wilson interval, seed range, and failures. A candidate requires a global mean " +
+        "candidate rate over the evaluated replications, Wilson interval, seed range, failures, and the seeds left out as not " +
+        "evaluable (a study that is not complete, or too few events at the candidate branch and horizon or in a fold); with " +
+        "none evaluated the rate is null. A candidate requires a global mean " +
         "confidence interval wholly above zero plus positive evidence in every synthetic fold. It does not " +
         "read or change TradingView, record a journal entry, rank variants, or establish profitability.",
       inputSchema: {
@@ -7059,7 +7061,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         title: z.string().min(1).max(120),
         thesis: z.string().min(1).max(2000),
         audit_definition: z.object({
-          runner: z.literal("event_study_falsification_audit_standard_v1"),
+          runner: z.literal("event_study_falsification_audit_standard_v1")
+            .describe("Names the standard audit CLI input contract, not the methodology a run reports: the same input now runs as standard v3 (v4 for yield-price)."),
           input: z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length > 0, "audit_definition.input must not be empty"),
         }).describe("Exact standard falsification-audit CLI input. It is canonicalized and hash-bound in the immutable journal entry."),
         evaluation_contract: z.object({

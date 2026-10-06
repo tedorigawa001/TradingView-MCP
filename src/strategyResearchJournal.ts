@@ -80,6 +80,9 @@ export type EventStudyHypothesis = {
   thesis: string;
   // Older records predate replayable falsification-audit definitions. New registrations receive
   // this through the MCP schema; keeping it optional preserves the append-only journal reader.
+  // The runner names the standard audit CLI input contract, not the methodology a run of it reports:
+  // since BACKLOG 102-15 the same input runs as standard v3 (v4 for yield-price), whose denominator
+  // leaves out draws too sparse to evaluate, so one inputHash now covers both v1 and v3 runs.
   auditDefinition?: {
     runner: "event_study_falsification_audit_standard_v1";
     input: Record<string, unknown>;

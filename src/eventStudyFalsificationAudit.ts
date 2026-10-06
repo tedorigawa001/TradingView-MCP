@@ -223,8 +223,10 @@ export function isEventStudyCandidate(result: EventStudyAuditResultShape, rule: 
  * Judges one replication (BACKLOG 102-15). The rule needs its events where it looks: a complete study, the minimum
  * event count at the candidate branch and horizon, and the fold count in every predeclared fold. A draw short of any of
  * these could never be a candidate, so it is not evaluable; counting it as a rejection would pull the null candidate
- * rate down whenever signals are sparse. The counts are fixed before any return is read, so leaving such a draw out
- * selects nothing by its outcome.
+ * rate down whenever signals are sparse. The rate is then P(candidate | evaluable). That is not free of the outcome:
+ * on the yield-price null the event count correlates with the mean return's t value (about 0.15), and draws with
+ * more events become candidates more often, so the conditional rate leans high, the cautious side for an alpha
+ * audit. Rates from settings whose evaluable share differs must be compared with `evaluated` and `notEvaluableSeeds`.
  */
 export function evaluateEventStudyCandidate(result: EventStudyAuditResultShape, rule: EventStudyCandidateRule) {
   if (result.status !== "complete") return "not_evaluable" as const;

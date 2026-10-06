@@ -75,6 +75,7 @@ async function main(): Promise<void> {
     ...(args.bars === null ? {} : { bars: args.bars }),
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.runs.some((run) => run.audit.status !== "complete")) process.stderr.write("event-study falsification audit: a run had failed replications, so its rate is descriptive only\n");
   if (result.runs.some((run) => run.audit.evaluated === 0)) process.stderr.write("event-study falsification audit: a run evaluated no replication and has no rate\n");
   process.exitCode = eventStudyFalsificationExitCode(result);
 }

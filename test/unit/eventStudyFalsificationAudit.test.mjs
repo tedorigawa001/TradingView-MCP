@@ -257,3 +257,29 @@ test("yield-price audit tells sparse draws from rejections and candidates", () =
   const candidates = run(2, 2, { firstSeed: 95 });
   assert.deepEqual([candidates.evaluated, candidates.candidates, candidates.candidateSeeds, candidates.observedRate], [2, 1, [96], 0.5]);
 });
+
+test("single-series audits leave out draws short of events or flagged incomplete, and still count candidates", () => {
+  // FVG over 600 bars with 30 events required: seeds 3 and 7 fall short, the other six are judged, one a candidate.
+  const fvg = runFvgRetestFalsificationAudit({
+    audit: { model: "white_noise", replications: 8, bars: 600, timeframeMinutes: 60, nominalAlpha: 0.05 },
+    study: {
+      symbol: "SYNTH:FVG", timeframe: "60", minimumGapBps: 10, retestWithinBars: 12, minImpulseBodyRatio: 0.5,
+      requireBoundaryHold: true, horizons: [1, 2], targetReturnBps: 20, minimumEvents: 30, eventLimit: 0,
+      confidenceLevel: 0.95, configurationTrials: 1, regime: null,
+    },
+    candidate: { branch: "fvg_retest_bullish", horizon: 2, minimumEvents: 30, minimumFoldEvents: 1, folds: 2 },
+  }).audit;
+  assert.deepEqual([fvg.evaluated, fvg.notEvaluableSeeds, fvg.candidates, fvg.observedRate], [6, [3, 7], 1, 1 / 6]);
+  // 340 bars end inside a session's range, so every failed-breakout study is partial for that quality issue, even the
+  // draw with events enough at the candidate branch: none is judged, and there is no rate.
+  const failed = runFailedBreakoutFalsificationAudit({
+    audit: { model: "white_noise", replications: 3, bars: 340, timeframeMinutes: 60, nominalAlpha: 0.05 },
+    study: {
+      symbol: "SYNTH:FAILED", timeframe: "60", timezone: "UTC", rangeStart: "00:00", rangeEnd: "08:00", failureEnd: "12:00",
+      confirmationBars: 1, minimumRangeCoverage: 1, horizons: [1, 2], targetReturnBps: 20, minimumEvents: 2, eventLimit: 0,
+      confidenceLevel: 0.95, configurationTrials: 1, regime: null,
+    },
+    candidate: { branch: "failed_breakout_up", horizon: 2, minimumEvents: 2, minimumFoldEvents: 1, folds: 2 },
+  }).audit;
+  assert.deepEqual([failed.evaluated, failed.notEvaluableSeeds, failed.observedRate], [0, [1, 2, 3], null]);
+});
