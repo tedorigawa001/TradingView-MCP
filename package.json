@@ -87,7 +87,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "fast-xml-parser": "^5.10.0",
     "pdfjs-dist": "^6.2.108",
     "ws": "^8.21.0",
@@ -102,6 +102,7 @@
     "@hono/node-server": "^2.0.11",
     "fast-uri": "^3.1.8",
     "hono": "^4.13.5",
-    "ip-address": "^10.7.1"
+    "ip-address": "^10.7.1",
+    "proxy-addr": "^2.0.8"
   }
 }

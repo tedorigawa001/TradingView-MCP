@@ -39,6 +39,20 @@ test('the fast-uri and ip-address overrides keep their advisory floors', async (
   }
 });
 
+test('the MCP SDK and the proxy-addr override keep their advisory floors (GHSA-6qxp-vccf-f47h, GHSA-jqcg-44mw-7w3h)', async () => {
+  const { dependencies, overrides } = await manifest();
+  // The SDK's OAuth client could send credentials to an authorization server chosen by the MCP server before 1.30.2.
+  assert.ok(atLeast(floorOf(dependencies['@modelcontextprotocol/sdk']), [1, 30, 2]),
+    `@modelcontextprotocol/sdk floor ${dependencies['@modelcontextprotocol/sdk']} is below the first patched version 1.30.2`);
+  // proxy-addr, under the SDK's express, trusted IPv4-mapped IPv6 addresses as their IPv4 subnet before 2.0.8.
+  assert.ok(overrides?.['proxy-addr'], 'the proxy-addr override was removed');
+  assert.ok(atLeast(floorOf(overrides['proxy-addr']), [2, 0, 8]),
+    `proxy-addr override floor ${overrides['proxy-addr']} is below the first patched version 2.0.8`);
+  const lock = JSON.parse(await readFile(new URL('../../package-lock.json', import.meta.url), 'utf8'));
+  assert.ok(atLeast(floorOf(lock.packages['node_modules/@modelcontextprotocol/sdk'].version), [1, 30, 2]),
+    'the lockfile still installs a vulnerable @modelcontextprotocol/sdk');
+});
+
 test('every override still resolves to something at or above its floor', async () => {
   const { overrides } = await manifest();
   const lock = JSON.parse(await readFile(new URL('../../package-lock.json', import.meta.url), 'utf8'));
