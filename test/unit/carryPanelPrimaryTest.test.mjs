@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runCarryPanelPrimaryTest } from "../../build/carryPanelPrimaryTest.js";
+import { CARRY_CORE_PRIMARY_PAIRS, runCarryPanelPrimaryTest } from "../../build/carryPanelPrimaryTest.js";
+import { getCarryCorePrimaryReadiness } from "../../build/carryPanelPrimaryReadiness.js";
 
 const bars = (multiplier) => Array.from({ length: 120 }, (_, index) => ({
   timeIso: new Date(Date.UTC(2026, 0, 1 + index)).toISOString(),
@@ -140,4 +141,44 @@ test("a stretch of missing closes never stretches a window past its horizon", ()
 test("the anchor grid starts on a business day", () => {
   assert.throws(() => runCarryPanelPrimaryTest({ ...baseInput(pairs), from: "2026-01-03" }), /Monday-to-Friday business day/);
   assert.throws(() => runCarryPanelPrimaryTest({ ...baseInput(pairs), from: "2026-01-04" }), /Monday-to-Friday business day/);
+});
+
+test("a missing close is counted as such before a heartbeat gap, and a forming last bar is no close", () => {
+  // Only the first two anchors have a recent heartbeat; the price missing on Thursday 2026-03-12 still counts as missing.
+  const gapped = runCarryPanelPrimaryTest({ ...baseInput([pairs[0], without(pairs[1], ["2026-03-12"])]), collectionHeartbeats: [{ first_seen_at: "2026-01-01T12:00:00.000Z" }], minimumAnchorClusters: 60 });
+  assert.deepEqual([gapped.anchor_clusters, gapped.anchors_excluded_for_missing_price, gapped.anchors_excluded_for_collection_gap], [2, 2, 13]);
+  // On the run date the last bar is still forming, so the window ending there has no endpoint close yet.
+  const forming = (pair) => ({ ...pair, bars: pair.bars.map((bar) => bar.timeIso.startsWith("2026-04-30") ? { ...bar, forming: true } : bar) });
+  const today = runCarryPanelPrimaryTest(baseInput(pairs.map(forming)));
+  assert.deepEqual([today.anchor_clusters, today.anchors_excluded_for_missing_price], [16, 1]);
+});
+
+test("under the frozen contract the anchors are the readiness tool's grid, complete on its estimated date", () => {
+  // Weekday bars for the five core pairs, a policy-rate history that changes now and then (never leaving a pair at a
+  // zero differential), and a heartbeat every weekday.
+  const weekdays = [];
+  for (let time = Date.UTC(2026, 6, 1); time <= Date.UTC(2031, 5, 30); time += 86_400_000) {
+    const day = new Date(time).getUTCDay();
+    if (day !== 0 && day !== 6) weekdays.push(new Date(time).toISOString());
+  }
+  let state = 12345;
+  const noise = () => { state = (state * 1103515245 + 12345) % 2147483648; return state / 2147483648 - 0.5; };
+  const corePairs = CARRY_CORE_PRIMARY_PAIRS.map((pair) => {
+    let close = 100;
+    return { pair_id: pair.pair_id, base_currency: pair.base_currency, quote_currency: pair.quote_currency, bars: weekdays.map((timeIso) => ({ timeIso, close: (close *= Math.exp(noise() * 0.01)) })) };
+  });
+  const rates = { USD: [4, 4.5, 3.5, 4.25], EUR: [2, 2.5, 1.5, 3], AUD: [3, 2.5, 3.25, 2], JPY: [0.5, 0.25, 0.75, 0.1], CAD: [3.25, 2.75, 3.75, 3], CHF: [1, 1.5, 0.5, 1.25] };
+  const changes = ["2026-07-30", "2027-09-15", "2028-11-15", "2030-01-15"];
+  const policyRateVersions = Object.fromEntries(Object.entries(rates).map(([currency, values], currencyIndex) => [currency,
+    values.map((value, index) => ({ ...record(currency, changes[index], value, `${changes[index]}T00:00:00.000Z`, currencyIndex * 10 + index + 1), first_seen_at: `${changes[index]}T00:00:00.000Z` }))]));
+  const collectionHeartbeats = weekdays.filter((timeIso) => timeIso >= "2026-07-30").map((timeIso) => ({ first_seen_at: timeIso.replace("T00:00:00.000Z", "T01:45:00.000Z") }));
+  const readiness = getCarryCorePrimaryReadiness({ asOf: "2031-06-30T12:00:00.000Z", policyRateVersions, collectionHeartbeats });
+  assert.equal(readiness.first_eligible_anchor_date, "2026-08-25");
+  const estimated = readiness.estimated_earliest_complete_window_date;
+  const run = (to) => runCarryPanelPrimaryTest({ pairs: corePairs, policyRateVersions, collectionHeartbeats, from: "2026-07-28", to, iterations: 100, seed: "frozen-grid" });
+  const dayBefore = new Date(Date.parse(`${estimated}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
+  const before = run(dayBefore);
+  assert.deepEqual([before.status, before.anchor_clusters, before.anchors_excluded_for_missing_price], ["not_evaluable", 59, 0]);
+  const due = run(estimated);
+  assert.deepEqual([due.status, due.anchor_clusters, due.anchors_excluded_for_collection_gap], ["complete", 60, 1]);
 });
