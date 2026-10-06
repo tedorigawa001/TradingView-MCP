@@ -6708,7 +6708,7 @@ test("run_event_study_falsification_audit calibrates a frozen FVG rule without c
   } });
   assert.equal(res.isError, undefined);
   const parsed = JSON.parse(res.content[0].text);
-  assert.equal(parsed.methodologyVersion, "event_study_falsification_audit_standard_v1");
+  assert.equal(parsed.methodologyVersion, "event_study_falsification_audit_standard_v3");
   assert.deepEqual(parsed.standard.models, ["white_noise"]);
   assert.equal(parsed.runs[0].candidateRule.branch, "fvg_retest_bearish");
   assert.equal(parsed.runs[0].audit.completed, 2);
@@ -6781,6 +6781,19 @@ test("run_lead_lag_falsification_audit returns a bound configuration hash withou
   const clusteredParsed = JSON.parse(clustered.content[0].text);
   assert.equal(clusteredParsed.audit.model, "factor_regime_switching_volatility_pair");
   assert.equal(clusteredParsed.audit.auditDefinition.input.generation.pairStructure.volatilityStateDependence, "shared");
+
+  // The legacy contract keeps its own runner and standard name; a run too sparse to judge has no rate.
+  const legacy = await client.callTool({ name: "run_lead_lag_falsification_audit", arguments: {
+    timeframe: "60", max_lag_bars: 2, minimum_observations: 1000, configuration_trials: 1,
+    folds: [
+      { fold_id: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
+      { fold_id: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" },
+    ],
+    return_standardization: "none", replications: 2, bars: 300,
+  } });
+  const legacyParsed = JSON.parse(legacy.content[0].text);
+  assert.deepEqual([legacyParsed.methodologyVersion, legacyParsed.audit.auditDefinition.runner, legacyParsed.audit.evaluated, legacyParsed.audit.observedRate],
+    ["lead_lag_falsification_audit_standard_v6", "lead_lag_falsification_audit_v6", 0, null]);
 });
 
 test("run_feature_outcome_power_audit returns separate effect-size detection runs without chart access", async () => {

@@ -1581,7 +1581,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Calibrate the frozen lead-lag candidate rule against paired nulls. Factor variants carry contemporaneous " +
         "dependence but no lagged predictability; independent variants isolate marginal path effects. Every replication runs the rule's own circular-shift empirical " +
-        "null after the v3 default's fixed causal prior-20-return RMS scaling. The result carries its fully resolved configuration and a hash of it, so a quoted rate can be " +
+        "null after the default contract's fixed causal prior-20-return RMS scaling (runner v7; a draw too sparse to judge is left out of the rate). The result carries its fully resolved configuration and a hash of it, so a quoted rate can be " +
         "reproduced. It does not read or change TradingView and does not establish profitability.",
       inputSchema: {
         timeframe: z.string().regex(/^[1-9]\d*$/),
@@ -1628,9 +1628,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         });
         return jsonResult({
           schemaVersion: "1.0",
-          methodologyVersion: audit.auditDefinition.runner === "lead_lag_falsification_audit_v7"
-            ? "lead_lag_falsification_audit_standard_v7"
-            : "lead_lag_falsification_audit_standard_v6",
+          // The standard name follows the runner, so every runner keeps its own name.
+          methodologyVersion: audit.auditDefinition.runner.replace("lead_lag_falsification_audit_", "lead_lag_falsification_audit_standard_"),
           audit,
           limitations: [
             "This response reports one explicitly named paired null model; rates from different models must not be pooled.",

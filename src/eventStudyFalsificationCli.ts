@@ -57,6 +57,14 @@ function parseConfig(value: string): StandardEventStudyFalsificationAuditInput {
   return parsed as StandardEventStudyFalsificationAuditInput;
 }
 
+/**
+ * Non-zero when a run failed a replication, or evaluated none, so it has no rate (BACKLOG 102-15): neither result
+ * is a calibration, and a caller that reads only the exit code must not take it for one.
+ */
+export function eventStudyFalsificationExitCode(result: { runs: Array<{ audit: { status: string; evaluated: number } }> }): 0 | 1 {
+  return result.runs.some((run) => run.audit.status !== "complete" || run.audit.evaluated === 0) ? 1 : 0;
+}
+
 async function main(): Promise<void> {
   const args = parseEventStudyFalsificationCliArguments(process.argv.slice(2));
   const config = parseConfig(await readFile(args.configPath, "utf8"));
@@ -67,7 +75,8 @@ async function main(): Promise<void> {
     ...(args.bars === null ? {} : { bars: args.bars }),
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (result.runs.some((run) => run.audit.status !== "complete")) process.exitCode = 1;
+  if (result.runs.some((run) => run.audit.evaluated === 0)) process.stderr.write("event-study falsification audit: a run evaluated no replication and has no rate\n");
+  process.exitCode = eventStudyFalsificationExitCode(result);
 }
 
 if (isCliEntrypoint(import.meta.url)) {

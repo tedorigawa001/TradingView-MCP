@@ -117,8 +117,9 @@ test("lead-lag audit leaves draws too sparse to judge out of the denominator and
 });
 
 test("a lead-lag draw is judged when one positive lag has a correlation, two folds with one, and a complete null", () => {
-  const lag = (lagBars, { correlation = 0.1, evaluableFolds = 2, gate = false } = {}) => ({
-    lagBars, correlation, foldStability: { evaluableFolds }, inference: { statisticalGateEligible: gate },
+  const lag = (lagBars, { correlation = 0.1, evaluableFolds = 2, gate = false, nullAtLag = "available" } = {}) => ({
+    lagBars, correlation, foldStability: { evaluableFolds },
+    inference: { statisticalGateEligible: gate, ...(nullAtLag === null ? {} : { empiricalNull: { status: nullAtLag } }) },
   });
   const complete = { status: "complete" };
   assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(-1), lag(0), lag(1), lag(2)] }), "non_candidate");
@@ -131,4 +132,17 @@ test("a lead-lag draw is judged when one positive lag has a correlation, two fol
   assert.equal(evaluateLeadLagCandidate({ byLag: [lag(1)] }), "not_evaluable");
   assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(-1), lag(0), lag(1, { correlation: null })] }), "not_evaluable");
   assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(1, { evaluableFolds: 1 }), lag(2, { evaluableFolds: 0 })] }), "not_evaluable");
+  // A null complete over the family can still have no draws at a lag.
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(1, { nullAtLag: "insufficient_sample" }), lag(2, { nullAtLag: null })] }), "not_evaluable");
+});
+
+test("a block sign-flip null complete over the family but empty at every lag judges no draw", () => {
+  // 100 bars with lags up to 50: the null is complete, but no lag has its own null draws, so no gate could pass.
+  const result = runLeadLagFalsificationAudit({
+    replications: 3, firstSeed: 10, bars: 100, timeframeMinutes: 60, nominalAlpha: 0.05, maxLagBars: 50,
+    minimumObservations: 4, confidenceLevel: 0.95, configurationTrials: 1, nullPolicy: "block_sign_flip", returnStandardization: "none",
+    folds: [{ foldId: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-04T02:00:00.000Z" },
+            { foldId: "second", from: "2006-01-04T02:00:00.000Z", to: "2006-01-06T04:00:00.000Z" }],
+  });
+  assert.deepEqual([result.auditDefinition.runner, result.evaluated, result.notEvaluableSeeds, result.observedRate], ["lead_lag_falsification_audit_v8", 0, [10, 11, 12], null]);
 });

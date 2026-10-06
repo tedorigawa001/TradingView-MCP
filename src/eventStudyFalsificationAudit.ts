@@ -148,10 +148,12 @@ export interface StandardEventStudyFalsificationAuditInput {
 export interface StandardEventStudyFalsificationAuditResult {
   schemaVersion: "1.0";
   /**
-   * v1 is every single-series study. Yield-price is v3: v2 counted a paired draw too sparse to evaluate the frozen rule
-   * as a rejection, and v3 leaves it out of the rate's denominator as the single-series studies do (BACKLOG 102-15).
+   * v3 is every single-series study and v4 the paired yield-price study. They replace v1 and v2, which counted a draw
+   * too sparse to evaluate the frozen rule as a rejection: v2 whenever the study fell short of its event count, and both
+   * whenever the candidate branch and horizon or a fold did. v3 and v4 leave such a draw out of the rate's denominator
+   * (BACKLOG 102-15). Rates measured under v1 and v2 stay their own evidence.
    */
-  methodologyVersion: "event_study_falsification_audit_standard_v1" | "event_study_falsification_audit_standard_v3";
+  methodologyVersion: "event_study_falsification_audit_standard_v3" | "event_study_falsification_audit_standard_v4";
   standard: {
     replications: number;
     bars: number;
@@ -217,10 +219,21 @@ export function isEventStudyCandidate(result: EventStudyAuditResultShape, rule: 
   });
 }
 
-function evaluateEventStudyCandidate(result: EventStudyAuditResultShape, rule: EventStudyCandidateRule) {
-  // `partial` means the frozen research contract was not fully evaluable on this generated draw.
-  // Counting it as a rejection would bias the null candidate rate downward whenever signals are sparse.
+/**
+ * Judges one replication (BACKLOG 102-15). The rule needs its events where it looks: a complete study, the minimum
+ * event count at the candidate branch and horizon, and the fold count in every predeclared fold. A draw short of any of
+ * these could never be a candidate, so it is not evaluable; counting it as a rejection would pull the null candidate
+ * rate down whenever signals are sparse. The counts are fixed before any return is read, so leaving such a draw out
+ * selects nothing by its outcome.
+ */
+export function evaluateEventStudyCandidate(result: EventStudyAuditResultShape, rule: EventStudyCandidateRule) {
   if (result.status !== "complete") return "not_evaluable" as const;
+  const global = result.byBranch[rule.branch]?.horizons[String(rule.horizon)];
+  if (global === undefined || global.availableEvents < rule.minimumEvents) return "not_evaluable" as const;
+  if (result.folds.length !== rule.folds || result.folds.some((fold) => {
+    const outcome = fold.byBranch[rule.branch]?.horizons[String(rule.horizon)];
+    return outcome === undefined || outcome.availableEvents < rule.minimumFoldEvents;
+  })) return "not_evaluable" as const;
   return isEventStudyCandidate(result, rule) ? "candidate" as const : "non_candidate" as const;
 }
 
@@ -346,7 +359,7 @@ export function runYieldPriceNonconfirmationFalsificationAudit(
         folds: syntheticFolds(targetBars, input.candidate.folds, stepMs),
       }),
       isCandidate: (result) => isEventStudyCandidate(result, input.candidate),
-      // A partial study (too few events, say) is not evaluable rather than rejected, as on the single-series paths.
+      // A draw too sparse for the rule is not evaluable rather than rejected, as on the single-series paths.
       evaluate: (result) => evaluateEventStudyCandidate(result, input.candidate),
     }),
   };
@@ -407,8 +420,8 @@ export function runStandardEventStudyFalsificationAudit(
   return {
     schemaVersion: "1.0",
     methodologyVersion: input.study.type === "yield_price_nonconfirmation"
-      ? "event_study_falsification_audit_standard_v3"
-      : "event_study_falsification_audit_standard_v1",
+      ? "event_study_falsification_audit_standard_v4"
+      : "event_study_falsification_audit_standard_v3",
     standard: { replications: audit.replications, bars: audit.bars, nominalAlpha: audit.nominalAlpha,
       folds: candidate.folds,
       models: input.study.type === "yield_price_nonconfirmation" ? models.map(factorPairModel) : [...models] },
