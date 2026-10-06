@@ -6762,8 +6762,8 @@ test("run_lead_lag_falsification_audit returns a bound configuration hash withou
     bars: 300,
   } });
   const parsed = JSON.parse(response.content[0].text);
-  assert.equal(parsed.methodologyVersion, "lead_lag_falsification_audit_standard_v3");
-  assert.equal(parsed.audit.auditDefinition.runner, "lead_lag_falsification_audit_v3");
+  assert.equal(parsed.methodologyVersion, "lead_lag_falsification_audit_standard_v7");
+  assert.equal(parsed.audit.auditDefinition.runner, "lead_lag_falsification_audit_v7");
   assert.match(parsed.audit.auditDefinition.inputHash, /^sha256:[a-f0-9]{64}$/);
   assert.equal(parsed.audit.auditDefinition.input.study.folds.length, 2);
   assert.equal(parsed.audit.auditDefinition.input.study.returnStandardization, "causal_prior_20_rms");

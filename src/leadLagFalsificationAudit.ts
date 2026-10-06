@@ -38,16 +38,33 @@ export type LeadLagFalsificationAuditResult = FalsificationAuditResult & {
      * null as well as with the statistic. v2 and v3 are the circular shift on raw and standardized
      * returns; v4 and v5 are the block sign flip on the same two. A reader quoting a rate sees this
      * before the hash, and two different nulls sharing one name is how a rate gets misattributed.
+     * v6 to v9 are v2 to v5 with a different denominator: a draw on which no positive lag could
+     * show the statistical gate is left out of the rate rather than counted as a rejection
+     * (BACKLOG 102-15). Rates measured under v2 to v5 stay their own evidence.
      */
     runner:
-      | "lead_lag_falsification_audit_v2"
-      | "lead_lag_falsification_audit_v3"
-      | "lead_lag_falsification_audit_v4"
-      | "lead_lag_falsification_audit_v5";
+      | "lead_lag_falsification_audit_v6"
+      | "lead_lag_falsification_audit_v7"
+      | "lead_lag_falsification_audit_v8"
+      | "lead_lag_falsification_audit_v9";
     input: CanonicalJson;
     inputHash: string;
   };
 };
+
+type LeadLagAuditStudyResult = Pick<ReturnType<typeof computeLeadLagRelationships>, "byLag" | "empiricalNullCalibration">;
+
+/**
+ * Judges one replication (BACKLOG 102-15). A positive lag can show the statistical gate only with a correlation, two
+ * folds that each have one, and a complete empirical null. A draw where no positive lag has these is too sparse to
+ * judge: it is not evaluable, and counting it as a rejection would pull the rate down whenever data is thin.
+ */
+export function evaluateLeadLagCandidate(result: LeadLagAuditStudyResult): "candidate" | "non_candidate" | "not_evaluable" {
+  const judged = result.empiricalNullCalibration?.status === "complete"
+    && result.byLag.some((lag) => lag.lagBars > 0 && lag.correlation !== null && lag.foldStability.evaluableFolds >= 2);
+  if (!judged) return "not_evaluable";
+  return result.byLag.some((lag) => lag.inference.statisticalGateEligible) ? "candidate" : "non_candidate";
+}
 
 /**
  * Audits the complete lead/lag candidate rule on paired nulls. Factor variants keep contemporaneous
@@ -81,6 +98,7 @@ export function runLeadLagFalsificationAudit(input: LeadLagFalsificationAuditInp
     // still measure the underlying statistical gate or every future calibration would report zero by
     // construction and could never demonstrate that the blocker is safe to remove.
     isCandidate: (result) => result.byLag.some((lag) => lag.inference.statisticalGateEligible),
+    evaluate: evaluateLeadLagCandidate,
     model: input.model,
   });
   // Built from the audit's own resolved generation values, never the caller shorthand, so an
@@ -97,16 +115,16 @@ export function runLeadLagFalsificationAudit(input: LeadLagFalsificationAuditInp
       pairStructure: audit.pairStructure ?? null,
     },
     study,
-    decision: { nominalAlpha: audit.nominalAlpha },
+    decision: { nominalAlpha: audit.nominalAlpha, notEvaluableDraws: "excluded_from_rate_denominator" },
   });
   return {
     ...audit,
     auditDefinition: {
       runner: nullPolicy === "block_sign_flip"
         ? (returnStandardization === "causal_prior_20_rms"
-            ? "lead_lag_falsification_audit_v5" : "lead_lag_falsification_audit_v4")
+            ? "lead_lag_falsification_audit_v9" : "lead_lag_falsification_audit_v8")
         : (returnStandardization === "causal_prior_20_rms"
-            ? "lead_lag_falsification_audit_v3" : "lead_lag_falsification_audit_v2"),
+            ? "lead_lag_falsification_audit_v7" : "lead_lag_falsification_audit_v6"),
       input: definition,
       inputHash: canonicalDefinitionHash(definition),
     },

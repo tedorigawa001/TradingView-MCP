@@ -1603,7 +1603,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           "factor_regime_switching_volatility_pair", "factor_bid_ask_bounce_pair",
         ]).optional(),
         return_standardization: z.enum(["causal_prior_20_rms", "none"]).optional()
-          .describe("Default causal_prior_20_rms is the v3 contract. none is the invalidated legacy v2 contract for reproduction only."),
+          .describe("Default causal_prior_20_rms is the v7 runner (the v3 contract, with draws too sparse to evaluate left out of the rate). none is the invalidated legacy contract (v6, formerly v2) for reproduction only."),
         rho: z.number().finite().gt(-1).lt(1).optional(),
         nominal_alpha: z.number().finite().gt(0).lt(1).optional(),
       },
@@ -1628,14 +1628,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         });
         return jsonResult({
           schemaVersion: "1.0",
-          methodologyVersion: audit.auditDefinition.runner === "lead_lag_falsification_audit_v3"
-            ? "lead_lag_falsification_audit_standard_v3"
-            : "lead_lag_falsification_audit_standard_v2",
+          methodologyVersion: audit.auditDefinition.runner === "lead_lag_falsification_audit_v7"
+            ? "lead_lag_falsification_audit_standard_v7"
+            : "lead_lag_falsification_audit_standard_v6",
           audit,
           limitations: [
             "This response reports one explicitly named paired null model; rates from different models must not be pooled.",
             "Factor variants preserve contemporaneous correlation; the clustered variant also shares the volatility state across legs.",
-            "The v3 statistical gate remains uncalibrated because its shared clustered-volatility rate exceeds nominal alpha; public candidate eligibility stays disabled.",
+            "The statistical gate remains uncalibrated because its shared clustered-volatility rate, measured under runner v3, exceeds nominal alpha; public candidate eligibility stays disabled.",
             "Quote a rate only together with auditDefinition.inputHash; fold boundaries alone move an otherwise identical run.",
             "Each replication runs the candidate rule's own fixed circular-shift calibration, so large audits are intentionally compute-intensive.",
           ],

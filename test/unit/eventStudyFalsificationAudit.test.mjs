@@ -158,7 +158,7 @@ test("standard yield-price audit runs all three correlated marginal models", () 
     "factor_regime_switching_volatility_pair",
     "factor_bid_ask_bounce_pair",
   ]);
-  assert.equal(result.methodologyVersion, "event_study_falsification_audit_standard_v2");
+  assert.equal(result.methodologyVersion, "event_study_falsification_audit_standard_v3");
   assert.deepEqual(result.runs.map((run) => run.audit.model), result.standard.models);
   assert.equal(result.runs[1].audit.pairStructure.volatilityStateDependence, "shared");
   assert.ok(result.runs.every((run) => run.audit.completed === 2));
@@ -207,4 +207,25 @@ test("standard event-study audit records separate standard-model calibrations", 
   assert.deepEqual(result.standard.models, ["white_noise", "bid_ask_bounce"]);
   assert.equal(result.runs.length, 2);
   assert.ok(result.runs.every((run) => run.audit.completed === 2));
+});
+
+// BACKLOG 102-15: a paired yield-price draw too sparse to evaluate the frozen rule is left out of the denominator.
+test("yield-price audit tells draws too sparse to evaluate from rejections, whether all or some are", () => {
+  const run = (minimumEvents, replications) => runYieldPriceNonconfirmationFalsificationAudit({
+    audit: { model: "white_noise", replications, bars: 400, timeframeMinutes: 60, nominalAlpha: 0.05 },
+    study: {
+      targetSymbol: "SYNTH:TARGET", driverSymbol: "SYNTH:DRIVER", targetTimeframe: "60", driverTimeframe: "60",
+      relationship: "inverse", driverLookback: 3, driverChangeThreshold: 0.001, priceBreakoutLookback: 3,
+      nonconfirmationBars: 2, triggerLookback: 2, triggerWithinBars: 3, maxDriverAgeBars: 1, horizons: [1, 2],
+      targetReturnBps: 20, minimumEvents, eventLimit: 0, configurationTrials: 1, confidenceLevel: 0.95,
+    },
+    candidate: { branch: "driver_up_target_failure", horizon: 2, minimumEvents, minimumFoldEvents: 1, folds: 2 }, rho: 0.5,
+  }).audit;
+  // No draw has 500 events: none is evaluated, and there is no rate rather than a rate of zero.
+  const none = run(500, 3);
+  assert.deepEqual([none.status, none.completed, none.evaluated, none.notEvaluableSeeds, none.candidates, none.observedRate, none.observedRateInterval, none.exceedsNominalAlpha],
+    ["complete", 3, 0, [1, 2, 3], 0, null, null, false]);
+  // With 35 required, three of these eight draws fall short; the five that do not are the rejections the rate counts.
+  const some = run(35, 8);
+  assert.deepEqual([some.completed, some.evaluated, some.notEvaluableSeeds, some.candidates, some.observedRate], [8, 5, [1, 4, 5], 0, 0]);
 });

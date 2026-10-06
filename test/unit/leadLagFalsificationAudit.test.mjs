@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runLeadLagFalsificationAudit } from "../../build/leadLagFalsificationAudit.js";
+import { evaluateLeadLagCandidate, runLeadLagFalsificationAudit } from "../../build/leadLagFalsificationAudit.js";
 
 test("lead/lag falsification audit runs the empirical-null candidate rule on a factor-null pair", () => {
   const result = runLeadLagFalsificationAudit({
@@ -34,7 +34,7 @@ test("lead-lag falsification audit pins its own resolved configuration by hash",
     ],
   };
   const omitted = runLeadLagFalsificationAudit(base);
-  assert.equal(omitted.auditDefinition.runner, "lead_lag_falsification_audit_v3");
+  assert.equal(omitted.auditDefinition.runner, "lead_lag_falsification_audit_v7");
   assert.match(omitted.auditDefinition.inputHash, /^sha256:[a-f0-9]{64}$/);
   // An omitted seed and rho are still pinned, because the hash is built from resolved values.
   assert.equal(omitted.auditDefinition.input.generation.firstSeed, omitted.firstSeed);
@@ -51,7 +51,7 @@ test("lead-lag falsification audit pins its own resolved configuration by hash",
   });
   assert.notEqual(movedFold.auditDefinition.inputHash, omitted.auditDefinition.inputHash);
   const legacy = runLeadLagFalsificationAudit({ ...base, returnStandardization: "none" });
-  assert.equal(legacy.auditDefinition.runner, "lead_lag_falsification_audit_v2");
+  assert.equal(legacy.auditDefinition.runner, "lead_lag_falsification_audit_v6");
   assert.notEqual(legacy.auditDefinition.inputHash, omitted.auditDefinition.inputHash);
 });
 
@@ -82,10 +82,10 @@ test("the runner version names the null and the statistic, not just the code", (
             { foldId: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" }],
   };
   const expected = [
-    ["circular_shift", "none", "lead_lag_falsification_audit_v2"],
-    ["circular_shift", "causal_prior_20_rms", "lead_lag_falsification_audit_v3"],
-    ["block_sign_flip", "none", "lead_lag_falsification_audit_v4"],
-    ["block_sign_flip", "causal_prior_20_rms", "lead_lag_falsification_audit_v5"],
+    ["circular_shift", "none", "lead_lag_falsification_audit_v6"],
+    ["circular_shift", "causal_prior_20_rms", "lead_lag_falsification_audit_v7"],
+    ["block_sign_flip", "none", "lead_lag_falsification_audit_v8"],
+    ["block_sign_flip", "causal_prior_20_rms", "lead_lag_falsification_audit_v9"],
   ];
   const hashes = new Set();
   for (const [nullPolicy, returnStandardization, runner] of expected) {
@@ -96,4 +96,39 @@ test("the runner version names the null and the statistic, not just the code", (
   }
   // Four distinct procedures, four distinct hashes; neither field alone stands in for the other.
   assert.equal(hashes.size, 4);
+});
+
+// BACKLOG 102-15: a draw on which no positive lag could show the statistical gate is not evaluable, not a rejection.
+test("lead-lag audit leaves draws too sparse to judge out of the denominator and binds that rule into its hash", () => {
+  const base = {
+    replications: 3, firstSeed: 10, bars: 300, timeframeMinutes: 60, nominalAlpha: 0.05, maxLagBars: 2,
+    minimumObservations: 30, confidenceLevel: 0.95, configurationTrials: 1,
+    folds: [{ foldId: "first", from: "2006-01-02T00:00:00.000Z", to: "2006-01-08T00:00:00.000Z" },
+            { foldId: "second", from: "2006-01-08T00:00:00.000Z", to: "2006-01-15T00:00:00.000Z" }],
+  };
+  // 1000 observations cannot come from 300 bars: no draw is judged, and there is no rate.
+  const sparse = runLeadLagFalsificationAudit({ ...base, minimumObservations: 1000 });
+  assert.deepEqual([sparse.status, sparse.completed, sparse.evaluated, sparse.notEvaluableSeeds, sparse.observedRate, sparse.exceedsNominalAlpha],
+    ["complete", 3, 0, [10, 11, 12], null, false]);
+  // Enough data: every draw is judged, and those without a gate are the rejections the rate counts.
+  const judged = runLeadLagFalsificationAudit(base);
+  assert.deepEqual([judged.evaluated, judged.notEvaluableSeeds, judged.candidates, judged.observedRate], [3, [], 0, 0]);
+  assert.equal(judged.auditDefinition.input.decision.notEvaluableDraws, "excluded_from_rate_denominator");
+});
+
+test("a lead-lag draw is judged when one positive lag has a correlation, two folds with one, and a complete null", () => {
+  const lag = (lagBars, { correlation = 0.1, evaluableFolds = 2, gate = false } = {}) => ({
+    lagBars, correlation, foldStability: { evaluableFolds }, inference: { statisticalGateEligible: gate },
+  });
+  const complete = { status: "complete" };
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(-1), lag(0), lag(1), lag(2)] }), "non_candidate");
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(1, { gate: true })] }), "candidate");
+  // One judged positive lag is enough, though the other is not.
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(1, { correlation: null }), lag(2)] }), "non_candidate");
+  // Not judged: an empirical null that is missing or not complete, only non-positive lags with a correlation, a positive
+  // lag without one, or one with fewer than two folds that have one.
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: { status: "not_evaluable" }, byLag: [lag(1)] }), "not_evaluable");
+  assert.equal(evaluateLeadLagCandidate({ byLag: [lag(1)] }), "not_evaluable");
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(-1), lag(0), lag(1, { correlation: null })] }), "not_evaluable");
+  assert.equal(evaluateLeadLagCandidate({ empiricalNullCalibration: complete, byLag: [lag(1, { evaluableFolds: 1 }), lag(2, { evaluableFolds: 0 })] }), "not_evaluable");
 });

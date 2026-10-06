@@ -147,7 +147,11 @@ export interface StandardEventStudyFalsificationAuditInput {
 
 export interface StandardEventStudyFalsificationAuditResult {
   schemaVersion: "1.0";
-  methodologyVersion: "event_study_falsification_audit_standard_v1" | "event_study_falsification_audit_standard_v2";
+  /**
+   * v1 is every single-series study. Yield-price is v3: v2 counted a paired draw too sparse to evaluate the frozen rule
+   * as a rejection, and v3 leaves it out of the rate's denominator as the single-series studies do (BACKLOG 102-15).
+   */
+  methodologyVersion: "event_study_falsification_audit_standard_v1" | "event_study_falsification_audit_standard_v3";
   standard: {
     replications: number;
     bars: number;
@@ -342,6 +346,8 @@ export function runYieldPriceNonconfirmationFalsificationAudit(
         folds: syntheticFolds(targetBars, input.candidate.folds, stepMs),
       }),
       isCandidate: (result) => isEventStudyCandidate(result, input.candidate),
+      // A partial study (too few events, say) is not evaluable rather than rejected, as on the single-series paths.
+      evaluate: (result) => evaluateEventStudyCandidate(result, input.candidate),
     }),
   };
 }
@@ -401,7 +407,7 @@ export function runStandardEventStudyFalsificationAudit(
   return {
     schemaVersion: "1.0",
     methodologyVersion: input.study.type === "yield_price_nonconfirmation"
-      ? "event_study_falsification_audit_standard_v2"
+      ? "event_study_falsification_audit_standard_v3"
       : "event_study_falsification_audit_standard_v1",
     standard: { replications: audit.replications, bars: audit.bars, nominalAlpha: audit.nominalAlpha,
       folds: candidate.folds,
