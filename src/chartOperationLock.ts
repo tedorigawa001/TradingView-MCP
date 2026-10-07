@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -33,7 +33,14 @@ export class ChartOperationLock {
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) {
       throw new Error(`chart operation lock must be owned by the current user: ${this.filePath}`);
     }
-    const handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+    let handle;
+    try {
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+    } catch (error) {
+      // Gone, or going on Windows, since it was found: look again.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(error)) return true;
+      throw error;
+    }
     try {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
@@ -48,7 +55,7 @@ export class ChartOperationLock {
       await unlink(this.filePath);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(error)) return true;
       throw error;
     } finally { await handle.close(); }
   }
@@ -76,14 +83,15 @@ export class ChartOperationLock {
           } finally { await owner.close(); }
         };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stat;
-        try { stat = await lstat(this.filePath); } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
+        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
+        const releasing = lockBeingReleased(error);
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw error;
+        const stat = releasing ? "releasing" : await inspectLockFile(this.filePath);
+        if (stat === "gone") continue;
+        if (stat !== "releasing") {
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("chart operation lock path is unsafe");
+          if (await this.reclaimStaleLock(stat)) continue;
         }
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("chart operation lock path is unsafe");
-        if (await this.reclaimStaleLock(stat)) continue;
         if (Date.now() >= deadline) throw new Error(`timed out acquiring chart operation lock at ${this.filePath}`);
         await new Promise((resolve) => setTimeout(resolve, 25));
       }

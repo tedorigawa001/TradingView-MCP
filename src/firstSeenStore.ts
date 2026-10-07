@@ -3,7 +3,7 @@ import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { dirname, resolve } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const DEFAULT_LOCK_WAIT_MS = 30_000;
 function lockWaitMilliseconds(): number {
@@ -129,17 +129,16 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
           }
         };
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
+        const releasing = lockBeingReleased(err);
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) {
           throw new Error(`unable to acquire ${this.label} history lock`, { cause: err });
         }
-        let stat;
-        try {
-          stat = await lstat(lockPath);
-        } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
+        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
+        if (stat === "gone") continue;
+        if (stat !== "releasing" && (!stat.isFile() || stat.isSymbolicLink())) {
+          throw new Error(`${this.label} history lock path is unsafe`);
         }
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${this.label} history lock path is unsafe`);
         const remaining = deadline - performance.now();
         if (remaining <= 0) throw timeout();
         // Jitter reduces synchronized polling by collectors in different processes.

@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { assertAppendableJsonl, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, noFollowFlag, openExclusiveFile, posixModeEnforced, lockBeingReleased } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -199,9 +199,12 @@ export class MacroSurpriseEvidenceStore {
           } finally { await handle?.close(); }
         };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39), and one
+        // removed since the create found it is tried again at once.
+        const releasing = lockBeingReleased(error);
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw error;
         let handle;
-        try {
+        if (!releasing) try {
           handle = await open(path, constants.O_RDONLY | noFollowFlag());
           const stat = await handle.stat();
           if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
@@ -210,6 +213,9 @@ export class MacroSurpriseEvidenceStore {
             const current = await lstat(path);
             if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); continue; }
           }
+        } catch (inspectError) {
+          if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          if (!lockBeingReleased(inspectError)) throw inspectError;
         } finally { await handle?.close(); }
         if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`);
         await new Promise((resolve) => setTimeout(resolve, 25));

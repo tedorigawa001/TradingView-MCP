@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -403,7 +403,8 @@ export class StrategyResearchJournalStore {
       await unlink(lockPath);
       return true;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+      // Gone, or going on Windows, since it was found: look again.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(err)) return true;
       throw err;
     } finally { await handle?.close(); }
   }
@@ -432,14 +433,15 @@ export class StrategyResearchJournalStore {
           } finally { await lock?.close(); }
         };
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        let stat;
-        try { stat = await lstat(lockPath); } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
+        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
+        const releasing = lockBeingReleased(err);
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw err;
+        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
+        if (stat === "gone") continue;
+        if (stat !== "releasing") {
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("strategy research journal lock path is unsafe");
+          if (await this.reclaimStaleLock(lockPath, stat)) continue;
         }
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("strategy research journal lock path is unsafe");
-        if (await this.reclaimStaleLock(lockPath, stat)) continue;
         if (Date.now() >= deadline) throw new Error(`timed out acquiring strategy research journal lock at ${lockPath}`);
         await new Promise((resolve) => setTimeout(resolve, 25));
       }

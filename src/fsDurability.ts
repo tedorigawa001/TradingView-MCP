@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 
@@ -69,6 +69,32 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
  * lstat check and the host O_NOFOLLOW flag together so every exclusive-create
  * call site has the same fail-closed behavior.
  */
+/**
+ * Whether creating, opening or inspecting a lock file failed because Windows is still deleting it (BACKLOG 102-39).
+ * Windows keeps a deleted file's name until every handle to it is closed, as when another process is reading the lock
+ * to see whether it is stale, and meanwhile refuses to create, open or inspect a file under that name with EPERM or
+ * EACCES. Taken as a hard failure, a lock a moment from free made a process give up instead of waiting for it, so lock
+ * loops wait on these as on EEXIST, within their deadline. Off Windows the codes keep their meaning.
+ */
+export function lockBeingReleased(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return platform === "win32" && (code === "EPERM" || code === "EACCES");
+}
+
+/**
+ * For a lock loop whose exclusive create found the lock taken: the lock file's lstat, or what stands in for it, "gone"
+ * when it was removed meanwhile (try again at once) or "releasing" while Windows deletes it (wait, then try again).
+ */
+export async function inspectLockFile(path: string): Promise<Stats | "gone" | "releasing"> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "gone";
+    if (lockBeingReleased(error)) return "releasing";
+    throw error;
+  }
+}
+
 export async function openExclusiveFile(path: string, label: string): Promise<FileHandle> {
   await assertNotSymbolicLink(path, label);
   return open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);

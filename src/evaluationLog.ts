@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -52,15 +52,14 @@ export class AppendOnlyEvaluationLog {
           }
         };
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        let stat;
-        try {
-          stat = await lstat(lockPath);
-        } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
+        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
+        const releasing = lockBeingReleased(err);
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw err;
+        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
+        if (stat === "gone") continue;
+        if (stat !== "releasing" && (!stat.isFile() || stat.isSymbolicLink())) {
+          throw new Error("evaluation log lock path is unsafe");
         }
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("evaluation log lock path is unsafe");
         if (Date.now() >= deadline) throw new Error("timed out acquiring evaluation log lock");
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
