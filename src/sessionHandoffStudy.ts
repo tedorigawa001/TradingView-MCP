@@ -169,6 +169,10 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
     for (let offset = firstDayOffset; offset <= lastDayOffset; offset += 1) {
       candidateBars.push(...(barsByLocalDate.get(localDateForIndex(anchor + offset)) ?? []));
     }
+    // Day by day is not time order where a clock change steps the local date back (America/Goose_Bay fell back from
+    // 00:01 on 2009-11-01 to 23:01 on 10-31): the later bars join the earlier date. The handoff window and its signal
+    // must follow the bars' own order, or a signal is stamped before bars it already read.
+    candidateBars.sort((left, right) => left.globalIndex - right.globalIndex);
     const relativeMinute = (bar: ReturnType<typeof localize>[number]) =>
       (localDayIndex(bar.localDate) - anchor) * 1440 + bar.localMinute;
     const prior = candidateBars.filter((bar) => sessions.some((session) => {

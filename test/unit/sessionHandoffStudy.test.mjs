@@ -252,3 +252,37 @@ test("a handoff day is found from its bars after midnight when none falls before
   assert.equal(result.quality.candidateHandoffDays, 3);
   assert.equal(result.quality.insufficientHandoffCoverage, 0);
 });
+
+test("a handoff window follows time order where a clock change steps the local date back", () => {
+  // America/Goose_Bay fell back at 00:01 on 2009-11-01 to 23:01 on 10-31, so 03:15Z-03:45Z carry the earlier local
+  // date. The eight-bar window from 23:00 ADT ends at 03:45Z; stamping the signal at 03:00Z read three later bars.
+  const build = (changed = null) => {
+    const bars = [];
+    const priorStart = Date.UTC(2009, 9, 31, 15);
+    for (let index = 0; index < 32; index += 1) {
+      const open = 1 + index * 0.006;
+      bars.push(bar(priorStart + index * 900_000, open, open + 0.008, open - 0.004, open + 0.006));
+    }
+    const high = bars.at(-1).high;
+    for (let index = 32; index < 44; index += 1) bars.push(bar(priorStart + index * 900_000, 1.19, 1.195, 1.185, 1.19));
+    const handoffStart = Date.UTC(2009, 10, 1, 2);
+    bars.push(bar(handoffStart, 1.19, high - 0.002, 1.16, 1.17));
+    for (let index = 1; index < 24; index += 1) {
+      const time = handoffStart + index * 900_000;
+      const close = 1.17 - index * 0.002;
+      bars.push(new Date(time).toISOString() === changed
+        ? bar(time, close, high + 0.05, close - 0.003, close + 0.001)
+        : bar(time, close + 0.002, close + 0.003, close - 0.003, close));
+    }
+    return bars;
+  };
+  const run = (bars) => runSessionExhaustionHandoffStudy(input(bars, {
+    timezone: "America/Goose_Bay", priorSessions: [{ sessionId: "day", start: "12:00", end: "20:00" }],
+    handoffStart: "23:00", handoffEnd: "03:00", handoffWindowBars: 8, minimumEvents: 1, folds: [],
+  }));
+  const result = run(build());
+  assert.deepEqual(result.events.map((event) => [event.localDate, event.signalTime]), [["2009-10-31", "2009-11-01T03:45:00.000Z"]]);
+  // The signal stands on bars up to its own time only: a later bar leaves it, the signal bar itself decides it.
+  assert.equal(run(build("2009-11-01T04:00:00.000Z")).events[0].signalTime, "2009-11-01T03:45:00.000Z");
+  assert.equal(run(build("2009-11-01T03:45:00.000Z")).sample.events, 0);
+});
