@@ -53,3 +53,32 @@ test("every dangerous construct after a URL is found", () => {
   ].join("\n");
   assert.deepEqual(codes(source), ["request_security", "pivots", "varip", "timenow", "calc_on_every_tick", "barstate_isrealtime"]);
 });
+
+test("a triple-quoted string spans lines, and the code after its close is audited", () => {
+  for (const quote of ['"""', "'''"]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}first\nsecond${quote}\n${security}`), ["request_security"], quote);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}first\nsecond${quote} + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], quote);
+    // What it contains, on any of its lines, is text.
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}first\ntimenow and varip in the text\nend${quote}\nplot(close)`), [], quote);
+    // One whose text begins with a quote closes at the triple quote after its opener, not one overlapping it.
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}${quote[0]}timenow${quote[0]} is quoted${quote}\nplot(close)`), [], quote);
+  }
+});
+
+test("a string wrapped onto an indented line continues there; a block-indented line is code", () => {
+  // Pine wraps a long line onto one indented by spaces that are not a multiple of four.
+  assert.deepEqual(codes('//@version=6\nstrategy("x")\nnote = "first part\n  second part" + str.tostring(request.security(syminfo.tickerid, "D", close))'), ["request_security"]);
+  assert.deepEqual(codes('//@version=6\nstrategy("x")\nnote = "first part\n  timenow in the text"\nplot(close)'), []);
+  // Four spaces indent a block body, which no string runs into.
+  assert.deepEqual(codes(`//@version=6\nstrategy("x")\nif close > open\n    note = "never closed\n    ${security}`), ["request_security"]);
+});
+
+test("unclosed block comment markers keep the pass linear", () => {
+  // Each "/*" used to search the rest of the source again: some 400,000 characters of them took seconds.
+  const source = `//@version=6\n${"x = 1 /* \n".repeat(40_000)}${security}\n`;
+  const started = performance.now();
+  const found = codes(source);
+  const elapsed = performance.now() - started;
+  assert.ok(found.includes("request_security"));
+  assert.ok(elapsed < 1_000, `took ${Math.round(elapsed)} ms`);
+});

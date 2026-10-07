@@ -1,31 +1,54 @@
+/** Leading spaces that make a line a wrapped continuation of the one before: a count that is not a multiple of four. */
+function wrapsOnto(source: string, lineStart: number): boolean {
+  let spaces = 0;
+  while (source[lineStart + spaces] === " ") spaces += 1;
+  return spaces % 4 !== 0;
+}
+
 /**
  * The source with its comments removed and every string literal emptied, read in one pass so that what a construct
  * contains is not taken for another (BACKLOG 102-19). Separate passes took the "//" of "https://..." for a comment,
  * cutting the string open so the next pass swallowed real code up to some later quote; and a "/*" inside a string
- * removed the code up to the next "*\/". A string ends at its closing quote, or at the end of its line, since a Pine
- * string cannot span lines; a block comment with no end is read as code, so nothing is hidden by a stray marker.
+ * removed the code up to the next "*\/".
+ *
+ * A triple-quoted string runs to its closing triple quote, across lines. Any other string runs to its closing quote,
+ * honouring escapes, and past a line end only onto a wrapped line (indented by a count of spaces that is not a multiple
+ * of four, as Pine wraps a long line; a multiple of four is a block body); otherwise it ends with its line. A block
+ * comment runs to its closing "*\/"; one that never closes is read as code, so a stray marker hides nothing. Once the
+ * search for a closing "*\/" fails, none exists past where it began, so later "/*" do not search again and the pass
+ * stays linear. A triple quote needs no such memory: a failed search leaves no later triple quote to search from.
  */
 function pineCodeOnly(source: string): string {
   let code = "";
   let index = 0;
+  let blockCommentUnclosedFrom = Infinity;
   while (index < source.length) {
     const char = source[index];
     const next = source[index + 1];
     if (char === "/" && next === "/") {
       while (index < source.length && source[index] !== "\n") index += 1;
-    } else if (char === "/" && next === "*" && source.indexOf("*/", index + 2) >= 0) {
-      index = source.indexOf("*/", index + 2) + 2;
-    } else if (char === '"' || char === "'") {
+      continue;
+    }
+    if (char === "/" && next === "*" && index < blockCommentUnclosedFrom) {
+      const close = source.indexOf("*/", index + 2);
+      if (close >= 0) { index = close + 2; continue; }
+      blockCommentUnclosedFrom = index;
+    }
+    if (char === '"' || char === "'") {
+      const triple = char.repeat(3);
+      const close = source.startsWith(triple, index) ? source.indexOf(triple, index + 3) : -1;
+      if (close >= 0) { index = close + 3; code += '""'; continue; }
       index += 1;
-      while (index < source.length && source[index] !== char && source[index] !== "\n") {
+      while (index < source.length && source[index] !== char) {
+        if (source[index] === "\n" && !wrapsOnto(source, index + 1)) break;
         index += source[index] === "\\" && source[index + 1] !== undefined && source[index + 1] !== "\n" ? 2 : 1;
       }
       if (source[index] === char) index += 1;
       code += '""';
-    } else {
-      code += char;
-      index += 1;
+      continue;
     }
+    code += char;
+    index += 1;
   }
   return code;
 }
