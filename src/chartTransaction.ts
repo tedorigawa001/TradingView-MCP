@@ -18,21 +18,21 @@ const normalizeResolution = (value: string) => {
 };
 
 const sameSymbol = (left: string, right: string) => left.toUpperCase() === right.toUpperCase();
-/**
- * A single listing, EXCHANGE:TICKER, capturing the ticker. A formula chart ("OANDA:EURUSD/OANDA:USDJPY",
- * "2*OANDA:EURUSD") also contains tickers but is none of them, so any character outside these keeps a symbol from
- * counting as a listing.
- */
-const LISTING = /^[A-Z0-9_]+:([A-Z0-9_.!]+)$/i;
+/** A symbol behind one exchange name, capturing all that follows it. Exchange names are letters, digits and "_". */
+const BEHIND_EXCHANGE = /^[A-Z0-9_]+:(.+)$/i;
 
 /**
- * Whether the chart's symbol is the requested one, or with `exchangeOptional` a listing of the requested ticker on some
- * exchange. A ticker holds no colon, so a requested symbol that names an exchange is matched exactly.
+ * Whether the chart's symbol is the requested one, or with `exchangeOptional` exactly the requested text behind one
+ * exchange name. The text is compared whole, so a listing whose ticker holds a "/" ("NYSE:BAC/PL" for "BAC/PL")
+ * satisfies it, while a formula chart holding the requested ticker among others ("OANDA:EURUSD/OANDA:USDJPY",
+ * "2*OANDA:EURUSD") does not: each of its tickers has more than an exchange name before it or more formula after it.
+ * A requested symbol that names its own exchange is matched exactly.
  */
 const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) => {
   if (sameSymbol(actual, requested)) return true;
-  const ticker = exchangeOptional ? LISTING.exec(actual)?.[1] : undefined;
-  return ticker !== undefined && sameSymbol(ticker, requested);
+  if (!exchangeOptional || requested.includes(":")) return false;
+  const behind = BEHIND_EXCHANGE.exec(actual)?.[1];
+  return behind !== undefined && sameSymbol(behind, requested);
 };
 const sameResolution = (left: string, right: string) =>
   normalizeResolution(left) === normalizeResolution(right);

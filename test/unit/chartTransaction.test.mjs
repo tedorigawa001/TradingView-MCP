@@ -95,11 +95,14 @@ test("a change the user asks for takes a symbol without its exchange, bound to t
   const again = await changeChartState(api, 1, { symbol: "EURUSD" }, { exchangeOptional: true });
   assert.equal(again.changed, false);
   assert.deepEqual(calls, ["eurusd"]);
-  // Tickers with the marks listings use.
-  for (const [requested, listing] of [["ES1!", "CME_MINI:ES1!"], ["BRK.B", "NYSE:BRK.B"]]) {
-    const { api: other } = resolvingCharts((symbol) => (symbol === requested ? listing : symbol));
+  // Tickers with the marks listings use, a "/" among them; one already shown is left alone.
+  for (const [requested, listing] of [["ES1!", "CME_MINI:ES1!"], ["BRK.B", "NYSE:BRK.B"], ["BAC/PL", "NYSE:BAC/PL"]]) {
+    const { charts: shown, api: other, calls: made } = resolvingCharts((symbol) => (symbol === requested ? listing : symbol));
     const listed = await changeChartState(other, 1, { symbol: requested }, { exchangeOptional: true });
-    assert.equal(listed.current.symbol, listing, requested);
+    assert.deepEqual([listed.current.symbol, listed.changed, made], [listing, true, [requested]], requested);
+    assert.equal(shown[1].symbol, listing, requested);
+    const kept = await changeChartState(other, 1, { symbol: requested }, { exchangeOptional: true });
+    assert.deepEqual([kept.current.symbol, kept.changed, made], [listing, false, [requested]], requested);
   }
 });
 
@@ -127,8 +130,10 @@ test("a symbol resolved to another instrument, or off the exchange it names, is 
     ["USDJPY", "OANDA:EURUSD/OANDA:USDJPY"],
     ["EURUSD", "OANDA:EURUSD/OANDA:USDJPY"],
     ["EURUSD", "2*OANDA:EURUSD"],
-    // A formula requested without prefixes is matched exactly, not as a ticker on one exchange.
-    ["EURUSD/USDJPY", "OANDA:EURUSD/USDJPY"],
+    // A formula is matched only as the chart writes it, an exchange before each ticker.
+    ["EURUSD/USDJPY", "OANDA:EURUSD/OANDA:USDJPY"],
+    // A request that names its exchange is matched exactly, even behind another name.
+    ["NYSE:BAC/PL", "X:NYSE:BAC/PL"],
   ]) {
     const { charts, api, calls } = resolvingCharts((symbol) => (symbol === requested ? resolved : symbol));
     await assert.rejects(
