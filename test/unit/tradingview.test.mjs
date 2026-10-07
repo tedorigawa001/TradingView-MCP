@@ -992,7 +992,7 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
   assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
   assert.ok(expr.includes("const keep = false"), "auto-remove is the default");
   assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
-  assert.ok(expr.includes("if (!keep || failure)"),
+  assert.ok(expr.includes("if (!keep || failure !== null)"),
     "a failed kept run must still remove its temporary strategy");
   assert.ok(expr.includes("activeDesc === meta.description"),
     "the report must be attributed to OUR strategy before being accepted");
@@ -1030,6 +1030,8 @@ async function backtestPage({ fault = null, removeFails = false, keepOnChart = f
       reportReads += 1;
       if (reportReads === 1) return null; // the report before this run
       if (fault === "report") throw new Error("report getter exploded");
+      if (fault === "empty error") throw new Error("");
+      if (fault === "empty string") throw "";
       return fault === "timeout" ? null : report;
     } },
   };
@@ -1059,6 +1061,9 @@ test("a backtest that fails after placing its strategy removes it, kept or not, 
     report: /^report getter exploded — the strategy was removed from the chart$/,
     format: /^activeStrategy getter exploded — the strategy was removed from the chart$/,
     timeout: /^backtest report did not appear within 20s .* — the strategy was removed from the chart$/,
+    // A cause with no message is a failure all the same, and is described.
+    "empty error": /^the page threw an error with no message — the strategy was removed from the chart$/,
+    "empty string": /^the page threw an empty string — the strategy was removed from the chart$/,
   };
   for (const [fault, cause] of Object.entries(causes)) {
     for (const keepOnChart of [false, true]) {

@@ -2462,8 +2462,12 @@ export class TradingView {
         // Once the strategy is on the chart, every way out passes the removal below (BACKLOG 102-22): a report that
         // could not be read or shaped used to throw past it and leave the strategy on the user's chart.
         // Causes are kept as their messages: an error from another realm (a frame, a worker) is no instance of this
-        // page's Error, yet carries a message.
-        const messageOf = (e) => (e && typeof e.message === "string" ? e.message : String(e));
+        // page's Error, yet carries a message. One without a message is still described, and whether the run failed is
+        // read from failure !== null, never from the message, so an empty one cannot pass for success.
+        const messageOf = (e) => {
+          const text = e && typeof e.message === "string" ? e.message : String(e);
+          return text === "" ? "the page threw " + (typeof e === "string" ? "an empty string" : "an error with no message") : text;
+        };
         let report = null;
         let failure = null;
         try {
@@ -2490,7 +2494,7 @@ export class TradingView {
         // applies only to a successful run: a failed one never strands it.
         let removed = false;
         let removalError = null;
-        if (!keep || failure) {
+        if (!keep || failure !== null) {
           try {
             await chart.removeEntity(studyId);
             removed = true;
@@ -2498,7 +2502,7 @@ export class TradingView {
             removalError = messageOf(e);
           }
         }
-        if (failure) {
+        if (failure !== null) {
           // The cause of the failure leads; what became of the strategy follows, with its id if it may remain.
           throw new Error(failure +
             (removed
