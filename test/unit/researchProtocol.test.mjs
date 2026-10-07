@@ -86,6 +86,8 @@ test("a research protocol is not ready when request.security follows a multi-lin
     `note = """first\nsecond""" + ${security}`,
     `note = """say \\""" here""" + ${security}`,
     `label.new(bar_index, 0, "first part\n    second part" + ${security})`,
+    // A draft that cannot compile: a block comment that never closes, then a string that never closes.
+    `/* (\nnote = "never closed\nh = request.security(syminfo.tickerid, "D", close) + "x)`,
   ]) {
     const result = validateResearchProtocol(definition(), auditPineSource(`//@version=6\nstrategy("x")\n${source}`), evaluatedAt);
     assert.ok(result.issues.some((issue) => issue.code === "pine_request_security"), source);

@@ -43,10 +43,12 @@ function tripleQuoteClose(source: string, start: number, triple: string, escapes
  * closes at the first triple quote, escaped or not. A block comment runs to its closing "*\/"; one that never closes is
  * read as code, so a stray marker hides nothing.
  *
- * `malformed` reports what valid Pine cannot contain: a string that never reaches its closing quote, a bracket closed
- * that was never opened or left open at the end, or a wrap outside brackets onto a line indented like a block body. In
- * valid Pine a string open at a line end is always wrapped; in a source that cannot compile, wrapping may instead carry
- * a stray quote on into real code. Not every such source is caught: a later stray quote can close the string again.
+ * `malformed` reports what valid Pine cannot contain: a string that never reaches its closing quote, a block comment
+ * that never closes, a bracket closed that was never opened or left open at the end, or a wrap outside brackets onto a
+ * line indented like a block body. In valid Pine a string open at a line end is always wrapped; in a source that cannot
+ * compile, wrapping may instead carry a stray quote on into real code, or across a line that a bracket in an unclosed
+ * block comment, read as code, seems to leave open. Not every such source is caught: a later stray quote can close the
+ * string again.
  *
  * Once the search for a closer fails, every later search for the same closer fails too, so it is not repeated and the
  * pass stays linear. For "*\/", and for a triple quote searched for without escapes, none exists past where the search
@@ -71,6 +73,7 @@ function pineCodeOnly(source: string, asPine: boolean): { code: string; malforme
       const close = source.indexOf("*/", index + 2);
       if (close >= 0) { index = close + 2; continue; }
       blockCommentUnclosedFrom = index;
+      malformed = true;
     }
     if (char === '"' || char === "'") {
       const triple = char.repeat(3);

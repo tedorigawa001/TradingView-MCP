@@ -140,6 +140,10 @@ test("a source that cannot compile is also read the plain way, and what either r
     `if close > open\n    note = "never closed\n    h = request.security(syminfo.tickerid, "https://x", close)\nplot(close)`,
     // So does a closer with nothing open, where the wrap alone would not.
     `x = close)\nnote = "never closed\n  ${security} + "x`,
+    // And a block comment that never closes, whose text, read as code, can open a bracket that carries a later string on.
+    `/* (\nnote = "never closed\n${security} + "x)`,
+    `/* [\nnote = "never closed\n${security} + "x]`,
+    `x = 1 /* ( and more\nnote = "never closed\n${security} + "x)\nplot(close)`,
     // The plain reading closes a triple quote at the first triple quote, though a backslash comes before it.
     `p = """C:\\dir\\"""\n${security}\nq = """x"""`,
   ]) {
