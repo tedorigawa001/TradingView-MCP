@@ -205,6 +205,10 @@ test("regime evaluation takes the closed-trade drawdown in exit order, whatever 
   assert.equal(unknown.overall.maxClosedTradeEquityDrawdown, null);
   assert.deepEqual([unknown.status, unknown.coverage.tradesMissingExitTime], ["partial", 1]);
   assert.ok(unknown.qualityIssues.includes("closed_trade_drawdown_unavailable_missing_exit_time"));
+  for (const time of [Number.NaN, undefined]) {
+    const unreadable = evaluate([trades[0], { ...trades[1], exit: { ...trades[1].exit, time } }, trades[2]], observations, { minimumGroupTrades: 1 });
+    assert.deepEqual([unreadable.overall.maxClosedTradeEquityDrawdown, unreadable.coverage.tradesMissingExitTime], [null, 1], String(time));
+  }
 });
 
 test("regime evaluation realizes a position closed at once as one fill", () => {

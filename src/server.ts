@@ -2642,7 +2642,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           ...(uniqueReferenceSymbols.length > 1 ? ["multiple_reference_symbols_inspected_in_matrix"] : []),
         ];
         const definition = {
-          methodologyVersion: "strategy_regime_matrix_v1",
+          methodologyVersion: "strategy_regime_matrix_v2",
           regime: regimeDefinition,
           join: joinDefinition,
           loadMoreBars,

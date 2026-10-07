@@ -347,7 +347,7 @@ The public surface is limited to `get_replay_status`, `start_chart_replay`, `ste
 
 ## Addendum: Backlog #34 (2026-07-20)
 
-`run_strategy_walk_forward` partitions complete ledgers without private Deep Backtesting writes or Pine modification. Only trades whose Entry and Exit are both within `[from,to)` are included; crossing, open, and untimestamped trades are counted separately. Inputs are bounded to 2-8 candidates, 2-12 folds, and explicit embargo. Selection uses train only, hides unselected candidates' test metrics, rejects ties, and requires every candidate to pass collection, ownership, quality, coverage, cleanup, and comparable-condition checks. Drawdown is explicitly closed-trade-equity drawdown, not TradingView's bar-level maximum DD. Ledger partitioning does not neutralize repainting and may retain pre-fold warm-up state; it is identified as `ledger_partition_v1`.
+`run_strategy_walk_forward` partitions complete ledgers without private Deep Backtesting writes or Pine modification. Only trades whose Entry and Exit are both within `[from,to)` are included; crossing, open, and untimestamped trades are counted separately. Inputs are bounded to 2-8 candidates, 2-12 folds, and explicit embargo. Selection uses train only, hides unselected candidates' test metrics, rejects ties, and requires every candidate to pass collection, ownership, quality, coverage, cleanup, and comparable-condition checks. Drawdown is explicitly closed-trade-equity drawdown, not TradingView's bar-level maximum DD. Ledger partitioning does not neutralize repainting and may retain pre-fold warm-up state; it is identified as `ledger_partition_v2` (v2 since its closed-trade drawdown follows exit order, BACKLOG 102-18).
 
 ## Addendum: Backlog #35 (2026-07-21)
 

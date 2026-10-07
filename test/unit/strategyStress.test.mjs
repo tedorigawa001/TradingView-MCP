@@ -153,5 +153,8 @@ test("strategy stress realizes a position closed at once as one fill", () => {
   const together = ledger({ profits: [-20, 30], commissions: [1, 1] });
   // Entered on the 2nd and 3rd, both closed on the 4th at the same price: -20 and +30 realize together.
   together.trades = together.trades.map((trade) => ({ ...trade, exit: side(Date.UTC(2025, 0, 4)) }));
-  assert.equal(evaluateStrategyStress({ ...base, ledger: together, bootstrap: null }).baseline.metrics.maxClosedTradeEquityDrawdown, 0);
+  const result = evaluateStrategyStress({ ...base, ledger: together, bootstrap: null });
+  assert.equal(result.baseline.metrics.maxClosedTradeEquityDrawdown, 0);
+  // Starting a bar later keeps both trades, and their fill.
+  assert.equal(result.scenarios[2].metrics.maxClosedTradeEquityDrawdown, 0);
 });

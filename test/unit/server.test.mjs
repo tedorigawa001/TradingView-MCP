@@ -4727,6 +4727,7 @@ test("run_strategy_walk_forward selects on train, exposes selected OOS only, and
   };
   const dry = JSON.parse((await client.callTool({ name: "run_strategy_walk_forward", arguments: args })).content[0].text);
   assert.equal(dry.dryRun, true);
+  assert.equal(dry.definition.methodologyVersion, "ledger_partition_v2");
   assert.equal(runCount, 0);
   assert.equal(dry.execution.nonSelectedOosMetricsExposed, false);
 
@@ -4813,6 +4814,7 @@ test("stress_test_strategy previews, evaluates a complete ledger, and restores",
   };
   const dry = JSON.parse((await client.callTool({ name: "stress_test_strategy", arguments: args })).content[0].text);
   assert.equal(dry.status, "preview");
+  assert.equal(dry.definition.methodologyVersion, "strategy_stress_v3");
   assert.equal(runs, 0);
   const result = JSON.parse((await client.callTool({ name: "stress_test_strategy",
     arguments: { ...args, confirm: true } })).content[0].text);
@@ -4820,6 +4822,7 @@ test("stress_test_strategy previews, evaluates a complete ledger, and restores",
   assert.equal(result.evaluation.baseline.metrics.netProfit, 110);
   assert.equal(result.evaluation.scenarios[0].metrics.netProfit, 70);
   assert.equal(result.rerunEvaluation.scenarios[0].metrics.netProfit, 55);
+  assert.deepEqual([result.evaluation.methodologyVersion, result.rerunEvaluation.methodologyVersion], ["ledger_stress_v2", "strategy_rerun_stress_v2"]);
   assert.equal(result.rerunCollections[0].appliedInputs[0].value, 1);
   assert.equal(result.chartState.restored, true);
   assert.equal(runs, 2);
@@ -7783,6 +7786,11 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   } })).content[0].text);
   assert.equal(preview.dryRun, true);
   assert.equal(preview.definition.regime.count, 20_000);
+  assert.equal(preview.definition.methodologyVersion, "strategy_regime_analysis_v2");
+  const matrixPreview = JSON.parse((await client.callTool({ name: "run_strategy_regime_matrix", arguments: {
+    expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", jobs: [{ symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId }],
+  } })).content[0].text);
+  assert.deepEqual([matrixPreview.dryRun, matrixPreview.definition.methodologyVersion], [true, "strategy_regime_matrix_v2"]);
   assert.equal(runs, 0);
   const invalidSessions = await client.callTool({ name: "run_strategy_regime_analysis", arguments: {
     expected_symbol: "OANDA:EURUSD", expected_timeframe: "60", pine_id: pineId,

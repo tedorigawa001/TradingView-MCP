@@ -31,6 +31,10 @@ test("exits at the same time and price are one fill; at different prices in one 
   // peak to 100 before the later -10, a drawdown of 110.
   assert.equal(closedTradeEquityDrawdown([{ profit: 100, exitTime: 1, exitPrice: 2 }, { profit: -100, exitTime: 1, exitPrice: 1 }, { profit: -10, exitTime: 2, exitPrice: 1 }]), 100);
   assert.equal(sequenceEquityDrawdown([100, -100, -10]), 110);
+  // The order is by profit, not price: for a short the lower price is the gain, and still the loss comes first.
+  assert.equal(closedTradeEquityDrawdown([{ profit: 100, exitTime: 1, exitPrice: 1 }, { profit: -100, exitTime: 1, exitPrice: 2 }, { profit: -10, exitTime: 2, exitPrice: 1 }]), 100);
+  // A NaN price is no price: such exits stand apart rather than share a fill.
+  assert.equal(closedTradeEquityDrawdown([{ profit: 50, exitTime: 3, exitPrice: Number.NaN }, { profit: -50, exitTime: 3, exitPrice: Number.NaN }]), 50);
 });
 
 test("non-overlapping trades give the plain running drawdown, and a missing exit time gives none", () => {
