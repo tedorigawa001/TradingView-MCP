@@ -7,6 +7,9 @@ import test from "node:test";
 import { archiveOfficialMacroRaw, collectOfficialMacroEvents, computeOfficialMacroEventCoverage, parseBlsArchiveEvents, parseBlsArchiveNonPublications, parseFomcHistoricalPage } from "../../build/officialMacroEventSources.js";
 import { buildMacroEvent60mStudy, firstFullM60BarAfterRelease, NFP_SHORT_FRIDAY_60M_CONTRACT } from "../../build/macroEvent60mStudy.js";
 import { preflightMacroEvent60mContract } from "../../build/macroEvent60mPreflight.js";
+import { recheckMacroEvent60mCoverage } from "../../build/macroEvent60mStudy.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { parseMacroEvent60mPreflightCliArguments } from "../../build/macroEvent60mPreflightCli.js";
 
 test("BLS archive events retain their official document URL and convert 8:30 ET across DST", () => {
@@ -105,7 +108,7 @@ test("the NFP Friday v2 contract evaluates its short breakout and retest sequenc
   const bars = prices.map(([open, high, low, close], index) => ({ timeIso: `2024-06-07T${String(13 + index).padStart(2, "0")}:00:00.000Z`, open, high, low, close, tickVolume: 1, minutesPresent: 60 }));
   const manifest = { bucket_minutes: 60, minimum_minute_coverage: 60, bar_count: bars.length, normalized_sha256: `sha256:${createHash("sha256").update(JSON.stringify(bars), "utf8").digest("hex")}`, first_bar_at: bars[0].timeIso, last_bar_at: bars.at(-1).timeIso, symbol: "OANDA:EURUSD" };
   const artifact = {
-    event_kind: "us_nfp", retrieved_at: "2024-06-08T00:00:00.000Z", coverage: { coverage_issues: [] },
+    event_kind: "us_nfp", retrieved_at: "2024-06-08T00:00:00.000Z", coverage: { requested_from_year: 2024, requested_to_year: 2024, coverage_issues: [] }, non_publications: [],
     events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
   };
   const result = buildMacroEvent60mStudy({ manifest, bars, artifact, contractId: "nfp_short_friday_v2", folds: [
@@ -129,7 +132,7 @@ test("macro-event preflight counts a Friday session boundary before a study can 
     first_bar_at: bars[0].timeIso, last_bar_at: bars.at(-1).timeIso,
   };
   const artifact = {
-    event_kind: "us_nfp", coverage: { coverage_issues: [] },
+    event_kind: "us_nfp", retrieved_at: "2024-06-08T00:00:00.000Z", coverage: { requested_from_year: 2024, requested_to_year: 2024, coverage_issues: [] }, non_publications: [],
     events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
   };
   const available = preflightMacroEvent60mContract({ manifest, bars, artifact, contractId: "nfp_short_friday_v2" });
@@ -146,7 +149,7 @@ test("the common macro contract exposes Friday's weekend boundary instead of tre
   const sunday = Array.from({ length: 13 }, (_, index) => new Date(Date.parse("2024-06-09T21:00:00.000Z") + index * 3_600_000).toISOString());
   const bars = [...friday, ...sunday].map((timeIso) => ({ timeIso, open: 1, high: 1.1, low: 0.9, close: 1, tickVolume: 1, minutesPresent: 60 }));
   const manifest = { bucket_minutes: 60, minimum_minute_coverage: 60, bar_count: bars.length, normalized_sha256: `sha256:${createHash("sha256").update(JSON.stringify(bars), "utf8").digest("hex")}`, first_bar_at: bars[0].timeIso, last_bar_at: bars.at(-1).timeIso };
-  const artifact = { event_kind: "us_nfp", coverage: { coverage_issues: [] }, events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] };
+  const artifact = { event_kind: "us_nfp", retrieved_at: "2024-06-08T00:00:00.000Z", coverage: { requested_from_year: 2024, requested_to_year: 2024, coverage_issues: [] }, non_publications: [], events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] };
   const result = preflightMacroEvent60mContract({ manifest, bars, artifact });
   assert.equal(result.availability.non_contiguous_maximum_window, 1);
   assert.equal(result.by_anchor_weekday.Fri.non_contiguous_maximum_window, 1);
@@ -156,7 +159,7 @@ test("the common macro contract exposes Friday's weekend boundary instead of tre
 test("macro-event preflight identifies a missing event anchor without inferring a substitute bar", () => {
   const bars = Array.from({ length: 8 }, (_, index) => ({ timeIso: `2024-06-07T${String(14 + index).padStart(2, "0")}:00:00.000Z`, open: 1, high: 1.1, low: 0.9, close: 1, tickVolume: 1, minutesPresent: 60 }));
   const manifest = { bucket_minutes: 60, minimum_minute_coverage: 60, bar_count: bars.length, normalized_sha256: `sha256:${createHash("sha256").update(JSON.stringify(bars), "utf8").digest("hex")}`, first_bar_at: bars[0].timeIso, last_bar_at: bars.at(-1).timeIso };
-  const artifact = { event_kind: "us_nfp", coverage: { coverage_issues: [] }, events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] };
+  const artifact = { event_kind: "us_nfp", retrieved_at: "2024-06-08T00:00:00.000Z", coverage: { requested_from_year: 2024, requested_to_year: 2024, coverage_issues: [] }, non_publications: [], events: [{ event_id: "us_nfp:2024-06-07", event_kind: "us_nfp", occurred_at: "2024-06-07T12:30:00.000Z", source_url: "https://example.test", raw_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] };
   const result = preflightMacroEvent60mContract({ manifest, bars, artifact, contractId: "nfp_short_friday_v2" });
   assert.equal(result.availability.missing_anchor_bar, 1);
   assert.equal(result.potentially_evaluable_events, 0);
@@ -326,4 +329,62 @@ test("one excusal fills one gap and credits one year, never two of either", () =
   );
   assert.deepEqual(result.missing_release_months, ["2025-11"]);
   assert.deepEqual(result.excused_non_publications_by_year, { 2025: 1 });
+});
+
+// BACKLOG 102-16: the M60 study and preflight recompute coverage from the artifact's events, as the M15 study does.
+const m60Bars = Array.from({ length: 8 }, (_, index) => ({ timeIso: `2024-06-07T${String(13 + index).padStart(2, "0")}:00:00.000Z`, open: 1, high: 1.1, low: 0.9, close: 1, tickVolume: 1, minutesPresent: 60 }));
+const m60Manifest = { bucket_minutes: 60, minimum_minute_coverage: 60, bar_count: m60Bars.length, normalized_sha256: `sha256:${createHash("sha256").update(JSON.stringify(m60Bars), "utf8").digest("hex")}`, first_bar_at: m60Bars[0].timeIso, last_bar_at: m60Bars.at(-1).timeIso, symbol: "OANDA:EURUSD" };
+const cpiEvent = (month) => ({ event_id: `us_cpi:2023-${month}-12`, event_kind: "us_cpi", occurred_at: `2023-${month}-12T12:30:00.000Z`, source_url: "https://example.test", raw_sha256: `sha256:${"a".repeat(64)}` });
+const months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+// A 2023 CPI artifact whose stored block still reports twelve clean months.
+const cleanSummary = { requested_from_year: 2023, requested_to_year: 2023, events_by_year: { "2023": 12 }, excused_non_publications_by_year: {}, missing_release_months: [], coverage_issues: [] };
+const cpiArtifact = (events, coverage = cleanSummary) => ({ event_kind: "us_cpi", retrieved_at: "2024-01-15T00:00:00.000Z", events, non_publications: [], scheduled_future_releases: [], coverage });
+const m60Folds = [{ foldId: "first", from: "2023-01-01T00:00:00.000Z", to: "2023-07-01T00:00:00.000Z" }, { foldId: "second", from: "2023-07-01T00:00:00.000Z", to: "2024-07-01T00:00:00.000Z" }];
+
+test("an M60 study and preflight refuse a clean stored summary over events that no longer prove it", () => {
+  const edited = cpiArtifact([cpiEvent("06")]);
+  assert.throws(() => buildMacroEvent60mStudy({ manifest: m60Manifest, bars: m60Bars, artifact: edited, folds: m60Folds }), /insufficient_official_event_coverage:2023:1_plus_0_excused_of_at_least_12/);
+  assert.throws(() => preflightMacroEvent60mContract({ manifest: m60Manifest, bars: m60Bars, artifact: edited }), /insufficient_official_event_coverage:2023/);
+  // Twelve releases, one moved out of its month: the count holds but May has none.
+  const gap = cpiArtifact(months.map((month) => month === "05" ? { ...cpiEvent("06"), event_id: "us_cpi:2023-06-28", occurred_at: "2023-06-28T12:30:00.000Z" } : cpiEvent(month)));
+  assert.throws(() => preflightMacroEvent60mContract({ manifest: m60Manifest, bars: m60Bars, artifact: gap }), /missing_official_monthly_release:2023-05/);
+});
+
+test("an M60 study and preflight decide by the recomputed coverage and keep the stored block only to compare", () => {
+  // The stored block, from an older rule, reported an issue the events do not have.
+  const stale = cpiArtifact(months.map(cpiEvent), { ...cleanSummary, coverage_issues: ["missing_official_monthly_release:2023-05"] });
+  const preflight = preflightMacroEvent60mContract({ manifest: m60Manifest, bars: m60Bars, artifact: stale });
+  assert.deepEqual(preflight.source.release_coverage.coverage_issues, []);
+  assert.deepEqual(preflight.source.release_coverage.events_by_year, { "2023": 12 });
+  assert.deepEqual(preflight.source.release_coverage_recheck, { coverage_issues_as_stored: ["missing_official_monthly_release:2023-05"], stored_block_is_stale: true });
+  const study = buildMacroEvent60mStudy({ manifest: m60Manifest, bars: m60Bars, artifact: stale, folds: m60Folds });
+  assert.deepEqual([study.source.release_coverage.coverage_issues, study.source.release_coverage_recheck.stored_block_is_stale], [[], true]);
+  assert.equal(recheckMacroEvent60mCoverage(cpiArtifact(months.map(cpiEvent))).recheck.stored_block_is_stale, false);
+});
+
+test("coverage cannot pass by checking nothing: a bad retrieval time, year range or missing lists are refused", () => {
+  const complete = cpiArtifact(months.map(cpiEvent));
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, retrieved_at: "not a time" }), /valid retrieval time/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, retrieved_at: undefined }), /valid retrieval time/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { coverage_issues: [] } }), /integer year range/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { ...cleanSummary, requested_from_year: 2024 } }), /integer year range/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { ...cleanSummary, requested_to_year: 2023.5 } }), /integer year range/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, non_publications: undefined }), /events and non-publications/);
+  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: undefined }), /no coverage block to recheck/);
+  assert.throws(() => computeOfficialMacroEventCoverage("us_cpi", 2023, 2023, complete.events, [], new Date(Number.NaN)), /valid retrieval time/);
+});
+
+test("the M60 study and preflight CLIs refuse the edited artifact too", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-m60-coverage-"));
+  const aggregate = join(dir, "aggregate.json");
+  const events = join(dir, "events.json");
+  await writeFile(aggregate, JSON.stringify({ manifest: m60Manifest, bars: m60Bars }));
+  await writeFile(events, JSON.stringify(cpiArtifact([cpiEvent("06")])));
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(TRADINGVIEW_MCP|TV_MCP|TV_CDP|OANDA)/.test(name))), HOME: dir, USERPROFILE: dir, LOCALAPPDATA: dir };
+  for (const cli of ["macroEvent60mCli.js", "macroEvent60mPreflightCli.js"]) {
+    const out = join(dir, `${cli}.out.json`);
+    const run = spawnSync(process.execPath, [fileURLToPath(new URL(`../../build/${cli}`, import.meta.url)), "--aggregate", aggregate, "--events", events, "--out", out, "--confirm-local-import"], { encoding: "utf8", env });
+    assert.equal(run.status, 1, `${cli} ${run.stdout}`);
+    assert.match(run.stderr, /does not prove the requested release-history coverage: insufficient_official_event_coverage:2023/, cli);
+  }
 });

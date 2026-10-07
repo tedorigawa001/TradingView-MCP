@@ -159,6 +159,11 @@ async function fetchOfficialPage(url: string, fetcher: OfficialMacroFetch, allow
 
 /** Exported so a stored artifact's coverage can be recomputed from its own events, without refetching. */
 export function computeOfficialMacroEventCoverage(kind: OfficialMacroEventKind, fromYear: number, toYear: number, events: OfficialMacroEvent[], nonPublications: OfficialMacroNonPublication[], now: Date) {
+  // An unreadable time or year range would leave no complete year to check, and the coverage would pass by checking
+  // nothing (BACKLOG 102-16).
+  if (!Number.isFinite(now.getTime())) throw new Error("official macro event coverage needs a valid retrieval time");
+  if (!Number.isInteger(fromYear) || !Number.isInteger(toYear) || fromYear > toYear) throw new Error("official macro event coverage needs an integer year range from a year to a later one");
+  if (!Array.isArray(events) || !Array.isArray(nonPublications)) throw new Error("official macro event coverage needs its events and non-publications");
   const eventsByYear: Record<string, number> = {};
   for (const event of events) { const year = event.occurred_at.slice(0, 4); eventsByYear[year] = (eventsByYear[year] ?? 0) + 1; }
   const currentYear = now.getUTCFullYear();
