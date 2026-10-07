@@ -69,8 +69,12 @@ test("a backslash escapes a quote inside a triple-quoted string", () => {
   for (const quote of ['"""', "'''"]) {
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}say \\${quote} here${quote} + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], quote);
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}say \\${quote} timenow${quote}\nplot(close)`), [], quote);
-    // An escaped backslash escapes nothing past itself.
-    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}C:\\\\${quote} + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], quote);
+    // An escaped backslash escapes nothing past itself, so the string closes before the next one opens.
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}C:\\\\${quote} + str.tostring(request.security(syminfo.tickerid, "D", close)) + ${quote}x${quote}`), ["request_security"], quote);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}C:\\\\${quote} + ${quote}timenow${quote}\nplot(close)`), [], quote);
+    // An empty one closes right after its opener.
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nx = f(${quote}${quote}, close)\ny = "a"\n${security}`), ["request_security"], quote);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nx = f(${quote}${quote}, "timenow")\nplot(close)`), [], quote);
   }
   // One that never closes hides nothing, and leaves the other kind of triple-quoted string to close as before.
   for (const [open, other] of [['"""', "'''"], ["'''", '"""']]) {
@@ -95,12 +99,43 @@ test("inside parentheses or brackets a string wraps at any indentation", () => {
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\nf() => ["first part\n${pad}second part", request.security(syminfo.tickerid, "D", close)]`), ["request_security"], pad);
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\nf() => ["first part\n${pad}timenow in the text", close]\nplot(close)`), [], pad);
   }
-  // Once the parentheses and brackets close, an unindented line is a new statement again; none in a string or comment counts.
+  // Inside nested parentheses, after an inner pair closes, and in parentheses opened on an earlier line.
+  for (const call of ["label.new(bar_index, math.max(0, 1), ", "label.new(bar_index, 0,\n "]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${call}"first part\nsecond part" + str.tostring(request.security(syminfo.tickerid, "D", close)))`), ["request_security"], call);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${call}"first part\ntimenow in the text")\nplot(close)`), [], call);
+  }
+  // Once the parentheses and brackets close none are left open, and none in a string or comment counts: brackets left
+  // open would have the source read again as one that cannot compile, taking the wrapped text below for code.
   for (const before of ['label.new(bar_index, 0, "a")', "x = close[1]", 's = "(["', "// (["]) {
-    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${before}\nnote = "never closed\n${security}`), ["request_security"], before);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${before}\nnote = "first part\n  timenow in the text"\nplot(close)`), [], before);
   }
   // A stray closer does not stop the next parentheses from counting.
   assert.deepEqual(codes(`//@version=6\nstrategy("x")\nx = close)]\nlabel.new(bar_index, 0, "first part\nsecond part" + str.tostring(request.security(syminfo.tickerid, "D", close)))`), ["request_security"]);
+});
+
+test("a source that cannot compile is also read with every string ending at its line, so a stray quote hides nothing", () => {
+  for (const source of [
+    `if close > open\n    note = "never closed\n    ${security}`,
+    `plot(close, title = "abc)\n${security}`,
+    `plot(close, title = """abc)\n${security}`,
+    `x = f(close\ny = "oops\n${security}`,
+    // Here only the triple quote that never closes, or only the parenthesis left open, shows that it cannot compile.
+    `note = """abc\n  ${security} + "x`,
+    `x = f(close\ny = "oops\n${security} + "x`,
+    // A string that never closes on its line does not run on into the next statement, even where a later stray quote
+    // would close it.
+    `note = "never closed\n${security} + "x`,
+    // What the wrapping reading finds still counts.
+    `note = "first part\n  second part" + str.tostring(request.security(syminfo.tickerid, "D", close))\nx = f(close`,
+  ]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${source}`), ["request_security"], source);
+  }
+});
+
+test("a carriage return ends a line, alone or before a line feed", () => {
+  for (const end of ["\r", "\r\n"]) {
+    assert.deepEqual(codes(["//@version=6", 'strategy("x")', "// a note", security, ""].join(end)), ["request_security"], JSON.stringify(end));
+  }
 });
 
 test("unclosed block comments and triple quotes keep the pass linear", () => {

@@ -1,6 +1,7 @@
 /**
  * Whether a string left open at a line end goes on to the next line. Pine wraps such a string onto a line indented by
- * one or more spaces, and inside parentheses or brackets places no limit on indentation at all.
+ * one or more spaces (a tab is taken as indentation too), and inside parentheses or brackets places no limit on
+ * indentation at all.
  */
 function wrapsOnto(source: string, lineStart: number, bracketed: boolean): boolean {
   return bracketed || source[lineStart] === " " || source[lineStart] === "\t";
@@ -23,16 +24,21 @@ function tripleQuoteClose(source: string, start: number, triple: string): number
  *
  * Every string honours backslash escapes. A triple-quoted string runs to its closing triple quote, across lines. Any
  * other string runs to its closing quote, and past a line end only onto a wrapped line (see wrapsOnto, which needs the
- * depth of parentheses and brackets the code has open); otherwise it ends with its line. A block comment runs to its
- * closing "*\/"; one that never closes is read as code, so a stray marker hides nothing.
+ * depth of parentheses and brackets the code has open) when `wrap` is set; otherwise it ends with its line. A block
+ * comment runs to its closing "*\/"; one that never closes is read as code, so a stray marker hides nothing.
+ *
+ * `malformed` reports a string that never reaches its closing quote, or brackets still open at the end. Valid Pine
+ * closes both, and in it a string open at a line end is always wrapped; in a source that cannot compile, wrapping may
+ * instead carry a stray quote on into real code.
  *
  * Once the search for a closer fails, every later search for the same closer fails too, so it is not repeated and the
  * pass stays linear. For "*\/" none exists past where the search began. For a triple quote, a later search starts past
  * a later opener, where it reads escapes exactly as the failed one did, so it finds nothing that one missed.
  */
-function pineCodeOnly(source: string): string {
+function pineCodeOnly(source: string, wrap: boolean): { code: string; malformed: boolean } {
   let code = "";
   let index = 0;
+  let malformed = false;
   let bracketDepth = 0;
   let blockCommentUnclosedFrom = Infinity;
   const tripleUnclosedFrom: Record<string, number> = { '"': Infinity, "'": Infinity };
@@ -54,13 +60,15 @@ function pineCodeOnly(source: string): string {
         const close = tripleQuoteClose(source, index, triple);
         if (close >= 0) { index = close + 3; code += '""'; continue; }
         tripleUnclosedFrom[char] = index;
+        malformed = true;
       }
       index += 1;
       while (index < source.length && source[index] !== char) {
-        if (source[index] === "\n" && !wrapsOnto(source, index + 1, bracketDepth > 0)) break;
+        if (source[index] === "\n" && !(wrap && wrapsOnto(source, index + 1, bracketDepth > 0))) break;
         index += source[index] === "\\" && source[index + 1] !== undefined && source[index + 1] !== "\n" ? 2 : 1;
       }
       if (source[index] === char) index += 1;
+      else malformed = true;
       code += '""';
       continue;
     }
@@ -69,11 +77,16 @@ function pineCodeOnly(source: string): string {
     code += char;
     index += 1;
   }
-  return code;
+  return { code, malformed: malformed || bracketDepth > 0 };
 }
 
 export function auditPineSource(source: string) {
-  const code = pineCodeOnly(source);
+  // A carriage return ends a line, alone or before a line feed.
+  const text = source.replace(/\r\n?/g, "\n");
+  const wrapped = pineCodeOnly(text, true);
+  // A source that cannot compile is read a second time with every string ending at its line, and what either reading
+  // finds counts, so a stray quote or bracket hides nothing.
+  const code = wrapped.malformed ? `${wrapped.code}\n${pineCodeOnly(text, false).code}` : wrapped.code;
   const usesRequestSecurity = /\brequest\.security(?:_lower_tf)?\s*\(/.test(code);
   const usesPivots = /\bta\.pivot(?:high|low)\s*\(/.test(code);
   const usesVarip = /\bvarip\b/.test(code);
