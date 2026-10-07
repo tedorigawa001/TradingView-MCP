@@ -357,7 +357,7 @@ export interface StrategyReport {
 
 export interface BacktestResult extends StrategyReport {
   pineId: string;
-  /** Study id when kept on the chart, otherwise null. */
+  /** Study id while the strategy is on the chart (kept, or its removal failed), otherwise null. */
   studyId: string | null;
   keptOnChart: boolean;
   removedFromChart: boolean;
@@ -2459,50 +2459,61 @@ export class TradingView {
         // is accepted.
         const staleReport = bt.activeStrategyReportData.value();
         const studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
+        // Once the strategy is on the chart, every way out passes the removal below (BACKLOG 102-22): a report that
+        // could not be read or shaped used to throw past it and leave the strategy on the user's chart.
+        // Causes are kept as their messages: an error from another realm (a frame, a worker) is no instance of this
+        // page's Error, yet carries a message.
+        const messageOf = (e) => (e && typeof e.message === "string" ? e.message : String(e));
         let report = null;
-        const t0 = Date.now();
-        while (Date.now() - t0 < 20000) {
-          // Only accept a report attributed to OUR strategy — if another
-          // strategy on the chart stays active, waiting out the timeout and
-          // failing is better than returning its numbers as ours.
-          let activeDesc = null;
-          try { activeDesc = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
-          const raw = bt.activeStrategyReportData.value();
-          if (raw !== null && raw !== staleReport && activeDesc === meta.description) {
-            report = formatReport(bt, ${tradesLimit});
-            if (report) break;
+        let failure = null;
+        try {
+          const t0 = Date.now();
+          while (Date.now() - t0 < 20000) {
+            // Only accept a report attributed to OUR strategy — if another
+            // strategy on the chart stays active, waiting out the timeout and
+            // failing is better than returning its numbers as ours.
+            let activeDesc = null;
+            try { activeDesc = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
+            const raw = bt.activeStrategyReportData.value();
+            if (raw !== null && raw !== staleReport && activeDesc === meta.description) {
+              report = formatReport(bt, ${tradesLimit});
+              if (report) break;
+            }
+            await new Promise((r) => setTimeout(r, 400));
           }
-          await new Promise((r) => setTimeout(r, 400));
+          if (!report) failure = "backtest report did not appear within 20s (another strategy may be active on the chart)";
+        } catch (e) {
+          failure = messageOf(e);
         }
 
-        // By default the strategy must not stay on the user's chart —
-        // remove it whether or not the report arrived.
+        // By default the strategy must not stay on the user's chart. keepOnChart
+        // applies only to a successful run: a failed one never strands it.
         let removed = false;
-        let warning;
-        // keepOnChart applies only to a successful run. A timed-out or
-        // unattributed report must never strand the temporary strategy.
-        if (!keep || !report) {
+        let removalError = null;
+        if (!keep || failure) {
           try {
-            chart.removeEntity(studyId);
+            await chart.removeEntity(studyId);
             removed = true;
           } catch (e) {
-            warning = "could not remove the strategy from the chart: " + e.message;
+            removalError = messageOf(e);
           }
         }
-        if (!report) {
-          throw new Error("backtest report did not appear within 20s (another strategy may be active on the chart)" +
+        if (failure) {
+          // The cause of the failure leads; what became of the strategy follows, with its id if it may remain.
+          throw new Error(failure +
             (removed
               ? " — the strategy was removed from the chart"
-              : " — WARNING: the strategy may still be on the chart"));
+              : " — WARNING: the strategy may still be on the chart as study " + studyId +
+                " (removing it failed: " + removalError + ")"));
         }
         const out = {
           pineId,
-          studyId: keep ? studyId : null,
+          studyId: keep || !removed ? studyId : null,
           keptOnChart: keep,
           removedFromChart: removed,
           ...report,
         };
-        if (warning) out.warning = warning;
+        if (removalError !== null) out.warning = "could not remove the strategy from the chart: " + removalError;
         return out;
       })()
     `);

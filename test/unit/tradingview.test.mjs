@@ -992,7 +992,7 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
   assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
   assert.ok(expr.includes("const keep = false"), "auto-remove is the default");
   assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
-  assert.ok(expr.includes("if (!keep || !report)"),
+  assert.ok(expr.includes("if (!keep || failure)"),
     "a failed kept run must still remove its temporary strategy");
   assert.ok(expr.includes("activeDesc === meta.description"),
     "the report must be attributed to OUR strategy before being accepted");
@@ -1007,6 +1007,88 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
 
   await tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0", keepOnChart: true });
   assert.ok(cdp.calls[1].includes("const keep = true"));
+});
+
+// BACKLOG 102-22: the backtest's page code run against a fake chart. `fault` makes reading the report throw ("report"),
+// shaping it throw ("format"), or never arrive ("timeout"); `removeFails` makes removing the strategy throw.
+async function backtestPage({ fault = null, removeFails = false, keepOnChart = false } = {}) {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0", keepOnChart });
+  const removed = [];
+  let reportReads = 0;
+  let clock = 0;
+  const report = { currency: "USD", performance: { all: { totalTrades: 1 }, initialCapital: 10_000 }, trades: [] };
+  const source = { metaInfo: () => ({ description: "My Strategy" }) };
+  const bt = {
+    activeStrategy: { value: () => {
+      if (fault === "format") throw new Error("activeStrategy getter exploded");
+      return source;
+    } },
+    activeStrategyMetaInfo: { value: () => ({ description: "My Strategy" }) },
+    activeStrategyReportData: { value: () => {
+      reportReads += 1;
+      if (reportReads === 1) return null; // the report before this run
+      if (fault === "report") throw new Error("report getter exploded");
+      return fault === "timeout" ? null : report;
+    } },
+  };
+  const chart = {
+    createStudy: async () => "st7",
+    removeEntity: (id) => {
+      if (removeFails) throw new Error("chart refused the removal");
+      removed.push(id);
+    },
+  };
+  // A clock that moves a second per reading and timers that fire at once, so the 20-second wait passes in no time.
+  class FakeDate extends Date { static now() { return (clock += 1_000); } }
+  const context = vm.createContext({
+    Date: FakeDate,
+    setTimeout: (fn) => { fn(); return 0; },
+    window: { TradingViewApi: {
+      activeChart: () => chart,
+      studyMetaIntoRepository: () => ({ findById: async () => ({ isTVScriptStrategy: true, description: "My Strategy" }) }),
+      backtestingStrategyApi: async () => bt,
+    } },
+  });
+  return { outcome: vm.runInContext(cdp.calls[0], context), removed };
+}
+
+test("a backtest that fails after placing its strategy removes it, kept or not, and names the cause", async () => {
+  const causes = {
+    report: /^report getter exploded — the strategy was removed from the chart$/,
+    format: /^activeStrategy getter exploded — the strategy was removed from the chart$/,
+    timeout: /^backtest report did not appear within 20s .* — the strategy was removed from the chart$/,
+  };
+  for (const [fault, cause] of Object.entries(causes)) {
+    for (const keepOnChart of [false, true]) {
+      const page = await backtestPage({ fault, keepOnChart });
+      await assert.rejects(page.outcome, (error) => cause.test(error.message), `${fault}, keep ${keepOnChart}`);
+      assert.deepEqual(page.removed, ["st7"], `${fault}, keep ${keepOnChart}`);
+    }
+  }
+});
+
+test("when removing the strategy fails too, the cause still leads and the study is named", async () => {
+  const failed = await backtestPage({ fault: "report", removeFails: true });
+  await assert.rejects(failed.outcome, (error) => error.message ===
+    "report getter exploded — WARNING: the strategy may still be on the chart as study st7 (removing it failed: chart refused the removal)");
+  // A run that succeeded but could not remove its strategy returns the study id, so the caller can remove it.
+  const succeeded = await backtestPage({ removeFails: true });
+  const result = await succeeded.outcome;
+  assert.deepEqual([result.studyId, result.keptOnChart, result.removedFromChart], ["st7", false, false]);
+  assert.match(result.warning, /could not remove the strategy from the chart: chart refused the removal/);
+});
+
+test("a successful backtest removes its strategy unless asked to keep it", async () => {
+  const removedRun = await backtestPage();
+  const removed = await removedRun.outcome;
+  assert.deepEqual([removed.studyId, removed.keptOnChart, removed.removedFromChart, removed.totalTrades], [null, false, true, 1]);
+  assert.deepEqual(removedRun.removed, ["st7"]);
+  const keptRun = await backtestPage({ keepOnChart: true });
+  const kept = await keptRun.outcome;
+  assert.deepEqual([kept.studyId, kept.keptOnChart, kept.removedFromChart], ["st7", true, false]);
+  assert.deepEqual(keptRun.removed, []);
 });
 
 test("getChartRect validates the index and reads the chart container rect", async () => {
