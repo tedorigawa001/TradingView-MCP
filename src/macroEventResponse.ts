@@ -2,7 +2,7 @@ import { canonicalDefinitionHash } from "./canonicalDefinition.js";
 import { assertAdmissibleAggregate } from "./fxCsvFeatureScanCli.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
-import { computeOfficialMacroEventCoverage } from "./officialMacroEventSources.js";
+import { computeOfficialMacroEventCoverage, officialMacroArtifactRetrievedAt } from "./officialMacroEventSources.js";
 import type { OfficialMacroEventArtifact, OfficialMacroEventKind } from "./officialMacroEventSources.js";
 
 /**
@@ -397,7 +397,7 @@ export function runMacroEventResponseStudy(input: {
       artifact.coverage.requested_to_year,
       artifact.events,
       artifact.non_publications,
-      new Date(artifact.retrieved_at),
+      officialMacroArtifactRetrievedAt(artifact),
     );
     if (recomputed.coverage_issues.length > 0) {
       throw new Error(`${artifact.event_kind} artifact does not prove the requested release-history coverage: ${recomputed.coverage_issues.join(", ")}`);

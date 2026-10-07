@@ -364,8 +364,11 @@ test("an M60 study and preflight decide by the recomputed coverage and keep the 
 
 test("coverage cannot pass by checking nothing: a bad retrieval time, year range or missing lists are refused", () => {
   const complete = cpiArtifact(months.map(cpiEvent));
-  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, retrieved_at: "not a time" }), /valid retrieval time/);
-  assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, retrieved_at: undefined }), /valid retrieval time/);
+  // new Date reads null, 0 and false as 1970, which would leave no complete year to check; a parseable but
+  // non-canonical string is no retrieval time the collector wrote either.
+  for (const retrieved_at of [null, 0, false, undefined, "not a time", "2024-01-15", "2024-01-15T00:00:00Z", Date.parse("2024-01-15T00:00:00.000Z")]) {
+    assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, retrieved_at }), /us_cpi artifact retrieved_at must be a canonical ISO timestamp/, String(retrieved_at));
+  }
   assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { coverage_issues: [] } }), /integer year range/);
   assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { ...cleanSummary, requested_from_year: 2024 } }), /integer year range/);
   assert.throws(() => recheckMacroEvent60mCoverage({ ...complete, coverage: { ...cleanSummary, requested_to_year: 2023.5 } }), /integer year range/);
@@ -380,11 +383,17 @@ test("the M60 study and preflight CLIs refuse the edited artifact too", async ()
   const events = join(dir, "events.json");
   await writeFile(aggregate, JSON.stringify({ manifest: m60Manifest, bars: m60Bars }));
   await writeFile(events, JSON.stringify(cpiArtifact([cpiEvent("06")])));
+  const epoch = join(dir, "epoch.json");
+  // One 2023 event read at "1970" would leave no complete year to check.
+  await writeFile(epoch, JSON.stringify({ ...cpiArtifact([cpiEvent("06")]), retrieved_at: null }));
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(TRADINGVIEW_MCP|TV_MCP|TV_CDP|OANDA)/.test(name))), HOME: dir, USERPROFILE: dir, LOCALAPPDATA: dir };
   for (const cli of ["macroEvent60mCli.js", "macroEvent60mPreflightCli.js"]) {
     const out = join(dir, `${cli}.out.json`);
     const run = spawnSync(process.execPath, [fileURLToPath(new URL(`../../build/${cli}`, import.meta.url)), "--aggregate", aggregate, "--events", events, "--out", out, "--confirm-local-import"], { encoding: "utf8", env });
     assert.equal(run.status, 1, `${cli} ${run.stdout}`);
     assert.match(run.stderr, /does not prove the requested release-history coverage: insufficient_official_event_coverage:2023/, cli);
+    const atEpoch = spawnSync(process.execPath, [fileURLToPath(new URL(`../../build/${cli}`, import.meta.url)), "--aggregate", aggregate, "--events", epoch, "--out", out, "--confirm-local-import"], { encoding: "utf8", env });
+    assert.equal(atEpoch.status, 1, `${cli} ${atEpoch.stdout}`);
+    assert.match(atEpoch.stderr, /retrieved_at must be a canonical ISO timestamp/, cli);
   }
 });

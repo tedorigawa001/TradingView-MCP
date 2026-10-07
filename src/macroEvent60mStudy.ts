@@ -3,7 +3,7 @@ import { runEventAftershockRetestStudy } from "./eventAftershockRetestStudy.js";
 import { assertAdmissibleAggregate } from "./fxCsvFeatureScanCli.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
-import { computeOfficialMacroEventCoverage, type OfficialMacroEvent, type OfficialMacroEventArtifact, type OfficialMacroEventKind } from "./officialMacroEventSources.js";
+import { computeOfficialMacroEventCoverage, officialMacroArtifactRetrievedAt, type OfficialMacroEvent, type OfficialMacroEventArtifact, type OfficialMacroEventKind } from "./officialMacroEventSources.js";
 
 export type MacroEvent60mContract = {
   contract_id: string;
@@ -86,7 +86,7 @@ export function recheckMacroEvent60mCoverage(artifact: OfficialMacroEventArtifac
   if (!artifact.coverage) throw new Error(`${artifact.event_kind} artifact carries no coverage block to recheck`);
   const recomputed = computeOfficialMacroEventCoverage(
     artifact.event_kind, artifact.coverage.requested_from_year, artifact.coverage.requested_to_year,
-    artifact.events, artifact.non_publications, new Date(artifact.retrieved_at),
+    artifact.events, artifact.non_publications, officialMacroArtifactRetrievedAt(artifact),
   );
   if (recomputed.coverage_issues.length > 0) {
     throw new Error(`macro event artifact does not prove the requested release-history coverage: ${recomputed.coverage_issues.join(", ")}`);

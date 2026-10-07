@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
 import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { isCanonicalTimestamp } from "./firstSeenStore.js";
 
 export type OfficialMacroEventKind = "us_cpi" | "us_nfp" | "fomc_statement";
 
@@ -155,6 +156,18 @@ async function fetchOfficialPage(url: string, fetcher: OfficialMacroFetch, allow
   if (!response.ok) throw new Error(`official macro event source returned HTTP ${response.status}`);
   assertExpectedResponseHost(response, url, "official macro event source");
   return readLimitedResponseText(response, MAX_SOURCE_BYTES, "official macro event source");
+}
+
+/**
+ * The retrieval time a stored artifact's coverage is recomputed at (BACKLOG 102-16). It must be the canonical ISO
+ * string the collector wrote: `new Date` reads null, 0 and false as 1970, which leaves no complete year to check and
+ * lets any events pass.
+ */
+export function officialMacroArtifactRetrievedAt(artifact: Pick<OfficialMacroEventArtifact, "event_kind" | "retrieved_at">): Date {
+  if (typeof artifact.retrieved_at !== "string" || !isCanonicalTimestamp(artifact.retrieved_at)) {
+    throw new Error(`${artifact.event_kind} artifact retrieved_at must be a canonical ISO timestamp`);
+  }
+  return new Date(artifact.retrieved_at);
 }
 
 /** Exported so a stored artifact's coverage can be recomputed from its own events, without refetching. */

@@ -257,6 +257,13 @@ test("the study refuses inputs that would quietly change the frozen population",
   const uncovered = makeStudyInput();
   for (const artifact of uncovered.artifacts) artifact.coverage = { ...artifact.coverage, requested_from_year: 2023 };
   assert.throws(() => runMacroEventResponseStudy(uncovered), /us_cpi artifact does not prove the requested release-history coverage/);
+  // A retrieval time new Date would read as 1970 leaves no complete year to check, so it is refused first (102-16).
+  for (const retrieved_at of [null, 0, false]) {
+    const epoch = makeStudyInput();
+    for (const artifact of epoch.artifacts) artifact.coverage = { ...artifact.coverage, requested_from_year: 2023 };
+    epoch.artifacts[0].retrieved_at = retrieved_at;
+    assert.throws(() => runMacroEventResponseStudy(epoch), /artifact retrieved_at must be a canonical ISO timestamp/, String(retrieved_at));
+  }
 
   // A kind that only contributes its guard must still prove its own coverage, or the guard it
   // contributes is built from an event list nobody has checked.
