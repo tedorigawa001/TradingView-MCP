@@ -64,7 +64,7 @@ function metrics(joined: JoinedTrade[]) {
   const gains = profits.filter((profit) => profit > 0).reduce((sum, profit) => sum + profit, 0);
   const losses = -profits.filter((profit) => profit < 0).reduce((sum, profit) => sum + profit, 0);
   // Taken in exit order, not this entry order; null when a trade has no exit time.
-  const maxClosedTradeEquityDrawdown = closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null })));
+  const maxClosedTradeEquityDrawdown = closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null, exitPrice: trade.exit?.price ?? null })));
   const runUps = trades.map((trade) => trade.runUp).filter((value): value is number => value !== null);
   const drawDowns = trades.map((trade) => trade.drawDown).filter((value): value is number => value !== null);
   const commissions = trades.map((trade) => trade.commission).filter((value): value is number => value !== null);
@@ -291,6 +291,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
     ...(!input.ledger.complete ? ["strategy_ledger_incomplete"] : []),
     ...(input.ledger.countMatchesSummary === false ? ["strategy_ledger_count_mismatch"] : []),
   ];
+  const tradesMissingExitTime = joined.filter((item) => typeof item.trade.exit?.time !== "number" || !Number.isFinite(item.trade.exit.time)).length;
   const qualityIssues = [...new Set([
     ...fatalLedgerIssues,
     ...input.ledger.qualityIssues.map((issue) => `strategy_ledger:${issue}`),
@@ -298,11 +299,14 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
     ...(correlationCoverageRatio !== null && correlationCoverageRatio < input.minimumCoverageRatio
       ? ["minimum_correlation_join_coverage_not_met"] : []),
     ...(joined.length === 0 ? ["no_trades_joined_to_regimes"] : []),
+    // Such a trade has no place in exit order, so every closed-trade drawdown that includes it is null (BACKLOG 102-18).
+    ...(tradesMissingExitTime > 0 ? ["closed_trade_drawdown_unavailable_missing_exit_time"] : []),
   ])];
   const blocked = fatalLedgerIssues.length > 0 || joined.length === 0;
   return {
     schemaVersion: "1.0" as const,
-    methodologyVersion: "entry_prior_closed_bar_regime_join_v1" as const,
+    // v2: closed-trade drawdown in exit order (BACKLOG 102-18).
+    methodologyVersion: "entry_prior_closed_bar_regime_join_v2" as const,
     status: blocked ? "blocked" as const : qualityIssues.length === 0 ? "complete" as const : "partial" as const,
     ledger: {
       ledgerId: input.ledger.ledgerId,
@@ -354,6 +358,7 @@ export function evaluateStrategyByRegime(input: StrategyRegimeEvaluationInput) {
       closedTrades: closedTrades.length,
       eligibleClosedTrades,
       joinedTrades: joined.length,
+      tradesMissingExitTime,
       coverageRatio,
       excluded,
       correlationJoinedTrades,

@@ -199,7 +199,18 @@ test("regime evaluation takes the closed-trade drawdown in exit order, whatever 
   assert.equal(result.overall.maxClosedTradeEquityDrawdown, 60);
   assert.equal(result.byDirectionalRegime.range.maxClosedTradeEquityDrawdown, 60);
   assert.equal(evaluate([...trades].reverse(), observations, { minimumGroupTrades: 1 }).overall.maxClosedTradeEquityDrawdown, 60);
-  // Without an exit time a trade has no place in the sequence.
-  const unknown = evaluate([trades[0], { ...trades[1], exit: null }, trades[2]], observations, { minimumGroupTrades: 1 });
+  assert.deepEqual([result.status, result.coverage.tradesMissingExitTime, result.methodologyVersion], ["complete", 0, "entry_prior_closed_bar_regime_join_v2"]);
+  // Without an exit time a trade has no place in the sequence: the drawdown is null, and the report says why.
+  const unknown = evaluate([trades[0], { ...trades[1], exit: { ...trades[1].exit, time: null } }, trades[2]], observations, { minimumGroupTrades: 1 });
   assert.equal(unknown.overall.maxClosedTradeEquityDrawdown, null);
+  assert.deepEqual([unknown.status, unknown.coverage.tradesMissingExitTime], ["partial", 1]);
+  assert.ok(unknown.qualityIssues.includes("closed_trade_drawdown_unavailable_missing_exit_time"));
+});
+
+test("regime evaluation realizes a position closed at once as one fill", () => {
+  const observations = Array.from({ length: 6 }, (_, index) => observation(index, "range", "normal"));
+  const exitAt = (item, hour) => ({ ...item, exit: { ...item.exit, time: start + hour * 3_600_000, timeIso: new Date(start + hour * 3_600_000).toISOString() } });
+  // Entered at 1h and 2h, both closed at 3h at the same price: -20 and +30 realize together.
+  const result = evaluate([exitAt(trade(1, -20), 3), exitAt(trade(2, 30), 3)], observations, { minimumGroupTrades: 1 });
+  assert.equal(result.overall.maxClosedTradeEquityDrawdown, 0);
 });

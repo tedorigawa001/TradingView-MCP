@@ -72,7 +72,7 @@ function metricsForTrades(trades: StrategyLedgerTrade[]): FoldMetrics {
   const losses = usableProfits.filter((value) => value < 0).reduce((sum, value) => sum + value, 0);
   // In exit order, as closed-trade equity is realized (BACKLOG 102-18); a window's trades all carry exit times.
   const maxDrawdown = completeProfits
-    ? closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null })))
+    ? closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null, exitPrice: trade.exit?.price ?? null })))
     : null;
   return {
     totalTrades: trades.length,
@@ -206,7 +206,7 @@ export function evaluateStrategyWalkForward(input: {
   if (blockers.length > 0) {
     return {
       status: "not_evaluable" as const,
-      methodologyVersion: "ledger_partition_v1",
+      methodologyVersion: "ledger_partition_v2",
       blockers: [...new Set(blockers)],
       folds: [],
       oosAggregate: null,
@@ -280,7 +280,7 @@ export function evaluateStrategyWalkForward(input: {
     fold.test.evidence.qualityIssues.length === 0);
   return {
     status: evaluableTests.length === folds.length ? "complete" as const : "partial" as const,
-    methodologyVersion: "ledger_partition_v1",
+    methodologyVersion: "ledger_partition_v2",
     mode: input.mode,
     embargoBars: input.embargoBars,
     embargoMilliseconds,

@@ -162,7 +162,28 @@ test("strategy walk-forward takes a window's closed-trade drawdown in exit order
     folds, mode: "anchored", timeframe: "240", embargoBars: 1, minimumTrainTrades: 2, minimumTestTrades: 2, selectionMetric: "expectancy",
   });
   const trades = [...overlapping.trades.slice(0, 4), ...year2022, ...overlapping.trades.slice(4)];
-  assert.equal(run(trades).folds[0].test.candidateId, "overlapping");
-  assert.equal(run(trades).folds[0].test.evidence.metrics.maxClosedTradeEquityDrawdown, 60);
-  assert.equal(run([...trades].reverse()).folds[0].test.evidence.metrics.maxClosedTradeEquityDrawdown, 60);
+  const result = run(trades);
+  assert.deepEqual([result.methodologyVersion, result.folds[0].test.candidateId], ["ledger_partition_v2", "overlapping"]);
+  assert.equal(result.folds[0].test.evidence.metrics.maxClosedTradeEquityDrawdown, 60);
+  // Across folds, in exit order: 2022's -60, 0, -60, then the weaker candidate's 2023 test, +1 and -2: a drawdown of 61.
+  assert.equal(result.oosAggregate.metrics.maxClosedTradeEquityDrawdown, 61);
+  const reversed = run([...trades].reverse());
+  assert.deepEqual([reversed.folds[0].test.evidence.metrics.maxClosedTradeEquityDrawdown, reversed.oosAggregate.metrics.maxClosedTradeEquityDrawdown], [60, 61]);
+});
+
+test("strategy walk-forward realizes a position closed at once as one fill", () => {
+  const together = ledger("e", { 2020: [2, -1], 2021: [3, -1], 2023: [5, -1] });
+  const hour = (h) => side(Date.UTC(2022, 1, 1, h));
+  // In 2022, entered at 0h and 1h, both closed at 2h at the same price: -20 and +30 realize together.
+  const year2022 = [0, 1].map((index) => ({ ...together.trades[0], reportIndex: 202200 + index, entry: hour(index), exit: hour(2), profit: [-20, 30][index] }));
+  const trades = [...together.trades.slice(0, 4), ...year2022, ...together.trades.slice(4)];
+  const result = evaluateStrategyWalkForward({
+    candidates: [
+      { candidateId: "together", ledger: { ...together, trades, totalTrades: trades.length, availableTrades: trades.length, returned: trades.length, limit: trades.length } },
+      { candidateId: "weaker", ledger: ledger("d", { 2020: [1, -2], 2021: [1, -2], 2022: [1, -2], 2023: [1, -2] }) },
+    ],
+    folds, mode: "anchored", timeframe: "240", embargoBars: 1, minimumTrainTrades: 2, minimumTestTrades: 2, selectionMetric: "expectancy",
+  });
+  assert.equal(result.folds[0].test.candidateId, "together");
+  assert.equal(result.folds[0].test.evidence.metrics.maxClosedTradeEquityDrawdown, 0);
 });

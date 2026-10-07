@@ -127,9 +127,13 @@ test("strategy stress takes closed-trade drawdowns in exit order, whatever the l
   overlapping.trades[1] = { ...overlapping.trades[1], exit: at(6) };
   overlapping.trades[2] = { ...overlapping.trades[2], exit: at(5) };
   const result = evaluateStrategyStress({ ...base, ledger: overlapping, bootstrap: null });
+  assert.equal(result.methodologyVersion, "ledger_stress_v2");
   assert.equal(result.baseline.metrics.maxClosedTradeEquityDrawdown, 60);
   // Ten more per trade: -70, then +50, then -70 in exit order, not -70, -140, -90.
   assert.equal(result.scenarios[0].metrics.maxClosedTradeEquityDrawdown, 90);
+  // Commission doubled (five more each): -65, +55, -65 in exit order. Starting a bar later keeps all three trades.
+  assert.equal(result.scenarios[1].metrics.maxClosedTradeEquityDrawdown, 75);
+  assert.equal(result.scenarios[2].metrics.maxClosedTradeEquityDrawdown, 60);
   const reordered = { ...overlapping, trades: [...overlapping.trades].reverse() };
   const again = evaluateStrategyStress({ ...base, ledger: reordered, bootstrap: null });
   assert.deepEqual([again.baseline.metrics.maxClosedTradeEquityDrawdown, again.scenarios[0].metrics.maxClosedTradeEquityDrawdown], [60, 90]);
@@ -138,8 +142,16 @@ test("strategy stress takes closed-trade drawdowns in exit order, whatever the l
 });
 
 test("a bootstrap sample is a new sequence, so its drawdown is taken in the order drawn", () => {
-  // A win then three losses. Sorted back into exit order every sample would put its wins before its losses; as drawn,
+  // Pinned for this seed: the two orders part only at the fifth percentile here (10 as drawn, 19.5 in exit order), and
+  // for many other seeds they summarize the same. A win then three losses. Sorted back into exit order every sample would put its wins before its losses; as drawn,
   // losses also come first, and the lower drawdowns show at the fifth percentile.
   const result = evaluateStrategyStress({ ...base, ledger: ledger({ profits: [100, -10, -10, -10], commissions: [1, 1, 1, 1] }) });
   assert.deepEqual(result.bootstrap.maxClosedTradeEquityDrawdown, { p05: 10, median: 30, p95: 40, worst: 40 });
+});
+
+test("strategy stress realizes a position closed at once as one fill", () => {
+  const together = ledger({ profits: [-20, 30], commissions: [1, 1] });
+  // Entered on the 2nd and 3rd, both closed on the 4th at the same price: -20 and +30 realize together.
+  together.trades = together.trades.map((trade) => ({ ...trade, exit: side(Date.UTC(2025, 0, 4)) }));
+  assert.equal(evaluateStrategyStress({ ...base, ledger: together, bootstrap: null }).baseline.metrics.maxClosedTradeEquityDrawdown, 0);
 });

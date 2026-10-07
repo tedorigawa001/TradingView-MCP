@@ -30,7 +30,7 @@ export interface StrategyRerunStressInput {
   }>;
 }
 
-type StressTrade = { profit: number; commission: number | null; exitTime: number };
+type StressTrade = { profit: number; commission: number | null; exitTime: number; exitPrice: number | null };
 
 const parseTime = (value: string, label: string): number => {
   const parsed = Date.parse(value);
@@ -150,7 +150,7 @@ function evaluateLedgerWindow(input: {
   if (selected.included.some((trade) => typeof trade.profit !== "number" || !Number.isFinite(trade.profit))) {
     blockers.push("included_trade_profit_unavailable");
   } else {
-    trades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time! })));
+    trades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time!, exitPrice: trade.exit.price })));
   }
   if (trades.length < input.minimumTrades) blockers.push("minimum_trade_count_not_met");
   return {
@@ -185,7 +185,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
   }
   const baseline = evaluateLedgerWindow(input);
   if (baseline.status === "not_evaluable") {
-    return { status: "not_evaluable" as const, methodologyVersion: "ledger_stress_v1" as const,
+    return { status: "not_evaluable" as const, methodologyVersion: "ledger_stress_v2" as const,
       blockers: baseline.blockers, baseline: null, scenarios: [], distribution: null, bootstrap: null };
   }
 
@@ -210,7 +210,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
       } else if (shifted.included.length < input.minimumTrades) {
         reason = "minimum_trade_count_not_met";
       } else {
-        adjusted = shifted.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time! }));
+        adjusted = shifted.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time!, exitPrice: trade.exit.price }));
       }
     }
     if (adjusted === null) return { ...scenario, status: "not_evaluable" as const, reason, metrics: null, degradation: null, excluded: scenarioExcluded };
@@ -260,7 +260,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
   }
   return {
     status: scenarioResults.every((scenario) => scenario.status === "complete") ? "complete" as const : "partial" as const,
-    methodologyVersion: "ledger_stress_v1" as const,
+    methodologyVersion: "ledger_stress_v2" as const,
     blockers: [],
     baseline: { window: baseline.window, metrics: baselineMetrics, excluded },
     scenarios: scenarioResults,
@@ -287,7 +287,7 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
   if (baselineEvaluation.status === "not_evaluable") {
     return {
       status: "not_evaluable" as const,
-      methodologyVersion: "strategy_rerun_stress_v1" as const,
+      methodologyVersion: "strategy_rerun_stress_v2" as const,
       blockers: baselineEvaluation.blockers,
       baseline: null,
       scenarios: [],
@@ -351,7 +351,7 @@ export function evaluateStrategyRerunStress(input: StrategyRerunStressInput) {
     status: scenarioResults.every((scenario) => scenario.status === "complete")
       ? "complete" as const
       : "partial" as const,
-    methodologyVersion: "strategy_rerun_stress_v1" as const,
+    methodologyVersion: "strategy_rerun_stress_v2" as const,
     blockers: [],
     baseline: {
       ledgerId: input.baselineLedger.ledgerId,

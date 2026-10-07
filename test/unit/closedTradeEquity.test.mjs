@@ -14,11 +14,23 @@ test("closed-trade drawdown follows exit order, so overlapping holds report the 
   }
 });
 
-test("trades closing at the same time realize together, whatever their ledger order", () => {
-  assert.equal(closedTradeEquityDrawdown([{ profit: -50, exitTime: 3 }, { profit: 50, exitTime: 3 }]), 0);
-  assert.equal(closedTradeEquityDrawdown([{ profit: 50, exitTime: 3 }, { profit: -50, exitTime: 3 }]), 0);
-  assert.equal(sequenceEquityDrawdown([-50, 50]), 50, "one after the other, the loss would show");
-  assert.equal(closedTradeEquityDrawdown([{ profit: 50, exitTime: 1 }, { profit: -50, exitTime: 2 }, { profit: -30, exitTime: 2 }]), 80);
+test("exits at the same time and price are one fill; at different prices in one bar, losses come first", () => {
+  // A pyramided position closed at once: two entries, one exit price, realized together whatever the ledger order.
+  for (const order of [[0, 1], [1, 0]]) {
+    const fill = [{ profit: -20, exitTime: 3, exitPrice: 1.1 }, { profit: 30, exitTime: 3, exitPrice: 1.1 }];
+    assert.equal(closedTradeEquityDrawdown(order.map((index) => fill[index])), 0, order.join(","));
+  }
+  // A stop and a target filled in one bar at a peak of 100: whichever filled first, equity fell 80.
+  const bar = [{ profit: 100, exitTime: 1, exitPrice: 1 }, { profit: 80, exitTime: 2, exitPrice: 1.2 }, { profit: -80, exitTime: 2, exitPrice: 0.9 }];
+  assert.equal(closedTradeEquityDrawdown(bar), 80);
+  assert.equal(closedTradeEquityDrawdown([bar[0], bar[2], bar[1]]), 80);
+  // Exits without a price cannot be shown to share a fill, so they stand apart too.
+  assert.equal(closedTradeEquityDrawdown([{ profit: 50, exitTime: 3 }, { profit: -50, exitTime: 3 }]), 50);
+  assert.equal(closedTradeEquityDrawdown([{ profit: 50, exitTime: 1 }, { profit: -50, exitTime: 2, exitPrice: 1 }, { profit: -30, exitTime: 2, exitPrice: 1 }]), 80);
+  // Losses first is the deepest fall at that moment, not a maximum over every order: gains first would have raised the
+  // peak to 100 before the later -10, a drawdown of 110.
+  assert.equal(closedTradeEquityDrawdown([{ profit: 100, exitTime: 1, exitPrice: 2 }, { profit: -100, exitTime: 1, exitPrice: 1 }, { profit: -10, exitTime: 2, exitPrice: 1 }]), 100);
+  assert.equal(sequenceEquityDrawdown([100, -100, -10]), 110);
 });
 
 test("non-overlapping trades give the plain running drawdown, and a missing exit time gives none", () => {

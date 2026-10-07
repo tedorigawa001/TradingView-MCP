@@ -2298,7 +2298,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         };
         if (joinDefinition.sessions !== undefined) validateSessionClockDefinitions(joinDefinition.sessions);
         const definition = {
-          methodologyVersion: "strategy_regime_analysis_v1",
+          methodologyVersion: "strategy_regime_analysis_v2",
           symbol: initialChart.symbol,
           timeframe: initialChart.timeframe,
           strategy: { pineId: pine_id, pineVersion: pine_version, name: script.name, inputs: requestedInputs },
@@ -6546,7 +6546,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             embargoBars,
           );
           const definition = {
-            methodologyVersion: "ledger_partition_v1",
+            methodologyVersion: "ledger_partition_v2",
             symbol: initialChart.symbol,
             timeframe: initialChart.timeframe,
             mode,
@@ -6639,7 +6639,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             : !conditionsMatched
               ? {
                 status: "not_evaluable" as const,
-                methodologyVersion: "ledger_partition_v1",
+                methodologyVersion: "ledger_partition_v2",
                 blockers: ["candidate_conditions_differ"],
                 folds: [],
                 oosAggregate: null,
@@ -6817,7 +6817,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           }
           const hasReruns = resolvedRerunScenarios.length > 0;
           const definition = {
-            methodologyVersion: hasReruns ? "strategy_stress_v2" : "ledger_stress_v1",
+            methodologyVersion: hasReruns ? "strategy_stress_v3" : "ledger_stress_v2",
             protocolId: protocol_id,
             symbol: initialChart.symbol,
             timeframe: initialChart.timeframe,
