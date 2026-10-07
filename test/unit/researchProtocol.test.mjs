@@ -74,3 +74,8 @@ test("research protocol warns for exploratory choices without inventing blockers
   assert.ok(result.issues.some((issue) => issue.code === "zero_cost_assumption"));
   assert.ok(result.issues.some((issue) => issue.code === "restart_difference_not_checked"));
 });
+
+test("a research protocol carries the warning for code after a URL string (102-19)", () => {
+  const result = validateResearchProtocol(definition(), auditPineSource(`//@version=6\nstrategy("x")\nlabel = "https://example.com"\nx = request.security(syminfo.tickerid, "D", close)`), evaluatedAt);
+  assert.ok(result.issues.some((issue) => issue.code === "pine_request_security" && issue.severity === "warning"));
+});

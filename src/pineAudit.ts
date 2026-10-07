@@ -1,8 +1,33 @@
+/**
+ * The source with its comments removed and every string literal emptied, read in one pass so that what a construct
+ * contains is not taken for another (BACKLOG 102-19). Separate passes took the "//" of "https://..." for a comment,
+ * cutting the string open so the next pass swallowed real code up to some later quote; and a "/*" inside a string
+ * removed the code up to the next "*\/". A string ends at its closing quote, or at the end of its line, since a Pine
+ * string cannot span lines; a block comment with no end is read as code, so nothing is hidden by a stray marker.
+ */
 function pineCodeOnly(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "")
-    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '""');
+  let code = "";
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === "/" && next === "/") {
+      while (index < source.length && source[index] !== "\n") index += 1;
+    } else if (char === "/" && next === "*" && source.indexOf("*/", index + 2) >= 0) {
+      index = source.indexOf("*/", index + 2) + 2;
+    } else if (char === '"' || char === "'") {
+      index += 1;
+      while (index < source.length && source[index] !== char && source[index] !== "\n") {
+        index += source[index] === "\\" && source[index + 1] !== undefined && source[index + 1] !== "\n" ? 2 : 1;
+      }
+      if (source[index] === char) index += 1;
+      code += '""';
+    } else {
+      code += char;
+      index += 1;
+    }
+  }
+  return code;
 }
 
 export function auditPineSource(source: string) {

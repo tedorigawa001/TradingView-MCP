@@ -248,7 +248,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `classify_cross_asset_shocks` | Classifies frozen same-UTC cross-asset shock states without producing outcomes, candidates, or trade instructions |
 | `evaluate_cross_asset_shock_outcomes` | Measures descriptive 15/30/60/120-minute outcomes for non-overlapping frozen shock states without producing a candidate |
 | `preflight_bookmap_flow_price_join` | Reads one bounded local Bookmap Collector JSONL and verifies conservative receipt-time coverage against active EURUSD M1/M5; CME flow remains a single-venue futures proxy |
-| `audit_pine_indicator` | Statically audits a user-owned Pine indicator for repainting risks |
+| `audit_pine_indicator` | Statically audits a user-owned Pine indicator for repainting risks, ignoring only what is inside comments and string literals (a URL in a string no longer hides the code after it) |
 | `compare_indicator_observations` | Detects changes in the same-bar values before and after reload |
 
 ### First-seen collection CLI
