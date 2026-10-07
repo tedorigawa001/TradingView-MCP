@@ -95,6 +95,26 @@ test("a change the user asks for takes a symbol without its exchange, bound to t
   const again = await changeChartState(api, 1, { symbol: "EURUSD" }, { exchangeOptional: true });
   assert.equal(again.changed, false);
   assert.deepEqual(calls, ["eurusd"]);
+  // Tickers with the marks listings use.
+  for (const [requested, listing] of [["ES1!", "CME_MINI:ES1!"], ["BRK.B", "NYSE:BRK.B"]]) {
+    const { api: other } = resolvingCharts((symbol) => (symbol === requested ? listing : symbol));
+    const listed = await changeChartState(other, 1, { symbol: requested }, { exchangeOptional: true });
+    assert.equal(listed.current.symbol, listing, requested);
+  }
+});
+
+test("a formula chart is no listing of a ticker it contains, so it is switched rather than kept", async () => {
+  for (const [shown, requested] of [
+    ["OANDA:EURUSD/OANDA:USDJPY", "USDJPY"],
+    ["OANDA:EURUSD/OANDA:USDJPY", "EURUSD"],
+    ["2*OANDA:EURUSD", "EURUSD"],
+    ["USDJPY/OANDA:EURUSD", "EURUSD"],
+  ]) {
+    const { charts, api, calls } = resolvingCharts();
+    charts[1].symbol = shown;
+    const result = await changeChartState(api, 1, { symbol: requested }, { exchangeOptional: true });
+    assert.deepEqual([result.current.symbol, result.changed, calls], [`OANDA:${requested}`, true, [requested]], shown);
+  }
 });
 
 test("a symbol resolved to another instrument, or off the exchange it names, is refused and rolled back", async () => {
@@ -103,11 +123,17 @@ test("a symbol resolved to another instrument, or off the exchange it names, is 
     ["EURUSD", "OANDA:EURUSD.P"],
     ["USD", "OANDA:EURUSD"],
     ["FX:EURUSD", "OANDA:EURUSD"],
+    // A formula that ends in, or contains, the requested ticker.
+    ["USDJPY", "OANDA:EURUSD/OANDA:USDJPY"],
+    ["EURUSD", "OANDA:EURUSD/OANDA:USDJPY"],
+    ["EURUSD", "2*OANDA:EURUSD"],
+    // A formula requested without prefixes is matched exactly, not as a ticker on one exchange.
+    ["EURUSD/USDJPY", "OANDA:EURUSD/USDJPY"],
   ]) {
     const { charts, api, calls } = resolvingCharts((symbol) => (symbol === requested ? resolved : symbol));
     await assert.rejects(
       changeChartState(api, 1, { symbol: requested, resolution: "15" }, { exchangeOptional: true }),
-      new RegExp(`did not verify: requested ${requested}, chart shows ${resolved.replace(".", "\\.")}`),
+      new RegExp(`did not verify: requested ${requested}, chart shows ${resolved.replace(/[.*/]/g, "\\$&")}`),
       requested,
     );
     assert.deepEqual([charts[1].symbol, charts[1].resolution], ["OANDA:XAUUSD", "60"], requested);

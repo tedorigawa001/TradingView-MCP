@@ -3,10 +3,10 @@ import type { ChartInfo, TradingView } from "./tradingview.js";
 type ChartStateApi = Pick<TradingView, "getChartContext" | "setSymbol" | "setResolution">;
 type ChartTarget = { symbol?: string; resolution?: string };
 /**
- * `exchangeOptional` lets a requested symbol without an exchange prefix ("EURUSD") stand for that ticker on whichever
- * exchange TradingView resolves it to ("OANDA:EURUSD"); the transaction then binds to the resolved symbol. Only a change
- * the user asks for takes it. Research evidence is bound to the exact symbol it names, so every other caller leaves it
- * unset, and a requested symbol that names its exchange is matched exactly either way.
+ * `exchangeOptional` lets a requested symbol without an exchange prefix ("EURUSD") stand for a listing of that ticker
+ * on whichever exchange TradingView resolves it to ("OANDA:EURUSD"); the transaction then binds to the resolved symbol.
+ * Only a change the user asks for takes it. Research evidence is bound to the exact symbol it names, so every other
+ * caller leaves it unset, and a requested symbol that names its exchange is matched exactly either way.
  */
 type ChartTargetOptions = { resolutionFirst?: boolean; exchangeOptional?: boolean };
 
@@ -19,12 +19,21 @@ const normalizeResolution = (value: string) => {
 
 const sameSymbol = (left: string, right: string) => left.toUpperCase() === right.toUpperCase();
 /**
- * Whether the chart's symbol is the requested one, or with `exchangeOptional` its ticker on some exchange. The ticker is
- * what follows the last colon, so a requested symbol that names an exchange never equals it and is matched exactly.
+ * A single listing, EXCHANGE:TICKER, capturing the ticker. A formula chart ("OANDA:EURUSD/OANDA:USDJPY",
+ * "2*OANDA:EURUSD") also contains tickers but is none of them, so any character outside these keeps a symbol from
+ * counting as a listing.
  */
-const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) =>
-  sameSymbol(actual, requested) ||
-  (exchangeOptional && sameSymbol(actual.slice(actual.lastIndexOf(":") + 1), requested));
+const LISTING = /^[A-Z0-9_]+:([A-Z0-9_.!]+)$/i;
+
+/**
+ * Whether the chart's symbol is the requested one, or with `exchangeOptional` a listing of the requested ticker on some
+ * exchange. A ticker holds no colon, so a requested symbol that names an exchange is matched exactly.
+ */
+const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) => {
+  if (sameSymbol(actual, requested)) return true;
+  const ticker = exchangeOptional ? LISTING.exec(actual)?.[1] : undefined;
+  return ticker !== undefined && sameSymbol(ticker, requested);
+};
 const sameResolution = (left: string, right: string) =>
   normalizeResolution(left) === normalizeResolution(right);
 
