@@ -2,9 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   cdpPortInspectionRemedy,
+  cdpStallRemedy,
   defaultBookmapFlowDirectory,
   tradingViewLaunchRemedy,
 } from "../../build/platformSupport.js";
+
+test("a stalled endpoint is answered with a restart and a port check for the platform", () => {
+  assert.match(cdpStallRemedy("9333", "win32"), /Get-NetTCPConnection -LocalPort 9333/);
+  assert.match(cdpStallRemedy("9333", "win32"), /Start-Process/);
+  assert.match(cdpStallRemedy("9333", "darwin"), /lsof -nP -iTCP:9333 -sTCP:LISTEN/);
+  assert.match(cdpStallRemedy("9333", "darwin"), /open -a TradingView/);
+});
 
 test("Windows guidance uses PowerShell and a Windows-local Bookmap evidence directory", () => {
   assert.match(tradingViewLaunchRemedy("win32"), /Start-Process/);

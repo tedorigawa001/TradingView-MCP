@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { redactSecrets } from "./redact.js";
-import { cdpPortInspectionRemedy, tradingViewLaunchRemedy } from "./platformSupport.js";
+import { cdpPortInspectionRemedy, cdpStallRemedy, tradingViewLaunchRemedy } from "./platformSupport.js";
 
 export interface CdpClientOptions {
   /** CDP HTTP endpoint, e.g. http://localhost:9222 */
@@ -109,11 +109,17 @@ export class CdpClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
+  private endpointPort(): string {
+    try { return new URL(this.baseUrl).port || "9222"; } catch { return "9222"; }
+  }
+
   /** An endpoint that took the connection but never finished answering: the app may be frozen, or something else holds the port. */
   private stalled(stage: string): TradingViewNotAvailableError {
+    // As for an unreachable endpoint, its address goes to the log only.
+    console.error(`[tradingview-mcp] CDP endpoint stalled ${stage}: ${redactSecrets(this.baseUrl)}`);
     return new TradingViewNotAvailableError(
-      `the CDP endpoint did not ${stage} within ${this.timeoutMs}ms`,
-      `If the app is open it may be frozen; restart it. ${tradingViewLaunchRemedy()}`,
+      `the CDP endpoint did not finish connecting within ${this.timeoutMs}ms; it stalled ${stage}`,
+      cdpStallRemedy(this.endpointPort()),
     );
   }
 
@@ -124,7 +130,7 @@ export class CdpClient {
       const res = await fetch(`${this.baseUrl}/json`, { signal });
       targets = (await res.json()) as CdpTarget[];
     } catch (err) {
-      if (signal.aborted) throw this.stalled("list its targets");
+      if (signal.aborted) throw this.stalled("listing its targets");
       // The endpoint URL may carry credentials or internal host names (via
       // TV_CDP_URL) — keep it out of the client-facing error, log it here.
       console.error(
@@ -163,7 +169,7 @@ export class CdpClient {
       // on the same port answers while the app sits on 127.0.0.1 and is never consulted.
       const collided = origins.length > 0;
       const localhost = /^https?:\/\/localhost(:|\/|$)/i.test(this.baseUrl);
-      const port = (() => { try { return new URL(this.baseUrl).port || "9222"; } catch { return "9222"; } })();
+      const port = this.endpointPort();
       // Naming the port is useful either way. The IPv6 explanation only applies to a localhost
       // endpoint, where the name resolves to [::1] first and can reach a different listener.
       const remedy = collided
@@ -191,8 +197,17 @@ export class CdpClient {
    * call starts a new one.
    */
   private async connect(): Promise<Connection> {
-    const deadline = Date.now() + this.timeoutMs;
-    const target = await this.findChartTarget(AbortSignal.timeout(this.timeoutMs));
+    // On the monotonic clock, which a wall clock stepped back cannot stretch; and by timers, which take any timeout the
+    // command timer takes, where AbortSignal.timeout refuses one that is not a whole number in range.
+    const deadline = performance.now() + this.timeoutMs;
+    const discovery = new AbortController();
+    const discoveryTimer = setTimeout(() => discovery.abort(), this.timeoutMs);
+    let target: CdpTarget;
+    try {
+      target = await this.findChartTarget(discovery.signal);
+    } finally {
+      clearTimeout(discoveryTimer);
+    }
     const socketUrl = assertDebuggerWebSocketUrl(target.webSocketDebuggerUrl, this.baseUrl);
     const ws = new WebSocket(socketUrl, {
       maxPayload: 256 * 1024 * 1024,
@@ -239,9 +254,9 @@ export class CdpClient {
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(this.stalled("complete the debugger socket handshake"));
+        reject(this.stalled("in the debugger socket handshake"));
         ws.terminate();
-      }, Math.max(0, deadline - Date.now()));
+      }, Math.max(0, deadline - performance.now()));
       ws.once("open", () => {
         clearTimeout(timer);
         resolve();

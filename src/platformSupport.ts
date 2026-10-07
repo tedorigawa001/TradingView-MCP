@@ -18,6 +18,14 @@ export function cdpPortInspectionRemedy(port: string, platform = process.platfor
   return `Something other than the desktop app is answering; check with lsof -nP -iTCP:${port} -sTCP:LISTEN before restarting the app.`;
 }
 
+/** An endpoint that took the connection and stalled: the app may be frozen, or another process may hold the port. */
+export function cdpStallRemedy(port: string, platform = process.platform): string {
+  const check = platform === "win32"
+    ? `Get-NetTCPConnection -LocalPort ${port} -State Listen`
+    : `lsof -nP -iTCP:${port} -sTCP:LISTEN`;
+  return `If the app is open it may be frozen; restart it, or check what else listens on the port with ${check}. ${tradingViewLaunchRemedy(platform)}`;
+}
+
 export function defaultBookmapFlowDirectory(
   platform = process.platform,
   home = homedir(),
