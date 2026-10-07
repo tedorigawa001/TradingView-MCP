@@ -170,7 +170,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 
 | Tool | Description |
 |---|---|
-| `set_symbol` | Changes the selected pane's symbol; defaults to the active pane and rolls back on failure |
+| `set_symbol` | Changes the selected pane's symbol; defaults to the active pane and rolls back on failure. A symbol without an exchange prefix takes the exchange TradingView resolves it to, and the result reports the resolved symbol |
 | `set_timeframe` | Changes the selected pane's timeframe with the same rollback behavior |
 | `set_indicator_input` | Temporarily changes indicator or strategy inputs without saving them |
 | `get_replay_status` | Reads Bar Replay availability, state, and historical cursor time |

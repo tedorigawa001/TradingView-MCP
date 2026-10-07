@@ -2,6 +2,13 @@ import type { ChartInfo, TradingView } from "./tradingview.js";
 
 type ChartStateApi = Pick<TradingView, "getChartContext" | "setSymbol" | "setResolution">;
 type ChartTarget = { symbol?: string; resolution?: string };
+/**
+ * `exchangeOptional` lets a requested symbol without an exchange prefix ("EURUSD") stand for that ticker on whichever
+ * exchange TradingView resolves it to ("OANDA:EURUSD"); the transaction then binds to the resolved symbol. Only a change
+ * the user asks for takes it. Research evidence is bound to the exact symbol it names, so every other caller leaves it
+ * unset, and a requested symbol that names its exchange is matched exactly either way.
+ */
+type ChartTargetOptions = { resolutionFirst?: boolean; exchangeOptional?: boolean };
 
 const normalizeResolution = (value: string) => {
   const upper = value.trim().toUpperCase();
@@ -11,6 +18,13 @@ const normalizeResolution = (value: string) => {
 };
 
 const sameSymbol = (left: string, right: string) => left.toUpperCase() === right.toUpperCase();
+/**
+ * Whether the chart's symbol is the requested one, or with `exchangeOptional` its ticker on some exchange. The ticker is
+ * what follows the last colon, so a requested symbol that names an exchange never equals it and is matched exactly.
+ */
+const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) =>
+  sameSymbol(actual, requested) ||
+  (exchangeOptional && sameSymbol(actual.slice(actual.lastIndexOf(":") + 1), requested));
 const sameResolution = (left: string, right: string) =>
   normalizeResolution(left) === normalizeResolution(right);
 
@@ -40,10 +54,12 @@ async function applyChartTarget(
   api: ChartStateApi,
   chartIndex: number,
   target: { symbol: string; resolution: string },
-  options: { resolutionFirst?: boolean } = {},
+  options: ChartTargetOptions = {},
 ) {
   const operations: Array<{ kind: "symbol" | "timeframe"; result: unknown }> = [];
+  const exchangeOptional = options.exchangeOptional === true;
   let current = await readChartState(api, chartIndex);
+  let symbol = target.symbol;
   const setResolution = async () => {
     if (!sameResolution(current.resolution, target.resolution)) {
       operations.push({ kind: "timeframe", result: await api.setResolution(target.resolution, chartIndex) });
@@ -51,15 +67,19 @@ async function applyChartTarget(
     }
   };
   const setSymbol = async () => {
-    if (!sameSymbol(current.symbol, target.symbol)) {
-      operations.push({ kind: "symbol", result: await api.setSymbol(target.symbol, chartIndex) });
+    if (!symbolSatisfies(current.symbol, symbol, exchangeOptional)) {
+      operations.push({ kind: "symbol", result: await api.setSymbol(symbol, chartIndex) });
       current = await readChartState(api, chartIndex);
-      if (!sameSymbol(current.symbol, target.symbol)) throw new Error(`chart ${chartIndex} symbol change did not verify`);
+      if (!symbolSatisfies(current.symbol, symbol, exchangeOptional)) {
+        throw new Error(`chart ${chartIndex} symbol change did not verify: requested ${symbol}, chart shows ${current.symbol}`);
+      }
     }
+    // From here the chart must keep the symbol it resolved to.
+    symbol = current.symbol;
   };
   if (options.resolutionFirst) { await setResolution(); await setSymbol(); }
   else { await setSymbol(); await setResolution(); }
-  const verified = await assertChartState(api, chartIndex, target);
+  const verified = await assertChartState(api, chartIndex, { symbol, resolution: target.resolution });
   return { operations, verified };
 }
 
@@ -75,7 +95,7 @@ export async function changeChartState(
   api: ChartStateApi,
   chartIndex: number,
   target: ChartTarget,
-  options: { resolutionFirst?: boolean } = {},
+  options: ChartTargetOptions = {},
 ) {
   const original = await readChartState(api, chartIndex);
   const requested = {

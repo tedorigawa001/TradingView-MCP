@@ -8237,6 +8237,32 @@ test("set_symbol and set_timeframe target one explicit pane and report the resul
   assert.deepEqual([charts[1].symbol, charts[1].resolution], ["NASDAQ:AAPL", "15"]);
 });
 
+test("set_symbol takes a symbol without its exchange and refuses one resolved to another instrument (102-21)", async () => {
+  const charts = [{ index: 0, symbol: "OANDA:XAUUSD", resolution: "60", studies: [] }];
+  // As TradingView: "EURUSD" resolves to OANDA's; "GBPUSD" lands on another instrument.
+  const resolve = (symbol) => (symbol === "GBPUSD" ? "OANDA:GBPJPY" : symbol.includes(":") ? symbol : `OANDA:${symbol}`);
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({ layoutName: "one", activeChartIndex: 0, chartsCount: 1, charts }),
+      setSymbol: async (symbol, chartIndex) => {
+        charts[chartIndex].symbol = resolve(symbol);
+        return { symbol: charts[chartIndex].symbol, resolution: charts[chartIndex].resolution, changed: true, bars: 100 };
+      },
+      setResolution: async () => { throw new Error("unused"); },
+    },
+  }));
+  const res = await client.callTool({ name: "set_symbol", arguments: { symbol: "EURUSD" } });
+  assert.equal(res.isError, undefined);
+  const result = JSON.parse(res.content[0].text);
+  assert.deepEqual([result.symbol, result.changed, result.transaction.original.symbol], ["OANDA:EURUSD", true, "OANDA:XAUUSD"]);
+  assert.equal(charts[0].symbol, "OANDA:EURUSD");
+
+  const wrong = await client.callTool({ name: "set_symbol", arguments: { symbol: "GBPUSD" } });
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.content[0].text, /requested GBPUSD, chart shows OANDA:GBPJPY/);
+  assert.equal(charts[0].symbol, "OANDA:EURUSD");
+});
+
 test("dependency failures come back as isError results, not crashes", async () => {
   const client = await connectedClient(
     makeDeps({

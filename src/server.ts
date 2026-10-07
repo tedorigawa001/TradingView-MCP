@@ -10157,13 +10157,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Change one TradingView chart to a different symbol, e.g. 'BTCUSD', " +
-        "'OANDA:EURUSD', 'NASDAQ:AAPL'. chart_index selects a pane in multi-chart layouts; " +
-        "the active chart is used by default. The target pane is read back and failures are rolled back.",
+        "'OANDA:EURUSD', 'NASDAQ:AAPL'. A symbol without an exchange prefix takes the exchange TradingView " +
+        "resolves it to, and the result reports that resolved symbol. chart_index selects a pane in multi-chart " +
+        "layouts; the active chart is used by default. The target pane is read back and failures are rolled back.",
       inputSchema: {
         symbol: z
           .string()
           .min(1)
-          .describe("Symbol to display, optionally exchange-prefixed"),
+          .describe("Symbol to display, optionally exchange-prefixed; with a prefix it must resolve exactly"),
         chart_index: z.number().int().min(0).optional()
           .describe("Chart index in a multi-chart layout. Default: active chart"),
       },
@@ -10174,7 +10175,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           const context = await tv.getChartContext();
           const selectedIndex = chart_index ?? context.activeChartIndex;
           if (selectedIndex === null) throw new Error("no active chart; provide chart_index explicitly");
-          const result = await changeChartState(tv, selectedIndex, { symbol });
+          // A change the user asks for, not a research binding: an unprefixed symbol may resolve to any exchange.
+          const result = await changeChartState(tv, selectedIndex, { symbol }, { exchangeOptional: true });
           return jsonResult({ ...result.current, changed: result.changed, bars: result.bars, transaction: result });
         } catch (err) {
           return errorResult(err);
