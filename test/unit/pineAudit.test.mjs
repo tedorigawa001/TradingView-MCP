@@ -65,20 +65,53 @@ test("a triple-quoted string spans lines, and the code after its close is audite
   }
 });
 
-test("a string wrapped onto an indented line continues there; a block-indented line is code", () => {
-  // Pine wraps a long line onto one indented by spaces that are not a multiple of four.
-  assert.deepEqual(codes('//@version=6\nstrategy("x")\nnote = "first part\n  second part" + str.tostring(request.security(syminfo.tickerid, "D", close))'), ["request_security"]);
-  assert.deepEqual(codes('//@version=6\nstrategy("x")\nnote = "first part\n  timenow in the text"\nplot(close)'), []);
-  // Four spaces indent a block body, which no string runs into.
-  assert.deepEqual(codes(`//@version=6\nstrategy("x")\nif close > open\n    note = "never closed\n    ${security}`), ["request_security"]);
+test("a backslash escapes a quote inside a triple-quoted string", () => {
+  for (const quote of ['"""', "'''"]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}say \\${quote} here${quote} + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], quote);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}say \\${quote} timenow${quote}\nplot(close)`), [], quote);
+    // An escaped backslash escapes nothing past itself.
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${quote}C:\\\\${quote} + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], quote);
+  }
+  // One that never closes hides nothing, and leaves the other kind of triple-quoted string to close as before.
+  for (const [open, other] of [['"""', "'''"], ["'''", '"""']]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${open}never closed\n${security}`), ["request_security"], open);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = ${open}never closed\nquoted = ${other}say ${other[0]}timenow${other[0]} here${other}\nplot(close)`), [], open);
+  }
 });
 
-test("unclosed block comment markers keep the pass linear", () => {
-  // Each "/*" used to search the rest of the source again: some 400,000 characters of them took seconds.
-  const source = `//@version=6\n${"x = 1 /* \n".repeat(40_000)}${security}\n`;
-  const started = performance.now();
-  const found = codes(source);
-  const elapsed = performance.now() - started;
-  assert.ok(found.includes("request_security"));
-  assert.ok(elapsed < 1_000, `took ${Math.round(elapsed)} ms`);
+test("a string wrapped onto an indented line continues there; an unindented line is a new statement", () => {
+  // Pine wraps a string onto a line indented by one or more spaces, four and eight among them, or by a tab.
+  for (const pad of ["  ", "    ", "        ", "\t"]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "first part\n${pad}second part" + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], pad);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "first part\n${pad}timenow in the text"\nplot(close)`), [], pad);
+  }
+  assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "never closed\n${security}`), ["request_security"]);
+});
+
+test("inside parentheses or brackets a string wraps at any indentation", () => {
+  for (const pad of ["", "    ", "        "]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nlabel.new(bar_index, 0, "first part\n${pad}second part" + str.tostring(request.security(syminfo.tickerid, "D", close)))`), ["request_security"], pad);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nlabel.new(bar_index, 0, "first part\n${pad}timenow in the text")\nplot(close)`), [], pad);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nf() => ["first part\n${pad}second part", request.security(syminfo.tickerid, "D", close)]`), ["request_security"], pad);
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nf() => ["first part\n${pad}timenow in the text", close]\nplot(close)`), [], pad);
+  }
+  // Once the parentheses and brackets close, an unindented line is a new statement again; none in a string or comment counts.
+  for (const before of ['label.new(bar_index, 0, "a")', "x = close[1]", 's = "(["', "// (["]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${before}\nnote = "never closed\n${security}`), ["request_security"], before);
+  }
+  // A stray closer does not stop the next parentheses from counting.
+  assert.deepEqual(codes(`//@version=6\nstrategy("x")\nx = close)]\nlabel.new(bar_index, 0, "first part\nsecond part" + str.tostring(request.security(syminfo.tickerid, "D", close)))`), ["request_security"]);
+});
+
+test("unclosed block comments and triple quotes keep the pass linear", () => {
+  // Each opener used to search the rest of the source again: some 400,000 characters of them took seconds. A triple
+  // quote behind a backslash is read as an opener in code, but escaped by the search from an earlier one.
+  for (const line of ["x = 1 /* \n", 'x = 1 \\""" \n', "x = 1 \\''' \n"]) {
+    const source = `//@version=6\n${line.repeat(40_000)}${security}\n`;
+    const started = performance.now();
+    const found = codes(source);
+    const elapsed = performance.now() - started;
+    assert.ok(found.includes("request_security"), line);
+    assert.ok(elapsed < 1_000, `${line.trim()} took ${Math.round(elapsed)} ms`);
+  }
 });

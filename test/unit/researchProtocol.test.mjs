@@ -81,7 +81,14 @@ test("a research protocol carries the warning for code after a URL string (102-1
 });
 
 test("a research protocol is not ready when request.security follows a multi-line string (102-19)", () => {
-  const result = validateResearchProtocol(definition(), auditPineSource(`//@version=6\nstrategy("x")\nnote = """first\nsecond""" + str.tostring(request.security(syminfo.tickerid, "D", close))`), evaluatedAt);
-  assert.ok(result.issues.some((issue) => issue.code === "pine_request_security"));
-  assert.deepEqual([result.status, result.adoptionEligible], ["warning", false]);
+  const security = 'str.tostring(request.security(syminfo.tickerid, "D", close))';
+  for (const source of [
+    `note = """first\nsecond""" + ${security}`,
+    `note = """say \\""" here""" + ${security}`,
+    `label.new(bar_index, 0, "first part\n    second part" + ${security})`,
+  ]) {
+    const result = validateResearchProtocol(definition(), auditPineSource(`//@version=6\nstrategy("x")\n${source}`), evaluatedAt);
+    assert.ok(result.issues.some((issue) => issue.code === "pine_request_security"), source);
+    assert.deepEqual([result.status, result.adoptionEligible], ["warning", false], source);
+  }
 });
