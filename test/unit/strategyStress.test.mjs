@@ -118,3 +118,28 @@ test("strategy rerun stress shares baseline ledger blockers with modeled stress"
   assert.equal(rerun.status, "not_evaluable");
   assert.deepEqual(rerun.blockers, modeled.blockers);
 });
+
+// BACKLOG 102-18: baseline and scenario drawdowns are taken in exit order.
+test("strategy stress takes closed-trade drawdowns in exit order, whatever the ledger order", () => {
+  const overlapping = ledger({ profits: [-60, -60, 60], commissions: [5, 5, 5] });
+  const at = (day, hour = 0) => side(Date.UTC(2025, 0, day, hour));
+  // Entered on the 2nd, 3rd and 4th; closed on the 2nd (-60), the 6th (-60) and the 5th (+60).
+  overlapping.trades[1] = { ...overlapping.trades[1], exit: at(6) };
+  overlapping.trades[2] = { ...overlapping.trades[2], exit: at(5) };
+  const result = evaluateStrategyStress({ ...base, ledger: overlapping, bootstrap: null });
+  assert.equal(result.baseline.metrics.maxClosedTradeEquityDrawdown, 60);
+  // Ten more per trade: -70, then +50, then -70 in exit order, not -70, -140, -90.
+  assert.equal(result.scenarios[0].metrics.maxClosedTradeEquityDrawdown, 90);
+  const reordered = { ...overlapping, trades: [...overlapping.trades].reverse() };
+  const again = evaluateStrategyStress({ ...base, ledger: reordered, bootstrap: null });
+  assert.deepEqual([again.baseline.metrics.maxClosedTradeEquityDrawdown, again.scenarios[0].metrics.maxClosedTradeEquityDrawdown], [60, 90]);
+  // Ordinary non-overlapping trades keep their running drawdown.
+  assert.equal(evaluateStrategyStress({ ...base, ledger: ledger(), bootstrap: null }).baseline.metrics.maxClosedTradeEquityDrawdown, 50);
+});
+
+test("a bootstrap sample is a new sequence, so its drawdown is taken in the order drawn", () => {
+  // A win then three losses. Sorted back into exit order every sample would put its wins before its losses; as drawn,
+  // losses also come first, and the lower drawdowns show at the fifth percentile.
+  const result = evaluateStrategyStress({ ...base, ledger: ledger({ profits: [100, -10, -10, -10], commissions: [1, 1, 1, 1] }) });
+  assert.deepEqual(result.bootstrap.maxClosedTradeEquityDrawdown, { p05: 10, median: 30, p95: 40, worst: 40 });
+});

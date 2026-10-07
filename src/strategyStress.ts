@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { closedTradeEquityDrawdown, sequenceEquityDrawdown } from "./closedTradeEquity.js";
 import type { StrategyLedgerTrade, StrategyTradeLedger } from "./tradingview.js";
 
 export type StrategyStressScenario =
@@ -29,7 +30,7 @@ export interface StrategyRerunStressInput {
   }>;
 }
 
-type StressTrade = { profit: number; commission: number | null };
+type StressTrade = { profit: number; commission: number | null; exitTime: number };
 
 const parseTime = (value: string, label: string): number => {
   const parsed = Date.parse(value);
@@ -51,18 +52,15 @@ function resolutionMilliseconds(value: string): number {
   return count * multiplier;
 }
 
-function metrics(trades: StressTrade[]) {
+/**
+ * `exit_time` is the ledger's own sequence: closed-trade equity in the order trades closed. A bootstrap sample is a new
+ * sequence, so it is taken as drawn.
+ */
+function metrics(trades: StressTrade[], drawdownOrder: "exit_time" | "as_drawn" = "exit_time") {
   const profits = trades.map((trade) => trade.profit);
   const gains = profits.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
   const losses = -profits.filter((value) => value < 0).reduce((sum, value) => sum + value, 0);
-  let equity = 0;
-  let peak = 0;
-  let maximumDrawdown = 0;
-  for (const profit of profits) {
-    equity += profit;
-    peak = Math.max(peak, equity);
-    maximumDrawdown = Math.max(maximumDrawdown, peak - equity);
-  }
+  const maximumDrawdown = drawdownOrder === "as_drawn" ? sequenceEquityDrawdown(profits) : closedTradeEquityDrawdown(trades)!;
   const netProfit = profits.reduce((sum, value) => sum + value, 0);
   return {
     totalTrades: profits.length,
@@ -152,7 +150,7 @@ function evaluateLedgerWindow(input: {
   if (selected.included.some((trade) => typeof trade.profit !== "number" || !Number.isFinite(trade.profit))) {
     blockers.push("included_trade_profit_unavailable");
   } else {
-    trades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission })));
+    trades.push(...selected.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time! })));
   }
   if (trades.length < input.minimumTrades) blockers.push("minimum_trade_count_not_met");
   return {
@@ -212,7 +210,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
       } else if (shifted.included.length < input.minimumTrades) {
         reason = "minimum_trade_count_not_met";
       } else {
-        adjusted = shifted.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission }));
+        adjusted = shifted.included.map((trade) => ({ profit: trade.profit!, commission: trade.commission, exitTime: trade.exit.time! }));
       }
     }
     if (adjusted === null) return { ...scenario, status: "not_evaluable" as const, reason, metrics: null, degradation: null, excluded: scenarioExcluded };
@@ -245,7 +243,7 @@ export function evaluateStrategyStress(input: StrategyStressInput) {
     for (let iteration = 0; iteration < input.bootstrap.iterations; iteration += 1) {
       const sampled = Array.from({ length: baselineTrades.length }, () =>
         baselineTrades[Math.floor(random() * baselineTrades.length)]);
-      samples.push(metrics(sampled));
+      samples.push(metrics(sampled, "as_drawn"));
     }
     const summarize = (key: "expectancy" | "netProfit" | "profitFactor" | "maxClosedTradeEquityDrawdown") => {
       const values = samples.map((sample) => sample[key]).filter((value): value is number => value !== null);

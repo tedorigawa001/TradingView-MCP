@@ -188,3 +188,18 @@ test("strategy regime evaluation joins only prior fresh correlation observations
   assert.ok(result.qualityIssues.includes("minimum_correlation_join_coverage_not_met"));
   assert.equal(result.status, "partial");
 });
+
+// BACKLOG 102-18: the closed-trade drawdown is taken in exit order.
+test("regime evaluation takes the closed-trade drawdown in exit order, whatever the ledger order", () => {
+  const observations = Array.from({ length: 6 }, (_, index) => observation(index, "range", "normal"));
+  const exitAt = (item, hour) => ({ ...item, exit: { ...item.exit, time: start + hour * 3_600_000, timeIso: new Date(start + hour * 3_600_000).toISOString() } });
+  // Entered at 1h, 2h and 3h; closed at 2h (-60), 5h (-60) and 4h (+60).
+  const trades = [trade(1, -60), exitAt(trade(2, -60), 5), exitAt(trade(3, 60), 4)];
+  const result = evaluate(trades, observations, { minimumGroupTrades: 1 });
+  assert.equal(result.overall.maxClosedTradeEquityDrawdown, 60);
+  assert.equal(result.byDirectionalRegime.range.maxClosedTradeEquityDrawdown, 60);
+  assert.equal(evaluate([...trades].reverse(), observations, { minimumGroupTrades: 1 }).overall.maxClosedTradeEquityDrawdown, 60);
+  // Without an exit time a trade has no place in the sequence.
+  const unknown = evaluate([trades[0], { ...trades[1], exit: null }, trades[2]], observations, { minimumGroupTrades: 1 });
+  assert.equal(unknown.overall.maxClosedTradeEquityDrawdown, null);
+});

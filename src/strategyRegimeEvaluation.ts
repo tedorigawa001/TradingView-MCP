@@ -1,4 +1,5 @@
 import type { StrategyLedgerTrade, StrategyTradeLedger } from "./tradingview.js";
+import { closedTradeEquityDrawdown } from "./closedTradeEquity.js";
 import {
   marketRegimeResolutionMilliseconds,
   type ClassifiedMarketRegimeObservation,
@@ -62,14 +63,8 @@ function metrics(joined: JoinedTrade[]) {
   const profits = trades.map((trade) => trade.profit!);
   const gains = profits.filter((profit) => profit > 0).reduce((sum, profit) => sum + profit, 0);
   const losses = -profits.filter((profit) => profit < 0).reduce((sum, profit) => sum + profit, 0);
-  let equity = 0;
-  let peak = 0;
-  let maxClosedTradeEquityDrawdown = 0;
-  for (const profit of profits) {
-    equity += profit;
-    peak = Math.max(peak, equity);
-    maxClosedTradeEquityDrawdown = Math.max(maxClosedTradeEquityDrawdown, peak - equity);
-  }
+  // Taken in exit order, not this entry order; null when a trade has no exit time.
+  const maxClosedTradeEquityDrawdown = closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null })));
   const runUps = trades.map((trade) => trade.runUp).filter((value): value is number => value !== null);
   const drawDowns = trades.map((trade) => trade.drawDown).filter((value): value is number => value !== null);
   const commissions = trades.map((trade) => trade.commission).filter((value): value is number => value !== null);

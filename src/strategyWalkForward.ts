@@ -1,4 +1,5 @@
 import type { StrategyLedgerTrade, StrategyTradeLedger } from "./tradingview.js";
+import { closedTradeEquityDrawdown } from "./closedTradeEquity.js";
 
 export type WalkForwardMode = "anchored" | "rolling";
 export type WalkForwardSelectionMetric = "expectancy" | "netProfit" | "profitFactor";
@@ -69,16 +70,10 @@ function metricsForTrades(trades: StrategyLedgerTrade[]): FoldMetrics {
   const usableProfits = profits.filter((value): value is number => value !== null && Number.isFinite(value));
   const gains = usableProfits.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
   const losses = usableProfits.filter((value) => value < 0).reduce((sum, value) => sum + value, 0);
-  let peak = 0;
-  let equity = 0;
-  let maxDrawdown = 0;
-  if (completeProfits) {
-    for (const profit of usableProfits) {
-      equity += profit;
-      peak = Math.max(peak, equity);
-      maxDrawdown = Math.max(maxDrawdown, peak - equity);
-    }
-  }
+  // In exit order, as closed-trade equity is realized (BACKLOG 102-18); a window's trades all carry exit times.
+  const maxDrawdown = completeProfits
+    ? closedTradeEquityDrawdown(trades.map((trade) => ({ profit: trade.profit!, exitTime: trade.exit?.time ?? null })))
+    : null;
   return {
     totalTrades: trades.length,
     tradesWithProfit: usableProfits.length,
@@ -90,7 +85,7 @@ function metricsForTrades(trades: StrategyLedgerTrade[]): FoldMetrics {
     winRate: completeProfits && trades.length > 0
       ? usableProfits.filter((value) => value > 0).length / trades.length
       : null,
-    maxClosedTradeEquityDrawdown: completeProfits && trades.length > 0 ? maxDrawdown : null,
+    maxClosedTradeEquityDrawdown: trades.length > 0 ? maxDrawdown : null,
     averageDurationMilliseconds: average(trades.map((trade) => trade.durationMilliseconds)),
     averageRunUp: average(trades.map((trade) => trade.runUp)),
     averageDrawDown: average(trades.map((trade) => trade.drawDown)),
