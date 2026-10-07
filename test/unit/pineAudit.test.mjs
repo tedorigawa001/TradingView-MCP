@@ -87,7 +87,12 @@ test("a string wrapped onto an indented line continues there; an unindented line
   // Pine wraps a string onto a line indented by one or more spaces, four and eight among them, or by a tab.
   for (const pad of ["  ", "    ", "        ", "\t"]) {
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "first part\n${pad}second part" + str.tostring(request.security(syminfo.tickerid, "D", close))`), ["request_security"], pad);
-    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "first part\n${pad}timenow in the text"\nplot(close)`), [], pad);
+  }
+  assert.deepEqual(codes('//@version=6\nstrategy("x")\nnote = "first part\n  timenow in the text"\nplot(close)'), []);
+  // Pine's general wrapping rule forbids a line indented like a block body, by a multiple of four spaces or a tab, so
+  // the source is also read with the string ending at its line, and the text there is taken for code as well.
+  for (const pad of ["    ", "        ", "\t", "  \t"]) {
+    assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "first part\n${pad}timenow in the text"\nplot(close)`), ["timenow"], pad);
   }
   assert.deepEqual(codes(`//@version=6\nstrategy("x")\nnote = "never closed\n${security}`), ["request_security"]);
 });
@@ -113,7 +118,7 @@ test("inside parentheses or brackets a string wraps at any indentation", () => {
   assert.deepEqual(codes(`//@version=6\nstrategy("x")\nx = close)]\nlabel.new(bar_index, 0, "first part\nsecond part" + str.tostring(request.security(syminfo.tickerid, "D", close)))`), ["request_security"]);
 });
 
-test("a source that cannot compile is also read with every string ending at its line, so a stray quote hides nothing", () => {
+test("a source that cannot compile is also read the plain way, and what either reading finds counts", () => {
   for (const source of [
     `if close > open\n    note = "never closed\n    ${security}`,
     `plot(close, title = "abc)\n${security}`,
@@ -125,8 +130,18 @@ test("a source that cannot compile is also read with every string ending at its 
     // A string that never closes on its line does not run on into the next statement, even where a later stray quote
     // would close it.
     `note = "never closed\n${security} + "x`,
+    // Here only the string left without its closing quote shows it.
+    `note = "never closed\n  ${security}`,
     // What the wrapping reading finds still counts.
     `note = "first part\n  second part" + str.tostring(request.security(syminfo.tickerid, "D", close))\nx = f(close`,
+    `a = "never closed\nb = 1\nnote = "first part\n  second part" + str.tostring(request.security(syminfo.tickerid, "D", close))`,
+    // A wrap onto a block body shows it, even where a later comment or a "//" in a string closes the stray string again.
+    `if close > open\n    note = "never closed\n    ${security}\n    // the 5" panel\nplot(close)`,
+    `if close > open\n    note = "never closed\n    h = request.security(syminfo.tickerid, "https://x", close)\nplot(close)`,
+    // So does a closer with nothing open, where the wrap alone would not.
+    `x = close)\nnote = "never closed\n  ${security} + "x`,
+    // The plain reading closes a triple quote at the first triple quote, though a backslash comes before it.
+    `p = """C:\\dir\\"""\n${security}\nq = """x"""`,
   ]) {
     assert.deepEqual(codes(`//@version=6\nstrategy("x")\n${source}`), ["request_security"], source);
   }
@@ -136,6 +151,9 @@ test("a carriage return ends a line, alone or before a line feed", () => {
   for (const end of ["\r", "\r\n"]) {
     assert.deepEqual(codes(["//@version=6", 'strategy("x")', "// a note", security, ""].join(end)), ["request_security"], JSON.stringify(end));
   }
+  // One alone may instead be a character in its line, so the source is read that way too.
+  assert.deepEqual(codes('//@version=6\nstrategy("x")\nn = "abc\rdef" + str.tostring(request.security(syminfo.tickerid, "D", close))'), ["request_security"]);
+  assert.deepEqual(codes(`//@version=6\nstrategy("x")\n// note\r"""\n${security}\nq = """x"""`), ["request_security"]);
 });
 
 test("unclosed block comments and triple quotes keep the pass linear", () => {
