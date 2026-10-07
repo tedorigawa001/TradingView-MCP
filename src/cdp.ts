@@ -5,7 +5,7 @@ import { cdpPortInspectionRemedy, tradingViewLaunchRemedy } from "./platformSupp
 export interface CdpClientOptions {
   /** CDP HTTP endpoint, e.g. http://localhost:9222 */
   baseUrl?: string;
-  /** Per-command timeout in ms */
+  /** Per-command timeout in ms, which also bounds each connection attempt: target discovery and the socket handshake. */
   timeoutMs?: number;
 }
 
@@ -109,12 +109,22 @@ export class CdpClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
-  private async findChartTarget(): Promise<CdpTarget> {
+  /** An endpoint that took the connection but never finished answering: the app may be frozen, or something else holds the port. */
+  private stalled(stage: string): TradingViewNotAvailableError {
+    return new TradingViewNotAvailableError(
+      `the CDP endpoint did not ${stage} within ${this.timeoutMs}ms`,
+      `If the app is open it may be frozen; restart it. ${tradingViewLaunchRemedy()}`,
+    );
+  }
+
+  private async findChartTarget(signal: AbortSignal): Promise<CdpTarget> {
     let targets: CdpTarget[];
     try {
-      const res = await fetch(`${this.baseUrl}/json`);
+      // The signal also covers reading the body, which a stalled endpoint can leave unfinished after its headers.
+      const res = await fetch(`${this.baseUrl}/json`, { signal });
       targets = (await res.json()) as CdpTarget[];
     } catch (err) {
+      if (signal.aborted) throw this.stalled("list its targets");
       // The endpoint URL may carry credentials or internal host names (via
       // TV_CDP_URL) — keep it out of the client-facing error, log it here.
       console.error(
@@ -174,9 +184,15 @@ export class CdpClient {
    * Establish a fresh connection. Each connection owns its pending map, so a
    * closing socket only rejects its own in-flight requests — never those of
    * a newer connection.
+   *
+   * The attempt, discovery and handshake together, ends within the timeout (BACKLOG 102-20). An endpoint that stalls
+   * would otherwise hold every caller waiting on it, and with them the chart operation queue and the lock it shares
+   * with the batch CLIs, which nothing reclaims while this process lives. A failed attempt is dropped, so the next
+   * call starts a new one.
    */
   private async connect(): Promise<Connection> {
-    const target = await this.findChartTarget();
+    const deadline = Date.now() + this.timeoutMs;
+    const target = await this.findChartTarget(AbortSignal.timeout(this.timeoutMs));
     const socketUrl = assertDebuggerWebSocketUrl(target.webSocketDebuggerUrl, this.baseUrl);
     const ws = new WebSocket(socketUrl, {
       maxPayload: 256 * 1024 * 1024,
@@ -222,10 +238,18 @@ export class CdpClient {
     });
 
     await new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
-      ws.once("error", (err) =>
-        reject(new TradingViewNotAvailableError(String(err))),
-      );
+      const timer = setTimeout(() => {
+        reject(this.stalled("complete the debugger socket handshake"));
+        ws.terminate();
+      }, Math.max(0, deadline - Date.now()));
+      ws.once("open", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.once("error", (err) => {
+        clearTimeout(timer);
+        reject(new TradingViewNotAvailableError(String(err)));
+      });
     });
 
     const conn: Connection = { ws, pending };

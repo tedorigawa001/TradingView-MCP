@@ -4,6 +4,11 @@ import assert from "node:assert/strict";
 import { WebSocketServer } from "ws";
 import { CdpClient, TradingViewNotAvailableError, assertDebuggerWebSocketUrl } from "../../build/cdp.js";
 import { startMockCdp, defaultHandler } from "./helpers/mock-cdp.mjs";
+import { ChartOperationLock, SerialOperationQueue } from "../../build/chartOperationLock.js";
+import http from "node:http";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("evaluate returns the value produced by the page", async (t) => {
   const mock = await startMockCdp({
@@ -406,4 +411,136 @@ test("a frame that is not JSON is dropped instead of killing the process", async
   // Still alive, and still able to serve the next call once the peer behaves.
   const recovered = await cdp.evaluate("2");
   assert.deepEqual(recovered, { echo: "2" });
+});
+
+// BACKLOG 102-20: an endpoint that takes the connection and never finishes answering. `stall` names the stage it stops
+// at, and null lets it answer as the desktop app does.
+async function startStallingCdp() {
+  // `held` collects the sockets the endpoint stalled on, so a test can see the client give them up.
+  const state = { stall: null, held: [], discoveryDelayMs: 0 };
+  const sockets = new Set();
+  const wss = new WebSocketServer({ noServer: true });
+  wss.on("connection", (ws) => {
+    ws.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      ws.send(JSON.stringify({ id: msg.id, ...defaultHandler(msg) }));
+    });
+  });
+  const server = http.createServer((req, res) => {
+    if (state.stall === "discovery" || state.stall === "body") state.held.push(req.socket);
+    if (state.stall === "discovery") return;
+    if (state.stall === "body") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("[{");
+      return;
+    }
+    const answer = () => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify([{
+        type: "page",
+        title: "chart",
+        url: "https://www.tradingview.com/chart/abc/",
+        webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/page`,
+      }]));
+    };
+    if (state.discoveryDelayMs > 0) setTimeout(answer, state.discoveryDelayMs);
+    else answer();
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  server.on("upgrade", (req, socket, head) => {
+    if (state.stall === "handshake") {
+      state.held.push(socket);
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    state,
+    close: () => new Promise((resolve) => {
+      for (const client of wss.clients) client.terminate();
+      for (const socket of sockets) socket.destroy();
+      server.close(resolve);
+    }),
+  };
+}
+
+test("each stage of a connection attempt ends within the timeout, and the next call connects again", { timeout: 10_000 }, async (t) => {
+  for (const stall of ["discovery", "body", "handshake"]) {
+    await t.test(stall, async (t) => {
+      const fake = await startStallingCdp();
+      t.after(() => fake.close());
+      const cdp = new CdpClient({ baseUrl: fake.baseUrl, timeoutMs: 200 });
+      t.after(() => cdp.close());
+      fake.state.stall = stall;
+      const started = Date.now();
+      // Two callers share the stalled attempt, and both are let go.
+      const calls = [cdp.evaluate("first"), cdp.evaluate("second")];
+      for (const call of calls) {
+        await assert.rejects(call, (error) => error instanceof TradingViewNotAvailableError && /did not .+ within 200ms/.test(error.message));
+      }
+      assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started} ms`);
+      // The client gives up the connection it stalled on rather than leaving it open: the endpoint sees it hang up.
+      assert.ok(fake.state.held.length > 0);
+      const hungUp = (socket) => socket.destroyed || socket.readableEnded
+        ? null
+        : new Promise((resolve) => { socket.once("end", resolve); socket.once("close", resolve); });
+      await Promise.race([
+        Promise.all(fake.state.held.map(hungUp)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("a stalled connection was left open")), 2_000)),
+      ]);
+      fake.state.stall = null;
+      assert.deepEqual(await cdp.evaluate("again"), { echo: "again" });
+    });
+  }
+});
+
+test("discovery and handshake share one deadline", { timeout: 10_000 }, async (t) => {
+  const fake = await startStallingCdp();
+  t.after(() => fake.close());
+  const cdp = new CdpClient({ baseUrl: fake.baseUrl, timeoutMs: 500 });
+  t.after(() => cdp.close());
+  // Discovery answers late, then the handshake stalls: the attempt ends near 500ms, not 500ms after discovery.
+  Object.assign(fake.state, { stall: "handshake", discoveryDelayMs: 350 });
+  const started = Date.now();
+  await assert.rejects(cdp.evaluate("1"), /did not complete the debugger socket handshake within 500ms/);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 450 && elapsed < 700, `took ${elapsed} ms`);
+});
+
+test("a stalled connection releases the chart operation lock, and the queue and client go on", { timeout: 10_000 }, async (t) => {
+  const fake = await startStallingCdp();
+  t.after(() => fake.close());
+  const lockPath = join(await mkdtemp(join(tmpdir(), "chart-operation-lock-")), "chart.lock");
+  const queue = new SerialOperationQueue(new ChartOperationLock(lockPath));
+  const cdp = new CdpClient({ baseUrl: fake.baseUrl, timeoutMs: 200 });
+  t.after(() => cdp.close());
+  fake.state.stall = "handshake";
+  const stalled = queue.run(() => cdp.evaluate("first"));
+  const next = queue.run(async () => "next ran");
+  await assert.rejects(stalled, TradingViewNotAvailableError);
+  assert.equal(await next, "next ran");
+  // The lock is free again: another process takes it at once instead of waiting out its 30-second limit.
+  const release = await Promise.race([
+    new ChartOperationLock(lockPath).acquire(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("the chart operation lock was not released")), 2_000)),
+  ]);
+  await release();
+  fake.state.stall = null;
+  assert.deepEqual(await queue.run(() => cdp.evaluate("again")), { echo: "again" });
+});
+
+test("a connection that opened is kept past the deadline of the attempt that opened it", async (t) => {
+  const mock = await startMockCdp();
+  t.after(() => mock.close());
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 100 });
+  t.after(() => cdp.close());
+  await cdp.evaluate("first");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(await cdp.evaluate("second"), { echo: "second" });
+  assert.equal(mock.state.connections, 1);
 });

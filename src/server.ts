@@ -107,7 +107,7 @@ import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
-import { ChartOperationLock } from "./chartOperationLock.js";
+import { ChartOperationLock, SerialOperationQueue } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
   ANALYSIS_OVERLAY_LEGACY_INPUTS,
@@ -306,20 +306,6 @@ const REAL_YIELD_OUTPUT_SCHEMA = {
 };
 
 type SnapshotStatus = "ok" | "partial" | "blocked";
-
-class SerialOperationQueue {
-  private tail: Promise<void> = Promise.resolve();
-  constructor(private readonly lock: Pick<ChartOperationLock, "acquire">) {}
-
-  run<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(async () => {
-      const release = await this.lock.acquire();
-      try { return await operation(); } finally { await release(); }
-    });
-    this.tail = result.then(() => undefined, () => undefined);
-    return result;
-  }
-}
 
 function journalDefinition(
   analysis: ReturnType<typeof parseAnalysisOverlayState>,

@@ -90,3 +90,23 @@ export class ChartOperationLock {
     }
   }
 }
+
+/**
+ * Runs chart operations one at a time in this process, each under the lock shared with the batch CLIs. The lock is held
+ * until the operation settles, so an operation must end on its own: nothing here cuts it short, since releasing the lock
+ * while it still drove the chart would let another process act on the same chart. A failed operation releases the lock
+ * and lets the next one run.
+ */
+export class SerialOperationQueue {
+  private tail: Promise<void> = Promise.resolve();
+  constructor(private readonly lock: Pick<ChartOperationLock, "acquire">) {}
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(async () => {
+      const release = await this.lock.acquire();
+      try { return await operation(); } finally { await release(); }
+    });
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
