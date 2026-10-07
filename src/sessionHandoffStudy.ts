@@ -124,8 +124,8 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
       bar.close < bar.low || bar.close > bar.high)) throw new Error("invalid OHLC bar");
   const closed = bars.filter((bar) => bar.forming !== true);
   const localized = localize(closed, input.timezone);
-  // Every prior window is anchored at most one local day before its handoff. Looking through all
-  // loaded bars for every candidate day made synthetic calibration quadratic in history length.
+  // Bars are read by local day around each handoff rather than searched in full, which made synthetic calibration
+  // quadratic in history length.
   const barsByLocalDate = new Map<string, ReturnType<typeof localize>>();
   for (const bar of localized) {
     const day = barsByLocalDate.get(bar.localDate) ?? [];
@@ -135,8 +135,17 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
   const localDateForIndex = (index: number) => new Date(index * 86_400_000).toISOString().slice(0, 10);
   const expectedPriorBars = sessions.reduce((sum, session) => sum + Math.ceil((session.end - session.start) / timeframe), 0);
   const minimumPriorBars = Math.ceil(expectedPriorBars * input.minimumPriorCoverage);
-  const handoffDays = [...new Set(localized.filter((bar) => bar.localMinute >= handoffStart && bar.localMinute < handoffEnd)
-    .map((bar) => bar.localDate))];
+  // The windows reach from the earliest prior session start, up to a day before the handoff day, to the later of the
+  // handoff's end, which is on the next day when the handoff crosses midnight, and the last prior session end. Every
+  // local day in that span is read (BACKLOG 102-17); reading only the day before and the day itself dropped the
+  // handoff bars after midnight.
+  const firstDayOffset = Math.floor(Math.min(handoffStart, ...sessions.map((session) => session.start)) / 1440);
+  const lastDayOffset = Math.floor((Math.max(handoffEnd, ...sessions.map((session) => session.end)) - 1) / 1440);
+  // A bar opens the handoff of its own day or, past midnight, of the day before, so a handoff day is found whichever
+  // side of midnight its bars fall.
+  const handoffDays = [...new Set(localized.flatMap((bar) => [0, 1]
+    .filter((dayBefore) => bar.localMinute + dayBefore * 1440 >= handoffStart && bar.localMinute + dayBefore * 1440 < handoffEnd)
+    .map((dayBefore) => localDateForIndex(localDayIndex(bar.localDate) - dayBefore))))].sort();
   const quality = {
     localDays: new Set(localized.map((bar) => bar.localDate)).size,
     candidateHandoffDays: handoffDays.length,
@@ -156,10 +165,10 @@ export function runSessionExhaustionHandoffStudy(input: SessionHandoffStudyInput
   }> = [];
   for (const localDate of handoffDays) {
     const anchor = localDayIndex(localDate);
-    const candidateBars = [
-      ...(barsByLocalDate.get(localDateForIndex(anchor - 1)) ?? []),
-      ...(barsByLocalDate.get(localDate) ?? []),
-    ];
+    const candidateBars: ReturnType<typeof localize> = [];
+    for (let offset = firstDayOffset; offset <= lastDayOffset; offset += 1) {
+      candidateBars.push(...(barsByLocalDate.get(localDateForIndex(anchor + offset)) ?? []));
+    }
     const relativeMinute = (bar: ReturnType<typeof localize>[number]) =>
       (localDayIndex(bar.localDate) - anchor) * 1440 + bar.localMinute;
     const prior = candidateBars.filter((bar) => sessions.some((session) => {

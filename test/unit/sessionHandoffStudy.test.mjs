@@ -180,3 +180,75 @@ test("session handoff study rejects range_break without a reference session", ()
     priorDirection: "range_break", minimumEvents: 1, folds: [],
   })), /range_break prior direction requires at least two prior sessions/);
 });
+
+// BACKLOG 102-17: the windows are read on every local day they span, so moving prices and session clocks together
+// through the day, with prior sessions or the handoff crossing midnight, finds the same events.
+const clock = (minutes) => {
+  const minute = ((minutes % 1440) + 1440) % 1440;
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+};
+const shifted = (bars, minutes) => bars.map((item) => bar(item.time * 1000 + minutes * 60_000, item.open, item.high, item.low, item.close));
+const eventsOf = (result) => [result.sample.events, result.events.map((event) => [event.priorDirection, event.direction, event.priorBars])];
+
+test("moving one-session handoffs through the day, across midnight, finds the same events", () => {
+  const base = [...handoffDay(5), ...handoffDay(6), ...handoffDay(7)];
+  const run = (minutes) => runSessionExhaustionHandoffStudy(input(shifted(base, minutes), {
+    priorSessions: [{ sessionId: "Tokyo", start: clock(0 + minutes), end: clock(480 + minutes) }],
+    handoffStart: clock(780 + minutes), handoffEnd: clock(960 + minutes), minimumEvents: 1, folds: [],
+  }));
+  const unshifted = run(0);
+  assert.deepEqual(eventsOf(unshifted), [3, Array(3).fill(["up", "short", 32])]);
+  const mean = unshifted.byBranch.exhaustion_up.horizons["4"].directionalReturn.mean;
+  for (let minutes = 15; minutes < 1440; minutes += 15) {
+    const result = run(minutes);
+    assert.deepEqual(eventsOf(result), eventsOf(unshifted), `handoff at ${clock(780 + minutes)}`);
+    assert.ok(Math.abs(result.byBranch.exhaustion_up.horizons["4"].directionalReturn.mean - mean) < 1e-12, `handoff at ${clock(780 + minutes)}`);
+  }
+  // At 23:30 the three-bar handoff window ends on the next day: its third bar is 00:00 there.
+  const acrossMidnight = run(630);
+  assert.equal(acrossMidnight.events[0].localDate, "2026-01-05");
+});
+
+test("moving a two-session range break through the day, with either session or the handoff across midnight, finds the same event", () => {
+  const asiaStart = Date.UTC(2026, 0, 4, 18);
+  const bars = [];
+  for (let index = 0; index < 32; index += 1) {
+    const close = 1.04 + (index % 3) * 0.002;
+    bars.push(bar(asiaStart + index * 900_000, close - 0.001, 1.06, 1.03, close));
+  }
+  const londonStart = Date.UTC(2026, 0, 5, 8);
+  for (let index = 0; index < 16; index += 1) {
+    const open = 1.07 + index * 0.01;
+    bars.push(bar(londonStart + index * 900_000, open, open + 0.004, open - 0.002, open + 0.003));
+  }
+  const londonHigh = bars.at(-1).high;
+  const handoffStart = Date.UTC(2026, 0, 5, 13);
+  bars.push(bar(handoffStart, 1.22, londonHigh - 0.002, 1.16, 1.17));
+  for (let index = 1; index < 5; index += 1) {
+    const close = 1.17 - index * 0.002;
+    bars.push(bar(handoffStart + index * 900_000, close + 0.002, close + 0.003, close - 0.003, close));
+  }
+  const run = (minutes) => runSessionExhaustionHandoffStudy(input(shifted(bars, minutes), {
+    priorSessions: [
+      { sessionId: "Asia", start: clock(1080 + minutes), end: clock(120 + minutes) },
+      { sessionId: "London", start: clock(480 + minutes), end: clock(720 + minutes) },
+    ],
+    handoffStart: clock(780 + minutes), handoffEnd: clock(960 + minutes), priorDirection: "range_break", minimumEvents: 1, folds: [],
+  }));
+  for (let minutes = 0; minutes < 1440; minutes += 15) {
+    assert.deepEqual(eventsOf(run(minutes)), [1, [["up", "short", 48]]], `handoff at ${clock(780 + minutes)}`);
+  }
+});
+
+test("a handoff day is found from its bars after midnight when none falls before it", () => {
+  // Handoffs at 23:45-02:45 with every 23:45 bar missing: each day's window starts at 00:00 on the next day.
+  const minutes = 645;
+  const base = shifted([...handoffDay(5), ...handoffDay(6), ...handoffDay(7)], minutes)
+    .filter((item) => !item.timeIso.endsWith("T23:45:00.000Z"));
+  const result = runSessionExhaustionHandoffStudy(input(base, {
+    priorSessions: [{ sessionId: "Tokyo", start: clock(minutes), end: clock(480 + minutes) }],
+    handoffStart: clock(780 + minutes), handoffEnd: clock(960 + minutes), minimumEvents: 1, folds: [],
+  }));
+  assert.equal(result.quality.candidateHandoffDays, 3);
+  assert.equal(result.quality.insufficientHandoffCoverage, 0);
+});
