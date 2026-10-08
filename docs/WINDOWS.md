@@ -44,8 +44,11 @@ npm run test:bookmap-addon
 ```
 
 The collector and delayed/Replay research modules default to
-`%USERPROFILE%\.tradingview-mcp\bookmap-data`. The Bookmap parameter can point
-elsewhere, including another local NTFS volume.
+`%USERPROFILE%\.tradingview-mcp\bookmap-data`, and the MCP server reads the same
+directory by default (earlier releases read
+`%LOCALAPPDATA%\TradingView-MCP\bookmap-data`). The Bookmap parameter can point
+elsewhere, including another local NTFS volume; set
+`TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY` to that directory for the server.
 
 ## Scheduled collection
 

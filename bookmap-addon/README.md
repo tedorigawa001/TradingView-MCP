@@ -28,9 +28,14 @@ the local receipt timestamp, rounded to canonical milliseconds. `bookmap_time_ns
 before the first timestamp callback. Do not treat it as tick-exact ordering
 evidence until the selected feed's callback ordering and timestamp semantics
 have been measured. The add-on writes one append-only JSONL file per attached
-instrument under `/Volumes/HD/bookmap_data`; this external-data directory is
-not part of Git. Set `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY` for the MCP
-server when using another location.
+instrument under its Output directory, `~/.tradingview-mcp/bookmap-data` by
+default on every platform; this external-data directory is not part of Git. The
+MCP server reads the same directory by default. Set
+`TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY` for the server when the add-on writes
+elsewhere. Earlier releases read `/Volumes/HD/bookmap_data` on macOS and
+`%LOCALAPPDATA%\TradingView-MCP\bookmap-data` on Windows by default; when the
+default holds no session and that directory exists, the server names it and the
+setting that reads it.
 
 The data represents the selected Bookmap feed and instrument only. For FX
 research, use CME futures such as `6E`, `6J`, or `GC` as explicitly labelled
@@ -162,7 +167,7 @@ nor places orders, and its replay adapter is not packaged into installable JARs.
 1. In Bookmap, open `Settings` then API plug-in configuration.
 2. Add `bushidoyasu_flow_collector_delayed_replay_v1_1.jar` and enable
    **Bushido Flow Collector** only for a delayed or Replay instrument.
-3. Keep the cross-platform `~/.tradingview-mcp/bookmap-data` default or configure a writable local directory.
+3. Keep the cross-platform `~/.tradingview-mcp/bookmap-data` default, which the MCP server also reads by default, or configure a writable local directory and set `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY` to it for the server.
 4. Confirm that a new JSONL file appears in the configured directory.
 5. Disable the add-on before moving or deleting its output files.
 

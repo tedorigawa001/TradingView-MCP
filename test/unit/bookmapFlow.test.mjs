@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   aggregateBookmapFlowByReceiptInterval,
+  listBookmapFlowSessionsAtDefault,
+  locateBookmapFlowSessions,
   parseBookmapFlowSession,
   preflightBookmapFlowPriceJoin,
 } from "../../build/bookmapFlow.js";
@@ -178,4 +183,47 @@ test("every condition the contract calls partial actually makes the preflight pa
   assert.ok(thin.quality_issues.includes("minimum_bookmap_intervals_not_met"));
   assert.equal(thin.status, "partial");
   assert.equal(thin.coverage.minimum_intervals, 500);
+});
+
+
+// BACKLOG 102-24: the reader's default moved to the collector's; sessions left at the old one are pointed at, not searched.
+test("an empty default Bookmap directory names an earlier default that still exists, with the setting that reads it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "bookmap-default-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const current = join(root, "current");
+  const earlier = join(root, "earlier");
+  const session = "bookmap-flow-6EQ6.CME_BMD-1.jsonl";
+  await mkdir(earlier);
+  const pointed = (error) => error.message.includes(`TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY=${earlier}`) && error.message.includes(current);
+  // Missing or empty, while the earlier default exists.
+  await assert.rejects(listBookmapFlowSessionsAtDefault(current, earlier), pointed);
+  await mkdir(current);
+  await assert.rejects(listBookmapFlowSessionsAtDefault(current, earlier), pointed);
+  // Sessions in the default are read, whatever the earlier one holds.
+  await writeFile(join(current, session), "");
+  assert.deepEqual(await listBookmapFlowSessionsAtDefault(current, earlier), [session]);
+  // With no earlier default there, or a directory the caller configured (no earlier default to name), nothing changes.
+  await rm(join(current, session));
+  assert.deepEqual(await listBookmapFlowSessionsAtDefault(current, join(root, "absent")), []);
+  assert.deepEqual(await listBookmapFlowSessionsAtDefault(current, null), []);
+  await assert.rejects(listBookmapFlowSessionsAtDefault(join(root, "missing"), join(root, "absent")), { code: "ENOENT" });
+  await assert.rejects(listBookmapFlowSessionsAtDefault(join(root, "missing"), null), { code: "ENOENT" });
+  // An earlier default that is a file, not a directory, is not named.
+  await writeFile(join(root, "plain"), "");
+  assert.deepEqual(await listBookmapFlowSessionsAtDefault(current, join(root, "plain")), []);
+});
+
+
+test("a configured Bookmap directory is read as it is; only the default names an earlier default", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "bookmap-locate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const defaults = { directory: join(root, "default"), earlier: join(root, "earlier") };
+  await mkdir(defaults.earlier);
+  await mkdir(join(root, "configured"));
+  assert.deepEqual(await locateBookmapFlowSessions(join(root, "configured"), defaults), { directory: join(root, "configured"), sessions: [] });
+  await assert.rejects(locateBookmapFlowSessions(join(root, "unset"), defaults), { code: "ENOENT" });
+  await assert.rejects(locateBookmapFlowSessions(undefined, defaults), /TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY=/);
+  await mkdir(defaults.directory);
+  await writeFile(join(defaults.directory, "bookmap-flow-6EQ6.CME_BMD-2.jsonl"), "");
+  assert.deepEqual(await locateBookmapFlowSessions(undefined, defaults), { directory: defaults.directory, sessions: ["bookmap-flow-6EQ6.CME_BMD-2.jsonl"] });
 });

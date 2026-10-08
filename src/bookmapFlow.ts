@@ -1,7 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { OhlcvBar } from "./tradingview.js";
-import { defaultBookmapFlowDirectory } from "./platformSupport.js";
+import { defaultBookmapFlowDirectory, earlierDefaultBookmapFlowDirectory } from "./platformSupport.js";
 
 const SESSION_FILE = /^bookmap-flow-(?!signals-)[A-Za-z0-9._-]+\.jsonl$/;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -84,8 +84,51 @@ function assertSafeFileName(fileName: string): void {
   }
 }
 
-export function resolveBookmapFlowDirectory(configured = process.env.TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY): string {
-  return resolve(configured ?? defaultBookmapFlowDirectory());
+/**
+ * The reader's directory and the collector's sessions in it: the configured directory (the server's own, or
+ * TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY), or else the default, where listBookmapFlowSessionsAtDefault names an
+ * earlier default left holding sessions (BACKLOG 102-24).
+ */
+export async function locateBookmapFlowSessions(
+  configured: string | undefined = process.env.TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY,
+  defaults: { directory: string; earlier: string | null } = {
+    directory: defaultBookmapFlowDirectory(),
+    earlier: earlierDefaultBookmapFlowDirectory(),
+  },
+): Promise<{ directory: string; sessions: string[] }> {
+  if (configured !== undefined) {
+    const directory = resolve(configured);
+    return { directory, sessions: await listBookmapFlowSessions(directory) };
+  }
+  const directory = resolve(defaults.directory);
+  return { directory, sessions: await listBookmapFlowSessionsAtDefault(directory, defaults.earlier) };
+}
+
+/**
+ * The collector's sessions in the reader's directory. When that is the default (`earlierDefault` given) and it holds no
+ * session, an earlier default that still exists is named in the error with the setting that reads it (BACKLOG 102-24):
+ * the default moved, and sessions are not looked for silently in two places.
+ */
+export async function listBookmapFlowSessionsAtDefault(directory: string, earlierDefault: string | null): Promise<string[]> {
+  let sessions: string[] = [];
+  let missing: unknown = null;
+  try {
+    sessions = await listBookmapFlowSessions(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || earlierDefault === null) throw error;
+    missing = error;
+  }
+  if (sessions.length > 0 || earlierDefault === null) return sessions;
+  const earlierExists = await lstat(earlierDefault).then((stat) => stat.isDirectory(), () => false);
+  if (earlierExists) {
+    throw new Error(
+      `no Bookmap Collector sessions in the default directory ${directory}; the reader's default moved there from ` +
+      `${earlierDefault} to match the collector's. Set TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY=${earlierDefault} to read ` +
+      "sessions saved there.",
+    );
+  }
+  if (missing !== null) throw missing;
+  return sessions;
 }
 
 export async function listBookmapFlowSessions(directory: string): Promise<string[]> {

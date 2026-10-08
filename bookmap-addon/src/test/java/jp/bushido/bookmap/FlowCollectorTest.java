@@ -39,6 +39,9 @@ public final class FlowCollectorTest {
     private static void usesOnlyBookmapSupportedParameterTypes() throws Exception {
         assertEquals(String.class, FlowCollector.class.getField("outputDirectory").getType());
         assertEquals(Integer.class, FlowCollector.class.getField("flushEveryRecords").getType());
+        // BACKLOG 102-24: the MCP reader looks here by default too (defaultBookmapFlowDirectory).
+        assertEquals(java.nio.file.Paths.get(System.getProperty("user.home"), ".tradingview-mcp", "bookmap-data").toString(),
+                new FlowCollector().outputDirectory);
     }
 
     private static void preservesUnknownTradeMetadataInsteadOfInventingASide() throws Exception {

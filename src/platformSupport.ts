@@ -26,16 +26,22 @@ export function cdpStallRemedy(port: string, platform = process.platform): strin
   return `If the app is open it may be frozen; restart it, or check what else listens on the port with ${check}. ${tradingViewLaunchRemedy(platform)}`;
 }
 
-export function defaultBookmapFlowDirectory(
+/**
+ * Where the Bookmap collector writes by default, which is where the reader looks by default: the home directory's
+ * .tradingview-mcp/bookmap-data on every platform, as FlowCollector builds it from user.home (BACKLOG 102-24). The reader
+ * used to look elsewhere on macOS and Windows, so with both left at their defaults it found no session.
+ */
+export function defaultBookmapFlowDirectory(platform = process.platform, home = homedir()): string {
+  // The target platform's join, not the host's: the answer must not change with the host running it.
+  return (platform === "win32" ? win32 : posix).join(home, ".tradingview-mcp", "bookmap-data");
+}
+
+/** The reader's default before BACKLOG 102-24, where it differed from today's; null where it did not. */
+export function earlierDefaultBookmapFlowDirectory(
   platform = process.platform,
-  home = homedir(),
   localAppData = process.env.LOCALAPPDATA,
-): string {
-  if (platform === "win32") {
-    return win32.join(localAppData?.trim() || home, "TradingView-MCP", "bookmap-data");
-  }
+): string | null {
   if (platform === "darwin") return "/Volumes/HD/bookmap_data";
-  // posix.join, not join: this function takes the target platform as an
-  // argument, so its answer must not change with the host running it.
-  return posix.join(home, ".tradingview-mcp", "bookmap-data");
+  if (platform === "win32" && localAppData?.trim()) return win32.join(localAppData.trim(), "TradingView-MCP", "bookmap-data");
+  return null;
 }

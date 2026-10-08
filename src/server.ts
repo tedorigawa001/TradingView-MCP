@@ -157,10 +157,9 @@ import {
 import { OANDA_FLOW_INSTRUMENTS, oandaFlowTokenConfigured } from "./oandaFlow.js";
 import {
   aggregateBookmapFlowByReceiptInterval,
-  listBookmapFlowSessions,
+  locateBookmapFlowSessions,
   preflightBookmapFlowPriceJoin,
   readBookmapFlowSession,
-  resolveBookmapFlowDirectory,
 } from "./bookmapFlow.js";
 import {
   AnalysisDefinitionConflictError,
@@ -9022,8 +9021,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         if (history.symbol.toUpperCase() !== expected_symbol || normalizeResolution(history.resolution) !== expected_timeframe) {
           throw new Error("OHLC evidence does not match the bound chart");
         }
-        const directory = resolveBookmapFlowDirectory(bookmapFlowDirectory);
-        const sessions = await listBookmapFlowSessions(directory);
+        const { directory, sessions } = await locateBookmapFlowSessions(
+          bookmapFlowDirectory ?? process.env.TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY,
+        );
         const fileName = session_file ?? sessions.at(-1);
         if (!fileName) throw new Error("no Bookmap Collector JSONL sessions found in the configured directory");
         const session = await readBookmapFlowSession(directory, fileName);
