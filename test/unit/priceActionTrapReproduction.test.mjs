@@ -350,6 +350,64 @@ test("a re-run on the same inputs finds its reproduction already published and l
   assert.deepEqual(await stagingLeft(out), []);
 });
 
+// A re-run that finds the same bytes reports the same durability as a run that links them: the file there may be one
+// an earlier run linked into place before its directory sync failed, or one written without a sync. Windows has no
+// directory sync to fail, and flushes only a handle open for writing, which the evidence is never opened for.
+test("a re-run that finds its reproduction there syncs it as a new one would, or fails", { skip: process.platform === "win32" && "Windows syncs neither a directory nor a read-only handle" }, async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  const realOpen = fsp.open;
+  const syncs = { directory: 0, file: 0 };
+  let directorySyncFails = true;
+  let fileSyncFails = false;
+  fsp.open = async (path, ...rest) => {
+    const handle = await realOpen(path, ...rest);
+    const kind = String(path) === out ? "file" : String(path) === dirname(out) ? "directory" : null;
+    if (kind !== null) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        syncs[kind] += 1;
+        if (kind === "directory" && directorySyncFails) throw new Error("synthetic directory sync failure");
+        if (kind === "file" && fileSyncFails) throw new Error("synthetic file sync failure");
+        return sync();
+      };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try {
+    // The first run links the file into place, and then its directory sync fails.
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /synthetic directory sync failure/);
+    assert.equal(await readFile(out, "utf8"), publishedBody());
+    // A re-run finds the same bytes there, and cannot confirm them durable either.
+    syncs.directory = 0;
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /synthetic directory sync failure/);
+    assert.equal(syncs.directory, 1);
+    // Nor when the file itself cannot be synced.
+    directorySyncFails = false;
+    fileSyncFails = true;
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /synthetic file sync failure/);
+    fileSyncFails = false;
+    // Once it can, it syncs the file and its directory and only then reports it published.
+    syncs.directory = 0;
+    syncs.file = 0;
+    assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
+    assert.deepEqual(syncs, { directory: 1, file: 1 });
+    assert.equal(await readFile(out, "utf8"), publishedBody());
+    // A different file is only refused: it is not synced, so the refusal is what the run reports.
+    const altered = `[${publishedBody().slice(1)}`;
+    await writeFile(out, altered);
+    fileSyncFails = true;
+    syncs.file = 0;
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
+    assert.equal(syncs.file, 0);
+    assert.equal(await readFile(out, "utf8"), altered);
+  } finally {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(await stagingLeft(out), []);
+});
+
 test("a write that fails leaves no reproduction behind, and an earlier one as it was", async (t) => {
   const { out, argv } = await reproductionWorkspace(t);
   const probe = await open(argv.at(-3), "r");

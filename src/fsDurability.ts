@@ -167,7 +167,9 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
  * is taken, so the destination never holds a partial file and a failed run leaves whatever was there as it was; the
  * staging directory is removed either way. When the name is taken, the file there is compared with `body`:
  * "identical" when it holds the same bytes, "different" otherwise, both left as they are for the caller to judge.
- * A symbolic link there is refused rather than followed.
+ * "identical" is reported only once the file and its directory entry are synced as a new one's are, since the file
+ * may be one an earlier run linked into place before its directory sync failed, or one written without a sync; a
+ * sync that fails is thrown. A symbolic link there is refused rather than followed.
  */
 export async function publishImmutableFile(
   destination: string,
@@ -185,7 +187,9 @@ export async function publishImmutableFile(
       await link(staged, destination);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      return await holdsExactly(destination, bytes, label) ? "identical" : "different";
+      if (!await holdsExactlySynced(destination, bytes, label)) return "different";
+      await syncDirectoryEntry(directory);
+      return "identical";
     }
     await syncDirectoryEntry(directory);
     return "created";
@@ -194,13 +198,20 @@ export async function publishImmutableFile(
   }
 }
 
-async function holdsExactly(path: string, bytes: Buffer, label: string): Promise<boolean> {
+/**
+ * Whether the file at `path` holds exactly `bytes`, synced when it does. It is opened only for reading, which Windows
+ * cannot flush (FlushFileBuffers needs a handle open for writing), so there it is left as syncDirectoryEntry leaves a
+ * directory.
+ */
+async function holdsExactlySynced(path: string, bytes: Buffer, label: string, platform = process.platform): Promise<boolean> {
   const entry = await lstat(path);
   if (entry.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
   if (!entry.isFile() || entry.size !== bytes.length) return false;
-  const handle = await open(path, constants.O_RDONLY | noFollowFlag());
+  const handle = await open(path, constants.O_RDONLY | noFollowFlag(platform));
   try {
-    return (await handle.readFile()).equals(bytes);
+    if (!(await handle.readFile()).equals(bytes)) return false;
+    if (platform !== "win32") await handle.sync();
+    return true;
   } finally {
     await handle.close();
   }
