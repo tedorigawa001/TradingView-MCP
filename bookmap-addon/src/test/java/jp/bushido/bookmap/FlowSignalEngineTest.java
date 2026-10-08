@@ -64,7 +64,9 @@ public final class FlowSignalEngineTest {
             assertEquals("", replay(String.format(around, between)));
         }
         assertEquals("4\tBUY\t3\t3\t3\t1\t1", replay(String.format(around, "0\tsell")).trim());
-        assertTrue(replayOutput(input).contains("#sweep_continuity\t" + FlowSignalEngine.SWEEP_CONTINUITY_POLICY + "\n"),
+        // Compared by line: println ends lines with the platform separator, which is "\r\n" on Windows.
+        assertTrue(replayOutput(input).lines()
+                        .anyMatch(line -> line.equals("#sweep_continuity\t" + FlowSignalEngine.SWEEP_CONTINUITY_POLICY)),
                 "the replay must name its sweep continuity policy");
         try {
             replay("1\t2\t100\t1\tbuy\n2\t1\t101\t1\tbuy\n");
