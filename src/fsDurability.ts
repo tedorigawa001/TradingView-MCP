@@ -69,6 +69,11 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
  * lstat check and the host O_NOFOLLOW flag together so every exclusive-create
  * call site has the same fail-closed behavior.
  */
+export async function openExclusiveFile(path: string, label: string): Promise<FileHandle> {
+  await assertNotSymbolicLink(path, label);
+  return open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
+}
+
 /**
  * Whether creating, opening or inspecting a lock file may have failed because Windows is still deleting it (BACKLOG
  * 102-39). Windows can keep a deleted file's name while a handle to it is open, the deleting one or another, and
@@ -80,25 +85,29 @@ export function lockBeingReleased(error: unknown, platform: NodeJS.Platform = pr
   return platform === "win32" && (error as NodeJS.ErrnoException | null)?.code === "EPERM";
 }
 
-/** What one attempt of a lock loop at its lock file found (see attemptLockFile). */
+/**
+ * What one attempt of a lock loop at its lock file found (see attemptLockFile). Unless it is `taken`, the caller waits,
+ * within its deadline, and names `refusal` as the cause if the deadline passes.
+ */
 export type LockFileAttempt =
   | { taken: true }
-  | { taken: false; held: Stats }
-  | { taken: false; refused: NodeJS.ErrnoException };
+  | { taken: false; held: Stats | null; refusal: NodeJS.ErrnoException | null };
 
 /**
  * One attempt of a lock loop to take its lock file: create it exclusively and write `contents` to it (BACKLOG 102-39).
- * It comes back `taken`; or `held`, with the lstat of the lock file found there, for the caller to check (unsafe path,
- * stale owner) and wait on; or `refused`, when on Windows the lock file found there cannot even be inspected
- * (lockBeingReleased), which the caller waits on as on a held lock and names if its deadline passes.
+ * Unless it is `taken`, `held` is the lstat of a lock file found there, for the caller to check (unsafe path, stale
+ * owner), and `refusal` the Windows EPERM met on the way: at the create while a lock file is there, or at the lstat,
+ * when the lock file found cannot even be inspected and `held` is null as it is being deleted.
  *
  * A create refused with no lock file there may have met a deletion that finished in between, so it is tried again
- * once; refused again with still no lock file, the refusal is real and is thrown. A lock gone after EEXIST is tried
- * again at once. If writing the new lock fails, it is removed and the error thrown: a lock file left behind would be
- * waited on, and a failed write is no sign of another owner.
+ * once; refused again with still no lock file, the refusal is real and is thrown. A lock gone between EEXIST and the
+ * lstat is tried again once at once; gone again, the attempt comes back with neither, to be waited on like the rest.
+ * If writing the new lock fails, it is removed, if it is still the one created here, and the error thrown: a lock file
+ * left behind would be waited on, and a failed write is no sign of another owner.
  */
 export async function attemptLockFile(path: string, label: string, contents: string): Promise<LockFileAttempt> {
   let refusedWithoutLock = false;
+  let vanished = false;
   while (true) {
     let handle: FileHandle;
     try {
@@ -107,14 +116,19 @@ export async function attemptLockFile(path: string, label: string, contents: str
       const refused = lockBeingReleased(error);
       if (!refused && (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
-        return { taken: false, held: await lstat(path) };
+        return { taken: false, held: await lstat(path), refusal: refused ? error as NodeJS.ErrnoException : null };
       } catch (inspectError) {
-        if (lockBeingReleased(inspectError)) return { taken: false, refused: inspectError as NodeJS.ErrnoException };
+        if (lockBeingReleased(inspectError)) {
+          return { taken: false, held: null, refusal: inspectError as NodeJS.ErrnoException };
+        }
         if ((inspectError as NodeJS.ErrnoException).code !== "ENOENT") throw inspectError;
       }
       if (refused) {
         if (refusedWithoutLock) throw error;
         refusedWithoutLock = true;
+      } else {
+        if (vanished) return { taken: false, held: null, refusal: null };
+        vanished = true;
       }
       continue;
     }
@@ -123,17 +137,17 @@ export async function attemptLockFile(path: string, label: string, contents: str
       await handle.sync();
       await handle.close();
     } catch (error) {
+      const created = await handle.stat().catch(() => null);
       await handle.close().catch(() => undefined);
-      await unlink(path).catch(() => undefined);
+      // A write stalled long enough for another process to reclaim the lock must not take that process's lock away.
+      const current = await lstat(path).catch(() => null);
+      if (created && current && current.ino === created.ino && current.dev === created.dev) {
+        await unlink(path).catch(() => undefined);
+      }
       throw error;
     }
     return { taken: true };
   }
-}
-
-export async function openExclusiveFile(path: string, label: string): Promise<FileHandle> {
-  await assertNotSymbolicLink(path, label);
-  return open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
 }
 
 export async function syncDirectoryEntry(directory: string, platform = process.platform): Promise<void> {

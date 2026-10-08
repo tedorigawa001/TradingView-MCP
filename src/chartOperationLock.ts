@@ -28,7 +28,8 @@ export class ChartOperationLock {
     }
   }
 
-  private async reclaimStaleLock(observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean> {
+  /** true: look again at once; false: wait; a Windows refusal: wait, and name it if the deadline passes (BACKLOG 102-39). */
+  private async reclaimStaleLock(observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean | NodeJS.ErrnoException> {
     if (Date.now() - Number(observed.mtimeMs) <= STALE_LOCK_MS) return false;
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) {
       throw new Error(`chart operation lock must be owned by the current user: ${this.filePath}`);
@@ -36,16 +37,12 @@ export class ChartOperationLock {
     let handle;
     try {
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
-    } catch (error) {
-      // Gone since it was found: look again at once. Being deleted on Windows: wait for it, within the deadline.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-      if (lockBeingReleased(error)) return false;
-      throw error;
-    }
-    try {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
+      // Closed before the unlink: on Windows an open handle keeps a deleted name taken.
+      await handle.close();
+      handle = undefined;
       const ownerPid = contents.match(/^[0-9a-f-]{36}\s+(\d+)\n$/i)?.[1];
       if (ownerPid) {
         try { process.kill(Number(ownerPid), 0); return false; }
@@ -56,10 +53,11 @@ export class ChartOperationLock {
       await unlink(this.filePath);
       return true;
     } catch (error) {
+      // Gone since it was found: look again at once. Being deleted on Windows: wait for it, within the deadline.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-      if (lockBeingReleased(error)) return false;
+      if (lockBeingReleased(error)) return error as NodeJS.ErrnoException;
       throw error;
-    } finally { await handle.close(); }
+    } finally { await handle?.close(); }
   }
 
   async acquire(): Promise<() => Promise<void>> {
@@ -90,12 +88,15 @@ export class ChartOperationLock {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      if ("held" in attempt) {
+      let refusal = attempt.refusal;
+      if (attempt.held) {
         if (!attempt.held.isFile() || attempt.held.isSymbolicLink()) throw new Error("chart operation lock path is unsafe");
-        if (await this.reclaimStaleLock(attempt.held)) continue;
+        const reclaimed = await this.reclaimStaleLock(attempt.held);
+        if (reclaimed === true) continue;
+        if (reclaimed !== false) refusal = reclaimed;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring chart operation lock at ${this.filePath}`, { cause: "refused" in attempt ? attempt.refused : undefined });
+        throw new Error(`timed out acquiring chart operation lock at ${this.filePath}`, { cause: refusal ?? undefined });
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

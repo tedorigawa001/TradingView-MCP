@@ -202,8 +202,8 @@ export class MacroSurpriseEvidenceStore {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      let refusal = "refused" in attempt ? attempt.refused : undefined;
-      if ("held" in attempt) {
+      let refusal = attempt.refusal;
+      if (attempt.held) {
         let handle;
         try {
           handle = await open(path, constants.O_RDONLY | noFollowFlag());
@@ -221,7 +221,7 @@ export class MacroSurpriseEvidenceStore {
           refusal = inspectError as NodeJS.ErrnoException;
         } finally { await handle?.close(); }
       }
-      if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`, { cause: refusal });
+      if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`, { cause: refusal ?? undefined });
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }

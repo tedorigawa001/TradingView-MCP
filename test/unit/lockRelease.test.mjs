@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { constants, existsSync } from "node:fs";
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,8 +22,10 @@ const real = { open: fsp.open, lstat: fsp.lstat, unlink: fsp.unlink };
 /**
  * Faults for one lock path, each list taken in order: `create` for its exclusive create, `inspect` for the lstat that
  * follows a create that failed, `read` for opening it to read, `reread` for an lstat that follows such an open (a
- * stale lock's reclaim checking it is still the one it read), and `write` for writing a lock just created. `after`
- * runs after each injected fault; `calls` counts the creates and reads of the path.
+ * stale lock's reclaim checking it is still the one it read), and `write` for writing a lock just created, after
+ * `onWrite` runs. `after` runs after each injected fault; `calls` counts the creates and reads of the path. The plan
+ * also records whether the new lock was synced, and whether the lock was unlinked while a handle to it was still open,
+ * which on Windows keeps the deleted name taken.
  */
 let plan = null;
 const fault = (code) => Object.assign(new Error(`${code}: injected`), { code });
@@ -45,12 +47,28 @@ fsp.open = async (path, flags, ...rest) => {
     if (exclusive) plan.armed = true;
     throw error;
   }
+  const owner = plan;
+  owner.open += 1;
+  const close = handle.close.bind(handle);
+  let closed = false;
+  handle.close = async () => {
+    if (!closed) { closed = true; owner.open -= 1; }
+    return close();
+  };
   if (!exclusive) plan.opened = true;
+  if (exclusive) {
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => { owner.synced = true; return sync(); };
+  }
   if (exclusive && plan.write.length > 0) {
     const code = plan.write.shift();
-    handle.writeFile = async () => { throw fault(code); };
+    handle.writeFile = async () => { await owner.onWrite?.(); throw fault(code); };
   }
   return handle;
+};
+fsp.unlink = async (path, ...rest) => {
+  if (plan && String(path) === plan.path && plan.open > 0) plan.unlinkedWhileOpen = true;
+  return real.unlink(path, ...rest);
 };
 fsp.lstat = async (path, ...rest) => {
   if (plan && String(path) === plan.path) {
@@ -89,9 +107,13 @@ async function onPlatform(platform, run) {
   const actual = process.platform;
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
   plan = null;
+  offset = 0;
   try {
     return await run((path) => {
-      plan = { path, create: [], inspect: [], read: [], reread: [], write: [], calls: { create: 0, read: 0 } };
+      plan = {
+        path, create: [], inspect: [], read: [], reread: [], write: [], calls: { create: 0, read: 0 },
+        open: 0, synced: false, unlinkedWhileOpen: false,
+      };
       sleeps = 0;
       return plan;
     });
@@ -112,6 +134,12 @@ const locks = {
 const reclaiming = ["analysis journal", "strategy research journal", "chart operation lock"];
 const heldBy = (pid) => `00000000-0000-4000-8000-000000000000 ${pid}\n`;
 const codeOf = (error) => (error.cause ?? error).code;
+// A lock held by this process, dated past the clock's jump so no lock reads it as stale once the deadlines pass.
+async function heldPastTheJump(path) {
+  await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+  const later = new Date(Date.now() + 2 * 3_600_000);
+  await utimes(path, later, later);
+}
 
 async function setUp(t, name) {
   const dir = await mkdtemp(join(tmpdir(), "lock-release-"));
@@ -224,18 +252,23 @@ test("a stale lock that vanishes while it is reclaimed is looked at again; one r
           assert.deepEqual(plan[at], [], `${name} ${code} at ${at}`);
           // A lock being deleted is waited for; one that vanished is looked at again at once.
           assert.equal(sleeps >= 1, code === "EPERM", `${name} ${code} at ${at}: ${sleeps} sleeps`);
+          assert.equal(plan.unlinkedWhileOpen, false, `${name}: the stale lock was unlinked with a handle open`);
           plan = null;
           await release();
         });
       }
     }
-    // Refused for good, the reclaim waits within the deadline instead of retrying at once.
+  }
+  // Refused for good, a reclaim (or the macro-surprise lock's inspection of a held lock) waits within the deadline
+  // instead of retrying at once, and its timeout names the refusal.
+  for (const name of [...reclaiming, "macro-surprise evidence"]) {
     await onPlatform("win32", async (faults) => {
       const [path, acquire] = await setUp(t, name);
-      await staleLock(path);
+      if (name === "macro-surprise evidence") await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      else await staleLock(path);
       faults(path).read.push(...Array(1_000).fill("EPERM"));
       plan.after = () => { if (sleeps === 3) passDeadlines(); };
-      await assert.rejects(acquire(), /timed out/, name);
+      await assert.rejects(acquire(), (error) => /timed out/.test(error.message) && error.cause?.code === "EPERM", name);
       assert.ok(sleeps >= 3 && plan.calls.read < 50, `${name}: ${sleeps} sleeps, ${plan.calls.read} reads`);
     });
   }
@@ -248,9 +281,80 @@ test("a lock that failed to be written is removed and fails at once, on any plat
         const [path, acquire] = await setUp(t, name);
         faults(path).write.push("EPERM");
         await assert.rejects(acquire(), (error) => codeOf(error) === "EPERM", `${name} on ${platform}`);
-        assert.deepEqual([existsSync(path), sleeps], [false, 0], `${name} on ${platform}`);
+        assert.deepEqual([existsSync(path), sleeps, plan.unlinkedWhileOpen], [false, 0, false], `${name} on ${platform}`);
       });
     }
+    // A write stalled while another process reclaimed the lock and took it: that lock is left alone.
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      faults(path).write.push("EIO");
+      plan.onWrite = async () => {
+        await real.unlink(path);
+        await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      };
+      await assert.rejects(acquire(), (error) => codeOf(error) === "EIO", name);
+      assert.equal(await readFile(path, "utf8"), heldBy(process.pid), name);
+    });
+  }
+});
+
+test("a lock just created is synced, and released without a handle open, even after its file vanished", async (t) => {
+  for (const name of Object.keys(locks)) {
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      faults(path);
+      const release = await acquire();
+      assert.equal(plan.synced, true, name);
+      await release();
+      assert.deepEqual([existsSync(path), plan.unlinkedWhileOpen], [false, false], name);
+      // Released after its file was removed, the lock lets go quietly.
+      const vanishing = await acquire();
+      await real.unlink(path);
+      await vanishing();
+    });
+  }
+});
+
+test("a lock that keeps vanishing between the create and the look is tried again once at once, then waited for", async (t) => {
+  for (const name of Object.keys(locks)) {
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      // Gone once: tried again at once.
+      faults(path).inspect.push("ENOENT");
+      plan.after = () => real.unlink(path);
+      const release = await acquire();
+      assert.deepEqual([plan.calls.create, sleeps], [2, 0], name);
+      plan = null;
+      await release();
+      // Gone every time: waited for, within the deadline.
+      await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      faults(path).inspect.push(...Array(1_000).fill("ENOENT"));
+      plan.onSleep = () => { if (sleeps === 3) passDeadlines(); };
+      await assert.rejects(acquire(), /timed out/, name);
+      assert.ok(sleeps >= 3 && plan.calls.create < 50, `${name}: ${sleeps} sleeps, ${plan.calls.create} creates`);
+    });
+  }
+});
+
+test("a held lock whose create Windows refuses names that refusal, and only the last attempt's refusal counts", async (t) => {
+  for (const name of Object.keys(locks)) {
+    // Created while the lock file is there, refused each time: waited for, and the refusal named.
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await heldPastTheJump(path);
+      faults(path).create.push(...Array(1_000).fill("EPERM"));
+      plan.onSleep = () => { if (sleeps === 3) passDeadlines(); };
+      await assert.rejects(acquire(), (error) => /timed out/.test(error.message) && error.cause?.code === "EPERM", name);
+    });
+    // Refused once, then simply held: the timeout no longer blames the refusal.
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await heldPastTheJump(path);
+      faults(path).inspect.push("EPERM");
+      plan.onSleep = () => { if (sleeps === 3) passDeadlines(); };
+      await assert.rejects(acquire(), (error) => /timed out/.test(error.message) && error.cause === undefined, name);
+    });
   }
 });
 

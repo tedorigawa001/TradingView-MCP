@@ -383,7 +383,8 @@ export class StrategyResearchJournalStore {
     if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("strategy research journal directory permissions must be 0700");
   }
 
-  private async reclaimStaleLock(lockPath: string, observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean> {
+  /** true: look again at once; false: wait; a Windows refusal: wait, and name it if the deadline passes (BACKLOG 102-39). */
+  private async reclaimStaleLock(lockPath: string, observed: Awaited<ReturnType<typeof lstat>>): Promise<boolean | NodeJS.ErrnoException> {
     if (Date.now() - Number(observed.mtimeMs) <= STALE_LOCK_MS) return false;
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) throw new Error(`strategy research journal lock must be owned by the current user: ${lockPath}`);
     let handle;
@@ -392,6 +393,8 @@ export class StrategyResearchJournalStore {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
+      // Closed before the unlink: on Windows an open handle keeps a deleted name taken.
+      await handle.close(); handle = undefined;
       const ownerPid = contents.match(/^[0-9a-f-]{36}\s+(\d+)\n$/i)?.[1];
       if (ownerPid) {
         try { process.kill(Number(ownerPid), 0); return false; } catch (err) {
@@ -405,7 +408,7 @@ export class StrategyResearchJournalStore {
     } catch (err) {
       // Gone since it was found: look again at once. Being deleted on Windows: wait for it, within the deadline.
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
-      if (lockBeingReleased(err)) return false;
+      if (lockBeingReleased(err)) return err as NodeJS.ErrnoException;
       throw err;
     } finally { await handle?.close(); }
   }
@@ -434,12 +437,15 @@ export class StrategyResearchJournalStore {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      if ("held" in attempt) {
+      let refusal = attempt.refusal;
+      if (attempt.held) {
         if (!attempt.held.isFile() || attempt.held.isSymbolicLink()) throw new Error("strategy research journal lock path is unsafe");
-        if (await this.reclaimStaleLock(lockPath, attempt.held)) continue;
+        const reclaimed = await this.reclaimStaleLock(lockPath, attempt.held);
+        if (reclaimed === true) continue;
+        if (reclaimed !== false) refusal = reclaimed;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring strategy research journal lock at ${lockPath}`, { cause: "refused" in attempt ? attempt.refused : undefined });
+        throw new Error(`timed out acquiring strategy research journal lock at ${lockPath}`, { cause: refusal ?? undefined });
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

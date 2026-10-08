@@ -52,11 +52,11 @@ export class AppendOnlyEvaluationLog {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      if ("held" in attempt && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
+      if (attempt.held && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
         throw new Error("evaluation log lock path is unsafe");
       }
       if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring evaluation log lock", { cause: "refused" in attempt ? attempt.refused : undefined });
+        throw new Error("timed out acquiring evaluation log lock", { cause: attempt.refusal ?? undefined });
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

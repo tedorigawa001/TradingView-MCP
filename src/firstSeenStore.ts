@@ -131,8 +131,8 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      refusal = "refused" in attempt ? attempt.refused : undefined;
-      if ("held" in attempt && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
+      refusal = attempt.refusal ?? undefined;
+      if (attempt.held && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
         throw new Error(`${this.label} history lock path is unsafe`);
       }
       const remaining = deadline - performance.now();
