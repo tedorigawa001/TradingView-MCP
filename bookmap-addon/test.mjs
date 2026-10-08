@@ -38,8 +38,8 @@ if (sdkPresent) {
 const runtimeClasspath = [testClasses, classpath].join(delimiter);
 for (const sourceName of selectedTests) {
   const className = sourceName.replace(/\.java$/, "");
-  const headless = /Marker|Research/.test(className) ? ["-Djava.awt.headless=true"] : [];
+  const headless = /Marker|Research|Display/.test(className) ? ["-Djava.awt.headless=true"] : [];
   run(tools.java, [...headless, "-ea", "-cp", runtimeClasspath, `jp.bushido.bookmap.${className}`]);
 }
-if (!sdkPresent) console.log("SKIPPED (no Bookmap SDK): FlowCollectorTest, FlowSignalResearchTest");
+if (!sdkPresent) console.log("SKIPPED (no Bookmap SDK): FlowCollectorTest, FlowSignalDisplayTest, FlowSignalResearchTest");
 run(process.execPath, ["--test", join(artifacts.addon, "replay.test.mjs")]);

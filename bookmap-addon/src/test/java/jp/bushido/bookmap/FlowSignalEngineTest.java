@@ -25,10 +25,17 @@ public final class FlowSignalEngineTest {
         consecutiveSignalsShareOneEpisodeAndOnlyTheFirstIsDrawn();
         anEpisodeGapAndTheOppositeSideEachStartTheirOwnEpisode();
         anEpisodeUnionsEveryLevelASweepCrossed();
+        aTradeWithoutAPriceLevelBreaksTheRun();
         System.out.println("FlowSignalEngineTest: PASS");
     }
 
     private static String replay(String input) throws Exception {
+        return replayOutput(input).lines()
+                .filter(line -> !line.startsWith("#"))
+                .collect(java.util.stream.Collectors.joining("\n"));
+    }
+
+    private static String replayOutput(String input) throws Exception {
         var priorIn = System.in;
         var priorOut = System.out;
         var bytes = new java.io.ByteArrayOutputStream();
@@ -36,9 +43,7 @@ public final class FlowSignalEngineTest {
             System.setIn(new java.io.ByteArrayInputStream(input.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
             System.setOut(new java.io.PrintStream(bytes, true, java.nio.charset.StandardCharsets.UTF_8));
             FlowSweepReplay.main(new String[]{"3", "3", "10000", "30000"});
-            return bytes.toString(java.nio.charset.StandardCharsets.UTF_8).lines()
-                    .filter(line -> !line.startsWith("#normalization\t"))
-                    .collect(java.util.stream.Collectors.joining("\n"));
+            return bytes.toString(java.nio.charset.StandardCharsets.UTF_8);
         } finally { System.setIn(priorIn); System.setOut(priorOut); }
     }
 
@@ -52,6 +57,15 @@ public final class FlowSignalEngineTest {
         assertEquals(replay(input), replay(input));
         assertEquals("", replay(input.replace("9999999999", "10000000000")));
         assertEquals("", replay(input.replace("999\t0\tunknown", "999\t1\tunknown")));
+        // BACKLOG 102-23: a trade off the price grid between two buys breaks their run, whatever its side, unless it
+        // carries no quantity; the replay names the rule it applied.
+        String around = "1\t0\t100\t1\tbuy\n2\t1\t101\t1\tbuy\n3\t2\t101.5\t%s\n4\t3\t102\t1\tbuy\n";
+        for (String between : new String[]{"1\tsell", "1\tunknown", "1\tbuy"}) {
+            assertEquals("", replay(String.format(around, between)));
+        }
+        assertEquals("4\tBUY\t3\t3\t3\t1\t1", replay(String.format(around, "0\tsell")).trim());
+        assertTrue(replayOutput(input).contains("#sweep_continuity\t" + FlowSignalEngine.SWEEP_CONTINUITY_POLICY + "\n"),
+                "the replay must name its sweep continuity policy");
         try {
             replay("1\t2\t100\t1\tbuy\n2\t1\t101\t1\tbuy\n");
             throw new AssertionError("backward clock accepted");
@@ -137,6 +151,65 @@ public final class FlowSignalEngineTest {
     private static FlowSignalEngine engine() {
         return new FlowSignalEngine(new FlowSignalEngine.Settings(3, 3, 10, 5, 0.5,
                 10_000, 10_000));
+    }
+
+    /** BACKLOG 102-23: a trade whose price is not a price level is still a trade between those around it. */
+    private static void aTradeWithoutAPriceLevelBreaksTheRun() {
+        FlowSignalEngine.Direction buy = FlowSignalEngine.Direction.BUY;
+        // Research stream: two buys, a trade without a level, a buy: no three-trade run, and the run starts again after it.
+        FlowSignalEngine research = engine();
+        assertNull(research.onSweepTrade(100, 1, buy));
+        assertNull(research.onSweepTrade(101, 1, buy));
+        research.onSweepTradeWithoutPriceLevel(1);
+        assertNull(research.onSweepTrade(102, 1, buy));
+        assertNull(research.onSweepTrade(103, 1, buy));
+        FlowSignalEngine.Signal resumed = research.onSweepTrade(104, 1, buy);
+        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, resumed.kind());
+        assertEquals(3, resumed.tradeCount());
+        // A zero-size callback carries no trade and breaks nothing.
+        FlowSignalEngine quiet = engine();
+        quiet.onSweepTrade(100, 1, buy);
+        quiet.onSweepTrade(101, 1, buy);
+        quiet.onSweepTradeWithoutPriceLevel(0);
+        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, quiet.onSweepTrade(102, 1, buy).kind());
+        // Display stream: the run is broken the same way.
+        FlowSignalEngine display = engine();
+        display.onTrade(100, 1, buy);
+        display.onTrade(101, 1, buy);
+        display.onTradeWithoutPriceLevel(1);
+        assertNull(display.onTrade(102, 1, buy));
+        FlowSignalEngine quietDisplay = engine();
+        quietDisplay.onTrade(100, 1, buy);
+        quietDisplay.onTrade(101, 1, buy);
+        quietDisplay.onTradeWithoutPriceLevel(0);
+        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, quietDisplay.onTrade(102, 1, buy).kind());
+        // A withdrawal waiting for its trade is dropped too, as for a trade of unknown direction; without the trade in
+        // between it fires.
+        FlowSignalEngine withdrawn = engine();
+        withdrawn.onBbo(10, 10);
+        withdrawn.onBbo(10, 1);
+        withdrawn.onTradeWithoutPriceLevel(1);
+        assertNull(withdrawn.onTrade(100, 1, buy));
+        FlowSignalEngine armed = engine();
+        armed.onBbo(10, 10);
+        armed.onBbo(10, 1);
+        assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL, armed.onTrade(100, 1, buy).kind());
+        // Each claims its own stream, and a negative size is refused.
+        try {
+            research.onTradeWithoutPriceLevel(1);
+            throw new AssertionError("a sweep instance accepted a display-stream trade without a price level");
+        } catch (IllegalStateException expected) { /* claimed */ }
+        try {
+            display.onSweepTradeWithoutPriceLevel(1);
+            throw new AssertionError("a display instance accepted a sweep-stream trade without a price level");
+        } catch (IllegalStateException expected) { /* claimed */ }
+        for (Runnable negative : new Runnable[]{
+                () -> engine().onTradeWithoutPriceLevel(-1), () -> engine().onSweepTradeWithoutPriceLevel(-1)}) {
+            try {
+                negative.run();
+                throw new AssertionError("a negative size was accepted");
+            } catch (IllegalArgumentException expected) { /* refused */ }
+        }
     }
 
     private static void detectsOnlyMonotonicKnownTradeSweep() {
@@ -393,6 +466,10 @@ public final class FlowSignalEngineTest {
         FlowSignalEngine.Signal askAgain = engine.onTrade(700, 3, FlowSignalEngine.Direction.BUY);
         assertEquals(askRun, askAgain.episode().sequence());
         assertEquals(2, askAgain.episode().signalIndex());
+    }
+
+    private static void assertTrue(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
     }
 
     private static void assertNull(Object value) {

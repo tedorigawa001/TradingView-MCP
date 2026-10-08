@@ -104,11 +104,11 @@ npm run test:bookmap-addon
 ```
 
 With the complete SDK, this tests the collector, signal engine, chart-marker
-presentation, and Bookmap signal adapter. Without the SDK, it tests the engine
-and marker presentation and reports the two adapter tests as skipped. `npm
-test` invokes this script, so GitHub Actions always compiles and tests the
-SDK-free signal and display logic while local development with Bookmap
-installed exercises all four Java tests.
+presentation, and the Bookmap research and display adapters. Without the SDK, it
+tests the engine and marker presentation and reports the three adapter tests as
+skipped. `npm test` invokes this script, so GitHub Actions always compiles and
+tests the SDK-free signal and display logic while local development with Bookmap
+installed exercises all five Java tests.
 
 ## Install and run
 
@@ -129,8 +129,16 @@ ULPs of that double. Genuine sub-tick prices, non-finite values and values
 outside the signed-int range are rejected. The replay report records the
 policy, normalized callbacks and rejected callbacks. Original raw bytes are
 never rewritten; results from the earlier strict-integer adapter remain separate.
+A rejected trade is not scored, but under `trade_without_price_level_breaks_run_v1`
+a positive-size one still breaks a sweep's run, whatever its side, as a trade of
+unknown direction does; on the chart stream it also drops a withdrawal waiting for
+its trade. Earlier builds skipped it, so a sell or unknown trade off the grid
+between two buys could join them into one buy sweep. The replay report records
+this as `sweep_continuity_policy`; results replayed without it remain separate.
 After reloading the research JAR, new signal JSONL records expose
-`price_level_policy: "nearest_integer_within_4_ulps_v1"` for installation verification.
+`price_level_policy: "nearest_integer_within_4_ulps_v1"` and
+`sweep_continuity_policy: "trade_without_price_level_breaks_run_v1"` for
+installation verification, and their `callback_sequence` also counts rejected trades.
 
 Each file starts independent detector and position state. Do not use this
 per-file utility to simulate overlapping sessions as one portfolio. Entry is

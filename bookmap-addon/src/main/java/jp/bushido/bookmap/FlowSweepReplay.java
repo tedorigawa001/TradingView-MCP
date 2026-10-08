@@ -26,7 +26,8 @@ public final class FlowSweepReplay {
             int size = Integer.parseInt(fields[3]);
             if (size < 0) throw new IllegalArgumentException("negative size");
             Integer level = FlowSignalEngine.normalizePriceLevel(rawPrice);
-            if (level == null) { rejected++; continue; }
+            // Not scored without a price level, but still a trade that breaks the run (BACKLOG 102-23).
+            if (level == null) { rejected++; engine.onSweepTradeWithoutPriceLevel(size); continue; }
             if (rawPrice != level.doubleValue()) { normalized++; if (size > 0) normalizedPositive++; }
             if (size > 0) eligiblePositive++;
             var signal = engine.onSweepTrade(level, size, direction);
@@ -34,6 +35,7 @@ public final class FlowSweepReplay {
                     + signal.tradeCount() + "\t" + signal.priceLevels() + "\t" + signal.aggressiveVolume()
                     + "\t" + signal.episode().sequence() + "\t" + signal.episode().signalIndex());
         }
+        System.out.println("#sweep_continuity\t" + FlowSignalEngine.SWEEP_CONTINUITY_POLICY);
         System.out.println("#normalization\t" + FlowSignalEngine.PRICE_LEVEL_POLICY + "\t"
                 + normalized + "\t" + rejected + "\t" + eligiblePositive + "\t" + normalizedPositive);
     }

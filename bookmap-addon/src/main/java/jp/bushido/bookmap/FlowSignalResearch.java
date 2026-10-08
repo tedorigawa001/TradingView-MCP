@@ -150,7 +150,11 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
     public synchronized void onTrade(double price, int size, TradeInfo tradeInfo) {
         if (engine == null || !hasBookmapTime()) return;
         Integer priceLevel = exactPriceLevel(price);
-        if (priceLevel == null) return;
+        if (priceLevel == null) {
+            // Not scored without a price level, but still a trade that breaks the run (BACKLOG 102-23).
+            engine.onTradeWithoutPriceLevel(size);
+            return;
+        }
         // Bookmap defines bid aggressor as a sell market order hitting the bid.
         FlowSignalEngine.Direction direction = tradeInfo == null ? null
                 : (tradeInfo.isBidAggressor
@@ -220,6 +224,7 @@ public final class FlowSignalResearch implements CustomModule, DepthDataListener
         try {
             writer.write("{\"schema_version\":\"1.2\",\"source\":\"bookmap_flow_signal_research\","
                     + "\"price_level_policy\":" + jsonString(FlowSignalEngine.PRICE_LEVEL_POLICY) + ","
+                    + "\"sweep_continuity_policy\":" + jsonString(FlowSignalEngine.SWEEP_CONTINUITY_POLICY) + ","
                     + "\"event_type\":" + jsonString(eventType) + ","
                     + "\"instrument_alias\":" + jsonString(alias) + ","
                     + "\"bookmap_time_ns\":"

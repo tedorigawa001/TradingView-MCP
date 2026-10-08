@@ -97,6 +97,9 @@ export function replayFile(path, config) {
   const lines = output.trim().split(/\r?\n/);
   const [tag, policy, normalized, rejected, eligiblePositive, normalizedPositive] = lines.pop().split('\t');
   if (tag !== '#normalization' || policy !== 'nearest_integer_within_4_ulps_v1') throw new Error('unsupported replay price policy');
+  // A trade without a price level breaks a sweep's run (BACKLOG 102-23); signals replayed under another rule are not these.
+  const [continuityTag, continuity] = (lines.pop() ?? '').split('\t');
+  if (continuityTag !== '#sweep_continuity' || continuity !== 'trade_without_price_level_breaks_run_v1') throw new Error('unsupported replay sweep continuity policy');
   for (const n of [normalized,rejected,eligiblePositive,normalizedPositive]) {
     if (!/^\d+$/.test(n ?? '')) throw new Error('invalid normalization count');
   }
@@ -110,6 +113,7 @@ export function replayFile(path, config) {
   return { source_file: resolve(path), raw_sha256: hash(bytes), engine_sha256: hash(readFileSync(resolve(artifacts.addon,'src/main/java/jp/bushido/bookmap/FlowSignalEngine.java'))), replay_class_sha256: classHashes, config,
     deterministic_replay: true, positive_trade_callbacks: trades.filter(r => r.size > 0).length,
     price_level_policy: policy,
+    sweep_continuity_policy: continuity,
     eligible_positive_trade_callbacks: Number(eligiblePositive),
     normalized_price_callbacks: Number(normalized),
     normalized_positive_trade_callbacks: Number(normalizedPositive),

@@ -17,6 +17,14 @@ public final class FlowSignalEngine {
 
     public static final String PRICE_LEVEL_POLICY = "nearest_integer_within_4_ulps_v1";
 
+    /**
+     * What a sweep's run may continue across (BACKLOG 102-23). A positive-size trade whose price is not a price level
+     * (normalizePriceLevel refuses it) is not scored, but it is still a trade between those around it, so it breaks the
+     * run as a trade of unknown direction does. Skipping it as though it had not happened let a sell or unknown trade
+     * between two buys join them into one buy sweep.
+     */
+    public static final String SWEEP_CONTINUITY_POLICY = "trade_without_price_level_breaks_run_v1";
+
     /** Recover only binary rounding noise in SDK price-level doubles, not sub-tick prices. */
     public static Integer normalizePriceLevel(double price) {
         if (!Double.isFinite(price) || price < Integer.MIN_VALUE || price > Integer.MAX_VALUE) return null;
@@ -276,6 +284,29 @@ public final class FlowSignalEngine {
         long now = monotonicNanos.getAsLong();
         Signal signal = updateSweep(priceLevel, size, direction, now);
         return signal == null ? null : withEpisode(signal, now);
+    }
+
+    /**
+     * Display stream: a trade whose price is not a price level (SWEEP_CONTINUITY_POLICY). As for a trade of unknown
+     * direction, the sweep and a withdrawal waiting for its trade are reset; absorption, kept per level, has no level to
+     * update. A zero-size callback carries no trade and changes nothing.
+     */
+    public void onTradeWithoutPriceLevel(int size) {
+        claimStream(TradeStream.DISPLAY);
+        sequence += 1;
+        if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
+        if (size == 0) return;
+        resetSweep();
+        withdrawalDirection = null;
+    }
+
+    /** Research stream counterpart of onTradeWithoutPriceLevel: the sweep's run is broken. */
+    public void onSweepTradeWithoutPriceLevel(int size) {
+        claimStream(TradeStream.SWEEP);
+        sequence += 1;
+        if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
+        if (size == 0) return;
+        resetSweep();
     }
 
     private Signal withEpisode(Signal signal, long nowNanos) {

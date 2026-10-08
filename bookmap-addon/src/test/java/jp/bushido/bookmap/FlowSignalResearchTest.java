@@ -25,6 +25,7 @@ public final class FlowSignalResearchTest {
         markerFailureDoesNotDisableEvidenceRecording();
         usesBookmapTimeForReplayWindowExpiry();
         rejectsNonIntegralPriceLevelsWithoutInventingASignal();
+        aTradeWithoutAPriceLevelBreaksTheRecordedSweep();
         System.out.println("FlowSignalResearchTest: PASS");
     }
 
@@ -181,6 +182,47 @@ public final class FlowSignalResearchTest {
         assertEquals(null, exactPriceLevel.invoke(null, 100.5));
         assertEquals(100, exactPriceLevel.invoke(null, 100.0));
         assertEquals(23053, exactPriceLevel.invoke(null, 23052.999999999996));
+    }
+
+    /** BACKLOG 102-23: a sell or unknown trade off the price grid between two buys breaks their run. */
+    private static void aTradeWithoutAPriceLevelBreaksTheRecordedSweep() throws Exception {
+        TradeInfo buy = new TradeInfo(false, false, false, false);
+        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null}) {
+            StringWriter output = new StringWriter();
+            FlowSignalResearch research = threeTradeResearch(output);
+            research.onTrade(100.0, 1, buy);
+            research.onTrade(101.0, 1, buy);
+            research.onTrade(101.5, 1, between);
+            research.onTrade(102.0, 1, buy);
+            assertEquals(0L, output.toString().lines().filter(line -> line.contains("\"event_type\":\"flow_signal\"")).count());
+        }
+        // Without it the three buys are a sweep, recorded with the rule that decided its run.
+        StringWriter output = new StringWriter();
+        FlowSignalResearch research = threeTradeResearch(output);
+        research.onTrade(100.0, 1, buy);
+        research.onTrade(101.0, 1, buy);
+        research.onTrade(102.0, 1, buy);
+        String recorded = lineWith(output.toString(), "\"event_type\":\"flow_signal\"");
+        assertContains(recorded, "\"kind\":\"TRADE_SWEEP\"");
+        assertContains(recorded, "\"sweep_continuity_policy\":\"" + FlowSignalEngine.SWEEP_CONTINUITY_POLICY + "\"");
+        // A trade without a price level is still a callback: it is counted in the sequence a signal records.
+        StringWriter counted = new StringWriter();
+        FlowSignalResearch afterOne = threeTradeResearch(counted);
+        afterOne.onTrade(99.5, 1, buy);
+        afterOne.onTrade(100.0, 1, buy);
+        afterOne.onTrade(101.0, 1, buy);
+        afterOne.onTrade(102.0, 1, buy);
+        assertContains(lineWith(counted.toString(), "\"event_type\":\"flow_signal\""), "\"callback_sequence\":4");
+    }
+
+    private static FlowSignalResearch threeTradeResearch(StringWriter output) throws Exception {
+        FlowSignalResearch research = research(output);
+        research.minimumSweepTrades = 3;
+        research.minimumSweepPriceLevels = 3;
+        Method createEngine = FlowSignalResearch.class.getDeclaredMethod("createEngine");
+        createEngine.setAccessible(true);
+        set(research, "engine", createEngine.invoke(research));
+        return research;
     }
 
     private static void usesBookmapTimeForReplayWindowExpiry() throws Exception {
