@@ -407,12 +407,11 @@ The preflight reports coverage only, classification reports contemporaneous froz
 
 ## Addendum: Bookmap Local Evidence Preflight (Backlog #83, 2026-08-13)
 
-`preflight_bookmap_flow_price_join` is the externally configurable local-evidence read boundary. It reads from `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY`, defaulting to `/Volumes/HD/bookmap_data` on macOS and a user-local directory on Windows/Linux, and accepts only a basename matching `bookmap-flow-*.jsonl`; path separators, traversal, absolute paths, and `bookmap-flow-signals-*` research outputs are rejected. The configured directory must be a real nonsymlink directory, and listed or selected sessions must be real nonsymlink regular files. A session is capped at 64 MiB and each JSONL line at 256 KiB before schema processing.
+`preflight_bookmap_flow_price_join` is the externally configurable local-evidence read boundary. It reads from `TRADINGVIEW_MCP_BOOKMAP_FLOW_DIRECTORY`, defaulting since BACKLOG 102-24 to the collector's `~/.tradingview-mcp/bookmap-data` on every platform (it was `/Volumes/HD/bookmap_data` on macOS and a user-local directory on Windows and Linux), and accepts only a basename matching `bookmap-flow-*.jsonl`; path separators, traversal, absolute paths, and `bookmap-flow-signals-*` research outputs are rejected. The configured directory must be a real nonsymlink directory, and listed or selected sessions must be real nonsymlink regular files. A session is capped at 64 MiB and each JSONL line at 256 KiB before schema processing.
 
 On Windows, the default Bookmap evidence directory was under
-`%LOCALAPPDATA%\TradingView-MCP\bookmap-data`; since BACKLOG 102-24 the reader's
-default on every platform is the collector's `~/.tradingview-mcp/bookmap-data`
-(`%USERPROFILE%\.tradingview-mcp\bookmap-data` on Windows), and the read boundary is otherwise unchanged. POSIX owner and mode checks do
+`%LOCALAPPDATA%\TradingView-MCP\bookmap-data` (under the home directory when LOCALAPPDATA was
+unset); it is now `%USERPROFILE%\.tradingview-mcp\bookmap-data`, and the read boundary is otherwise unchanged. POSIX owner and mode checks do
 not map to Windows ACLs, and Node.js does not expose `O_NOFOLLOW` on Windows.
 Both divergences are now named in code rather than implied: `posixModeEnforced`
 returns false on Windows, where Node synthesises a mode from the read-only

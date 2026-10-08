@@ -34,7 +34,17 @@ test("Bookmap evidence is read by default where the collector writes it, on ever
   // The defaults the reader had before, for pointing at sessions left there.
   assert.equal(earlierDefaultBookmapFlowDirectory("darwin"), "/Volumes/HD/bookmap_data");
   assert.equal(earlierDefaultBookmapFlowDirectory("win32", "C:\\Users\\tester\\AppData\\Local"), "C:\\Users\\tester\\AppData\\Local\\TradingView-MCP\\bookmap-data");
-  assert.equal(earlierDefaultBookmapFlowDirectory("win32", " "), null);
+  // With LOCALAPPDATA empty or unset it was under the home directory.
+  for (const empty of ["", " "]) {
+    assert.equal(earlierDefaultBookmapFlowDirectory("win32", empty, "C:\\Users\\tester"), "C:\\Users\\tester\\TradingView-MCP\\bookmap-data", JSON.stringify(empty));
+  }
+  const localAppData = process.env.LOCALAPPDATA;
+  delete process.env.LOCALAPPDATA;
+  try {
+    assert.equal(earlierDefaultBookmapFlowDirectory("win32", undefined, "C:\\Users\\tester"), "C:\\Users\\tester\\TradingView-MCP\\bookmap-data");
+  } finally {
+    if (localAppData !== undefined) process.env.LOCALAPPDATA = localAppData;
+  }
   assert.equal(earlierDefaultBookmapFlowDirectory("linux"), null);
 });
 

@@ -36,12 +36,16 @@ export function defaultBookmapFlowDirectory(platform = process.platform, home = 
   return (platform === "win32" ? win32 : posix).join(home, ".tradingview-mcp", "bookmap-data");
 }
 
-/** The reader's default before BACKLOG 102-24, where it differed from today's; null where it did not. */
+/**
+ * The reader's default before BACKLOG 102-24, where it differed from today's; null where it did not. On Windows it was
+ * under LOCALAPPDATA, or under the home directory when LOCALAPPDATA was unset or empty.
+ */
 export function earlierDefaultBookmapFlowDirectory(
   platform = process.platform,
   localAppData = process.env.LOCALAPPDATA,
+  home = homedir(),
 ): string | null {
   if (platform === "darwin") return "/Volumes/HD/bookmap_data";
-  if (platform === "win32" && localAppData?.trim()) return win32.join(localAppData.trim(), "TradingView-MCP", "bookmap-data");
+  if (platform === "win32") return win32.join(localAppData?.trim() || home, "TradingView-MCP", "bookmap-data");
   return null;
 }
