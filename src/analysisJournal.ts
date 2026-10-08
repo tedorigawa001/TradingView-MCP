@@ -362,7 +362,18 @@ export class AnalysisJournalStore {
     const lockPath = `${this.filePath}.lock`;
     const token = randomUUID();
     const deadline = Date.now() + LOCK_WAIT_MS;
-    while (true) {
+    const timedOut = (cause: NodeJS.ErrnoException | null) => new Error(
+      `timed out acquiring analysis journal lock at ${lockPath}; ` +
+        "if no TradingView-MCP process is using it, remove that lock file and retry",
+      { cause: cause ?? undefined },
+    );
+    // The deadline is checked before every attempt but the first, an immediate retry included, and no two retries in a
+    // row skip the sleep: a lock that kept vanishing or being recreated would otherwise be retried for good (BACKLOG
+    // 102-39).
+    let refusal: NodeJS.ErrnoException | null = null;
+    let retriedAtOnce = false;
+    for (let attempted = false; ; attempted = true) {
+      if (attempted && Date.now() >= deadline) throw timedOut(refusal);
       const attempt = await attemptLockFile(lockPath, "analysis journal lock", `${token} ${process.pid}\n`);
       if (attempt.taken) {
         return async () => {
@@ -386,20 +397,19 @@ export class AnalysisJournalStore {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      let refusal = attempt.refusal;
+      refusal = attempt.refusal;
+      let again = false;
       if (attempt.held) {
         if (!attempt.held.isFile() || attempt.held.isSymbolicLink()) throw new Error("analysis journal lock path is unsafe");
         const reclaimed = await this.reclaimStaleLock(lockPath, attempt.held);
-        if (reclaimed === true) continue;
-        if (reclaimed !== false) refusal = reclaimed;
+        if (reclaimed === true) again = true;
+        else if (reclaimed !== false) refusal = reclaimed;
       }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `timed out acquiring analysis journal lock at ${lockPath}; ` +
-            "if no TradingView-MCP process is using it, remove that lock file and retry",
-          { cause: refusal ?? undefined },
-        );
+      if (again && !retriedAtOnce) {
+        retriedAtOnce = true;
+        continue;
       }
+      retriedAtOnce = false;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }

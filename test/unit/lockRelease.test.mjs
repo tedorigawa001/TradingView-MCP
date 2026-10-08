@@ -39,6 +39,7 @@ fsp.open = async (path, flags, ...rest) => {
   if (!plan || String(path) !== plan.path) return real.open(path, flags, ...rest);
   const exclusive = typeof flags === "number" && (flags & constants.O_EXCL) !== 0;
   plan.calls[exclusive ? "create" : "read"] += 1;
+  if (!exclusive) plan.readAfterSleeps.push(sleeps);
   let handle;
   try {
     await inject(exclusive ? "create" : "read");
@@ -68,7 +69,9 @@ fsp.open = async (path, flags, ...rest) => {
 };
 fsp.unlink = async (path, ...rest) => {
   if (plan && String(path) === plan.path && plan.open > 0) plan.unlinkedWhileOpen = true;
-  return real.unlink(path, ...rest);
+  const removed = await real.unlink(path, ...rest);
+  if (plan && String(path) === plan.path) await plan.onUnlink?.();
+  return removed;
 };
 fsp.lstat = async (path, ...rest) => {
   if (plan && String(path) === plan.path) {
@@ -112,7 +115,7 @@ async function onPlatform(platform, run) {
     return await run((path) => {
       plan = {
         path, create: [], inspect: [], read: [], reread: [], write: [], calls: { create: 0, read: 0 },
-        open: 0, synced: false, unlinkedWhileOpen: false,
+        open: 0, synced: false, unlinkedWhileOpen: false, readAfterSleeps: [],
       };
       sleeps = 0;
       return plan;
@@ -250,8 +253,10 @@ test("a stale lock that vanishes while it is reclaimed is looked at again; one r
           faults(path)[at].push(code);
           const release = await acquire();
           assert.deepEqual(plan[at], [], `${name} ${code} at ${at}`);
-          // A lock being deleted is waited for; one that vanished is looked at again at once.
-          assert.equal(sleeps >= 1, code === "EPERM", `${name} ${code} at ${at}: ${sleeps} sleeps`);
+          // A lock being deleted is waited for; one that vanished is looked at again at once: the read after the fault
+          // comes with no sleep in between.
+          const [first, second] = plan.readAfterSleeps;
+          assert.equal(second > first, code === "EPERM", `${name} ${code} at ${at}: reads after ${plan.readAfterSleeps} sleeps`);
           assert.equal(plan.unlinkedWhileOpen, false, `${name}: the stale lock was unlinked with a handle open`);
           plan = null;
           await release();
@@ -370,4 +375,73 @@ test("a macro-surprise lock that vanishes while it is inspected is tried again a
     plan = null;
     await release();
   });
+});
+
+test("a lock that keeps vanishing or coming back while it is inspected or reclaimed sleeps, and ends at the deadline", { timeout: 20_000 }, async (t) => {
+  const staleLock = async (path) => {
+    const stale = new Date(Date.now() - 11 * 60_000);
+    await writeFile(path, heldBy(2147483646), { mode: 0o600 });
+    await utimes(path, stale, stale);
+  };
+  for (const name of [...reclaiming, "macro-surprise evidence"]) {
+    // Gone each time it is opened to be read: at most one retry in a row skips the sleep.
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      if (name === "macro-surprise evidence") await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      else await staleLock(path);
+      faults(path).read.push(...Array(1_000).fill("ENOENT"));
+      let readsBy;
+      plan.onSleep = () => { if (sleeps === 3) { passDeadlines(); readsBy = plan.calls.read; } };
+      await assert.rejects(acquire(), /timed out/, `${name} vanishing`);
+      assert.ok(sleeps >= 3 && plan.calls.read <= 2 * sleeps + 2, `${name} vanishing: ${sleeps} sleeps, ${plan.calls.read} reads`);
+      // Once the deadline has passed, no retry is made, not even an immediate one.
+      assert.equal(plan.calls.read, readsBy, `${name} vanishing: read again after the deadline`);
+    });
+    // A stale lock put back each time it is reclaimed.
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await staleLock(path);
+      faults(path);
+      let removals = 0;
+      plan.onUnlink = async () => { removals += 1; await staleLock(path); };
+      let removalsBy;
+      plan.onSleep = () => { if (sleeps === 3) { passDeadlines(); removalsBy = removals; } };
+      await assert.rejects(acquire(), /timed out/, `${name} coming back`);
+      assert.ok(sleeps >= 3 && removals <= 2 * sleeps + 2, `${name} coming back: ${sleeps} sleeps, ${removals} removals`);
+      assert.equal(removals, removalsBy, `${name} coming back: reclaimed again after the deadline`);
+      plan = null;
+      await real.unlink(path);
+    });
+  }
+});
+
+test("after a sleep, a lock that vanishes or is reclaimed again is retried at once again", async (t) => {
+  for (const name of [...reclaiming, "macro-surprise evidence"]) {
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      if (name === "macro-surprise evidence") {
+        // Vanished, held, vanished again: one sleep between the two vanishings, none after the second.
+        await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+        faults(path).read.push("ENOENT", "", "ENOENT");
+        plan.after = () => { if (plan.read.length === 0) return real.unlink(path); };
+      } else {
+        // Vanished, reclaimed (and put back once), reclaimed again: one sleep, between the two reclaims.
+        const stale = new Date(Date.now() - 11 * 60_000);
+        await writeFile(path, heldBy(2147483646), { mode: 0o600 });
+        await utimes(path, stale, stale);
+        faults(path).read.push("ENOENT");
+        let putBack = false;
+        plan.onUnlink = async () => {
+          if (putBack) return;
+          putBack = true;
+          await writeFile(path, heldBy(2147483646), { mode: 0o600 });
+          await utimes(path, stale, stale);
+        };
+      }
+      const release = await acquire();
+      assert.equal(sleeps, 1, name);
+      plan = null;
+      await release();
+    });
+  }
 });

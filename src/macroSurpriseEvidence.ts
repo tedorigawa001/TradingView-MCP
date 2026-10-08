@@ -182,7 +182,14 @@ export class MacroSurpriseEvidenceStore {
   private async acquireLock(): Promise<() => Promise<void>> {
     await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
     const path = `${this.filePath}.lock`; const token = randomUUID(); const deadline = Date.now() + LOCK_WAIT_MS;
-    while (true) {
+    const timedOut = (cause: NodeJS.ErrnoException | null) => new Error(`timed out acquiring macro-surprise evidence lock at ${path}`, { cause: cause ?? undefined });
+    // The deadline is checked before every attempt but the first, an immediate retry included, and no two retries in a
+    // row skip the sleep: a lock that kept vanishing or being recreated would otherwise be retried for good (BACKLOG
+    // 102-39).
+    let refusal: NodeJS.ErrnoException | null = null;
+    let retriedAtOnce = false;
+    for (let attempted = false; ; attempted = true) {
+      if (attempted && Date.now() >= deadline) throw timedOut(refusal);
       const attempt = await attemptLockFile(path, "macro surprise evidence lock", `${token}\n`);
       if (attempt.taken) {
         return async () => {
@@ -202,7 +209,8 @@ export class MacroSurpriseEvidenceStore {
         };
       }
       // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
-      let refusal = attempt.refusal;
+      refusal = attempt.refusal;
+      let again = false;
       if (attempt.held) {
         let handle;
         try {
@@ -212,16 +220,17 @@ export class MacroSurpriseEvidenceStore {
           if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
             await handle.readFile("utf8");
             const current = await lstat(path);
-            if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); continue; }
+            if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); again = true; }
           }
         } catch (inspectError) {
           // Removed since it was found: try again at once. Being deleted on Windows: wait for it.
-          if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          if (!lockBeingReleased(inspectError)) throw inspectError;
-          refusal = inspectError as NodeJS.ErrnoException;
+          if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") again = true;
+          else if (lockBeingReleased(inspectError)) refusal = inspectError as NodeJS.ErrnoException;
+          else throw inspectError;
         } finally { await handle?.close(); }
       }
-      if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`, { cause: refusal ?? undefined });
+      if (again && !retriedAtOnce) { retriedAtOnce = true; continue; }
+      retriedAtOnce = false;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
