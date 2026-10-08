@@ -1,6 +1,7 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { link, lstat, mkdtemp, open, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 /**
  * Persist a newly-created directory entry where the host exposes directory
@@ -155,6 +156,51 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
   const handle = await open(directory, constants.O_RDONLY | noFollowFlag(platform));
   try {
     await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Publishes `body` at `destination` as a new file and never replaces one already there (BACKLOG 102-25). The file is
+ * written and synced in a fresh directory beside the destination and hard-linked into place, which fails if the name
+ * is taken, so the destination never holds a partial file and a failed run leaves whatever was there as it was; the
+ * staging directory is removed either way. When the name is taken, the file there is compared with `body`:
+ * "identical" when it holds the same bytes, "different" otherwise, both left as they are for the caller to judge.
+ * A symbolic link there is refused rather than followed.
+ */
+export async function publishImmutableFile(
+  destination: string,
+  body: string | Buffer,
+  label: string,
+): Promise<"created" | "identical" | "different"> {
+  const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
+  const directory = dirname(destination);
+  const staging = await mkdtemp(join(directory, ".publish-"));
+  try {
+    const staged = join(staging, "file");
+    const handle = await openExclusiveFile(staged, label);
+    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    try {
+      await link(staged, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return await holdsExactly(destination, bytes, label) ? "identical" : "different";
+    }
+    await syncDirectoryEntry(directory);
+    return "created";
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function holdsExactly(path: string, bytes: Buffer, label: string): Promise<boolean> {
+  const entry = await lstat(path);
+  if (entry.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
+  if (!entry.isFile() || entry.size !== bytes.length) return false;
+  const handle = await open(path, constants.O_RDONLY | noFollowFlag());
+  try {
+    return (await handle.readFile()).equals(bytes);
   } finally {
     await handle.close();
   }

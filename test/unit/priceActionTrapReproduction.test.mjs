@@ -1,14 +1,18 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   PRICE_ACTION_TRAP_REPRODUCTION_V1,
   detectPriceActionTrap,
   runPriceActionTrapReproduction,
 } from "../../build/priceActionTrapReproduction.js";
-import { parsePriceActionTrapReproductionCliArguments } from "../../build/priceActionTrapReproductionCli.js";
+import { parsePriceActionTrapReproductionCliArguments, runPriceActionTrapReproductionCli } from "../../build/priceActionTrapReproductionCli.js";
 
 const bar = (index, values) => ({
   timeIso: new Date(Date.UTC(2024, 0, 1, 0, index * 15)).toISOString(),
@@ -254,5 +258,155 @@ test("every horizon says which of the two it is, so a null is never ambiguous", 
   for (const point of Object.values(fixtureRun().response_curve)) {
     assert.ok(point.status === "measured" || point.status === "not_evaluated");
     assert.equal(point.status === "measured", Number.isFinite(point.mean_bps));
+  }
+});
+
+// BACKLOG 102-25: a reproduction is published as immutable evidence. The file at the output path is never replaced or
+// left half-written: a re-run that produces the same bytes finds them there, a different result is refused with the
+// earlier file kept, and a failed write leaves the path as it was. Everything runs on made-up aggregates in a
+// temporary directory; the faults are injected into node:fs/promises, whose live bindings the publication reads.
+const CLI = fileURLToPath(new URL("../../build/priceActionTrapReproductionCli.js", import.meta.url));
+const fsp = createRequire(import.meta.url)("node:fs/promises");
+const realLink = fsp.link;
+const earlierEvidence = '{"earlier":"evidence"}\n';
+
+async function reproductionWorkspace(t) {
+  const dir = await mkdtemp(join(tmpdir(), "trap-reproduction-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const argv = ["--confirm-local-import"];
+  for (const symbol of PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols) {
+    const path = join(dir, `${symbol}.json`);
+    await writeFile(path, JSON.stringify(fixtureSeries(symbol)));
+    argv.push("--aggregate", path);
+  }
+  // A directory that does not exist yet, which the run creates.
+  const out = join(dir, "evidence", "four-bar-trap-v1.json");
+  return { dir, out, argv: [...argv, "--out", out] };
+}
+const publishedBody = () => `${JSON.stringify(fixtureRun(), null, 2)}\n`;
+const stagingLeft = async (out) => (await readdir(dirname(out))).filter((name) => name !== basename(out));
+
+test("a reproduction never overwrites a different file at its output path", async (t) => {
+  const { dir, out, argv } = await reproductionWorkspace(t);
+  await mkdir(dirname(out));
+  await writeFile(out, earlierEvidence);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TRADINGVIEW_MCP|TV_MCP|TV_CDP|OANDA)/.test(key)));
+  const run = spawnSync(process.execPath, [CLI, ...argv], {
+    encoding: "utf8", timeout: 60_000, env: { ...env, HOME: dir, USERPROFILE: dir, LOCALAPPDATA: dir },
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stdout, "");
+  assert.match(run.stderr, /already holds a different file, and reproduction evidence is never overwritten/);
+  assert.ok(run.stderr.includes(`this run's artifact_hash is ${fixtureRun().artifact_hash}`), run.stderr);
+  assert.equal(await readFile(out, "utf8"), earlierEvidence);
+  assert.deepEqual(await stagingLeft(out), []);
+  // Nor one of the same length that differs in a single byte.
+  const altered = `[${publishedBody().slice(1)}`;
+  await writeFile(out, altered);
+  await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
+  assert.equal(await readFile(out, "utf8"), altered);
+  // Something that is not a file at all is not replaced either.
+  await rm(out);
+  await mkdir(out);
+  await assert.rejects(runPriceActionTrapReproductionCli(argv), process.platform === "win32" ? Error : /never overwritten/);
+  assert.equal((await lstat(out)).isDirectory(), true);
+  assert.deepEqual(await stagingLeft(out), []);
+});
+
+test("a re-run on the same inputs finds its reproduction already published and leaves it", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  // The new name is synced into its directory where the host can sync one.
+  const realOpen = fsp.open;
+  let directoryOpened = false;
+  fsp.open = async (path, ...rest) => {
+    if (String(path) === dirname(out)) directoryOpened = true;
+    return realOpen(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  let first;
+  try {
+    first = await runPriceActionTrapReproductionCli(argv);
+  } finally {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  }
+  assert.equal(directoryOpened, process.platform !== "win32");
+  assert.equal(first.written, true);
+  assert.equal(first.artifact_hash, fixtureRun().artifact_hash);
+  assert.equal(first.output_path, out);
+  assert.equal(await readFile(out, "utf8"), publishedBody());
+  if (process.platform !== "win32") assert.equal((await stat(out)).mode & 0o777, 0o600);
+  const before = await stat(out);
+  assert.deepEqual(await runPriceActionTrapReproductionCli(argv), { ...first, written: false });
+  const after = await stat(out);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.deepEqual(await stagingLeft(out), []);
+  // Two runs at once: one publishes, the other finds the same bytes there.
+  await rm(out);
+  const both = await Promise.all([runPriceActionTrapReproductionCli(argv), runPriceActionTrapReproductionCli(argv)]);
+  assert.deepEqual(both.map((summary) => summary.written).sort(), [false, true]);
+  assert.equal(await readFile(out, "utf8"), publishedBody());
+  assert.deepEqual(await stagingLeft(out), []);
+});
+
+test("a write that fails leaves no reproduction behind, and an earlier one as it was", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  const probe = await open(argv.at(-3), "r");
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  for (const earlier of [null, earlierEvidence]) {
+    if (earlier !== null) await writeFile(out, earlier);
+    for (const method of ["writeFile", "sync"]) {
+      const original = proto[method];
+      proto[method] = async () => { throw new Error(`synthetic ${method} failure`); };
+      try {
+        await assert.rejects(runPriceActionTrapReproductionCli(argv), new RegExp(`synthetic ${method} failure`));
+      } finally {
+        proto[method] = original;
+      }
+      if (earlier === null) await assert.rejects(stat(out), { code: "ENOENT" });
+      else assert.equal(await readFile(out, "utf8"), earlier);
+      assert.deepEqual(await stagingLeft(out), []);
+    }
+  }
+  await rm(out);
+  assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
+  assert.equal(await readFile(out, "utf8"), publishedBody());
+});
+
+test("a reproduction another run publishes meanwhile is kept, and agreed with only if identical", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  for (const [competitor, agrees] of [[publishedBody(), true], ['{"another":"run"}\n', false]]) {
+    // The other run's file lands between this run's staging and its link into place.
+    fsp.link = async (from, to) => {
+      if (String(to) === out) await writeFile(out, competitor);
+      return realLink(from, to);
+    };
+    syncBuiltinESMExports();
+    try {
+      if (agrees) assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
+      else await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
+    } finally {
+      fsp.link = realLink;
+      syncBuiltinESMExports();
+    }
+    assert.equal(await readFile(out, "utf8"), competitor);
+    assert.deepEqual(await stagingLeft(out), []);
+    await rm(out);
+  }
+});
+
+test("a symbolic link at the output path is refused and what it points at left alone", { skip: process.platform === "win32" && "symbolic links need privileges on Windows" }, async (t) => {
+  const { dir, out, argv } = await reproductionWorkspace(t);
+  const target = join(dir, "elsewhere.json");
+  await mkdir(dirname(out));
+  await symlink(target, out);
+  for (const contents of ["untouched\n", publishedBody()]) {
+    await writeFile(target, contents);
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /must be a regular file, not a symbolic link/);
+    assert.equal(await readFile(target, "utf8"), contents);
+    assert.equal((await lstat(out)).isSymbolicLink(), true);
+    assert.deepEqual(await stagingLeft(out), []);
   }
 });

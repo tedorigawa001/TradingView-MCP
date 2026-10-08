@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { runPriceActionTrapReproduction } from "./priceActionTrapReproduction.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
+import { publishImmutableFile } from "./fsDurability.js";
 
 type AggregateFile = { manifest: FxCsvM1AggregationManifest; bars: AggregatedBar[] };
 
@@ -31,13 +32,23 @@ export function parsePriceActionTrapReproductionCliArguments(argv: string[]): Pr
   };
 }
 
-async function main(): Promise<void> {
-  const args = parsePriceActionTrapReproductionCliArguments(process.argv.slice(2));
+/**
+ * Runs the reproduction and publishes it as immutable evidence (BACKLOG 102-25): the file at the output path is never
+ * replaced, and never left half-written. The study is deterministic, so a re-run on the same inputs produces the same
+ * bytes and finds them already there (`written: false`); a run whose result differs is refused and the earlier file
+ * kept. A reproduction of changed inputs goes to a new path with --out, or to the default once the earlier file has
+ * been moved away.
+ */
+export async function runPriceActionTrapReproductionCli(argv: string[]) {
+  const args = parsePriceActionTrapReproductionCliArguments(argv);
   const inputs = await Promise.all(args.aggregatePaths.map(async (path) => JSON.parse(await readFile(path, "utf8")) as AggregateFile));
   const result = runPriceActionTrapReproduction(inputs);
   await mkdir(dirname(args.outputPath), { recursive: true, mode: 0o700 });
-  await writeFile(args.outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({
+  const publication = await publishImmutableFile(args.outputPath, `${JSON.stringify(result, null, 2)}\n`, "price-action trap reproduction");
+  if (publication === "different") {
+    throw new Error(`${args.outputPath} already holds a different file, and reproduction evidence is never overwritten; this run's artifact_hash is ${result.artifact_hash}. Pass --out with a new path, or move the existing file away first`);
+  }
+  return {
     contract_hash: result.contract_hash,
     artifact_hash: result.artifact_hash,
     events: result.event_ledger.length,
@@ -49,11 +60,14 @@ async function main(): Promise<void> {
       p_value: result.empirical_null.p_value,
     },
     output_path: args.outputPath,
-  })}\n`);
+    written: publication === "created",
+  };
 }
 
 if (isCliEntrypoint(import.meta.url)) {
-  main().catch((error) => {
+  runPriceActionTrapReproductionCli(process.argv.slice(2)).then((summary) => {
+    process.stdout.write(`${JSON.stringify(summary)}\n`);
+  }).catch((error) => {
     process.stderr.write(`price-action trap reproduction failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });
