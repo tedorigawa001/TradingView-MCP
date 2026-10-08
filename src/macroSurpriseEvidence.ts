@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { assertAppendableJsonl, noFollowFlag, openExclusiveFile, posixModeEnforced, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -183,14 +183,16 @@ export class MacroSurpriseEvidenceStore {
     await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
     const path = `${this.filePath}.lock`; const token = randomUUID(); const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
-      try {
-        const handle = await openExclusiveFile(path, "macro surprise evidence lock");
-        try { await handle.writeFile(`${token}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
+      const attempt = await attemptLockFile(path, "macro surprise evidence lock", `${token}\n`);
+      if (attempt.taken) {
         return async () => {
+          // The read handle is closed before the unlink: on Windows an open handle keeps a deleted name taken, which
+          // makes the next owner wait (BACKLOG 102-39).
           let handle;
           try {
             handle = await open(path, constants.O_RDONLY | noFollowFlag());
             const stat = await handle.stat(); const contents = await handle.readFile("utf8");
+            await handle.close(); handle = undefined;
             const current = await lstat(path);
             if (!stat.isFile() || current.ino !== stat.ino || current.mtimeMs !== stat.mtimeMs || contents !== `${token}\n`) throw new Error("macro-surprise evidence lock ownership was lost");
             await unlink(path);
@@ -198,13 +200,12 @@ export class MacroSurpriseEvidenceStore {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
           } finally { await handle?.close(); }
         };
-      } catch (error) {
-        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39), and one
-        // removed since the create found it is tried again at once.
-        const releasing = lockBeingReleased(error);
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw error;
+      }
+      // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
+      let refusal = "refused" in attempt ? attempt.refused : undefined;
+      if ("held" in attempt) {
         let handle;
-        if (!releasing) try {
+        try {
           handle = await open(path, constants.O_RDONLY | noFollowFlag());
           const stat = await handle.stat();
           if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
@@ -214,12 +215,14 @@ export class MacroSurpriseEvidenceStore {
             if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); continue; }
           }
         } catch (inspectError) {
+          // Removed since it was found: try again at once. Being deleted on Windows: wait for it.
           if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") continue;
           if (!lockBeingReleased(inspectError)) throw inspectError;
+          refusal = inspectError as NodeJS.ErrnoException;
         } finally { await handle?.close(); }
-        if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      if (Date.now() >= deadline) throw new Error(`timed out acquiring macro-surprise evidence lock at ${path}`, { cause: refusal });
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
 

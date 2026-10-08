@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -403,8 +403,9 @@ export class StrategyResearchJournalStore {
       await unlink(lockPath);
       return true;
     } catch (err) {
-      // Gone, or going on Windows, since it was found: look again.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(err)) return true;
+      // Gone since it was found: look again at once. Being deleted on Windows: wait for it, within the deadline.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+      if (lockBeingReleased(err)) return false;
       throw err;
     } finally { await handle?.close(); }
   }
@@ -415,9 +416,8 @@ export class StrategyResearchJournalStore {
     const token = randomUUID();
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
-      try {
-        const handle = await openExclusiveFile(lockPath, "strategy research journal lock");
-        try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
+      const attempt = await attemptLockFile(lockPath, "strategy research journal lock", `${token} ${process.pid}\n`);
+      if (attempt.taken) {
         return async () => {
           let lock;
           try {
@@ -432,19 +432,16 @@ export class StrategyResearchJournalStore {
             if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
           } finally { await lock?.close(); }
         };
-      } catch (err) {
-        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
-        const releasing = lockBeingReleased(err);
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw err;
-        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
-        if (stat === "gone") continue;
-        if (stat !== "releasing") {
-          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("strategy research journal lock path is unsafe");
-          if (await this.reclaimStaleLock(lockPath, stat)) continue;
-        }
-        if (Date.now() >= deadline) throw new Error(`timed out acquiring strategy research journal lock at ${lockPath}`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
+      if ("held" in attempt) {
+        if (!attempt.held.isFile() || attempt.held.isSymbolicLink()) throw new Error("strategy research journal lock path is unsafe");
+        if (await this.reclaimStaleLock(lockPath, attempt.held)) continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out acquiring strategy research journal lock at ${lockPath}`, { cause: "refused" in attempt ? attempt.refused : undefined });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
 

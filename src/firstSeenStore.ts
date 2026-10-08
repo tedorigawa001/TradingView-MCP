@@ -3,7 +3,7 @@ import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { dirname, resolve } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, type LockFileAttempt } from "./fsDurability.js";
 
 const DEFAULT_LOCK_WAIT_MS = 30_000;
 function lockWaitMilliseconds(): number {
@@ -91,22 +91,23 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     const token = randomUUID();
     const started = performance.now();
     const deadline = started + budgetMs;
-    const timeout = () => Object.assign(new Error(
+    const timeout = (cause?: unknown) => Object.assign(new Error(
       `timed out acquiring ${this.label} history lock after ${Math.round(budgetMs)}ms: ${lockPath}; ` +
       "another process may still hold it; do not remove a live owner's lock",
+      { cause },
     ), { code: "HISTORY_LOCK_TIMEOUT" });
     let attempted = false;
+    let refusal: NodeJS.ErrnoException | undefined;
     while (true) {
-      if (attempted && performance.now() >= deadline) throw timeout();
+      if (attempted && performance.now() >= deadline) throw timeout(refusal);
       attempted = true;
+      let attempt: LockFileAttempt;
       try {
-        const handle = await openExclusiveFile(lockPath, `${this.label} lock`);
-        try {
-          await handle.writeFile(`${token} ${process.pid}\n`, "utf8");
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
+        attempt = await attemptLockFile(lockPath, `${this.label} lock`, `${token} ${process.pid}\n`);
+      } catch (err) {
+        throw new Error(`unable to acquire ${this.label} history lock`, { cause: err });
+      }
+      if (attempt.taken) {
         return async () => {
           let handle;
           try {
@@ -128,22 +129,16 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
             await handle?.close();
           }
         };
-      } catch (err) {
-        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
-        const releasing = lockBeingReleased(err);
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) {
-          throw new Error(`unable to acquire ${this.label} history lock`, { cause: err });
-        }
-        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
-        if (stat === "gone") continue;
-        if (stat !== "releasing" && (!stat.isFile() || stat.isSymbolicLink())) {
-          throw new Error(`${this.label} history lock path is unsafe`);
-        }
-        const remaining = deadline - performance.now();
-        if (remaining <= 0) throw timeout();
-        // Jitter reduces synchronized polling by collectors in different processes.
-        await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 25 + Math.random() * 50)));
       }
+      // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
+      refusal = "refused" in attempt ? attempt.refused : undefined;
+      if ("held" in attempt && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
+        throw new Error(`${this.label} history lock path is unsafe`);
+      }
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw timeout(refusal);
+      // Jitter reduces synchronized polling by collectors in different processes.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 25 + Math.random() * 50)));
     }
   }
 

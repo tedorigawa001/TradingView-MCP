@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
+import { attemptLockFile, lockBeingReleased, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -37,8 +37,9 @@ export class ChartOperationLock {
     try {
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
     } catch (error) {
-      // Gone, or going on Windows, since it was found: look again.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(error)) return true;
+      // Gone since it was found: look again at once. Being deleted on Windows: wait for it, within the deadline.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      if (lockBeingReleased(error)) return false;
       throw error;
     }
     try {
@@ -55,7 +56,8 @@ export class ChartOperationLock {
       await unlink(this.filePath);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || lockBeingReleased(error)) return true;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      if (lockBeingReleased(error)) return false;
       throw error;
     } finally { await handle.close(); }
   }
@@ -65,14 +67,18 @@ export class ChartOperationLock {
     const token = randomUUID();
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
-      try {
-        const handle = await openExclusiveFile(this.filePath, "chart operation lock");
-        try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
+      const attempt = await attemptLockFile(this.filePath, "chart operation lock", `${token} ${process.pid}\n`);
+      if (attempt.taken) {
         return async () => {
-          const owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+          // The read handle is closed before the unlink: on Windows an open handle keeps a deleted name taken, which
+          // makes the next owner wait (BACKLOG 102-39).
+          let owner;
           try {
+            owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
             const before = await owner.stat();
             const contents = await owner.readFile("utf8");
+            await owner.close();
+            owner = undefined;
             const current = await lstat(this.filePath);
             if (!before.isFile() || current.ino !== before.ino || !contents.startsWith(`${token} `)) {
               throw new Error("chart operation lock ownership was lost");
@@ -80,21 +86,18 @@ export class ChartOperationLock {
             await unlink(this.filePath);
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          } finally { await owner.close(); }
+          } finally { await owner?.close(); }
         };
-      } catch (error) {
-        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
-        const releasing = lockBeingReleased(error);
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw error;
-        const stat = releasing ? "releasing" : await inspectLockFile(this.filePath);
-        if (stat === "gone") continue;
-        if (stat !== "releasing") {
-          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("chart operation lock path is unsafe");
-          if (await this.reclaimStaleLock(stat)) continue;
-        }
-        if (Date.now() >= deadline) throw new Error(`timed out acquiring chart operation lock at ${this.filePath}`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
+      if ("held" in attempt) {
+        if (!attempt.held.isFile() || attempt.held.isSymbolicLink()) throw new Error("chart operation lock path is unsafe");
+        if (await this.reclaimStaleLock(attempt.held)) continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out acquiring chart operation lock at ${this.filePath}`, { cause: "refused" in attempt ? attempt.refused : undefined });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
 }

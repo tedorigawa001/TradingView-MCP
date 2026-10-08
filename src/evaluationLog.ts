@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, openExclusiveFile, inspectLockFile, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, attemptLockFile } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -30,9 +30,8 @@ export class AppendOnlyEvaluationLog {
     const token = randomUUID();
     const deadline = Date.now() + LOCK_WAIT_MS;
     while (true) {
-      try {
-        const handle = await openExclusiveFile(lockPath, "evaluation log lock");
-        try { await handle.writeFile(`${token} ${process.pid}\n`, "utf8"); } finally { await handle.close(); }
+      const attempt = await attemptLockFile(lockPath, "evaluation log lock", `${token} ${process.pid}\n`);
+      if (attempt.taken) {
         return async () => {
           let handle;
           try {
@@ -51,18 +50,15 @@ export class AppendOnlyEvaluationLog {
             await handle?.close();
           }
         };
-      } catch (err) {
-        // A lock Windows is still deleting is waited for like a held one (lockBeingReleased, BACKLOG 102-39).
-        const releasing = lockBeingReleased(err);
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST" && !releasing) throw err;
-        const stat = releasing ? "releasing" : await inspectLockFile(lockPath);
-        if (stat === "gone") continue;
-        if (stat !== "releasing" && (!stat.isFile() || stat.isSymbolicLink())) {
-          throw new Error("evaluation log lock path is unsafe");
-        }
-        if (Date.now() >= deadline) throw new Error("timed out acquiring evaluation log lock");
-        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      // Held by another process, or being deleted on Windows: waited for alike (BACKLOG 102-39).
+      if ("held" in attempt && (!attempt.held.isFile() || attempt.held.isSymbolicLink())) {
+        throw new Error("evaluation log lock path is unsafe");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("timed out acquiring evaluation log lock", { cause: "refused" in attempt ? attempt.refused : undefined });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
 

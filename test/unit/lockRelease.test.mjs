@@ -1,9 +1,10 @@
-// BACKLOG 102-39: Windows refuses to create, open or inspect a lock file it is still deleting, with EPERM or EACCES.
-// Every lock loop must wait on that as on a lock that is held, and only on Windows. The faults are injected into
-// node:fs/promises, whose live bindings the stores read, and the platform is set per test.
+// BACKLOG 102-39: Windows refuses to create or open a lock file it is still deleting, with EPERM. Every lock loop must
+// wait on that as on a lock that is held, sleeping and within its deadline, while a refusal with no lock file there,
+// a refusal off Windows and a failed write of its own lock still fail. The faults are injected into node:fs/promises,
+// whose live bindings the stores read; the platform, the clock and the sleeps are the test's.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { constants } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -14,56 +15,87 @@ import { AppendOnlyEvaluationLog } from "../../build/evaluationLog.js";
 import { StrategyResearchJournalStore } from "../../build/strategyResearchJournal.js";
 import { MacroSurpriseEvidenceStore } from "../../build/macroSurpriseEvidence.js";
 import { ChartOperationLock } from "../../build/chartOperationLock.js";
-import { inspectLockFile, lockBeingReleased } from "../../build/fsDurability.js";
+import { lockBeingReleased } from "../../build/fsDurability.js";
 
 const fsp = createRequire(import.meta.url)("node:fs/promises");
 const real = { open: fsp.open, lstat: fsp.lstat, unlink: fsp.unlink };
 /**
- * Faults for one lock path, each list taken in order: `create` for its exclusive create, `inspect` for an lstat that
- * follows a create finding the lock taken, `read` for opening it to read, and `reread` for an lstat that follows such
- * an open (a stale lock's reclaim checking it is still the one it read). When `inspect` runs out, the held lock is
- * removed, as the deletion Windows was finishing completes.
+ * Faults for one lock path, each list taken in order: `create` for its exclusive create, `inspect` for the lstat that
+ * follows a create that failed, `read` for opening it to read, `reread` for an lstat that follows such an open (a
+ * stale lock's reclaim checking it is still the one it read), and `write` for writing a lock just created. `after`
+ * runs after each injected fault; `calls` counts the creates and reads of the path.
  */
 let plan = null;
 const fault = (code) => Object.assign(new Error(`${code}: injected`), { code });
+async function inject(kind) {
+  const code = plan[kind].shift();
+  if (!code) return;
+  await plan.after?.(kind);
+  throw fault(code);
+}
 fsp.open = async (path, flags, ...rest) => {
-  if (plan && String(path) === plan.path) {
-    const exclusive = typeof flags === "number" && (flags & constants.O_EXCL) !== 0;
-    const code = (exclusive ? plan.create : plan.read).shift();
-    if (code) throw fault(code);
-    try {
-      const handle = await real.open(path, flags, ...rest);
-      if (!exclusive) plan.opened = true;
-      return handle;
-    } catch (error) {
-      if (exclusive && error.code === "EEXIST") plan.armed = true;
-      throw error;
-    }
+  if (!plan || String(path) !== plan.path) return real.open(path, flags, ...rest);
+  const exclusive = typeof flags === "number" && (flags & constants.O_EXCL) !== 0;
+  plan.calls[exclusive ? "create" : "read"] += 1;
+  let handle;
+  try {
+    await inject(exclusive ? "create" : "read");
+    handle = await real.open(path, flags, ...rest);
+  } catch (error) {
+    if (exclusive) plan.armed = true;
+    throw error;
   }
-  return real.open(path, flags, ...rest);
+  if (!exclusive) plan.opened = true;
+  if (exclusive && plan.write.length > 0) {
+    const code = plan.write.shift();
+    handle.writeFile = async () => { throw fault(code); };
+  }
+  return handle;
 };
 fsp.lstat = async (path, ...rest) => {
-  if (plan?.armed && String(path) === plan.path && plan.inspect.length > 0) {
-    plan.armed = false;
-    const code = plan.inspect.shift();
-    if (plan.inspect.length === 0) await real.unlink(path);
-    throw fault(code);
-  }
-  if (plan?.opened && String(path) === plan.path && (plan.reread ?? []).length > 0) {
-    plan.opened = false;
-    throw fault(plan.reread.shift());
+  if (plan && String(path) === plan.path) {
+    if (plan.armed) {
+      plan.armed = false;
+      await inject("inspect");
+    } else if (plan.opened) {
+      plan.opened = false;
+      await inject("reread");
+    }
   }
   return real.lstat(path, ...rest);
 };
 syncBuiltinESMExports();
 
-// Windows is simulated elsewhere by turning POSIX checks off, which is safe; another platform cannot be simulated on
-// Windows, where it would turn POSIX mode checks on against Windows files. Tests for any platform run on the real one.
+// The clock both deadlines read, which a test moves on to end a wait, and the lock loops' sleeps, counted.
+const realNow = { date: Date.now, performance: performance.now.bind(performance) };
+const realSetTimeout = globalThis.setTimeout;
+let offset = 0;
+let sleeps = 0;
+Date.now = () => realNow.date() + offset;
+performance.now = () => realNow.performance() + offset;
+globalThis.setTimeout = (callback, ms, ...rest) => {
+  if (ms >= 20 && ms <= 80) {
+    sleeps += 1;
+    plan?.onSleep?.();
+  }
+  return realSetTimeout(callback, ms, ...rest);
+};
+const passDeadlines = () => { offset += 3_600_000; };
+
+// Windows is simulated by turning POSIX checks off, which is safe; another platform cannot be simulated on Windows,
+// where it would turn POSIX mode checks on against Windows files. Tests meant for any platform run on the real one.
 const here = process.platform;
 async function onPlatform(platform, run) {
   const actual = process.platform;
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
-  try { return await run(); } finally {
+  plan = null;
+  try {
+    return await run((path) => {
+      plan = { path, create: [], inspect: [], read: [], reread: [], write: [], calls: { create: 0, read: 0 } };
+      sleeps = 0;
+      return plan;
+    });
+  } finally {
     Object.defineProperty(process, "platform", { value: actual, configurable: true });
     plan = null;
   }
@@ -77,114 +109,161 @@ const locks = {
   "macro-surprise evidence": (dir) => [`${dir}/evidence.jsonl.lock`, () => new MacroSurpriseEvidenceStore(`${dir}/evidence.jsonl`).acquireLock()],
   "chart operation lock": (dir) => [`${dir}/chart.lock`, () => new ChartOperationLock(`${dir}/chart.lock`).acquire()],
 };
+const reclaiming = ["analysis journal", "strategy research journal", "chart operation lock"];
+const heldBy = (pid) => `00000000-0000-4000-8000-000000000000 ${pid}\n`;
+const codeOf = (error) => (error.cause ?? error).code;
 
-async function directory(t) {
+async function setUp(t, name) {
   const dir = await mkdtemp(join(tmpdir(), "lock-release-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  return dir;
+  const [path, acquire] = locks[name](dir);
+  // Each store sets up its directory on a first acquisition, with no faults.
+  await acquire().then((release) => release());
+  return [path, acquire];
 }
 
-test("Windows codes for a file being deleted are told apart from the same codes elsewhere", async (t) => {
-  for (const code of ["EPERM", "EACCES"]) {
-    assert.equal(lockBeingReleased(fault(code), "win32"), true, code);
-    assert.equal(lockBeingReleased(fault(code), "darwin"), false, code);
-    assert.equal(lockBeingReleased(fault(code), "linux"), false, code);
+test("on Windows EPERM alone is read as a lock file being deleted", () => {
+  assert.equal(lockBeingReleased(fault("EPERM"), "win32"), true);
+  for (const platform of ["darwin", "linux"]) assert.equal(lockBeingReleased(fault("EPERM"), platform), false, platform);
+  for (const code of ["EACCES", "EEXIST", "ENOENT", "EBUSY", undefined]) {
+    assert.equal(lockBeingReleased(fault(code), "win32"), false, String(code));
   }
-  for (const code of ["EEXIST", "ENOENT", "EBUSY", undefined]) assert.equal(lockBeingReleased(fault(code), "win32"), false, String(code));
   assert.equal(lockBeingReleased(null, "win32"), false);
-  const dir = await directory(t);
-  assert.equal(await inspectLockFile(`${dir}/absent.lock`), "gone");
-  await writeFile(`${dir}/held.lock`, "x");
-  assert.equal((await inspectLockFile(`${dir}/held.lock`)).isFile(), true);
 });
 
-test("on Windows every lock waits through a lock being deleted, at its create and at its inspection", async (t) => {
-  for (const [name, setUp] of Object.entries(locks)) {
-    // The create itself is refused while the previous owner's lock is being deleted.
-    await onPlatform("win32", async () => {
-      const [path, acquire] = setUp(await directory(t));
-      plan = { path, create: ["EPERM", "EACCES", "EPERM"], inspect: [], read: [] };
+test("on Windows every lock sleeps through a lock file being deleted, at its create and while it is held", async (t) => {
+  for (const name of Object.keys(locks)) {
+    // Created and inspected while the previous owner's lock is being deleted, twice.
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      faults(path).create.push("EPERM", "EPERM");
+      plan.inspect.push("EPERM", "EPERM");
       const release = await acquire();
-      assert.deepEqual(plan.create, [], name);
+      assert.deepEqual([plan.create, plan.inspect], [[], []], name);
+      assert.ok(sleeps >= 2, `${name} slept ${sleeps} times`);
       plan = null;
       await release();
     });
-    // The lock is held when the create runs, and inspecting it is refused while its deletion completes.
-    await onPlatform("win32", async () => {
-      const [path, acquire] = setUp(await directory(t));
-      await acquire().then((release) => release());
-      await writeFile(path, `00000000-0000-4000-8000-000000000000 ${process.pid}\n`, { mode: 0o600 });
-      plan = { path, create: [], inspect: ["EPERM", "EACCES"], read: [] };
-      if (name === "macro-surprise evidence") Object.assign(plan, { inspect: [], read: ["EPERM"], create: [] });
-      const pending = acquire();
-      if (name === "macro-surprise evidence") setTimeout(() => real.unlink(path), 60);
-      const release = await pending;
-      assert.deepEqual([plan.inspect, plan.read], [[], []], name);
+    // Held when the create runs, then refused while its deletion completes.
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+      const kind = name === "macro-surprise evidence" ? "read" : "inspect";
+      faults(path)[kind].push("EPERM", "EPERM");
+      plan.after = async () => { if (plan[kind].length === 0) await real.unlink(path); };
+      const release = await acquire();
+      assert.deepEqual(plan[kind], [], name);
+      assert.ok(sleeps >= 2, `${name} slept ${sleeps} times`);
       plan = null;
       await release();
     });
   }
 });
 
-test("off Windows the same codes still fail at once", { skip: here === "win32" && "another platform cannot be simulated on Windows" }, async (t) => {
-  for (const [name, setUp] of Object.entries(locks)) {
-    await onPlatform(here, async () => {
-      const [path, acquire] = setUp(await directory(t));
-      plan = { path, create: ["EPERM"], inspect: [], read: [] };
-      await assert.rejects(acquire(), (error) => (error.cause ?? error).code === "EPERM", name);
+test("a create refused with no lock file there is tried again once, then fails as a real denial", async (t) => {
+  for (const name of Object.keys(locks)) {
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      // Once: a deletion that finished in between.
+      faults(path).create.push("EPERM");
+      const release = await acquire();
+      assert.deepEqual([plan.calls.create, sleeps], [2, 0], name);
+      plan = null;
+      await release();
+      // Twice with no lock to blame: a denial, thrown at once.
+      faults(path).create.push("EPERM", "EPERM", "EPERM");
+      await assert.rejects(acquire(), (error) => codeOf(error) === "EPERM", name);
+      assert.deepEqual([plan.calls.create, sleeps], [2, 0], name);
     });
   }
 });
 
-test("a lock that stays unavailable on Windows still ends in the lock's own timeout", async (t) => {
-  await onPlatform("win32", async () => {
-    const dir = await directory(t);
-    const log = new AppendOnlyFirstSeenLog(`${dir}/log.jsonl`, "test", (x) => x, { maxFileBytes: 10_000, maxRecordBytes: 1_000 });
-    plan = { path: `${dir}/log.jsonl.lock`, create: Array(10_000).fill("EPERM"), inspect: [], read: [] };
-    await assert.rejects(log.acquireFileLock(150), { code: "HISTORY_LOCK_TIMEOUT" });
-  });
+test("off Windows EPERM still fails at once", { skip: here === "win32" && "another platform cannot be simulated on Windows" }, async (t) => {
+  for (const name of Object.keys(locks)) {
+    await onPlatform(here, async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      faults(path).create.push("EPERM");
+      await assert.rejects(acquire(), (error) => codeOf(error) === "EPERM", name);
+      assert.equal(plan.calls.create, 1, name);
+    });
+  }
 });
 
-test("a macro-surprise lock that vanishes while it is inspected is tried again, on any platform", async (t) => {
-  await onPlatform(here, async () => {
-    const [path, acquire] = locks["macro-surprise evidence"](await directory(t));
-    await acquire().then((release) => release());
-    await writeFile(path, `00000000-0000-4000-8000-000000000000 ${process.pid}\n`, { mode: 0o600 });
-    plan = { path, create: [], inspect: [], read: ["ENOENT"] };
-    const pending = acquire();
-    setTimeout(() => real.unlink(path), 60);
-    const release = await pending;
-    assert.deepEqual(plan.read, []);
-    plan = null;
-    await release();
-  });
-});
-
-test("a stale lock that vanishes, or is being deleted, while it is reclaimed is looked at again", async (t) => {
-  const stale = new Date(Date.now() - 11 * 60_000);
-  const reclaiming = {
-    "analysis journal": locks["analysis journal"],
-    "strategy research journal": locks["strategy research journal"],
-    "chart operation lock": locks["chart operation lock"],
-  };
-  for (const [name, setUp] of Object.entries(reclaiming)) {
-    // ENOENT anywhere; EPERM only on Windows, where it means the file is being deleted.
-    for (const [platform, code] of [[here, "ENOENT"], ["win32", "EPERM"]]) {
-      await onPlatform(platform, async () => {
-        const [path, acquire] = setUp(await directory(t));
-        await acquire().then((release) => release());
-        // A lock left by a process that no longer runs, old enough to reclaim.
-        // At the open that reads it, or at the check after reading it.
-        for (const at of ["read", "reread"]) {
-          await writeFile(path, "00000000-0000-4000-8000-000000000000 2147483646\n", { mode: 0o600 });
-          await utimes(path, stale, stale);
-          plan = { path, create: [], inspect: [], read: [], reread: [], [at]: [code] };
-          const release = await acquire();
-          assert.deepEqual(plan[at], [], `${name} ${code} at ${at}`);
-          plan = null;
-          await release();
-        }
+test("a lock file refused for good ends in the lock's own timeout, which names the refusal", async (t) => {
+  for (const name of Object.keys(locks)) {
+    // The deadline passes during an attempt, or during a sleep.
+    for (const when of ["after", "onSleep"]) {
+      await onPlatform("win32", async (faults) => {
+        const [path, acquire] = await setUp(t, name);
+        faults(path).create.push(...Array(1_000).fill("EPERM"));
+        plan.inspect.push(...Array(1_000).fill("EPERM"));
+        plan[when] = () => { if (sleeps === 3) passDeadlines(); };
+        await assert.rejects(acquire(), (error) => /timed out/.test(error.message) && error.cause?.code === "EPERM", `${name} ${when}`);
+        assert.ok(sleeps >= 3 && plan.calls.create < 50, `${name} ${when}: ${sleeps} sleeps, ${plan.calls.create} creates`);
       });
     }
   }
+});
+
+test("a stale lock that vanishes while it is reclaimed is looked at again; one refused is waited for", async (t) => {
+  const staleLock = async (path) => {
+    // Left by a process that no longer runs, and old enough to reclaim.
+    const stale = new Date(Date.now() - 11 * 60_000);
+    await writeFile(path, heldBy(2147483646), { mode: 0o600 });
+    await utimes(path, stale, stale);
+  };
+  for (const name of reclaiming) {
+    for (const [platform, code] of [[here, "ENOENT"], ["win32", "EPERM"]]) {
+      // At the open that reads it, or at the check after reading it.
+      for (const at of ["read", "reread"]) {
+        await onPlatform(platform, async (faults) => {
+          const [path, acquire] = await setUp(t, name);
+          await staleLock(path);
+          faults(path)[at].push(code);
+          const release = await acquire();
+          assert.deepEqual(plan[at], [], `${name} ${code} at ${at}`);
+          // A lock being deleted is waited for; one that vanished is looked at again at once.
+          assert.equal(sleeps >= 1, code === "EPERM", `${name} ${code} at ${at}: ${sleeps} sleeps`);
+          plan = null;
+          await release();
+        });
+      }
+    }
+    // Refused for good, the reclaim waits within the deadline instead of retrying at once.
+    await onPlatform("win32", async (faults) => {
+      const [path, acquire] = await setUp(t, name);
+      await staleLock(path);
+      faults(path).read.push(...Array(1_000).fill("EPERM"));
+      plan.after = () => { if (sleeps === 3) passDeadlines(); };
+      await assert.rejects(acquire(), /timed out/, name);
+      assert.ok(sleeps >= 3 && plan.calls.read < 50, `${name}: ${sleeps} sleeps, ${plan.calls.read} reads`);
+    });
+  }
+});
+
+test("a lock that failed to be written is removed and fails at once, on any platform", async (t) => {
+  for (const name of Object.keys(locks)) {
+    for (const platform of new Set([here, "win32"])) {
+      await onPlatform(platform, async (faults) => {
+        const [path, acquire] = await setUp(t, name);
+        faults(path).write.push("EPERM");
+        await assert.rejects(acquire(), (error) => codeOf(error) === "EPERM", `${name} on ${platform}`);
+        assert.deepEqual([existsSync(path), sleeps], [false, 0], `${name} on ${platform}`);
+      });
+    }
+  }
+});
+
+test("a macro-surprise lock that vanishes while it is inspected is tried again at once, on any platform", async (t) => {
+  await onPlatform(here, async (faults) => {
+    const [path, acquire] = await setUp(t, "macro-surprise evidence");
+    await writeFile(path, heldBy(process.pid), { mode: 0o600 });
+    faults(path).read.push("ENOENT");
+    // Removed for real once the inspection has been told it was.
+    plan.after = () => real.unlink(path);
+    const release = await acquire();
+    assert.deepEqual([plan.read, sleeps], [[], 0]);
+    plan = null;
+    await release();
+  });
 });
