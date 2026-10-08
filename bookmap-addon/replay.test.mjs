@@ -58,8 +58,10 @@ test('a trade off the price grid between two buys breaks their run in the raw-to
       writeFileSync(path,rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
       return replayFile(path,config).sweep_signals;
     };
+    // An unknown aggressor cannot reach this path: the collector records it with is_otc null, which parseRaw refuses
+    // as a whole file. The engine test covers it on the TSV the Java replay reads.
     assert.equal(sweeps(trade(3,101.5,'sell')),0);
-    assert.equal(sweeps(trade(3,101.5,'unknown')),0);
+    assert.equal(sweeps(trade(3,101.5,'buy')),0);
     // Carrying no quantity, it is no trade and breaks nothing.
     assert.equal(sweeps(trade(3,101.5,'sell',0)),1);
   } finally { rmSync(dir,{recursive:true,force:true}); }

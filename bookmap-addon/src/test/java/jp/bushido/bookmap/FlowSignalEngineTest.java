@@ -156,14 +156,15 @@ public final class FlowSignalEngineTest {
     /** BACKLOG 102-23: a trade whose price is not a price level is still a trade between those around it. */
     private static void aTradeWithoutAPriceLevelBreaksTheRun() {
         FlowSignalEngine.Direction buy = FlowSignalEngine.Direction.BUY;
-        // Research stream: two buys, a trade without a level, a buy: no three-trade run, and the run starts again after it.
-        FlowSignalEngine research = engine();
-        assertNull(research.onSweepTrade(100, 1, buy));
-        assertNull(research.onSweepTrade(101, 1, buy));
-        research.onSweepTradeWithoutPriceLevel(1);
-        assertNull(research.onSweepTrade(102, 1, buy));
-        assertNull(research.onSweepTrade(103, 1, buy));
-        FlowSignalEngine.Signal resumed = research.onSweepTrade(104, 1, buy);
+        FlowSignalEngine.Direction sell = FlowSignalEngine.Direction.SELL;
+        // Sweep stream: two buys, a trade without a level, a buy: no three-trade run, and the run starts again after it.
+        FlowSignalEngine sweep = engine();
+        assertNull(sweep.onSweepTrade(100, 1, buy));
+        assertNull(sweep.onSweepTrade(101, 1, buy));
+        sweep.onSweepTradeWithoutPriceLevel(1);
+        assertNull(sweep.onSweepTrade(102, 1, buy));
+        assertNull(sweep.onSweepTrade(103, 1, buy));
+        FlowSignalEngine.Signal resumed = sweep.onSweepTrade(104, 1, buy);
         assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, resumed.kind());
         assertEquals(3, resumed.tradeCount());
         // A zero-size callback carries no trade and breaks nothing.
@@ -172,39 +173,63 @@ public final class FlowSignalEngineTest {
         quiet.onSweepTrade(101, 1, buy);
         quiet.onSweepTradeWithoutPriceLevel(0);
         assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, quiet.onSweepTrade(102, 1, buy).kind());
-        // Display stream: the run is broken the same way.
-        FlowSignalEngine display = engine();
-        display.onTrade(100, 1, buy);
-        display.onTrade(101, 1, buy);
-        display.onTradeWithoutPriceLevel(1);
-        assertNull(display.onTrade(102, 1, buy));
-        FlowSignalEngine quietDisplay = engine();
-        quietDisplay.onTrade(100, 1, buy);
-        quietDisplay.onTrade(101, 1, buy);
-        quietDisplay.onTradeWithoutPriceLevel(0);
-        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, quietDisplay.onTrade(102, 1, buy).kind());
-        // A withdrawal waiting for its trade is dropped too, as for a trade of unknown direction; without the trade in
-        // between it fires.
-        FlowSignalEngine withdrawn = engine();
-        withdrawn.onBbo(10, 10);
-        withdrawn.onBbo(10, 1);
-        withdrawn.onTradeWithoutPriceLevel(1);
-        assertNull(withdrawn.onTrade(100, 1, buy));
-        FlowSignalEngine armed = engine();
-        armed.onBbo(10, 10);
-        armed.onBbo(10, 1);
-        assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL, armed.onTrade(100, 1, buy).kind());
+        // Chart stream: broken the same way whatever the side, and started again after it.
+        for (FlowSignalEngine.Direction between : new FlowSignalEngine.Direction[]{sell, null, buy}) {
+            FlowSignalEngine chart = engine();
+            chart.onTrade(100, 1, buy);
+            chart.onTrade(101, 1, buy);
+            chart.onTradeWithoutPriceLevel(1, between);
+            assertNull(chart.onTrade(102, 1, buy));
+            assertNull(chart.onTrade(103, 1, buy));
+            assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, chart.onTrade(104, 1, buy).kind());
+        }
+        FlowSignalEngine quietChart = engine();
+        quietChart.onTrade(100, 1, buy);
+        quietChart.onTrade(101, 1, buy);
+        quietChart.onTradeWithoutPriceLevel(0, sell);
+        assertEquals(FlowSignalEngine.SignalKind.TRADE_SWEEP, quietChart.onTrade(102, 1, buy).kind());
+        // A buy withdrawal waiting for its trade is dropped by a buy or unknown trade without a level, which could have
+        // been it, and left waiting by a sell, as a sell on the grid leaves it.
+        for (FlowSignalEngine.Direction between : new FlowSignalEngine.Direction[]{buy, null, sell}) {
+            FlowSignalEngine withdrawn = engine();
+            withdrawn.onBbo(10, 10);
+            withdrawn.onBbo(10, 1);
+            withdrawn.onTradeWithoutPriceLevel(1, between);
+            FlowSignalEngine.Signal next = withdrawn.onTrade(100, 1, buy);
+            if (between == sell) assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_LIQUIDITY_WITHDRAWAL, next.kind());
+            else assertNull(next);
+        }
+        // It is a callback all the same, counted in the sequence a later signal carries.
+        FlowSignalEngine countedSweep = engine();
+        countedSweep.onSweepTradeWithoutPriceLevel(1);
+        countedSweep.onSweepTrade(100, 1, buy);
+        countedSweep.onSweepTrade(101, 1, buy);
+        assertEquals(4L, countedSweep.onSweepTrade(102, 1, buy).sequence());
+        FlowSignalEngine countedChart = engine();
+        countedChart.onTradeWithoutPriceLevel(1, null);
+        countedChart.onTrade(100, 1, buy);
+        countedChart.onTrade(101, 1, buy);
+        assertEquals(4L, countedChart.onTrade(102, 1, buy).sequence());
+        // Absorption, kept per level, is untouched: a burst at one level still counts across it.
+        FlowSignalEngine absorbing = new FlowSignalEngine(
+                new FlowSignalEngine.Settings(100, 2, 10, 5, 0.5, 10_000, 5_000), new TestClock());
+        absorbing.onDepth(false, 100, 10);
+        absorbing.onSnapshotEnd();
+        assertNull(absorbing.onTrade(100, 4, buy));
+        assertNull(absorbing.onTrade(100, 4, buy));
+        absorbing.onTradeWithoutPriceLevel(1, buy);
+        assertEquals(FlowSignalEngine.SignalKind.POSSIBLE_PASSIVE_ABSORPTION, absorbing.onTrade(100, 4, buy).kind());
         // Each claims its own stream, and a negative size is refused.
         try {
-            research.onTradeWithoutPriceLevel(1);
-            throw new AssertionError("a sweep instance accepted a display-stream trade without a price level");
+            sweep.onTradeWithoutPriceLevel(1, buy);
+            throw new AssertionError("a sweep instance accepted a chart-stream trade without a price level");
         } catch (IllegalStateException expected) { /* claimed */ }
         try {
-            display.onSweepTradeWithoutPriceLevel(1);
-            throw new AssertionError("a display instance accepted a sweep-stream trade without a price level");
+            quietChart.onSweepTradeWithoutPriceLevel(1);
+            throw new AssertionError("a chart instance accepted a sweep-stream trade without a price level");
         } catch (IllegalStateException expected) { /* claimed */ }
         for (Runnable negative : new Runnable[]{
-                () -> engine().onTradeWithoutPriceLevel(-1), () -> engine().onSweepTradeWithoutPriceLevel(-1)}) {
+                () -> engine().onTradeWithoutPriceLevel(-1, buy), () -> engine().onSweepTradeWithoutPriceLevel(-1)}) {
             try {
                 negative.run();
                 throw new AssertionError("a negative size was accepted");

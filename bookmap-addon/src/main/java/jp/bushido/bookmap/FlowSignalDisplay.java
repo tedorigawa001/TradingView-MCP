@@ -125,14 +125,14 @@ public final class FlowSignalDisplay implements CustomModule, DepthDataListener,
     public synchronized void onTrade(double price, int size, TradeInfo tradeInfo) {
         if (engine == null || !hasBookmapTime()) return;
         Integer priceLevel = FlowSignalEngine.normalizePriceLevel(price);
-        if (priceLevel == null) {
-            // Not scored without a price level, but still a trade that breaks the run (BACKLOG 102-23).
-            engine.onTradeWithoutPriceLevel(size);
-            return;
-        }
         FlowSignalEngine.Direction direction = tradeInfo == null ? null
                 : (tradeInfo.isBidAggressor
                         ? FlowSignalEngine.Direction.SELL : FlowSignalEngine.Direction.BUY);
+        if (priceLevel == null) {
+            // Not scored without a price level, but still a trade that breaks the run (BACKLOG 102-23).
+            engine.onTradeWithoutPriceLevel(size, direction);
+            return;
+        }
         FlowSignalEngine.Signal signal = engine.onTrade(priceLevel, size, direction);
         if (signal == null || !signal.episode().startsEpisode()) return;
         display(signal);

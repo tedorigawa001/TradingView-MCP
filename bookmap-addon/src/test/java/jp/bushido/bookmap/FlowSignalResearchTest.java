@@ -184,17 +184,33 @@ public final class FlowSignalResearchTest {
         assertEquals(23053, exactPriceLevel.invoke(null, 23052.999999999996));
     }
 
-    /** BACKLOG 102-23: a sell or unknown trade off the price grid between two buys breaks their run. */
+    /** BACKLOG 102-23: a trade off the price grid between two buys breaks their run, whatever its side. */
     private static void aTradeWithoutAPriceLevelBreaksTheRecordedSweep() throws Exception {
         TradeInfo buy = new TradeInfo(false, false, false, false);
-        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null}) {
-            StringWriter output = new StringWriter();
-            FlowSignalResearch research = threeTradeResearch(output);
-            research.onTrade(100.0, 1, buy);
-            research.onTrade(101.0, 1, buy);
-            research.onTrade(101.5, 1, between);
-            research.onTrade(102.0, 1, buy);
-            assertEquals(0L, output.toString().lines().filter(line -> line.contains("\"event_type\":\"flow_signal\"")).count());
+        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null, buy}) {
+            for (int size : new int[]{1, 0}) {
+                StringWriter output = new StringWriter();
+                FlowSignalResearch research = threeTradeResearch(output);
+                research.onTrade(100.0, 1, buy);
+                research.onTrade(101.0, 1, buy);
+                research.onTrade(101.5, size, between);
+                research.onTrade(102.0, 1, buy);
+                // Carrying no quantity, it is no trade and breaks nothing.
+                assertEquals(size == 0 ? 1L : 0L, output.toString().lines()
+                        .filter(line -> line.contains("\"event_type\":\"flow_signal\"")).count());
+            }
+        }
+        // A buy withdrawal waiting for its trade outlasts a sell off the grid, as it outlasts one on it; a buy or unknown
+        // trade off the grid, which could have been its trade, drops it.
+        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null, buy}) {
+            StringWriter withdrawals = new StringWriter();
+            FlowSignalResearch waiting = threeTradeResearch(withdrawals);
+            waiting.onBbo(99, 100, 101, 100);
+            waiting.onBbo(99, 100, 101, 10);
+            waiting.onTrade(101.5, 1, between);
+            waiting.onTrade(100.0, 1, buy);
+            assertEquals(between != null && between.isBidAggressor ? 1L : 0L, withdrawals.toString().lines()
+                    .filter(line -> line.contains("\"kind\":\"POSSIBLE_LIQUIDITY_WITHDRAWAL\"")).count());
         }
         // Without it the three buys are a sweep, recorded with the rule that decided its run.
         StringWriter output = new StringWriter();

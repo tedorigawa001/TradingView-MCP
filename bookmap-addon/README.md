@@ -78,18 +78,20 @@ and finally the JDK on `PATH`. Set `BOOKMAP_HOME` on Windows to the directory
 whose `lib` subdirectory contains the two Bookmap SDK JARs.
 
 When both required Bookmap SDK JARs are available under the default macOS
-Bookmap install or configured `BOOKMAP_HOME`, the command creates two
-delayed/Replay-only JARs:
+Bookmap install or configured `BOOKMAP_HOME`, the command creates the three JARs
+listed under Artifacts:
 
 - `bookmap-addon/dist/bushidoyasu_flow_collector_delayed_replay_v1_1.jar`:
-  raw evidence collector.
+  raw evidence collector, for delayed and Replay data.
 - `bookmap-addon/dist/bushidoyasu_flow_signal_research_delayed_replay_v1_2.jar`:
-  provisional flow-signal recorder with in-Bookmap chart markers.
+  provisional flow-signal recorder with in-Bookmap chart markers, for delayed and
+  Replay data.
+- `bookmap-addon/dist/bushidoyasu_flow_signal_display_v1_0.jar`:
+  chart markers only, keeping nothing.
 
 The collector artifact deliberately contains `FlowCollector` only. The pure
-research classes `FlowSignalEngine` and `FlowSignalMarker` are packaged only
-into the signal-research JAR. The two JARs cannot contain one another's
-Bookmap module. No display-only real-time JAR exists yet.
+classes `FlowSignalEngine` and `FlowSignalMarker` are packaged into the
+signal-research and display JARs. No JAR contains another's Bookmap module.
 
 The licensed Bookmap SDK is not available on GitHub-hosted runners. If either
 SDK dependency is absent, the build compiles only the SDK-free
@@ -131,9 +133,11 @@ policy, normalized callbacks and rejected callbacks. Original raw bytes are
 never rewritten; results from the earlier strict-integer adapter remain separate.
 A rejected trade is not scored, but under `trade_without_price_level_breaks_run_v1`
 a positive-size one still breaks a sweep's run, whatever its side, as a trade of
-unknown direction does; on the chart stream it also drops a withdrawal waiting for
-its trade. Earlier builds skipped it, so a sell or unknown trade off the grid
-between two buys could join them into one buy sweep. The replay report records
+unknown direction does. On the chart stream, which the research recorder and the
+display module both use, it also drops a withdrawal waiting for its trade when it
+is on that side or of unknown direction, so recorded withdrawals follow the same
+rule. Earlier builds skipped it, so a sell or unknown trade off the grid between
+two buys could join them into one buy sweep. The replay report records
 this as `sweep_continuity_policy`; results replayed without it remain separate.
 After reloading the research JAR, new signal JSONL records expose
 `price_level_policy: "nearest_integer_within_4_ulps_v1"` and

@@ -17,17 +17,30 @@ public final class FlowSignalDisplayTest {
         System.out.println("FlowSignalDisplayTest: PASS");
     }
 
-    /** BACKLOG 102-23: a sell or unknown trade off the price grid between two buys breaks their run. */
+    /** BACKLOG 102-23: a trade off the price grid between two buys breaks their run, whatever its side. */
     private static void aTradeWithoutAPriceLevelBreaksTheDrawnSweep() throws Exception {
         TradeInfo buy = new TradeInfo(false, false, false, false);
-        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null}) {
-            RecordingIndicator indicator = new RecordingIndicator();
-            FlowSignalDisplay display = display(indicator);
-            display.onTrade(100.0, 1, buy);
-            display.onTrade(101.0, 1, buy);
-            display.onTrade(101.5, 1, between);
-            display.onTrade(102.0, 1, buy);
-            assertEquals(0, indicator.icons);
+        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null, buy}) {
+            for (int size : new int[]{1, 0}) {
+                RecordingIndicator indicator = new RecordingIndicator();
+                FlowSignalDisplay display = display(indicator);
+                display.onTrade(100.0, 1, buy);
+                display.onTrade(101.0, 1, buy);
+                display.onTrade(101.5, size, between);
+                display.onTrade(102.0, 1, buy);
+                // Carrying no quantity, it is no trade and breaks nothing.
+                assertEquals(size == 0 ? 1 : 0, indicator.icons);
+            }
+        }
+        // A buy withdrawal waiting for its trade outlasts a sell off the grid; a buy or unknown trade off the grid drops it.
+        for (TradeInfo between : new TradeInfo[]{new TradeInfo(false, true, false, false), null, buy}) {
+            RecordingIndicator withdrawals = new RecordingIndicator();
+            FlowSignalDisplay waiting = display(withdrawals);
+            waiting.onBbo(99, 100, 101, 100);
+            waiting.onBbo(99, 100, 101, 10);
+            waiting.onTrade(101.5, 1, between);
+            waiting.onTrade(100.0, 1, buy);
+            assertEquals(between != null && between.isBidAggressor ? 1 : 0, withdrawals.icons);
         }
         // Without it the three buys are a sweep, and its marker is drawn.
         RecordingIndicator indicator = new RecordingIndicator();

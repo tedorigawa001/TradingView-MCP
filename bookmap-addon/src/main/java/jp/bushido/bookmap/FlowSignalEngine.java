@@ -287,20 +287,24 @@ public final class FlowSignalEngine {
     }
 
     /**
-     * Display stream: a trade whose price is not a price level (SWEEP_CONTINUITY_POLICY). As for a trade of unknown
-     * direction, the sweep and a withdrawal waiting for its trade are reset; absorption, kept per level, has no level to
-     * update. A zero-size callback carries no trade and changes nothing.
+     * Chart stream (onTrade, which the research recorder and the display module both use): a trade whose price is not a
+     * price level (SWEEP_CONTINUITY_POLICY). It breaks the sweep's run whatever its side. A withdrawal waiting for its
+     * trade is dropped when this trade could be it, as it is for a trade of unknown direction: the aggression it waited
+     * for came at a price that cannot be scored. A trade on the other side leaves it waiting, as one on the grid does.
+     * Absorption, kept per level, has no level to update. A zero-size callback carries no trade and changes nothing.
+     *
+     * @param direction null when Bookmap did not provide a reliable aggressor
      */
-    public void onTradeWithoutPriceLevel(int size) {
+    public void onTradeWithoutPriceLevel(int size, Direction direction) {
         claimStream(TradeStream.DISPLAY);
         sequence += 1;
         if (size < 0) throw new IllegalArgumentException("trade size must be non-negative");
         if (size == 0) return;
         resetSweep();
-        withdrawalDirection = null;
+        if (direction == null || direction == withdrawalDirection) withdrawalDirection = null;
     }
 
-    /** Research stream counterpart of onTradeWithoutPriceLevel: the sweep's run is broken. */
+    /** Sweep stream (onSweepTrade, the offline replay) counterpart of onTradeWithoutPriceLevel. */
     public void onSweepTradeWithoutPriceLevel(int size) {
         claimStream(TradeStream.SWEEP);
         sequence += 1;
