@@ -63,11 +63,19 @@ export class CotFirstSeenStore {
       });
       const records = await this.log.readAllUnlocked();
       const latestSeen = records.at(-1)?.first_seen_at;
-      if (latestSeen && candidates.some((item) => item.first_seen_at < latestSeen)) throw new Error("COT first-seen clock moved backwards");
+      const currentFor = (candidate: CotFirstSeenRecord) =>
+        records.filter((item) => item.symbol === candidate.symbol && item.observation_date === candidate.observation_date).at(-1);
+      // Only a version that will be appended must not be older than the log's last. A run takes its time before it waits
+      // for the lock, so another process (the MCP server) may append, later, meanwhile; a version already recorded
+      // unchanged is returned as it is, as the real-yield store does (BACKLOG 102-29). Checked before anything is
+      // appended, so a refused batch writes nothing.
+      if (latestSeen && candidates.some((item) => currentFor(item)?.value_hash !== item.value_hash && item.first_seen_at < latestSeen)) {
+        throw new Error("COT first-seen clock moved backwards");
+      }
       let sequence = records.length;
       const results: CotFirstSeenRecord[] = [];
       for (const candidate of candidates) {
-        const current = records.filter((item) => item.symbol === candidate.symbol && item.observation_date === candidate.observation_date).at(-1);
+        const current = currentFor(candidate);
         if (current?.value_hash === candidate.value_hash) {
           results.push(current);
           continue;
