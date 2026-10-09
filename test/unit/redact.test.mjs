@@ -133,6 +133,9 @@ const LEAKS_102_27 = [
   ["X-Auth: Token hunter2", "X-Auth: ***"],
   ["auth: token ghp_hunter2", "auth: ***"],
   ["es-auth: ApiKey hunter2", "es-auth: ***"],
+  ["X-Auth: api-key hunter2", "X-Auth: ***"],
+  ["X-Auth: Token: hunter2", "X-Auth: ***"],
+  ["X-Auth: DPoP hunter2", "X-Auth: ***"],
   ["&quot;password&quot;: Token hunter2", "&quot;password&quot;: ***"],
   // An unquoted value may start with or hold brackets, "<", ">" or a backslash, and ";" or "&" before more of it.
   ["password=(hunter2)", "password=***"],
@@ -148,6 +151,15 @@ const LEAKS_102_27 = [
   ["password=`hunter2`", "password=***"],
   ["password=Xy7&&hunter2", "password=***"],
   ["token=https://h.example/cb?a=1&&sig=hunter2", "token=***"],
+  // An unquoted value stops before the next secret name or scheme, so that one keeps its own mask (102-27 third review).
+  ["Server=db;Password=abc;Token='hunter2'", "Server=db;Password=***;Token='***'"],
+  ["password=Xy7&&token='hunter2'", "password=***&&token='***'"],
+  ["X-Auth: Token abc]client_secret='hunter2'", "X-Auth: ***]client_secret='***'"],
+  ["session_id=abc|Bearer hunter2", "session_id=***|Bearer ***"],
+  ["Bearer abc:token='hunter2'", "Bearer ***:token='***'"],
+  // A run of separators at the end is not part of the value; nor are backslashes before a quote.
+  ["password=abc123;;", "password=***;;"],
+  [String.raw`password=ab\\"cd`, String.raw`password=***\\"cd`],
   ["redirect_token=https://h.example/cb?a=1;;sig=hunter2 done", "redirect_token=*** done"],
   ["httpAuth=bob:hunter2", "httpAuth=***"],
   // A name runs on past the secret word: "_value_primary" is 14 characters.
@@ -179,6 +191,8 @@ const LEAKS_102_27 = [
   ["&quot;token&quot;:&quot;hunter2&quot;", "&quot;token&quot;:***&quot;"],
   ["&quot;password&quot;:&quot;correct horse hunter2&quot;", "&quot;password&quot;:***&quot;"],
   ["&#34;token&#34;:&#34;hunter2&#34;", "&#34;token&#34;:***&#34;"],
+  ["&#x22;token&#x22;:&#x22;hunter2&#x22;", "&#x22;token&#x22;:***&#x22;"],
+  ["&quot;password&quot;:&quot;pa&ss hunter2&quot;", "&quot;password&quot;:***&quot;"],
   ["&apos;token&apos;: &apos;hunter2&apos;", "&apos;token&apos;: ***&apos;"],
   ["&#39;password&#39;=&#39;hunter2&#39;", "&#39;password&#39;=***&#39;"],
   ["&#x27;password&#x27;=&#x27;hunter2&#x27;", "&#x27;password&#x27;=***&#x27;"],
@@ -187,6 +201,11 @@ const LEAKS_102_27 = [
   ["token=%20hunter2", "token=%20***"],
   ["token=%2520hunter2", "token=%2520***"],
   ["bearer=%20hunter2", "bearer=%20***"],
+  ["bearer=%20%20hunter2", "bearer=%20%20***"],
+  // After a blank, an encoded blank is part of the value.
+  ["Bearer %20hunter2", "Bearer ***"],
+  ["token %20hunter2", "token ***"],
+  ["Bearer :abc123", "Bearer :***"],
   // A secret name in a query whose value is quoted.
   ['https://h.example/x?token="hunter2"', 'https://h.example/x?***"***"'],
   // A password holding "@": the userinfo runs to the last "@" before the host.
@@ -203,11 +222,23 @@ const LEAKS_102_27 = [
   // A secret word and a separator inside the userinfo: the userinfo goes before the secret-name rule can split it.
   ["connect postgres://app:hunter2Secret:2024@db:5432/x failed", "connect postgres://***@db:5432/x failed"],
   ["redis://:hunter2token=9@cache:6379", "redis://***@cache:6379"],
+  ["custom+ssh-tunnel-proxy://u:hunter2@h.example/x", "custom+ssh-tunnel-proxy://***@h.example/x"],
+  // A scheme is a letter and up to 64 more characters before "://", digits included.
+  ["x1234567890://u:hunter2@h.example", "x1234567890://***@h.example"],
   // A userinfo holding ",", "&" or a quote goes in the later pass.
   ["connect http://user:pa,ss-hunter2@10.0.0.1/ failed", "connect http://***@10.0.0.1/ failed"],
   ["http://u:p&hunter2@h.example/x", "http://***@h.example/x"],
   // A secret value holding "@" after a URL with no path is masked under its own key before the userinfo rule runs.
-  ['{"endpoint":"https://api.example","password":"p@ss-hunter2"}', '{"endpoint":"https://api.example","password":"***"}'],
+  // The host goes too: with a secret name after it, the userinfo might have run on into it, so all before that name goes
+  // and the name is masked by its own rule (102-27 third review).
+  ['{"endpoint":"https://api.example","password":"p@ss-hunter2"}', '{"endpoint":"https://***","password":"***"}'],
+  ["url=https://api.example|password=p@ss-hunter2", "url=https://***|password=***"],
+  ["redis://:pw@cache}access_token=a@hunter2", "redis://***@cache}access_token=***"],
+  ["postgres://app:hunter2,Secret:2024@db:5432/x", "postgres://***,Secret:***"],
+  // The tail after an ambiguous userinfo stops before the next key or scheme, which its own rule then masks.
+  ["GET https://api.example?u=a@b,Authorization:Digest username=u, response=hunter2", "GET https://***,Authorization:***"],
+  ['{"redirect":"https://app.example?login=bob@corp.example","client_secret":"s3cr3t hunter2"}', '{"redirect":"https://***","client_secret":"***"}'],
+  ["https://h.example?u=a@b;Bearer sk-live-123", "https://***;Bearer ***"],
   // JSON escaped twice, util.inspect of an escaped JSON string (backslashes doubled, quotes not escaped), JSON escaped
   // three times, and inner quotes escaped only once.
   [String.raw`{\\\"token\\\":\\\"abc123\\\"}`, String.raw`{\\\"token\\\":\\\"***\\\"}`],
@@ -295,7 +326,10 @@ test("a long message cannot stall the thread that redacts it", () => {
     `token=${",a".repeat(100_000)}`,
     // And those of its review: HAR across lines, brackets, entities, a scheme with long blanks, "?" in userinfo, cut keys.
     `"token",${"\n".repeat(200_000)}`, `token=${"(".repeat(200_000)}`, "&quot;token&quot;".repeat(12_000), `auth: Bearer${" ".repeat(200_000)}`,
-    `x://${"?".repeat(200_000)}`, "basicAuth".repeat(20_000), "-----BEGIN PRIVATE KEY-----\n***\n-----END".repeat(5_000)]) {
+    `x://${"?".repeat(200_000)}`, "basicAuth".repeat(20_000), "-----BEGIN PRIVATE KEY-----\n***\n-----END".repeat(5_000),
+    // And of the third: hyphens and punctuation runs where a next key is looked for, a long word before "://".
+    `password=a${"-".repeat(200_000)}`, `password=${"a-".repeat(100_000)}`, `password=${"|||||||||||||||||a".repeat(11_000)}`,
+    `x://${"a-".repeat(100_000)}@h`, `x://a?b@${"c-".repeat(100_000)}`, `${"a".repeat(200_000)}://h?q`, "|token=".repeat(28_000)]) {
     const started = process.hrtime.bigint();
     redactSecrets(adversarial);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
