@@ -1,7 +1,7 @@
 import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdtemp, open, realpath, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 
 /**
  * Persist a newly-created directory entry where the host exposes directory
@@ -164,7 +164,8 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
 /**
  * Publishes `body` at `destination` as a new file and never replaces one already there (BACKLOG 102-25). The file is
  * written and synced in a fresh directory beside the destination and hard-linked into place, which fails if the name
- * is taken, so the destination never holds a partial file and a failed run leaves whatever was there as it was. When
+ * is taken, so the destination never holds a partial file and a run that fails before the link leaves whatever was
+ * there as it was; one whose directory sync fails after the link reports the failure with the new file in place. When
  * the name is taken, before staging or when the link finds it taken, the file there is compared with `body`:
  * "identical" when it holds the same bytes, "different" otherwise, both left as they are for the caller to judge, and
  * a symbolic link there is refused rather than followed. "identical" is reported only once the file and its directory
@@ -182,6 +183,12 @@ export async function publishImmutableFile(
   label: string,
 ): Promise<"created" | "identical" | "different"> {
   const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
+  // The destination must name a file: resolving the directory would otherwise turn "name/" into a file "name", and "",
+  // "." or ".." into a look at a directory.
+  const name = basename(destination);
+  if (name === "" || name === "." || name === ".." || destination.endsWith(sep) || destination.endsWith("/")) {
+    throw new Error(`${label} path must name a file: ${JSON.stringify(destination)}`);
+  }
   const directory = await realpath(dirname(destination));
   const target = join(directory, basename(destination));
   // A re-run that finds its file needs no staging, so it can confirm evidence in a directory made read-only.
@@ -239,6 +246,8 @@ async function settleExistingFile(
     handle = await open(path, constants.O_RDONLY | noFollowFlag(platform) | (platform === "win32" ? 0 : constants.O_NONBLOCK));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // A symbolic link swapped in after the lstat, refused by O_NOFOLLOW.
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`${label} path changed while it was being compared; nothing was published`);
     throw error;
   }
   try {

@@ -1,9 +1,9 @@
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { constants, writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
@@ -448,14 +448,29 @@ test("a reproduction another run publishes meanwhile is kept, and agreed with on
       if (String(to) === out) await writeFile(out, competitor);
       return realLink(from, to);
     };
+    // Agreeing with it syncs it and its directory, as finding it before staging does.
+    const realOpen = fsp.open;
+    const syncs = { directory: 0, file: 0 };
+    fsp.open = async (path, ...rest) => {
+      const handle = await realOpen(path, ...rest);
+      const kind = String(path) === out ? "file" : String(path) === dirname(out) ? "directory" : null;
+      if (kind !== null) {
+        const sync = handle.sync.bind(handle);
+        handle.sync = async () => { syncs[kind] += 1; return sync(); };
+      }
+      return handle;
+    };
     syncBuiltinESMExports();
     try {
       if (agrees) assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
       else await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
     } finally {
       fsp.link = realLink;
+      fsp.open = realOpen;
       syncBuiltinESMExports();
     }
+    const synced = agrees && process.platform !== "win32" ? 1 : 0;
+    assert.deepEqual(syncs, { directory: synced, file: synced });
     assert.equal(await readFile(out, "utf8"), competitor);
     assert.deepEqual(await stagingLeft(out), []);
     await rm(out);
@@ -634,12 +649,49 @@ async function swappedWhileCompared(t, swap) {
 }
 
 test("a file swapped for a FIFO while it is compared is refused without hanging the run", { skip: process.platform === "win32" && "no FIFOs on Windows", timeout: 30_000 }, async (t) => {
+  // A comparison that blocked opening the FIFO would hang the run past any test timeout, since the blocked open keeps
+  // the process alive. After a while the writing end is opened, which releases such a reader (and fails harmlessly,
+  // ENXIO, when there is none), and records that one was there.
+  let release;
+  let blocked = false;
+  try {
+    const out = await swappedWhileCompared(t, async (path) => {
+      await unlink(path);
+      const made = spawnSync("mkfifo", [path], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      release = setTimeout(async () => {
+        const writer = await open(path, constants.O_WRONLY | constants.O_NONBLOCK).catch(() => null);
+        if (writer !== null) { blocked = true; await writer.close(); }
+      }, 5_000);
+    });
+    assert.equal((await lstat(out)).isFIFO(), true);
+  } finally {
+    clearTimeout(release);
+  }
+  assert.equal(blocked, false, "the comparison blocked opening the FIFO");
+});
+
+test("a file swapped for a symbolic link while it is compared is refused as changed", { skip: process.platform === "win32" && "symbolic links need privileges on Windows" }, async (t) => {
   const out = await swappedWhileCompared(t, async (path) => {
+    // The file it points at lies outside the evidence directory, so nothing but the link is left in it.
+    const elsewhere = join(dirname(dirname(path)), "elsewhere.json");
+    await writeFile(elsewhere, publishedBody());
     await unlink(path);
-    const made = spawnSync("mkfifo", [path], { encoding: "utf8" });
-    assert.equal(made.status, 0, made.stderr);
+    await symlink(elsewhere, path);
   });
-  assert.equal((await lstat(out)).isFIFO(), true);
+  assert.equal((await lstat(out)).isSymbolicLink(), true);
+});
+
+test("an output path that names no file is refused before anything is published", async (t) => {
+  const { dir, out, argv } = await reproductionWorkspace(t);
+  const withOut = (path) => [...argv.slice(0, -1), path];
+  // Resolving the directory would otherwise publish "name/" as a file "name".
+  // Written out, since join() would resolve the "..".
+  for (const path of [`${out}${sep}`, `${out}/`, "", ".", `${dir}${sep}..`]) {
+    await assert.rejects(runPriceActionTrapReproductionCli(withOut(path)), /path must name a file/, JSON.stringify(path));
+  }
+  await assert.rejects(stat(out), { code: "ENOENT" });
+  assert.deepEqual(await stagingLeft(out), []);
 });
 
 test("a file swapped for another while it is compared is refused, even holding the same bytes", async (t) => {
