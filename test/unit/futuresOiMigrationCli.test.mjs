@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { FuturesOpenInterestFirstSeenStore } from "../../build/futuresOpenInterestHistory.js";
 
@@ -47,7 +47,8 @@ for (const [script, from, to, label] of [
   test(`the futures OI ${label} migration runs when started, and not when imported`, async (t) => {
     const { paths, env } = await workspace(t);
     await new FuturesOpenInterestFirstSeenStore(paths[from]).observeMany([observation]);
-    const url = pathToFileURL(new URL(script, BUILD).pathname).href;
+    // A URL to import and a path to start, so a checkout under a path with blanks, or on Windows, works too.
+    const url = new URL(script, BUILD).href;
     // Imported, by code and from a module that names it: nothing is read, written or printed.
     for (const args of [["--input-type=module", "-e", `await import(${JSON.stringify(url)})`],
       ["--input-type=module", "-e", `import ${JSON.stringify(url)}`]]) {
@@ -56,7 +57,7 @@ for (const [script, from, to, label] of [
       assert.equal(await exists(paths[to]), false, `importing ${script} migrated`);
     }
     // Started: it migrates and reports, as before.
-    const started = await run([new URL(script, BUILD).pathname], env);
+    const started = await run([fileURLToPath(new URL(script, BUILD))], env);
     assert.equal(started.code, 0, started.stderr);
     assert.equal(started.stderr, "");
     const result = JSON.parse(started.stdout);
