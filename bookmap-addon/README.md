@@ -99,9 +99,10 @@ classes `FlowSignalEngine` and `FlowSignalMarker` are packaged into the
 signal-research and display JARs. No JAR contains another's Bookmap module.
 
 The licensed Bookmap SDK is not available on GitHub-hosted runners. If either
-SDK dependency is absent, the build compiles only the SDK-free
-`FlowSignalEngine`, removes stale installable JARs from `dist`, and exits
-successfully without producing a JAR. A partial SDK installation is treated as
+SDK dependency is absent, the build compiles only the SDK-free classes
+(`FlowSignalEngine`, `FlowSignalMarker` and the offline `FlowSweepReplay`),
+removes stale installable JARs from `dist`, and exits successfully without
+producing a JAR. A partial SDK installation is treated as
 unavailable rather than attempting an incomplete adapter build.
 
 Run the Java tests on macOS, Windows, or Linux with:
@@ -116,6 +117,10 @@ tests the engine and marker presentation and reports the three adapter tests as
 skipped. `npm test` invokes this script, so GitHub Actions always compiles and
 tests the SDK-free signal and display logic while local development with Bookmap
 installed exercises all five Java tests.
+
+The earlier macOS scripts `bookmap-addon/build.sh` and `bookmap-addon/test.sh`
+only run these two Node scripts. They used to compile their own source list,
+which had drifted: without the SDK the engine test failed to compile.
 
 ## Install and run
 
