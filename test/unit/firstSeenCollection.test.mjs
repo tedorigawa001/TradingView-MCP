@@ -155,6 +155,9 @@ test("a real COT store that cannot write makes the run partial, its heartbeat pa
     cotSymbols: ["OANDA:EURUSD"], cotWeeks: 1, coverage: async () => completeCoverage(),
   });
   assert.deepEqual([result.status, result.cot[0].status], ["partial", "error"]);
+  // The log says why: the store's own error, here making its directory under a file (BACKLOG 102-30).
+  assert.match(fetched.first_seen_error, /\b(EEXIST|ENOTDIR|ENOENT)\b/);
+  assert.equal(result.cot[0].error, `1 of 1 COT observations were fetched but not recorded as first seen: ${fetched.first_seen_error}`);
   // The heartbeat the CLI records, and what the health check makes of it.
   const heartbeatPath = join(dir, "heartbeats.jsonl");
   const heartbeat = await new FirstSeenCollectionHeartbeatStore(heartbeatPath).recordRun(firstSeenHeartbeatRun(result, ["OANDA:EURUSD"]));
@@ -196,7 +199,9 @@ test("a real real-yield store that cannot write makes that source an error in th
     cotSymbols: ["OANDA:XAUUSD"], cotWeeks: 52, coverage: async () => completeCoverage(),
   });
   assert.deepEqual([result.status, result.real_yield.status], ["partial", "error"]);
-  assert.equal(result.real_yield.error, `real-yield ${date} was fetched but its first-seen record failed to save`);
+  // The log says why: the store's own error (BACKLOG 102-30).
+  assert.match(result.real_yield.error,
+    new RegExp(`^real-yield ${date} was fetched but its first-seen record failed to save: .*(EEXIST|ENOTDIR|ENOENT)`));
   const heartbeat = await new FirstSeenCollectionHeartbeatStore(join(dir, "heartbeats.jsonl"))
     .recordRun(firstSeenHeartbeatRun(result, ["OANDA:XAUUSD"]));
   assert.deepEqual([heartbeat.status, heartbeat.cot_complete, heartbeat.real_yield_status], ["partial", 1, "error"]);

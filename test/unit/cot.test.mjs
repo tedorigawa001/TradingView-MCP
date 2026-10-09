@@ -90,6 +90,26 @@ test("CotClient exposes local first-seen availability without inferring publicat
   assert.match(result.positioning_features.point_in_time_reason, /collection start/);
 });
 
+test("CotClient keeps a fetch usable when its first-seen store fails, and says why (BACKLOG 102-30)", async (t) => {
+  const server = http.createServer((_req, res) => res.end(JSON.stringify([{
+    market_and_exchange_names: "EURO FX", cftc_contract_market_code: "099741", report_date_as_yyyy_mm_dd: "2026-07-07",
+    open_interest_all: "100", dealer_positions_long_all: "20", dealer_positions_short_all: "30",
+  }])));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  // The cause goes with the result, redacted as an error would be.
+  const failing = { observeMany: async () => { throw new Error("lock wait timed out at x://user:hunter2@host"); } };
+  const history = await new CotClient(base, 15_000, failing).getHistory("OANDA:EURUSD", 1);
+  assert.equal(history.observations[0].available_at, null);
+  assert.equal(history.first_seen_error, "lock wait timed out at x://***@host");
+  assert.equal((await new CotClient(base, 15_000, failing).getLatest("OANDA:EURUSD")).first_seen_error, "lock wait timed out at x://***@host");
+  // A store that saves, or none, has no error to report.
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-cot-client-"));
+  assert.equal((await new CotClient(base, 15_000, new CotFirstSeenStore(join(dir, "history.jsonl"))).getHistory("OANDA:EURUSD", 1)).first_seen_error, null);
+  assert.equal((await new CotClient(base).getHistory("OANDA:EURUSD", 1)).first_seen_error, null);
+});
+
 test("CotClient validates history weeks and rejects incomplete history", async (t) => {
   let calls = 0;
   const server = http.createServer((_req, res) => {

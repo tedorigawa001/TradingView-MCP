@@ -302,6 +302,8 @@ const REAL_YIELD_OUTPUT_SCHEMA = {
   quality_issues: z.array(z.string()),
   cache_status: z.enum(["hit", "miss", "not_applicable"]),
   source_error: z.string().nullable(),
+  // Why a quality issue was raised, by issue, where an error said so (BACKLOG 102-30).
+  quality_issue_details: z.record(z.string(), z.string()).optional(),
 };
 
 type SnapshotStatus = "ok" | "partial" | "blocked";
@@ -7850,6 +7852,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           quality_issues: [as_of === undefined ? "source_request_failed" : "history_query_failed"],
           cache_status: as_of === undefined ? "miss" : "not_applicable",
           source_error: redactSecrets(err instanceof Error ? err.message : String(err)),
+          quality_issue_details: {},
         });
       }
     },

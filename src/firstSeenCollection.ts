@@ -89,7 +89,9 @@ export async function collectFirstSeenSources(input: {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
       const unrecorded = history.observations.filter((observation) => typeof observation.available_at !== "string").length;
       if (unrecorded > 0) {
-        throw new Error(`${unrecorded} of ${history.observations.length} COT observations were fetched but not recorded as first seen`);
+        // With the store's own error when it failed, so the log says why (BACKLOG 102-30).
+        const cause = typeof history.first_seen_error === "string" ? `: ${history.first_seen_error}` : "";
+        throw new Error(`${unrecorded} of ${history.observations.length} COT observations were fetched but not recorded as first seen${cause}`);
       }
       return { symbol, status: "complete" as const, observations: history.observations.length };
     } catch (error) {
@@ -100,7 +102,13 @@ export async function collectFirstSeenSources(input: {
   try {
     const latest = await input.realYield.getLatest();
     const problems = [
-      ...latest.quality_issues.flatMap((issue) => REAL_YIELD_PERSISTENCE_ISSUES.get(issue)?.(latest.observation_date) ?? []),
+      ...latest.quality_issues.flatMap((issue) => {
+        const problem = REAL_YIELD_PERSISTENCE_ISSUES.get(issue)?.(latest.observation_date);
+        if (problem === undefined) return [];
+        // With the store's own error when it failed, so the log says why (BACKLOG 102-30).
+        const cause = latest.quality_issue_details?.[issue];
+        return [typeof cause === "string" ? `${problem}: ${cause}` : problem];
+      }),
       ...(typeof latest.available_at !== "string" && !latest.quality_issues.some((issue) => REAL_YIELD_PERSISTENCE_ISSUES.has(issue))
         ? [`the latest Treasury 10-year value for ${latest.observation_date} is ${latest.value_status}, so no first-seen record was made; check the feed`]
         : []),

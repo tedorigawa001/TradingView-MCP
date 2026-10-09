@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { RealYieldFirstSeenStore } from "./realYieldHistory.js";
 import { assertExpectedResponseHost } from "./boundedResponse.js";
+import { redactSecrets } from "./redact.js";
 
 const MAX_XML_BYTES = 2_000_000;
 const CACHE_TTL_MS = 15 * 60_000;
@@ -204,6 +205,11 @@ export class TreasuryRealYieldClient {
     let sourceUpdatedAtRaw = current.sourceUpdatedAtRaw;
     let observedFeedYear = currentYear;
     let previousYearRevisionScanFailed = false;
+    // Why a quality issue was raised, by issue, where an error said so (BACKLOG 102-30).
+    const qualityIssueDetails: Record<string, string> = {};
+    const detail = (issue: string, error: unknown) => {
+      qualityIssueDetails[issue] ??= redactSecrets(error instanceof Error ? error.message : String(error));
+    };
     if (observations.length === 0) {
       const previous = await this.fetchYear(currentYear - 1);
       feeds.push({ year: currentYear - 1, ...previous });
@@ -214,8 +220,9 @@ export class TreasuryRealYieldClient {
       try {
         const previous = await this.fetchYear(currentYear - 1);
         feeds.push({ year: currentYear - 1, ...previous });
-      } catch {
+      } catch (error) {
         previousYearRevisionScanFailed = true;
+        detail("previous_year_revision_scan_failed", error);
       }
     }
     const receiptTime = this.clock();
@@ -252,8 +259,9 @@ export class TreasuryRealYieldClient {
             pointInTimeStatus = "observed_first_seen";
             revisionStatus = "first_seen_tracked";
           }
-        } catch {
+        } catch (error) {
           qualityIssues.push("first_seen_persistence_failed");
+          detail("first_seen_persistence_failed", error);
         }
       }
       for (const feed of feeds.filter((candidate) => candidate.year !== observedFeedYear)) {
@@ -269,8 +277,9 @@ export class TreasuryRealYieldClient {
             source_updated_at_raw: feed.sourceUpdatedAtRaw,
             observed_feed_year: feed.year,
           })));
-        } catch {
+        } catch (error) {
           qualityIssues.push("first_seen_auxiliary_persistence_failed");
+          detail("first_seen_auxiliary_persistence_failed", error);
         }
       }
     } else if (latest.valueStatus === "valid" && !isFuture) {
@@ -300,6 +309,7 @@ export class TreasuryRealYieldClient {
       as_of: null,
       source_error: null,
       quality_issues: qualityIssues,
+      quality_issue_details: qualityIssueDetails,
     };
   }
 
@@ -343,6 +353,7 @@ export class TreasuryRealYieldClient {
       as_of: asOf.toISOString(),
       source_error: null,
       cache_status: "not_applicable" as const,
+      quality_issue_details: {} as Record<string, string>,
     };
     if (!this.firstSeenStore) {
       return {

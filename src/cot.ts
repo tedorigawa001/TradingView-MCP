@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
 import { assertExpectedResponseHost, readLimitedResponseText } from "./boundedResponse.js";
+import { redactSecrets } from "./redact.js";
 
 const rowsSchema = z.array(z.record(z.string(), z.unknown()));
 type CotSpec = {
@@ -362,6 +363,7 @@ export class CotClient {
       throw new Error(`requested ${weeks} COT weeks for ${spec.market}, but only ${matching.length} are available`);
     }
     let observations = matching.map((row) => this.normalizeRow(symbol, spec, row));
+    let firstSeenError: string | null = null;
     if (this.firstSeenStore) {
       try {
         const observedAt = new Date().toISOString();
@@ -376,8 +378,11 @@ export class CotClient {
         const availableAt = new Map(records.map((record) => [`${record.symbol}:${record.observation_date}`, record.first_seen_at]));
         observations = observations.map((observation) => ({ ...observation,
           available_at: availableAt.get(`${observation.symbol}:${observation.report_date!.slice(0, 10)}`) ?? null }));
-      } catch {
-        // COT remains usable as delayed context when local provenance storage is unavailable.
+      } catch (error) {
+        // COT remains usable as delayed context when local provenance storage is unavailable; why it was unavailable
+        // (ENOTDIR, the size limit, a lock wait that ran out) goes with the result, so a collection run can report it
+        // (BACKLOG 102-30).
+        firstSeenError = redactSecrets(error instanceof Error ? error.message : String(error));
       }
     }
     return {
@@ -386,6 +391,7 @@ export class CotClient {
       observations: observations.slice(0, weeks),
       positioning_features: computeCotPositioningFeatures(observations),
       cache_status: cacheStatus,
+      first_seen_error: firstSeenError,
     };
   }
 
@@ -395,6 +401,7 @@ export class CotClient {
       ...history.observations[0],
       positioning_features: history.positioning_features,
       cache_status: history.cache_status,
+      first_seen_error: history.first_seen_error,
     };
   }
 }

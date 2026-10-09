@@ -178,6 +178,35 @@ test("TreasuryRealYieldClient scans the previous year for late revisions during 
   assert.deepEqual(rows.map((row) => row.observed_feed_year), [2026, 2025]);
 });
 
+test("TreasuryRealYieldClient says why a first-seen save or the previous-year scan failed (BACKLOG 102-30)", async (t) => {
+  let previousYearFails = false;
+  const mock = await startServer((req, res) => {
+    const year = new URL(req.url, "http://localhost").searchParams.get("field_tdr_date_value");
+    if (year === "2025" && previousYearFails) { res.statusCode = 404; res.end("gone"); return; }
+    res.end(year === "2026" ? feed([entry("2026-01-14", "1.80")]) : feed([entry("2025-12-31", "1.75")]));
+  });
+  t.after(() => mock.close());
+  const clock = () => new Date("2026-01-15T01:00:00.000Z");
+  const now = new Date("2026-01-15T12:00:00.000Z");
+  // Both the latest feed's save and the previous year's fail: each issue carries its cause, redacted.
+  const failing = { observeMany: async () => { throw new Error("ENOSPC: no space left, write x://user:hunter2@host"); } };
+  const failed = await new TreasuryRealYieldClient(mock.baseUrl, 15_000, failing, clock).getLatest(now);
+  assert.deepEqual(failed.quality_issue_details, {
+    first_seen_persistence_failed: "ENOSPC: no space left, write x://***@host",
+    first_seen_auxiliary_persistence_failed: "ENOSPC: no space left, write x://***@host",
+  });
+  // A previous-year scan that fails says so too.
+  previousYearFails = true;
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-real-yield-details-"));
+  const scanFailed = await new TreasuryRealYieldClient(mock.baseUrl, 15_000, new RealYieldFirstSeenStore(join(dir, "history.jsonl")), clock).getLatest(now);
+  assert.ok(scanFailed.quality_issues.includes("previous_year_revision_scan_failed"));
+  assert.match(scanFailed.quality_issue_details.previous_year_revision_scan_failed, /404/);
+  // A clean run has no details.
+  previousYearFails = false;
+  const clean = await new TreasuryRealYieldClient(mock.baseUrl, 15_000, new RealYieldFirstSeenStore(join(dir, "clean.jsonl")), clock).getLatest(now);
+  assert.deepEqual(clean.quality_issue_details, {});
+});
+
 test("TreasuryRealYieldClient reports stale and future observations without filling gaps", async (t) => {
   const staleMock = await startServer((_req, res) => res.end(feed([entry("2026-07-08", "1.90")])));
   t.after(() => staleMock.close());
