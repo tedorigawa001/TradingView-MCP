@@ -3,7 +3,8 @@ import { basename, dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -271,7 +272,9 @@ const realLink = fsp.link;
 const earlierEvidence = '{"earlier":"evidence"}\n';
 
 async function reproductionWorkspace(t) {
-  const dir = await mkdtemp(join(tmpdir(), "trap-reproduction-"));
+  // Resolved, so the paths the publication opens are the paths built here (the temporary directory is reached through
+  // a symbolic link on macOS, and through a short name on Windows).
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "trap-reproduction-")));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const argv = ["--confirm-local-import"];
   for (const symbol of PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols) {
@@ -308,7 +311,7 @@ test("a reproduction never overwrites a different file at its output path", asyn
   // Something that is not a file at all is not replaced either.
   await rm(out);
   await mkdir(out);
-  await assert.rejects(runPriceActionTrapReproductionCli(argv), process.platform === "win32" ? Error : /never overwritten/);
+  await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
   assert.equal((await lstat(out)).isDirectory(), true);
   assert.deepEqual(await stagingLeft(out), []);
 });
@@ -413,11 +416,15 @@ test("a write that fails leaves no reproduction behind, and an earlier one as it
   const probe = await open(argv.at(-3), "r");
   const proto = Object.getPrototypeOf(probe);
   await probe.close();
+  // An earlier file found before staging is refused without writing anything, so the earlier file here is one that
+  // lands while this run writes its own (written with the synchronous API, which no FileHandle method serves).
   for (const earlier of [null, earlierEvidence]) {
-    if (earlier !== null) await writeFile(out, earlier);
     for (const method of ["writeFile", "sync"]) {
       const original = proto[method];
-      proto[method] = async () => { throw new Error(`synthetic ${method} failure`); };
+      proto[method] = async () => {
+        if (earlier !== null) writeFileSync(out, earlier);
+        throw new Error(`synthetic ${method} failure`);
+      };
       try {
         await assert.rejects(runPriceActionTrapReproductionCli(argv), new RegExp(`synthetic ${method} failure`));
       } finally {
@@ -426,9 +433,9 @@ test("a write that fails leaves no reproduction behind, and an earlier one as it
       if (earlier === null) await assert.rejects(stat(out), { code: "ENOENT" });
       else assert.equal(await readFile(out, "utf8"), earlier);
       assert.deepEqual(await stagingLeft(out), []);
+      if (earlier !== null) await unlink(out);
     }
   }
-  await rm(out);
   assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
   assert.equal(await readFile(out, "utf8"), publishedBody());
 });
@@ -467,4 +474,191 @@ test("a symbolic link at the output path is refused and what it points at left a
     assert.equal((await lstat(out)).isSymbolicLink(), true);
     assert.deepEqual(await stagingLeft(out), []);
   }
+});
+
+test("an output directory reached through a symbolic link is published into, as a plain write was", async (t) => {
+  const { dir, argv } = await reproductionWorkspace(t);
+  const real = join(dir, "real-evidence");
+  const linked = join(dir, "linked-evidence");
+  await mkdir(real);
+  // A junction on Windows, which needs no privilege; a symbolic link elsewhere (as /tmp is on macOS).
+  await symlink(real, linked, "junction");
+  const args = [...argv.slice(0, -1), join(linked, "four-bar-trap-v1.json")];
+  const realOpen = fsp.open;
+  let directorySynced = false;
+  fsp.open = async (path, ...rest) => {
+    if (String(path) === real) directorySynced = true;
+    return realOpen(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.equal((await runPriceActionTrapReproductionCli(args)).written, true);
+    assert.equal(directorySynced, process.platform !== "win32");
+    assert.equal(await readFile(join(real, "four-bar-trap-v1.json"), "utf8"), publishedBody());
+    directorySynced = false;
+    assert.equal((await runPriceActionTrapReproductionCli(args)).written, false);
+    assert.equal(directorySynced, process.platform !== "win32");
+  } finally {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(await readdir(real), ["four-bar-trap-v1.json"]);
+});
+
+test("the same eight aggregates give the same reproduction whatever order they are named in", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  const pairs = [];
+  for (let index = 1; index < argv.length - 2; index += 2) pairs.push(argv.slice(index, index + 2));
+  assert.equal(pairs.length, PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols.length);
+  const reversed = ["--confirm-local-import", ...pairs.reverse().flat(), "--out", out];
+  const first = await runPriceActionTrapReproductionCli(reversed);
+  assert.equal(first.written, true);
+  assert.equal(first.artifact_hash, fixtureRun().artifact_hash);
+  assert.equal(await readFile(out, "utf8"), publishedBody());
+  assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
+});
+
+test("a staging directory that cannot be removed does not change what the run reports", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  const realRm = fsp.rm;
+  fsp.rm = async (path, ...rest) => {
+    if (basename(String(path)).startsWith(".publish-")) throw Object.assign(new Error("EBUSY: injected"), { code: "EBUSY" });
+    return realRm(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
+    assert.equal(await readFile(out, "utf8"), publishedBody());
+    // A refusal after staging (another run's file lands before the link) is still reported as the refusal.
+    await unlink(out);
+    fsp.link = async (from, to) => {
+      if (String(to) === out) await writeFile(out, earlierEvidence);
+      return realLink(from, to);
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
+    assert.equal(await readFile(out, "utf8"), earlierEvidence);
+  } finally {
+    fsp.rm = realRm;
+    fsp.link = realLink;
+    syncBuiltinESMExports();
+  }
+  // What is left is the two staging directories, beside the evidence.
+  const left = await stagingLeft(out);
+  assert.equal(left.length, 2);
+  assert.ok(left.every((name) => name.startsWith(".publish-")), left.join(", "));
+});
+
+test("a file that vanishes between the link and the look is linked again once, and a path in flux is given up", async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  const realLstat = fsp.lstat;
+  const realOpen = fsp.open;
+  const injected = { plant: 0, vanish: 0, vanishAtOpen: 0, links: 0 };
+  // Each link into place first finds another run's file there (while `plant` lasts), and each look at the path finds
+  // it removed again (while `vanish` lasts).
+  fsp.link = async (from, to) => {
+    if (String(to) === out) {
+      injected.links += 1;
+      if (injected.plant > 0) { injected.plant -= 1; await writeFile(out, '{"another":"run"}\n'); }
+    }
+    return realLink(from, to);
+  };
+  fsp.lstat = async (path, ...rest) => {
+    if (String(path) === out && injected.vanish > 0 && await unlink(out).then(() => true, () => false)) injected.vanish -= 1;
+    return realLstat(path, ...rest);
+  };
+  // Or it is there for the lstat and gone by the open.
+  fsp.open = async (path, ...rest) => {
+    if (String(path) === out && injected.vanishAtOpen > 0 && await unlink(out).then(() => true, () => false)) injected.vanishAtOpen -= 1;
+    return realOpen(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    Object.assign(injected, { plant: 1, vanish: 1, links: 0 });
+    assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
+    assert.equal(injected.links, 2);
+    assert.equal(await readFile(out, "utf8"), publishedBody());
+    await unlink(out);
+    // The other run's file must be the same size for the look to get as far as opening it.
+    fsp.link = async (from, to) => {
+      if (String(to) === out) {
+        injected.links += 1;
+        if (injected.plant > 0) { injected.plant -= 1; await writeFile(out, `[${publishedBody().slice(1)}`); }
+      }
+      return realLink(from, to);
+    };
+    syncBuiltinESMExports();
+    Object.assign(injected, { plant: 1, vanishAtOpen: 1, links: 0 });
+    assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
+    assert.equal(injected.links, 2);
+    assert.equal(await readFile(out, "utf8"), publishedBody());
+    await unlink(out);
+    Object.assign(injected, { plant: Infinity, vanish: Infinity, links: 0 });
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /kept changing while it was being published; nothing was published/);
+    assert.equal(injected.links, 2);
+  } finally {
+    fsp.link = realLink;
+    fsp.lstat = realLstat;
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  }
+  await assert.rejects(stat(out), { code: "ENOENT" });
+  assert.deepEqual(await stagingLeft(out), []);
+});
+
+// The file the comparison opens must be the one the lstat saw: swapped for a FIFO it must not hang the run, and swapped
+// for another file, even one with the same bytes, it is not taken as the evidence that was looked at.
+async function swappedWhileCompared(t, swap) {
+  const { out, argv } = await reproductionWorkspace(t);
+  await mkdir(dirname(out));
+  await writeFile(out, publishedBody());
+  const realLstat = fsp.lstat;
+  let swapped = false;
+  fsp.lstat = async (path, ...rest) => {
+    const seen = await realLstat(path, ...rest);
+    if (String(path) === out && !swapped) {
+      swapped = true;
+      await swap(out);
+    }
+    return seen;
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(runPriceActionTrapReproductionCli(argv), /changed while it was being compared; nothing was published/);
+  } finally {
+    fsp.lstat = realLstat;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(await stagingLeft(out), []);
+  return out;
+}
+
+test("a file swapped for a FIFO while it is compared is refused without hanging the run", { skip: process.platform === "win32" && "no FIFOs on Windows", timeout: 30_000 }, async (t) => {
+  const out = await swappedWhileCompared(t, async (path) => {
+    await unlink(path);
+    const made = spawnSync("mkfifo", [path], { encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+  });
+  assert.equal((await lstat(out)).isFIFO(), true);
+});
+
+test("a file swapped for another while it is compared is refused, even holding the same bytes", async (t) => {
+  // Written beside it and renamed over it, so the new file is allocated while the old one still exists.
+  const out = await swappedWhileCompared(t, async (path) => {
+    await writeFile(`${path}.swap`, publishedBody());
+    await rename(`${path}.swap`, path);
+  });
+  assert.equal(await readFile(out, "utf8"), publishedBody());
+});
+
+test("a re-run confirms its reproduction in a directory made read-only", { skip: (process.platform === "win32" || process.getuid?.() === 0) && "permissions are not enforced here" }, async (t) => {
+  const { out, argv } = await reproductionWorkspace(t);
+  assert.equal((await runPriceActionTrapReproductionCli(argv)).written, true);
+  await chmod(dirname(out), 0o500);
+  try {
+    assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
+  } finally {
+    await chmod(dirname(out), 0o700);
+  }
+  assert.deepEqual(await stagingLeft(out), []);
 });

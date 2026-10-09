@@ -1,7 +1,7 @@
 import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdtemp, open, rm, unlink } from "node:fs/promises";
+import { link, lstat, mkdtemp, open, realpath, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /**
  * Persist a newly-created directory entry where the host exposes directory
@@ -164,12 +164,17 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
 /**
  * Publishes `body` at `destination` as a new file and never replaces one already there (BACKLOG 102-25). The file is
  * written and synced in a fresh directory beside the destination and hard-linked into place, which fails if the name
- * is taken, so the destination never holds a partial file and a failed run leaves whatever was there as it was; the
- * staging directory is removed either way. When the name is taken, the file there is compared with `body`:
- * "identical" when it holds the same bytes, "different" otherwise, both left as they are for the caller to judge.
- * "identical" is reported only once the file and its directory entry are synced as a new one's are, since the file
- * may be one an earlier run linked into place before its directory sync failed, or one written without a sync; a
- * sync that fails is thrown. A symbolic link there is refused rather than followed.
+ * is taken, so the destination never holds a partial file and a failed run leaves whatever was there as it was. When
+ * the name is taken, before staging or when the link finds it taken, the file there is compared with `body`:
+ * "identical" when it holds the same bytes, "different" otherwise, both left as they are for the caller to judge, and
+ * a symbolic link there is refused rather than followed. "identical" is reported only once the file and its directory
+ * entry are synced as a new one's are, since the file may be one an earlier run linked into place before its directory
+ * sync failed, or one written without a sync; a sync that fails is thrown. Windows flushes neither a directory nor a
+ * file opened only for reading, so there "identical" syncs nothing. The destination's directory is resolved first, so
+ * it may itself be reached through a symbolic link (/tmp on macOS), as it could be when the file was simply written.
+ * The staging directory is removed when the run ends, as a best effort that never changes the result: a run killed
+ * meanwhile, or a removal that fails (Windows refuses to delete a file another process holds open), leaves a
+ * `.publish-*` directory beside the destination.
  */
 export async function publishImmutableFile(
   destination: string,
@@ -177,44 +182,77 @@ export async function publishImmutableFile(
   label: string,
 ): Promise<"created" | "identical" | "different"> {
   const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
-  const directory = dirname(destination);
+  const directory = await realpath(dirname(destination));
+  const target = join(directory, basename(destination));
+  // A re-run that finds its file needs no staging, so it can confirm evidence in a directory made read-only.
+  const found = await settleExistingFile(target, directory, bytes, label);
+  if (found !== null) return found;
   const staging = await mkdtemp(join(directory, ".publish-"));
   try {
     const staged = join(staging, "file");
     const handle = await openExclusiveFile(staged, label);
     try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-    try {
-      await link(staged, destination);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (!await holdsExactlySynced(destination, bytes, label)) return "different";
-      await syncDirectoryEntry(directory);
-      return "identical";
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await link(staged, target);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const settled = await settleExistingFile(target, directory, bytes, label);
+        if (settled !== null) return settled;
+        // Gone again between the link and the look: once is a removal racing this run, twice is a path in flux.
+        if (attempt === 2) throw new Error(`${label} path kept changing while it was being published; nothing was published`);
+      }
     }
     await syncDirectoryEntry(directory);
     return "created";
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
   }
 }
 
 /**
- * Whether the file at `path` holds exactly `bytes`, synced when it does. It is opened only for reading, which Windows
- * cannot flush (FlushFileBuffers needs a handle open for writing), so there it is left as syncDirectoryEntry leaves a
- * directory.
+ * What is already at `path`: null when nothing is, "different" when it is not a regular file holding exactly `bytes`,
+ * and "identical" once it and its directory entry are synced. The file is opened without blocking (a FIFO swapped in
+ * after the lstat must not hang the run) and checked to be the file the lstat saw. It is opened only for reading, which
+ * Windows cannot flush (FlushFileBuffers needs a handle open for writing), so there it is left as syncDirectoryEntry
+ * leaves a directory.
  */
-async function holdsExactlySynced(path: string, bytes: Buffer, label: string, platform = process.platform): Promise<boolean> {
-  const entry = await lstat(path);
-  if (entry.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
-  if (!entry.isFile() || entry.size !== bytes.length) return false;
-  const handle = await open(path, constants.O_RDONLY | noFollowFlag(platform));
+async function settleExistingFile(
+  path: string,
+  directory: string,
+  bytes: Buffer,
+  label: string,
+  platform = process.platform,
+): Promise<"identical" | "different" | null> {
+  let entry;
   try {
-    if (!(await handle.readFile()).equals(bytes)) return false;
+    entry = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (entry.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
+  if (!entry.isFile() || entry.size !== bytes.length) return "different";
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | noFollowFlag(platform) | (platform === "win32" ? 0 : constants.O_NONBLOCK));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) {
+      throw new Error(`${label} path changed while it was being compared; nothing was published`);
+    }
+    if (!(await handle.readFile()).equals(bytes)) return "different";
     if (platform !== "win32") await handle.sync();
-    return true;
   } finally {
     await handle.close();
   }
+  await syncDirectoryEntry(directory, platform);
+  return "identical";
 }
 
 /**

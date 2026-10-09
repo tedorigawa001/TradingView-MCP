@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { runPriceActionTrapReproduction } from "./priceActionTrapReproduction.js";
+import { PRICE_ACTION_TRAP_REPRODUCTION_V1, runPriceActionTrapReproduction } from "./priceActionTrapReproduction.js";
 import type { AggregatedBar } from "./fxCsvM1Aggregation.js";
 import type { FxCsvM1AggregationManifest } from "./fxCsvM1AggregationCli.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
@@ -37,11 +37,16 @@ export function parsePriceActionTrapReproductionCliArguments(argv: string[]): Pr
  * replaced, and never left half-written. The study is deterministic, so a re-run on the same inputs produces the same
  * bytes and finds them already there (`written: false`); a run whose result differs is refused and the earlier file
  * kept. A reproduction of changed inputs goes to a new path with --out, or to the default once the earlier file has
- * been moved away.
+ * been moved away. The study reads its inputs in the order given, which orders its ledger and the placebo pools its
+ * seeded draws index into, so the aggregates are put in the contract's symbol order first: the same eight files give
+ * the same bytes whatever order --aggregate names them in.
  */
 export async function runPriceActionTrapReproductionCli(argv: string[]) {
   const args = parsePriceActionTrapReproductionCliArguments(argv);
   const inputs = await Promise.all(args.aggregatePaths.map(async (path) => JSON.parse(await readFile(path, "utf8")) as AggregateFile));
+  // A file that names no contract symbol sorts first, and the study rejects it.
+  const rank = (input: AggregateFile) => (PRICE_ACTION_TRAP_REPRODUCTION_V1.symbols as readonly string[]).indexOf(input?.manifest?.symbol);
+  inputs.sort((left, right) => rank(left) - rank(right));
   const result = runPriceActionTrapReproduction(inputs);
   await mkdir(dirname(args.outputPath), { recursive: true, mode: 0o700 });
   const publication = await publishImmutableFile(args.outputPath, `${JSON.stringify(result, null, 2)}\n`, "price-action trap reproduction");
