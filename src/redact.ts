@@ -31,11 +31,21 @@ const SCHEME = String.raw`(?:bearer|basic|digest|negotiate|ntlm|aws4-hmac-sha256
 /** A value folded onto an indented next line; never a stack frame ("    at …"), and past the whole indent. */
 const FOLD = String.raw`(?:\r?\n[ \t]+(?![ \t]|at\s))`;
 
+/** A quote written as an HTML entity: &quot;, &#34;, &#x22;, &apos;, &#39; or &#x27;. */
+const ENTITY_QUOTE = String.raw`(?:&quot;|&apos;|&#0*3[49];|&#x0*2[27];)`;
+
+/**
+ * A value opened by an entity quote, up to the same kind of entity quote (not included), blanks and all; with none on its
+ * line, to the end of the line (102-27 re-review).
+ */
+const ENTITY_QUOTED = String.raw`(?:&quot;|&#0*34;|&#x0*22;)(?:(?!&quot;|&#0*34;|&#x0*22;)[^\r\n])*` +
+  String.raw`|(?:&apos;|&#0*39;|&#x0*27;)(?:(?!&apos;|&#0*39;|&#x0*27;)[^\r\n])*`;
+
 /**
  * A quote around a key or value: plain or escaped up to 15 times (JSON escaped four times), URL-encoded once or twice
  * (%22, %27, %2522, %2527), or as an HTML entity (BACKLOG 102-27).
  */
-const QUOTE = String.raw`(?:\\{0,15}["']|%(?:25)?2[27]|&quot;|&apos;|&#0*39;|&#x0*27;)`;
+const QUOTE = String.raw`(?:\\{0,15}["']|%(?:25)?2[27]|${ENTITY_QUOTE})`;
 
 /**
  * What may stand between a key and its value: the key's closing quote and a closing bracket (`headers['x-api-key']`),
@@ -117,19 +127,24 @@ function escapedRun(quote: string): string {
 const SECRET_WORD = String.raw`(?:token|secret|passw(?:or)?d|passphrase|credential|jwt|api[_-]?key|access[_-]?key|private[_-]?key` +
   String.raw`|session[_-]?(?:id|key)|device_t|(?:basic|proxy|http)[_-]?auth|(?<![a-z0-9])auth(?![a-z]))`;
 
+/** A character of an unquoted value: anything but a blank, a quote, `,`, `;` or `&`, and backslashes not before a quote. */
+const VALUE_CHAR = String.raw`(?:[^\s"'\\,;&]|\\+(?![\\"']))`;
+
 /**
- * An unquoted value: up to a blank, a quote, a backtick, two backslashes or one before a quote, or a `,`, `;` or `&`
- * that a blank, a quote or the end follows. Brackets, `<` and `>` are part of it, as in a generated password.
+ * An unquoted value: up to a blank, a quote, backslashes before a quote, an entity quote, or a run of `,`, `;` and `&`
+ * that a blank, a quote or the end follows. Brackets, `<`, `>`, backticks and backslashes are part of it, as in a
+ * generated password, and so is a run such as `&&` or `;;` before more of it (102-27 re-review).
  */
-const UNQUOTED = String.raw`(?:[^\s"'\x60\\,;&]|\\(?![\\"'])|[,;&](?=[^\s,;&"'\x60\\]))+`;
+const UNQUOTED = String.raw`(?:${VALUE_CHAR}|(?:[,;]|&(?!quot;|apos;|#0*3[49];|#x0*2[27];))+(?=${VALUE_CHAR}))+`;
 
 /**
  * The value of a key whose name holds a secret word, after a separator (see SEPARATOR) or as HAR's
- * `{"name":"access_token","value":"…"}`. A quoted value goes to its closing quote, an unquoted one as UNQUOTED says,
- * with an Authorization scheme before it (`X-Auth: Bearer …`) going too.
+ * `{"name":"access_token","value":"…"}`. A quoted value goes to its closing quote (an entity-quoted one to its closing
+ * entity), an unquoted one as UNQUOTED says, with an Authorization scheme, Token or ApiKey before it (`X-Auth: Bearer …`,
+ * `X-Auth: Token …`) going too.
  */
 const KEYED = new RegExp(String.raw`(${SECRET_WORD}[\w-]{0,32})(${SEPARATOR}${FOLD}?(?=\S)|${HAR_VALUE_KEY})` +
-  String.raw`(?:${quotedValue(3)}|(?!${LITERAL})(?:${SCHEME}(?:[ \t]+|[ \t]*${FOLD}))?${UNQUOTED})`, "gi");
+  String.raw`(?:${quotedValue(3)}|${ENTITY_QUOTED}|(?!${LITERAL})(?:(?:${SCHEME}|token|api[_-]?key)(?:[ \t]+|[ \t]*${FOLD}))?${UNQUOTED})`, "gi");
 
 /** HAR with the value before the name: `{"value":"…","name":"Cookie"}`. */
 const HAR_VALUE_FIRST = new RegExp(String.raw`("value"[ \t]*:[ \t]*")(?:[^"\\\r\n]|\\.)*` +
@@ -142,15 +157,51 @@ const HAR_VALUE_FIRST = new RegExp(String.raw`("value"[ \t]*:[ \t]*")(?:[^"\\\r\
 const PRIVATE_KEY_BLOCK = new RegExp(String.raw`(-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----)` +
   String.raw`(?:[\s\S]*?(-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----)|[\s\S]*)`, "g");
 
-/** A masked block that a cut left without its whole END line, which a second pass must keep as it is. */
-const CUT_PRIVATE_KEY = /^\n\*\*\*(?:\n(?:-{1,5}(?:E|EN|END(?: [A-Z0-9 ]*-{0,5})?)?)?)?$/;
+/**
+ * A masked block that a cut left without its whole END line, which the second pass of a cut result keeps as it is; a
+ * first pass masks it like any other block, so text that merely looks masked keeps nothing.
+ */
+const CUT_PRIVATE_KEY = /^\n\*\*\*(?:\n(?:-{1,5}(?:E|EN|END(?: [A-Z0-9 ]{0,40}-{0,5})?)?)?)?$/;
 
 /**
  * Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line; a value runs on
- * through "%" and ":" (BACKLOG 102-27).
+ * through "%" and ":" (BACKLOG 102-27), and never starts with an encoded blank, which belongs to the separator.
  */
 const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
-  String.raw`(\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})(?!${LITERAL})[\w.~+/%:-]+=*`, "gi");
+  String.raw`(\\?["']?[ \t]*(?:=>|[=:])(?:[ \t]|%(?:25)?20)*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})(?!${LITERAL}|%(?:25)?20)[\w.~+/%:-]+=*`, "gi");
+
+/**
+ * A URL's scheme with the word characters before it, matched from the start of that word only, with `group` the number of
+ * the capturing group it opens. The lookahead is atomic, so a URL whose rule then fails is not tried again from each
+ * later letter of the same word, which cost up to 65 scans of the rest of the URL per "://" (102-27 re-review). The
+ * scheme is the same as an unanchored `[a-z][\w+.-]{0,64}:\/\/` finds: the leftmost run of at most 65 characters, starting
+ * with a letter, that reaches the "://". A word with no "://" after it is passed over in one scan.
+ */
+function schemeWord(group: number): string {
+  return String.raw`(?<![\w+.-])(?=[\w+.-]*:\/\/)(?=([\w+.-]*?[a-z][\w+.-]{0,64}:\/\/))` + `\\${group}`;
+}
+
+/**
+ * URL userinfo, made of the characters `chars` matches: to the last "@" before a "/" or a blank, so a password holding
+ * "@" goes whole (BACKLOG 102-27). With a "?" or "#" before that "@" the password may hold them, or the "@" may be in the
+ * query (`https://h.example?email=bob@x&sig=…`), so the rest up to the next blank goes too, whatever it holds, in a
+ * second group (102-27 re-review). A run of "?" or "#" is searched once: the first part holds neither, so it cannot backtrack across them.
+ */
+function userinfoRule(chars: string): RegExp {
+  return new RegExp(String.raw`(${schemeWord(2)})` +
+    String.raw`(?:(${chars}*[?#](?:${chars}|[?#])*@\S*)|${chars}*@)`, "gi");
+}
+
+/** A userinfo with none of the characters that end a value in JSON or a list, tried before the keyed rules. */
+const NARROW_USERINFO = userinfoRule(String.raw`[^\s/?#"'\x60\\,;&]`);
+
+/** Any userinfo, tried after the keyed rules. */
+const USERINFO = userinfoRule(String.raw`[^\s/?#]`);
+
+const maskUserinfo = (_: string, scheme: string, _word: string, ambiguous?: string) => `${scheme}***${ambiguous === undefined ? "@" : ""}`;
+
+/** A URL and its query or fragment, if it has one. */
+const QUERY = new RegExp(String.raw`(${schemeWord(2)}[^\s?#"'<>()[\]]+)([?#][^\s"'<>()[\]]*)?`, "gi");
 
 /** What a keyed rule leaves: the name, the separator, the value's opening quote if any, then the mask. */
 const maskValue = (_: string, name: string, separator: string, ...openings: unknown[]) =>
@@ -168,7 +219,7 @@ export function redactSecrets(text: string): string {
   const truncated = text.endsWith(TRUNCATED);
   let redacted: string;
   try {
-    redacted = redactAll(truncated ? text.slice(0, -TRUNCATED.length) : text);
+    redacted = redactAll(truncated ? text.slice(0, -TRUNCATED.length) : text, truncated);
   } catch {
     // A quoted run pushes one backtracking entry per character, so a value of some 8 million characters (a page may
     // send up to 256 MiB) overflows the regexp stack. Fail closed rather than throw from an error path (102-02 review).
@@ -180,25 +231,26 @@ export function redactSecrets(text: string): string {
     : `${redacted.slice(0, MAX_REDACTED_CHARS).replace(/\\+$/, "")}${TRUNCATED}`;
 }
 
-function redactAll(text: string): string {
+function redactAll(text: string, cut: boolean): string {
   return text
     .replace(PRIVATE_KEY_BLOCK, (block: string, begin: string, end?: string) =>
-      (end === undefined && CUT_PRIVATE_KEY.test(block.slice(begin.length))
+      (cut && end === undefined && CUT_PRIVATE_KEY.test(block.slice(begin.length))
         ? block
         : `${begin}\n***${end === undefined ? "" : `\n${end}`}`))
-    // The keyed rules run before the userinfo rule, which would otherwise take a later key and the start of its value as
-    // userinfo when a URL with no path is followed by a value holding "@" (102-27 review); and before the query rule,
+    // A userinfo that holds no quote, backtick, backslash, ",", ";" or "&" goes first, so that a secret word and a
+    // separator inside it ("app:hunter2Secret:2024@db") cannot leave half of it to the secret-name rule (102-27 re-review).
+    .replace(NARROW_USERINFO, maskUserinfo)
+    // The keyed rules run before the wide userinfo rule, which would otherwise take a later key and the start of its value
+    // as userinfo when a URL with no path is followed by a value holding "@" (102-27 review); and before the query rule,
     // which stops at a space and so would leave "?***" and the credential behind it.
     .replace(AUTHORIZATION, maskValue)
     .replace(HAR_VALUE_FIRST, "$1***")
     .replace(KEYED, maskValue)
-    // To the last "@" before a "/" or a blank, so a password holding "@", "?" or "#" goes whole (BACKLOG 102-27); an "@"
-    // in a query without a path takes the host with it, which fails closed.
-    .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/]*@/gi, "$1***@")
+    .replace(USERINFO, maskUserinfo)
     // The query is optional so that a URL without one is consumed whole: requiring it made every later "x://" in the
     // body rescan the rest of the message, which took 5 s on 200 KB of "x://" (code review of 102-02). A fragment goes as
     // a query does, since an OAuth redirect carries its tokens there (BACKLOG 102-27).
-    .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?#"'<>()[\]]+)([?#][^\s"'<>()[\]]*)?/gi,
-      (match: string, url: string, query: string | undefined) => (query === undefined ? match : `${url}${query[0]}***`))
+    .replace(QUERY, (match: string, url: string, _word: string, query: string | undefined) =>
+      (query === undefined ? match : `${url}${query[0]}***`))
     .replace(GENERIC, "$1$2***");
 }

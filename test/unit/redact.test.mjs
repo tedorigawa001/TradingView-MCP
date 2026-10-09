@@ -129,6 +129,11 @@ const LEAKS_102_27 = [
   ["{ auth: Bearer hunter2 }", "{ auth: *** }"],
   ["auth:\n  Bearer hunter2", "auth:\n  ***"],
   ["auth: Bearer\n  hunter2", "auth: ***"],
+  // Token and ApiKey are schemes there too (GitHub, Elasticsearch).
+  ["X-Auth: Token hunter2", "X-Auth: ***"],
+  ["auth: token ghp_hunter2", "auth: ***"],
+  ["es-auth: ApiKey hunter2", "es-auth: ***"],
+  ["&quot;password&quot;: Token hunter2", "&quot;password&quot;: ***"],
   // An unquoted value may start with or hold brackets, "<", ">" or a backslash, and ";" or "&" before more of it.
   ["password=(hunter2)", "password=***"],
   ["password=<hunter2>", "password=***"],
@@ -136,6 +141,17 @@ const LEAKS_102_27 = [
   ["password=Xy7(kLhunter2", "password=***"],
   ["password=;hunter2", "password=***"],
   ["password=\\hunter2", "password=***"],
+  [String.raw`password=\\hunter2`, "password=***"],
+  ["password=;;hunter2", "password=***"],
+  ["password=&&hunter2", "password=***"],
+  ["password=,\\hunter2", "password=***"],
+  ["password=`hunter2`", "password=***"],
+  ["password=Xy7&&hunter2", "password=***"],
+  ["token=https://h.example/cb?a=1&&sig=hunter2", "token=***"],
+  ["redirect_token=https://h.example/cb?a=1;;sig=hunter2 done", "redirect_token=*** done"],
+  ["httpAuth=bob:hunter2", "httpAuth=***"],
+  // A name runs on past the secret word: "_value_primary" is 14 characters.
+  ["secret_value_primary: hunter2", "secret_value_primary: ***"],
   // A literal only ends a value before a blank, a quote, a bracket or the end.
   ["password=null,hunter2", "password=***"],
   ["token: true,hunter2", "token: ***"],
@@ -159,17 +175,37 @@ const LEAKS_102_27 = [
   ["access_token%3Dabc123%26state%3Dk-9", "access_token%3D***"],
   ["%22token%22%3A%22abc123%22", "%22token%22%3A***"],
   ["access_token%253Dhunter2", "access_token%253D***"],
-  // The closing entity's ";" ends the value, so it stays.
-  ["&quot;token&quot;:&quot;hunter2&quot;", "&quot;token&quot;:***;"],
+  // A value in entity quotes runs to its closing entity, blanks included.
+  ["&quot;token&quot;:&quot;hunter2&quot;", "&quot;token&quot;:***&quot;"],
+  ["&quot;password&quot;:&quot;correct horse hunter2&quot;", "&quot;password&quot;:***&quot;"],
+  ["&#34;token&#34;:&#34;hunter2&#34;", "&#34;token&#34;:***&#34;"],
+  ["&apos;token&apos;: &apos;hunter2&apos;", "&apos;token&apos;: ***&apos;"],
+  ["&#39;password&#39;=&#39;hunter2&#39;", "&#39;password&#39;=***&#39;"],
+  ["&#x27;password&#x27;=&#x27;hunter2&#x27;", "&#x27;password&#x27;=***&#x27;"],
+  ["%2522token%2522%253A%2522hunter2%2522", "%2522token%2522%253A***"],
+  // An encoded blank after the separator stays with it, and a second pass changes nothing (102-27 re-review).
+  ["token=%20hunter2", "token=%20***"],
+  ["token=%2520hunter2", "token=%2520***"],
+  ["bearer=%20hunter2", "bearer=%20***"],
   // A secret name in a query whose value is quoted.
   ['https://h.example/x?token="hunter2"', 'https://h.example/x?***"***"'],
   // A password holding "@": the userinfo runs to the last "@" before the host.
   ["connect http://user:p@ss-hunter2@10.0.0.1:9222/x failed", "connect http://***@10.0.0.1:9222/x failed"],
   // A password may hold "?" or "#", so the userinfo runs to the last "@" before a "/" or a blank: an "@" in a query
   // without a path takes the host with it, which fails closed (102-27 review).
-  ["connect http://admin:hunter2?x@10.0.0.1/ failed", "connect http://***@10.0.0.1/ failed"],
-  ["redis://:p#ss-hunter2@cache.local:6379", "redis://***@cache.local:6379"],
-  ["GET https://h.example?mail=ops@mail.example", "GET https://***@mail.example"],
+  // With a "?" or "#" before that "@", what follows may be the query as well as the host, so all of it goes up to the next
+  // blank (102-27 re-review).
+  ["connect http://admin:hunter2?x@10.0.0.1/ failed", "connect http://*** failed"],
+  ["redis://:p#ss-hunter2@cache.local:6379", "redis://***"],
+  ["GET https://h.example?mail=ops@mail.example", "GET https://***"],
+  ["GET https://h.example?email=bob@x.example&sig=hunter2 failed", "GET https://*** failed"],
+  ["https://app.example#state=a@b&code=hunter2", "https://***"],
+  // A secret word and a separator inside the userinfo: the userinfo goes before the secret-name rule can split it.
+  ["connect postgres://app:hunter2Secret:2024@db:5432/x failed", "connect postgres://***@db:5432/x failed"],
+  ["redis://:hunter2token=9@cache:6379", "redis://***@cache:6379"],
+  // A userinfo holding ",", "&" or a quote goes in the later pass.
+  ["connect http://user:pa,ss-hunter2@10.0.0.1/ failed", "connect http://***@10.0.0.1/ failed"],
+  ["http://u:p&hunter2@h.example/x", "http://***@h.example/x"],
   // A secret value holding "@" after a URL with no path is masked under its own key before the userinfo rule runs.
   ['{"endpoint":"https://api.example","password":"p@ss-hunter2"}', '{"endpoint":"https://api.example","password":"***"}'],
   // JSON escaped twice, util.inspect of an escaped JSON string (backslashes doubled, quotes not escaped), JSON escaped
@@ -191,6 +227,8 @@ const LEAKS_102_27 = [
   // util.inspect of a CDP cookie, pretty-printed HAR, HAR escaped twice, and a name-value pair escaped twice.
   ["[{ name: 'sessionid', value: 'hunter2', domain: '.tradingview.com' }]", "[{ name: 'sessionid', value: '***', domain: '.tradingview.com' }]"],
   ['{\n  "name": "x-api-key",\n  "value": "hunter2"\n}', '{\n  "name": "x-api-key",\n  "value": "***"\n}'],
+  ['{\r\n  "name": "x-api-key",\r\n  "value": "hunter2"\r\n}', '{\r\n  "name": "x-api-key",\r\n  "value": "***"\r\n}'],
+  ["['Authorization',\n  'Basic dXNlcjpwYXNz']", "['Authorization',\n  '***']"],
   [String.raw`{\\\"name\\\":\\\"access_token\\\",\\\"value\\\":\\\"hunter2\\\"}`, String.raw`{\\\"name\\\":\\\"access_token\\\",\\\"value\\\":\\\"***\\\"}`],
   [String.raw`[\\\"Authorization\\\", \\\"Basic hunter2\\\"]`, String.raw`[\\\"Authorization\\\", \\\"***\\\"]`],
   ['{"value":"Basic dXNlcjpwYXNz","name":"Authorization"}', '{"value":"***","name":"Authorization"}'],
@@ -201,6 +239,8 @@ const LEAKS_102_27 = [
     "key: -----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----\nnext line"],
   ["-----BEGIN RSA PRIVATE KEY-----\nabc123\nk-9", "-----BEGIN RSA PRIVATE KEY-----\n***"],
   ["-----BEGIN PRIVATE KEY-----\nabc123\n-----END CERTIFICATE-----\nk-9", "-----BEGIN PRIVATE KEY-----\n***"],
+  // A masked-looking body with a partial END line is kept only on the second pass of a cut result, never on a first.
+  ["-----BEGIN PRIVATE KEY-----\n***\n-----END HUNTER2", "-----BEGIN PRIVATE KEY-----\n***"],
   ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc123\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n***\n-----END PGP PRIVATE KEY BLOCK-----"],
 ];
 
@@ -222,6 +262,7 @@ test("the wider rules keep ordinary text: a trading session, prose about secrets
     "see https://docs.example/page for details", "at run (https://cdn.example/bundle.js:1:2)", "mail ops@example.com",
     "http://host.example/path@v2", "-----BEGIN PUBLIC KEY-----\nMIIBIj\n-----END PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----\nMIIB",
     '{"token":null,"x":1}', "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled", "password: null, user: bob",
+    "password=null,{x}", "password=null,[1]", "f(password=null)", "password=null;", String.raw`{\"password\":null,\"x\":1}`,
   ]) assert.equal(redactSecrets(text), text, JSON.stringify(text));
 });
 
@@ -302,6 +343,14 @@ test("a second redaction of a cut result changes nothing, wherever the cut falls
       if (once.length > MAX_REDACTED_CHARS) assert.equal(once.split("[truncated]").length, 2, `one marker at ${offset}`);
     }
   }
+});
+
+test("a second pass keeps a cut private key only when what is left is the mask and part of its END line", () => {
+  // The second pass of a cut result keeps "\n***" and a partial END line, and masks anything else after BEGIN.
+  const kept = "-----BEGIN PRIVATE KEY-----\n***\n-----END PRIV\n… [truncated]";
+  assert.equal(redactSecrets(kept), kept);
+  assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\n***\nhunter2\n… [truncated]"), "-----BEGIN PRIVATE KEY-----\n***\n… [truncated]");
+  assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\nhunter2\n… [truncated]"), "-----BEGIN PRIVATE KEY-----\n***\n… [truncated]");
 });
 
 test("truncation happens after redaction, so no secret survives by straddling the cut", () => {
