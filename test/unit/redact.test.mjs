@@ -90,7 +90,8 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
   }
 });
 
-// Leaks found in the 102-02 review and the 2026-10-04 follow-up (BACKLOG 102-27).
+// Leaks found in the 102-02 review and the 2026-10-04 follow-up (BACKLOG 102-27), and in its own review.
+const Q4 = `${"\\".repeat(15)}"`;
 const LEAKS_102_27 = [
   // A secret key inside a longer name: snake_case, camelCase, kebab-case, a prefix ending in "_".
   ["access_token=abc123", "access_token=***"],
@@ -101,6 +102,7 @@ const LEAKS_102_27 = [
   ["HTTP_AUTHORIZATION: Bearer abc123", "HTTP_AUTHORIZATION: ***"],
   ['authorizationHeader: "Bearer abc123"', 'authorizationHeader: "***"'],
   ["{ proxyAuthorization: 'Basic dXNlcjpwYXNz' }", "{ proxyAuthorization: '***' }"],
+  ['upstreamAuthorization: Digest username="u", response="abc123"', "upstreamAuthorization: ***"],
   // Keys that had no rule at all.
   ["client_secret=abc123", "client_secret=***"],
   ['{"clientSecret":"abc123"}', '{"clientSecret":"***"}'],
@@ -117,6 +119,26 @@ const LEAKS_102_27 = [
   ["session_id: abc123", "session_id: ***"],
   ['{"sessionId":"abc123"}', '{"sessionId":"***"}'],
   ["sessionid_sign=abc123", "sessionid_sign=***"],
+  ["device_t=hunter2", "device_t=***"],
+  ["basicAuth: 'bob:hunter2'", "basicAuth: '***'"],
+  ["proxyAuth=bob:hunter2", "proxyAuth=***"],
+  ["headers['x-api-key'] = 'hunter2'", "headers['x-api-key'] = '***'"],
+  // A scheme before the credential under a secret name goes with it, as under Authorization (102-27 review).
+  ["X-Auth: Bearer hunter2", "X-Auth: ***"],
+  ["password: Basic hunter2", "password: ***"],
+  ["{ auth: Bearer hunter2 }", "{ auth: *** }"],
+  ["auth:\n  Bearer hunter2", "auth:\n  ***"],
+  ["auth: Bearer\n  hunter2", "auth: ***"],
+  // An unquoted value may start with or hold brackets, "<", ">" or a backslash, and ";" or "&" before more of it.
+  ["password=(hunter2)", "password=***"],
+  ["password=<hunter2>", "password=***"],
+  ["client_secret: Q9]hunter2", "client_secret: ***"],
+  ["password=Xy7(kLhunter2", "password=***"],
+  ["password=;hunter2", "password=***"],
+  ["password=\\hunter2", "password=***"],
+  // A literal only ends a value before a blank, a quote, a bracket or the end.
+  ["password=null,hunter2", "password=***"],
+  ["token: true,hunter2", "token: ***"],
   // A cookie header goes whole, as an Authorization value does.
   ["Cookie: sessionid=abc123; csrftoken=k-9", "Cookie: ***"],
   ["Set-Cookie: sessionid=abc123; Path=/; HttpOnly", "Set-Cookie: ***"],
@@ -125,6 +147,10 @@ const LEAKS_102_27 = [
   ["token=abc123%2Fk-9", "token=***"],
   ["api_key=abc123:k-9", "api_key=***"],
   ["access_token=abc123,k-9", "access_token=***"],
+  // So do a bearer value and a token after a space.
+  ["Bearer abc123%2Fhunter2", "Bearer ***"],
+  ["Bearer abc123:hunter2", "Bearer ***"],
+  ["token abc123%2Fhunter2", "token ***"],
   // A URL fragment goes as a query does.
   ["redirect to https://app.example/cb#access_token=abc123&state=k-9", "redirect to https://app.example/cb#***"],
   ["https://app.example/cb?x=1#id_token=abc123", "https://app.example/cb?***"],
@@ -132,22 +158,41 @@ const LEAKS_102_27 = [
   ["Authorization%3A%20Bearer%20abc123", "Authorization%3A%20***"],
   ["access_token%3Dabc123%26state%3Dk-9", "access_token%3D***"],
   ["%22token%22%3A%22abc123%22", "%22token%22%3A***"],
+  ["access_token%253Dhunter2", "access_token%253D***"],
+  // The closing entity's ";" ends the value, so it stays.
+  ["&quot;token&quot;:&quot;hunter2&quot;", "&quot;token&quot;:***;"],
+  // A secret name in a query whose value is quoted.
+  ['https://h.example/x?token="hunter2"', 'https://h.example/x?***"***"'],
   // A password holding "@": the userinfo runs to the last "@" before the host.
   ["connect http://user:p@ss-hunter2@10.0.0.1:9222/x failed", "connect http://***@10.0.0.1:9222/x failed"],
-  // An "@" in the query is not userinfo: the host stays and the query goes.
-  ["GET https://h.example?mail=ops@k-9.example", "GET https://h.example?***"],
+  // A password may hold "?" or "#", so the userinfo runs to the last "@" before a "/" or a blank: an "@" in a query
+  // without a path takes the host with it, which fails closed (102-27 review).
+  ["connect http://admin:hunter2?x@10.0.0.1/ failed", "connect http://***@10.0.0.1/ failed"],
+  ["redis://:p#ss-hunter2@cache.local:6379", "redis://***@cache.local:6379"],
+  ["GET https://h.example?mail=ops@mail.example", "GET https://***@mail.example"],
+  // A secret value holding "@" after a URL with no path is masked under its own key before the userinfo rule runs.
+  ['{"endpoint":"https://api.example","password":"p@ss-hunter2"}', '{"endpoint":"https://api.example","password":"***"}'],
   // JSON escaped twice, util.inspect of an escaped JSON string (backslashes doubled, quotes not escaped), JSON escaped
   // three times, and inner quotes escaped only once.
   [String.raw`{\\\"token\\\":\\\"abc123\\\"}`, String.raw`{\\\"token\\\":\\\"***\\\"}`],
   [String.raw`{\\\"Authorization\\\":\\\"Basic dXNlcjpwYXNz\\\",\\\"Host\\\":\\\"x\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\",\\\"Host\\\":\\\"x\\\"}`],
   [String.raw`'{\\"Authorization\\":\\"Basic dXNlcjpwYXNz\\"}'`, String.raw`'{\\"Authorization\\":\\"***\\"}'`],
   [String.raw`{\\\\\\\"token\\\\\\\":\\\\\\\"abc123\\\\\\\"}`, String.raw`{\\\\\\\"token\\\\\\\":\\\\\\\"***\\\\\\\"}`],
+  // JSON escaped four times (15 backslashes), one escaped twice and pretty-printed, and one with no closing quote.
+  [`{${Q4}token${Q4}:${Q4}hunter2${Q4}}`, `{${Q4}token${Q4}:${Q4}***${Q4}}`],
+  [String.raw`{\\n  \\\"token\\\": \\\"hunter2\\\"\\n}, keep`, String.raw`{\\n  \\\"token\\\": \\\"***\\\"\\n}, keep`],
+  [String.raw`{\\\"token\\\":\\\"hunter2`, String.raw`{\\\"token\\\":\\\"***`],
   [String.raw`{\\\"Authorization\\\":\\\"Digest username=\"u\", response=\"abc123\"\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\"}`],
   // A quote escaped one level deeper inside does not close the value, even followed by ",".
   [String.raw`{\\\"Authorization\\\":\\\"Digest a=\\\\\\\"u\\\\\\\", response=\\\\\\\"abc123\\\\\\\"\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\"}`],
   // HAR entries for any secret name, and with the value before the name.
   ['{"name":"Cookie","value":"sessionid=abc123"}', '{"name":"Cookie","value":"***"}'],
   ['{"name":"access_token","value":"abc123"}', '{"name":"access_token","value":"***"}'],
+  // util.inspect of a CDP cookie, pretty-printed HAR, HAR escaped twice, and a name-value pair escaped twice.
+  ["[{ name: 'sessionid', value: 'hunter2', domain: '.tradingview.com' }]", "[{ name: 'sessionid', value: '***', domain: '.tradingview.com' }]"],
+  ['{\n  "name": "x-api-key",\n  "value": "hunter2"\n}', '{\n  "name": "x-api-key",\n  "value": "***"\n}'],
+  [String.raw`{\\\"name\\\":\\\"access_token\\\",\\\"value\\\":\\\"hunter2\\\"}`, String.raw`{\\\"name\\\":\\\"access_token\\\",\\\"value\\\":\\\"***\\\"}`],
+  [String.raw`[\\\"Authorization\\\", \\\"Basic hunter2\\\"]`, String.raw`[\\\"Authorization\\\", \\\"***\\\"]`],
   ['{"value":"Basic dXNlcjpwYXNz","name":"Authorization"}', '{"value":"***","name":"Authorization"}'],
   ['{"value":"abc123", "name":"sessionid"}', '{"value":"***", "name":"sessionid"}'],
   ['{"value":"sessionid=abc123","name":"Set-Cookie"}', '{"value":"***","name":"Set-Cookie"}'],
@@ -155,6 +200,8 @@ const LEAKS_102_27 = [
   ["key: -----BEGIN PRIVATE KEY-----\nMIIabc123\nk-9\n-----END PRIVATE KEY-----\nnext line",
     "key: -----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----\nnext line"],
   ["-----BEGIN RSA PRIVATE KEY-----\nabc123\nk-9", "-----BEGIN RSA PRIVATE KEY-----\n***"],
+  ["-----BEGIN PRIVATE KEY-----\nabc123\n-----END CERTIFICATE-----\nk-9", "-----BEGIN PRIVATE KEY-----\n***"],
+  ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc123\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n***\n-----END PGP PRIVATE KEY BLOCK-----"],
 ];
 
 test("secrets under longer or other names, in fragments, encoded, escaped deeper, in HAR or a private key go too (BACKLOG 102-27)", () => {
@@ -174,7 +221,7 @@ test("the wider rules keep ordinary text: a trading session, prose about secrets
     "password reset required", "cookie banner dismissed", "Unexpected token '<' in JSON", "authorization failed",
     "see https://docs.example/page for details", "at run (https://cdn.example/bundle.js:1:2)", "mail ops@example.com",
     "http://host.example/path@v2", "-----BEGIN PUBLIC KEY-----\nMIIBIj\n-----END PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----\nMIIB",
-    '{"token":null,"x":1}', "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled",
+    '{"token":null,"x":1}', "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled", "password: null, user: bob",
   ]) assert.equal(redactSecrets(text), text, JSON.stringify(text));
 });
 
@@ -204,7 +251,10 @@ test("a long message cannot stall the thread that redacts it", () => {
     "authorization%3A".repeat(12_000), "sessionid".repeat(20_000), String.raw`token:\\\"`.repeat(20_000),
     String.raw`{\"token\":\"` + "a".repeat(200_000), `"value":"${"a".repeat(200_000)}`, '"value":"a",'.repeat(15_000),
     "-----BEGIN PRIVATE KEY-----".repeat(7_000), `http://${"@".repeat(200_000)}`, `${"a".repeat(64)}://${"b@".repeat(1_000)}`.repeat(90),
-    `token=${",a".repeat(100_000)}`]) {
+    `token=${",a".repeat(100_000)}`,
+    // And those of its review: HAR across lines, brackets, entities, a scheme with long blanks, "?" in userinfo, cut keys.
+    `"token",${"\n".repeat(200_000)}`, `token=${"(".repeat(200_000)}`, "&quot;token&quot;".repeat(12_000), `auth: Bearer${" ".repeat(200_000)}`,
+    `x://${"?".repeat(200_000)}`, "basicAuth".repeat(20_000), "-----BEGIN PRIVATE KEY-----\n***\n-----END".repeat(5_000)]) {
     const started = process.hrtime.bigint();
     redactSecrets(adversarial);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
@@ -243,7 +293,8 @@ test("a second redaction of a cut result changes nothing, wherever the cut falls
   // The marker is set aside before a second pass and a dangling backslash at the cut is dropped, so neither a value
   // shortened at the cut nor a lone backslash read as a value can move or drop the marker.
   for (const tail of [String.raw`{\"Authorization\":\"Basic dXNlcjpwYXNz\"}`, `{"Authorization":"Basic dXNlcjpwYXNz"}`,
-    String.raw`{\"Authorization\":\"Digest username=\\\"u\\\", response=\\\"dXNlcjpwYXNz\\\"\"}`, String.raw`{\"token\":\"dXNlcjpwYXNz\"}`]) {
+    String.raw`{\"Authorization\":\"Digest username=\\\"u\\\", response=\\\"dXNlcjpwYXNz\\\"\"}`, String.raw`{\"token\":\"dXNlcjpwYXNz\"}`,
+    "-----BEGIN PRIVATE KEY-----\ndXNlcjpwYXNz\n-----END PRIVATE KEY-----"]) {
     for (let offset = MAX_REDACTED_CHARS - 80; offset <= MAX_REDACTED_CHARS + 20; offset++) {
       const once = redactSecrets(`${"x".repeat(offset)}${tail} and more`);
       assert.equal(redactSecrets(once), once, `${tail} at ${offset}`);
