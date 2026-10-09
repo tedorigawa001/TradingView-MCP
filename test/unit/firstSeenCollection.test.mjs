@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { syncBuiltinESMExports } from "node:module";
+import { createRequire } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -205,4 +207,51 @@ test("a real real-yield store that cannot write makes that source an error in th
   const heartbeat = await new FirstSeenCollectionHeartbeatStore(join(dir, "heartbeats.jsonl"))
     .recordRun(firstSeenHeartbeatRun(result, ["OANDA:XAUUSD"]));
   assert.deepEqual([heartbeat.status, heartbeat.cot_complete, heartbeat.real_yield_status], ["partial", 1, "error"]);
+});
+
+// A Treasury feed with one valid 10-year row from three days ago.
+const treasuryFeed = () => {
+  const date = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+  return `<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"
+    xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+    <updated>${new Date().toISOString()}</updated><entry><updated>2099-01-01T00:00:00Z</updated><content type="application/xml"><m:properties>
+    <d:NEW_DATE m:type="Edm.DateTime">${date}T00:00:00</d:NEW_DATE><d:TC_10YEAR m:type="Edm.Double">2.01</d:TC_10YEAR>
+    </m:properties></content></entry></feed>`;
+};
+
+// BACKLOG 102-30 follow-up: the store wraps a lock it could not take ("unable to acquire … history lock") around the
+// filesystem's error, so the cause chain is what says why; a disk that is full, a permission or an I/O error each shows.
+test("a store that cannot take its lock reports the filesystem's error through the chain, for COT and real yield", async (t) => {
+  const fsp = createRequire(import.meta.url)("node:fs/promises");
+  const realOpen = fsp.open;
+  const server = http.createServer((req, res) => res.end(!req.url.includes("field_tdr_date_value") ? JSON.stringify([{ market_and_exchange_names: "EURO FX - CME",
+    cftc_contract_market_code: "099741", report_date_as_yyyy_mm_dd: "2026-07-07T00:00:00.000", open_interest_all: "100",
+    dealer_positions_long_all: "20", dealer_positions_short_all: "30" }]) : treasuryFeed()));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (const code of ["ENOSPC", "EACCES", "EIO"]) {
+    const dir = await mkdtemp(join(tmpdir(), "first-seen-lock-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    fsp.open = async (path, ...rest) => {
+      if (String(path).endsWith(".lock")) throw Object.assign(new Error(`${code}: injected, open '${path}'`), { code });
+      return realOpen(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    try {
+      const cot = new CotClient(base, 15_000, new CotFirstSeenStore(join(dir, "cot.jsonl")));
+      const realYield = new TreasuryRealYieldClient(base, 15_000, new RealYieldFirstSeenStore(join(dir, "real-yield.jsonl")));
+      const fetched = await cot.getHistory("OANDA:EURUSD", 1);
+      assert.match(fetched.first_seen_error, new RegExp(`unable to acquire .*lock: ${code}: injected`), code);
+      const result = await collectFirstSeenSources({
+        cot, realYield, cmeGoldOpenInterest: goldOpenInterest, futuresOpenInterest: futuresStore,
+        cotSymbols: ["OANDA:EURUSD"], cotWeeks: 1, coverage: async () => completeCoverage(),
+      });
+      assert.match(result.cot[0].error, new RegExp(`not recorded as first seen: unable to acquire .*lock: ${code}: injected`), code);
+      assert.match(result.real_yield.error, new RegExp(`failed to save: unable to acquire .*lock: ${code}: injected`), code);
+    } finally {
+      fsp.open = realOpen;
+      syncBuiltinESMExports();
+    }
+  }
 });

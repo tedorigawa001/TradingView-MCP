@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CotFirstSeenStore } from "./cotFirstSeenHistory.js";
 import { assertExpectedResponseHost, readLimitedResponseText } from "./boundedResponse.js";
+import { describeErrorChain } from "./errorChain.js";
 import { redactSecrets } from "./redact.js";
 
 const rowsSchema = z.array(z.record(z.string(), z.unknown()));
@@ -380,9 +381,9 @@ export class CotClient {
           available_at: availableAt.get(`${observation.symbol}:${observation.report_date!.slice(0, 10)}`) ?? null }));
       } catch (error) {
         // COT remains usable as delayed context when local provenance storage is unavailable; why it was unavailable
-        // (ENOTDIR, the size limit, a lock wait that ran out) goes with the result, so a collection run can report it
-        // (BACKLOG 102-30).
-        firstSeenError = redactSecrets(error instanceof Error ? error.message : String(error));
+        // (ENOTDIR, the size limit, a lock wait that ran out) goes with the result, causes and all, so a collection run
+        // can report it (BACKLOG 102-30).
+        firstSeenError = redactSecrets(describeErrorChain(error));
       }
     }
     return {

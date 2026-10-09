@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { RealYieldFirstSeenStore } from "./realYieldHistory.js";
 import { assertExpectedResponseHost } from "./boundedResponse.js";
+import { describeErrorChain } from "./errorChain.js";
 import { redactSecrets } from "./redact.js";
 
 const MAX_XML_BYTES = 2_000_000;
@@ -205,10 +206,10 @@ export class TreasuryRealYieldClient {
     let sourceUpdatedAtRaw = current.sourceUpdatedAtRaw;
     let observedFeedYear = currentYear;
     let previousYearRevisionScanFailed = false;
-    // Why a quality issue was raised, by issue, where an error said so (BACKLOG 102-30).
+    // Why a quality issue was raised, by issue, where an error said so, causes and all (BACKLOG 102-30).
     const qualityIssueDetails: Record<string, string> = {};
     const detail = (issue: string, error: unknown) => {
-      qualityIssueDetails[issue] ??= redactSecrets(error instanceof Error ? error.message : String(error));
+      qualityIssueDetails[issue] ??= redactSecrets(describeErrorChain(error));
     };
     if (observations.length === 0) {
       const previous = await this.fetchYear(currentYear - 1);
