@@ -90,6 +90,94 @@ test("an Authorization value goes whole, scheme and credentials, also quoted, fo
   }
 });
 
+// Leaks found in the 102-02 review and the 2026-10-04 follow-up (BACKLOG 102-27).
+const LEAKS_102_27 = [
+  // A secret key inside a longer name: snake_case, camelCase, kebab-case, a prefix ending in "_".
+  ["access_token=abc123", "access_token=***"],
+  ["refresh_token: abc123", "refresh_token: ***"],
+  ['{"accessToken":"abc123","expires_in":3600}', '{"accessToken":"***","expires_in":3600}'],
+  ["x-auth-token: abc123", "x-auth-token: ***"],
+  ["csrftoken=abc123", "csrftoken=***"],
+  ["HTTP_AUTHORIZATION: Bearer abc123", "HTTP_AUTHORIZATION: ***"],
+  ['authorizationHeader: "Bearer abc123"', 'authorizationHeader: "***"'],
+  ["{ proxyAuthorization: 'Basic dXNlcjpwYXNz' }", "{ proxyAuthorization: '***' }"],
+  // Keys that had no rule at all.
+  ["client_secret=abc123", "client_secret=***"],
+  ['{"clientSecret":"abc123"}', '{"clientSecret":"***"}'],
+  ["password: hunter2", "password: ***"],
+  ['{"password":"hunter2","user":"bob"}', '{"password":"***","user":"bob"}'],
+  ["passwd=hunter2", "passwd=***"],
+  ["passphrase: hunter2", "passphrase: ***"],
+  ["access_key=abc123", "access_key=***"],
+  ["{ auth: 'bob:hunter2' }", "{ auth: '***' }"],
+  ['{"private_key":"abc123"}', '{"private_key":"***"}'],
+  ["credentials=abc123", "credentials=***"],
+  ['{"jwt":"abc123"}', '{"jwt":"***"}'],
+  ["sessionid=abc123", "sessionid=***"],
+  ["session_id: abc123", "session_id: ***"],
+  ['{"sessionId":"abc123"}', '{"sessionId":"***"}'],
+  ["sessionid_sign=abc123", "sessionid_sign=***"],
+  // A cookie header goes whole, as an Authorization value does.
+  ["Cookie: sessionid=abc123; csrftoken=k-9", "Cookie: ***"],
+  ["Set-Cookie: sessionid=abc123; Path=/; HttpOnly", "Set-Cookie: ***"],
+  ['{"cookie":"sessionid=abc123; csrftoken=k-9"}', '{"cookie":"***"}'],
+  // A value no longer stops at "%", ":" or a "," that something other than a blank follows.
+  ["token=abc123%2Fk-9", "token=***"],
+  ["api_key=abc123:k-9", "api_key=***"],
+  ["access_token=abc123,k-9", "access_token=***"],
+  // A URL fragment goes as a query does.
+  ["redirect to https://app.example/cb#access_token=abc123&state=k-9", "redirect to https://app.example/cb#***"],
+  ["https://app.example/cb?x=1#id_token=abc123", "https://app.example/cb?***"],
+  // URL- or form-encoded separators and quotes.
+  ["Authorization%3A%20Bearer%20abc123", "Authorization%3A%20***"],
+  ["access_token%3Dabc123%26state%3Dk-9", "access_token%3D***"],
+  ["%22token%22%3A%22abc123%22", "%22token%22%3A***"],
+  // A password holding "@": the userinfo runs to the last "@" before the host.
+  ["connect http://user:p@ss-hunter2@10.0.0.1:9222/x failed", "connect http://***@10.0.0.1:9222/x failed"],
+  // An "@" in the query is not userinfo: the host stays and the query goes.
+  ["GET https://h.example?mail=ops@k-9.example", "GET https://h.example?***"],
+  // JSON escaped twice, util.inspect of an escaped JSON string (backslashes doubled, quotes not escaped), JSON escaped
+  // three times, and inner quotes escaped only once.
+  [String.raw`{\\\"token\\\":\\\"abc123\\\"}`, String.raw`{\\\"token\\\":\\\"***\\\"}`],
+  [String.raw`{\\\"Authorization\\\":\\\"Basic dXNlcjpwYXNz\\\",\\\"Host\\\":\\\"x\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\",\\\"Host\\\":\\\"x\\\"}`],
+  [String.raw`'{\\"Authorization\\":\\"Basic dXNlcjpwYXNz\\"}'`, String.raw`'{\\"Authorization\\":\\"***\\"}'`],
+  [String.raw`{\\\\\\\"token\\\\\\\":\\\\\\\"abc123\\\\\\\"}`, String.raw`{\\\\\\\"token\\\\\\\":\\\\\\\"***\\\\\\\"}`],
+  [String.raw`{\\\"Authorization\\\":\\\"Digest username=\"u\", response=\"abc123\"\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\"}`],
+  // A quote escaped one level deeper inside does not close the value, even followed by ",".
+  [String.raw`{\\\"Authorization\\\":\\\"Digest a=\\\\\\\"u\\\\\\\", response=\\\\\\\"abc123\\\\\\\"\\\"}`, String.raw`{\\\"Authorization\\\":\\\"***\\\"}`],
+  // HAR entries for any secret name, and with the value before the name.
+  ['{"name":"Cookie","value":"sessionid=abc123"}', '{"name":"Cookie","value":"***"}'],
+  ['{"name":"access_token","value":"abc123"}', '{"name":"access_token","value":"***"}'],
+  ['{"value":"Basic dXNlcjpwYXNz","name":"Authorization"}', '{"value":"***","name":"Authorization"}'],
+  ['{"value":"abc123", "name":"sessionid"}', '{"value":"***", "name":"sessionid"}'],
+  ['{"value":"sessionid=abc123","name":"Set-Cookie"}', '{"value":"***","name":"Set-Cookie"}'],
+  // A private key spans lines; one cut before its end goes to the end of the text.
+  ["key: -----BEGIN PRIVATE KEY-----\nMIIabc123\nk-9\n-----END PRIVATE KEY-----\nnext line",
+    "key: -----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----\nnext line"],
+  ["-----BEGIN RSA PRIVATE KEY-----\nabc123\nk-9", "-----BEGIN RSA PRIVATE KEY-----\n***"],
+];
+
+test("secrets under longer or other names, in fragments, encoded, escaped deeper, in HAR or a private key go too (BACKLOG 102-27)", () => {
+  for (const [input, expected] of LEAKS_102_27) {
+    const once = redactSecrets(input);
+    assert.equal(once, expected, JSON.stringify(input));
+    assert.equal(redactSecrets(once), once, `redacting twice changes nothing: ${JSON.stringify(input)}`);
+    for (const secret of ["sk-live-123", "dXNlcjpwYXNz", "abc123", "k-9", "hunter2", "p@ss"]) {
+      assert.ok(!once.includes(secret), `${secret} in ${once}`);
+    }
+  }
+});
+
+test("the wider rules keep ordinary text: a trading session, prose about secrets, plain URLs and public keys stay", () => {
+  for (const text of [
+    '{"session":"asia","timezone":"UTC"}', "session: london", "invalid local session date: 2026-01-01", 'quote.session = "regular"',
+    "password reset required", "cookie banner dismissed", "Unexpected token '<' in JSON", "authorization failed",
+    "see https://docs.example/page for details", "at run (https://cdn.example/bundle.js:1:2)", "mail ops@example.com",
+    "http://host.example/path@v2", "-----BEGIN PUBLIC KEY-----\nMIIBIj\n-----END PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----\nMIIB",
+    '{"token":null,"x":1}', "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled",
+  ]) assert.equal(redactSecrets(text), text, JSON.stringify(text));
+});
+
 test("redaction keeps ordinary text: an empty value, a stack frame, a JSON literal and prose stay as they are", () => {
   for (const text of [
     "study st1 not found", "authorization failed", "Unexpected token '<'", "(reading 'authorization')",
@@ -110,7 +198,13 @@ test("a long message cannot stall the thread that redacts it", () => {
   // The query rule rescanned the rest of the message from every later "x://": 200 KB of them took 5 s (102-02 review).
   for (const adversarial of [`http://${"a".repeat(200_000)}`, "x://".repeat(50_000), "x://y".repeat(40_000), "authorization: ".repeat(15_000),
     `Authorization: Bearer ${"a".repeat(200_000)}`, `authorization${" ".repeat(200_000)}`, '"authorization"'.repeat(14_000),
-    "'authorization', ".repeat(12_000), `"token"${" ".repeat(200_000)}`]) {
+    "'authorization', ".repeat(12_000), `"token"${" ".repeat(200_000)}`,
+    // The rules of 102-27: secret names, cookies, encoded separators, deep escapes, HAR, private keys and userinfo.
+    "access_token=".repeat(15_000), `access_token${"_".repeat(200_000)}`, `Cookie: ${"a".repeat(200_000)}`,
+    "authorization%3A".repeat(12_000), "sessionid".repeat(20_000), String.raw`token:\\\"`.repeat(20_000),
+    String.raw`{\"token\":\"` + "a".repeat(200_000), `"value":"${"a".repeat(200_000)}`, '"value":"a",'.repeat(15_000),
+    "-----BEGIN PRIVATE KEY-----".repeat(7_000), `http://${"@".repeat(200_000)}`, `${"a".repeat(64)}://${"b@".repeat(1_000)}`.repeat(90),
+    `token=${",a".repeat(100_000)}`]) {
     const started = process.hrtime.bigint();
     redactSecrets(adversarial);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
