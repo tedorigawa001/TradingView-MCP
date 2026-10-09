@@ -87,8 +87,8 @@ const LITERAL = String.raw`(?:null|true|false|undefined)[ \t]*(?:[)\]}]|[,;](?=[
  * an escaped JSON string the closing quote is the \" that ends the JSON value (see escapedRun), so a ', an inner \\\"
  * (a quote escaped twice) or a \\/ does not end it. An unquoted value runs to the end of
  * the line, and onto a folded next line only when its line holds just the scheme. It follows:
- * - `:`, `=` or `=>` or their URL encodings, after a key quoted or not (JSON, Python, util.inspect, a Map, JSON escaped
- *   once or more), with a fold before the value;
+ * - `:`, `=` or `=>`, after a key quoted or not (JSON, Python, util.inspect, a Map, an escaped JSON string), with a
+ *   fold before the value, and Proxy-Authorization included since \b falls after its hyphen;
  * - a name-value pair with a scheme next, `['Authorization', 'Basic …']`, so a list of header names keeps its next
  *   name; and HAR's `{"name":"Authorization","value":"…"}` whatever the value;
  * - a known scheme after a space alone.
@@ -167,8 +167,9 @@ const CUT_PRIVATE_KEY = /^\*\*\*(?:(?:\r?\n|(?:\\r)?\\n|[ \t]+)(?:-{1,5}(?:E|EN|
 /** A private key's body masked between its armour lines, with the line break it was written with. */
 function maskPrivateKey(block: string, begin: string, end: string | undefined, cut: boolean): string {
   const rest = block.slice(begin.length);
-  const lineBreak = KEY_LINE_BREAK.exec(rest)?.[0] ?? "\n";
-  if (cut && end === undefined && CUT_PRIVATE_KEY.test(rest.slice(lineBreak.length))) return block;
+  const written = KEY_LINE_BREAK.exec(rest)?.[0];
+  if (cut && end === undefined && written !== undefined && CUT_PRIVATE_KEY.test(rest.slice(written.length))) return block;
+  const lineBreak = written ?? "\n";
   return `${begin}${lineBreak}***${end === undefined ? "" : `${lineBreak}${end}`}`;
 }
 
@@ -207,11 +208,16 @@ export function redactSecrets(text: string): string {
 /**
  * 0.1.34's rules first, as they shipped and in their order, then the rules of BACKLOG 102-27 on what they leave. A later
  * rule only replaces text with a mask and keeps nothing but what it was given, so whatever 0.1.34 masked stays masked:
- * four reviews of rules folded in among the old ones found each new form leaking a secret 0.1.34 had masked (see
- * BACKLOG).
+ * five reviews of rules folded in among the old ones found each new form leaking a secret 0.1.34 had masked (see
+ * BACKLOG). 0.1.34's rules run twice, as on a page exception, which the CDP client and then the tool error both redact:
+ * a first pass can open a match for the second (a query rule taking a "/" out of a userinfo), and the rules here would
+ * otherwise take the scheme or "@" that second pass needs (102-27 sixth review). With both 0.1.34 passes done first, a
+ * second redaction of the result masks at least what 0.1.34's two did. A text the first pass leaves as it is needs no
+ * second.
  */
 function redactAll(text: string, cut: boolean): string {
-  return redactAs0134(text)
+  const once = redactAs0134(text);
+  return (once === text ? once : redactAs0134(once))
     .replace(PRIVATE_KEY_BLOCK, (block: string, begin: string, end?: string) => maskPrivateKey(block, begin, end, cut))
     .replace(AUTHORIZATION, maskValue)
     .replace(HAR_VALUE_FIRST, "$1***")

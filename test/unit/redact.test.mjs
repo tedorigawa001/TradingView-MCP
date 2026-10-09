@@ -246,6 +246,11 @@ const LEAKS_102_27 = [
   ['{"token":null,"x":1}', '{"token":***,"x":1}'],
   ["password: null, user: bob", "password: ***, user: bob"],
   ["bearer: null", "bearer: ***"],
+  // 0.1.34's rules run twice before the new ones, as a page exception is redacted twice: its first pass can open a match
+  // for its second (the query rule takes the "/" out of this userinfo), which the new rules must not take away first.
+  ['{"token_url":"https://svc:hunter2?9/k(3@auth.example.com/cb?code=abc123"}', '{"token_url":"***://***@auth.example.com/cb?***"}'],
+  ["password=postgres://app:hunter2?9/k'3@db.example:5432/app", "password=***://***@db.example:5432/app"],
+  ["https://app:hunter2?9/k(3;cookie=a@db.example/x?sid=abc123", "https://***@db.example/x?***"],
   // A mask that takes a blank away lets the userinfo rule match in the same pass.
   ["x://password:Bearer b@c", "x://***@c"],
   // A masked-looking body with a partial END line is kept only on the second pass of a cut result, never on a first.
@@ -364,6 +369,8 @@ test("a second pass keeps a cut private key only when what is left is the mask a
   assert.equal(redactSecrets(kept), kept);
   assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\n***\nhunter2\n… [truncated]"), "-----BEGIN PRIVATE KEY-----\n***\n… [truncated]");
   assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\nhunter2\n… [truncated]"), "-----BEGIN PRIVATE KEY-----\n***\n… [truncated]");
+  // With no line break after BEGIN, nothing is taken for one before the mask is looked for.
+  assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----h***\n… [truncated]"), "-----BEGIN PRIVATE KEY-----\n***\n… [truncated]");
 });
 
 test("truncation happens after redaction, so no secret survives by straddling the cut", () => {
