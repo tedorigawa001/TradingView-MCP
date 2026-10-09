@@ -26,6 +26,9 @@
 export const MAX_REDACTED_CHARS = 4096;
 
 /** Authorization schemes that may follow the header name after a space alone, or stand alone before a folded value. */
+const SCHEME_0134 = String.raw`(?:bearer|basic|digest|negotiate|ntlm|aws4-hmac-sha256|oauth)`;
+
+/** The schemes the rules of BACKLOG 102-27 know, DPoP added. */
 const SCHEME = String.raw`(?:bearer|basic|digest|negotiate|ntlm|aws4-hmac-sha256|oauth|dpop)`;
 
 /** A value folded onto an indented next line; never a stack frame ("    at …"), and past the whole indent. */
@@ -90,9 +93,20 @@ const LITERAL = String.raw`(?:null|true|false|undefined)[ \t]*(?:[)\]}]|[,;](?=[
  *   name; and HAR's `{"name":"Authorization","value":"…"}` whatever the value;
  * - a known scheme after a space alone.
  * A value that is only null, true, false or undefined is left as it is, so a JSON dump stays whole; one that merely
- * starts with such a word, as from a template with an undefined scheme, is masked. The key may sit inside a longer name
- * (HTTP_AUTHORIZATION, proxyAuthorization, authorizationHeader, BACKLOG 102-27), and a Cookie or Set-Cookie header,
- * whose value is a list of credentials, goes whole the same way.
+ * starts with such a word, as from a template with an undefined scheme, is masked. This is the rule as 0.1.34 shipped
+ * it, run first and unchanged (see redactAll).
+ */
+const AUTHORIZATION_0134 = new RegExp(String.raw`\b(authorization)(` +
+  String.raw`\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?(?=\S)` +
+  String.raw`|\\?["'][ \t]*,[ \t]*(?:\\?["']value\\?["'][ \t]*:[ \t]*(?=\\?["'])|(?=\\?["']${SCHEME_0134}\b))` +
+  String.raw`|[ \t]+(?=${SCHEME_0134}\b)` +
+  String.raw`)(?:${escapedRun('"')}|${escapedRun("'")}|(")(?:[^"\\\r\n]|\\.)*|(')(?:[^'\\\r\n]|\\.)*` +
+  String.raw`|(?!(?:null|true|false|undefined)[ \t]*(?:[,;)\]}]|\r?\n|$))(?:${SCHEME_0134}[ \t]*${FOLD})?[^\r\n]+)`, "gi");
+
+/**
+ * The wider Authorization rule of BACKLOG 102-27, run after 0.1.34's rules (see redactAll): the key inside a longer name
+ * (HTTP_AUTHORIZATION, proxyAuthorization, authorizationHeader) or a Cookie or Set-Cookie header, whose value is a list
+ * of credentials; encoded separators and quotes; HAR and name-value pairs in any quoting; values escaped deeper.
  */
 const AUTHORIZATION = new RegExp(String.raw`(authorization[\w-]{0,32}|cookie[\w-]{0,32})(` +
   String.raw`${SEPARATOR}${FOLD}?(?=\S)` +
@@ -124,12 +138,11 @@ const SECRET_WORD = String.raw`(?:token|secret|passw(?:or)?d|passphrase|credenti
  * The value of a key whose name holds a secret word, after a separator (see SEPARATOR) or as HAR's
  * `{"name":"access_token","value":"…"}`, past its opening quote (plain, escaped, encoded or an entity) and an
  * Authorization scheme, Token or ApiKey before it (`X-Auth: Bearer …`), which goes with it. The value itself is what the
- * bearer rule masks, `[\w.~+/-]+=*`: it never crosses the punctuation that ends a value in a list, JSON or a URL, so it
- * cannot run into a next key and leave that key's value in clear, which the wider values tried in the 102-27 reviews did
- * (see BACKLOG). A value holding `%`, `:` or a blank keeps what follows them, as under the bearer rule.
+ * bearer rule masks, `[\w.~+/-]+=*`, or a mask an earlier rule left (`X-Auth: Bearer ***` becomes `X-Auth: ***`). A
+ * value holding `%`, `:` or a blank keeps what follows them, as under the bearer rule.
  */
 const KEYED = new RegExp(String.raw`(${SECRET_WORD}[\w-]{0,32})((?:${SEPARATOR}${FOLD}?|${HAR_VALUE_KEY})${QUOTE}?)` +
-  String.raw`(?!${LITERAL})(?:(?:${SCHEME}|token|api[_-]?key):?(?:[ \t]+|[ \t]*${FOLD}))?[\w.~+/-]+=*`, "gi");
+  String.raw`(?:(?:${SCHEME}|token|api[_-]?key):?(?:[ \t]+|[ \t]*${FOLD}))?(?:[\w.~+/-]+=*|\*\*\*)`, "gi");
 
 /** HAR with the value before the name: `{"value":"…","name":"Cookie"}`. */
 const HAR_VALUE_FIRST = new RegExp(String.raw`("value"[ \t]*:[ \t]*")(?:[^"\\\r\n]|\\.)*` +
@@ -142,18 +155,26 @@ const HAR_VALUE_FIRST = new RegExp(String.raw`("value"[ \t]*:[ \t]*")(?:[^"\\\r\
 const PRIVATE_KEY_BLOCK = new RegExp(String.raw`(-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----)` +
   String.raw`(?:[\s\S]*?(-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----)|[\s\S]*)`, "g");
 
+/** What follows a private key's BEGIN line: a line break, an escaped one (`\n` in JSON), or blanks on one line. */
+const KEY_LINE_BREAK = /^(?:\r?\n|(?:\\r)?\\n|[ \t]+)/;
+
 /**
  * A masked block that a cut left without its whole END line, which the second pass of a cut result keeps as it is; a
  * first pass masks it like any other block, so text that merely looks masked keeps nothing.
  */
-const CUT_PRIVATE_KEY = /^\n\*\*\*(?:\n(?:-{1,5}(?:E|EN|END(?: [A-Z0-9 ]{0,40}-{0,5})?)?)?)?$/;
+const CUT_PRIVATE_KEY = /^\*\*\*(?:(?:\r?\n|(?:\\r)?\\n|[ \t]+)(?:-{1,5}(?:E|EN|END(?: [A-Z0-9 ]{0,40}-{0,5})?)?)?)?$/;
 
-/**
- * Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line. A value that is
- * only null, true, false or undefined is left as it is (BACKLOG 102-27).
- */
+/** A private key's body masked between its armour lines, with the line break it was written with. */
+function maskPrivateKey(block: string, begin: string, end: string | undefined, cut: boolean): string {
+  const rest = block.slice(begin.length);
+  const lineBreak = KEY_LINE_BREAK.exec(rest)?.[0] ?? "\n";
+  if (cut && end === undefined && CUT_PRIVATE_KEY.test(rest.slice(lineBreak.length))) return block;
+  return `${begin}${lineBreak}***${end === undefined ? "" : `${lineBreak}${end}`}`;
+}
+
+/** Bearer, token and API-key values after a separator, a space, or a fold onto an indented next line (0.1.34's rule). */
 const GENERIC = new RegExp(String.raw`\b(bearer|token|api[_-]?key)` +
-  String.raw`(\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})(?!${LITERAL})[\w.~+/-]+=*`, "gi");
+  String.raw`(\\?["']?[ \t]*(?:=>|[=:])[ \t]*${FOLD}?\\?["']?|[ \t]+|[ \t]*${FOLD})[\w.~+/-]+=*`, "gi");
 
 /** What a keyed rule leaves: the name, the separator, the value's opening quote if any, then the mask. */
 const maskValue = (_: string, name: string, separator: string, ...openings: unknown[]) =>
@@ -183,22 +204,34 @@ export function redactSecrets(text: string): string {
     : `${redacted.slice(0, MAX_REDACTED_CHARS).replace(/\\+$/, "")}${TRUNCATED}`;
 }
 
+/**
+ * 0.1.34's rules first, as they shipped and in their order, then the rules of BACKLOG 102-27 on what they leave. A later
+ * rule only replaces text with a mask and keeps nothing but what it was given, so whatever 0.1.34 masked stays masked:
+ * four reviews of rules folded in among the old ones found each new form leaking a secret 0.1.34 had masked (see
+ * BACKLOG).
+ */
 function redactAll(text: string, cut: boolean): string {
-  return text
-    .replace(PRIVATE_KEY_BLOCK, (block: string, begin: string, end?: string) =>
-      (cut && end === undefined && CUT_PRIVATE_KEY.test(block.slice(begin.length))
-        ? block
-        : `${begin}\n***${end === undefined ? "" : `\n${end}`}`))
-    .replace(/([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi, "$1***@")
-    // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
+  return redactAs0134(text)
+    .replace(PRIVATE_KEY_BLOCK, (block: string, begin: string, end?: string) => maskPrivateKey(block, begin, end, cut))
     .replace(AUTHORIZATION, maskValue)
     .replace(HAR_VALUE_FIRST, "$1***")
+    .replace(KEYED, "$1$2***")
+    // Once more at the end: a mask that took a blank away ("x://password:Bearer b@c") lets it match, and would otherwise
+    // only on a second pass.
+    .replace(USERINFO, "$1***@");
+}
+
+/** URL userinfo up to the first "@" (0.1.34's rule). */
+const USERINFO = /([a-z][\w+.-]{0,64}:\/\/)[^\s/@]+@/gi;
+
+function redactAs0134(text: string): string {
+  return text
+    .replace(USERINFO, "$1***@")
+    // Before the query rule, which stops at a space and so would leave "?***" and the credential behind it.
+    .replace(AUTHORIZATION_0134, maskValue)
     // The query is optional so that a URL without one is consumed whole: requiring it made every later "x://" in the
     // body rescan the rest of the message, which took 5 s on 200 KB of "x://" (code review of 102-02).
     .replace(/([a-z][\w+.-]{0,64}:\/\/[^\s?"'<>()[\]]+)(\?[^\s"'<>()[\]]*)?/gi,
       (match: string, url: string, query: string | undefined) => (query === undefined ? match : `${url}?***`))
-    // After the query rule, as the bearer rule: a value that is a URL would otherwise lose its scheme to the mask and the
-    // URL its query mask (102-27 reviews).
-    .replace(KEYED, "$1$2***")
     .replace(GENERIC, "$1$2***");
 }

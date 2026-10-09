@@ -226,6 +226,28 @@ const LEAKS_102_27 = [
     "key: -----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----\nnext line"],
   ["-----BEGIN RSA PRIVATE KEY-----\nabc123\nk-9", "-----BEGIN RSA PRIVATE KEY-----\n***"],
   ["-----BEGIN PRIVATE KEY-----\nabc123\n-----END CERTIFICATE-----\nk-9", "-----BEGIN PRIVATE KEY-----\n***"],
+  // A key written on one line keeps its line: escaped line breaks or blanks.
+  ["-----BEGIN PRIVATE KEY----- abc123 -----END PRIVATE KEY-----", "-----BEGIN PRIVATE KEY----- *** -----END PRIVATE KEY-----"],
+  [String.raw`{"k":"-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----"}`, String.raw`{"k":"-----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----"}`],
+  // 0.1.34's rules run first and the new ones on what they leave, so nothing 0.1.34 masked is left in clear: each of these
+  // leaked when the new rules ran among the old ones (102-27 fifth review).
+  ["{ auth: 'apikey:SG.hunter2' }", "{ auth: '***:***' }"],
+  ['{"name":"token","value":"bearer:hunter2"}', '{"name":"token","value":"***:***"}'],
+  ["password=x-api-key hunter2", "password=*** ***"],
+  ["password=my-token=hunter2", "password=******"],
+  ["Authorization: Bearer x -----BEGIN PRIVATE KEY----- y -----END PRIVATE KEY----- hunter2", "Authorization: ***"],
+  [String.raw`curl -H 'Authorization: Basic Y2xp' -d '{"k":"-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n"}' -u admin:hunter2 https://h.example/x`, "curl -H 'Authorization: ***"],
+  ["Cookie: a=1; Authorization:\n  Basic hunter2", "Cookie: ***\n  ***"],
+  ["authorization: null,x token:\n  hunter2", "authorization: ***\n  ***"],
+  [String.raw`authorization: \\"Digest a\\", response=\\"hunter2\\"`, "authorization: ***"],
+  ['authorization=%20"x" hunter2', "authorization=***"],
+  ['cookie: "x authorization:" Basic hunter2', 'cookie: "***"***'],
+  // A literal under a secret name is masked, as 0.1.34's bearer rule masks it.
+  ['{"token":null,"x":1}', '{"token":***,"x":1}'],
+  ["password: null, user: bob", "password: ***, user: bob"],
+  ["bearer: null", "bearer: ***"],
+  // A mask that takes a blank away lets the userinfo rule match in the same pass.
+  ["x://password:Bearer b@c", "x://***@c"],
   // A masked-looking body with a partial END line is kept only on the second pass of a cut result, never on a first.
   ["-----BEGIN PRIVATE KEY-----\n***\n-----END HUNTER2", "-----BEGIN PRIVATE KEY-----\n***"],
   ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc123\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n***\n-----END PGP PRIVATE KEY BLOCK-----"],
@@ -248,8 +270,9 @@ test("the wider rules keep ordinary text: a trading session, prose about secrets
     "password reset required", "cookie banner dismissed", "Unexpected token '<' in JSON", "authorization failed",
     "see https://docs.example/page for details", "at run (https://cdn.example/bundle.js:1:2)", "mail ops@example.com",
     "http://host.example/path@v2", "-----BEGIN PUBLIC KEY-----\nMIIBIj\n-----END PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----\nMIIB",
-    '{"token":null,"x":1}', "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled", "password: null, user: bob",
-    "password=null,{x}", "password=null,[1]", "f(password=null)", "password=null;", String.raw`{\"password\":null,\"x\":1}`,
+    "allowed headers: ['authorization', 'cookie']", "author: Ada", "OAuth: enabled",
+    // A literal under Authorization before a bracket, a closing parenthesis, ";" or an escaped quote is kept, as by 0.1.34.
+    "Authorization: null,{}", "f(Authorization=null)", "Authorization: null;", String.raw`{\"Authorization\":null,\"x\":1}`,
   ]) assert.equal(redactSecrets(text), text, JSON.stringify(text));
 });
 
