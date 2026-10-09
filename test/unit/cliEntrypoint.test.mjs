@@ -191,11 +191,12 @@ test("every CLI decides its entry point through isCliEntrypoint, and none compar
     if (/process\.argv(?!\.slice\(2\)|\[2\])/.test(await readFile(new URL(name, src), "utf8"))) offenders.push(name);
   }
   assert.deepEqual(offenders, [], "use isCliEntrypoint(import.meta.url) from cliEntrypoint.ts");
-  // Every bin and every `node build/X.js` script runs only as the entry point; index and the migrations run on import.
+  // Every bin and every `node build/X.js` script runs only as the entry point; index alone runs on import (the
+  // migrations did too until BACKLOG 102-28).
   const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
   const targets = new Set([...Object.values(pkg.bin), ...Object.values(pkg.scripts)].flatMap((command) =>
     [...command.matchAll(/(?:^|\s)build\/(\w+)\.js\b/g)].map((match) => match[1])));
-  const unconditional = new Set(["index", "migrateFuturesOiDatesCli", "migrateFuturesOiCmeCleanupCli"]);
+  const unconditional = new Set(["index"]);
   assert.ok(targets.size > 20, `${targets.size} targets`);
   const unguarded = [];
   for (const name of targets) {
