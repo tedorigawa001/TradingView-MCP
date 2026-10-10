@@ -14,19 +14,40 @@ const PAGE_ATTEMPTS = 3;
 const OANDA_HOSTS = { practice: "api-fxpractice.oanda.com", live: "api-fxtrade.oanda.com" } as const;
 
 type OandaEnvironment = keyof typeof OANDA_HOSTS;
+/**
+ * The OANDA instruments the collector reads (BACKLOG 103-1): the majors against USD, AUD/NZD and gold, which the HMM
+ * research plan v2 needs for its forward test and its USD basket. EUR_USD is the default and keeps its files as before.
+ */
+export const OANDA_FX_INSTRUMENTS = ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "NZD_USD", "USD_CAD", "USD_CHF", "AUD_NZD", "XAU_USD"] as const;
+export type OandaFxInstrument = (typeof OANDA_FX_INSTRUMENTS)[number];
+export const isOandaFxInstrument = (value: unknown): value is OandaFxInstrument =>
+  typeof value === "string" && (OANDA_FX_INSTRUMENTS as readonly string[]).includes(value);
+/** The repository's symbol for an instrument: OANDA:EURUSD for EUR_USD. */
+export const canonicalOandaSymbol = (instrument: OandaFxInstrument) => `OANDA:${instrument.replace("_", "")}`;
 export type FxM15Bar = { time: string; open: number; high: number; low: number; close: number; volume: number };
 export type FxHistoricalManifest = {
   schema_version: "1.0"; sequence: number; series: "fx_historical_m15"; evidence_tier: "official_revised_history";
-  source_id: "oanda_v20"; source_url_template: string; canonical_symbol: "OANDA:EURUSD"; instrument: "EUR_USD"; granularity: "M15"; price: "M";
+  source_id: "oanda_v20"; source_url_template: string; canonical_symbol: string; instrument: OandaFxInstrument; granularity: "M15"; price: "M";
   requested_from: string; requested_to: string; retrieved_at: string; first_seen_at: string; observation_date: string; raw_sha256: string[]; normalized_sha256: string;
   bar_count: number; first_bar_at: string; last_bar_at: string; duplicate_timestamps_removed: number; non_contiguous_weekday_intervals: number;
 };
 export type OandaHistoricalFetch = (url: string, init: RequestInit) => Promise<BoundedResponse & { ok: boolean; status: number }>;
 type FxHistoricalCheckpointPort = { completed(collectionKey: string): Promise<FxHistoricalPageCheckpoint[]>; append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string): Promise<{ recorded: boolean; sequence: number | null }> };
-export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestStore; checkpoints?: FxHistoricalCheckpointPort };
+export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; instrument?: OandaFxInstrument; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestStore; checkpoints?: FxHistoricalCheckpointPort };
 
 export const resolveFxHistoricalManifestPath = (configuredPath = process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH): string =>
   configuredPath?.trim() || join(homedir(), ".tradingview-mcp", "fx-history-m15-manifest.jsonl");
+
+/**
+ * Each instrument keeps its own manifest, and checkpoints beside it (BACKLOG 103-1). EUR_USD keeps the path it always had,
+ * so its files, and the versions that read only them, are unchanged; another instrument's name goes before the suffix:
+ * fx-history-m15-manifest.USD_JPY.jsonl.
+ */
+export const resolveFxHistoricalManifestPathFor = (instrument: OandaFxInstrument, configuredPath = process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH): string => {
+  const path = resolveFxHistoricalManifestPath(configuredPath);
+  if (instrument === "EUR_USD") return path;
+  return path.endsWith(".jsonl") ? `${path.slice(0, -".jsonl".length)}.${instrument}.jsonl` : `${path}.${instrument}`;
+};
 
 const canonical = (value: string, label: string) => {
   if (!isCanonicalTimestamp(value)) throw new Error(`${label} must be a canonical ISO timestamp`);
@@ -102,10 +123,11 @@ function parsePage(body: Uint8Array): { bars: FxM15Bar[]; incomplete: number } {
 const pageFinal = (page: { incomplete: number }, pageEnd: number, readAt: string) =>
   page.incomplete === 0 && new Date(readAt).getTime() >= pageEnd + FIFTEEN_MINUTES;
 
-const validateManifest = (value: unknown): FxHistoricalManifest => {
+const validateManifest = (value: unknown, instrument: OandaFxInstrument): FxHistoricalManifest => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid FX history manifest");
   const row = value as Partial<FxHistoricalManifest>;
-  if (row.schema_version !== "1.0" || row.series !== "fx_historical_m15" || row.evidence_tier !== "official_revised_history" || row.source_id !== "oanda_v20" || row.canonical_symbol !== "OANDA:EURUSD" || row.instrument !== "EUR_USD" || row.granularity !== "M15" || row.price !== "M") throw new Error("unsupported FX history manifest");
+  // A manifest holds one instrument's collections only (BACKLOG 103-1).
+  if (row.schema_version !== "1.0" || row.series !== "fx_historical_m15" || row.evidence_tier !== "official_revised_history" || row.source_id !== "oanda_v20" || row.canonical_symbol !== canonicalOandaSymbol(instrument) || row.instrument !== instrument || row.granularity !== "M15" || row.price !== "M") throw new Error("unsupported FX history manifest");
   if (!Number.isSafeInteger(row.sequence) || (row.sequence ?? 0) < 1 || !Number.isSafeInteger(row.bar_count) || (row.bar_count ?? 0) < 1 || !Number.isSafeInteger(row.duplicate_timestamps_removed) || (row.duplicate_timestamps_removed ?? -1) < 0 || !Number.isSafeInteger(row.non_contiguous_weekday_intervals) || (row.non_contiguous_weekday_intervals ?? -1) < 0) throw new Error("invalid FX history manifest counters");
   for (const timestamp of [row.requested_from, row.requested_to, row.retrieved_at, row.first_seen_at, row.first_bar_at, row.last_bar_at]) if (typeof timestamp !== "string" || !isCanonicalTimestamp(timestamp)) throw new Error("invalid FX history manifest timestamp");
   if (row.requested_from! >= row.requested_to! || row.first_bar_at! > row.last_bar_at! || row.first_seen_at !== row.retrieved_at || row.observation_date !== row.retrieved_at!.slice(0, 10) || typeof row.source_url_template !== "string" || !row.source_url_template.startsWith("https://api-fx") || !Array.isArray(row.raw_sha256) || row.raw_sha256.length < 1 || row.raw_sha256.some((hash) => !/^sha256:[a-f0-9]{64}$/.test(hash)) || typeof row.normalized_sha256 !== "string" || !/^sha256:[a-f0-9]{64}$/.test(row.normalized_sha256)) throw new Error("invalid FX history manifest fields");
@@ -114,11 +136,13 @@ const validateManifest = (value: unknown): FxHistoricalManifest => {
 
 export class FxHistoricalManifestStore {
   private readonly log: AppendOnlyFirstSeenLog<FxHistoricalManifest>;
-  constructor(path = resolveFxHistoricalManifestPath()) { this.log = new AppendOnlyFirstSeenLog(path, "FX history manifest", validateManifest, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES }); }
+  constructor(path = resolveFxHistoricalManifestPath(), private readonly instrument: OandaFxInstrument = "EUR_USD") {
+    this.log = new AppendOnlyFirstSeenLog(path, "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
+  }
   async append(manifest: Omit<FxHistoricalManifest, "schema_version" | "sequence" | "series" | "evidence_tier" | "first_seen_at" | "observation_date">) {
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();
-      const candidate = validateManifest({ ...manifest, schema_version: "1.0", sequence: records.length + 1, series: "fx_historical_m15", evidence_tier: "official_revised_history", first_seen_at: manifest.retrieved_at, observation_date: manifest.retrieved_at.slice(0, 10) });
+      const candidate = validateManifest({ ...manifest, schema_version: "1.0", sequence: records.length + 1, series: "fx_historical_m15", evidence_tier: "official_revised_history", first_seen_at: manifest.retrieved_at, observation_date: manifest.retrieved_at.slice(0, 10) }, this.instrument);
       if (records.some((record) => record.normalized_sha256 === candidate.normalized_sha256)) return { recorded: false, sequence: null };
       await this.log.appendUnlocked(candidate);
       return { recorded: true, sequence: candidate.sequence };
@@ -172,20 +196,26 @@ export class FxHistoricalCheckpointStore {
   }
 }
 
-export async function collectOandaEurUsdM15History(input: OandaHistoricalRequest) {
+/** Collects one instrument's confirmed M15 midpoint candles (EUR_USD unless input.instrument names another). */
+export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const from = canonical(input.from, "from"); const to = canonical(input.to, "to");
   if (from >= to) throw new Error("from must precede to");
+  const instrument = input.instrument ?? "EUR_USD";
+  if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
+  const canonicalSymbol = canonicalOandaSymbol(instrument);
   if (!/^[A-Za-z0-9_-]{3,128}$/.test(input.accountId) || input.token.trim().length < 16) throw new Error("OANDA credentials are missing or malformed");
   const environment = input.environment ?? "practice";
   const host = OANDA_HOSTS[environment];
   const fetcher = input.fetch ?? ((url, init) => fetch(url, init) as Promise<BoundedResponse & { ok: boolean; status: number }>);
   const sleep = input.sleep ?? defaultSleep;
   const archive = input.archive ?? new FxHistoricalArchive(resolveFxHistoricalArchivePath());
-  const store = input.store ?? new FxHistoricalManifestStore();
-  const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore();
+  const manifestPath = resolveFxHistoricalManifestPathFor(instrument);
+  const store = input.store ?? new FxHistoricalManifestStore(manifestPath, instrument);
+  const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore(`${manifestPath}.checkpoints`);
   const rawSha256: string[] = []; const bars: FxM15Bar[] = []; let duplicates = 0;
   const normalizedHash = createHash("sha256"); normalizedHash.update("["); let firstNormalizedBar = true;
-  const collectionKey = digest(`oanda_v20|${environment}|EUR_USD|M15|M|${from}|${to}`);
+  // The key always named the instrument, so EUR_USD's checkpoints resume as before.
+  const collectionKey = digest(`oanda_v20|${environment}|${instrument}|M15|M|${from}|${to}`);
   // The latest checkpoint of each page; a later one replaces an earlier one written before the page was final.
   const completed = new Map((await checkpoints.completed(collectionKey)).sort((left, right) => left.sequence - right.sequence)
     .map((row) => [`${row.requested_from}:${row.requested_to}`, row]));
@@ -223,7 +253,7 @@ export async function collectOandaEurUsdM15History(input: OandaHistoricalRequest
         rawSha256.push(priorCheckpoint.raw_sha256); appendBars(page.bars, cursor, pageEnd); resumedPages += 1; cursor = pageEnd; continue;
       }
     }
-    const url = new URL(`https://${host}/v3/accounts/${encodeURIComponent(input.accountId)}/instruments/EUR_USD/candles`);
+    const url = new URL(`https://${host}/v3/accounts/${encodeURIComponent(input.accountId)}/instruments/${instrument}/candles`);
     url.search = new URLSearchParams({ price: "M", granularity: "M15", from: requestFrom, to: requestTo, includeFirst: "true" }).toString();
     const readAt = now();
     const response = await fetchOandaPage(url.toString(), input.token, fetcher, sleep);
@@ -243,7 +273,11 @@ export async function collectOandaEurUsdM15History(input: OandaHistoricalRequest
   const retrievedAt = now();
   normalizedHash.update("]");
   const normalizedSha256 = `sha256:${normalizedHash.digest("hex")}`;
-  const sourceUrlTemplate = `https://${host}/v3/accounts/{account}/instruments/EUR_USD/candles`;
-  const persisted = await store.append({ source_id: "oanda_v20", source_url_template: sourceUrlTemplate, canonical_symbol: "OANDA:EURUSD", instrument: "EUR_USD", granularity: "M15", price: "M", requested_from: from, requested_to: to, retrieved_at: retrievedAt, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, bar_count: bars.length, first_bar_at: bars[0].time, last_bar_at: bars.at(-1)!.time, duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular });
-  return { source: "oanda_v20", evidence_tier: "official_revised_history", canonical_symbol: "OANDA:EURUSD", bars, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, manifest: persisted, collection_key: collectionKey, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, quality: { duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular } };
+  const sourceUrlTemplate = `https://${host}/v3/accounts/{account}/instruments/${instrument}/candles`;
+  const persisted = await store.append({ source_id: "oanda_v20", source_url_template: sourceUrlTemplate, canonical_symbol: canonicalSymbol, instrument, granularity: "M15", price: "M", requested_from: from, requested_to: to, retrieved_at: retrievedAt, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, bar_count: bars.length, first_bar_at: bars[0].time, last_bar_at: bars.at(-1)!.time, duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular });
+  return { source: "oanda_v20", evidence_tier: "official_revised_history", canonical_symbol: canonicalSymbol, instrument, bars, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, manifest: persisted, collection_key: collectionKey, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, quality: { duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular } };
 }
+
+/** The EUR_USD collection, as before BACKLOG 103-1. */
+export const collectOandaEurUsdM15History = (input: Omit<OandaHistoricalRequest, "instrument">) =>
+  collectOandaM15History({ ...input, instrument: "EUR_USD" });
