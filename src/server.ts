@@ -4892,14 +4892,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           });
         }
         const journalView = await journal.list({ limit: 500 });
-        // The attempt log only orders the analyses (BACKLOG 102-34): if it cannot be read, they are selected without it
-        // and the preview says so.
-        let lastAttempts: Awaited<ReturnType<typeof journal.lastAttempts>> = new Map();
-        let attemptLogError: string | null = null;
+        // The attempt log only orders the analyses (BACKLOG 102-34): what cannot be read of it is left out, and the
+        // preview says what.
+        let lastAttempts: Awaited<ReturnType<typeof journal.lastAttempts>>["attempts"] = new Map();
+        let attemptLog: Record<string, unknown> = { status: "read" };
         try {
-          lastAttempts = await journal.lastAttempts();
+          const read = await journal.lastAttempts();
+          lastAttempts = read.attempts;
+          if (read.unreadable.length > 0) {
+            attemptLog = {
+              status: "partial",
+              unreadable: read.unreadable.map(({ path, error }) => ({ path: redactSecrets(path), error: redactSecrets(describeErrorChain(error)) })),
+            };
+          }
         } catch (err) {
-          attemptLogError = redactSecrets(describeErrorChain(err));
+          attemptLog = { status: "unavailable", error: redactSecrets(describeErrorChain(err)) };
         }
         const selection = selectDueAnalyses(
           journalView.analyses as JournalAnalysisRecord[],
@@ -4931,6 +4938,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               outcome: candidate.latestOutcome.outcome,
               evidenceThrough: candidate.latestOutcome.evidenceThrough,
             },
+            // The order: its group, from the outcome recorded last, and when it was last looked at (BACKLOG 102-34).
+            orderGroup: candidate.orderGroup,
+            recentOutcome: candidate.recentOutcome === null ? null : {
+              status: candidate.recentOutcome.status,
+              outcome: candidate.recentOutcome.outcome,
+              evidenceThrough: candidate.recentOutcome.evidenceThrough,
+              evaluatedAt: candidate.recentOutcome.evaluatedAt,
+            },
             lastSeenAt: candidate.lastSeenAt,
             lastAttempt: candidate.lastAttempt,
             estimatedChanges: {
@@ -4955,7 +4970,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           truncated: selection.truncated,
           // Completes an earlier version closed without evidence through the expiry, rechecked to be replaced (102-32).
           legacyCompleteWithoutCoverage: selection.legacyCompleteWithoutCoverage,
-          attemptLog: attemptLogError === null ? { status: "read" } : { status: "unavailable", error: attemptLogError },
+          attemptLog,
           candidates: previewItems,
           skipped: selection.skipped,
         };
@@ -5382,7 +5397,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     {
       description:
         "Read locally journaled analysis definitions and their monotonic latest evaluations, " +
-        "with the evaluation recorded last beside them (recentOutcome). " +
+        "with the evaluation recorded last beside them when it is not the latest (recentOutcome). " +
         "A completed evaluation is never displaced by a later stale ongoing read. This tool " +
         "does not access or change the TradingView chart.",
       inputSchema: {

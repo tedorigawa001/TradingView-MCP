@@ -137,8 +137,9 @@ test("evaluated results that stayed open go last in the order they were recorded
   // at together (BACKLOG 102-34).
   assert.deepEqual(selectDueAnalyses(records, { now }).candidates.map((candidate) => candidate.analysisId),
     ["fresh", "ongoingAtExpiry", "checkedBefore", "active", "ambiguousEarly", "shortOld", "gapStale"]);
+  // With a limit, the open results' group still gets a slot, its result looked at longest ago (BACKLOG 102-34 review).
   assert.deepEqual(selectDueAnalyses(records, { now, limit: 3 }).candidates.map((candidate) => candidate.analysisId),
-    ["fresh", "ongoingAtExpiry", "checkedBefore"], "the oldest expiries no longer take every slot");
+    ["fresh", "ongoingAtExpiry", "ambiguousEarly"], "the oldest expiries no longer take every slot");
 });
 
 test("an ambiguous or gapped result with history through the expiry is named unless rechecked on another timeframe", () => {
@@ -298,4 +299,30 @@ test("groups go by the outcome recorded last: an ongoing latest after a recheck 
   // A caller without the outcome recorded last groups by the latest, as before.
   const plain = record("plain", "2026-07-20T00:00:00.000Z", ongoing);
   assert.equal(selectDueAnalyses([plain], { now }).candidates[0].recentOutcome.outcome, "awaiting_terminal");
+});
+
+test("each group gets a slot, so a failed due analysis takes its turn even when ongoing analyses fill the limit (102-34 review)", () => {
+  const now = new Date("2026-07-21T00:00:00.000Z");
+  // Twenty active analyses rechecked on every run fill the front group.
+  const active = Array.from({ length: 20 }, (_, index) => record(`active-${String(index).padStart(2, "0")}`, "2026-07-25T00:00:00.000Z",
+    { ...outcome("ongoing", "awaiting_terminal"), evaluatedAt: "2026-07-20T23:00:00.000Z" }));
+  const due = record("due", "2026-07-20T12:00:00.000Z");
+  const open = record("open", "2026-07-19T00:00:00.000Z", { ...outcome("incomplete", "history_ends_before_expiry"), evaluatedAt: "2026-07-20T01:00:00.000Z" });
+  const legacy = record("legacy", "2026-07-16T05:00:00.000Z", outcome("complete", "not_activated"));
+  const records = [...active, due, open, legacy];
+  const run = (log, limit = 20) => selectDueAnalyses(records, { now, limit, lastAttempts: attempts(log) });
+  // The due analysis failed once. The open results' group gets a slot (the open result, looked at longer ago), and so
+  // does the legacy group; the front group takes the rest.
+  const failed = [["due", "2026-07-20T13:00:00.000Z", "failed"]];
+  const first = run(failed);
+  assert.equal(first.candidates.length, 20);
+  assert.deepEqual(first.candidates.slice(-2).map((item) => [item.analysisId, item.orderGroup]), [["open", "open_or_failed"], ["legacy", "legacy_recheck"]]);
+  assert.equal(first.candidates.filter((item) => item.orderGroup === "due_or_ongoing").length, 18);
+  assert.equal(first.truncated, true);
+  // Once the open result's recheck is noted, the failed due analysis has the group's slot.
+  const next = run([...failed, ["open", "2026-07-21T00:00:00.000Z", "unchanged"]]);
+  assert.deepEqual(next.candidates.filter((item) => item.orderGroup === "open_or_failed").map((item) => item.analysisId), ["due"]);
+  // With fewer slots than groups, the earlier groups have them.
+  assert.deepEqual(run(failed, 2).candidates.map((item) => item.orderGroup), ["due_or_ongoing", "open_or_failed"]);
+  assert.deepEqual(run(failed, 1).candidates.map((item) => item.orderGroup), ["due_or_ongoing"]);
 });

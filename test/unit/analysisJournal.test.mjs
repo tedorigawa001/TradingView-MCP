@@ -574,13 +574,13 @@ test("the attempt log notes the last evaluation of each analysis beside the jour
   const hash = analysisDefinitionHash(value);
   await store.recordAnalysis(value);
   const journalBefore = await readFile(path, "utf8");
-  assert.deepEqual(await store.lastAttempts(), new Map());
+  assert.deepEqual(await store.lastAttempts(), { attempts: new Map(), unreadable: [] });
   // A log left readable by others is made owner-only when appended to.
   if (posixModeEnforced()) await writeFile(store.attemptLogPaths.current, "", { mode: 0o644 });
   const first = await store.recordAttempt("noted", hash, "failed");
   const second = await store.recordAttempt("noted", hash, "unchanged");
   assert.ok(first.attemptedAt <= second.attemptedAt);
-  assert.deepEqual(await store.lastAttempts(), new Map([["noted", { ...second, definitionHash: hash }]]));
+  assert.deepEqual((await store.lastAttempts()).attempts, new Map([["noted", { ...second, definitionHash: hash }]]));
   // The journal itself is untouched, and the log is owner-only beside it.
   assert.equal(await readFile(path, "utf8"), journalBefore);
   assert.deepEqual(store.attemptLogPaths, { current: `${path}.attempts.jsonl`, previous: `${path}.attempts.1.jsonl` });
@@ -588,22 +588,30 @@ test("the attempt log notes the last evaluation of each analysis beside the jour
   // A full segment replaces the previous one: what only the dropped segment held is gone, the rest is kept.
   await store.recordAttempt("dropped", hash, "failed");
   for (let index = 0; index < 12; index += 1) await store.recordAttempt(`kept-${index % 3}`, hash, "unchanged");
-  const last = await store.lastAttempts();
+  const last = (await store.lastAttempts()).attempts;
   assert.equal(last.has("dropped"), false);
   assert.deepEqual([...last.keys()].sort(), ["kept-0", "kept-1", "kept-2"]);
   for (const segment of Object.values(store.attemptLogPaths)) assert.ok((await stat(segment)).size <= 1024, segment);
-  // A record that cannot be read is named with its file; nothing is appended after a cut-off line.
+  // A segment that cannot be read is named with its file, and the other one is still read.
+  const unreadable = async () => {
+    const read = await store.lastAttempts();
+    return [read.attempts.size, read.unreadable.map(({ path, error }) => [path, error.message])];
+  };
+  const fromPrevious = (await store.readAttemptSegmentUnlocked(store.attemptLogPaths.previous)).length > 0;
+  assert.ok(fromPrevious);
   await appendFile(store.attemptLogPaths.current, "{\"schema_version\":\"1.0\"}\n");
   const badLine = (await readFile(store.attemptLogPaths.current, "utf8")).trim().split("\n").length;
-  await assert.rejects(store.lastAttempts(), (err) => err.message === `invalid analysis attempt record at line ${badLine} of ${store.attemptLogPaths.current}`);
-  // A log another user could read, or one past its size, is refused.
+  const [kept, named] = await unreadable();
+  assert.ok(kept > 0, "the previous segment is still read");
+  assert.deepEqual(named, [[store.attemptLogPaths.current, `invalid analysis attempt record at line ${badLine} of ${store.attemptLogPaths.current}`]]);
+  // A log another user could read, or one past its size, is refused, segment by segment.
   if (posixModeEnforced()) {
-    await chmod(store.attemptLogPaths.current, 0o644);
-    await assert.rejects(store.lastAttempts(), /analysis attempt log permissions must be 0600/);
-    await chmod(store.attemptLogPaths.current, 0o600);
+    await chmod(store.attemptLogPaths.previous, 0o644);
+    assert.match((await unreadable())[1][0][1], /analysis attempt log permissions must be 0600/);
+    await chmod(store.attemptLogPaths.previous, 0o600);
   }
   await writeFile(store.attemptLogPaths.previous, "\n".repeat(1024 + 1024 + 1), { mode: 0o600 });
-  await assert.rejects(store.lastAttempts(), /analysis attempt log is too large/);
+  assert.match((await unreadable())[1][0][1], /analysis attempt log is too large/);
   await writeFile(store.attemptLogPaths.current, "{\"cut", { mode: 0o600 });
   await assert.rejects(store.recordAttempt("noted", hash, "failed"), /does not end with a newline/);
   await assert.rejects(store.recordAttempt("noted", hash, "recorded"), /invalid analysis attempt record/);
@@ -626,11 +634,14 @@ test("journal list gives the outcome recorded last beside the latest, and due se
   const fresh = { ...definition("fresh"), analyzedAt: "2026-10-08T01:00:00.000Z", expiresAt: "2026-10-09T01:00:00.000Z" };
   await store.recordAnalysis(fresh);
   const selected = selectDueAnalyses((await store.list({ limit: 500 })).analyses,
-    { now: new Date("2026-10-11T00:00:00.000Z"), requestedBars: 1000, lastAttempts: await store.lastAttempts() });
+    { now: new Date("2026-10-11T00:00:00.000Z"), requestedBars: 1000, lastAttempts: (await store.lastAttempts()).attempts });
   assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["fresh"]);
   assert.deepEqual(selected.skipped, [{ analysisId: "ongoing-then-short", reason: "history_short_fixed_for_request" }]);
-  // An analysis with no outcome has none recorded last either.
-  assert.equal((await store.list({ analysisId: "fresh" })).analyses[0].recentOutcome, null);
+  // It is given only when it is not the latest: not for an analysis with no outcome, nor when the latest was recorded
+  // last, so the usual record is not repeated.
+  assert.equal("recentOutcome" in (await store.list({ analysisId: "fresh" })).analyses[0], false);
+  await store.recordOutcome("fresh", analysisDefinitionHash(fresh), outcome("awaiting_entry", "ongoing", "2026-10-08T02:00:00.000Z", "2026-10-11T00:00:00.000Z"));
+  assert.equal("recentOutcome" in (await store.list({ analysisId: "fresh" })).analyses[0], false);
 });
 
 test("a cut-off last line at the segment boundary refuses the append before the segment is moved (102-34 review)", async () => {
@@ -666,7 +677,9 @@ test("a FIFO in the attempt log's place is refused without blocking (102-34 revi
       if (writer !== null) { blocked = true; await writer.close(); }
     }, 5_000);
     try {
-      await assert.rejects(store.lastAttempts(), /analysis attempt log path must be a regular file/, segment);
+      const read = await store.lastAttempts();
+      assert.deepEqual(read.unreadable.map((item) => item.path), [path], segment);
+      assert.match(read.unreadable[0].error.message, /analysis attempt log path must be a regular file/);
       if (segment === "current") await assert.rejects(store.recordAttempt("fifo", hash, "failed"), /analysis attempt log path must be a regular file/);
     } finally {
       clearTimeout(release);

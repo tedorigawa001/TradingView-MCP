@@ -737,7 +737,7 @@ export class AnalysisJournalStore {
         throw new Error(`analysis attempt log must be owned by the current user: ${path}`);
       }
       if (posixModeEnforced() && (stat.mode & 0o077) !== 0) throw new Error(`analysis attempt log permissions must be 0600: ${path}`);
-      // A segment grows past its size by at most one record before it is replaced.
+      // A segment stays within its size, but for one record larger than a whole segment, alone in a new one.
       if (stat.size > this.attemptSegmentBytes + MAX_ATTEMPT_RECORD_BYTES) throw new Error(`analysis attempt log is too large: ${path}`);
       const text = await handle.readFile("utf8");
       return text.split("\n").filter(Boolean).map((line, index) => {
@@ -816,18 +816,34 @@ export class AnalysisJournalStore {
     });
   }
 
-  /** The last attempt noted for each analysis, from both segments of the attempt log, keyed by analysis_id and definition hash. */
-  async lastAttempts(): Promise<Map<string, AnalysisAttempt & { definitionHash: string }>> {
+  /**
+   * The last attempt noted for each analysis, from both segments of the attempt log, keyed by analysis_id and definition
+   * hash. A segment that cannot be read is named in unreadable and the other is still used: the log only orders due
+   * analyses, and a damaged previous segment would otherwise disable it until the current one is full (BACKLOG 102-34).
+   */
+  async lastAttempts(): Promise<{
+    attempts: Map<string, AnalysisAttempt & { definitionHash: string }>;
+    unreadable: Array<{ path: string; error: unknown }>;
+  }> {
     return this.serialize(async () => {
       const { current, previous } = this.attemptLogPaths;
       const last = new Map<string, AnalysisAttempt & { definitionHash: string }>();
-      for (const entry of [...await this.readAttemptSegmentUnlocked(previous), ...await this.readAttemptSegmentUnlocked(current)]) {
+      const unreadable: Array<{ path: string; error: unknown }> = [];
+      const entries: AnalysisAttemptEntry[] = [];
+      for (const path of [previous, current]) {
+        try {
+          entries.push(...await this.readAttemptSegmentUnlocked(path));
+        } catch (error) {
+          unreadable.push({ path, error });
+        }
+      }
+      for (const entry of entries) {
         const known = last.get(entry.analysis_id);
         if (known === undefined || known.attemptedAt <= entry.attempted_at) {
           last.set(entry.analysis_id, { attemptedAt: entry.attempted_at, result: entry.result, definitionHash: entry.definition_hash });
         }
       }
-      return last;
+      return { attempts: last, unreadable };
     });
   }
 
@@ -850,8 +866,9 @@ export class AnalysisJournalStore {
           definition,
           latestOutcome: latest,
           // The outcome recorded last, which due selection groups by: the latest is chosen by its evidence, so an
-          // ongoing result stays the latest after a recheck with less evidence (BACKLOG 102-34).
-          recentOutcome: outcomes.at(-1) ?? null,
+          // ongoing result stays the latest after a recheck with less evidence (BACKLOG 102-34). Given only when it is
+          // not the latest, so the usual record is not repeated.
+          ...(outcomes.length > 0 && outcomes.at(-1) !== latest ? { recentOutcome: outcomes.at(-1) } : {}),
           outcomeCount: outcomes.length,
           latestAlertLink: alertLinks.at(-1) ?? null,
           alertLinkCount: alertLinks.length,

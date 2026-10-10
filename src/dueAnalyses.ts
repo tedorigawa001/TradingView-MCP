@@ -10,7 +10,7 @@ import { asksForMoreHistory, isLegacyUncoveredComplete, recordedHistoryRequest, 
 export type JournalAnalysisRecord = {
   definition: AnalysisJournalEntry & { payload: AnalysisJournalDefinition };
   latestOutcome: (AnalysisJournalEntry & { payload: AnalysisJournalOutcome }) | null;
-  /** The outcome recorded last (journal.list); without it the latest stands in (BACKLOG 102-34). */
+  /** The outcome recorded last (journal.list gives it only when it is not the latest); without it the latest stands in (BACKLOG 102-34). */
   recentOutcome?: (AnalysisJournalEntry & { payload: AnalysisJournalOutcome }) | null;
   outcomeCount: number;
 };
@@ -26,7 +26,11 @@ export type DueAnalysisCandidate = {
   /** When it was last looked at: its last recorded outcome or its last attempt, whichever is later; null if never. */
   lastSeenAt: string | null;
   reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "legacy_complete_recheck";
+  /** The group it is ordered in (see selectDueAnalyses), shown so the preview explains the order (BACKLOG 102-34). */
+  orderGroup: (typeof ORDER_GROUPS)[number];
 };
+
+const ORDER_GROUPS = ["due_or_ongoing", "open_or_failed", "legacy_recheck"] as const;
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
@@ -38,7 +42,7 @@ export function selectDueAnalyses(
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
     throw new Error("due analysis limit must be between 1 and 50");
   }
-  const candidates: DueAnalysisCandidate[] = [];
+  const found: Array<Omit<DueAnalysisCandidate, "orderGroup">> = [];
   const skipped: Array<{ analysisId: string; reason: string }> = [];
   let legacyCompleteWithoutCoverage = 0;
 
@@ -64,7 +68,7 @@ export function selectDueAnalyses(
       // picked as legacy again, and what replaced it is rechecked as any other result. It goes last, after the due
       // analyses and the evaluated results that stayed open.
       legacyCompleteWithoutCoverage += 1;
-      candidates.push({
+      found.push({
         analysisId: definition.analysisId,
         definitionHash: item.definition.definition_hash,
         definition,
@@ -108,7 +112,7 @@ export function selectDueAnalyses(
     const expiryMs = definition.expiresAt === null ? null : Date.parse(definition.expiresAt);
     const expired = expiryMs !== null && expiryMs <= nowMs;
     if (latest !== null) {
-      candidates.push({
+      found.push({
         analysisId: definition.analysisId,
         definitionHash: item.definition.definition_hash,
         definition,
@@ -119,7 +123,7 @@ export function selectDueAnalyses(
       continue;
     }
     if (expired) {
-      candidates.push({
+      found.push({
         analysisId: definition.analysisId,
         definitionHash: item.definition.definition_hash,
         definition,
@@ -130,7 +134,7 @@ export function selectDueAnalyses(
       continue;
     }
     if (options.includeActive === true) {
-      candidates.push({
+      found.push({
         analysisId: definition.analysisId,
         definitionHash: item.definition.definition_hash,
         definition,
@@ -153,14 +157,17 @@ export function selectDueAnalyses(
   // Within a group, the analysis looked at longest ago goes first, one never looked at before any: a recheck that finds
   // the same result, or fails, records nothing in the journal but is noted in the attempt log, so those that do not
   // resolve take turns instead of the oldest taking every remaining slot (BACKLOG 102-34). In the front group an analysis
-  // whose window has closed comes before one still active, as it needs its final evaluation. Ties go by expiry.
-  const group = (candidate: DueAnalysisCandidate) => {
+  // whose window has closed comes before one still active, as it needs its final evaluation. Ties go by expiry. The
+  // groups are named in each candidate's orderGroup.
+  const groupOf = (candidate: Omit<DueAnalysisCandidate, "orderGroup">) => {
     if (candidate.reason === "legacy_complete_recheck") return 2;
     const attempt = candidate.lastAttempt;
     const failedSince = attempt?.result === "failed" &&
       (candidate.recentOutcome === null || Date.parse(attempt.attemptedAt) > Date.parse(candidate.recentOutcome.evaluatedAt));
     return failedSince || (candidate.recentOutcome !== null && candidate.recentOutcome.status !== "ongoing") ? 1 : 0;
   };
+  const candidates: DueAnalysisCandidate[] = found.map((candidate) => ({ ...candidate, orderGroup: ORDER_GROUPS[groupOf(candidate)] }));
+  const group = (candidate: DueAnalysisCandidate) => ORDER_GROUPS.indexOf(candidate.orderGroup);
   const expiredAt = (candidate: DueAnalysisCandidate) =>
     candidate.definition.expiresAt !== null && Date.parse(candidate.definition.expiresAt) <= nowMs;
   const seenMs = (candidate: DueAnalysisCandidate) => candidate.lastSeenAt === null ? Number.NEGATIVE_INFINITY : Date.parse(candidate.lastSeenAt);
@@ -183,8 +190,21 @@ export function selectDueAnalyses(
     return Date.parse(left.definition.analyzedAt) - Date.parse(right.definition.analyzedAt) ||
       left.analysisId.localeCompare(right.analysisId);
   });
+  // Each group with candidates gets a slot first, in group order while slots remain, and the rest go in order. The front
+  // group can fill every run (an active analysis is rechecked each time), so without this an open result, or an analysis
+  // whose evaluation failed, could wait behind it for good (BACKLOG 102-34 review); with it each takes its turn in its
+  // group's slot.
+  const chosen = new Set<DueAnalysisCandidate>();
+  for (const name of ORDER_GROUPS) {
+    const first = candidates.find((candidate) => candidate.orderGroup === name);
+    if (first !== undefined && chosen.size < limit) chosen.add(first);
+  }
+  for (const candidate of candidates) {
+    if (chosen.size >= limit) break;
+    chosen.add(candidate);
+  }
   return {
-    candidates: candidates.slice(0, limit),
+    candidates: candidates.filter((candidate) => chosen.has(candidate)),
     skipped,
     truncated: candidates.length > limit,
     eligible: candidates.length,

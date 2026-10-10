@@ -381,7 +381,7 @@ function makeDeps(overrides = {}) {
         },
       }),
       list: async (options) => ({ total: 0, returned: 0, analyses: [], options }),
-      lastAttempts: async () => new Map(),
+      lastAttempts: async () => ({ attempts: new Map(), unreadable: [] }),
       recordAttempt: async (_analysisId, _definitionHash, result) => ({ attemptedAt: "2026-07-02T00:00:00.000Z", result }),
       calibration: async (options) => ({
         population: 0,
@@ -3884,7 +3884,7 @@ test("evaluate_due_analyses notes evaluations that record nothing, and selects b
         const idempotent = analysisId === "XAUUSD-same";
         return { recorded: !idempotent, idempotent, entry: { event_id: `outcome-${analysisId}`, payload: value } };
       },
-      lastAttempts: async () => new Map(attempts),
+      lastAttempts: async () => ({ attempts: new Map(attempts), unreadable: [] }),
       recordAttempt: async (analysisId, definitionHash, result) => {
         noted.push([analysisId, definitionHash, result]);
         if (analysisId === "AUDUSD-unjournaled") throw new Error("attempt log refused", { cause: new Error("ENOSPC") });
@@ -3913,6 +3913,39 @@ test("evaluate_due_analyses notes evaluations that record nothing, and selects b
   assert.equal(next.preview.candidates[2].lastSeenAt, "2026-07-02T00:00:02.000Z");
 });
 
+test("evaluate_due_analyses names the attempt log segments it could not read and uses the rest (102-34 review)", async () => {
+  const short = {
+    schema_version: "1.0", event_id: "outcome-EURUSD-open", sequence: 3, recorded_at: "2026-07-01T03:00:00.000Z",
+    kind: "outcome_evaluated", analysis_id: "EURUSD-open", definition_hash: "hash-EURUSD-open",
+    payload: { status: "incomplete", outcome: "history_ends_before_expiry", evaluatedAt: "2026-07-01T03:00:00.000Z", evidenceTimeframe: "15",
+      evidenceThrough: "2026-07-01T00:30:00.000Z", result: {} },
+  };
+  const ongoing = { ...short, sequence: 2, payload: { ...short.payload, status: "ongoing", outcome: "awaiting_terminal", evidenceThrough: "2026-07-01T00:45:00.000Z" } };
+  // The latest is ongoing (more evidence), but the outcome recorded last is an open one.
+  const records = [{ ...dueAnalysisRecord("EURUSD-open", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z", ongoing), recentOutcome: short }];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "batch", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+      }),
+    },
+    journal: {
+      list: async () => ({ total: records.length, returned: records.length, analyses: records }),
+      lastAttempts: async () => ({
+        attempts: new Map([["EURUSD-open", { attemptedAt: "2026-07-02T00:00:00.000Z", result: "unchanged", definitionHash: "hash-EURUSD-open" }]]),
+        unreadable: [{ path: "/x/journal.jsonl.attempts.1.jsonl", error: new Error("unable to read", { cause: new Error("EACCES") }) }],
+      }),
+    },
+  }));
+  const preview = JSON.parse((await client.callTool({ name: "evaluate_due_analyses", arguments: { chart_index: 0 } })).content[0].text).preview;
+  assert.deepEqual(preview.attemptLog, { status: "partial", unreadable: [{ path: "/x/journal.jsonl.attempts.1.jsonl", error: "unable to read: EACCES" }] });
+  const [item] = preview.candidates;
+  assert.deepEqual([item.orderGroup, item.latestOutcome.outcome, item.recentOutcome, item.lastSeenAt], ["open_or_failed", "awaiting_terminal",
+    { status: "incomplete", outcome: "history_ends_before_expiry", evidenceThrough: "2026-07-01T00:30:00.000Z", evaluatedAt: "2026-07-01T03:00:00.000Z" },
+    "2026-07-02T00:00:00.000Z"]);
+});
+
 test("evaluate_due_analyses selects without the attempt log when it cannot be read, and says so (102-34)", async () => {
   const records = [dueAnalysisRecord("EURUSD-due", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z")];
   const client = await connectedClient(makeDeps({
@@ -3938,6 +3971,7 @@ test("evaluate_due_analyses aborts remaining work when chart restoration fails",
     dueAnalysisRecord("XAUUSD-unprocessed", "OANDA:XAUUSD", "15", "2026-07-01T02:00:00.000Z"),
   ];
   const state = { symbol: "OANDA:USDJPY", resolution: "240" };
+  const noted = [];
   const client = await connectedClient(makeDeps({
     tv: {
       getChartContext: async () => ({
@@ -3954,6 +3988,12 @@ test("evaluate_due_analyses aborts remaining work when chart restoration fails",
     },
     journal: {
       list: async () => ({ total: 2, returned: 2, analyses: records }),
+      // The result was already recorded, so the item is noted in the attempt log, before the run stops (102-34).
+      recordOutcome: async (analysisId, _hash, value) => ({ recorded: false, idempotent: true, entry: { event_id: `outcome-${analysisId}`, payload: value } }),
+      recordAttempt: async (analysisId, _definitionHash, result) => {
+        noted.push([analysisId, result]);
+        return { attemptedAt: "2026-07-02T00:00:00.000Z", result };
+      },
     },
   }));
   const result = JSON.parse((await client.callTool({
@@ -3964,6 +4004,8 @@ test("evaluate_due_analyses aborts remaining work when chart restoration fails",
   assert.equal(result.processed, 1);
   assert.equal(result.remaining, 1);
   assert.equal(result.results[0].result.chartState.restored, false);
+  assert.deepEqual(noted, [["EURUSD-restore", "unchanged"]]);
+  assert.deepEqual(result.results[0].attemptLog, { result: "unchanged", recorded: true });
 });
 
 test("get_analysis_performance aggregates journal path metrics without chart access", async () => {
