@@ -16,6 +16,8 @@ const STALE_LOCK_MS = 60_000;
 // previous one when it is full (BACKLOG 102-34).
 const ATTEMPT_SEGMENT_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPT_RECORD_BYTES = 1024;
+// An open that waits for a writer would hang on a FIFO put in the attempt log's place; Windows has neither.
+const NON_BLOCKING_OPEN = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
 
 export class AnalysisDefinitionConflictError extends Error {
   readonly code = "analysis_id_definition_conflict";
@@ -704,11 +706,26 @@ export class AnalysisJournalStore {
     });
   }
 
+  /**
+   * The kind of an attempt log segment is checked before it is opened, and the open does not wait, so a FIFO or device
+   * in its place is refused instead of blocking the server; one swapped in after the check is refused on the handle.
+   */
+  private async attemptSegmentKind(path: string): Promise<"missing" | "file"> {
+    await assertNotSymbolicLink(path, "analysis attempt log");
+    const found = await lstat(path).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    });
+    if (found === null) return "missing";
+    if (!found.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${path}`);
+    return "file";
+  }
+
   private async readAttemptSegmentUnlocked(path: string): Promise<AnalysisAttemptEntry[]> {
+    if (await this.attemptSegmentKind(path) === "missing") return [];
     let handle;
     try {
-      await assertNotSymbolicLink(path, "analysis attempt log");
-      handle = await open(path, constants.O_RDONLY | noFollowFlag());
+      handle = await open(path, constants.O_RDONLY | noFollowFlag() | NON_BLOCKING_OPEN);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error(`unable to open analysis attempt log as a regular file: ${path}`, { cause: err });
@@ -756,32 +773,44 @@ export class AnalysisJournalStore {
     return this.serialize(async () => {
       await this.ensureDirectory();
       const { current, previous } = this.attemptLogPaths;
-      await assertNotSymbolicLink(current, "analysis attempt log");
-      const existing = await lstat(current).catch((err: NodeJS.ErrnoException) => {
-        if (err.code === "ENOENT") return null;
-        throw err;
-      });
-      if (existing !== null && !existing.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${current}`);
-      // A full segment replaces the previous one; every reader and writer holds the journal lock, so no handle is open.
-      if (existing !== null && existing.size > 0 && existing.size + line.byteLength > this.attemptSegmentBytes) {
-        await rename(current, previous);
-        await syncDirectoryEntry(dirname(current));
-      }
-      const handle = await open(current, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600);
-      try {
-        const stat = await handle.stat();
-        if (!stat.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${current}`);
-        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-          throw new Error(`analysis attempt log must be owned by the current user: ${current}`);
+      // Opened and checked before anything else, a full segment included: a cut-off last line refuses the append before
+      // the segment could be moved, so it never ends up in the previous segment behind a successful append.
+      const openCurrent = async () => {
+        await this.attemptSegmentKind(current);
+        const handle = await open(current, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag() | NON_BLOCKING_OPEN, 0o600);
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${current}`);
+          if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+            throw new Error(`analysis attempt log must be owned by the current user: ${current}`);
+          }
+          await assertAppendableJsonl(handle, stat.size, "analysis attempt log", current);
+          return { handle, size: stat.size };
+        } catch (err) {
+          await handle.close();
+          throw err;
         }
-        await assertAppendableJsonl(handle, stat.size, "analysis attempt log", current);
+      };
+      let opened: Awaited<ReturnType<typeof openCurrent>> | null = await openCurrent();
+      try {
+        // A full segment replaces the previous one. It is closed first, as an open handle stops a rename on Windows;
+        // every reader and writer holds the journal lock, so no other handle is open.
+        if (opened.size > 0 && opened.size + line.byteLength > this.attemptSegmentBytes) {
+          const full = opened;
+          opened = null;
+          await full.handle.close();
+          await rename(current, previous);
+          await syncDirectoryEntry(dirname(current));
+          opened = await openCurrent();
+        }
+        const { handle, size } = opened;
         await handle.chmod(0o600);
         const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);
         if (bytesWritten !== line.byteLength) throw new Error("short write to analysis attempt log");
         await handle.sync();
-        if (stat.size === 0) await syncDirectoryEntry(dirname(current));
+        if (size === 0) await syncDirectoryEntry(dirname(current));
       } finally {
-        await handle.close();
+        await opened?.handle.close();
       }
       return { attemptedAt: entry.attempted_at, result: entry.result };
     });

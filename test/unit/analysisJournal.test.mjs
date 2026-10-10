@@ -2,7 +2,9 @@ import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, open, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -629,4 +631,47 @@ test("journal list gives the outcome recorded last beside the latest, and due se
   assert.deepEqual(selected.skipped, [{ analysisId: "ongoing-then-short", reason: "history_short_fixed_for_request" }]);
   // An analysis with no outcome has none recorded last either.
   assert.equal((await store.list({ analysisId: "fresh" })).analyses[0].recentOutcome, null);
+});
+
+test("a cut-off last line at the segment boundary refuses the append before the segment is moved (102-34 review)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"), { attemptSegmentBytes: 1024 });
+  const hash = analysisDefinitionHash(definition("boundary"));
+  for (let index = 0; index < 3; index += 1) await store.recordAttempt("boundary", hash, "unchanged");
+  // Cut off after a crash, and long enough that the next record would fill the segment.
+  await appendFile(store.attemptLogPaths.current, `{"cut":"${"x".repeat(200)}`);
+  const before = await readFile(store.attemptLogPaths.current, "utf8");
+  assert.ok(Buffer.byteLength(before) + 200 > 1024);
+  await assert.rejects(store.recordAttempt("boundary", hash, "failed"), /does not end with a newline/);
+  // Nothing moved or appended: the cut-off line stays where its error names it.
+  assert.equal(await readFile(store.attemptLogPaths.current, "utf8"), before);
+  await assert.rejects(stat(store.attemptLogPaths.previous), { code: "ENOENT" });
+});
+
+test("a FIFO in the attempt log's place is refused without blocking (102-34 review)", { skip: process.platform === "win32" && "mkfifo is POSIX" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const hash = analysisDefinitionHash(definition("fifo"));
+  await store.recordAttempt("fifo", hash, "unchanged");
+  for (const segment of ["current", "previous"]) {
+    const path = store.attemptLogPaths[segment];
+    await rm(path, { force: true });
+    const made = spawnSync("mkfifo", [path], { encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    // An open that waited for a writer would hang the run: after a while the writing end is opened, which releases
+    // such a reader (and fails harmlessly, ENXIO, when there is none), and records that one was there.
+    let blocked = false;
+    const release = setTimeout(async () => {
+      const writer = await open(path, constants.O_WRONLY | constants.O_NONBLOCK).catch(() => null);
+      if (writer !== null) { blocked = true; await writer.close(); }
+    }, 5_000);
+    try {
+      await assert.rejects(store.lastAttempts(), /analysis attempt log path must be a regular file/, segment);
+      if (segment === "current") await assert.rejects(store.recordAttempt("fifo", hash, "failed"), /analysis attempt log path must be a regular file/);
+    } finally {
+      clearTimeout(release);
+    }
+    assert.equal(blocked, false, `reading the ${segment} segment blocked on the FIFO`);
+    await rm(path, { force: true });
+  }
 });
