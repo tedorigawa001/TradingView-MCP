@@ -582,9 +582,13 @@ export class AnalysisJournalStore {
           !(legacy(prior) && !legacy(outcome));
       });
       if (conflicting) throw new Error(`analysis_id ${analysisId} has conflicting terminal outcomes`);
+      // Nor is a result that is not legacy a duplicate of anything up to the last legacy complete: recorded after it, it
+      // replaces it, even when it repeats a record from before it.
+      const lastLegacy = outcomes.filter((entry) => legacy(entry.payload as AnalysisJournalOutcome))
+        .reduce((last, entry) => Math.max(last, entry.sequence), 0);
       const semanticDuplicates = outcomes.filter((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
-        if (legacy(prior) && !legacy(outcome)) return false;
+        if (!legacy(outcome) && entry.sequence <= lastLegacy) return false;
         return prior.status === outcome.status &&
           prior.outcome === outcome.outcome &&
           prior.evidenceTimeframe === outcome.evidenceTimeframe &&

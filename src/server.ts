@@ -4896,6 +4896,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             limit: limit ?? 20,
             evaluationTimeframe: evaluation_timeframe,
             includeFixed: include_fixed ?? false,
+            loadMoreBars: load_more_bars ?? 0,
+            requestedBars: count ?? 1000,
           },
         );
         const requestedBars = count ?? 1000;

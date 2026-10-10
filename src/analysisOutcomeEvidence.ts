@@ -36,8 +36,8 @@ export function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: s
 
 /**
  * A complete result without a terminal event whose own evidence does not reach the expiry: before 0.1.22 the evaluator
- * closed such results by the clock alone (BACKLOG 102-04). It claims what its evidence does not show, so the journal ranks
- * it below every other evaluation of its analysis and lets a later evaluation replace it (BACKLOG 102-32).
+ * closed such results by the clock alone (BACKLOG 102-04). It claims what its evidence does not show, so the journal lets
+ * what is recorded after it replace it, while what came before stays below it (BACKLOG 102-32).
  */
 export function isLegacyUncoveredComplete(outcome: AnalysisJournalOutcome, expiresAt: string | null): boolean {
   return outcome.status === "complete" && WITHOUT_TERMINAL.has(outcome.outcome) && !recordCoversExpiry(outcome, expiresAt);

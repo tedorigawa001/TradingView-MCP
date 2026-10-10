@@ -20,9 +20,17 @@ export type DueAnalysisCandidate = {
   reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "legacy_complete_recheck";
 };
 
+/** The OHLCV bar count the evaluation that recorded an outcome requested (result.source.requestedBars), when it names one. */
+function requestedBarsOf(outcome: AnalysisJournalOutcome): number | null {
+  const source = outcome.result.source;
+  const requested = typeof source === "object" && source !== null ? (source as { requestedBars?: unknown }).requestedBars : undefined;
+  return typeof requested === "number" && Number.isFinite(requested) ? requested : null;
+}
+
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
-  options: { now?: Date; includeActive?: boolean; limit?: number; evaluationTimeframe?: string; includeFixed?: boolean } = {},
+  options: { now?: Date; includeActive?: boolean; limit?: number; evaluationTimeframe?: string; includeFixed?: boolean; loadMoreBars?: number;
+    requestedBars?: number; } = {},
 ) {
   const nowMs = (options.now ?? new Date()).getTime();
   const limit = options.limit ?? 20;
@@ -44,7 +52,8 @@ export function selectDueAnalyses(
       // An earlier version closed a result with no terminal by the clock alone, even when its history stopped short of
       // the expiry (BACKLOG 102-04). The journal now ranks such a record below any later evaluation and lets one replace
       // it (BACKLOG 102-32), so it is rechecked; once anything is recorded after it, it is no longer the latest and is not
-      // picked again. It goes last, after the due analyses and the evaluated results that stayed open.
+      // picked as legacy again, and what replaced it is rechecked as any other result. It goes last, after the due
+      // analyses and the evaluated results that stayed open.
       legacyCompleteWithoutCoverage += 1;
       candidates.push({
         analysisId: definition.analysisId,
@@ -69,6 +78,18 @@ export function selectDueAnalyses(
       typeof recordedProof(latest) === "string" &&
       normalizeResolution(options.evaluationTimeframe ?? definition.timeframe) === normalizeResolution(latest.evidenceTimeframe)) {
       skipped.push({ analysisId: definition.analysisId, reason: "open_result_fixed_for_timeframe" });
+      continue;
+    }
+    // A history that does not reach back to the analysis only falls further behind with time, so a recheck on the same
+    // timeframe that loads no more history and inspects no more bars than the run that recorded it comes out the same,
+    // records nothing and would be picked on every call (BACKLOG 102-32 re-review; an old legacy complete rechecked on
+    // intraday bars usually ends here). Loading more history, more bars than the record requested, another timeframe or
+    // includeFixed rechecks it; a record that names no requested count is not rechecked for more bars.
+    const recordedRequest = latest === null ? null : requestedBarsOf(latest);
+    const moreBars = options.requestedBars !== undefined && recordedRequest !== null && options.requestedBars > recordedRequest;
+    if (options.includeFixed !== true && (options.loadMoreBars ?? 0) === 0 && !moreBars && latest !== null && latest.outcome === "history_incomplete" &&
+      normalizeResolution(options.evaluationTimeframe ?? definition.timeframe) === normalizeResolution(latest.evidenceTimeframe)) {
+      skipped.push({ analysisId: definition.analysisId, reason: "history_short_fixed_for_request" });
       continue;
     }
     const expiryMs = definition.expiresAt === null ? null : Date.parse(definition.expiresAt);

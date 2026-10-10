@@ -81,8 +81,8 @@ test("selectDueAnalyses can include active analyses and applies a deterministic 
 });
 
 test("a terminal-less complete recorded without history through the expiry is rechecked after the due analyses (102-32)", () => {
-  // The journal now lets a later evaluation replace such a record (it ranks below any other), so it is rechecked; it
-  // goes with the evaluated open results, after the analyses that just became due, so it crowds none of them out.
+  // The journal now lets what is recorded after such a record replace it, so it is rechecked; it goes after the analyses
+  // that just became due and the evaluated open results, so it crowds none of them out.
   const withEvidence = (label, closedThrough, evidenceTimeframe = "15") =>
     ({ ...outcome("complete", label), evidenceTimeframe, result: { evidence: { closedThrough } } });
   const selected = selectDueAnalyses([
@@ -173,4 +173,38 @@ test("legacy rechecks go after the other evaluated open results, so one that kee
     record("fresh", "2026-10-09T05:00:00.000Z"),
   ], { now: new Date("2026-10-10T00:00:00.000Z") });
   assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["fresh", "openRecent", "legacyOld"]);
+});
+
+test("legacy rechecks go in the order their records were evaluated, not by expiry (102-32 re-review)", () => {
+  const legacy = (id, expiresAt, evaluatedAt) => record(id, expiresAt, { ...outcome("complete", "not_activated"), evaluatedAt });
+  const selected = selectDueAnalyses([
+    legacy("expiresFirst", "2026-07-10T05:00:00.000Z", "2026-07-20T00:00:00.000Z"),
+    legacy("evaluatedFirst", "2026-07-15T05:00:00.000Z", "2026-07-16T00:00:00.000Z"),
+  ], { now: new Date("2026-10-10T00:00:00.000Z") });
+  assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["evaluatedFirst", "expiresFirst"]);
+});
+
+// 102-32 re-review: a history that does not reach back to the analysis only falls further behind on the same request, so
+// a recheck on the same timeframe without loading more history comes out the same and would be picked on every call.
+test("a result whose history does not reach back is named unless the run loads more or evaluates on another timeframe", () => {
+  // Recorded on the analysis timeframe (60), as a recheck without evaluation_timeframe evaluates it, from 1000 bars.
+  const short = (id, result = { source: { requestedBars: 1000 } }) => record(id, "2026-07-16T05:00:00.000Z",
+    { ...outcome("incomplete", "history_incomplete"), evidenceTimeframe: "60", evaluatedAt: "2026-10-10T00:00:00.000Z", result });
+  const options = { now: new Date("2026-10-14T00:00:00.000Z"), requestedBars: 1000 };
+  const named = selectDueAnalyses([short("old"), record("fresh", "2026-10-13T00:00:00.000Z")], options);
+  assert.deepEqual(named.candidates.map((candidate) => candidate.analysisId), ["fresh"]);
+  assert.deepEqual(named.skipped, [{ analysisId: "old", reason: "history_short_fixed_for_request" }]);
+  // Fewer bars than the record requested, or no count, change nothing either.
+  for (const extra of [{ requestedBars: 500 }, { requestedBars: undefined }]) {
+    assert.deepEqual(selectDueAnalyses([short("old")], { ...options, ...extra }).skipped.map((item) => item.reason), ["history_short_fixed_for_request"]);
+  }
+  for (const extra of [{ loadMoreBars: 5000 }, { evaluationTimeframe: "15" }, { includeFixed: true }, { requestedBars: 5000 }]) {
+    const rechecked = selectDueAnalyses([short("old")], { ...options, ...extra });
+    assert.deepEqual(rechecked.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [["old", "non_terminal_recheck"]], JSON.stringify(extra));
+  }
+  // A record that names no requested count is not rechecked for more bars.
+  for (const result of [{}, { source: null }, { source: { requestedBars: "1000" } }]) {
+    assert.deepEqual(selectDueAnalyses([short("old", result)], { ...options, requestedBars: 5000 }).skipped.map((item) => item.reason),
+      ["history_short_fixed_for_request"], JSON.stringify(result));
+  }
 });
