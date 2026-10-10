@@ -15,6 +15,13 @@ const REAL_YIELD_PERSISTENCE_ISSUES = new Map<string, (date: string) => string>(
   ["first_seen_auxiliary_persistence_failed", () => "real-yield previous-year revision rows were fetched but failed to save"],
   ["first_seen_persistence_disabled", () => "real-yield first-seen store is disabled"],
 ]);
+/**
+ * The real-yield quality issues that leave a run's evidence incomplete though the latest value was recorded: a January
+ * scan of the previous year's feed that failed leaves last year's revisions unchecked (BACKLOG 102-31).
+ */
+const REAL_YIELD_INCOMPLETE_ISSUES = new Map<string, string>([
+  ["previous_year_revision_scan_failed", "real-yield previous-year revision scan failed, so last year's revisions were not checked"],
+]);
 type RealYieldCollector = Pick<TreasuryRealYieldClient, "getLatest">;
 type CmeGoldOpenInterestCollector = Pick<CmeDailyBulletinClient, "getLatestGoldOpenInterest">;
 
@@ -83,7 +90,8 @@ export async function collectFirstSeenSources(input: {
   // a persistence quality issue (real yield). For a collection run that is the failure that matters: a fetch that was not
   // recorded is no evidence, so it is an error here, the run is partial, and the heartbeat says so (BACKLOG 102-07). A
   // latest real-yield value that is missing, invalid or future-dated is an error too, though nothing failed to write: no
-  // first-seen record was made, and a renamed or reformatted Treasury field shows up only this way.
+  // first-seen record was made, and a renamed or reformatted Treasury field shows up only this way. So is a previous-year
+  // revision scan that failed in January: last year's revisions went unchecked (BACKLOG 102-31).
   const cot = await Promise.all(input.cotSymbols.map(async (symbol) => {
     try {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
@@ -112,6 +120,12 @@ export async function collectFirstSeenSources(input: {
       ...(typeof latest.available_at !== "string" && !latest.quality_issues.some((issue) => REAL_YIELD_PERSISTENCE_ISSUES.has(issue))
         ? [`the latest Treasury 10-year value for ${latest.observation_date} is ${latest.value_status}, so no first-seen record was made; check the feed`]
         : []),
+      ...latest.quality_issues.flatMap((issue) => {
+        const problem = REAL_YIELD_INCOMPLETE_ISSUES.get(issue);
+        if (problem === undefined) return [];
+        const cause = latest.quality_issue_details?.[issue];
+        return [typeof cause === "string" ? `${problem}: ${cause}` : problem];
+      }),
     ];
     if (problems.length > 0) throw new Error(problems.join("; "));
     realYield = {

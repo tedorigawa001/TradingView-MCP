@@ -132,6 +132,18 @@ test("a fetch that was not recorded as first seen is an error, not a complete so
   const missing = await run([{ available_at: "2026-07-26T00:00:00.000Z" }], { ...recorded, available_at: null, value_status: "missing" });
   assert.deepEqual([missing.status, missing.real_yield.status], ["partial", "error"]);
   assert.match(missing.real_yield.error, /^the latest Treasury 10-year value for 2026-07-25 is missing, so no first-seen record was made; check the feed$/);
+  // A previous-year revision scan that failed in January leaves last year's revisions unchecked: an error too, though the
+  // latest value was recorded, with its cause when the client gave one (BACKLOG 102-31).
+  const unscanned = await run([{ available_at: "2026-07-26T00:00:00.000Z" }],
+    { ...recorded, quality_issues: ["previous_year_revision_scan_failed"], quality_issue_details: { previous_year_revision_scan_failed: "Treasury request failed with HTTP 503" } });
+  assert.deepEqual([unscanned.status, unscanned.real_yield.status], ["partial", "error"]);
+  assert.equal(unscanned.real_yield.error,
+    "real-yield previous-year revision scan failed, so last year's revisions were not checked: Treasury request failed with HTTP 503");
+  // It does not hide that the latest value itself was not recorded.
+  const both = await run([{ available_at: "2026-07-26T00:00:00.000Z" }],
+    { ...recorded, available_at: null, value_status: "missing", quality_issues: ["previous_year_revision_scan_failed"] });
+  assert.equal(both.real_yield.error, "the latest Treasury 10-year value for 2026-07-25 is missing, so no first-seen record was made; check the feed; " +
+    "real-yield previous-year revision scan failed, so last year's revisions were not checked");
   // A quality issue that is not about persistence leaves a recorded value complete.
   const stale = await run([{ available_at: "2026-07-26T00:00:00.000Z" }], { ...recorded, quality_issues: ["stale_observation", "publication_time_unavailable"] });
   assert.deepEqual([stale.status, stale.real_yield.status], ["complete", "complete"]);
@@ -254,4 +266,33 @@ test("a store that cannot take its lock reports the filesystem's error through t
       syncBuiltinESMExports();
     }
   }
+});
+
+test("a January run whose previous-year scan fails makes the real-yield source an error and the run partial (102-31)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "first-seen-scan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The current year's feed has a row; last year's request fails.
+  const server = http.createServer((req, res) => {
+    const year = new URL(req.url, "http://localhost").searchParams.get("field_tdr_date_value");
+    if (year === "2025") { res.statusCode = 503; res.end("down"); return; }
+    res.end(`<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+      <updated>2026-01-14T20:00:00Z</updated><entry><updated>2099-01-01T00:00:00Z</updated><content type="application/xml"><m:properties>
+      <d:NEW_DATE m:type="Edm.DateTime">2026-01-14T00:00:00</d:NEW_DATE><d:TC_10YEAR m:type="Edm.Double">1.80</d:TC_10YEAR>
+      </m:properties></content></entry></feed>`);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const client = new TreasuryRealYieldClient(`http://127.0.0.1:${server.address().port}`, 15_000,
+    new RealYieldFirstSeenStore(join(dir, "real-yield.jsonl")), () => new Date("2026-01-15T01:00:00.000Z"));
+  const result = await collectFirstSeenSources({
+    cot: { getHistory: async () => ({ observations: [{ available_at: "2026-07-26T00:00:00.000Z" }] }) },
+    realYield: { getLatest: () => client.getLatest(new Date("2026-01-15T12:00:00.000Z")) },
+    cmeGoldOpenInterest: goldOpenInterest, futuresOpenInterest: futuresStore,
+    cotSymbols: ["OANDA:XAUUSD"], cotWeeks: 52, coverage: async () => completeCoverage(),
+  });
+  assert.deepEqual([result.status, result.real_yield.status], ["partial", "error"]);
+  assert.match(result.real_yield.error, /^real-yield previous-year revision scan failed, so last year's revisions were not checked: .*503/);
+  const heartbeat = await new FirstSeenCollectionHeartbeatStore(join(dir, "heartbeats.jsonl")).recordRun(firstSeenHeartbeatRun(result, ["OANDA:XAUUSD"]));
+  assert.deepEqual([heartbeat.status, heartbeat.real_yield_status], ["partial", "error"]);
 });
