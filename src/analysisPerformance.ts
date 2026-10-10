@@ -98,7 +98,7 @@ export function buildAnalysisPerformance(
     let wins = 0;
     let losses = 0;
     // Records an earlier version left that cannot be told right yet (BACKLOG 102-32), counted as they stand.
-    const legacy = { completeWithoutCoverage: 0, binaryWithoutGapCheck: 0 };
+    const legacy = { completeWithoutCoverage: 0, includedWithoutGapCheck: 0 };
 
     for (const item of items) {
       const latest = item.latestOutcome?.payload ?? null;
@@ -108,7 +108,7 @@ export function buildAnalysisPerformance(
       }
       latestEvaluations += 1;
       if (isLegacyUncoveredComplete(latest, item.definition.payload.expiresAt)) legacy.completeWithoutCoverage += 1;
-      if (isTerminalWithoutGapCheck(latest)) legacy.binaryWithoutGapCheck += 1;
+      if (isTerminalWithoutGapCheck(latest)) legacy.includedWithoutGapCheck += 1;
       outcomes[latest.outcome] = (outcomes[latest.outcome] ?? 0) + 1;
       if (latest.outcome === "target_before_stop") wins += 1;
       else if (latest.outcome === "stop_before_target") losses += 1;

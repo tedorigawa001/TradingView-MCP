@@ -285,27 +285,39 @@ const validateEntry = (value: unknown, line?: number): AnalysisJournalEntry => {
   return { ...entry, payload } as AnalysisJournalEntry;
 };
 
+const outcomeRank = (entry: AnalysisJournalEntry): [number, string, string, number] => {
+  const payload = entry.payload as AnalysisJournalOutcome;
+  return [
+    payload.status === "complete" ? 1 : 0,
+    payload.evidenceThrough ?? "",
+    payload.evaluatedAt,
+    entry.sequence,
+  ];
+};
+
+/** How outcomes of one analysis rank: a complete one above the others, and among equals the later evidence, evaluation and sequence. */
+const compareRank = (left: AnalysisJournalEntry, right: AnalysisJournalEntry): number => {
+  const a = outcomeRank(left);
+  const b = outcomeRank(right);
+  return a[0] - b[0] || a[1].localeCompare(b[1]) || a[2].localeCompare(b[2]) || a[3] - b[3];
+};
+
 /**
- * How outcomes of one analysis rank, the last being its latest: a complete one above the others, and among equals the
- * later evidence, evaluation and sequence. A complete one without a terminal event whose evidence does not reach the
- * expiry (an evaluator before 0.1.22 closed such results by the clock alone, BACKLOG 102-04) ranks below every other, so
- * any later evaluation becomes the latest and replaces it (BACKLOG 102-32).
+ * The latest outcome of one analysis (BACKLOG 102-32). A complete one is final, unless it is a legacy complete: one
+ * without a terminal event whose evidence does not reach the expiry, which an evaluator before 0.1.22 closed by the clock
+ * alone (BACKLOG 102-04). Such a record gives way to whatever was recorded after it, and only to that: evaluations
+ * written before it (an ongoing one while the analysis was active, an incomplete one) stay below it, as they always did.
+ * So the latest is the best ranked complete that is not legacy; failing that, the best ranked of the records after the
+ * last legacy one; failing that, the best ranked of all.
  */
-const compareRank = (expiresAt: string | null) => {
-  const rank = (entry: AnalysisJournalEntry): [number, string, string, number] => {
-    const payload = entry.payload as AnalysisJournalOutcome;
-    return [
-      isLegacyUncoveredComplete(payload, expiresAt) ? 0 : payload.status === "complete" ? 2 : 1,
-      payload.evidenceThrough ?? "",
-      payload.evaluatedAt,
-      entry.sequence,
-    ];
-  };
-  return (left: AnalysisJournalEntry, right: AnalysisJournalEntry): number => {
-    const a = rank(left);
-    const b = rank(right);
-    return a[0] - b[0] || a[1].localeCompare(b[1]) || a[2].localeCompare(b[2]) || a[3] - b[3];
-  };
+const latestOutcomeOf = (outcomes: AnalysisJournalEntry[], expiresAt: string | null): AnalysisJournalEntry | null => {
+  const best = (entries: AnalysisJournalEntry[]) => [...entries].sort(compareRank).at(-1) ?? null;
+  const legacy = (entry: AnalysisJournalEntry) => isLegacyUncoveredComplete(entry.payload as AnalysisJournalOutcome, expiresAt);
+  const final = outcomes.filter((entry) => (entry.payload as AnalysisJournalOutcome).status === "complete" && !legacy(entry));
+  if (final.length > 0) return best(final);
+  const lastLegacy = outcomes.filter(legacy).reduce((last, entry) => Math.max(last, entry.sequence), 0);
+  const after = outcomes.filter((entry) => entry.sequence > lastLegacy);
+  return best(lastLegacy > 0 && after.length > 0 ? after : outcomes);
 };
 
 export class AnalysisJournalStore {
@@ -558,14 +570,16 @@ export class AnalysisJournalStore {
         );
       }
       const outcomes = entries.filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === analysisId);
-      // A complete without a terminal whose evidence did not reach the expiry (BACKLOG 102-04) gives way to a later
-      // evaluation: a terminal found later does not conflict with it, and a result whose evidence reaches the expiry is
-      // no duplicate of it, the same label included (BACKLOG 102-32). Between other complete results nothing changes.
+      // A legacy complete (see latestOutcomeOf) gives way to a later evaluation that is not legacy: a complete of another
+      // label recorded after it (a terminal or invalidation found later) does not conflict with it, and one whose
+      // evidence reaches the expiry is no duplicate of it, the same label included (BACKLOG 102-32). Legacy completes
+      // still conflict with each other, as other completes do.
       const expiresAt = (definition.payload as AnalysisJournalDefinition).expiresAt;
       const legacy = (value: AnalysisJournalOutcome) => isLegacyUncoveredComplete(value, expiresAt);
       const conflicting = outcomes.find((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
-        return prior.status === "complete" && outcome.status === "complete" && prior.outcome !== outcome.outcome && !legacy(prior);
+        return prior.status === "complete" && outcome.status === "complete" && prior.outcome !== outcome.outcome &&
+          !(legacy(prior) && !legacy(outcome));
       });
       if (conflicting) throw new Error(`analysis_id ${analysisId} has conflicting terminal outcomes`);
       const semanticDuplicates = outcomes.filter((entry) => {
@@ -652,7 +666,7 @@ export class AnalysisJournalStore {
       const analyses = definitions.map((definition) => {
         const outcomes = entries.filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id);
         const alertLinks = entries.filter((entry) => entry.kind === "alerts_created" && entry.analysis_id === definition.analysis_id);
-        const latest = outcomes.sort(compareRank((definition.payload as AnalysisJournalDefinition).expiresAt)).at(-1) ?? null;
+        const latest = latestOutcomeOf(outcomes, (definition.payload as AnalysisJournalDefinition).expiresAt);
         return {
           definition,
           latestOutcome: latest,
@@ -683,10 +697,8 @@ export class AnalysisJournalStore {
       const legacy = { completeWithoutCoverage: 0, includedWithoutGapCheck: 0 };
       for (const definition of definitions) {
         const expiresAt = (definition.payload as AnalysisJournalDefinition).expiresAt;
-        const outcomes = entries
-          .filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id)
-          .sort(compareRank(expiresAt));
-        const latest = outcomes.at(-1);
+        const latest = latestOutcomeOf(entries
+          .filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id), expiresAt);
         if (!latest) {
           excluded.no_evaluation = (excluded.no_evaluation ?? 0) + 1;
           continue;

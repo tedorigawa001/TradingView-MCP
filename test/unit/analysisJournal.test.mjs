@@ -342,7 +342,7 @@ test("a complete recorded without evidence through the expiry gives way to a lat
   assert.deepEqual(calibration.legacy, { completeWithoutCoverage: 2, includedWithoutGapCheck: 1 });
   assert.equal(calibration.included, 1);
   const performance = buildAnalysisPerformance((await store.list({ limit: 500 })).analyses);
-  assert.deepEqual(performance.groups[0].legacy, { completeWithoutCoverage: 2, binaryWithoutGapCheck: 1 });
+  assert.deepEqual(performance.groups[0].legacy, { completeWithoutCoverage: 2, includedWithoutGapCheck: 1 });
 });
 
 test("a legacy complete is rechecked once: after a recheck is recorded it is not selected again (102-32)", async () => {
@@ -366,4 +366,59 @@ test("a legacy complete is rechecked once: after a recheck is recorded it is not
   const final = await due();
   assert.deepEqual(final.candidates, []);
   assert.deepEqual(final.skipped, [{ analysisId: "legacy", reason: "terminal_evaluation_exists" }]);
+});
+
+// 102-32 review: a legacy complete gives way only to what was recorded after it. Evaluations written before it (an
+// ongoing one while the analysis was active, an incomplete one) stay below it, as before, so they do not come back as
+// the latest, get counted wrong, or crowd out due analyses.
+test("a legacy complete still outranks what was recorded before it, and only later records replace it (102-32 review)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("ongoing-then-legacy");
+  await store.recordAnalysis(value);
+  const hash = analysisDefinitionHash(value);
+  await store.recordOutcome("ongoing-then-legacy", hash, outcome("awaiting_entry", "ongoing", "2026-07-16T02:00:00.000Z", "2026-07-16T02:05:00.000Z"));
+  await store.recordOutcome("ongoing-then-legacy", hash, legacyComplete("not_activated"));
+  const fresh = definition("fresh");
+  await store.recordAnalysis({ ...fresh, analyzedAt: "2026-10-08T01:00:00.000Z", expiresAt: "2026-10-09T01:00:00.000Z" });
+  const latest = async () => (await store.list({ analysisId: "ongoing-then-legacy" })).analyses[0].latestOutcome.payload;
+  assert.equal((await latest()).outcome, "not_activated", "the earlier ongoing record does not come back");
+  assert.deepEqual((await store.calibration({ bins: 2 })).legacy, { completeWithoutCoverage: 1, includedWithoutGapCheck: 0 });
+  const due = async () => selectDueAnalyses((await store.list({ limit: 500 })).analyses, { now: new Date("2026-10-10T00:00:00.000Z"), limit: 1 });
+  const first = await due();
+  assert.deepEqual(first.candidates.map((candidate) => candidate.analysisId), ["fresh"], "the fresh due analysis is not crowded out");
+  assert.equal(first.legacyCompleteWithoutCoverage, 1);
+  // A recheck whose history no longer reaches back (no evidence time) is recorded after it and replaces it, though its
+  // evidence is older than the ongoing record's; it is not selected as a legacy record again.
+  await store.recordOutcome("ongoing-then-legacy", hash, outcome("history_incomplete", "incomplete", null, "2026-10-10T00:00:00.000Z"));
+  assert.equal((await latest()).outcome, "history_incomplete");
+  const all = selectDueAnalyses((await store.list({ limit: 500 })).analyses, { now: new Date("2026-10-10T00:00:00.000Z") });
+  assert.deepEqual(all.candidates.map((candidate) => [candidate.analysisId, candidate.reason]),
+    [["fresh", "expired_without_terminal"], ["ongoing-then-legacy", "non_terminal_recheck"]]);
+  assert.equal(all.legacyCompleteWithoutCoverage, 0);
+});
+
+test("legacy completes keep conflicting with each other, and a 0.1.22+ terminal before the expiry is no old record (102-32 review)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("two-legacy");
+  await store.recordAnalysis(value);
+  await store.recordOutcome("two-legacy", analysisDefinitionHash(value), legacyComplete("no_terminal_event"));
+  // An older writer's legacy record with another label still conflicts, as before; a terminal found later does not.
+  await assert.rejects(store.recordOutcome("two-legacy", analysisDefinitionHash(value), legacyComplete("not_activated")), /conflicting terminal outcomes/);
+  // A complete that is not legacy stays final, even when an older writer's legacy record of its label and a later
+  // incomplete one follow it.
+  const proven = definition("proven-first");
+  await store.recordAnalysis(proven);
+  for (const item of [covered("no_terminal_event"), outcome("no_terminal_event", "complete", "2026-07-16T03:30:00.000Z"),
+    outcome("history_incomplete", "incomplete", null, "2026-10-10T00:00:00.000Z")]) {
+    assert.equal((await store.recordOutcome("proven-first", analysisDefinitionHash(proven), item)).recorded, true);
+  }
+  assert.equal((await store.list({ analysisId: "proven-first" })).analyses[0].latestOutcome.payload.result.evidence.expiryCoveredBy, "closed_bar");
+  // A target recorded by 0.1.22 or later before the expiry names no proof (null), and was checked for gaps.
+  const checked = definition("checked-hit");
+  await store.recordAnalysis(checked);
+  await store.recordOutcome("checked-hit", analysisDefinitionHash(checked), { ...outcome("target_before_stop", "complete", "2026-07-16T03:00:00.000Z"),
+    result: { status: "complete", outcome: "target_before_stop", evidence: { closedThrough: "2026-07-16T03:00:00.000Z", expiryCoveredBy: null } } });
+  assert.deepEqual((await store.calibration({ bins: 2 })).legacy, { completeWithoutCoverage: 1, includedWithoutGapCheck: 0 });
 });

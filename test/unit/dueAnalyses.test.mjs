@@ -164,3 +164,13 @@ test("an ambiguous or gapped result with history through the expiry is named unl
   assert.deepEqual(ids(selectDueAnalyses(records, { now, includeFixed: true })),
     ["ambiguous", "fiveMinute", "gap", "gapEarly", "legacy", "short"]);
 });
+
+test("legacy rechecks go after the other evaluated open results, so one that keeps failing blocks none of them (102-32 review)", () => {
+  const evaluated = (status, label, evaluatedAt) => ({ ...outcome(status, label), evaluatedAt });
+  const selected = selectDueAnalyses([
+    record("legacyOld", "2026-07-16T05:00:00.000Z", { ...outcome("complete", "not_activated"), evaluatedAt: "2026-07-17T00:00:00.000Z" }),
+    record("openRecent", "2026-10-01T05:00:00.000Z", evaluated("incomplete", "history_ends_before_expiry", "2026-10-02T00:00:00.000Z")),
+    record("fresh", "2026-10-09T05:00:00.000Z"),
+  ], { now: new Date("2026-10-10T00:00:00.000Z") });
+  assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["fresh", "openRecent", "legacyOld"]);
+});

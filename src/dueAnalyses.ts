@@ -43,8 +43,8 @@ export function selectDueAnalyses(
     if (latest !== null && isLegacyUncoveredComplete(latest, definition.expiresAt)) {
       // An earlier version closed a result with no terminal by the clock alone, even when its history stopped short of
       // the expiry (BACKLOG 102-04). The journal now ranks such a record below any later evaluation and lets one replace
-      // it (BACKLOG 102-32), so it is rechecked; once anything is recorded it is no longer the latest and is not picked
-      // again. It goes with the evaluated results that stayed open, after the analyses that just became due.
+      // it (BACKLOG 102-32), so it is rechecked; once anything is recorded after it, it is no longer the latest and is not
+      // picked again. It goes last, after the due analyses and the evaluated results that stayed open.
       legacyCompleteWithoutCoverage += 1;
       candidates.push({
         analysisId: definition.analysisId,
@@ -111,11 +111,14 @@ export function selectDueAnalyses(
   // that just became due (BACKLOG 102-04). They go in the order their current result was first recorded, since a recheck
   // that finds the same result records nothing (rotating them fairly is BACKLOG 102-34). The rest go by expiry, so an
   // analysis whose window has closed but has no final evaluation comes before one still active.
-  const evaluatedOpen = (candidate: DueAnalysisCandidate) =>
-    candidate.latestOutcome !== null && candidate.latestOutcome.status !== "ongoing";
+  // Legacy completes come after those (BACKLOG 102-32): they are old, and one whose recheck keeps failing records nothing
+  // and keeps its place, so it should block neither the due analyses nor the other open results.
+  const group = (candidate: DueAnalysisCandidate) => candidate.reason === "legacy_complete_recheck" ? 2
+    : candidate.latestOutcome !== null && candidate.latestOutcome.status !== "ongoing" ? 1 : 0;
   candidates.sort((left, right) => {
-    const leftOpen = evaluatedOpen(left), rightOpen = evaluatedOpen(right);
-    if (leftOpen !== rightOpen) return leftOpen ? 1 : -1;
+    const leftGroup = group(left), rightGroup = group(right);
+    if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+    const leftOpen = leftGroup > 0;
     if (leftOpen) {
       const byEvaluation = Date.parse(left.latestOutcome!.evaluatedAt) - Date.parse(right.latestOutcome!.evaluatedAt);
       if (byEvaluation !== 0) return byEvaluation;
