@@ -108,6 +108,7 @@ import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
 import { describeErrorChain } from "./errorChain.js";
+import { computeDeflatedSharpe } from "./deflatedSharpe.js";
 import { ChartOperationLock, SerialOperationQueue } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -9850,6 +9851,40 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }) => {
       try {
         return jsonResult(computeRoundTripCost({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "compute_deflated_sharpe",
+    {
+      description:
+        "Deflate a selected configuration's Sharpe ratio for the number of configurations tried (BACKLOG 103-2): " +
+        "the probabilistic Sharpe ratio, the expected maximum Sharpe ratio of N unskilled trials, the deflated Sharpe " +
+        "ratio (Bailey and Lopez de Prado 2014) and the minimum backtest length (Bailey et al. 2014). Give the selected " +
+        "configuration's per-period returns and either every trial's per-period Sharpe ratio or the trial count with " +
+        "the variance of their Sharpe ratios. N must count discarded trials too. A pure computation: it reads and " +
+        "writes nothing. See docs/DEFLATED_SHARPE.md.",
+      inputSchema: {
+        returns: z.array(z.number().finite()).min(2).max(100_000)
+          .describe("The selected configuration's per-period returns, in one unit"),
+        trial_sharpes: z.array(z.number().finite()).min(2).max(100_000).optional()
+          .describe("Per-period Sharpe ratios of every configuration tried, the selected and discarded ones included"),
+        trial_count: z.number().int().min(2).max(1_000_000_000).optional()
+          .describe("Instead of trial_sharpes: the number of configurations tried"),
+        trial_sharpe_variance: z.number().finite().nonnegative().optional()
+          .describe("With trial_count: the variance of the trials' per-period Sharpe ratios"),
+        periods_per_year: z.number().finite().positive().optional()
+          .describe("Annualizes the Sharpe ratio for display and gives the minimum backtest length in periods"),
+        target_annual_sharpe: z.number().finite().positive().optional()
+          .describe("The annualized Sharpe ratio the minimum backtest length guards against. Default: 1"),
+      },
+    },
+    async (input) => {
+      try {
+        return jsonResult(computeDeflatedSharpe(input));
       } catch (err) {
         return errorResult(err);
       }

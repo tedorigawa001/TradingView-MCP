@@ -1180,7 +1180,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred twelve expected tools", async () => {
+test("exposes exactly the one hundred thirteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1198,6 +1198,7 @@ test("exposes exactly the one hundred twelve expected tools", async () => {
       "compare_research_evidence",
       "compare_strategy_experiments",
       "compute_correlation_regimes",
+      "compute_deflated_sharpe",
       "compute_feature_outcome_relationships",
       "compute_lead_lag_relationships",
       "compute_market_features",
@@ -3852,6 +3853,20 @@ test("evaluate_due_analyses continues after one evaluation failure", async () =>
   assert.equal(result.results[0].status, "failed");
   assert.equal(result.results[1].status, "evaluated");
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+});
+
+test("compute_deflated_sharpe returns the deflated Sharpe ratio and refuses a mixed trial input (103-2)", async () => {
+  const client = await connectedClient(makeDeps());
+  const returns = Array.from({ length: 60 }, (_, t) => ((t * 13) % 7 - 2.5) / 1000);
+  const result = JSON.parse((await client.callTool({ name: "compute_deflated_sharpe",
+    arguments: { returns, trial_count: 7, trial_sharpe_variance: 0.0004, periods_per_year: 252 } })).content[0].text);
+  assert.equal(result.status, "evaluated");
+  assert.equal(result.trials.count, 7);
+  assert.ok(result.deflated_sharpe > 0 && result.deflated_sharpe < 1);
+  assert.ok(Math.abs(result.min_backtest_length.years - 1.923143406664121) < 1e-12);
+  const mixed = await client.callTool({ name: "compute_deflated_sharpe", arguments: { returns, trial_sharpes: [0.1, 0.2], trial_count: 2, trial_sharpe_variance: 0.1 } });
+  assert.equal(mixed.isError, true);
+  assert.match(mixed.content[0].text, /either trial_sharpes, or trial_count/);
 });
 
 test("evaluate_due_analyses notes evaluations that record nothing, and selects by when each was last looked at (102-34)", async () => {
