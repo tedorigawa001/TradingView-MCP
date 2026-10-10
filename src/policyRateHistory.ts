@@ -76,14 +76,22 @@ export class PolicyRateFirstSeenStore {
       });
       const records = await this.log.readAllUnlocked();
       const latestFirstSeen = records.at(-1)?.first_seen_at;
-      if (latestFirstSeen && candidates.some((candidate) => candidate.first_seen_at < latestFirstSeen)) throw new Error("policy-rate first-seen clock moved backwards");
+      const currentFor = (candidate: PolicyRateFirstSeenRecord) => records
+        .filter((record) => record.currency === candidate.currency && record.observation_date === candidate.observation_date)
+        .sort((a, b) => b.sequence - a.sequence)[0];
+      // Only a version that will be appended must not be older than the log's last. The MCP server and the collection
+      // CLIs write this log, and a run takes its time before it waits for the lock, so another may append, later,
+      // meanwhile; an unchanged version is counted as such (BACKLOG 102-41, as 102-29 for COT). Checked before anything
+      // is appended, so a refused batch writes nothing.
+      if (latestFirstSeen && candidates.some((candidate) => currentFor(candidate)?.value !== candidate.value && candidate.first_seen_at < latestFirstSeen)) {
+        throw new Error("policy-rate first-seen clock moved backwards");
+      }
       const recorded: PolicyRateFirstSeenRecord[] = [];
       let unchanged = 0;
       let revisions = 0;
       let sequence = records.length;
       for (const candidate of candidates) {
-        const current = records.filter((record) => record.currency === candidate.currency && record.observation_date === candidate.observation_date)
-          .sort((a, b) => b.sequence - a.sequence)[0];
+        const current = currentFor(candidate);
         if (current?.value === candidate.value) { unchanged += 1; continue; }
         if (current) revisions += 1;
         const record = { ...candidate, sequence: ++sequence };

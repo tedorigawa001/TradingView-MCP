@@ -319,3 +319,25 @@ test("a date after the retrieval day is not judged, so no change is derived ther
   assert.deepEqual([due.recorded.length, due.derived], [1, 1]);
   assert.deepEqual(await series(store, "CHF"), [["2026-08-31", 0.25], ["2026-09-30", 0], ["2026-10-31", 0.25]]);
 });
+
+// BACKLOG 102-41: as for the first-seen policy rates, only an observation that will be appended has to be later than the
+// log's last; one already recorded unchanged is counted as such, whatever time its retrieval took.
+test("OfficialPolicyRateHistoryStore counts unchanged observations even when another writer appended later meanwhile", async () => {
+  const path = join(await mkdtemp(join(tmpdir(), "tv-mcp-policy-rate-official-")), "history.jsonl");
+  const lines = async () => (await readFile(path, "utf8")).trim().split("\n").length;
+  const run = new OfficialPolicyRateHistoryStore(path);
+  await run.observeMany([observation()]);
+  // Another process records another date with a later retrieval.
+  await new OfficialPolicyRateHistoryStore(path).observeMany([observation({ observation_date: "2020-04-29", retrieved_at: "2026-07-29T13:00:00.000Z" })]);
+  // The run, with an earlier retrieval, finds its observation unchanged.
+  const again = await run.observeMany([observation({ retrieved_at: "2026-07-29T12:30:00.000Z" })]);
+  assert.deepEqual([again.recorded.length, again.unchanged], [0, 1]);
+  assert.equal(await lines(), 2);
+  // An observation to append with an earlier retrieval is still refused, as before, and nothing is written.
+  await assert.rejects(() => run.observeMany([observation({ retrieved_at: "2026-07-29T12:30:00.000Z" }),
+    observation({ observation_date: "2020-06-10", value: 0.1, retrieved_at: "2026-07-29T12:30:00.000Z" })]), /retrieval clock moved backwards/);
+  assert.equal(await lines(), 2);
+  // At or after the log's last retrieval, it is appended.
+  const appended = await run.observeMany([observation({ observation_date: "2020-06-10", value: 0.1, retrieved_at: "2026-07-29T13:00:00.000Z" })]);
+  assert.equal(appended.recorded.length, 1);
+});

@@ -226,7 +226,6 @@ export class OfficialPolicyRateHistoryStore {
       const observed = observedDates(spans, candidates);
       const records = await this.log.readAllUnlocked();
       const latestFirstSeen = records.at(-1)?.first_seen_at;
-      if (latestFirstSeen && candidates.some((candidate) => candidate.first_seen_at < latestFirstSeen)) throw new Error("official policy-rate retrieval clock moved backwards");
       const latest = new Map<string, OfficialPolicyRateHistoryRecord>();
       for (const record of records) latest.set(`${record.currency}:${record.observation_date}`, record);
       const recorded: OfficialPolicyRateHistoryRecord[] = [];
@@ -298,6 +297,11 @@ export class OfficialPolicyRateHistoryStore {
           record(current, point);
         });
       }
+      // Only what will be appended must not be older than the log's last: the MCP server and the collection CLIs write
+      // this log, and a run takes its retrieval time before it waits for the lock, so another may append, later,
+      // meanwhile; an unchanged observation is counted as such (BACKLOG 102-41, as 102-29 for COT). Nothing is appended
+      // before this and the checks below.
+      if (latestFirstSeen && recorded.some((item) => item.first_seen_at < latestFirstSeen)) throw new Error("official policy-rate retrieval clock moved backwards");
       await this.log.assertAppendableUnlocked(records, recorded);
       for (const item of recorded) await this.log.appendUnlocked(item);
       return { recorded, unchanged, revisions, reappeared, withdrawn: withdrawals, derived };
