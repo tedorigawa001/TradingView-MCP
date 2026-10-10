@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalOandaSymbol, collectOandaEurUsdM15History, collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore,
   OANDA_FX_INSTRUMENTS, resolveFxHistoricalManifestPathFor } from "../../build/oandaHistoricalFx.js";
-import { parseFxHistoryCollectionCliArguments } from "../../build/fxHistoryCollectionCli.js";
+import { parseFxHistoryCollectionCliArguments, runFxHistoryCollection } from "../../build/fxHistoryCollectionCli.js";
 
 const candle = (time, close = "1.1002") => ({ complete: true, volume: 17, time, mid: { o: "1.1000", h: "1.1004", l: "1.0998", c: close } });
 const response = (candles) => new Response(JSON.stringify({ candles }), { status: 200, headers: { "content-type": "application/json" } });
@@ -255,9 +255,10 @@ test("an early checkpoint fetched again but still not final stays, and two runs 
 
 // BACKLOG 103-1: the collector reads one of nine instruments, each into its own manifest and checkpoints; EUR_USD keeps
 // the files and the collection key it always had.
-test("another instrument is collected into its own manifest and checkpoints, and EUR_USD keeps its files and key (103-1)", async (t) => {
+// Points the manifest and raw archive paths into a temporary directory for one test, and restores them after it.
+async function withFxPaths(t, manifestName = "fx-history-m15-manifest.jsonl") {
   const directory = await mkdtemp(join(tmpdir(), "oanda-instruments-"));
-  const base = join(directory, "fx-history-m15-manifest.jsonl");
+  const base = join(directory, manifestName);
   const saved = { manifest: process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH, archive: process.env.TRADINGVIEW_MCP_FX_HISTORY_RAW_ARCHIVE_PATH };
   process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH = base;
   process.env.TRADINGVIEW_MCP_FX_HISTORY_RAW_ARCHIVE_PATH = join(directory, "raw");
@@ -266,14 +267,23 @@ test("another instrument is collected into its own manifest and checkpoints, and
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   });
-  const exists = (path) => access(path).then(() => true, () => false);
+  return { directory, base };
+}
+const exists = (path) => access(path).then(() => true, () => false);
+const yenCandles = () => [candle("2026-01-05T00:00:00.000Z", "157.012"), candle("2026-01-05T00:15:00.000Z", "157.010")]
+  .map((bar) => ({ ...bar, mid: { o: "157.000", h: "157.020", l: "156.990", c: bar.mid.c } }));
+const stubPorts = () => ({ checkpoints: checkpointStore(), archive: { store: async () => ({ stored: true, bytes: 1 }) },
+  store: { append: async () => ({ recorded: true, sequence: 1 }) } });
+
+test("another instrument is collected into its own manifest and checkpoints, and EUR_USD keeps its files and key (103-1)", async (t) => {
+  const { directory, base } = await withFxPaths(t);
   const requested = [];
   const common = {
     accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length", from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z",
     now: () => new Date("2026-02-01T00:00:00.000Z"),
     fetch: async (url) => {
       requested.push(new URL(url).pathname);
-      return response([candle("2026-01-05T00:00:00.000Z", "157.012"), candle("2026-01-05T00:15:00.000Z", "157.010")].map((bar) => ({ ...bar, mid: { o: "157.000", h: "157.020", l: "156.990", c: bar.mid.c } })));
+      return response(yenCandles());
     },
   };
   const yen = await collectOandaM15History({ ...common, instrument: "USD_JPY" });
@@ -284,6 +294,7 @@ test("another instrument is collected into its own manifest and checkpoints, and
   assert.deepEqual([row.instrument, row.canonical_symbol, row.source_url_template.endsWith("/instruments/USD_JPY/candles")], ["USD_JPY", "OANDA:USDJPY", true]);
   assert.equal(await exists(`${yenManifest}.checkpoints`), true);
   assert.equal(await exists(base), false, "the EUR_USD manifest is not touched");
+  assert.equal(await exists(`${base}.checkpoints`), false, "nor are its checkpoints");
   // EUR_USD keeps its paths and its collection key; the two collections of one range do not share a key.
   const euro = await collectOandaM15History({ ...common });
   assert.equal(euro.collection_key, `sha256:${createHash("sha256").update(`oanda_v20|practice|EUR_USD|M15|M|${common.from}|${common.to}`).digest("hex")}`);
@@ -294,22 +305,103 @@ test("another instrument is collected into its own manifest and checkpoints, and
   await assert.rejects(new FxHistoricalManifestStore(yenManifest).coverage(), /unsupported FX history manifest/);
   assert.equal((await new FxHistoricalManifestStore(yenManifest, "USD_JPY").coverage()).records, 1);
   await assert.rejects(new FxHistoricalManifestStore(base, "USD_JPY").coverage(), /unsupported FX history manifest/);
-  // The EUR_USD wrapper is the default collection.
+  // The EUR_USD wrapper is the default collection, and a caller cannot turn it into another instrument.
   assert.equal((await collectOandaEurUsdM15History({ ...common })).collection_key, euro.collection_key);
+  assert.equal((await collectOandaEurUsdM15History({ ...common, instrument: "USD_JPY" })).instrument, "EUR_USD");
+  // Without a path, a store uses its own instrument's files (review: it used EUR_USD's).
+  assert.equal((await new FxHistoricalManifestStore(undefined, "USD_JPY").coverage()).records, 1);
+  assert.ok((await new FxHistoricalCheckpointStore(undefined, "USD_JPY").completed(yen.collection_key)).length > 0);
+  assert.deepEqual(await new FxHistoricalCheckpointStore(undefined, "USD_JPY").completed(euro.collection_key), []);
+  // Each half of a row's identity is checked: the instrument, and the symbol that goes with it.
+  const [euroRow] = (await readFile(base, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  for (const [name, row, instrument] of [["symbol", { ...euroRow, canonical_symbol: "OANDA:USDJPY" }, "EUR_USD"],
+    ["instrument", { ...euroRow, instrument: "USD_JPY" }, "EUR_USD"], ["instrument-for-yen", { ...euroRow, instrument: "USD_JPY" }, "USD_JPY"]]) {
+    const path = join(directory, `${name}.jsonl`);
+    await writeFile(path, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+    await assert.rejects(new FxHistoricalManifestStore(path, instrument).coverage(), /unsupported FX history manifest/, name);
+  }
+});
+
+test("a store, a checkpoint store or a response for another instrument is refused (103-1 review)", async () => {
+  let fetched = 0;
+  const common = { accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length", from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z",
+    now: () => new Date("2026-02-01T00:00:00.000Z"), instrument: "USD_JPY" };
+  const directory = await mkdtemp(join(tmpdir(), "oanda-mismatch-"));
+  // Before anything is fetched or written.
+  for (const [name, ports] of [
+    ["manifest store", { ...stubPorts(), store: new FxHistoricalManifestStore(join(directory, "m.jsonl")) }],
+    ["checkpoint store", { ...stubPorts(), checkpoints: new FxHistoricalCheckpointStore(join(directory, "m.jsonl.checkpoints")) }],
+  ]) {
+    await assert.rejects(collectOandaM15History({ ...common, ...ports, fetch: async () => { fetched += 1; return response(yenCandles()); } }),
+      new RegExp(`the FX history ${name} is for EUR_USD, not USD_JPY`));
+  }
+  assert.equal(fetched, 0);
+  assert.equal(await exists(join(directory, "m.jsonl")), false);
+  // A response that names another instrument or granularity.
+  for (const [named, pattern] of [[{ instrument: "EUR_USD", granularity: "M15" }, /named EUR_USD, not USD_JPY/], [{ instrument: "USD_JPY", granularity: "H1" }, /granularity H1, not M15/]]) {
+    await assert.rejects(collectOandaM15History({ ...common, ...stubPorts(),
+      fetch: async () => new Response(JSON.stringify({ ...named, candles: yenCandles() }), { status: 200 }) }), pattern);
+  }
+  const ok = await collectOandaM15History({ ...common, ...stubPorts(),
+    fetch: async () => new Response(JSON.stringify({ instrument: "USD_JPY", granularity: "M15", candles: yenCandles() }), { status: 200 }) });
+  assert.equal(ok.bars.length, 2);
+});
+
+test("gold's daily trading break is counted as a weekday discontinuity (103-1 review)", async () => {
+  // A summer week of XAU_USD: Monday 00:00 to Friday 20:45 UTC, with the daily break 21:00-22:00 UTC (17:00-18:00 New York).
+  const candles = [];
+  for (let at = Date.parse("2026-07-06T00:00:00.000Z"); at <= Date.parse("2026-07-10T20:45:00.000Z"); at += 15 * 60 * 1000) {
+    if (new Date(at).getUTCHours() === 21) continue;
+    candles.push({ complete: true, volume: 5, time: new Date(at).toISOString(), mid: { o: "2650.125", h: "2650.500", l: "2649.875", c: "2650.250" } });
+  }
+  const result = await collectOandaM15History({ accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length",
+    from: "2026-07-06T00:00:00.000Z", to: "2026-07-10T21:00:00.000Z", instrument: "XAU_USD", now: () => new Date("2026-08-01T00:00:00.000Z"),
+    ...stubPorts(), fetch: async () => response(candles) });
+  assert.deepEqual([result.canonical_symbol, result.bars.length, result.quality.non_contiguous_weekday_intervals], ["OANDA:XAUUSD", candles.length, 4]);
+});
+
+test("a configured manifest path that names a directory is refused before anything is fetched (103-1 review)", async (t) => {
+  const { directory } = await withFxPaths(t, "manifest-directory");
+  await mkdir(join(directory, "manifest-directory"));
+  let fetched = 0;
+  await assert.rejects(collectOandaM15History({ accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length",
+    from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z", instrument: "USD_JPY", fetch: async () => { fetched += 1; return response(yenCandles()); } }),
+  /must name a file, not a directory/);
+  assert.equal(fetched, 0);
+  assert.equal(await exists(join(directory, "manifest-directory.USD_JPY")), false);
+});
+
+test("the CLI collects the instrument it names (103-1 review)", async (t) => {
+  const { directory } = await withFxPaths(t);
+  const requested = [];
+  const argv = ["--from", "2026-01-05T00:00:00.000Z", "--to", "2026-01-05T00:30:00.000Z", "--confirm-external-fetch", "--instrument", "USD_JPY"];
+  const env = { OANDA_FX_HISTORY_ACCOUNT_ID: "001-001-1234567-001", OANDA_FX_HISTORY_ACCESS_TOKEN: "a-valid-token-with-enough-length" };
+  const summary = await runFxHistoryCollection(argv, env, { now: () => new Date("2026-02-01T00:00:00.000Z"),
+    fetch: async (url) => { requested.push(new URL(url).pathname); return response(yenCandles()); } });
+  assert.deepEqual([summary.instrument, summary.canonical_symbol, summary.bars_collected, "bars" in summary], ["USD_JPY", "OANDA:USDJPY", 2, false]);
+  assert.match(requested[0], /\/instruments\/USD_JPY\/candles$/);
+  assert.equal(await exists(join(directory, "fx-history-m15-manifest.USD_JPY.jsonl")), true);
+  await assert.rejects(runFxHistoryCollection(argv, {}, {}), /set OANDA_FX_HISTORY_ACCOUNT_ID and OANDA_FX_HISTORY_ACCESS_TOKEN/);
 });
 
 test("only the listed instruments are read, and each has its own manifest path (103-1)", async () => {
   assert.deepEqual([...OANDA_FX_INSTRUMENTS], ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "NZD_USD", "USD_CAD", "USD_CHF", "AUD_NZD", "XAU_USD"]);
   assert.deepEqual(OANDA_FX_INSTRUMENTS.map(canonicalOandaSymbol).slice(0, 2), ["OANDA:EURUSD", "OANDA:USDJPY"]);
   assert.equal(canonicalOandaSymbol("XAU_USD"), "OANDA:XAUUSD");
-  for (const instrument of ["BTC_USD", "EUR/USD", "eur_usd", ""]) {
+  // Stub ports, so a check that came too late would touch nothing under the real home.
+  for (const instrument of ["BTC_USD", "EUR/USD", "eur_usd", "", null]) {
     await assert.rejects(collectOandaM15History({ accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length",
-      from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z", instrument, fetch: async () => { throw new Error("no request expected"); } }),
+      from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z", instrument, ...stubPorts(), fetch: async () => { throw new Error("no request expected"); } }),
     /instrument must be one of EUR_USD, USD_JPY/, JSON.stringify(instrument));
   }
+  assert.throws(() => new FxHistoricalManifestStore("/x/m.jsonl", "BTC_USD"), /instrument must be one of/);
   assert.equal(resolveFxHistoricalManifestPathFor("EUR_USD", "/x/m.jsonl"), "/x/m.jsonl");
   assert.equal(resolveFxHistoricalManifestPathFor("XAU_USD", "/x/m.jsonl"), "/x/m.XAU_USD.jsonl");
+  assert.equal(resolveFxHistoricalManifestPathFor("XAU_USD", "/x/m.JSONL"), "/x/m.XAU_USD.JSONL");
   assert.equal(resolveFxHistoricalManifestPathFor("AUD_NZD", "/x/manifest"), "/x/manifest.AUD_NZD");
+  for (const path of ["/x/dir/", "C:\\x\\dir\\"]) {
+    assert.throws(() => resolveFxHistoricalManifestPathFor("USD_JPY", path), /must name a file, not a directory/, path);
+  }
 });
 
 test("the CLI names the instrument, EUR_USD by default (103-1)", () => {

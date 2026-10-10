@@ -1,4 +1,4 @@
-import { collectOandaM15History, isOandaFxInstrument, OANDA_FX_INSTRUMENTS, type OandaFxInstrument } from "./oandaHistoricalFx.js";
+import { collectOandaM15History, isOandaFxInstrument, OANDA_FX_INSTRUMENTS, type OandaFxInstrument, type OandaHistoricalRequest } from "./oandaHistoricalFx.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 
 export function parseFxHistoryCollectionCliArguments(argv: string[]) {
@@ -18,14 +18,20 @@ export function parseFxHistoryCollectionCliArguments(argv: string[]) {
   return { from, to, environment, instrument };
 }
 
-async function main() {
-  const args = parseFxHistoryCollectionCliArguments(process.argv.slice(2));
-  const accountId = process.env.OANDA_FX_HISTORY_ACCOUNT_ID;
-  const token = process.env.OANDA_FX_HISTORY_ACCESS_TOKEN;
+/** One collection as the CLI runs it: the arguments, the credentials from the environment, and the summary it prints. */
+export async function runFxHistoryCollection(argv: string[], env: Record<string, string | undefined> = process.env,
+  deps: Pick<OandaHistoricalRequest, "fetch" | "now" | "sleep"> = {}) {
+  const args = parseFxHistoryCollectionCliArguments(argv);
+  const accountId = env.OANDA_FX_HISTORY_ACCOUNT_ID;
+  const token = env.OANDA_FX_HISTORY_ACCESS_TOKEN;
   if (!accountId || !token) throw new Error("set OANDA_FX_HISTORY_ACCOUNT_ID and OANDA_FX_HISTORY_ACCESS_TOKEN before collecting FX history");
-  const result = await collectOandaM15History({ ...args, accountId, token });
+  const result = await collectOandaM15History({ ...args, ...deps, accountId, token });
   const { bars, ...summary } = result;
-  process.stdout.write(`${JSON.stringify({ ...summary, bars_collected: bars.length })}\n`);
+  return { ...summary, bars_collected: bars.length };
+}
+
+async function main() {
+  process.stdout.write(`${JSON.stringify(await runFxHistoryCollection(process.argv.slice(2)))}\n`);
 }
 
 if (isCliEntrypoint(import.meta.url)) main().catch((error) => { process.stderr.write(`FX history collection failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

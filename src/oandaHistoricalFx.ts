@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AppendOnlyFirstSeenLog, isCanonicalTimestamp } from "./firstSeenStore.js";
@@ -15,8 +16,8 @@ const OANDA_HOSTS = { practice: "api-fxpractice.oanda.com", live: "api-fxtrade.o
 
 type OandaEnvironment = keyof typeof OANDA_HOSTS;
 /**
- * The OANDA instruments the collector reads (BACKLOG 103-1): the majors against USD, AUD/NZD and gold, which the HMM
- * research plan v2 needs for its forward test and its USD basket. EUR_USD is the default and keeps its files as before.
+ * The OANDA instruments the collector reads (BACKLOG 103-1): the majors against USD, AUD/NZD and gold. EUR_USD is the
+ * default and keeps its files as before.
  */
 export const OANDA_FX_INSTRUMENTS = ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "NZD_USD", "USD_CAD", "USD_CHF", "AUD_NZD", "XAU_USD"] as const;
 export type OandaFxInstrument = (typeof OANDA_FX_INSTRUMENTS)[number];
@@ -32,8 +33,9 @@ export type FxHistoricalManifest = {
   bar_count: number; first_bar_at: string; last_bar_at: string; duplicate_timestamps_removed: number; non_contiguous_weekday_intervals: number;
 };
 export type OandaHistoricalFetch = (url: string, init: RequestInit) => Promise<BoundedResponse & { ok: boolean; status: number }>;
-type FxHistoricalCheckpointPort = { completed(collectionKey: string): Promise<FxHistoricalPageCheckpoint[]>; append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string): Promise<{ recorded: boolean; sequence: number | null }> };
-export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; instrument?: OandaFxInstrument; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestStore; checkpoints?: FxHistoricalCheckpointPort };
+type FxHistoricalCheckpointPort = { readonly instrument?: OandaFxInstrument; completed(collectionKey: string): Promise<FxHistoricalPageCheckpoint[]>; append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string): Promise<{ recorded: boolean; sequence: number | null }> };
+type FxHistoricalManifestPort = Pick<FxHistoricalManifestStore, "append"> & { readonly instrument?: OandaFxInstrument };
+export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; instrument?: OandaFxInstrument; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestPort; checkpoints?: FxHistoricalCheckpointPort };
 
 export const resolveFxHistoricalManifestPath = (configuredPath = process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH): string =>
   configuredPath?.trim() || join(homedir(), ".tradingview-mcp", "fx-history-m15-manifest.jsonl");
@@ -44,9 +46,12 @@ export const resolveFxHistoricalManifestPath = (configuredPath = process.env.TRA
  * fx-history-m15-manifest.USD_JPY.jsonl.
  */
 export const resolveFxHistoricalManifestPathFor = (instrument: OandaFxInstrument, configuredPath = process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH): string => {
+  if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
   const path = resolveFxHistoricalManifestPath(configuredPath);
+  // A path ending in a separator names a directory, where another instrument's file would become a hidden one.
+  if (/[\\/]$/.test(path)) throw new Error(`FX history manifest path must name a file, not a directory: ${path}`);
   if (instrument === "EUR_USD") return path;
-  return path.endsWith(".jsonl") ? `${path.slice(0, -".jsonl".length)}.${instrument}.jsonl` : `${path}.${instrument}`;
+  return /\.jsonl$/i.test(path) ? path.replace(/(\.jsonl)$/i, `.${instrument}$1`) : `${path}.${instrument}`;
 };
 
 const canonical = (value: string, label: string) => {
@@ -90,10 +95,14 @@ async function fetchOandaPage(url: string, token: string, fetcher: OandaHistoric
 }
 
 /** The complete candles of a page, and how many it returned that were not complete yet. */
-function parsePage(body: Uint8Array): { bars: FxM15Bar[]; incomplete: number } {
+function parsePage(body: Uint8Array, instrument: OandaFxInstrument): { bars: FxM15Bar[]; incomplete: number } {
   let data: unknown;
   try { data = JSON.parse(new TextDecoder().decode(body)); } catch { throw new Error("OANDA candle response was not JSON"); }
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid OANDA candle response");
+  // OANDA names the instrument and granularity of a candle response; a page of another one is refused (BACKLOG 103-1).
+  const named = data as { instrument?: unknown; granularity?: unknown };
+  if (named.instrument !== undefined && named.instrument !== instrument) throw new Error(`OANDA candle response named ${String(named.instrument)}, not ${instrument}`);
+  if (named.granularity !== undefined && named.granularity !== "M15") throw new Error(`OANDA candle response named granularity ${String(named.granularity)}, not M15`);
   const candles = (data as { candles?: unknown }).candles;
   if (!Array.isArray(candles)) throw new Error("OANDA candle response did not include candles");
   let incomplete = 0;
@@ -136,8 +145,10 @@ const validateManifest = (value: unknown, instrument: OandaFxInstrument): FxHist
 
 export class FxHistoricalManifestStore {
   private readonly log: AppendOnlyFirstSeenLog<FxHistoricalManifest>;
-  constructor(path = resolveFxHistoricalManifestPath(), private readonly instrument: OandaFxInstrument = "EUR_USD") {
-    this.log = new AppendOnlyFirstSeenLog(path, "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
+  /** Bound to one instrument; without a path it uses that instrument's own manifest (BACKLOG 103-1). */
+  constructor(path?: string, readonly instrument: OandaFxInstrument = "EUR_USD") {
+    if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
+    this.log = new AppendOnlyFirstSeenLog(path ?? resolveFxHistoricalManifestPathFor(instrument), "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
   async append(manifest: Omit<FxHistoricalManifest, "schema_version" | "sequence" | "series" | "evidence_tier" | "first_seen_at" | "observation_date">) {
     return this.log.serialize(async () => {
@@ -174,7 +185,11 @@ const validateCheckpoint = (value: unknown): FxHistoricalPageCheckpoint => {
 
 export class FxHistoricalCheckpointStore {
   private readonly log: AppendOnlyFirstSeenLog<FxHistoricalPageCheckpoint>;
-  constructor(path = `${resolveFxHistoricalManifestPath()}.checkpoints`) { this.log = new AppendOnlyFirstSeenLog(path, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES }); }
+  /** Bound to one instrument; without a path it uses the checkpoints beside that instrument's manifest (BACKLOG 103-1). */
+  constructor(path?: string, readonly instrument: OandaFxInstrument = "EUR_USD") {
+    if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
+    this.log = new AppendOnlyFirstSeenLog(path ?? `${resolveFxHistoricalManifestPathFor(instrument)}.checkpoints`, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
+  }
   async completed(collectionKey: string) { return this.log.serialize(async () => (await this.log.readAllUnlocked()).filter((row) => row.collection_key === collectionKey)); }
   async append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string) {
     return this.log.serialize(async () => {
@@ -200,18 +215,27 @@ export class FxHistoricalCheckpointStore {
 export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const from = canonical(input.from, "from"); const to = canonical(input.to, "to");
   if (from >= to) throw new Error("from must precede to");
-  const instrument = input.instrument ?? "EUR_USD";
+  const instrument = input.instrument === undefined ? "EUR_USD" : input.instrument;
   if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
   const canonicalSymbol = canonicalOandaSymbol(instrument);
+  // A manifest or checkpoint store given for another instrument is refused before anything is fetched or written.
+  for (const [label, port] of [["manifest store", input.store], ["checkpoint store", input.checkpoints]] as const) {
+    if (port?.instrument !== undefined && port.instrument !== instrument) throw new Error(`the FX history ${label} is for ${port.instrument}, not ${instrument}`);
+  }
   if (!/^[A-Za-z0-9_-]{3,128}$/.test(input.accountId) || input.token.trim().length < 16) throw new Error("OANDA credentials are missing or malformed");
   const environment = input.environment ?? "practice";
   const host = OANDA_HOSTS[environment];
   const fetcher = input.fetch ?? ((url, init) => fetch(url, init) as Promise<BoundedResponse & { ok: boolean; status: number }>);
   const sleep = input.sleep ?? defaultSleep;
   const archive = input.archive ?? new FxHistoricalArchive(resolveFxHistoricalArchivePath());
-  const manifestPath = resolveFxHistoricalManifestPathFor(instrument);
-  const store = input.store ?? new FxHistoricalManifestStore(manifestPath, instrument);
-  const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore(`${manifestPath}.checkpoints`);
+  if (input.store === undefined || input.checkpoints === undefined) {
+    // The configured manifest path is the base of every instrument's files: a directory there is refused for all of them.
+    const base = resolveFxHistoricalManifestPath();
+    const found = await lstat(base).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    if (found?.isDirectory()) throw new Error(`FX history manifest path must name a file, not a directory: ${base}`);
+  }
+  const store = input.store ?? new FxHistoricalManifestStore(undefined, instrument);
+  const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore(undefined, instrument);
   const rawSha256: string[] = []; const bars: FxM15Bar[] = []; let duplicates = 0;
   const normalizedHash = createHash("sha256"); normalizedHash.update("["); let firstNormalizedBar = true;
   // The key always named the instrument, so EUR_USD's checkpoints resume as before.
@@ -246,7 +270,7 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
     if (priorCheckpoint) {
       const body = await archive.read(priorCheckpoint.raw_sha256);
       if (body.byteLength !== priorCheckpoint.raw_bytes) throw new Error("FX history checkpoint raw payload size does not match");
-      const page = parsePage(body);
+      const page = parsePage(body, instrument);
       // Earlier versions checkpointed a page before it was final; such a page is fetched again below, and its
       // checkpoint and raw response are kept.
       if (pageFinal(page, pageEnd, priorCheckpoint.first_seen_at)) {
@@ -259,7 +283,7 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
     const response = await fetchOandaPage(url.toString(), input.token, fetcher, sleep);
     const body = await readLimitedResponseBytes(response, MAX_RESPONSE_BYTES, "OANDA candle");
     const hash = digest(body); await archive.store(hash, Buffer.from(body)); rawSha256.push(hash);
-    const page = parsePage(body);
+    const page = parsePage(body, instrument);
     appendBars(page.bars, cursor, pageEnd);
     if (pageFinal(page, pageEnd, readAt)) {
       await checkpoints.append({ collection_key: collectionKey, requested_from: requestFrom, requested_to: requestTo, raw_sha256: hash, raw_bytes: body.byteLength,
