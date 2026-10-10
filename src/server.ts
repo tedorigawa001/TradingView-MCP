@@ -107,6 +107,7 @@ import { reconcileGoldOpenInterest } from "./openInterestReconciliation.js";
 import { evaluateStrategyByRegime } from "./strategyRegimeEvaluation.js";
 import { assertChartState, changeChartState, withTemporaryChartState } from "./chartTransaction.js";
 import { redactSecrets } from "./redact.js";
+import { describeErrorChain } from "./errorChain.js";
 import { ChartOperationLock, SerialOperationQueue } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -206,7 +207,7 @@ export interface ServerDeps {
   calendar: Pick<EconomicCalendar, "getEvents">;
   cot: Pick<CotClient, "getLatest" | "getHistory">;
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
-  journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration">;
+  journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration" | "recordAttempt" | "lastAttempts">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies" | "findHypothesis">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
   policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf" | "getVersionsAsOf">;
@@ -4835,7 +4836,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "confirmation it temporarily changes one selected chart's symbol and evidence " +
         "timeframe for each analysis, evaluates closed OHLCV, records the result, and " +
         "restores the original chart after every item. Individual failures do not stop the " +
-        "batch; a chart restoration failure stops all remaining work.",
+        "batch; a chart restoration failure stops all remaining work. An evaluation that " +
+        "finds the result already recorded, or fails, is noted in an attempt log beside the " +
+        "journal, so analyses that do not resolve take turns, looked at longest ago first.",
       inputSchema: {
         chart_index: z.number().int().min(0).optional(),
         evaluation_timeframe: z
@@ -4889,9 +4892,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           });
         }
         const journalView = await journal.list({ limit: 500 });
+        // The attempt log only orders the analyses (BACKLOG 102-34): if it cannot be read, they are selected without it
+        // and the preview says so.
+        let lastAttempts: Awaited<ReturnType<typeof journal.lastAttempts>> = new Map();
+        let attemptLogError: string | null = null;
+        try {
+          lastAttempts = await journal.lastAttempts();
+        } catch (err) {
+          attemptLogError = redactSecrets(describeErrorChain(err));
+        }
         const selection = selectDueAnalyses(
           journalView.analyses as JournalAnalysisRecord[],
           {
+            lastAttempts,
             includeActive: include_active ?? false,
             limit: limit ?? 20,
             evaluationTimeframe: evaluation_timeframe,
@@ -4918,6 +4931,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               outcome: candidate.latestOutcome.outcome,
               evidenceThrough: candidate.latestOutcome.evidenceThrough,
             },
+            lastSeenAt: candidate.lastSeenAt,
+            lastAttempt: candidate.lastAttempt,
             estimatedChanges: {
               symbol: originalChart.symbol.toUpperCase() !== candidate.definition.symbol.toUpperCase(),
               timeframe: normalizeResolution(originalChart.resolution) !== evidenceTimeframe,
@@ -4940,6 +4955,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           truncated: selection.truncated,
           // Completes an earlier version closed without evidence through the expiry, rechecked to be replaced (102-32).
           legacyCompleteWithoutCoverage: selection.legacyCompleteWithoutCoverage,
+          attemptLog: attemptLogError === null ? { status: "read" } : { status: "unavailable", error: attemptLogError },
           candidates: previewItems,
           skipped: selection.skipped,
         };
@@ -5081,6 +5097,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                   error: redactSecrets(err instanceof Error ? err.message : String(err)),
                 },
               });
+            }
+          }
+          // An evaluation that recorded no outcome (it failed, or found the result already recorded) is noted, so the
+          // next selection knows when it was looked at (BACKLOG 102-34). Failing to note it changes nothing else.
+          const last = results[results.length - 1];
+          const lastJournal = last.journal as { idempotent?: boolean; error?: string } | undefined;
+          const attempt = last.status === "failed" || lastJournal?.error !== undefined ? "failed" as const
+            : lastJournal?.idempotent === true ? "unchanged" as const : null;
+          if (attempt !== null) {
+            try {
+              await journal.recordAttempt(candidate.analysisId, candidate.definitionHash, attempt);
+              last.attemptLog = { result: attempt, recorded: true };
+            } catch (err) {
+              last.attemptLog = { result: attempt, recorded: false, error: redactSecrets(describeErrorChain(err)) };
             }
           }
           if (restoreError !== null) {
@@ -5351,7 +5381,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "get_analysis_journal",
     {
       description:
-        "Read locally journaled analysis definitions and their monotonic latest evaluations. " +
+        "Read locally journaled analysis definitions and their monotonic latest evaluations, " +
+        "with the evaluation recorded last beside them (recentOutcome). " +
         "A completed evaluation is never displaced by a later stale ongoing read. This tool " +
         "does not access or change the TradingView chart.",
       inputSchema: {

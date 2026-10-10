@@ -133,10 +133,12 @@ test("evaluated results that stayed open go last in the order they were recorded
     record("ongoingAtExpiry", "2026-07-20T01:00:00.000Z", evaluated("ongoing", "awaiting_terminal", "2026-07-20T01:00:00.000Z")),
   ];
   const now = new Date("2026-07-20T03:00:00.000Z");
+  // The analysis never looked at goes first, then the ongoing ones looked at longest ago, by expiry when they were looked
+  // at together (BACKLOG 102-34).
   assert.deepEqual(selectDueAnalyses(records, { now }).candidates.map((candidate) => candidate.analysisId),
-    ["ongoingAtExpiry", "checkedBefore", "fresh", "active", "ambiguousEarly", "shortOld", "gapStale"]);
+    ["fresh", "ongoingAtExpiry", "checkedBefore", "active", "ambiguousEarly", "shortOld", "gapStale"]);
   assert.deepEqual(selectDueAnalyses(records, { now, limit: 3 }).candidates.map((candidate) => candidate.analysisId),
-    ["ongoingAtExpiry", "checkedBefore", "fresh"], "the oldest expiries no longer take every slot");
+    ["fresh", "ongoingAtExpiry", "checkedBefore"], "the oldest expiries no longer take every slot");
 });
 
 test("an ambiguous or gapped result with history through the expiry is named unless rechecked on another timeframe", () => {
@@ -212,4 +214,88 @@ test("a result whose history does not reach back is named unless the run loads m
     assert.deepEqual(selectDueAnalyses([short("old", result)], { ...options, requestedBars: 5000 }).skipped.map((item) => item.reason),
       ["history_short_fixed_for_request"], JSON.stringify(result));
   }
+});
+
+// BACKLOG 102-34: a recheck that finds the same result, or fails, records nothing in the journal, so due selection had
+// no time it last looked at an analysis. The attempt log beside the journal gives one.
+const attempts = (entries) => new Map(entries.map(([id, attemptedAt, result]) => [id, { attemptedAt, result, definitionHash: `hash-${id}` }]));
+
+test("open results take turns, looked at longest ago first, as the attempt log notes rechecks that found the same (102-34)", () => {
+  const open = (id, evaluatedAt) => record(id, "2026-07-20T00:00:00.000Z", { ...outcome("incomplete", "history_ends_before_expiry"), evaluatedAt });
+  const records = [open("a", "2026-07-20T01:00:00.000Z"), open("b", "2026-07-20T01:10:00.000Z"), open("c", "2026-07-20T01:20:00.000Z")];
+  const now = new Date("2026-07-21T00:00:00.000Z");
+  const pick = (log) => selectDueAnalyses(records, { now, limit: 1, lastAttempts: attempts(log) }).candidates[0];
+  // Without the log the result recorded first goes first, as before; once its recheck is noted, the next one does.
+  assert.equal(pick([]).analysisId, "a");
+  const log = [["a", "2026-07-21T00:00:00.000Z", "unchanged"]];
+  assert.equal(pick(log).analysisId, "b");
+  log.push(["b", "2026-07-21T00:01:00.000Z", "unchanged"]);
+  assert.equal(pick(log).analysisId, "c");
+  log.push(["c", "2026-07-21T00:02:00.000Z", "unchanged"]);
+  const again = pick(log);
+  assert.deepEqual([again.analysisId, again.lastSeenAt, again.lastAttempt], ["a", "2026-07-21T00:00:00.000Z", { attemptedAt: "2026-07-21T00:00:00.000Z", result: "unchanged" }]);
+  // Among open results, turns do not depend on expiry: one still active, looked at longer ago, goes first.
+  const activeOpen = record("activeOpen", "2026-07-25T00:00:00.000Z", { ...outcome("ambiguous", "terminal_order_unknown"), evaluatedAt: "2026-07-20T00:30:00.000Z" });
+  assert.equal(selectDueAnalyses([...records, activeOpen], { now, limit: 1 }).candidates[0].analysisId, "activeOpen");
+  // When it was last looked at is the later of its last recorded outcome and its last attempt.
+  const recorded = selectDueAnalyses([open("a", "2026-07-21T05:00:00.000Z")], { now, lastAttempts: attempts(log) }).candidates[0];
+  assert.equal(recorded.lastSeenAt, "2026-07-21T05:00:00.000Z");
+  // An attempt noted for another definition of the id is not this analysis's.
+  const other = new Map([["b", { attemptedAt: "2026-07-21T09:00:00.000Z", result: "unchanged", definitionHash: "hash-other" }]]);
+  assert.equal(selectDueAnalyses(records, { now, lastAttempts: other }).candidates.find((item) => item.analysisId === "b").lastAttempt, null);
+});
+
+test("an analysis whose evaluation keeps failing takes turns with the open results, behind the due ones, and is not shut out (102-34)", () => {
+  const now = new Date("2026-07-21T00:00:00.000Z");
+  const records = [
+    record("failing", "2026-07-19T00:00:00.000Z"),
+    record("open", "2026-07-19T12:00:00.000Z", { ...outcome("incomplete", "history_ends_before_expiry"), evaluatedAt: "2026-07-20T01:00:00.000Z" }),
+    record("fresh", "2026-07-20T12:00:00.000Z"),
+  ];
+  const ids = (log, limit = 3) => selectDueAnalyses(records, { now, limit, lastAttempts: attempts(log) }).candidates.map((item) => item.analysisId);
+  // Never looked at, the oldest expiry goes first; after it fails, the due one goes first and it waits its turn among
+  // the open results, by when each was last looked at.
+  assert.deepEqual(ids([]), ["failing", "fresh", "open"]);
+  assert.deepEqual(ids([["failing", "2026-07-20T00:30:00.000Z", "failed"]]), ["fresh", "failing", "open"]);
+  assert.deepEqual(ids([["failing", "2026-07-20T02:00:00.000Z", "failed"]]), ["fresh", "open", "failing"]);
+  assert.deepEqual(ids([["failing", "2026-07-20T02:00:00.000Z", "failed"]], 1), ["fresh"], "a failing analysis does not take the due one's slot");
+  // A failed recheck of an ongoing result moves it back too; an outcome recorded after the failure brings it forward.
+  const ongoing = (evaluatedAt) => record("ongoing", "2026-07-22T00:00:00.000Z", { ...outcome("ongoing", "awaiting_terminal"), evaluatedAt });
+  const withOngoing = (evaluatedAt, log) => selectDueAnalyses([ongoing(evaluatedAt), records[1]], { now, lastAttempts: attempts(log) })
+    .candidates.map((item) => item.analysisId);
+  assert.deepEqual(withOngoing("2026-07-20T00:00:00.000Z", []), ["ongoing", "open"]);
+  assert.deepEqual(withOngoing("2026-07-20T00:00:00.000Z", [["ongoing", "2026-07-20T03:00:00.000Z", "failed"]]), ["open", "ongoing"]);
+  assert.deepEqual(withOngoing("2026-07-20T04:00:00.000Z", [["ongoing", "2026-07-20T03:00:00.000Z", "failed"]]), ["ongoing", "open"]);
+  // In front, an analysis whose window has closed comes before the active ones, even one never looked at; among those,
+  // the one never looked at goes first.
+  const activeNew = record("activeNew", "2026-07-23T00:00:00.000Z");
+  assert.deepEqual(selectDueAnalyses([activeNew, ongoing("2026-07-20T00:00:00.000Z"), { ...ongoing("2026-07-20T00:00:00.000Z"),
+    definition: { ...record("closed", "2026-07-20T12:00:00.000Z").definition } }], { now, includeActive: true }).candidates
+    .map((item) => item.analysisId), ["closed", "activeNew", "ongoing"]);
+  // A recheck that found the same ongoing result stays in front.
+  assert.deepEqual(withOngoing("2026-07-20T00:00:00.000Z", [["ongoing", "2026-07-20T03:00:00.000Z", "unchanged"]]), ["ongoing", "open"]);
+});
+
+test("groups go by the outcome recorded last: an ongoing latest after a recheck with less evidence does not hold a front slot (102-34)", () => {
+  const now = new Date("2026-07-21T00:00:00.000Z");
+  const withRecent = (id, latest, recent) => ({ ...record(id, "2026-07-20T00:00:00.000Z", latest),
+    recentOutcome: { ...record(id, "2026-07-20T00:00:00.000Z", recent).latestOutcome, sequence: 3 } });
+  const ongoing = { ...outcome("ongoing", "awaiting_terminal"), evidenceTimeframe: "60", evaluatedAt: "2026-07-19T23:00:00.000Z" };
+  const fresh = record("fresh", "2026-07-20T12:00:00.000Z");
+  // The latest stays ongoing (more evidence), but the last recheck found the history ending before the expiry.
+  const stopped = withRecent("stopped", ongoing, { ...outcome("incomplete", "history_ends_before_expiry"), evidenceThrough: "2026-07-19T20:00:00.000Z", evaluatedAt: "2026-07-20T06:00:00.000Z" });
+  assert.deepEqual(selectDueAnalyses([stopped, fresh], { now, limit: 1 }).candidates.map((item) => item.analysisId), ["fresh"]);
+  // It goes after an ongoing analysis, even one still active and looked at later.
+  const other = record("other", "2026-07-22T00:00:00.000Z", { ...ongoing, evaluatedAt: "2026-07-20T07:00:00.000Z" });
+  assert.deepEqual(selectDueAnalyses([stopped, other], { now }).candidates.map((item) => item.analysisId), ["other", "stopped"]);
+  const candidate = selectDueAnalyses([stopped], { now }).candidates[0];
+  assert.deepEqual([candidate.latestOutcome.outcome, candidate.recentOutcome.outcome], ["awaiting_terminal", "history_ends_before_expiry"]);
+  // The last recheck found a history that no longer reaches back on the same request: named, not picked on every call.
+  const short = withRecent("short", ongoing, { ...outcome("incomplete", "history_incomplete"), evidenceTimeframe: "60", evidenceThrough: null,
+    evaluatedAt: "2026-07-20T06:00:00.000Z", result: { source: { requestedBars: 1000, loadMoreBars: 0 } } });
+  const named = selectDueAnalyses([short], { now, requestedBars: 1000 });
+  assert.deepEqual([named.candidates, named.skipped], [[], [{ analysisId: "short", reason: "history_short_fixed_for_request" }]]);
+  // A caller without the outcome recorded last groups by the latest, as before.
+  const plain = record("plain", "2026-07-20T00:00:00.000Z", ongoing);
+  assert.equal(selectDueAnalyses([plain], { now }).candidates[0].recentOutcome.outcome, "awaiting_terminal");
 });

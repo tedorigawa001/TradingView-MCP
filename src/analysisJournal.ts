@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
@@ -12,6 +12,10 @@ const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
 const LOCK_WAIT_MS = 2_000;
 const STALE_LOCK_MS = 60_000;
+// The attempt log is scheduling data only, so it keeps two segments of this size: the current one is renamed over the
+// previous one when it is full (BACKLOG 102-34).
+const ATTEMPT_SEGMENT_BYTES = 4 * 1024 * 1024;
+const MAX_ATTEMPT_RECORD_BYTES = 1024;
 
 export class AnalysisDefinitionConflictError extends Error {
   readonly code = "analysis_id_definition_conflict";
@@ -42,6 +46,22 @@ export type AnalysisJournalOutcome = {
   evidenceTimeframe: string;
   evidenceThrough: string | null;
   result: Record<string, unknown>;
+};
+
+/**
+ * A due evaluation that recorded no outcome: it found the result already recorded (unchanged), or it failed, its outcome
+ * included (BACKLOG 102-34). Kept in a log beside the journal, so due selection knows when an analysis was last looked at
+ * and an earlier version still reads the journal.
+ */
+export type AnalysisAttemptResult = "unchanged" | "failed";
+export type AnalysisAttempt = { attemptedAt: string; result: AnalysisAttemptResult };
+type AnalysisAttemptEntry = {
+  schema_version: "1.0";
+  attempt_id: string;
+  attempted_at: string;
+  analysis_id: string;
+  definition_hash: string;
+  result: AnalysisAttemptResult;
 };
 
 export type AnalysisJournalAlertLink = {
@@ -285,6 +305,17 @@ const validateEntry = (value: unknown, line?: number): AnalysisJournalEntry => {
   return { ...entry, payload } as AnalysisJournalEntry;
 };
 
+const validateAttemptEntry = (value: unknown, where: string): AnalysisAttemptEntry => {
+  const entry = (value !== null && typeof value === "object" && !Array.isArray(value) ? value : {}) as Partial<AnalysisAttemptEntry>;
+  if (entry.schema_version !== "1.0" || typeof entry.attempt_id !== "string" || !/^[0-9a-f-]{36}$/i.test(entry.attempt_id) ||
+    !isCanonicalTimestamp(entry.attempted_at) || !validateAnalysisId(entry.analysis_id) ||
+    typeof entry.definition_hash !== "string" || !/^[0-9a-f]{64}$/.test(entry.definition_hash) ||
+    (entry.result !== "unchanged" && entry.result !== "failed")) {
+    throw new Error(`invalid analysis attempt record ${where}`);
+  }
+  return entry as AnalysisAttemptEntry;
+};
+
 const outcomeRank = (entry: AnalysisJournalEntry): [number, string, string, number] => {
   const payload = entry.payload as AnalysisJournalOutcome;
   return [
@@ -323,8 +354,16 @@ const latestOutcomeOf = (outcomes: AnalysisJournalEntry[], expiresAt: string | n
 export class AnalysisJournalStore {
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {
+  private readonly attemptSegmentBytes: number;
+
+  constructor(private readonly filePath: string, options: { attemptSegmentBytes?: number } = {}) {
     if (!filePath) throw new Error("analysis journal path is required");
+    this.attemptSegmentBytes = options.attemptSegmentBytes ?? ATTEMPT_SEGMENT_BYTES;
+  }
+
+  /** The attempt log beside the journal: the current segment, and the previous one it replaced when full (BACKLOG 102-34). */
+  get attemptLogPaths(): { current: string; previous: string } {
+    return { current: `${this.filePath}.attempts.jsonl`, previous: `${this.filePath}.attempts.1.jsonl` };
   }
 
   private async ensureDirectory(): Promise<void> {
@@ -665,6 +704,104 @@ export class AnalysisJournalStore {
     });
   }
 
+  private async readAttemptSegmentUnlocked(path: string): Promise<AnalysisAttemptEntry[]> {
+    let handle;
+    try {
+      await assertNotSymbolicLink(path, "analysis attempt log");
+      handle = await open(path, constants.O_RDONLY | noFollowFlag());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw new Error(`unable to open analysis attempt log as a regular file: ${path}`, { cause: err });
+    }
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${path}`);
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new Error(`analysis attempt log must be owned by the current user: ${path}`);
+      }
+      if (posixModeEnforced() && (stat.mode & 0o077) !== 0) throw new Error(`analysis attempt log permissions must be 0600: ${path}`);
+      // A segment grows past its size by at most one record before it is replaced.
+      if (stat.size > this.attemptSegmentBytes + MAX_ATTEMPT_RECORD_BYTES) throw new Error(`analysis attempt log is too large: ${path}`);
+      const text = await handle.readFile("utf8");
+      return text.split("\n").filter(Boolean).map((line, index) => {
+        try {
+          return validateAttemptEntry(JSON.parse(line) as unknown, `at line ${index + 1} of ${path}`);
+        } catch (err) {
+          if (err instanceof SyntaxError) throw new Error(`invalid analysis attempt JSON at line ${index + 1} of ${path}`);
+          throw err;
+        }
+      });
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * Notes that a due evaluation of an analysis recorded no outcome, so due selection can look at the analyses it has not
+   * looked at for longest first (BACKLOG 102-34). Only the format is checked, not the journal: an attempt for an analysis
+   * the journal does not hold is never read.
+   */
+  async recordAttempt(analysisId: string, definitionHash: string, result: AnalysisAttemptResult): Promise<AnalysisAttempt> {
+    if (!validateAnalysisId(analysisId)) throw new Error("invalid analysis_id");
+    const entry = validateAttemptEntry({
+      schema_version: "1.0",
+      attempt_id: randomUUID(),
+      attempted_at: new Date().toISOString(),
+      analysis_id: analysisId,
+      definition_hash: definitionHash,
+      result,
+    }, "to append");
+    const line = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
+    if (line.byteLength > MAX_ATTEMPT_RECORD_BYTES) throw new Error("analysis attempt record is too large");
+    return this.serialize(async () => {
+      await this.ensureDirectory();
+      const { current, previous } = this.attemptLogPaths;
+      await assertNotSymbolicLink(current, "analysis attempt log");
+      const existing = await lstat(current).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") return null;
+        throw err;
+      });
+      if (existing !== null && !existing.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${current}`);
+      // A full segment replaces the previous one; every reader and writer holds the journal lock, so no handle is open.
+      if (existing !== null && existing.size > 0 && existing.size + line.byteLength > this.attemptSegmentBytes) {
+        await rename(current, previous);
+        await syncDirectoryEntry(dirname(current));
+      }
+      const handle = await open(current, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600);
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) throw new Error(`analysis attempt log path must be a regular file: ${current}`);
+        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+          throw new Error(`analysis attempt log must be owned by the current user: ${current}`);
+        }
+        await assertAppendableJsonl(handle, stat.size, "analysis attempt log", current);
+        await handle.chmod(0o600);
+        const { bytesWritten } = await handle.write(line, 0, line.byteLength, null);
+        if (bytesWritten !== line.byteLength) throw new Error("short write to analysis attempt log");
+        await handle.sync();
+        if (stat.size === 0) await syncDirectoryEntry(dirname(current));
+      } finally {
+        await handle.close();
+      }
+      return { attemptedAt: entry.attempted_at, result: entry.result };
+    });
+  }
+
+  /** The last attempt noted for each analysis, from both segments of the attempt log, keyed by analysis_id and definition hash. */
+  async lastAttempts(): Promise<Map<string, AnalysisAttempt & { definitionHash: string }>> {
+    return this.serialize(async () => {
+      const { current, previous } = this.attemptLogPaths;
+      const last = new Map<string, AnalysisAttempt & { definitionHash: string }>();
+      for (const entry of [...await this.readAttemptSegmentUnlocked(previous), ...await this.readAttemptSegmentUnlocked(current)]) {
+        const known = last.get(entry.analysis_id);
+        if (known === undefined || known.attemptedAt <= entry.attempted_at) {
+          last.set(entry.analysis_id, { attemptedAt: entry.attempted_at, result: entry.result, definitionHash: entry.definition_hash });
+        }
+      }
+      return last;
+    });
+  }
+
   async list(options: { analysisId?: string; symbol?: string; limit?: number } = {}) {
     const limit = options.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("journal limit must be between 1 and 500");
@@ -683,6 +820,9 @@ export class AnalysisJournalStore {
         return {
           definition,
           latestOutcome: latest,
+          // The outcome recorded last, which due selection groups by: the latest is chosen by its evidence, so an
+          // ongoing result stays the latest after a recheck with less evidence (BACKLOG 102-34).
+          recentOutcome: outcomes.at(-1) ?? null,
           outcomeCount: outcomes.length,
           latestAlertLink: alertLinks.at(-1) ?? null,
           alertLinkCount: alertLinks.length,

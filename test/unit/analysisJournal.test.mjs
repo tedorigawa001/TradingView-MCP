@@ -2,7 +2,7 @@ import { posixModeEnforced } from "../../build/fsDurability.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -560,4 +560,73 @@ test("a duplicate is still found among the records after the latest, and a large
   const ongoing = (requestedBars) => ({ ...outcome("awaiting_entry", "ongoing", "2026-07-16T02:00:00.000Z"),
     result: { status: "ongoing", outcome: "awaiting_entry", source: { requestedBars, loadMoreBars: 0 } } });
   assert.deepEqual(await add("ongoing-more-bars", [ongoing(1000), ongoing(5000)]), [true, false]);
+});
+
+// BACKLOG 102-34: evaluations that record no outcome are noted in an attempt log beside the journal, never in it, so an
+// earlier version still reads the journal; the log keeps two segments, so it does not grow without bound.
+test("the attempt log notes the last evaluation of each analysis beside the journal, in two bounded segments (102-34)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const path = join(directory, "journal", "events.jsonl");
+  const store = new AnalysisJournalStore(path, { attemptSegmentBytes: 1024 });
+  const value = definition("noted");
+  const hash = analysisDefinitionHash(value);
+  await store.recordAnalysis(value);
+  const journalBefore = await readFile(path, "utf8");
+  assert.deepEqual(await store.lastAttempts(), new Map());
+  // A log left readable by others is made owner-only when appended to.
+  if (posixModeEnforced()) await writeFile(store.attemptLogPaths.current, "", { mode: 0o644 });
+  const first = await store.recordAttempt("noted", hash, "failed");
+  const second = await store.recordAttempt("noted", hash, "unchanged");
+  assert.ok(first.attemptedAt <= second.attemptedAt);
+  assert.deepEqual(await store.lastAttempts(), new Map([["noted", { ...second, definitionHash: hash }]]));
+  // The journal itself is untouched, and the log is owner-only beside it.
+  assert.equal(await readFile(path, "utf8"), journalBefore);
+  assert.deepEqual(store.attemptLogPaths, { current: `${path}.attempts.jsonl`, previous: `${path}.attempts.1.jsonl` });
+  if (posixModeEnforced()) assert.equal((await stat(store.attemptLogPaths.current)).mode & 0o777, 0o600);
+  // A full segment replaces the previous one: what only the dropped segment held is gone, the rest is kept.
+  await store.recordAttempt("dropped", hash, "failed");
+  for (let index = 0; index < 12; index += 1) await store.recordAttempt(`kept-${index % 3}`, hash, "unchanged");
+  const last = await store.lastAttempts();
+  assert.equal(last.has("dropped"), false);
+  assert.deepEqual([...last.keys()].sort(), ["kept-0", "kept-1", "kept-2"]);
+  for (const segment of Object.values(store.attemptLogPaths)) assert.ok((await stat(segment)).size <= 1024, segment);
+  // A record that cannot be read is named with its file; nothing is appended after a cut-off line.
+  await appendFile(store.attemptLogPaths.current, "{\"schema_version\":\"1.0\"}\n");
+  const badLine = (await readFile(store.attemptLogPaths.current, "utf8")).trim().split("\n").length;
+  await assert.rejects(store.lastAttempts(), (err) => err.message === `invalid analysis attempt record at line ${badLine} of ${store.attemptLogPaths.current}`);
+  // A log another user could read, or one past its size, is refused.
+  if (posixModeEnforced()) {
+    await chmod(store.attemptLogPaths.current, 0o644);
+    await assert.rejects(store.lastAttempts(), /analysis attempt log permissions must be 0600/);
+    await chmod(store.attemptLogPaths.current, 0o600);
+  }
+  await writeFile(store.attemptLogPaths.previous, "\n".repeat(1024 + 1024 + 1), { mode: 0o600 });
+  await assert.rejects(store.lastAttempts(), /analysis attempt log is too large/);
+  await writeFile(store.attemptLogPaths.current, "{\"cut", { mode: 0o600 });
+  await assert.rejects(store.recordAttempt("noted", hash, "failed"), /does not end with a newline/);
+  await assert.rejects(store.recordAttempt("noted", hash, "recorded"), /invalid analysis attempt record/);
+  await assert.rejects(store.recordAttempt("bad id!", hash, "failed"), /invalid analysis_id/);
+});
+
+test("journal list gives the outcome recorded last beside the latest, and due selection uses both (102-34)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("ongoing-then-short");
+  const hash = analysisDefinitionHash(value);
+  await store.recordAnalysis(value);
+  await store.recordOutcome("ongoing-then-short", hash, outcome("awaiting_entry", "ongoing", "2026-07-16T02:00:00.000Z", "2026-07-16T02:05:00.000Z"));
+  // A recheck on the analysis timeframe whose history no longer reaches back: recorded, but the ongoing result keeps
+  // more evidence and stays the latest.
+  await store.recordOutcome("ongoing-then-short", hash, { ...outcome("history_incomplete", "incomplete", null, "2026-10-10T00:00:00.000Z"),
+    evidenceTimeframe: "240", result: { status: "incomplete", outcome: "history_incomplete", source: { requestedBars: 1000, loadMoreBars: 0 } } });
+  const [item] = (await store.list({ analysisId: "ongoing-then-short" })).analyses;
+  assert.deepEqual([item.latestOutcome.payload.outcome, item.recentOutcome.payload.outcome, item.outcomeCount], ["awaiting_entry", "history_incomplete", 2]);
+  const fresh = { ...definition("fresh"), analyzedAt: "2026-10-08T01:00:00.000Z", expiresAt: "2026-10-09T01:00:00.000Z" };
+  await store.recordAnalysis(fresh);
+  const selected = selectDueAnalyses((await store.list({ limit: 500 })).analyses,
+    { now: new Date("2026-10-11T00:00:00.000Z"), requestedBars: 1000, lastAttempts: await store.lastAttempts() });
+  assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["fresh"]);
+  assert.deepEqual(selected.skipped, [{ analysisId: "ongoing-then-short", reason: "history_short_fixed_for_request" }]);
+  // An analysis with no outcome has none recorded last either.
+  assert.equal((await store.list({ analysisId: "fresh" })).analyses[0].recentOutcome, null);
 });
