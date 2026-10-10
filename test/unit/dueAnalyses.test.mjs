@@ -194,14 +194,19 @@ test("a result whose history does not reach back is named unless the run loads m
   const named = selectDueAnalyses([short("old"), record("fresh", "2026-10-13T00:00:00.000Z")], options);
   assert.deepEqual(named.candidates.map((candidate) => candidate.analysisId), ["fresh"]);
   assert.deepEqual(named.skipped, [{ analysisId: "old", reason: "history_short_fixed_for_request" }]);
-  // Fewer bars than the record requested, or no count, change nothing either.
-  for (const extra of [{ requestedBars: 500 }, { requestedBars: undefined }]) {
+  // Fewer bars than the record requested, or no count, change nothing either, nor does the same timeframe written another
+  // way.
+  for (const extra of [{ requestedBars: 500 }, { requestedBars: undefined }, { evaluationTimeframe: "1h" }]) {
     assert.deepEqual(selectDueAnalyses([short("old")], { ...options, ...extra }).skipped.map((item) => item.reason), ["history_short_fixed_for_request"]);
   }
   for (const extra of [{ loadMoreBars: 5000 }, { evaluationTimeframe: "15" }, { includeFixed: true }, { requestedBars: 5000 }]) {
     const rechecked = selectDueAnalyses([short("old")], { ...options, ...extra });
     assert.deepEqual(rechecked.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [["old", "non_terminal_recheck"]], JSON.stringify(extra));
   }
+  // A load is compared with the record's: no larger load changes nothing, a larger one rechecks it.
+  const loaded = short("old", { source: { requestedBars: 1000, loadMoreBars: 2000 } });
+  assert.deepEqual(selectDueAnalyses([loaded], { ...options, loadMoreBars: 2000 }).skipped.map((item) => item.reason), ["history_short_fixed_for_request"]);
+  assert.deepEqual(selectDueAnalyses([loaded], { ...options, loadMoreBars: 3000 }).candidates.map((candidate) => candidate.analysisId), ["old"]);
   // A record that names no requested count is not rechecked for more bars.
   for (const result of [{}, { source: null }, { source: { requestedBars: "1000" } }]) {
     assert.deepEqual(selectDueAnalyses([short("old", result)], { ...options, requestedBars: 5000 }).skipped.map((item) => item.reason),

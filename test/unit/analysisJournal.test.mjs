@@ -498,3 +498,66 @@ test("legacy records rechecked into a history that does not reach back do not ta
   assert.deepEqual(selected.skipped.map((item) => item.reason), Array(4).fill("history_short_fixed_for_request"));
   assert.equal(selected.legacyCompleteWithoutCoverage, 0);
 });
+
+// 102-32 third review: due selection compares a run with the latest record, so what a run finds must be able to become
+// the latest. A recheck that repeats a record from before the latest is recorded once; a short history found from more
+// history than a record asked for is recorded too. Neither loops: the next run with the same request skips it.
+test("a short history found on another request is recorded once, so the next run with that request skips it (102-32 third review)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const value = definition("short");
+  const hash = analysisDefinitionHash(value);
+  await store.recordAnalysis(value);
+  await store.recordOutcome("short", hash, legacyComplete("not_activated"));
+  const short = (timeframe, requestedBars = 1000, loadMoreBars = 0) => ({
+    ...outcome("history_incomplete", "incomplete", null, "2026-10-10T00:00:00.000Z"),
+    evidenceTimeframe: timeframe,
+    result: { status: "incomplete", outcome: "history_incomplete", source: { requestedBars, returnedBars: requestedBars, loadMoreBars } },
+  });
+  const record = async (item) => (await store.recordOutcome("short", hash, item)).recorded;
+  const due = async (request = {}) => selectDueAnalyses((await store.list({ limit: 500 })).analyses,
+    { now: new Date("2026-10-11T00:00:00.000Z"), requestedBars: 1000, loadMoreBars: 0, ...request });
+  const reasons = (selected) => [...selected.candidates.map((candidate) => candidate.reason), ...selected.skipped.map((item) => item.reason)];
+  // A default run on the analysis timeframe (240), then one on 60: the 60 record is the latest.
+  assert.equal(await record(short("240")), true);
+  assert.equal(await record(short("60")), true);
+  assert.deepEqual(reasons(await due()), ["non_terminal_recheck"]);
+  // The next default run repeats the 240 record. It is recorded and becomes the latest, so the run after skips it.
+  assert.equal(await record(short("240")), true);
+  assert.equal((await store.list({ analysisId: "short" })).analyses[0].latestOutcome.payload.evidenceTimeframe, "240");
+  assert.deepEqual(reasons(await due()), ["history_short_fixed_for_request"]);
+  assert.equal(await record(short("240")), false, "repeated again, it is a duplicate");
+  // A larger load, or more bars: recorded once, then that request (and any smaller one) skips it.
+  for (const [request, item] of [[{ loadMoreBars: 2000 }, short("240", 1000, 2000)], [{ requestedBars: 5000 }, short("240", 5000, 0)]]) {
+    assert.deepEqual(reasons(await due(request)), ["non_terminal_recheck"], JSON.stringify(request));
+    assert.equal(await record(item), true, JSON.stringify(request));
+    assert.deepEqual(reasons(await due(request)), ["history_short_fixed_for_request"], JSON.stringify(request));
+    assert.equal(await record(item), false);
+  }
+  // A smaller request repeating the latest is a duplicate of it.
+  assert.equal(await record(short("240", 1000, 0)), false);
+  // Every recorded result counts: the legacy record, 240, 60, 240 again, the larger load and the larger count.
+  assert.equal((await store.list({ analysisId: "short" })).analyses[0].outcomeCount, 6);
+});
+
+test("a duplicate is still found among the records after the latest, and a larger request matters only for a short history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analysis-journal-"));
+  const store = new AnalysisJournalStore(join(directory, "journal", "events.jsonl"));
+  const add = async (id, items) => {
+    const value = definition(id);
+    await store.recordAnalysis(value);
+    const results = [];
+    for (const item of items) results.push((await store.recordOutcome(id, analysisDefinitionHash(value), item)).recorded);
+    return results;
+  };
+  // Two legacy records, the earlier one outranking the later (later evidence): the latest is the earlier one, and a
+  // recheck that repeats the record between them is still recorded after the last one and replaces it.
+  const between = outcome("history_ends_before_expiry", "incomplete", "2026-07-16T03:30:00.000Z", "2026-07-17T00:00:00.000Z");
+  assert.deepEqual(await add("outranked-last", [outcome("not_activated", "complete", "2026-07-16T03:45:00.000Z"), between,
+    outcome("not_activated", "complete", "2026-07-16T03:00:00.000Z"), { ...between, evaluatedAt: "2026-10-10T00:00:00.000Z" }]), [true, true, true, true]);
+  assert.equal((await store.list({ analysisId: "outranked-last" })).analyses[0].latestOutcome.payload.evaluatedAt, "2026-10-10T00:00:00.000Z");
+  // Another result from more bars is a duplicate as before: only a short history depends on how much was asked for.
+  const ongoing = (requestedBars) => ({ ...outcome("awaiting_entry", "ongoing", "2026-07-16T02:00:00.000Z"),
+    result: { status: "ongoing", outcome: "awaiting_entry", source: { requestedBars, loadMoreBars: 0 } } });
+  assert.deepEqual(await add("ongoing-more-bars", [ongoing(1000), ongoing(5000)]), [true, false]);
+});

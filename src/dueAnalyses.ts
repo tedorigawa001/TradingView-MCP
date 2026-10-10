@@ -4,7 +4,7 @@ import type {
   AnalysisJournalOutcome,
 } from "./analysisJournal.js";
 import { normalizeResolution } from "./analysisOverlay.js";
-import { isLegacyUncoveredComplete, recordedProof } from "./analysisOutcomeEvidence.js";
+import { asksForMoreHistory, isLegacyUncoveredComplete, recordedHistoryRequest, recordedProof } from "./analysisOutcomeEvidence.js";
 
 export type JournalAnalysisRecord = {
   definition: AnalysisJournalEntry & { payload: AnalysisJournalDefinition };
@@ -19,13 +19,6 @@ export type DueAnalysisCandidate = {
   latestOutcome: AnalysisJournalOutcome | null;
   reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "legacy_complete_recheck";
 };
-
-/** The OHLCV bar count the evaluation that recorded an outcome requested (result.source.requestedBars), when it names one. */
-function requestedBarsOf(outcome: AnalysisJournalOutcome): number | null {
-  const source = outcome.result.source;
-  const requested = typeof source === "object" && source !== null ? (source as { requestedBars?: unknown }).requestedBars : undefined;
-  return typeof requested === "number" && Number.isFinite(requested) ? requested : null;
-}
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
@@ -81,13 +74,15 @@ export function selectDueAnalyses(
       continue;
     }
     // A history that does not reach back to the analysis only falls further behind with time, so a recheck on the same
-    // timeframe that loads no more history and inspects no more bars than the run that recorded it comes out the same,
-    // records nothing and would be picked on every call (BACKLOG 102-32 re-review; an old legacy complete rechecked on
-    // intraday bars usually ends here). Loading more history, more bars than the record requested, another timeframe or
-    // includeFixed rechecks it; a record that names no requested count is not rechecked for more bars.
-    const recordedRequest = latest === null ? null : requestedBarsOf(latest);
-    const moreBars = options.requestedBars !== undefined && recordedRequest !== null && options.requestedBars > recordedRequest;
-    if (options.includeFixed !== true && (options.loadMoreBars ?? 0) === 0 && !moreBars && latest !== null && latest.outcome === "history_incomplete" &&
+    // timeframe that asks for no more history than the run that recorded it (no more bars, none more loaded before) comes
+    // out the same, records nothing and would be picked on every call (BACKLOG 102-32 re-review; an old legacy complete
+    // rechecked on intraday bars usually ends here). A run that asks for more history, evaluates on another timeframe or
+    // sets includeFixed rechecks it; what it records is no duplicate of the record, so the next run with the same request
+    // finds it and skips it (see AnalysisJournalStore.recordOutcome). A record that names no requested count is not
+    // rechecked for more bars.
+    const runRequest = { requestedBars: options.requestedBars ?? 0, loadMoreBars: options.loadMoreBars ?? 0 };
+    if (options.includeFixed !== true && latest !== null && latest.outcome === "history_incomplete" &&
+      !asksForMoreHistory(runRequest, recordedHistoryRequest(latest)) &&
       normalizeResolution(options.evaluationTimeframe ?? definition.timeframe) === normalizeResolution(latest.evidenceTimeframe)) {
       skipped.push({ analysisId: definition.analysisId, reason: "history_short_fixed_for_request" });
       continue;
@@ -127,8 +122,8 @@ export function selectDueAnalyses(
     }
   }
 
-  // Results that were evaluated and stayed open (ambiguous, a gap, a short or stopped history, history not reaching back)
-  // go last: they may never resolve, and with the oldest expiries they would otherwise take every slot from the analyses
+  // Results that were evaluated and stayed open (ambiguous, a gap, a short or stopped history, and a history not reaching
+  // back when the run asks for more history or another timeframe) go last: they may never resolve, and with the oldest expiries they would otherwise take every slot from the analyses
   // that just became due (BACKLOG 102-04). They go in the order their current result was first recorded, since a recheck
   // that finds the same result records nothing (rotating them fairly is BACKLOG 102-34). The rest go by expiry, so an
   // analysis whose window has closed but has no final evaluation comes before one still active.

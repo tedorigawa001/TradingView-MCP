@@ -3777,6 +3777,47 @@ test("evaluate_due_analyses names a gapped result with history through the expir
   assert.deepEqual([forced.selected, forced.includeFixed, forced.candidates[0].evaluationTimeframe], [1, true, "15"]);
 });
 
+test("evaluate_due_analyses names a history that does not reach back unless the run asks for more, and counts legacy completes (102-32)", async () => {
+  const entry = (analysisId, payload) => ({
+    schema_version: "1.0", event_id: `outcome-${analysisId}`, sequence: 2, recorded_at: "2026-10-10T00:00:00.000Z",
+    kind: "outcome_evaluated", analysis_id: analysisId, definition_hash: `hash-${analysisId}`, payload,
+  });
+  const short = entry("EURUSD-short", {
+    status: "incomplete", outcome: "history_incomplete", evaluatedAt: "2026-10-10T00:00:00.000Z", evidenceTimeframe: "60",
+    evidenceThrough: null, result: { source: { requestedBars: 1000, returnedBars: 1000, loadMoreBars: 0 } },
+  });
+  const legacy = entry("EURUSD-legacy", {
+    status: "complete", outcome: "not_activated", evaluatedAt: "2026-07-01T02:00:00.000Z", evidenceTimeframe: "15",
+    evidenceThrough: "2026-07-01T00:30:00.000Z", result: { evidence: { closedThrough: "2026-07-01T00:30:00.000Z" } },
+  });
+  const records = [
+    dueAnalysisRecord("EURUSD-short", "OANDA:EURUSD", "60", "2026-07-01T01:00:00.000Z", short),
+    dueAnalysisRecord("EURUSD-legacy", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z", legacy),
+  ];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => ({
+        layoutName: "batch",
+        activeChartIndex: 0,
+        chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] }],
+      }),
+    },
+    journal: { list: async () => ({ total: records.length, returned: records.length, analyses: records }) },
+  }));
+  const preview = async (args) => JSON.parse((await client.callTool({ name: "evaluate_due_analyses", arguments: args })).content[0].text).preview;
+  const plain = await preview({ chart_index: 0 });
+  assert.deepEqual(plain.candidates.map((item) => [item.analysisId, item.reason]), [["EURUSD-legacy", "legacy_complete_recheck"]]);
+  assert.deepEqual(plain.skipped, [{ analysisId: "EURUSD-short", reason: "history_short_fixed_for_request" }]);
+  assert.equal(plain.legacyCompleteWithoutCoverage, 1);
+  assert.deepEqual((await preview({ chart_index: 0, count: 1000 })).skipped.map((item) => item.analysisId), ["EURUSD-short"]);
+  for (const args of [{ load_more_bars: 500 }, { count: 2000 }]) {
+    const more = await preview({ chart_index: 0, ...args });
+    assert.deepEqual(more.candidates.map((item) => [item.analysisId, item.reason]),
+      [["EURUSD-short", "non_terminal_recheck"], ["EURUSD-legacy", "legacy_complete_recheck"]], JSON.stringify(args));
+  }
+});
+
 test("evaluate_due_analyses continues after one evaluation failure", async () => {
   const records = [
     dueAnalysisRecord("EURUSD-fails", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),

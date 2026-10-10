@@ -50,3 +50,24 @@ export function isLegacyUncoveredComplete(outcome: AnalysisJournalOutcome, expir
 export function isTerminalWithoutGapCheck(outcome: AnalysisJournalOutcome): boolean {
   return (outcome.outcome === "target_before_stop" || outcome.outcome === "stop_before_target") && recordedProof(outcome) === undefined;
 }
+
+/**
+ * How much history the evaluation that recorded an outcome asked for (result.source): the OHLCV bars it requested and the
+ * bars it loaded before (BACKLOG 102-32). A record that names no requested count counts as having asked for every bar,
+ * and one that names no load as having loaded none (the single evaluation tool loads none).
+ */
+export type HistoryRequest = { requestedBars: number; loadMoreBars: number };
+
+export function recordedHistoryRequest(outcome: AnalysisJournalOutcome): HistoryRequest {
+  const source = outcome.result.source;
+  const field = (name: string) => {
+    const value = typeof source === "object" && source !== null ? (source as Record<string, unknown>)[name] : undefined;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  };
+  return { requestedBars: field("requestedBars") ?? Infinity, loadMoreBars: field("loadMoreBars") ?? 0 };
+}
+
+/** Whether a request asks for more history than another: more bars, or more loaded before. */
+export function asksForMoreHistory(request: HistoryRequest, than: HistoryRequest): boolean {
+  return request.requestedBars > than.requestedBars || request.loadMoreBars > than.loadMoreBars;
+}

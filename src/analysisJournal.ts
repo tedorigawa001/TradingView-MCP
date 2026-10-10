@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
-import { isLegacyUncoveredComplete, isTerminalWithoutGapCheck } from "./analysisOutcomeEvidence.js";
+import { asksForMoreHistory, isLegacyUncoveredComplete, isTerminalWithoutGapCheck, recordedHistoryRequest } from "./analysisOutcomeEvidence.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
@@ -582,13 +582,22 @@ export class AnalysisJournalStore {
           !(legacy(prior) && !legacy(outcome));
       });
       if (conflicting) throw new Error(`analysis_id ${analysisId} has conflicting terminal outcomes`);
-      // Nor is a result that is not legacy a duplicate of anything up to the last legacy complete: recorded after it, it
-      // replaces it, even when it repeats a record from before it.
+      // A result is a duplicate only of the latest and what was recorded after it. One that repeats an earlier record
+      // the latest outranks or replaced is recorded once, so a recheck can become the latest again (a short history
+      // evaluated once on another timeframe does not keep the latest away from what every later run on its own timeframe
+      // finds), and stays bounded: repeated again, it is a duplicate of that record. Nor is a result that is not legacy a
+      // duplicate of anything up to the last legacy complete: recorded after it, it replaces it, even when it repeats a
+      // record from before it. A history that does not reach back, found from more history than a record asked for, is
+      // no duplicate of it either, so due selection finds the larger request recorded (BACKLOG 102-32).
+      const latest = latestOutcomeOf(outcomes, expiresAt);
       const lastLegacy = outcomes.filter((entry) => legacy(entry.payload as AnalysisJournalOutcome))
         .reduce((last, entry) => Math.max(last, entry.sequence), 0);
       const semanticDuplicates = outcomes.filter((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
+        if (latest !== null && entry.sequence < latest.sequence) return false;
         if (!legacy(outcome) && entry.sequence <= lastLegacy) return false;
+        if (outcome.outcome === "history_incomplete" &&
+          asksForMoreHistory(recordedHistoryRequest(outcome), recordedHistoryRequest(prior))) return false;
         return prior.status === outcome.status &&
           prior.outcome === outcome.outcome &&
           prior.evidenceTimeframe === outcome.evidenceTimeframe &&

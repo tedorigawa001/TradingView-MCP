@@ -4845,15 +4845,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .optional()
           .describe("Optional evidence timeframe for every candidate; defaults to each analysis timeframe"),
         count: z.number().int().min(1).max(5000).optional()
-          .describe("Loaded OHLCV bars inspected per analysis. Default: 1000"),
+          .describe("Loaded OHLCV bars inspected per analysis. More bars than a history_incomplete record requested recheck it. Default: 1000"),
         load_more_bars: z.number().int().min(0).max(5000).optional()
-          .describe("Explicit history load before evaluation. Default: 0 (no persistent history load)"),
+          .describe("Explicit history load before evaluation. A larger load than a history_incomplete record's rechecks it. Default: 0 (no persistent history load)"),
         limit: z.number().int().min(1).max(50).optional()
           .describe("Maximum analyses to evaluate. Default: 20"),
         include_active: z.boolean().optional()
           .describe("Include active analyses with no prior evaluation. Default: false"),
         include_fixed: z.boolean().optional()
-          .describe("Also recheck ambiguous or gapped results whose history reached the expiry on the same timeframe; they come out the same unless the chart's bars changed (session or adjustment settings, a backfill). Default: false"),
+          .describe("Also recheck results skipped as fixed for the request: ambiguous or gapped results whose history reached the expiry on the same timeframe, and history_incomplete results on the same timeframe without more bars or a larger load than they recorded; they come out the same unless the chart's bars changed (session or adjustment settings, a backfill). Default: false"),
         confirm: z.boolean().optional()
           .describe("Must be true to change the chart and append outcomes. Default: false"),
       },
