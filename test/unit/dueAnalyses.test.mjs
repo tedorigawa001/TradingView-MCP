@@ -80,8 +80,9 @@ test("selectDueAnalyses can include active analyses and applies a deterministic 
   assert.equal(selected.truncated, true);
 });
 
-test("a terminal-less complete recorded without history through the expiry is named but not reselected (102-04)", () => {
-  // The append-only journal cannot replace such a record, so reselecting it would loop and crowd out due analyses.
+test("a terminal-less complete recorded without history through the expiry is rechecked after the due analyses (102-32)", () => {
+  // The journal now lets a later evaluation replace such a record (it ranks below any other), so it is rechecked; it
+  // goes with the evaluated open results, after the analyses that just became due, so it crowds none of them out.
   const withEvidence = (label, closedThrough, evidenceTimeframe = "15") =>
     ({ ...outcome("complete", label), evidenceTimeframe, result: { evidence: { closedThrough } } });
   const selected = selectDueAnalyses([
@@ -94,10 +95,16 @@ test("a terminal-less complete recorded without history through the expiry is na
     record("due", "2026-07-20T02:30:00.000Z"),
   ], { now: new Date("2026-07-20T03:00:00.000Z"), limit: 1 });
   assert.deepEqual(selected.candidates.map((candidate) => candidate.analysisId), ["due"], "the due analysis is not crowded out");
+  assert.deepEqual([selected.eligible, selected.truncated, selected.legacyCompleteWithoutCoverage], [5, true, 4]);
   assert.deepEqual(selected.skipped.map((item) => [item.analysisId, item.reason]), [
-    ["short", "legacy_complete_without_coverage"], ["covered", "terminal_evaluation_exists"],
-    ["unknown", "legacy_complete_without_coverage"], ["unconfirmed", "legacy_complete_without_coverage"],
-    ["garbled", "legacy_complete_without_coverage"], ["stopped", "terminal_evaluation_exists"]]);
+    ["covered", "terminal_evaluation_exists"], ["stopped", "terminal_evaluation_exists"]]);
+  const all = selectDueAnalyses([
+    record("short", "2026-07-20T02:00:00.000Z", withEvidence("no_terminal_event", "2026-07-20T01:00:00.000Z")),
+    record("unknown", "2026-07-20T02:00:00.000Z", outcome("complete", "not_activated")),
+    record("due", "2026-07-20T02:30:00.000Z"),
+  ], { now: new Date("2026-07-20T03:00:00.000Z") });
+  assert.deepEqual(all.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [
+    ["due", "expired_without_terminal"], ["short", "legacy_complete_recheck"], ["unknown", "legacy_complete_recheck"]]);
 });
 
 test("a complete that names its proof of reaching the expiry is final, a forming bar included (102-04 follow-up)", () => {
@@ -107,8 +114,9 @@ test("a complete that names its proof of reaching the expiry is final, a forming
   const selected = selectDueAnalyses([proven("forming", "forming_bar"), proven("closed", "closed_bar"), proven("none", null),
     proven("garbled", "yes")], { now: new Date("2026-07-20T03:00:00.000Z") });
   assert.deepEqual(selected.skipped.map((item) => [item.analysisId, item.reason]), [
-    ["forming", "terminal_evaluation_exists"], ["closed", "terminal_evaluation_exists"],
-    ["none", "legacy_complete_without_coverage"], ["garbled", "legacy_complete_without_coverage"]]);
+    ["forming", "terminal_evaluation_exists"], ["closed", "terminal_evaluation_exists"]]);
+  assert.deepEqual(selected.candidates.map((candidate) => [candidate.analysisId, candidate.reason]), [
+    ["garbled", "legacy_complete_recheck"], ["none", "legacy_complete_recheck"]]);
 });
 
 test("evaluated results that stayed open go last in the order they were recorded, so due analyses are not starved", () => {

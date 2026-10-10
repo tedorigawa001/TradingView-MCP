@@ -4,7 +4,7 @@ import type {
   AnalysisJournalOutcome,
 } from "./analysisJournal.js";
 import { normalizeResolution } from "./analysisOverlay.js";
-import { historyCoversExpiry } from "./analysisOutcome.js";
+import { isLegacyUncoveredComplete, recordedProof } from "./analysisOutcomeEvidence.js";
 
 export type JournalAnalysisRecord = {
   definition: AnalysisJournalEntry & { payload: AnalysisJournalDefinition };
@@ -17,40 +17,8 @@ export type DueAnalysisCandidate = {
   definitionHash: string;
   definition: AnalysisJournalDefinition;
   latestOutcome: AnalysisJournalOutcome | null;
-  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation";
+  reason: "expired_without_terminal" | "non_terminal_recheck" | "active_without_evaluation" | "legacy_complete_recheck";
 };
-
-/** The outcomes that close an analysis without a terminal event, final only once the history reached its expiry. */
-const WITHOUT_TERMINAL = new Set(["no_terminal_event", "not_activated", "expired_without_confirmation"]);
-
-/**
- * The proof of reaching the expiry that a record from this version names (evidence.expiryCoveredBy: a closed bar, or a
- * forming bar past the expiry), null when it names none, or undefined for a record from an earlier version.
- */
-function recordedProof(outcome: AnalysisJournalOutcome): "closed_bar" | "forming_bar" | null | undefined {
-  const evidence = outcome.result.evidence;
-  if (typeof evidence !== "object" || evidence === null || !("expiryCoveredBy" in evidence)) return undefined;
-  const coveredBy = (evidence as { expiryCoveredBy: unknown }).expiryCoveredBy;
-  return coveredBy === "closed_bar" || coveredBy === "forming_bar" ? coveredBy : null;
-}
-
-/**
- * Whether a recorded outcome's own evidence shows history through the expiry: the proof a record from this version
- * names, or for an older one its last closed bar (see historyCoversExpiry).
- */
-function recordCoversExpiry(outcome: AnalysisJournalOutcome, expiresAt: string | null): boolean {
-  const proof = recordedProof(outcome);
-  if (proof !== undefined) return proof !== null;
-  const evidence = outcome.result.evidence;
-  const closedThrough = typeof evidence === "object" && evidence !== null && typeof (evidence as { closedThrough?: unknown }).closedThrough === "string"
-    ? (evidence as { closedThrough: string }).closedThrough
-    : null;
-  try {
-    return historyCoversExpiry(closedThrough, outcome.evidenceTimeframe, expiresAt);
-  } catch {
-    return false;
-  }
-}
 
 export function selectDueAnalyses(
   analyses: JournalAnalysisRecord[],
@@ -63,6 +31,7 @@ export function selectDueAnalyses(
   }
   const candidates: DueAnalysisCandidate[] = [];
   const skipped: Array<{ analysisId: string; reason: string }> = [];
+  let legacyCompleteWithoutCoverage = 0;
 
   for (const item of analyses) {
     const definition = item.definition.payload;
@@ -71,16 +40,23 @@ export function selectDueAnalyses(
       skipped.push({ analysisId: definition.analysisId, reason: "neutral_analysis" });
       continue;
     }
-    if (latest?.status === "complete") {
+    if (latest !== null && isLegacyUncoveredComplete(latest, definition.expiresAt)) {
       // An earlier version closed a result with no terminal by the clock alone, even when its history stopped short of
-      // the expiry (BACKLOG 102-04). Such a record is named, not rechecked: the append-only journal cannot replace it (a
-      // terminal found later conflicts, an equal result is a duplicate, an incomplete one ranks below it), so it would be
-      // selected on every call and crowd out the analyses that are due. Repairing them is BACKLOG 102-32.
-      skipped.push({
+      // the expiry (BACKLOG 102-04). The journal now ranks such a record below any later evaluation and lets one replace
+      // it (BACKLOG 102-32), so it is rechecked; once anything is recorded it is no longer the latest and is not picked
+      // again. It goes with the evaluated results that stayed open, after the analyses that just became due.
+      legacyCompleteWithoutCoverage += 1;
+      candidates.push({
         analysisId: definition.analysisId,
-        reason: WITHOUT_TERMINAL.has(latest.outcome) && !recordCoversExpiry(latest, definition.expiresAt)
-          ? "legacy_complete_without_coverage" : "terminal_evaluation_exists",
+        definitionHash: item.definition.definition_hash,
+        definition,
+        latestOutcome: latest,
+        reason: "legacy_complete_recheck",
       });
+      continue;
+    }
+    if (latest?.status === "complete") {
+      skipped.push({ analysisId: definition.analysisId, reason: "terminal_evaluation_exists" });
       continue;
     }
     // An ambiguous or gapped result whose history already reached the expiry comes out the same on every recheck with
@@ -159,5 +135,6 @@ export function selectDueAnalyses(
     skipped,
     truncated: candidates.length > limit,
     eligible: candidates.length,
+    legacyCompleteWithoutCoverage,
   };
 }

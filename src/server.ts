@@ -4936,6 +4936,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           eligible: selection.eligible,
           selected: previewItems.length,
           truncated: selection.truncated,
+          // Completes an earlier version closed without evidence through the expiry, rechecked to be replaced (102-32).
+          legacyCompleteWithoutCoverage: selection.legacyCompleteWithoutCoverage,
           candidates: previewItems,
           skipped: selection.skipped,
         };

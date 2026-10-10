@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
+import { isLegacyUncoveredComplete, isTerminalWithoutGapCheck } from "./analysisOutcomeEvidence.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
 
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
@@ -284,20 +285,27 @@ const validateEntry = (value: unknown, line?: number): AnalysisJournalEntry => {
   return { ...entry, payload } as AnalysisJournalEntry;
 };
 
-const outcomeRank = (entry: AnalysisJournalEntry): [number, string, string, number] => {
-  const payload = entry.payload as AnalysisJournalOutcome;
-  return [
-    payload.status === "complete" ? 1 : 0,
-    payload.evidenceThrough ?? "",
-    payload.evaluatedAt,
-    entry.sequence,
-  ];
-};
-
-const compareRank = (left: AnalysisJournalEntry, right: AnalysisJournalEntry): number => {
-  const a = outcomeRank(left);
-  const b = outcomeRank(right);
-  return a[0] - b[0] || a[1].localeCompare(b[1]) || a[2].localeCompare(b[2]) || a[3] - b[3];
+/**
+ * How outcomes of one analysis rank, the last being its latest: a complete one above the others, and among equals the
+ * later evidence, evaluation and sequence. A complete one without a terminal event whose evidence does not reach the
+ * expiry (an evaluator before 0.1.22 closed such results by the clock alone, BACKLOG 102-04) ranks below every other, so
+ * any later evaluation becomes the latest and replaces it (BACKLOG 102-32).
+ */
+const compareRank = (expiresAt: string | null) => {
+  const rank = (entry: AnalysisJournalEntry): [number, string, string, number] => {
+    const payload = entry.payload as AnalysisJournalOutcome;
+    return [
+      isLegacyUncoveredComplete(payload, expiresAt) ? 0 : payload.status === "complete" ? 2 : 1,
+      payload.evidenceThrough ?? "",
+      payload.evaluatedAt,
+      entry.sequence,
+    ];
+  };
+  return (left: AnalysisJournalEntry, right: AnalysisJournalEntry): number => {
+    const a = rank(left);
+    const b = rank(right);
+    return a[0] - b[0] || a[1].localeCompare(b[1]) || a[2].localeCompare(b[2]) || a[3] - b[3];
+  };
 };
 
 export class AnalysisJournalStore {
@@ -550,13 +558,19 @@ export class AnalysisJournalStore {
         );
       }
       const outcomes = entries.filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === analysisId);
+      // A complete without a terminal whose evidence did not reach the expiry (BACKLOG 102-04) gives way to a later
+      // evaluation: a terminal found later does not conflict with it, and a result whose evidence reaches the expiry is
+      // no duplicate of it, the same label included (BACKLOG 102-32). Between other complete results nothing changes.
+      const expiresAt = (definition.payload as AnalysisJournalDefinition).expiresAt;
+      const legacy = (value: AnalysisJournalOutcome) => isLegacyUncoveredComplete(value, expiresAt);
       const conflicting = outcomes.find((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
-        return prior.status === "complete" && outcome.status === "complete" && prior.outcome !== outcome.outcome;
+        return prior.status === "complete" && outcome.status === "complete" && prior.outcome !== outcome.outcome && !legacy(prior);
       });
       if (conflicting) throw new Error(`analysis_id ${analysisId} has conflicting terminal outcomes`);
       const semanticDuplicates = outcomes.filter((entry) => {
         const prior = entry.payload as AnalysisJournalOutcome;
+        if (legacy(prior) && !legacy(outcome)) return false;
         return prior.status === outcome.status &&
           prior.outcome === outcome.outcome &&
           prior.evidenceTimeframe === outcome.evidenceTimeframe &&
@@ -638,7 +652,7 @@ export class AnalysisJournalStore {
       const analyses = definitions.map((definition) => {
         const outcomes = entries.filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id);
         const alertLinks = entries.filter((entry) => entry.kind === "alerts_created" && entry.analysis_id === definition.analysis_id);
-        const latest = outcomes.sort(compareRank).at(-1) ?? null;
+        const latest = outcomes.sort(compareRank((definition.payload as AnalysisJournalDefinition).expiresAt)).at(-1) ?? null;
         return {
           definition,
           latestOutcome: latest,
@@ -663,20 +677,28 @@ export class AnalysisJournalStore {
       });
       const excluded: Record<string, number> = {};
       const rows: Array<{ probability: number; outcome: boolean }> = [];
+      // Records an earlier version left that cannot be told right yet (BACKLOG 102-32): completes without a terminal or
+      // evidence through the expiry, still the latest until a recheck replaces them (excluded as their label), and target
+      // or stop results from before the gap check, included as they are.
+      const legacy = { completeWithoutCoverage: 0, includedWithoutGapCheck: 0 };
       for (const definition of definitions) {
+        const expiresAt = (definition.payload as AnalysisJournalDefinition).expiresAt;
         const outcomes = entries
           .filter((entry) => entry.kind === "outcome_evaluated" && entry.analysis_id === definition.analysis_id)
-          .sort(compareRank);
+          .sort(compareRank(expiresAt));
         const latest = outcomes.at(-1);
         if (!latest) {
           excluded.no_evaluation = (excluded.no_evaluation ?? 0) + 1;
           continue;
         }
-        const label = (latest.payload as AnalysisJournalOutcome).outcome;
+        const latestPayload = latest.payload as AnalysisJournalOutcome;
+        if (isLegacyUncoveredComplete(latestPayload, expiresAt)) legacy.completeWithoutCoverage += 1;
+        const label = latestPayload.outcome;
         if (label !== "target_before_stop" && label !== "stop_before_target") {
           excluded[label] = (excluded[label] ?? 0) + 1;
           continue;
         }
+        if (isTerminalWithoutGapCheck(latestPayload)) legacy.includedWithoutGapCheck += 1;
         rows.push({
           probability: (definition.payload as AnalysisJournalDefinition).confidence,
           outcome: label === "target_before_stop",
@@ -686,6 +708,7 @@ export class AnalysisJournalStore {
         population: definitions.length,
         included: rows.length,
         excluded,
+        legacy,
         labelDefinition: { positive: "target_before_stop", negative: "stop_before_target" },
         calibration: rows.length === 0 ? null : binaryCalibration(rows, bins),
       };
