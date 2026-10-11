@@ -55,6 +55,8 @@ const trialCountOf = (value: unknown, label: string) => {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 2 || value > MAX_TRIALS) throw new Error(`${label} must be an integer from 2 to 1,000,000,000`);
   return value;
 };
+/** A number that is finite: the range checks below rely on it, since null, "5" or false would compare as numbers. */
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const maxAbs = (values: number[]) => values.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
 const meanOf = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
 
@@ -76,11 +78,12 @@ export function computeDeflatedSharpe(input: DeflatedSharpeInput) {
     throw new Error("trial_count and trial_sharpe_variance must be given together");
   }
   if (input.effective_trial_count !== undefined && !hasTrials) throw new Error("effective_trial_count goes with trial_sharpes; with a summary, give the effective count as trial_count");
-  if (input.periods_per_year !== undefined && !(input.periods_per_year > 0 && input.periods_per_year <= L.maxPeriodsPerYear)) {
+  if (input.periods_per_year !== undefined && !(isFiniteNumber(input.periods_per_year) && input.periods_per_year > 0 && input.periods_per_year <= L.maxPeriodsPerYear)) {
     throw new Error(`periods_per_year must be a positive number of at most ${L.maxPeriodsPerYear}`);
   }
-  const target = input.target_annual_sharpe ?? 1;
-  if (!(target >= L.minTargetAnnualSharpe && target <= L.maxTargetAnnualSharpe)) {
+  // Only an omitted target takes the default; null is refused like any other non-number.
+  const target = input.target_annual_sharpe === undefined ? 1 : input.target_annual_sharpe;
+  if (!(isFiniteNumber(target) && target >= L.minTargetAnnualSharpe && target <= L.maxTargetAnnualSharpe)) {
     throw new Error(`target_annual_sharpe must be a positive number from ${L.minTargetAnnualSharpe} to ${L.maxTargetAnnualSharpe}`);
   }
 
@@ -98,7 +101,7 @@ export function computeDeflatedSharpe(input: DeflatedSharpeInput) {
   } else {
     trialCount = trialCountOf(input.trial_count, "trial_count");
     trialVariance = input.trial_sharpe_variance!;
-    if (!(trialVariance >= 0 && trialVariance <= L.maxTrialSharpeVariance)) throw new Error(`trial_sharpe_variance must be a non-negative number of at most ${L.maxTrialSharpeVariance}`);
+    if (!(isFiniteNumber(trialVariance) && trialVariance >= 0 && trialVariance <= L.maxTrialSharpeVariance)) throw new Error(`trial_sharpe_variance must be a non-negative number of at most ${L.maxTrialSharpeVariance}`);
   }
 
   // Sample statistics in normalised units: the returns are first divided by their largest magnitude, and the deviations

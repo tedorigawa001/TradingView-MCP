@@ -221,3 +221,23 @@ test("a trial computed with the population standard deviation matches only in lo
   close(result.sharpe, 0.5 * Math.sqrt(29 / 30), 1e-12, "sample sharpe");
   assert.deepEqual([result.trials.selected_matches_a_trial, result.warnings.includes("selected_not_among_trials")], [false, true]);
 });
+
+test("a direct call refuses non-numbers that a range comparison alone would accept (103-2 review 3)", () => {
+  // null >= 0, "5" > 0 and false coerce to numbers in a comparison; each must be refused as not a number.
+  const summary = { returns: returnsA, trial_count: 7, trial_sharpe_variance: 0.0004 };
+  for (const value of [null, "0", "0.0004", false, true]) {
+    assert.throws(() => computeDeflatedSharpe({ ...summary, trial_sharpe_variance: value }), /trial_sharpe_variance must be a non-negative number/, JSON.stringify(value));
+  }
+  for (const value of [null, "5", "252", true]) {
+    assert.throws(() => computeDeflatedSharpe({ ...summary, periods_per_year: value }), /periods_per_year must be a positive number/, JSON.stringify(value));
+  }
+  for (const value of [null, "1", true]) {
+    assert.throws(() => computeDeflatedSharpe({ ...summary, target_annual_sharpe: value }), /target_annual_sharpe must be a positive number/, JSON.stringify(value));
+  }
+  for (const value of [null, "7", 7.5]) {
+    assert.throws(() => computeDeflatedSharpe({ ...summary, trial_count: value }), /trial_count must be an integer/, JSON.stringify(value));
+    assert.throws(() => computeDeflatedSharpe({ returns: returnsA, trial_sharpes: trialsA, effective_trial_count: value }), /effective_trial_count must be an integer/, JSON.stringify(value));
+  }
+  // An omitted target still takes the default of 1.
+  close(computeDeflatedSharpe(summary).min_backtest_length.target_annual_sharpe, 1, 0, "default target");
+});
