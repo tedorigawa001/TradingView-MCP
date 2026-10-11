@@ -162,6 +162,52 @@ test("a set of all-zero returns has a Sharpe ratio of 0, so a configuration trad
   assert.equal(computeBacktestOverfitting({ configurations: series(3, 40), blocks: 2 }).warnings.includes("zero_return_sets"), false);
 });
 
+test("each block keeps its own scale, so a block far smaller than the rest of its series is not lost to underflow (103-3 review 2)", () => {
+  // Normalised by the whole series (largest 2), the first half's squared deviations are about 1e-401 and underflow to
+  // 0; it would be judged constant. In its own units it is [0.5, 1], with a Sharpe ratio of 3/sqrt(2) like [1, 2].
+  const tiny = computeBacktestOverfitting({ configurations: [{ id: "A", returns: [1e-200, 2e-200, 1, 2] }, { id: "B", returns: [1, 3, 2, 5] }], blocks: 2 });
+  assert.equal(tiny.status, "evaluated");
+  assert.equal(tiny.pbo, 0);
+  close(tiny.selected.training_sharpe_mean, 3 / Math.SQRT2, 1e-15, "tiny training");
+  close(tiny.selected.testing_sharpe_mean, 3 / Math.SQRT2, 1e-15, "tiny testing");
+  // A constant block beside it is named alone: the varying tiny block is not mistaken for a constant one.
+  const halfConstant = computeBacktestOverfitting({ configurations: [{ id: "A", returns: [1e-200, 2e-200, 1, 1] }, { id: "B", returns: [1, 3, 2, 5] }], blocks: 2 });
+  assert.equal(halfConstant.status, "not_evaluable");
+  assert.deepEqual(halfConstant.constant_configurations, [{ id: "A", set: "testing" }]);
+  // Blocks 0 and 2 of configuration 3 are 1e-200 times the rest: sets of tiny blocks only and mixed sets both match
+  // the reference, which divides each set by its own largest magnitude.
+  const mixed = series(4, 80).map((c, j) => (j === 3 ? { id: c.id, returns: c.returns.map((v, k) => (k < 20 || (k >= 40 && k < 60) ? v * 1e-200 : v)) } : c));
+  checkAgainst(computeBacktestOverfitting({ configurations: mixed, blocks: 4 }), {
+    splits: 6, pbo: 0.8333333333333334, logit_mean: -0.7607246985779726, q05: -1.3862943611198906, q25: -1.3862943611198906, median: -0.8958797346140275,
+    q75: -0.4054651081081643, q95: 0.2027325540540822, lmin: -1.3862943611198906, lmax: 0.4054651081081642, omega_mean: 0.3333333333333333,
+    tr_mean: 0.1452687714181829, tr_med: 0.13920375343637853, te_mean: -0.04238262821458991, te_med: -0.05319027063321005, ploss: 0.6666666666666666,
+    slope: -0.5114624654174847, intercept: 0.031916895763122954, r2: 0.5990543877064922, freq: [[1, 3], [2, 2], [0, 1]], block_sizes: [20, 20],
+  }, "v7");
+  // A always leads (B's Sharpe ratio is 0 on every set), and its sets mix tiny and ordinary blocks in every order. Its
+  // Sharpe ratios match a direct computation on each set divided by its largest magnitude.
+  const direct = (values) => {
+    const top = Math.max(...values.map(Math.abs)); const x = values.map((v) => v / top);
+    const mean = x.reduce((sum, v) => sum + v, 0) / x.length;
+    return mean / Math.sqrt(x.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (x.length - 1));
+  };
+  const lead = [1e-200, 2e-200, 1, 2, 1e-200, 2e-200, 1, 2];
+  const order = computeBacktestOverfitting({ configurations: [{ id: "A", returns: lead }, { id: "B", returns: [1, -1, 2, -2, 1, -1, 2, -2].map((v) => v / 100) }], blocks: 4 });
+  const sets = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+  const on = (blocks) => direct(blocks.flatMap((b) => lead.slice(2 * b, 2 * b + 2)));
+  assert.deepEqual(order.selection_frequency.map((item) => [item.id, item.count]), [["A", 6]]);
+  close(order.selected.training_sharpe_mean, sets.reduce((sum, set) => sum + on(set), 0) / 6, 1e-12, "mixed-order training");
+  close(order.selected.testing_sharpe_mean, sets.reduce((sum, set) => sum + on([0, 1, 2, 3].filter((b) => !set.includes(b))), 0) / 6, 1e-12, "mixed-order testing");
+  // Constancy is decided on the raw range alone: a range of 3e-12 of the largest magnitude varies (with an implausible
+  // Sharpe ratio), while 5e-13 is rounding level.
+  const varying = Array.from({ length: 20 }, (_, k) => ((k % 4) - 1.5) / 1000);
+  const nearly = (relative) => [...Array.from({ length: 20 }, (_, k) => (k === 7 ? 0.01 * (1 + relative) : 0.01)), ...varying];
+  const above = computeBacktestOverfitting({ configurations: [...series(3, 40), { id: "nearly", returns: nearly(3e-12) }], blocks: 2 });
+  assert.equal(above.status, "evaluated");
+  assert.ok(above.warnings.includes("extreme_sharpe"));
+  const below = computeBacktestOverfitting({ configurations: [...series(3, 40), { id: "nearly", returns: nearly(5e-13) }], blocks: 2 });
+  assert.deepEqual(below.constant_configurations, [{ id: "nearly", set: "training" }]);
+});
+
 test("the inputs are checked (103-3)", () => {
   const ok = series(3, 40);
   const cases = [

@@ -15,8 +15,9 @@ export type BacktestOverfittingInput = {
 
 // A per-period Sharpe ratio above this in magnitude is implausible for real returns and is warned about.
 const EXTREME_SHARPE = 10;
-// A set whose standard deviation is below this share of its largest magnitude is treated as constant (a rounding guard).
-const CONSTANT_RELATIVE_SD = 1e-12;
+// A set whose range (maximum − minimum) is at most this share of its largest magnitude is treated as constant: it varies
+// only at rounding level.
+const CONSTANT_RELATIVE_RANGE = 1e-12;
 
 const LIMITATIONS = [
   "The configurations must be every one tried, discarded ones included, over the same aligned periods; PBO describes the selection among the configurations given.",
@@ -37,15 +38,11 @@ function assertAllFinite(value: unknown, path: string): void {
   else if (value !== null && typeof value === "object") for (const [key, item] of Object.entries(value)) assertAllFinite(item, `${path}.${key}`);
 }
 
-type Moments = { n: number; mean: number; m2: number; min: number; max: number };
-/** Chan, Golub and LeVeque's pairwise combination of counts, means and centred sums of squares. */
-const combine = (a: Moments, b: Moments): Moments => {
-  if (a.n === 0) return b;
-  if (b.n === 0) return a;
-  const n = a.n + b.n;
-  const delta = b.mean - a.mean;
-  return { n, mean: a.mean + (delta * b.n) / n, m2: a.m2 + b.m2 + (delta * delta * a.n * b.n) / n, min: Math.min(a.min, b.min), max: Math.max(a.max, b.max) };
-};
+/**
+ * A block's count, mean and centred sum of squares in units of its own largest magnitude `scale`, with its raw minimum
+ * and maximum.
+ */
+type BlockMoments = { n: number; mean: number; m2: number; scale: number; min: number; max: number };
 /**
  * Rounds a Sharpe ratio to 12 decimal places, so a tie or a zero that rounding has split by a few ulps compares as one.
  * A Sharpe ratio is unitless, so the grid is the same for every scale of returns.
@@ -120,42 +117,55 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
   const bounds: Array<[number, number]> = [];
   for (let b = 0, start = 0; b < blocks; b += 1) { const size = base + (b < extra ? 1 : 0); bounds.push([start, start + size]); start += size; }
 
-  // Per block and configuration: count, mean and centred sum of squares, in units of the configuration's largest
-  // magnitude so proportional inputs give the same result.
-  const blockMoments: Moments[][] = bounds.map(() => []);
-  // The raw minimum and maximum tell a constant set exactly, which the normalised moments cannot after rounding.
-  const scales: number[] = [];
+  // Per block and configuration: count, mean and centred sum of squares in units of the block's own largest magnitude,
+  // so proportional inputs give the same result, and a block far smaller than the rest of its series keeps its
+  // precision (normalised by the whole series, its squared deviations would underflow to 0). The raw minimum and
+  // maximum decide constancy exactly.
+  const blockMoments: BlockMoments[][] = bounds.map(() => []);
   configurations.forEach(({ returns }) => {
-    const scale = returns.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
-    scales.push(scale);
     bounds.forEach(([start, end], b) => {
-      let sum = 0; let min = Infinity; let max = -Infinity;
-      for (let t = start; t < end; t += 1) { sum += scale > 0 ? returns[t] / scale : 0; min = Math.min(min, returns[t]); max = Math.max(max, returns[t]); }
+      let scale = 0; let min = Infinity; let max = -Infinity;
+      for (let t = start; t < end; t += 1) { scale = Math.max(scale, Math.abs(returns[t])); min = Math.min(min, returns[t]); max = Math.max(max, returns[t]); }
+      let sum = 0;
+      for (let t = start; t < end; t += 1) sum += scale > 0 ? returns[t] / scale : 0;
       const mean = sum / (end - start);
       let m2 = 0;
       for (let t = start; t < end; t += 1) { const c = (scale > 0 ? returns[t] / scale : 0) - mean; m2 += c * c; }
-      blockMoments[b].push({ n: end - start, mean, m2, min, max });
+      blockMoments[b].push({ n: end - start, mean, m2, scale, min, max });
     });
   });
 
   const splits = combinations(blocks, blocks / 2);
-  const empty: Moments = { n: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
   let extremeSharpe = false; let zeroSets = false;
   /**
    * Each configuration's Sharpe ratio on a set of blocks. A set whose returns are all zero has a Sharpe ratio of 0 (no
    * exposure, no performance). A set that is constant at another value, or varies only at rounding level, has no
-   * defined Sharpe ratio; such configurations are returned as constant.
+   * defined Sharpe ratio; such configurations are returned as constant. Constancy is decided on the raw range alone,
+   * never on a computed variance, so a lack of numerical range is not mistaken for it.
    */
   const sharpes = (indices: number[]) => {
     const values: number[] = []; const constant: number[] = [];
     for (let j = 0; j < n; j += 1) {
-      let moments = empty;
-      for (const b of indices) moments = combine(moments, blockMoments[b][j]);
-      if (moments.min === 0 && moments.max === 0) { zeroSets = true; values.push(0); continue; }
-      const largest = Math.max(Math.abs(moments.min), Math.abs(moments.max)) / scales[j];
-      const sd = Math.sqrt(moments.m2 / (moments.n - 1));
-      if (moments.min === moments.max || !(sd > CONSTANT_RELATIVE_SD * largest)) { constant.push(j); values.push(0); continue; }
-      const sharpe = moments.mean / sd;
+      let scale = 0; let min = Infinity; let max = -Infinity;
+      for (const b of indices) { const block = blockMoments[b][j]; scale = Math.max(scale, block.scale); min = Math.min(min, block.min); max = Math.max(max, block.max); }
+      if (scale === 0) { zeroSets = true; values.push(0); continue; }
+      if ((max - min) / scale <= CONSTANT_RELATIVE_RANGE) { constant.push(j); values.push(0); continue; }
+      // Each block is converted to units of the set's largest magnitude, and the blocks are combined by Chan, Golub and
+      // LeVeque's pairwise formula. A block whose terms underflow there is negligible beside the block that sets the scale.
+      let count = 0; let mean = 0; let m2 = 0;
+      for (const b of indices) {
+        const block = blockMoments[b][j]; const ratio = block.scale / scale;
+        const blockMean = block.mean * ratio; const blockM2 = block.m2 * ratio * ratio;
+        if (count === 0) { count = block.n; mean = blockMean; m2 = blockM2; continue; }
+        const total = count + block.n; const delta = blockMean - mean;
+        mean += (delta * block.n) / total;
+        m2 += blockM2 + (delta * delta * count * block.n) / total;
+        count = total;
+      }
+      const sd = Math.sqrt(m2 / (count - 1));
+      // A range above rounding level bounds the standard deviation away from 0 (sd ≥ range / sqrt(2(n − 1))); a guard.
+      if (!(sd > 0)) throw new Error(`compute_backtest_overfitting lost the variance of configuration "${configurations[j].id}" to the numerical range`);
+      const sharpe = mean / sd;
       if (Math.abs(sharpe) > EXTREME_SHARPE) extremeSharpe = true;
       values.push(sharpe);
     }

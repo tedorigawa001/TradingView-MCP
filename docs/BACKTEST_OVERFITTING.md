@@ -31,13 +31,21 @@ Probability of Backtest Overfitting", Journal of Computational Finance 20(4).
    the standard deviation with n − 1, and no risk-free rate.
    - Statistics are combined from per-block counts, means and centred sums of squares (Chan, Golub and LeVeque), so
      every split costs O(N·S).
-   - Each configuration is divided by its largest magnitude first, so proportional inputs give the same result,
-     subnormal ones included.
+   - Each block's statistics are kept in units of that block's largest magnitude. On a set, each block is converted
+     to units of the set's largest magnitude before the blocks are combined. Proportional inputs therefore give the
+     same result, subnormal ones included. A block far smaller than the rest of its series also keeps its precision:
+     with [1e-200, 2e-200, 1, 2] in 2 blocks, the first block has a Sharpe ratio of 3/√2, like the second. Divided by
+     the whole series' largest magnitude, its squared deviations would underflow to 0.
+     - A block whose terms underflow in the set's units is negligible beside the block that sets the scale.
    - **A set whose returns are all zero has a Sharpe ratio of 0**: no exposure, no performance. A configuration that
      trades in some blocks only is therefore evaluated (`zero_return_sets` notes it).
-   - A set constant at a nonzero value has no Sharpe ratio (see Not evaluable). Constancy is decided on the raw
-     minimum and maximum of the set, exactly, and a standard deviation below 1e-12 of the set's largest magnitude
-     (in the normalised units) also counts as constant: such a set varies only at rounding level.
+   - A set constant at a nonzero value has no Sharpe ratio (see Not evaluable).
+     - Constancy is decided on the raw minimum and maximum of the set alone, never on a computed variance, so a lack
+       of numerical range is not mistaken for it.
+     - A set is constant when its range (maximum − minimum) is at most 1e-12 of its largest magnitude: it varies only
+       at rounding level.
+     - Any wider range bounds the standard deviation away from 0 (sd ≥ range / √(2(n − 1))). A computed standard
+       deviation of 0 for such a set would throw, as a guard.
 4. **Comparison.** Selection, ranks and the sign of a loss compare the Sharpe ratios rounded to 12 decimal places. A
    Sharpe ratio is unitless, so the grid is the same at every scale. Ties and zeros that rounding has split by a few
    ulps (a permutation of the same returns, a mean that is exactly 0 on paper) then compare as one. Two values that
