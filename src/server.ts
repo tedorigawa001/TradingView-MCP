@@ -9871,20 +9871,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "pass the group-level count, because correlated or duplicated trials can bias the result in either direction. " +
         "A pure computation: it reads and writes nothing.",
       inputSchema: {
-        returns: z.array(z.number().finite()).min(2).max(100_000)
-          .describe("The selected configuration's per-period returns, in one unit"),
-        trial_sharpes: z.array(z.number().finite()).min(2).max(100_000).optional()
+        returns: z.array(z.number().finite().gte(-1e300).lte(1e300)).min(2).max(100_000)
+          .describe("The selected configuration's per-period returns, in one unit, magnitude at most 1e300"),
+        trial_sharpes: z.array(z.number().finite().gte(-1e6).lte(1e6)).min(2).max(100_000).optional()
           .describe("Per-period Sharpe ratios (mean / sd with T - 1, no risk-free rate) of every configuration tried, the selected and discarded ones included, over the same sample and length"),
         effective_trial_count: z.number().int().min(2).max(1_000_000_000).optional()
           .describe("With trial_sharpes: the effective number of independent trials, when trials are correlated or grouped"),
         trial_count: z.number().int().min(2).max(1_000_000_000).optional()
           .describe("Instead of trial_sharpes: the number of (effectively independent) configurations tried"),
-        trial_sharpe_variance: z.number().finite().nonnegative().optional()
+        trial_sharpe_variance: z.number().finite().nonnegative().max(1e12).optional()
           .describe("With trial_count: the variance of the trials' per-period Sharpe ratios (divide an annualized variance by the periods per year)"),
-        periods_per_year: z.number().finite().positive().optional()
+        periods_per_year: z.number().finite().positive().max(1e8).optional()
           .describe("Annualizes the Sharpe ratio for display, gives the minimum backtest length in periods, and enables the unit checks"),
-        target_annual_sharpe: z.number().finite().positive().optional()
-          .describe("The annualized Sharpe ratio the minimum backtest length guards against. Default: 1"),
+        target_annual_sharpe: z.number().finite().min(1e-4).max(1e4).optional()
+          .describe("The annualized Sharpe ratio the minimum backtest length guards against, from 1e-4 to 1e4. Default: 1"),
       },
     },
     async (input) => {

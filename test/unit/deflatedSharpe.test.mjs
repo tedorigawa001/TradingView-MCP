@@ -161,11 +161,19 @@ test("returns at any finite scale give the same statistics, and the far quantile
     for (const key of ["sharpe", "skewness", "kurtosis", "deflated_sharpe"]) close(scaled[key], reference[key], 1e-12, `${key} at ${scale}`);
     assert.ok(Number.isFinite(scaled.standard_deviation), `sd at ${scale}`);
   }
-  // Large values of one sign: their plain sum would overflow, but the scaled mean does not.
+  // Large values of one sign near the input limit.
   const shifted = computeDeflatedSharpe({ returns: returnsA.map((value) => value + 0.9), trial_count: 7, trial_sharpe_variance: 0.0004 });
-  const huge = computeDeflatedSharpe({ returns: returnsA.map((value) => (value + 0.9) * 1e308), trial_count: 7, trial_sharpe_variance: 0.0004 });
+  const huge = computeDeflatedSharpe({ returns: returnsA.map((value) => (value + 0.9) * 1e300), trial_count: 7, trial_sharpe_variance: 0.0004 });
   assert.equal(huge.status, "evaluated");
-  for (const key of ["sharpe", "skewness", "kurtosis"]) close(huge[key], shifted[key], 1e-12, `${key} near the largest double`);
+  for (const key of ["sharpe", "skewness", "kurtosis"]) close(huge[key], shifted[key], 1e-12, `${key} near the input limit`);
+  // Proportional subnormal inputs give exactly the statistics of the integers they are multiples of (review 2): the
+  // mean is formed in normalised units, not in the input's unit.
+  const tiny = 5e-324;
+  for (const integers of [[1, 2], [3, 5, 7], [1, 4, 2, 8, 5]]) {
+    const plain = computeDeflatedSharpe({ returns: integers, trial_count: 7, trial_sharpe_variance: 0.0004 });
+    const subnormal = computeDeflatedSharpe({ returns: integers.map((value) => value * tiny), trial_count: 7, trial_sharpe_variance: 0.0004 });
+    for (const key of ["sharpe", "deflated_sharpe", "psr_zero"]) close(subnormal[key], plain[key], 1e-12, `${key} for ${integers}`);
+  }
   // E[max] of a billion trials, computed from the lower tail so 1 - 1/N is never rounded (Python reference).
   close(expectedMaxStandardNormal(1_000_000_000), 6.0903889964134565, 1e-14, "1e9");
   // AS241's region boundaries: |q| = 0.425 (p = 0.075, 0.925) and r = 5 (p = exp(-25)).
@@ -176,4 +184,40 @@ test("returns at any finite scale give the same statistics, and the far quantile
     [5e-10, -6.1094102048693975], [3e-11, -6.543737689677802], [1e-12, -7.034483825301132], [1e-13, -7.3487961028006765],
     [8e-14, -7.378568887831625], [0.999999999999, 7.0344869100478356]];
   for (const [p, z] of boundary) close(normalQuantile(p), z, 1e-15, `p=${p}`);
+});
+
+// Every number in a result is finite, so the MCP response never carries a null (review 2).
+const assertFinite = (value, path = "result") => {
+  if (typeof value === "number") assert.ok(Number.isFinite(value), `${path} is ${value}`);
+  else if (Array.isArray(value)) value.forEach((item, index) => assertFinite(item, `${path}[${index}]`));
+  else if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) assertFinite(item, `${path}.${key}`);
+};
+
+test("inputs outside the ranges that keep results finite are refused, and results at the edges are finite (103-2 review 2)", () => {
+  const base = { returns: returnsA, trial_count: 1_000_000_000, trial_sharpe_variance: 0.0004 };
+  for (const [extra, pattern] of [
+    [{ target_annual_sharpe: 1e-160 }, /target_annual_sharpe must be a positive number from 0.0001 to 10000/],
+    [{ target_annual_sharpe: 1e5 }, /target_annual_sharpe must be a positive number from/],
+    [{ periods_per_year: 1e308 }, /periods_per_year must be a positive number of at most 100000000/],
+    [{ trial_sharpe_variance: 1e13 }, /trial_sharpe_variance must be a non-negative number of at most/],
+    [{ returns: [...returnsA, 1e301] }, /returns must hold 2 to 100000 finite numbers of magnitude at most 1e\+300/],
+  ]) assert.throws(() => computeDeflatedSharpe({ ...base, ...extra }), pattern, JSON.stringify(Object.keys(extra)));
+  assert.throws(() => computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [0.1, 1e7] }), /trial_sharpes must hold 2 to 100000 finite numbers of magnitude at most 1000000/);
+  // At the edges every returned number is finite.
+  for (const extra of [{ target_annual_sharpe: 1e-4, periods_per_year: 1e8 }, { target_annual_sharpe: 1e4, periods_per_year: 1e-9 }, { trial_sharpe_variance: 1e12 }, { trial_sharpe_variance: 0 }]) {
+    const result = computeDeflatedSharpe({ ...base, ...extra });
+    assert.equal(result.status, "evaluated", JSON.stringify(extra));
+    assertFinite(result);
+  }
+  assertFinite(computeDeflatedSharpe({ returns: returnsA.map((value) => (value + 0.9) * 1e300), trial_sharpes: [1e6, -1e6, 0.5] }));
+  assertFinite(computeDeflatedSharpe({ returns: [5e-324, 1e-323], trial_count: 2, trial_sharpe_variance: 0 }));
+  assertFinite(computeDeflatedSharpe({ returns: [0, 0, 0], trial_count: 2, trial_sharpe_variance: 1 }));
+});
+
+test("a trial computed with the population standard deviation matches only in long samples with modest Sharpe ratios (103-2 review 2)", () => {
+  // Thirty alternating returns of -0.01 and +0.03: the sample Sharpe ratio is 0.5·sqrt(29/30), the population one 0.5.
+  const alternating = Array.from({ length: 30 }, (_, t) => (t % 2 === 0 ? -0.01 : 0.03));
+  const result = computeDeflatedSharpe({ returns: alternating, trial_sharpes: [0, 0.1, 0.5] });
+  close(result.sharpe, 0.5 * Math.sqrt(29 / 30), 1e-12, "sample sharpe");
+  assert.deepEqual([result.trials.selected_matches_a_trial, result.warnings.includes("selected_not_among_trials")], [false, true]);
 });

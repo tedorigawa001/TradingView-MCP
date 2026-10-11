@@ -19,14 +19,17 @@ The tool description and schema text repeat these rules, because an MCP client s
 
 | Field | Meaning |
 |---|---|
-| `returns` | The selected configuration's per-period returns: 2 to 100,000 finite numbers in one unit |
-| `trial_sharpes` | The per-period Sharpe ratios of **every** configuration tried, the selected and discarded ones included: 2 to 100,000 finite numbers |
+| `returns` | The selected configuration's per-period returns: 2 to 100,000 finite numbers in one unit, each of magnitude at most 1e300 |
+| `trial_sharpes` | The per-period Sharpe ratios of **every** configuration tried, the selected and discarded ones included: 2 to 100,000 finite numbers, each of magnitude at most 1e6 |
 | `effective_trial_count` | With `trial_sharpes` only: the effective number of independent trials (2 to 1,000,000,000), when trials are correlated or grouped. It replaces the listed count in SR₀ and the minimum backtest length |
-| `trial_count`, `trial_sharpe_variance` | Instead of `trial_sharpes`: the number of (effectively independent) trials N, from 2 to 1,000,000,000, and the variance of their per-period Sharpe ratios (≥ 0). Give both or neither |
-| `periods_per_year` | Optional, positive. Annualizes the Sharpe ratio for display, gives the minimum backtest length in periods, and enables the unit checks |
-| `target_annual_sharpe` | Optional, positive, default 1. The annualized Sharpe ratio the minimum backtest length guards against |
+| `trial_count`, `trial_sharpe_variance` | Instead of `trial_sharpes`: the number of (effectively independent) trials N, from 2 to 1,000,000,000, and the variance of their per-period Sharpe ratios, from 0 to 1e12. Give both or neither |
+| `periods_per_year` | Optional, positive, at most 1e8. Annualizes the Sharpe ratio for display, gives the minimum backtest length in periods, and enables the unit checks |
+| `target_annual_sharpe` | Optional, from 1e-4 to 1e4, default 1. The annualized Sharpe ratio the minimum backtest length guards against |
 
 Exactly one of `trial_sharpes` and the pair (`trial_count`, `trial_sharpe_variance`) is required.
+
+The ranges are wide enough for any real use. They keep every returned number finite, so an MCP response never carries
+a null; a final check throws if a non-finite number would still be returned.
 
 ## Computation
 
@@ -35,8 +38,11 @@ Exactly one of `trial_sharpes` and the pair (`trial_count`, `trial_sharpe_varian
 - SR̂ = μ̂/σ̂;
 - skewness γ₃ = m₃/m₂^{3/2} and kurtosis γ₄ = m₄/m₂², not excess (3 for a normal distribution), where m_k =
   (1/T) Σ (r − μ̂)^k.
-- The deviations are divided by their largest magnitude before the moments are formed, and the mean by the largest
-  return, so no finite input overflows or underflows. SR̂, γ₃ and γ₄ do not depend on scale.
+- The statistics are computed in normalised units. The returns are first divided by their largest magnitude, and the
+  deviations again by theirs before the moments are formed. Every step works on numbers near 1, so proportional inputs
+  give the same SR̂, γ₃ and γ₄, subnormal ones included: [5e-324, 1e-323] gives what [1, 2] gives.
+- The reported `mean` and `standard_deviation` are converted back to the input's unit. For subnormal inputs they may
+  round towards zero there; the statistics do not.
 
 **Standard error of the Sharpe ratio**, in the form Bailey and López de Prado use (after Mertens 2002, with T − 1):
 
@@ -84,7 +90,9 @@ identical to CPython's `statistics`.
   - from `trial_sharpes` also:
     - `listed`, `mean_sharpe`, `max_sharpe`, `duplicate_values`;
     - `selected_matches_a_trial`: whether the nearest trial is within max(0.01·se, 1e-9·max(1, |SR̂|)) of SR̂. That is
-      loose enough for rounding, or for a trial computed with the population standard deviation;
+      loose enough for rounding to about eight decimals. A trial computed with the population standard deviation
+      differs by SR̂·(sqrt(T/(T − 1)) − 1), so it matches only when that difference is below the tolerance: in long
+      samples with modest Sharpe ratios. Thirty alternating returns of −0.01 and +0.03 do not match;
     - `nearest_trial_sharpe` and `nearest_trial_distance`.
 - `expected_max_sharpe` (SR₀, per period) and `deflated_sharpe`.
 - `min_backtest_length`: `target_annual_sharpe`, `years`, `upper_bound_years`, and `periods` when `periods_per_year` is
