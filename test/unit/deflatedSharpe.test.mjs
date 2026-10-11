@@ -241,3 +241,11 @@ test("a direct call refuses non-numbers that a range comparison alone would acce
   // An omitted target still takes the default of 1.
   close(computeDeflatedSharpe(summary).min_backtest_length.target_annual_sharpe, 1, 0, "default target");
 });
+
+test("a hole in a sparse array is refused, not skipped (103-3 review)", () => {
+  const holey = (values, index) => { const copy = [...values]; delete copy[index]; return copy; };
+  assert.throws(() => computeDeflatedSharpe({ returns: holey(returnsA, 3), trial_count: 7, trial_sharpe_variance: 0.0004 }), /returns must hold 2 to 100000 finite numbers/);
+  assert.throws(() => computeDeflatedSharpe({ returns: returnsA, trial_sharpes: holey(trialsA, 0) }), /trial_sharpes must hold 2 to 100000 finite numbers/);
+  // new Array(n) is all holes.
+  assert.throws(() => computeDeflatedSharpe({ returns: new Array(10), trial_count: 7, trial_sharpe_variance: 0.0004 }), /returns must hold/);
+});

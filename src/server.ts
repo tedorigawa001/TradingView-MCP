@@ -9867,19 +9867,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "configuration tried, discarded ones included, as per-period returns aligned in time (row t is the same period " +
         "for every configuration). The periods are split into an even number of contiguous blocks (default 16, giving " +
         "12,870 splits); on each split the configuration with the best training Sharpe ratio (mean / sd with n - 1, no " +
-        "risk-free rate) is ranked among all configurations on the testing half. PBO is the share of splits where it " +
-        "lands at or below the median. Also returns the logit distribution, the selected configurations' training and " +
-        "testing Sharpe ratios, the probability of an out-of-sample loss and the degradation line. PBO is not a p-value. " +
-        "A pure computation: it reads and writes nothing.",
-      inputSchema: {
+        "risk-free rate; a set of all-zero returns counts as 0) is ranked among all configurations on the testing half. " +
+        "Sharpe ratios are compared after rounding to 12 decimal places. PBO is the share of splits where it lands below " +
+        "the median, a split exactly at the median counting half: about 0.5 with no skill, for any number of " +
+        "configurations; pbo_inclusive counts the median as overfit, as the paper does. The degradation slope is negative " +
+        "even with no skill. Needs T >= 2 x blocks periods; at least 20 periods per block are recommended, so choose " +
+        "fewer blocks for a short history. The status is not_evaluable, naming the configurations, the split and its " +
+        "blocks, when a configuration is constant at a nonzero value on a training or testing set. Also returns the logit " +
+        "distribution, the selected configurations' training and testing Sharpe ratios, the probability of an " +
+        "out-of-sample loss and the degradation line. PBO is not a p-value. A pure computation: it reads and writes nothing.",
+      inputSchema: z.object({
         configurations: z.array(z.object({
           id: z.string().min(1).max(80),
           returns: z.array(z.number().finite().gte(-1e300).lte(1e300)).min(4).max(250_000),
         }).strict()).min(2).max(1_000)
-          .describe("Every configuration tried, each with a unique id and the same number of aligned per-period returns; at most 500,000 returns in total"),
+          .describe("Every configuration tried, each with a unique id and the same number T of aligned per-period returns; at most 500,000 returns in total"),
         blocks: z.number().int().min(2).max(16).optional()
-          .describe("An even number of contiguous blocks, 2 to 16. Default: 16"),
-      },
+          .describe("An even number of contiguous blocks, 2 to 16, with T >= 2 x blocks. Default: 16 (12,870 splits); at least 20 periods per block are recommended"),
+      }).strict(),
     },
     async (input) => {
       try {

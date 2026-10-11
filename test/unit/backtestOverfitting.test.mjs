@@ -18,6 +18,8 @@ const checkAgainst = (result, ref, label) => {
   assert.equal(result.status, "evaluated", label);
   assert.equal(result.splits, ref.splits, `${label} splits`);
   close(result.pbo, ref.pbo, 0, `${label} pbo`);
+  close(result.pbo_inclusive, ref.pbo_inclusive ?? ref.pbo, 0, `${label} pbo_inclusive`);
+  assert.equal(result.splits_at_median, ref.at_median ?? 0, `${label} splits at the median`);
   for (const [key, value] of [["mean", ref.logit_mean], ["q05", ref.q05], ["q25", ref.q25], ["median", ref.median], ["q75", ref.q75], ["q95", ref.q95], ["min", ref.lmin], ["max", ref.lmax]]) {
     close(result.logit[key], value, 1e-12, `${label} logit ${key}`);
   }
@@ -78,7 +80,7 @@ test("a configuration that dominates everywhere has a PBO of zero and is flagged
     slope: -0.9895153515370555, intercept: 13.741506585768061, r2: 0.9791406309275026, freq: [[0, 20]], block_sizes: [20, 20],
   }, "v3");
   assert.deepEqual(result.warnings, ["few_configurations", "few_splits", "dominant_selection"]);
-  assert.equal(result.limitations.length, 5);
+  assert.equal(result.limitations.length, 6);
 });
 
 test("proportional configurations give the same result at any finite scale, subnormal included (103-3)", () => {
@@ -96,15 +98,68 @@ test("proportional configurations give the same result at any finite scale, subn
   close(tiny.pbo, plain.pbo, 0, "subnormal pbo");
 });
 
-test("a configuration with no variation on a set is not evaluable, and names it (103-3)", () => {
+test("a configuration constant at a nonzero value on a set is not evaluable, naming every one with the split's blocks (103-3)", () => {
   const configurations = [...series(3, 40), { id: "flat", returns: Array(40).fill(0.001) }];
   const result = computeBacktestOverfitting({ configurations, blocks: 4 });
   assert.equal(result.status, "not_evaluable");
-  assert.match(result.reason, /configuration "flat" has zero standard deviation on the training set of split 0/);
+  assert.match(result.reason, /^On split 0, these configurations are constant at a nonzero value .*: "flat" \(training\), "flat" \(testing\)$/);
+  assert.deepEqual(result.constant_configurations, [{ id: "flat", set: "training" }, { id: "flat", set: "testing" }]);
+  assert.deepEqual(result.split, {
+    index: 0,
+    training_blocks: [{ block: 0, first_period: 0, last_period: 9 }, { block: 1, first_period: 10, last_period: 19 }],
+    testing_blocks: [{ block: 2, first_period: 20, last_period: 29 }, { block: 3, first_period: 30, last_period: 39 }],
+  });
   assert.equal("pbo" in result, false);
   // Constant within one block only is fine: a set always holds several blocks.
   const piecewise = [...series(3, 40), { id: "steps", returns: Array.from({ length: 40 }, (_, t) => (t < 10 ? 0.001 : (t % 3) / 1000)) }];
   assert.equal(computeBacktestOverfitting({ configurations: piecewise, blocks: 4 }).status, "evaluated");
+  // Constant on blocks 1 and 3 only: the splits run in lexicographic order ([0,1], [0,2], ...), so the first one where
+  // a set is constant is split 1, on its testing set. Every constant configuration is named, in input order.
+  const alternate = (t) => (Math.floor(t / 10) % 2 === 1 ? 0.002 : ((t % 4) - 1.5) / 1000);
+  const odd = [...series(3, 40), { id: "odd", returns: Array.from({ length: 40 }, (_, t) => alternate(t)) }, { id: "odd2", returns: Array.from({ length: 40 }, (_, t) => 2 * alternate(t)) }];
+  const second = computeBacktestOverfitting({ configurations: odd, blocks: 4 });
+  assert.equal(second.status, "not_evaluable");
+  assert.deepEqual(second.constant_configurations, [{ id: "odd", set: "testing" }, { id: "odd2", set: "testing" }]);
+  assert.deepEqual([second.split.index, second.split.training_blocks.map((b) => b.block), second.split.testing_blocks.map((b) => b.block)], [1, [0, 2], [1, 3]]);
+  assert.match(second.reason, /split 1/);
+  // A value with no exact binary form, repeated: its normalised mean need not equal it, so the centred sum of squares
+  // can be a rounding residue. The raw minimum and maximum still see a constant set.
+  const third = [...series(3, 40), { id: "third", returns: Array.from({ length: 40 }, (_, t) => (t < 20 ? 0.001 : t % 2 === 0 ? 0.003 : -0.001)) }];
+  const thirdResult = computeBacktestOverfitting({ configurations: third, blocks: 2 });
+  assert.equal(thirdResult.status, "not_evaluable");
+  assert.deepEqual(thirdResult.constant_configurations, [{ id: "third", set: "training" }]);
+  // The same over 16 blocks: half the history flat at 0.0001 is constant on the first split's training set.
+  const halfFlat = [...series(19, 640), { id: "half", returns: Array.from({ length: 640 }, (_, t) => (t < 320 ? 0.0001 : ((t % 5) - 2) / 1000)) }];
+  const sixteen = computeBacktestOverfitting({ configurations: halfFlat });
+  assert.equal(sixteen.status, "not_evaluable");
+  assert.deepEqual(sixteen.constant_configurations, [{ id: "half", set: "training" }]);
+  assert.equal(sixteen.split.testing_blocks[0].first_period, 320);
+  // Values that differ only in the last bit vary at rounding level, and count as constant.
+  const ulp = [...series(3, 40), { id: "ulp", returns: Array.from({ length: 40 }, (_, t) => (t % 2 === 0 ? 0.1 + 0.2 : 0.3)) }];
+  assert.deepEqual(computeBacktestOverfitting({ configurations: ulp, blocks: 2 }).constant_configurations, [{ id: "ulp", set: "training" }, { id: "ulp", set: "testing" }]);
+  // The rounding-level test is relative to the set's largest magnitude, so it holds at any scale.
+  const tiny = 3e-11; const nextTiny = tiny * (1 + Number.EPSILON);
+  const ulpTiny = [...series(3, 40), { id: "ulp", returns: Array.from({ length: 40 }, (_, t) => (t % 2 === 0 ? tiny : nextTiny)) }];
+  assert.deepEqual(computeBacktestOverfitting({ configurations: ulpTiny, blocks: 2 }).constant_configurations, [{ id: "ulp", set: "training" }, { id: "ulp", set: "testing" }]);
+});
+
+test("a set of all-zero returns has a Sharpe ratio of 0, so a configuration trading in some blocks only is evaluated (103-3 review)", () => {
+  // Configuration 3 trades only in blocks 0 and 3 of 4, and is zero elsewhere. Reference: Python, with 0 for an
+  // all-zero set.
+  const sparse = series(4, 80).map((c, j) => (j === 3 ? { id: c.id, returns: c.returns.map((v, k) => (k < 20 || k >= 60 ? v : 0)) } : c));
+  const result = computeBacktestOverfitting({ configurations: sparse, blocks: 4 });
+  checkAgainst(result, {
+    splits: 6, pbo: 0.8333333333333334, logit_mean: -0.9241962407465937, q05: -1.3862943611198906, q25: -1.3862943611198906, median: -1.3862943611198906,
+    q75: -0.6506724213610958, q95: 0.2027325540540822, lmin: -1.3862943611198906, lmax: 0.4054651081081642, omega_mean: 0.3,
+    tr_mean: 0.15018307644753753, tr_med: 0.1392037534363785, te_mean: -0.07686238859944054, te_med: -0.07791577481603684, ploss: 0.6666666666666666,
+    slope: 0.010346789321803402, intercept: -0.0784163012511435, r2: 6.604432973705245e-05, freq: [[1, 3], [2, 2], [3, 1]], block_sizes: [20, 20],
+  }, "v6");
+  assert.deepEqual(result.warnings, ["few_configurations", "few_splits", "zero_return_sets"]);
+  // A configuration that never trades has a Sharpe ratio of 0 everywhere, and is evaluated too.
+  const idle = computeBacktestOverfitting({ configurations: [...series(3, 40), { id: "idle", returns: Array(40).fill(0) }], blocks: 2 });
+  assert.equal(idle.status, "evaluated");
+  assert.ok(idle.warnings.includes("zero_return_sets"));
+  assert.equal(computeBacktestOverfitting({ configurations: series(3, 40), blocks: 2 }).warnings.includes("zero_return_sets"), false);
 });
 
 test("the inputs are checked (103-3)", () => {
@@ -120,6 +175,11 @@ test("the inputs are checked (103-3)", () => {
     [{ configurations: [...ok, { id: "big", returns: [...ok[0].returns.slice(1), 1e301] }] }, /magnitude at most 1e\+300/],
     [{ configurations: [...ok, { id: "str", returns: [...ok[0].returns.slice(1), "0.1"] }] }, /returns must be finite numbers/],
     [{ configurations: [...ok, null] }, /configuration 3 must be an object/],
+    [{ configurations: [ok[0], , ok[1]] }, /configuration 1 must be an object/],
+    [{ configurations: [...ok, { id: 5, returns: ok[0].returns }] }, /configuration 3 needs an id of 1 to 80 characters/],
+    [{ configurations: [...ok, { id: "text", returns: "0.1,0.2" }] }, /configuration "text" returns must be an array of finite numbers/],
+    [{ configurations: [...ok, { id: "holey", returns: (() => { const r = [...ok[0].returns]; delete r[5]; return r; })() }] }, /configuration "holey" returns must be finite numbers .*\(period 5\)/],
+    [{ configurations: ok, blocks: 0 }, /blocks must be an even integer from 2 to 16/],
     [{ configurations: ok, blocks: 3 }, /blocks must be an even integer from 2 to 16/],
     [{ configurations: ok, blocks: 18 }, /blocks must be an even integer from 2 to 16/],
     [{ configurations: ok, blocks: "4" }, /blocks must be an even integer from 2 to 16/],
@@ -130,21 +190,27 @@ test("the inputs are checked (103-3)", () => {
   for (const [input, pattern] of cases) assert.throws(() => computeBacktestOverfitting(input), pattern, JSON.stringify(Object.keys(input)));
   // Blocks default to 16.
   assert.equal(computeBacktestOverfitting({ configurations: series(3, 64) }).splits, 12870);
+  // Exactly 500,000 returns are accepted.
+  assert.equal(computeBacktestOverfitting({ configurations: series(2, 250_000), blocks: 2 }).status, "evaluated");
 });
 
-test("ties choose the earliest configuration, ranks average ties, and a median rank counts towards PBO (103-3)", () => {
+test("ties choose the earliest configuration, ranks average ties, and a median rank counts half towards PBO (103-3)", () => {
   // Two identical configurations tie everywhere: the earlier one is always selected, and its testing rank averages
-  // the tie.
+  // the tie. Reference: Python, same data; one split lands exactly at the median.
   const base = series(3, 40);
   const twins = [base[0], { id: "twin", returns: base[0].returns }, base[1], base[2]];
   const result = computeBacktestOverfitting({ configurations: twins, blocks: 4 });
+  checkAgainst(result, {
+    splits: 6, pbo: 0.5833333333333334, pbo_inclusive: 0.6666666666666666, at_median: 1, logit_mean: -0.23104906018664836, q05: -1.3862943611198906,
+    q25: -1.3862943611198906, median: -0.6931471805599453, q75: 1.039720770839918, q95: 1.3862943611198908, lmin: -1.3862943611198906,
+    lmax: 1.3862943611198908, omega_mean: 0.45, tr_mean: 0.2554081102667953, tr_med: 0.15923573656504017, te_mean: -0.17342007402677084,
+    te_med: -0.059419797772955196, ploss: 0.6666666666666666, slope: -0.9747262524163112, intercept: 0.07553291613031449, r2: 0.4243383859493905,
+    // Python's indices 2, 0 and 3 are c1, c0 and c2 here, after the twin.
+    freq: [[1, 4], [0, 1], [2, 1]], block_sizes: [10, 10],
+  }, "v5");
   assert.equal(result.selection_frequency.some((item) => item.id === "twin"), false);
-  // Reference: the tie is ranked by its average (Python, same data).
-  close(result.oos_relative_rank_mean, 0.45, 1e-12, "average-ranked tie");
-  close(result.pbo, 0.6666666666666666, 0, "twins pbo");
-  close(result.logit.mean, -0.23104906018664836, 1e-12, "twins logit mean");
   // With three configurations, one that is always second out of sample has rank 2 of 3, a relative rank of 0.5 and a
-  // logit of 0, which counts towards PBO.
+  // logit of 0: half towards PBO, and wholly towards pbo_inclusive.
   const t = 40;
   const lead = Array.from({ length: t }, (_, k) => (k % 2 === 0 ? 0.03 : -0.01));
   const middle = Array.from({ length: t }, (_, k) => (k % 2 === 0 ? 0.02 : -0.01));
@@ -155,10 +221,55 @@ test("ties choose the earliest configuration, ranks average ties, and a median r
   const median = computeBacktestOverfitting({ configurations: [{ id: "lead", returns: leadDamped }, { id: "middle", returns: middleBoosted }, { id: "low", returns: low }], blocks: 2 });
   assert.equal(median.splits, 2);
   assert.equal(median.status, "evaluated");
-  // On the split training on the first half, "middle" is selected and ranks second of three out of sample: logit 0.
-  assert.ok(median.logit.max >= 0 && median.logit.min <= 0);
-  assert.equal(median.pbo, 1, "a logit of exactly 0 counts as at or below the median");
+  // Training on the first half selects "middle", second of three out of sample (logit 0); training on the second half
+  // selects "lead", last out of sample.
+  assert.deepEqual([median.pbo, median.pbo_inclusive, median.splits_at_median], [0.75, 1, 1]);
   close(median.logit.max, 0, 0, "the median rank's logit");
+  assert.equal(median.selected.probability_oos_loss, 0.5);
   // Selected in exactly half the splits is not dominant.
   assert.deepEqual(median.warnings, ["few_configurations", "few_splits"]);
+});
+
+test("Sharpe ratios are compared after rounding, so a tie or a zero split by rounding is still one (103-3 review)", () => {
+  // A and B hold the same values on the first half, in reverse order: their training Sharpe ratios are equal, but
+  // B's computes larger in the last bit. Rounded, they tie and the earlier, A, is selected.
+  const h = [-0.00422266, 0.00246329, -0.00137511, 0.00432011, 0.00045351, 0.00133043, 0.00533488, -0.00160486, -0.00313616, 0.00303854,
+    0.00132097, -0.00361719, -0.00016021, 0.00385129, 0.00332069, 0.00179923, 0.00162866, -0.00154785, -0.00004796, 0.0045193];
+  const tail = [-0.00302825, 0.00459465, 0.0046813, 0.00447527, 0.0010041, 0.00095961, -0.00402344, -0.00306195, 0.00276448, -0.00295922,
+    0.0049194, 0.00156098, 0.00263359, 0.00361514, 0.00144884, 0.00489735, 0.00198177, 0.00207877, 0.00076193, -0.00124564];
+  const c = [0.00401611, 0.00052104, 0.00118402, -0.00181918, 0.00405887, 0.0040689, -0.00344698, -0.00349319, -0.00103825, -0.00057044,
+    -0.0047553, 0.00042636, 0.00128093, 0.00392733, 0.00389164, 0.00294319, 0.00397832, -0.00304332, 0.00158064, 0.00135282,
+    -0.00077058, -0.00465217, 0.00220592, -0.00171226, -0.00066659, -0.00236477, 0.00006979, -0.00182108, -0.00283008, 0.00381715,
+    -0.00401414, -0.0046368, 0.00177132, -0.00206824, -0.00036519, -0.00067973, 0.00178336, 0.00079759, -0.00310697, 0.0026933];
+  const tie = computeBacktestOverfitting({ configurations: [{ id: "A", returns: [...h, ...tail] }, { id: "B", returns: [...[...h].reverse(), ...tail.map((v) => -v)] }, { id: "C", returns: c }], blocks: 2 });
+  assert.deepEqual(tie.selection_frequency.map((item) => [item.id, item.count]), [["A", 2]]);
+  // Z leads on the first half; its second half has a mean of exactly 0 that computes as about -4.7e-17. Rounded, it
+  // is 0: not an out-of-sample loss.
+  const zero = Array.from({ length: 20 }, (_, k) => (k < 18 ? [0.3, -0.1, -0.2][k % 3] : k === 18 ? 0.05 : -0.05));
+  const strong = Array.from({ length: 20 }, (_, k) => (k % 2 === 0 ? 0.3 : -0.1));
+  const weak = (step) => Array.from({ length: 40 }, (_, k) => (((k * step) % 7) - 3) / 10);
+  const loss = computeBacktestOverfitting({ configurations: [{ id: "Z", returns: [...strong, ...zero] }, { id: "n1", returns: weak(3) }, { id: "n2", returns: weak(5) }], blocks: 2 });
+  assert.deepEqual(loss.selection_frequency.map((item) => [item.id, item.count]), [["Z", 1], ["n1", 1]]);
+  assert.equal(loss.selected.probability_oos_loss, 0.5, "only the split that selects n1 loses");
+});
+
+test("the degradation line reports why it is undefined, and implausible Sharpe ratios are flagged (103-3 review)", () => {
+  // p leads on the first half, q on the second, and each scores the same out of sample: the selections' testing
+  // Sharpe ratios do not vary, so R² is undefined. Powers of two keep the shared half exact under normalisation.
+  const pair = (a, b) => Array.from({ length: 40 }, (_, k) => ((k < 20 ? a : b) * (k % 2 === 0 ? 1 : 0) + (k % 2 === 0 ? 0 : -0.25)));
+  const flatY = computeBacktestOverfitting({ configurations: [{ id: "p", returns: pair(1, 0.5) }, { id: "q", returns: pair(0.5, 2) }], blocks: 2 });
+  assert.equal(flatY.degradation.r_squared, null);
+  assert.equal(flatY.degradation.r_squared_reason, "the selections' testing Sharpe ratios do not vary");
+  assert.ok(Number.isFinite(flatY.degradation.slope));
+  // r leads on both halves, which are identical: the training Sharpe ratios do not vary, so no line is fitted.
+  const half = Array.from({ length: 20 }, (_, k) => (k % 2 === 0 ? 0.03 : -0.01));
+  const flatX = computeBacktestOverfitting({ configurations: [{ id: "r", returns: [...half, ...half] }, ...series(2, 40)], blocks: 2 });
+  assert.deepEqual(flatX.degradation, { slope: null, intercept: null, r_squared: null, reason: "the selections' training Sharpe ratios do not vary" });
+  assert.equal("r_squared_reason" in computeBacktestOverfitting({ configurations: series(5, 80), blocks: 4 }).degradation, false);
+  // Returns of 0.01 with a jitter of 1e-6 have a per-period Sharpe ratio in the thousands.
+  const jitter = Array.from({ length: 40 }, (_, k) => 0.01 + (k % 2 === 0 ? 1e-6 : -1e-6) * ((k % 3) + 1));
+  const extreme = computeBacktestOverfitting({ configurations: [...series(3, 40), { id: "jitter", returns: jitter }], blocks: 2 });
+  assert.equal(extreme.status, "evaluated");
+  assert.ok(extreme.warnings.includes("extreme_sharpe"));
+  assert.equal(computeBacktestOverfitting({ configurations: series(3, 40), blocks: 2 }).warnings.includes("extreme_sharpe"), false);
 });

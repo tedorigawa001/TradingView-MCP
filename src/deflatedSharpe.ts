@@ -45,9 +45,12 @@ export function expectedMaxStandardNormal(trialCount: number): number {
 }
 
 const finiteArray = (values: unknown, label: string, min: number, maxAbsValue: number) => {
-  if (!Array.isArray(values) || values.length < min || values.length > MAX_LENGTH
-    || values.some((value) => typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > maxAbsValue)) {
-    throw new Error(`${label} must hold ${min} to ${MAX_LENGTH} finite numbers of magnitude at most ${maxAbsValue}`);
+  const message = `${label} must hold ${min} to ${MAX_LENGTH} finite numbers of magnitude at most ${maxAbsValue}`;
+  if (!Array.isArray(values) || values.length < min || values.length > MAX_LENGTH) throw new Error(message);
+  // An index loop, not some(): a hole in a sparse array is read as undefined and refused, not skipped.
+  for (let index = 0; index < values.length; index += 1) {
+    const value: unknown = values[index];
+    if (!isFiniteNumber(value) || Math.abs(value) > maxAbsValue) throw new Error(message);
   }
   return values as number[];
 };

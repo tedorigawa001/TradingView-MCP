@@ -3866,6 +3866,10 @@ test("compute_backtest_overfitting returns the PBO and refuses unequal lengths (
   const uneven = await client.callTool({ name: "compute_backtest_overfitting", arguments: { configurations: [...configurations, { id: "short", returns: [0.1, 0.2, 0.3, 0.4] }], blocks: 2 } });
   assert.equal(uneven.isError, true);
   assert.match(uneven.content[0].text, /every configuration must have 40/);
+  // A misspelt option is refused, not ignored (it would silently fall back to 16 blocks).
+  const misspelt = await client.callTool({ name: "compute_backtest_overfitting", arguments: { configurations, block: 4 } });
+  assert.equal(misspelt.isError, true);
+  assert.match(misspelt.content[0].text, /block|unrecognized/i);
 });
 
 test("compute_deflated_sharpe returns the deflated Sharpe ratio and refuses a mixed trial input (103-2)", async () => {

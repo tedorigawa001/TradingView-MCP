@@ -28,8 +28,9 @@ The tool description and schema text repeat these rules, because an MCP client s
 
 Exactly one of `trial_sharpes` and the pair (`trial_count`, `trial_sharpe_variance`) is required.
 
-Every numeric input must be a finite number of type number; null, strings and booleans are refused even on a direct
-call of the function, where a range comparison alone would coerce them. Only an omitted `target_annual_sharpe` takes
+Every numeric input must be a finite number of type number; null, strings, booleans and the holes of a sparse array are
+refused even on a direct call of the function, where a range comparison alone would coerce them (or an array method
+would skip the hole). Only an omitted `target_annual_sharpe` takes
 the default. The ranges are wide enough for any real use. They keep every returned number finite, so an MCP response never carries
 a null; a final check throws if a non-finite number would still be returned.
 

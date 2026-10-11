@@ -13,9 +13,15 @@ export type BacktestOverfittingInput = {
   blocks?: number;
 };
 
+// A per-period Sharpe ratio above this in magnitude is implausible for real returns and is warned about.
+const EXTREME_SHARPE = 10;
+// A set whose standard deviation is below this share of its largest magnitude is treated as constant (a rounding guard).
+const CONSTANT_RELATIVE_SD = 1e-12;
+
 const LIMITATIONS = [
   "The configurations must be every one tried, discarded ones included, over the same aligned periods; PBO describes the selection among the configurations given.",
-  "Performance is the per-period Sharpe ratio (mean / standard deviation with n - 1, no risk-free rate), with no costs beyond those already in the returns.",
+  "Performance is the per-period Sharpe ratio (mean / standard deviation with n - 1, no risk-free rate), with no costs beyond those already in the returns. A set whose returns are all zero (no exposure) has a Sharpe ratio of 0. Sharpe ratios are compared after rounding to 12 decimal places, so ties and zeros are not decided by rounding noise.",
+  "PBO counts a split whose selection lands exactly at the median as half; with no skill it is about 0.5 for any number of configurations. pbo_inclusive counts it as overfit, as the paper's integral does. The degradation slope is negative even with no skill, because each split's training and testing sets are complements.",
   "Contiguous blocks keep serial dependence inside a block, but adjacent blocks share boundaries, and training and testing sets are interleaved in time, not ordered.",
   "PBO is not a p-value. A low PBO says the in-sample ranking tends to persist out of sample among these configurations; it does not say the best one is profitable.",
   "Few blocks or few configurations give a coarse estimate.",
@@ -31,15 +37,20 @@ function assertAllFinite(value: unknown, path: string): void {
   else if (value !== null && typeof value === "object") for (const [key, item] of Object.entries(value)) assertAllFinite(item, `${path}.${key}`);
 }
 
-type Moments = { n: number; mean: number; m2: number };
+type Moments = { n: number; mean: number; m2: number; min: number; max: number };
 /** Chan, Golub and LeVeque's pairwise combination of counts, means and centred sums of squares. */
 const combine = (a: Moments, b: Moments): Moments => {
   if (a.n === 0) return b;
   if (b.n === 0) return a;
   const n = a.n + b.n;
   const delta = b.mean - a.mean;
-  return { n, mean: a.mean + (delta * b.n) / n, m2: a.m2 + b.m2 + (delta * delta * a.n * b.n) / n };
+  return { n, mean: a.mean + (delta * b.n) / n, m2: a.m2 + b.m2 + (delta * delta * a.n * b.n) / n, min: Math.min(a.min, b.min), max: Math.max(a.max, b.max) };
 };
+/**
+ * Rounds a Sharpe ratio to 12 decimal places, so a tie or a zero that rounding has split by a few ulps compares as one.
+ * A Sharpe ratio is unitless, so the grid is the same for every scale of returns.
+ */
+const roundSharpe = (value: number) => Math.round(value * 1e12) / 1e12;
 
 /** The combinations of k indices out of 0..s−1, in lexicographic order. */
 function combinations(s: number, k: number): number[][] {
@@ -72,25 +83,31 @@ function validate(input: BacktestOverfittingInput) {
   }
   const ids = new Set<string>();
   let length: number | null = null;
-  configurations.forEach((configuration, index) => {
+  // Index loops, so a hole in a sparse array is read as undefined and refused, not skipped.
+  for (let index = 0; index < configurations.length; index += 1) {
+    const configuration = configurations[index];
     if (configuration === null || typeof configuration !== "object") throw new Error(`configuration ${index} must be an object with id and returns`);
     const { id, returns } = configuration;
     if (typeof id !== "string" || id.length < 1 || id.length > 80) throw new Error(`configuration ${index} needs an id of 1 to 80 characters`);
     if (ids.has(id)) throw new Error(`configuration id "${id}" is not unique`);
     ids.add(id);
-    if (!Array.isArray(returns) || returns.some((value) => !isFiniteNumber(value) || Math.abs(value) > MAX_ABS_RETURN)) {
-      throw new Error(`configuration "${id}" returns must be finite numbers of magnitude at most ${MAX_ABS_RETURN}`);
+    if (!Array.isArray(returns)) throw new Error(`configuration "${id}" returns must be an array of finite numbers`);
+    for (let t = 0; t < returns.length; t += 1) {
+      const value = returns[t];
+      if (!isFiniteNumber(value) || Math.abs(value) > MAX_ABS_RETURN) {
+        throw new Error(`configuration "${id}" returns must be finite numbers of magnitude at most ${MAX_ABS_RETURN} (period ${t})`);
+      }
     }
     if (length === null) length = returns.length;
     else if (returns.length !== length) throw new Error(`configuration "${id}" has ${returns.length} returns; every configuration must have ${length}`);
-  });
+  }
   const periods = length!;
   if (periods * configurations.length > MAX_CELLS) throw new Error(`configurations hold ${periods * configurations.length} returns; at most ${MAX_CELLS}`);
   const blocks = input.blocks === undefined ? DEFAULT_BLOCKS : input.blocks;
   if (!(isFiniteNumber(blocks) && Number.isInteger(blocks) && blocks >= 2 && blocks <= 16 && blocks % 2 === 0)) {
     throw new Error("blocks must be an even integer from 2 to 16");
   }
-  if (Math.floor(periods / blocks) < 2) throw new Error(`${periods} periods give blocks of fewer than 2 periods with ${blocks} blocks`);
+  if (Math.floor(periods / blocks) < 2) throw new Error(`${periods} periods give blocks of fewer than 2 periods with ${blocks} blocks; use at least ${2 * blocks} periods or fewer blocks`);
   return { configurations, periods, blocks };
 }
 
@@ -106,52 +123,76 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
   // Per block and configuration: count, mean and centred sum of squares, in units of the configuration's largest
   // magnitude so proportional inputs give the same result.
   const blockMoments: Moments[][] = bounds.map(() => []);
+  // The raw minimum and maximum tell a constant set exactly, which the normalised moments cannot after rounding.
+  const scales: number[] = [];
   configurations.forEach(({ returns }) => {
     const scale = returns.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+    scales.push(scale);
     bounds.forEach(([start, end], b) => {
-      let sum = 0;
-      for (let t = start; t < end; t += 1) sum += scale > 0 ? returns[t] / scale : 0;
+      let sum = 0; let min = Infinity; let max = -Infinity;
+      for (let t = start; t < end; t += 1) { sum += scale > 0 ? returns[t] / scale : 0; min = Math.min(min, returns[t]); max = Math.max(max, returns[t]); }
       const mean = sum / (end - start);
       let m2 = 0;
       for (let t = start; t < end; t += 1) { const c = (scale > 0 ? returns[t] / scale : 0) - mean; m2 += c * c; }
-      blockMoments[b].push({ n: end - start, mean, m2 });
+      blockMoments[b].push({ n: end - start, mean, m2, min, max });
     });
   });
 
   const splits = combinations(blocks, blocks / 2);
-  const empty: Moments = { n: 0, mean: 0, m2: 0 };
-  const sharpes = (indices: number[], set: "training" | "testing", split: number) => {
-    const out: number[] = [];
+  const empty: Moments = { n: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
+  let extremeSharpe = false; let zeroSets = false;
+  /**
+   * Each configuration's Sharpe ratio on a set of blocks. A set whose returns are all zero has a Sharpe ratio of 0 (no
+   * exposure, no performance). A set that is constant at another value, or varies only at rounding level, has no
+   * defined Sharpe ratio; such configurations are returned as constant.
+   */
+  const sharpes = (indices: number[]) => {
+    const values: number[] = []; const constant: number[] = [];
     for (let j = 0; j < n; j += 1) {
       let moments = empty;
       for (const b of indices) moments = combine(moments, blockMoments[b][j]);
-      if (!(moments.m2 > 0)) return { error: `configuration "${configurations[j].id}" has zero standard deviation on the ${set} set of split ${split}` };
-      out.push(moments.mean / Math.sqrt(moments.m2 / (moments.n - 1)));
+      if (moments.min === 0 && moments.max === 0) { zeroSets = true; values.push(0); continue; }
+      const largest = Math.max(Math.abs(moments.min), Math.abs(moments.max)) / scales[j];
+      const sd = Math.sqrt(moments.m2 / (moments.n - 1));
+      if (moments.min === moments.max || !(sd > CONSTANT_RELATIVE_SD * largest)) { constant.push(j); values.push(0); continue; }
+      const sharpe = moments.mean / sd;
+      if (Math.abs(sharpe) > EXTREME_SHARPE) extremeSharpe = true;
+      values.push(sharpe);
     }
-    return { values: out };
+    return { values, constant };
   };
 
   const logits: number[] = []; const omegas: number[] = [];
   const trainingSelected: number[] = []; const testingSelected: number[] = [];
   const selectedCount = new Array<number>(n).fill(0);
+  let belowMedian = 0; let atMedian = 0; let losses = 0;
   for (let s = 0; s < splits.length; s += 1) {
     const training = splits[s];
     const testing = bounds.map((_, b) => b).filter((b) => !training.includes(b));
-    const trainingSharpe = sharpes(training, "training", s);
-    if (trainingSharpe.error !== undefined) return notEvaluable(trainingSharpe.error);
-    const testingSharpe = sharpes(testing, "testing", s);
-    if (testingSharpe.error !== undefined) return notEvaluable(testingSharpe.error);
-    const trainValues = trainingSharpe.values!; const testValues = testingSharpe.values!;
+    const trainingSharpe = sharpes(training);
+    const testingSharpe = sharpes(testing);
+    if (trainingSharpe.constant.length > 0 || testingSharpe.constant.length > 0) {
+      return notEvaluable(s, training, testing, [
+        ...trainingSharpe.constant.map((j) => ({ id: configurations[j].id, set: "training" as const })),
+        ...testingSharpe.constant.map((j) => ({ id: configurations[j].id, set: "testing" as const })),
+      ]);
+    }
+    // Selection, ranks and signs compare the Sharpe ratios rounded to 12 decimal places.
+    const trainRounded = trainingSharpe.values.map(roundSharpe); const testRounded = testingSharpe.values.map(roundSharpe);
     let best = 0;
-    for (let j = 1; j < n; j += 1) if (trainValues[j] > trainValues[best]) best = j;
-    const x = testValues[best];
+    for (let j = 1; j < n; j += 1) if (trainRounded[j] > trainRounded[best]) best = j;
+    const x = testRounded[best];
     let below = 0; let equal = 0;
-    for (const value of testValues) { if (value < x) below += 1; else if (value === x) equal += 1; }
-    const omega = (below + (equal + 1) / 2) / (n + 1);
+    for (const value of testRounded) { if (value < x) below += 1; else if (value === x) equal += 1; }
+    // Twice the rank, an integer: below the median when 2·rank < N + 1, at the median when equal.
+    const twiceRank = 2 * below + equal + 1;
+    if (twiceRank < n + 1) belowMedian += 1; else if (twiceRank === n + 1) atMedian += 1;
+    if (x < 0) losses += 1;
+    const omega = twiceRank / (2 * (n + 1));
     omegas.push(omega);
     logits.push(Math.log(omega / (1 - omega)));
-    trainingSelected.push(trainValues[best]);
-    testingSelected.push(x);
+    trainingSelected.push(trainingSharpe.values[best]);
+    testingSelected.push(testingSharpe.values[best]);
     selectedCount[best] += 1;
   }
 
@@ -175,6 +216,8 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
   if (n < 10) warnings.push("few_configurations");
   if (blocks < 8) warnings.push("few_splits");
   if (frequency.length > 0 && frequency[0].count > total / 2) warnings.push("dominant_selection");
+  if (extremeSharpe) warnings.push("extreme_sharpe");
+  if (zeroSets) warnings.push("zero_return_sets");
 
   const result = {
     status: "evaluated" as const,
@@ -183,7 +226,9 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
     blocks,
     block_size: { min: Math.min(...blockSizes), max: Math.max(...blockSizes) },
     splits: total,
-    pbo: logits.filter((value) => value <= 0).length / total,
+    pbo: (belowMedian + atMedian / 2) / total,
+    pbo_inclusive: (belowMedian + atMedian) / total,
+    splits_at_median: atMedian,
     logit: {
       mean: meanOf(logits),
       min: sortedLogits[0], q05: quantile(sortedLogits, 0.05), q25: quantile(sortedLogits, 0.25), median: quantile(sortedLogits, 0.5),
@@ -193,7 +238,7 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
     selected: {
       training_sharpe_mean: meanX, training_sharpe_median: median(trainingSelected),
       testing_sharpe_mean: meanY, testing_sharpe_median: median(testingSelected),
-      probability_oos_loss: testingSelected.filter((value) => value < 0).length / total,
+      probability_oos_loss: losses / total,
     },
     degradation,
     selection_frequency: frequency,
@@ -203,8 +248,16 @@ export function computeBacktestOverfitting(input: BacktestOverfittingInput) {
   assertAllFinite(result, "result");
   return result;
 
-  function notEvaluable(reason: string) {
-    const out = { status: "not_evaluable" as const, reason, configurations: n, observations: periods, blocks, splits: splits.length, limitations: LIMITATIONS };
+  /** Names every configuration that is constant on a set of the first split where one is, with that split's blocks. */
+  function notEvaluable(split: number, training: number[], testing: number[], constant: Array<{ id: string; set: "training" | "testing" }>) {
+    const periodsOf = (indices: number[]) => indices.map((b) => ({ block: b, first_period: bounds[b][0], last_period: bounds[b][1] - 1 }));
+    const out = {
+      status: "not_evaluable" as const,
+      reason: `On split ${split}, these configurations are constant at a nonzero value (or vary only at rounding level) on the set named, so their Sharpe ratio there is undefined: ${constant.map((item) => `"${item.id}" (${item.set})`).join(", ")}`,
+      constant_configurations: constant,
+      split: { index: split, training_blocks: periodsOf(training), testing_blocks: periodsOf(testing) },
+      configurations: n, observations: periods, blocks, splits: splits.length, limitations: LIMITATIONS,
+    };
     assertAllFinite(out, "result");
     return out;
   }
