@@ -1,0 +1,130 @@
+# Reality Check and SPA (`compute_reality_check`)
+
+BACKLOG 103-8. A pure computation: it reads no chart, journal or file, and writes nothing. It answers one question:
+once the search over every configuration tried is accounted for, does the best one still beat the benchmark?
+
+Methods:
+- White (2000), "A Reality Check for Data Snooping", Econometrica 68(5).
+- Hansen (2005), "A Test for Superior Predictive Ability", Journal of Business & Economic Statistics 23(4).
+- The stationary bootstrap of Politis and Romano (1994), Journal of the American Statistical Association 89(428).
+
+## Inputs
+
+| Field | Meaning |
+|---|---|
+| `configurations` | 1 to 1,000 objects `{ id, returns }`, one per configuration tried, discarded ones included. Each `id` is 1 to 80 characters and unique. Every `returns` holds the same number n of per-period returns (10 to 100,000), aligned in time, each a finite number of magnitude at most 1e300 |
+| `benchmark` | Optional: the benchmark's n per-period returns, aligned with the configurations. Default: zero, so the test asks whether the best configuration's mean return is positive |
+| `mean_block` | The stationary bootstrap's mean block length in periods, from 1 (an i.i.d. bootstrap) to n/2; fractional values are allowed. Default: round(n^(1/3)), the rate of the optimal block length |
+| `draws` | Bootstrap draws B, an integer from 100 to 10,000. Default: 2,000 |
+| `seed` | The seed of the generator, an integer from 0 to 4,294,967,295. Default: 20,261,011 |
+
+- n × N is at most 500,000 numbers.
+- The bootstrap's work, draws × (n / mean_block) × (20 + N), is at most 2e9, which is a few seconds. Drawing a run costs
+  about twenty times summing one configuration over it.
+- Every numeric input must be a finite number of type number. Null, strings, booleans and the holes of a sparse array
+  are refused, even on a direct call of the function. Through MCP, an unknown field is refused rather than ignored.
+- **Choosing the mean block.** It should cover the serial dependence of the differences: longer for returns of
+  overlapping holding periods or for volatility clustering. The p-values depend on it; report it with them.
+
+## Computation
+
+1. **Differences.** d_{k,t} = r_{k,t} − b_t, configuration k's return minus the benchmark's, or r_{k,t} with no
+   benchmark. Performance is the mean difference d̄_k. It is not risk-adjusted: White's and Hansen's tests compare
+   expected performance.
+2. **Identical and constant configurations.**
+   - A configuration whose differences are at most 1e-12 of the largest magnitude of its returns is identical to the
+     benchmark, to rounding (its returns then have the benchmark's magnitude). It contributes 0: its d̄ is 0, and its bootstrap mean is 0.
+     A configuration of all-zero returns against no benchmark is identical too.
+   - Differences whose range is at most 1e-12 of their largest magnitude are constant. Their standard error is 0 (see
+     Not evaluable).
+3. **Standard errors.** ω̂²_k is the variance of √n times the stationary-bootstrap mean of the differences, exactly
+   (Politis and Romano 1994, Lemma 1), as Hansen uses it:
+
+     ω̂² = γ̂₀ + 2 Σ_{i=1}^{n−1} κ(n, i) γ̂_i,  κ(n, i) = (1 − i/n) ρ^i + (i/n) ρ^{n−i},  ρ = 1 − 1/mean_block
+
+   with the autocovariances γ̂_i = n⁻¹ Σ_{j=1}^{n−i} (d_j − d̄)(d_{j+i} − d̄).
+   - It equals γ̂₀ + 2 Σ (1 − h/n) ρ^h C_h with circular autocovariances C_h. The tool computes that sum in O(n), by
+     backward recursions for Σ_i ρ^i c_{t+i} and Σ_i i ρ^i c_{t+i}.
+   - It does not depend on the draws, so the observed statistics do not depend on the seed.
+   - With a mean block of 1 it is the population variance, γ̂₀.
+   - Each configuration is divided by the largest magnitude of its differences first, so proportional inputs give the
+     same statistics and p-values at any finite scale.
+   - The t of configuration k is t_k = √n d̄_k / ω̂_k.
+4. **Statistics.**
+   - Reality Check: V = max_k √n d̄_k, over every configuration (an identical one counts with d̄ = 0).
+   - SPA: T = max(max_k t_k, 0), over the configurations that differ from the benchmark. The maximum with 0 stands for
+     the identical ones.
+   - Ties go to the earliest configuration.
+5. **Bootstrap.** One `createRandom(seed)` stream (mulberry32) across the draws. Every configuration uses the same
+   resampled time indices, so their dependence is kept.
+   - Each run starts at floor(u·n) and continues at (previous + 1) mod n, circularly.
+   - Its length is geometric with mean `mean_block`: 1 + floor(ln(1 − u′) / ln(1 − 1/mean_block)). This is the same as
+     starting a new run at each period with probability 1/mean_block. With a mean block of 1, every run has length 1
+     and u′ is not drawn.
+   - The last run is cut at n periods.
+   - Each run's sum is read from the prefix sums of the centred differences. One draw b gives z_{k,b} = √n (d̄*_{k,b} −
+     d̄_k) for every configuration.
+6. **Null distributions.**
+   - Reality Check: V*_b = max_k z_{k,b}, not studentized and not recentred.
+   - SPA: T*_b = max(0, max_k (z_{k,b} / ω̂_k + s_k)), with Hansen's recentring s_k:
+     - upper: s_k = 0, every configuration at the boundary of the null. This is the studentized Reality Check, and
+       the most conservative.
+     - consistent: s_k = t_k when t_k < −√(2 ln ln n), else 0. Configurations clearly worse than the benchmark are
+       moved below it, so they no longer inflate the p-value. Recommended.
+     - lower: s_k = min(t_k, 0). The most liberal.
+7. **P-values** = (1 + the number of draws with a null statistic ≥ the observed one) / (1 + B). This form is never 0 and
+   is valid at a finite B. With an observed SPA statistic of 0, every draw reaches it and p = 1.
+   - The best configuration's **nominal p-value** applies the same rule to its own studentized z alone: the p-value
+     as if it had been the only configuration tried. The gap between it and the consistent p-value is the price of
+     the search.
+
+## Output
+- `status`: `evaluated` or `not_evaluable`.
+- `configurations` N, `observations` n, `benchmark` (`zero` or `given`).
+- `bootstrap`: `method` (`stationary`), `draws`, `mean_block`, `mean_block_source` (`default` or `given`), `seed`.
+- `reality_check`: `statistic` V, `p_value`, `monte_carlo_error` √(p(1 − p)/B), and `best`: the configuration with
+  the highest mean difference, with its `id` and `mean_difference`.
+- `spa`:
+  - `statistic` T;
+  - `p_values` `lower`, `consistent` and `upper`;
+  - `monte_carlo_error` of the consistent p-value;
+  - `threshold` √(2 ln ln n);
+  - `recentred_configurations`: the number moved by the consistent recentring.
+- `best`: the configuration with the highest t among those that differ, with `id`, `mean_difference`,
+  `standard_error` ω̂/√n, `t` and `nominal_p_value`.
+- `positive_mean_configurations` and `identical_to_benchmark`: counts.
+- `top_by_t`: up to 10 configurations that differ, by t, with id, mean difference and t. Ties go to input order.
+- `warnings` and `limitations`.
+
+Every returned number is finite. A final check throws if one would not be.
+
+### Not evaluable
+The status is `not_evaluable`, with `configurations`, `observations`, `benchmark` and `limitations`, and no test, when:
+- some configurations differ from the benchmark by a constant (at rounding level). The reason names every one, and
+  `constant_configurations` lists them. Their standard error is 0, so the studentized statistic is undefined. A
+  constant difference is rarely real: check that the returns are aligned and not a fill value;
+- every configuration is identical to the benchmark, so there is nothing to test.
+
+A configuration that varies has a positive bootstrap variance, at least γ̂₀(1 − ρ)/(1 + ρ). A computed ω̂ of 0 for one
+would throw, as a guard.
+
+### Warnings
+
+| Warning | Condition |
+|---|---|
+| `short_sample` | n < 100: the bootstrap's approximation is coarse |
+| `few_draws` | B < 1,000: the p-values carry a large Monte Carlo error |
+| `long_mean_block` | The mean block exceeds n/10: few independent blocks |
+| `identical_to_benchmark` | Some configuration is identical to the benchmark, to rounding |
+
+## Limitations, stated in every response
+- The configurations must be every one tried, discarded ones included, over the same aligned periods. The tests
+  describe the best among the configurations given.
+- Performance is the mean per-period excess return: not risk-adjusted, with no costs beyond those already in the
+  returns.
+- The stationary bootstrap assumes stationary, weakly dependent differences. The mean block should cover their serial
+  dependence, and the p-values depend on it.
+- The tests ask only whether the best configuration beats the benchmark. They say neither which others do (a stepwise
+  procedure would) nor how large the edge is after costs.
+- The Reality Check is conservative when many configurations are poor; the consistent SPA p-value is recommended.
+  P-values carry Monte Carlo error.

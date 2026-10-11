@@ -110,6 +110,7 @@ import { redactSecrets } from "./redact.js";
 import { describeErrorChain } from "./errorChain.js";
 import { computeDeflatedSharpe } from "./deflatedSharpe.js";
 import { computeBacktestOverfitting } from "./backtestOverfitting.js";
+import { computeRealityCheck } from "./realityCheck.js";
 import { ChartOperationLock, SerialOperationQueue } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -9928,6 +9929,47 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async (input) => {
       try {
         return jsonResult(computeDeflatedSharpe(input));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "compute_reality_check",
+    {
+      description:
+        "Test whether the best of several configurations beats a benchmark once the search over them is accounted for: " +
+        "White's Reality Check (2000) and Hansen's test for superior predictive ability (SPA, 2005) by the stationary " +
+        "bootstrap. Give every configuration tried, discarded ones included, as per-period returns aligned in time, and " +
+        "optionally the benchmark's returns over the same periods (default: zero, testing for a positive mean). " +
+        "Performance is the mean return in excess of the benchmark, not risk-adjusted. Returns the Reality Check p-value, " +
+        "SPA's lower, consistent and upper p-values (consistent is recommended), the best configuration's mean " +
+        "difference, standard error, t and nominal p-value (which ignores the search), and the top configurations by t. " +
+        "The mean block length (default round(n^(1/3))) should cover the returns' serial dependence; the p-values depend " +
+        "on it and on the draws (default 2,000, Monte Carlo error reported) and seed (fixed default, reproducible). " +
+        "Not evaluable when a configuration differs from the benchmark by a constant; one identical to it contributes 0. " +
+        "A low p-value says the best is unlikely to beat the benchmark by luck among these configurations, not that it " +
+        "is profitable after costs. A pure computation: it reads and writes nothing.",
+      inputSchema: z.object({
+        configurations: z.array(z.object({
+          id: z.string().min(1).max(80),
+          returns: z.array(z.number().finite().gte(-1e300).lte(1e300)).min(10).max(100_000),
+        }).strict()).min(1).max(1_000)
+          .describe("Every configuration tried, each with a unique id and the same number n of aligned per-period returns (10 to 100,000); at most 500,000 returns in total"),
+        benchmark: z.array(z.number().finite().gte(-1e300).lte(1e300)).min(10).max(100_000).optional()
+          .describe("The benchmark's per-period returns over the same n periods. Default: zero"),
+        mean_block: z.number().finite().min(1).optional()
+          .describe("The stationary bootstrap's mean block length in periods, from 1 (i.i.d.) to n/2; fractional values are allowed. Default: round(n^(1/3))"),
+        draws: z.number().int().min(100).max(10_000).optional()
+          .describe("Bootstrap draws, 100 to 10,000. Default: 2,000"),
+        seed: z.number().int().min(0).max(4_294_967_295).optional()
+          .describe("Seed of the bootstrap's generator. Default: 20261011"),
+      }).strict(),
+    },
+    async (input) => {
+      try {
+        return jsonResult(computeRealityCheck(input));
       } catch (err) {
         return errorResult(err);
       }

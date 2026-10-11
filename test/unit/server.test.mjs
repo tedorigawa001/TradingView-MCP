@@ -1180,7 +1180,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred fourteen expected tools", async () => {
+test("exposes exactly the one hundred fifteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1205,6 +1205,7 @@ test("exposes exactly the one hundred fourteen expected tools", async () => {
       "compute_market_features",
       "compute_market_regimes",
       "compute_position_size",
+      "compute_reality_check",
       "compute_realized_covariance",
       "compute_round_trip_cost",
       "compute_session_profile",
@@ -3870,6 +3871,22 @@ test("compute_backtest_overfitting returns the PBO and refuses unequal lengths (
   const misspelt = await client.callTool({ name: "compute_backtest_overfitting", arguments: { configurations, block: 4 } });
   assert.equal(misspelt.isError, true);
   assert.match(misspelt.content[0].text, /block|unrecognized/i);
+});
+
+test("compute_reality_check returns the Reality Check and SPA p-values and refuses a misspelt option (103-8)", async () => {
+  const client = await connectedClient(makeDeps());
+  const configurations = Array.from({ length: 4 }, (_, j) => ({ id: `c${j}`, returns: Array.from({ length: 60 }, (_, k) => ((k * (7919 + 13 * j)) % 1000 - 500) / 100000 + (j === 2 ? 0.002 : 0)) }));
+  const result = JSON.parse((await client.callTool({ name: "compute_reality_check", arguments: { configurations, mean_block: 3, draws: 200 } })).content[0].text);
+  assert.equal(result.status, "evaluated");
+  assert.equal(result.best.id, "c2");
+  assert.ok(result.spa.p_values.consistent > 0 && result.spa.p_values.consistent <= 1);
+  assert.deepEqual(result.bootstrap, { method: "stationary", draws: 200, mean_block: 3, mean_block_source: "given", seed: 20261011 });
+  const misspelt = await client.callTool({ name: "compute_reality_check", arguments: { configurations, meanblock: 3 } });
+  assert.equal(misspelt.isError, true);
+  assert.match(misspelt.content[0].text, /meanblock|unrecognized/i);
+  const short = await client.callTool({ name: "compute_reality_check", arguments: { configurations, benchmark: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1] } });
+  assert.equal(short.isError, true);
+  assert.match(short.content[0].text, /benchmark has 10 returns; it must have 60/);
 });
 
 test("compute_deflated_sharpe returns the deflated Sharpe ratio and refuses a mixed trial input (103-2)", async () => {
