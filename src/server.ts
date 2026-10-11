@@ -109,6 +109,7 @@ import { assertChartState, changeChartState, withTemporaryChartState } from "./c
 import { redactSecrets } from "./redact.js";
 import { describeErrorChain } from "./errorChain.js";
 import { computeDeflatedSharpe } from "./deflatedSharpe.js";
+import { computeBacktestOverfitting } from "./backtestOverfitting.js";
 import { ChartOperationLock, SerialOperationQueue } from "./chartOperationLock.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -9851,6 +9852,38 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }) => {
       try {
         return jsonResult(computeRoundTripCost({ symbol, bid, ask, quantity, commission_per_unit, slippage_pips_per_side }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "compute_backtest_overfitting",
+    {
+      description:
+        "Estimate the probability of backtest overfitting (PBO) of choosing the best of several configurations, by " +
+        "combinatorially symmetric cross-validation (Bailey, Borwein, Lopez de Prado and Zhu 2017). Give every " +
+        "configuration tried, discarded ones included, as per-period returns aligned in time (row t is the same period " +
+        "for every configuration). The periods are split into an even number of contiguous blocks (default 16, giving " +
+        "12,870 splits); on each split the configuration with the best training Sharpe ratio (mean / sd with n - 1, no " +
+        "risk-free rate) is ranked among all configurations on the testing half. PBO is the share of splits where it " +
+        "lands at or below the median. Also returns the logit distribution, the selected configurations' training and " +
+        "testing Sharpe ratios, the probability of an out-of-sample loss and the degradation line. PBO is not a p-value. " +
+        "A pure computation: it reads and writes nothing.",
+      inputSchema: {
+        configurations: z.array(z.object({
+          id: z.string().min(1).max(80),
+          returns: z.array(z.number().finite().gte(-1e300).lte(1e300)).min(4).max(250_000),
+        }).strict()).min(2).max(1_000)
+          .describe("Every configuration tried, each with a unique id and the same number of aligned per-period returns; at most 500,000 returns in total"),
+        blocks: z.number().int().min(2).max(16).optional()
+          .describe("An even number of contiguous blocks, 2 to 16. Default: 16"),
+      },
+    },
+    async (input) => {
+      try {
+        return jsonResult(computeBacktestOverfitting(input));
       } catch (err) {
         return errorResult(err);
       }

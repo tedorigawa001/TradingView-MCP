@@ -1180,7 +1180,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred thirteen expected tools", async () => {
+test("exposes exactly the one hundred fourteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1197,6 +1197,7 @@ test("exposes exactly the one hundred thirteen expected tools", async () => {
       "compare_indicator_observations",
       "compare_research_evidence",
       "compare_strategy_experiments",
+      "compute_backtest_overfitting",
       "compute_correlation_regimes",
       "compute_deflated_sharpe",
       "compute_feature_outcome_relationships",
@@ -3853,6 +3854,18 @@ test("evaluate_due_analyses continues after one evaluation failure", async () =>
   assert.equal(result.results[0].status, "failed");
   assert.equal(result.results[1].status, "evaluated");
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+});
+
+test("compute_backtest_overfitting returns the PBO and refuses unequal lengths (103-3)", async () => {
+  const client = await connectedClient(makeDeps());
+  const configurations = Array.from({ length: 4 }, (_, j) => ({ id: `c${j}`, returns: Array.from({ length: 40 }, (_, k) => ((k * (7919 + 13 * j)) % 1000 - 500) / 100000) }));
+  const result = JSON.parse((await client.callTool({ name: "compute_backtest_overfitting", arguments: { configurations, blocks: 4 } })).content[0].text);
+  assert.equal(result.status, "evaluated");
+  assert.equal(result.splits, 6);
+  assert.ok(result.pbo >= 0 && result.pbo <= 1);
+  const uneven = await client.callTool({ name: "compute_backtest_overfitting", arguments: { configurations: [...configurations, { id: "short", returns: [0.1, 0.2, 0.3, 0.4] }], blocks: 2 } });
+  assert.equal(uneven.isError, true);
+  assert.match(uneven.content[0].text, /every configuration must have 40/);
 });
 
 test("compute_deflated_sharpe returns the deflated Sharpe ratio and refuses a mixed trial input (103-2)", async () => {
