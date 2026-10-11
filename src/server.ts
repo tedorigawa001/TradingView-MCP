@@ -9861,23 +9861,28 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "compute_deflated_sharpe",
     {
       description:
-        "Deflate a selected configuration's Sharpe ratio for the number of configurations tried (BACKLOG 103-2): " +
-        "the probabilistic Sharpe ratio, the expected maximum Sharpe ratio of N unskilled trials, the deflated Sharpe " +
-        "ratio (Bailey and Lopez de Prado 2014) and the minimum backtest length (Bailey et al. 2014). Give the selected " +
-        "configuration's per-period returns and either every trial's per-period Sharpe ratio or the trial count with " +
-        "the variance of their Sharpe ratios. N must count discarded trials too. A pure computation: it reads and " +
-        "writes nothing. See docs/DEFLATED_SHARPE.md.",
+        "Deflate a selected configuration's Sharpe ratio for the number of configurations tried: the probabilistic " +
+        "Sharpe ratio, the expected maximum Sharpe ratio of N unskilled trials, the deflated Sharpe ratio (Bailey and " +
+        "Lopez de Prado 2014) and the minimum backtest length (Bailey et al. 2014). Units decide whether the answer means " +
+        "anything: every Sharpe ratio is PER PERIOD of the returns, computed as mean / standard deviation (T - 1) with no " +
+        "risk-free rate, over the same sample and length for every trial. Divide an annualized Sharpe ratio by " +
+        "sqrt(periods per year) and an annualized variance by the periods per year. TradingView's sharpeRatio (2% " +
+        "risk-free rate) is not compatible. N must count discarded trials too; group near-duplicate configurations and " +
+        "pass the group-level count, because correlated or duplicated trials can bias the result in either direction. " +
+        "A pure computation: it reads and writes nothing.",
       inputSchema: {
         returns: z.array(z.number().finite()).min(2).max(100_000)
           .describe("The selected configuration's per-period returns, in one unit"),
         trial_sharpes: z.array(z.number().finite()).min(2).max(100_000).optional()
-          .describe("Per-period Sharpe ratios of every configuration tried, the selected and discarded ones included"),
+          .describe("Per-period Sharpe ratios (mean / sd with T - 1, no risk-free rate) of every configuration tried, the selected and discarded ones included, over the same sample and length"),
+        effective_trial_count: z.number().int().min(2).max(1_000_000_000).optional()
+          .describe("With trial_sharpes: the effective number of independent trials, when trials are correlated or grouped"),
         trial_count: z.number().int().min(2).max(1_000_000_000).optional()
-          .describe("Instead of trial_sharpes: the number of configurations tried"),
+          .describe("Instead of trial_sharpes: the number of (effectively independent) configurations tried"),
         trial_sharpe_variance: z.number().finite().nonnegative().optional()
-          .describe("With trial_count: the variance of the trials' per-period Sharpe ratios"),
+          .describe("With trial_count: the variance of the trials' per-period Sharpe ratios (divide an annualized variance by the periods per year)"),
         periods_per_year: z.number().finite().positive().optional()
-          .describe("Annualizes the Sharpe ratio for display and gives the minimum backtest length in periods"),
+          .describe("Annualizes the Sharpe ratio for display, gives the minimum backtest length in periods, and enables the unit checks"),
         target_annual_sharpe: z.number().finite().positive().optional()
           .describe("The annualized Sharpe ratio the minimum backtest length guards against. Default: 1"),
       },

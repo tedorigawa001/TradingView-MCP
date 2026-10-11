@@ -39,9 +39,14 @@ test("the deflated Sharpe ratio matches the reference from every trial's Sharpe 
   close(result.min_backtest_length.years, 3.612690715683428, 1e-12, "minbtl");
   close(result.min_backtest_length.upper_bound_years, 5.991464547107982, 1e-12, "upper bound");
   close(result.min_backtest_length.periods, 910.3980603522239, 1e-12, "periods");
-  // The selected Sharpe ratio is not among the trials here, and it is above their maximum.
-  assert.deepEqual([result.trials.selected_matches_a_trial, result.warnings], [false, ["selected_not_among_trials"]]);
-  assert.equal(result.limitations.length, 4);
+  close(result.trials.mean_sharpe, 0.003125, 1e-12, "mean sharpe");
+  close(result.trials.variance_to_sampling_variance, 0.11527845834245236, 1e-12, "variance ratio");
+  assert.deepEqual([result.trials.listed, result.trials.duplicate_values, result.trials.nearest_trial_sharpe], [20, 3, 0.025]);
+  // The selected Sharpe ratio is not among the trials here and is above their maximum; the trials vary far less than one
+  // Sharpe ratio's sampling error, and 500 days are shorter than the minimum backtest length.
+  assert.deepEqual([result.trials.selected_matches_a_trial, result.warnings],
+    [false, ["trial_variance_far_below_sampling", "backtest_shorter_than_min_length", "selected_not_among_trials", "duplicate_trial_sharpes"]]);
+  assert.equal(result.limitations.length, 5);
 });
 
 test("from a trial count and variance, and the paper's example: seven trials need about two years for a Sharpe of one", () => {
@@ -64,10 +69,23 @@ test("from a trial count and variance, and the paper's example: seven trials nee
 });
 
 test("a selected Sharpe ratio among the trials is matched, short samples are flagged, and constant returns are not evaluable", () => {
-  const matched = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...trialsA, 0.14409016554761872] });
-  assert.deepEqual([matched.trials.selected_matches_a_trial, matched.warnings], [true, []]);
-  const below = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...trialsA, 0.14409016554761872, 0.3] });
-  assert.deepEqual(below.warnings, ["selected_below_trial_max"]);
+  const distinct = [-0.02, -0.01, 0.0, 0.01, 0.02];
+  const matched = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...distinct, 0.14409016554761872] });
+  assert.equal(matched.trials.selected_matches_a_trial, true);
+  assert.equal(matched.warnings.some((w) => w.startsWith("selected_")), false);
+  // Rounded to eight decimals, or computed with the population standard deviation, the trial still matches (review L1).
+  for (const near of [0.14409017, 0.1442344722092716]) {
+    const rounded = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...distinct, near] });
+    assert.deepEqual([rounded.trials.selected_matches_a_trial, rounded.warnings.filter((w) => w.startsWith("selected_"))], [true, []], String(near));
+  }
+  // Half a standard error away is another trial.
+  const apart = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...distinct, 0.14409016554761872 + 0.0187] });
+  assert.deepEqual([apart.trials.selected_matches_a_trial, apart.warnings.filter((w) => w.startsWith("selected_"))], [false, ["selected_not_among_trials", "selected_below_trial_max"]]);
+  close(apart.trials.nearest_trial_distance, 0.0187, 1e-9, "distance");
+  const below = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...distinct, 0.14409016554761872, 0.3] });
+  assert.deepEqual(below.warnings.filter((w) => w.startsWith("selected_")), ["selected_below_trial_max"]);
+  // A maximum below zero is found too.
+  assert.equal(computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [-0.3, -0.2, -0.1] }).trials.max_sharpe, -0.1);
   const short = computeDeflatedSharpe({ returns: returnsA.slice(0, 29), trial_count: 5, trial_sharpe_variance: 0.01 });
   assert.ok(short.warnings.includes("short_sample"));
   assert.equal(computeDeflatedSharpe({ returns: returnsA.slice(0, 30), trial_count: 5, trial_sharpe_variance: 0.01 }).warnings.includes("short_sample"), false);
@@ -92,7 +110,70 @@ test("the inputs are checked (103-2)", () => {
     [{ returns: returnsA, trial_sharpes: [0.1] }, /trial_sharpes must hold 2 to/],
     [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, periods_per_year: 0 }, /periods_per_year must be a positive/],
     [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, target_annual_sharpe: -1 }, /target_annual_sharpe must be a positive/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, target_annual_sharpe: 0 }, /target_annual_sharpe must be a positive/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, target_annual_sharpe: NaN }, /target_annual_sharpe must be a positive/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, target_annual_sharpe: Infinity }, /target_annual_sharpe must be a positive/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, periods_per_year: Infinity }, /periods_per_year must be a positive/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: Infinity }, /trial_sharpe_variance must be a non-negative/],
+    [{ returns: returnsA, trial_count: 1_000_000_001, trial_sharpe_variance: 0.1 }, /trial_count must be an integer from 2 to 1,000,000,000/],
+    [{ returns: Array.from({ length: 100_001 }, (_, i) => i % 7), trial_count: 3, trial_sharpe_variance: 0.1 }, /returns must hold 2 to 100000/],
+    [{ returns: returnsA, trial_sharpes: Array.from({ length: 100_001 }, (_, i) => i % 7) }, /trial_sharpes must hold 2 to 100000/],
+    [{ returns: returnsA, trial_sharpes: trialsA, effective_trial_count: 1 }, /effective_trial_count must be an integer/],
+    [{ returns: returnsA, trial_count: 3, trial_sharpe_variance: 0.1, effective_trial_count: 2 }, /effective_trial_count goes with trial_sharpes/],
   ];
   for (const [input, pattern] of cases) assert.throws(() => computeDeflatedSharpe(input), pattern, JSON.stringify(Object.keys(input)));
   assert.throws(() => expectedMaxStandardNormal(1), /at least 2/);
+});
+
+test("duplicated or correlated trials are flagged, and an effective count replaces the listed one (103-2 review)", () => {
+  // The selected trial, a trial at 0 and 198 copies of a trial at 0.06: duplication shrinks the variance.
+  const crowded = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [0.14409016554761872, 0, ...Array(198).fill(0.06)] });
+  assert.ok(crowded.warnings.includes("duplicate_trial_sharpes"));
+  assert.ok(crowded.warnings.includes("trial_variance_far_below_sampling"));
+  assert.equal(crowded.trials.duplicate_values, 197);
+  // Three effectively independent ideas: the effective count replaces the listed 200 in SR0.
+  const effective = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [0.14409016554761872, 0, ...Array(198).fill(0.06)], effective_trial_count: 3 });
+  assert.deepEqual([effective.trials.count, effective.trials.listed, effective.trials.count_source], [3, 200, "effective_trial_count"]);
+  close(effective.expected_max_sharpe, Math.sqrt(effective.trials.sharpe_variance) * expectedMaxStandardNormal(3), 1e-12, "sr0");
+  // A variance of zero switches deflation off, and says so.
+  const zero = computeDeflatedSharpe({ returns: returnsA, trial_count: 1_000_000_000, trial_sharpe_variance: 0 });
+  assert.deepEqual([zero.expected_max_sharpe, zero.deflated_sharpe === zero.psr_zero], [0, true]);
+  assert.ok(zero.warnings.includes("zero_trial_variance"));
+  assert.equal(zero.warnings.includes("trial_variance_far_below_sampling"), false);
+});
+
+test("annualized trial Sharpe ratios are recognised (103-2 review)", () => {
+  const annualized = trialsA.map((value) => value * Math.sqrt(252));
+  const result = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...annualized, 0.14409016554761872 * Math.sqrt(252)], periods_per_year: 252 });
+  assert.ok(result.warnings.includes("trial_sharpes_look_annualized"));
+  assert.ok(result.warnings.includes("trial_variance_far_above_sampling"));
+  // Per-period trials that include the selected one raise neither.
+  const perPeriod = computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...trialsA, 0.14409016554761872], periods_per_year: 252 });
+  assert.equal(perPeriod.warnings.includes("trial_sharpes_look_annualized"), false);
+  assert.equal(computeDeflatedSharpe({ returns: returnsA, trial_sharpes: [...annualized, 0.14409016554761872 * Math.sqrt(252)] }).warnings.includes("trial_sharpes_look_annualized"), false, "needs periods_per_year");
+});
+
+test("returns at any finite scale give the same statistics, and the far quantiles are exact (103-2 review)", () => {
+  const reference = computeDeflatedSharpe({ returns: returnsA, trial_count: 7, trial_sharpe_variance: 0.0004 });
+  for (const scale of [1e-300, 1e-90, 1e-78, 1e100, 1e300]) {
+    const scaled = computeDeflatedSharpe({ returns: returnsA.map((value) => value * scale), trial_count: 7, trial_sharpe_variance: 0.0004 });
+    assert.equal(scaled.status, "evaluated", String(scale));
+    for (const key of ["sharpe", "skewness", "kurtosis", "deflated_sharpe"]) close(scaled[key], reference[key], 1e-12, `${key} at ${scale}`);
+    assert.ok(Number.isFinite(scaled.standard_deviation), `sd at ${scale}`);
+  }
+  // Large values of one sign: their plain sum would overflow, but the scaled mean does not.
+  const shifted = computeDeflatedSharpe({ returns: returnsA.map((value) => value + 0.9), trial_count: 7, trial_sharpe_variance: 0.0004 });
+  const huge = computeDeflatedSharpe({ returns: returnsA.map((value) => (value + 0.9) * 1e308), trial_count: 7, trial_sharpe_variance: 0.0004 });
+  assert.equal(huge.status, "evaluated");
+  for (const key of ["sharpe", "skewness", "kurtosis"]) close(huge[key], shifted[key], 1e-12, `${key} near the largest double`);
+  // E[max] of a billion trials, computed from the lower tail so 1 - 1/N is never rounded (Python reference).
+  close(expectedMaxStandardNormal(1_000_000_000), 6.0903889964134565, 1e-14, "1e9");
+  // AS241's region boundaries: |q| = 0.425 (p = 0.075, 0.925) and r = 5 (p = exp(-25)).
+  const boundary = [[0.075, -1.4395314709384557], [0.925, 1.439531470938456], [0.0749999999, -1.4395314716448926], [0.0750000001, -1.4395314702320186],
+    [Math.exp(-25) * (1 - 1e-9), -6.65790464364812], [Math.exp(-25) * (1 + 1e-9), -6.657904643354088], [1 - Math.exp(-25) * (1 + 1e-6), 6.657904029578415],
+    // Points each region's own formula covers, away from the boundaries.
+    [0.08, -1.4050715603096322], [0.09, -1.3407550336902165], [0.0999, -1.2821215797087744], [0.92, 1.4050715603096327],
+    [5e-10, -6.1094102048693975], [3e-11, -6.543737689677802], [1e-12, -7.034483825301132], [1e-13, -7.3487961028006765],
+    [8e-14, -7.378568887831625], [0.999999999999, 7.0344869100478356]];
+  for (const [p, z] of boundary) close(normalQuantile(p), z, 1e-15, `p=${p}`);
 });
