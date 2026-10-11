@@ -64,6 +64,9 @@ test("the Reality Check and SPA p-values match the reference, and adjust the bes
       ["c2", -0.0027134666666666666, -6.013642574360548], ["c0", -0.0031136000000000002, -7.184089472475368], ["c5", -0.0050628, -9.942851847458039]],
   }, "r2");
   assert.equal(r2.benchmark, "given");
+  // Each Monte Carlo error belongs to its own p-value: the Reality Check's, and SPA's consistent one.
+  close(r2.reality_check.monte_carlo_error, Math.sqrt(r2.reality_check.p_value * (1 - r2.reality_check.p_value) / 400), 1e-15, "RC Monte Carlo error");
+  close(r2.spa.monte_carlo_error, Math.sqrt(r2.spa.p_values.consistent * (1 - r2.spa.p_values.consistent) / 400), 1e-15, "SPA Monte Carlo error");
 
   // Thirty configurations with no skill, an i.i.d. bootstrap (mean block 1) and the default seed: the best looks
   // significant alone (nominal p 0.003), not after the search is accounted for (0.086 and 0.103).
@@ -88,6 +91,25 @@ test("the Reality Check and SPA p-values match the reference, and adjust the bes
     top: [["c2", 0.00203025, 3.0454171491774176], ["c1", 0.0015799999999999998, 2.2204830666923403], ["c0", -0.0010525, -1.646515257412362]],
   }, "r4");
   assert.deepEqual(r4.warnings, ["short_sample", "few_draws", "long_mean_block"]);
+
+  // Every configuration below a zero benchmark, none identical: V < 0, SPA's T is 0 (p = 1), and the Reality Check's
+  // p-value is below 1, because no identical configuration puts a 0 in its maximum.
+  const r5 = computeRealityCheck({ configurations: series(3, 80, (j) => -0.001 * (j + 1), 21), mean_block: 3, draws: 500, seed: 2 });
+  checkAgainst(r5, {
+    V: -0.003821440173547141, T: 0, threshold: 1.7190179285598743, best: "c0", best_mean: "c0", t: -0.6812163173817851, mean: -0.00042725,
+    se: 0.000627186972916489, recentred: 2, positive: 0,
+    p: { rc: 0.9900199600798403, lower: 1, consistent: 1, upper: 1, nominal: 0.7604790419161677 },
+    top: [["c0", -0.00042725, -0.6812163173817851], ["c1", -0.0020647499999999997, -3.5750364672362838], ["c2", -0.002906125, -4.619407190923537]],
+  }, "r5");
+
+  // One configuration with t > 0: the search is trivial, so all five p-values coincide.
+  const r6 = computeRealityCheck({ configurations: series(1, 200, () => 0.0006, 4), mean_block: 4, draws: 500, seed: 9 });
+  checkAgainst(r6, {
+    V: 0.009726960882002146, T: 1.9833802163933663, threshold: 1.8261376137309364, best: "c0", best_mean: "c0", t: 1.9833802163933663, mean: 0.0006877999999999999,
+    se: 0.00034678171856060685, recentred: 0, positive: 1,
+    p: { rc: 0.041916167664670656, lower: 0.041916167664670656, consistent: 0.041916167664670656, upper: 0.041916167664670656, nominal: 0.041916167664670656 },
+    top: [["c0", 0.0006877999999999999, 1.9833802163933663]],
+  }, "r6");
 });
 
 test("the bootstrap variance's O(n) recursion equals Hansen's ω̂² and, with a mean block of 1, the population variance (103-8)", () => {
@@ -146,15 +168,45 @@ test("a configuration identical to the benchmark contributes 0, a constant diffe
   assert.equal(rounding.identical_to_benchmark, 1);
   // A configuration that never trades is identical to a zero benchmark.
   assert.equal(computeRealityCheck({ configurations: [...poor, { id: "idle", returns: Array(60).fill(0) }], mean_block: 2, draws: 200 }).identical_to_benchmark, 1);
-  // A constant difference has no standard error.
-  const carry = computeRealityCheck({ configurations: [...poor, { id: "carry", returns: bench.map((v) => v + 0.001) }, { id: "carry2", returns: bench.map((v) => v - 0.002) }], benchmark: bench, mean_block: 2, draws: 200 });
+  // A constant difference has no standard error. A benchmark plus a small constant varies by the benchmark's rounding,
+  // which is large beside the constant (about 1e-12 of 1e-6 here), so the variation is judged against the returns'
+  // magnitude too; judged against the difference alone, the configuration below had a t of about 1e13.
+  const carry = computeRealityCheck({ configurations: [...poor, { id: "carry", returns: bench.map((v) => v + 0.001) }, { id: "carry2", returns: bench.map((v) => v - 0.002) }, { id: "tiny", returns: bench.map((v) => v + 1e-6) }, { id: "tiny2", returns: bench.map((v) => v - 1e-6) }], benchmark: bench, mean_block: 2, draws: 200 });
   assert.equal(carry.status, "not_evaluable");
-  assert.deepEqual(carry.constant_configurations, ["carry", "carry2"]);
-  assert.match(carry.reason, /differ from the benchmark by a constant .*"carry", "carry2"/);
+  assert.deepEqual(carry.constant_configurations, ["carry", "carry2", "tiny", "tiny2"]);
+  assert.match(carry.reason, /differ from the benchmark by a constant .*"carry", "carry2", "tiny", "tiny2"/);
   assert.equal("spa" in carry, false);
+  assert.equal(carry.benchmark, "given");
   // A configuration whose mean difference is exactly 0 differs from the benchmark but is not counted as positive.
   const flat = computeRealityCheck({ configurations: [...poor, { id: "flat", returns: Array.from({ length: 60 }, (_, t) => (t % 2 === 0 ? 0.01 : -0.01)) }], mean_block: 2, draws: 200 });
   assert.deepEqual([flat.best.id, flat.best.mean_difference, flat.positive_mean_configurations, flat.identical_to_benchmark], ["flat", 0, 0, 0]);
+  // The rounding share is 1e-9 of the configuration's largest return. Proportional differences of 5e-10 are identical
+  // to the benchmark; of 2e-9 they are real but nearly constant, and named.
+  const share = (relative) => bench.map((v) => v * (1 + relative));
+  const sharing = computeRealityCheck({ configurations: [...poor, { id: "half", returns: share(5e-10) }, { id: "double", returns: share(2e-9) }], benchmark: bench, mean_block: 2, draws: 200 });
+  assert.equal(sharing.identical_to_benchmark, 1);
+  assert.deepEqual(sharing.nearly_constant_configurations, ["double"]);
+  assert.ok(sharing.warnings.includes("nearly_constant_difference"));
+  // A constant plus variation of about 4.5e-10 of the returns is constant; 4.5e-9 is nearly constant; 4.5e-7 is still
+  // nearly constant; 4.5e-6 is not.
+  const wobble = (step) => bench.map((v, t) => v + 0.001 + (t % 2 === 0 ? step : 0));
+  assert.deepEqual(computeRealityCheck({ configurations: [...poor, { id: "w", returns: wobble(5e-12) }], benchmark: bench, mean_block: 2, draws: 200 }).constant_configurations, ["w"]);
+  const wobbles = computeRealityCheck({ configurations: [...poor, { id: "w1", returns: wobble(5e-11) }, { id: "w2", returns: wobble(5e-9) }, { id: "w3", returns: wobble(5e-8) }], benchmark: bench, mean_block: 2, draws: 200 });
+  assert.equal(wobbles.status, "evaluated");
+  assert.deepEqual(wobbles.nearly_constant_configurations, ["w1", "w2"]);
+  assert.deepEqual(computeRealityCheck({ configurations: poor, benchmark: bench, mean_block: 2, draws: 200 }).nearly_constant_configurations, []);
+  assert.equal(computeRealityCheck({ configurations: poor, benchmark: bench, mean_block: 2, draws: 200 }).warnings.includes("nearly_constant_difference"), false);
+  // The same strategy's returns computed by two formulas from 5-decimal prices differ by rounding of about 1e-16 of the
+  // price ratio: about 1e-11 of returns of 1e-5. They are identical, and the poorer configuration is the best.
+  let state = 13; const uniform = () => { state = (state * 48271) % 2147483647; return state / 2147483647 * 2 - 1; };
+  const prices = [1.1];
+  for (let t = 1; t <= 5000; t += 1) prices.push(Math.round(prices[t - 1] * (1 + 2e-5 * uniform()) * 1e5) / 1e5);
+  const simple = prices.slice(1).map((p, t) => (p - prices[t]) / prices[t]);
+  const ratio = prices.slice(1).map((p, t) => p / prices[t] - 1);
+  const ratioScale = Math.max(...ratio.map(Math.abs)); const gap = Math.max(...ratio.map((v, t) => Math.abs(v - simple[t])));
+  assert.ok(gap > 1e-12 * ratioScale && gap < 1e-9 * ratioScale, `the formulas differ by ${gap / ratioScale} of the returns`);
+  const formulas = computeRealityCheck({ configurations: [{ id: "poorer", returns: simple.map((v, t) => v - 5e-6 + (t % 3) * 4e-6) }, { id: "same", returns: ratio }], benchmark: simple, mean_block: 5, draws: 200 });
+  assert.deepEqual([formulas.identical_to_benchmark, formulas.best.id], [1, "poorer"]);
   // Duplicated configurations tie: the earliest is the best, and the top list keeps input order.
   const strong = series(1, 60, () => 0.004, 2)[0].returns;
   const duplicated = computeRealityCheck({ configurations: [{ id: "first", returns: strong }, ...poor, { id: "second", returns: [...strong] }, { id: "twin", returns: [...bench] }, { id: "twin2", returns: [...bench] }], benchmark: bench, mean_block: 2, draws: 200 });
@@ -178,6 +230,7 @@ test("the inputs are checked, and the defaults are stated (103-8)", () => {
     [{ configurations: [...ok, { id: "c0", returns: ok[0].returns }] }, /id "c0" is not unique/],
     [{ configurations: [...ok, { id: "", returns: ok[0].returns }] }, /needs an id of 1 to 80 characters/],
     [{ configurations: [...ok, { id: 5, returns: ok[0].returns }] }, /configuration 3 needs an id/],
+    [{ configurations: [...ok, { id: "x".repeat(81), returns: ok[0].returns }] }, /configuration 3 needs an id of 1 to 80 characters/],
     [{ configurations: [...ok, null] }, /configuration 3 must be an object/],
     [{ configurations: [ok[0], , ok[1]] }, /configuration 1 must be an object/],
     [{ configurations: [...ok, { id: "short", returns: ok[0].returns.slice(1) }] }, /has 39 returns; every configuration must have 40/],
@@ -189,6 +242,9 @@ test("the inputs are checked, and the defaults are stated (103-8)", () => {
     [{ configurations: series(2, 9) }, /must hold 10 to 100000 returns; got 9/],
     [{ configurations: series(1, 100_001) }, /must hold 10 to 100000 returns; got 100001/],
     [{ configurations: series(6, 100_000) }, /hold 600000 returns; at most 500000/],
+    // The sizes are checked before any value is read.
+    [{ configurations: [...series(5, 100_000), { id: "late", returns: [NaN, ...series(1, 99_999)[0].returns] }] }, /hold 600000 returns; at most 500000/],
+    [{ configurations: ok, benchmark: [NaN] }, /benchmark has 1 returns; it must have 40/],
     [{ configurations: ok, benchmark: ok[0].returns.slice(1) }, /benchmark has 39 returns; it must have 40/],
     [{ configurations: ok, benchmark: holey(ok[0].returns, 0) }, /benchmark must be finite numbers .*\(period 0\)/],
     [{ configurations: ok, benchmark: "x" }, /benchmark must be an array/],
@@ -212,6 +268,11 @@ test("the inputs are checked, and the defaults are stated (103-8)", () => {
   const defaults = computeRealityCheck({ configurations: series(2, 1000) });
   assert.deepEqual(defaults.bootstrap, { method: "stationary", draws: 2000, mean_block: 10, mean_block_source: "default", seed: 20261011 });
   assert.equal(computeRealityCheck({ configurations: series(2, 10) }).bootstrap.mean_block, 2);
+  // cbrt(20) = 2.71 rounds to 3.
+  assert.equal(computeRealityCheck({ configurations: series(2, 20) }).bootstrap.mean_block, 3);
+  // Magnitudes of exactly 1e300 are accepted.
+  assert.equal(computeRealityCheck({ configurations: [...ok, { id: "edge", returns: [...ok[0].returns.slice(2), 1e300, -1e300] }], mean_block: 2, draws: 100 }).status, "evaluated");
+  assert.equal(computeRealityCheck({ configurations: ok, benchmark: [...ok[0].returns.slice(1), 1e300], mean_block: 2, draws: 100 }).status, "evaluated");
   for (const extra of [{ mean_block: 1 }, { mean_block: 20 }, { draws: 100 }, { draws: 10_000, mean_block: 20 }, { seed: 0 }, { seed: 2 ** 32 - 1 }]) {
     assert.equal(computeRealityCheck({ configurations: ok, ...extra }).status, "evaluated", JSON.stringify(extra));
   }
@@ -231,6 +292,16 @@ test("warnings mark short samples, few draws, long blocks, and the same seed rep
   assert.deepEqual(computeRealityCheck({ configurations: series(4, 100, () => 0, 3), mean_block: 2, draws: 1000 }).warnings, []);
   assert.deepEqual(computeRealityCheck({ configurations: long, mean_block: 40, draws: 1000 }), quiet);
   assert.notDeepEqual(computeRealityCheck({ configurations: long, mean_block: 40, draws: 1000, seed: 7 }).spa.p_values, quiet.spa.p_values);
-  assert.equal(quiet.limitations.length, 5);
+  assert.equal(quiet.limitations.length, 6);
   close(quiet.spa.monte_carlo_error, Math.sqrt(quiet.spa.p_values.consistent * (1 - quiet.spa.p_values.consistent) / 1000), 1e-15, "Monte Carlo error");
+});
+
+test("mathematically tied configurations are ranked by input order, not by rounding (103-8 review)", () => {
+  // A series and its reverse have the same mean and, with a mean block of 1, the same ω̂ (the population variance), but
+  // their computed values can differ in the last bit. Rounded, they tie, and the earlier is the best in both tests.
+  for (let seed = 1; seed <= 30; seed += 1) {
+    const forward = series(1, 50, () => 0.0005, seed)[0].returns;
+    const result = computeRealityCheck({ configurations: [{ id: "forward", returns: forward }, { id: "reverse", returns: [...forward].reverse() }], mean_block: 1, draws: 100 });
+    assert.deepEqual([result.best.id, result.reality_check.best.id, result.top_by_t[0].id], ["forward", "forward", "forward"], `seed ${seed}`);
+  }
 });

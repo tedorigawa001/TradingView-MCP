@@ -18,9 +18,9 @@ Methods:
 | `draws` | Bootstrap draws B, an integer from 100 to 10,000. Default: 2,000 |
 | `seed` | The seed of the generator, an integer from 0 to 4,294,967,295. Default: 20,261,011 |
 
-- n × N is at most 500,000 numbers.
-- The bootstrap's work, draws × (n / mean_block) × (20 + N), is at most 2e9, which is a few seconds. Drawing a run costs
-  about twenty times summing one configuration over it.
+- n × N is at most 500,000 numbers. The sizes are checked before any value is read.
+- The bootstrap's work, draws × (n / mean_block) × (20 + N), is at most 2e9. At the cap the time is about 1 to 3.6
+  seconds. Drawing a run (two draws and a logarithm) costs up to about twenty times summing one configuration over it.
 - Every numeric input must be a finite number of type number. Null, strings, booleans and the holes of a sparse array
   are refused, even on a direct call of the function. Through MCP, an unknown field is refused rather than ignored.
 - **Choosing the mean block.** It should cover the serial dependence of the differences: longer for returns of
@@ -32,11 +32,20 @@ Methods:
    benchmark. Performance is the mean difference d̄_k. It is not risk-adjusted: White's and Hansen's tests compare
    expected performance.
 2. **Identical and constant configurations.**
-   - A configuration whose differences are at most 1e-12 of the largest magnitude of its returns is identical to the
-     benchmark, to rounding (its returns then have the benchmark's magnitude). It contributes 0: its d̄ is 0, and its bootstrap mean is 0.
-     A configuration of all-zero returns against no benchmark is identical too.
-   - Differences whose range is at most 1e-12 of their largest magnitude are constant. Their standard error is 0 (see
-     Not evaluable).
+   - **Rounding share.** Returns computed from prices carry rounding of about 1e-16 of the price ratio, not of the
+     return. That is about 1e-11 of returns of 1e-5: two formulas for the same simple return differ by that much. The
+     tool therefore treats a difference of at most 1e-9 of a configuration's largest return as rounding.
+   - **Identical.** A configuration whose differences are all at most 1e-9 of the largest magnitude of its returns is
+     identical to the benchmark. Its returns then have the benchmark's magnitude. It contributes 0: its d̄ is 0, and
+     its bootstrap mean is 0. A configuration of all-zero returns against no benchmark is identical too.
+   - **Constant.** Differences whose range is at most 1e-9 of the larger of the returns' largest magnitude and the
+     differences' own are constant. Their standard error is 0 (see Not evaluable).
+     - The larger of the two, because a difference's rounding is proportional to the returns it came from. A
+       benchmark plus 1e-6 varies by the benchmark's rounding, which is about 1e-12 of 1e-6 when the benchmark is near
+       0.01. Judged against the difference alone, such a configuration had a t of about 1e13.
+   - **Nearly constant.** A range of at most 1e-6 on the same scale is real but negligible. A t built on it reflects
+     rounding or fee granularity more than a strategy. Such configurations are evaluated, listed in
+     `nearly_constant_configurations`, and warned about.
 3. **Standard errors.** ω̂²_k is the variance of √n times the stationary-bootstrap mean of the differences, exactly
    (Politis and Romano 1994, Lemma 1), as Hansen uses it:
 
@@ -49,12 +58,19 @@ Methods:
    - With a mean block of 1 it is the population variance, γ̂₀.
    - Each configuration is divided by the largest magnitude of its differences first, so proportional inputs give the
      same statistics and p-values at any finite scale.
+   - The mean is computed in two passes: the second removes the first's rounding residue. The centred values then
+     sum to 0 to rounding, and the bootstrap means carry no drift.
    - The t of configuration k is t_k = √n d̄_k / ω̂_k.
 4. **Statistics.**
-   - Reality Check: V = max_k √n d̄_k, over every configuration (an identical one counts with d̄ = 0).
-   - SPA: T = max(max_k t_k, 0), over the configurations that differ from the benchmark. The maximum with 0 stands for
-     the identical ones.
-   - Ties go to the earliest configuration.
+   - Reality Check: V = max_k √n d̄_k, over every configuration (an identical one counts with d̄ = 0). Its best is the
+     configuration with the highest mean difference.
+   - SPA: T = max(max_k t_k, 0), over the configurations that differ from the benchmark. The maximum with 0 is part of
+     Hansen's definition, and also covers identical configurations, which have no t. Its best, reported as `best`, is
+     the configuration with the highest t.
+   - The best configurations are chosen on rounded values: t to 12 decimal places, mean differences to 12 significant
+     digits. Ties that rounding has split by a few ulps therefore go to the earliest configuration. Examples are a
+     series and its reverse with a mean block of 1. Two values that straddle a rounding boundary can still differ;
+     that is rare.
 5. **Bootstrap.** One `createRandom(seed)` stream (mulberry32) across the draws. Every configuration uses the same
    resampled time indices, so their dependence is kept.
    - Each run starts at floor(u·n) and continues at (previous + 1) mod n, circularly.
@@ -74,9 +90,10 @@ Methods:
      - lower: s_k = min(t_k, 0). The most liberal.
 7. **P-values** = (1 + the number of draws with a null statistic ≥ the observed one) / (1 + B). This form is never 0 and
    is valid at a finite B. With an observed SPA statistic of 0, every draw reaches it and p = 1.
-   - The best configuration's **nominal p-value** applies the same rule to its own studentized z alone: the p-value
-     as if it had been the only configuration tried. The gap between it and the consistent p-value is the price of
-     the search.
+   - The best configuration's **nominal p-value** applies the same rule to its own studentized z alone. That is the
+     Reality Check's p-value had it been the only configuration tried; with one configuration and t > 0, all five
+     p-values coincide. It has no floor at t ≤ 0, where a lone SPA p-value would be 1. The gap between it and the
+     consistent p-value is the price of the search.
 
 ## Output
 - `status`: `evaluated` or `not_evaluable`.
@@ -93,6 +110,7 @@ Methods:
 - `best`: the configuration with the highest t among those that differ, with `id`, `mean_difference`,
   `standard_error` ω̂/√n, `t` and `nominal_p_value`.
 - `positive_mean_configurations` and `identical_to_benchmark`: counts.
+- `nearly_constant_configurations`: the ids of configurations whose differences vary by at most 1e-6 (see step 2).
 - `top_by_t`: up to 10 configurations that differ, by t, with id, mean difference and t. Ties go to input order.
 - `warnings` and `limitations`.
 
@@ -116,6 +134,7 @@ would throw, as a guard.
 | `few_draws` | B < 1,000: the p-values carry a large Monte Carlo error |
 | `long_mean_block` | The mean block exceeds n/10: few independent blocks |
 | `identical_to_benchmark` | Some configuration is identical to the benchmark, to rounding |
+| `nearly_constant_difference` | Some configuration's differences vary by at most 1e-6 of its returns' magnitude: its t reflects rounding or fee granularity more than a strategy |
 
 ## Limitations, stated in every response
 - The configurations must be every one tried, discarded ones included, over the same aligned periods. The tests
@@ -126,5 +145,7 @@ would throw, as a guard.
   dependence, and the p-values depend on it.
 - The tests ask only whether the best configuration beats the benchmark. They say neither which others do (a stepwise
   procedure would) nor how large the edge is after costs.
+- Differences from the benchmark, or variation in them, of at most 1e-9 of a configuration's largest return are
+  treated as rounding.
 - The Reality Check is conservative when many configurations are poor; the consistent SPA p-value is recommended.
   P-values carry Monte Carlo error.

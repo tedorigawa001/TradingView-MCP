@@ -9943,14 +9943,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "White's Reality Check (2000) and Hansen's test for superior predictive ability (SPA, 2005) by the stationary " +
         "bootstrap. Give every configuration tried, discarded ones included, as per-period returns aligned in time, and " +
         "optionally the benchmark's returns over the same periods (default: zero, testing for a positive mean). " +
-        "Performance is the mean return in excess of the benchmark, not risk-adjusted. Returns the Reality Check p-value, " +
-        "SPA's lower, consistent and upper p-values (consistent is recommended), the best configuration's mean " +
-        "difference, standard error, t and nominal p-value (which ignores the search), and the top configurations by t. " +
-        "The mean block length (default round(n^(1/3))) should cover the returns' serial dependence; the p-values depend " +
-        "on it and on the draws (default 2,000, Monte Carlo error reported) and seed (fixed default, reproducible). " +
-        "Not evaluable when a configuration differs from the benchmark by a constant; one identical to it contributes 0. " +
-        "A low p-value says the best is unlikely to beat the benchmark by luck among these configurations, not that it " +
-        "is profitable after costs. A pure computation: it reads and writes nothing.",
+        "Performance is the mean return in excess of the benchmark, not risk-adjusted. Returns the Reality Check p-value " +
+        "(its best is the configuration with the highest mean difference), SPA's lower, consistent and upper p-values " +
+        "(consistent is recommended), the SPA best (highest t) with its mean difference, standard error, t and nominal " +
+        "p-value (the p-value had it been the only configuration tried, ignoring the search), and the top configurations " +
+        "by t. The mean block length (default round(n^(1/3))) should cover the returns' serial dependence; the p-values " +
+        "depend on it and on the draws (default 2,000, Monte Carlo error reported) and seed (fixed default, " +
+        "reproducible). Differences, or variation in them, of at most 1e-9 of a configuration's largest return are " +
+        "rounding: a configuration identical to the benchmark contributes 0, and one that differs by a constant makes the " +
+        "result not evaluable; variation of at most 1e-6 is flagged as nearly constant. A low p-value says the best " +
+        "configuration's edge over the benchmark is unlikely to be luck from the search among these configurations, not " +
+        "that it is profitable after costs. A pure computation: it reads and writes nothing.",
       inputSchema: z.object({
         configurations: z.array(z.object({
           id: z.string().min(1).max(80),

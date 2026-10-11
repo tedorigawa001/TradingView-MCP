@@ -14,13 +14,17 @@ const MAX_DRAWS = 10_000;
 const DEFAULT_DRAWS = 2_000;
 const DEFAULT_SEED = 20_261_011;
 // Bootstrap work, draws × expected runs × (20 + configurations) with expected runs = periods / mean block, is at most
-// this: a few seconds. Drawing a run costs about twenty times summing one configuration over it.
+// this: a few seconds. Drawing a run (two draws and a logarithm) costs up to about twenty times summing one
+// configuration over it.
 const MAX_WORK = 2e9;
-// A configuration whose differences from the benchmark are at most this share of its returns' largest magnitude differs
-// only by rounding: it is identical to the benchmark. (Its returns' magnitude is then the benchmark's too.)
-const IDENTICAL_RELATIVE = 1e-12;
-// Differences whose range is at most this share of their largest magnitude are constant.
-const CONSTANT_RELATIVE_RANGE = 1e-12;
+// Rounding in returns computed from prices is about 1e-16 of the price ratio, not of the return: about 1e-11 of returns
+// of 1e-5. Differences from the benchmark at most this share of the configuration's largest return magnitude are
+// rounding (the configuration is identical to the benchmark), and so is variation in the differences at most this share
+// of the larger of that magnitude and the differences' own (the difference is constant).
+const ROUNDING_RELATIVE = 1e-9;
+// Variation in the differences at most this share is real but negligible: a t built on it reflects rounding or fee
+// granularity more than a strategy.
+const NEGLIGIBLE_RELATIVE = 1e-6;
 
 export type RealityCheckInput = {
   configurations: Array<{ id: string; returns: number[] }>;
@@ -35,6 +39,7 @@ const LIMITATIONS = [
   "Performance is the mean per-period return in excess of the benchmark (zero when none is given): not risk-adjusted, with no costs beyond those already in the returns.",
   "The stationary bootstrap assumes the differences are stationary and weakly dependent; the mean block length should cover their serial dependence, and the p-values depend on it.",
   "The tests ask only whether the best configuration beats the benchmark. They do not say which others do, nor how large the edge is after costs.",
+  "Differences from the benchmark, or variation in them, of at most 1e-9 of a configuration's largest return are treated as rounding.",
   "The Reality Check is conservative when many configurations are poor; Hansen's consistent p-value is the recommended one. P-values carry Monte Carlo error from the finite number of draws.",
 ];
 
@@ -72,15 +77,20 @@ function validate(input: RealityCheckInput) {
     if (typeof id !== "string" || id.length < 1 || id.length > 80) throw new Error(`configuration ${index} needs an id of 1 to 80 characters`);
     if (ids.has(id)) throw new Error(`configuration id "${id}" is not unique`);
     ids.add(id);
-    finiteReturns(returns, `configuration "${id}" returns`);
+    if (!Array.isArray(returns)) throw new Error(`configuration "${id}" returns must be an array of finite numbers`);
     if (length === null) length = returns.length;
     else if (returns.length !== length) throw new Error(`configuration "${id}" has ${returns.length} returns; every configuration must have ${length}`);
   }
+  // The sizes are checked before any value is read, so an oversized direct call is refused at once.
   const periods = length!;
   if (periods < MIN_PERIODS || periods > MAX_PERIODS) throw new Error(`each configuration must hold ${MIN_PERIODS} to ${MAX_PERIODS} returns; got ${periods}`);
   if (periods * configurations.length > MAX_CELLS) throw new Error(`configurations hold ${periods * configurations.length} returns; at most ${MAX_CELLS}`);
+  if (input.benchmark !== undefined) {
+    if (!Array.isArray(input.benchmark)) throw new Error("benchmark must be an array of finite numbers");
+    if (input.benchmark.length !== periods) throw new Error(`benchmark has ${input.benchmark.length} returns; it must have ${periods}, like the configurations`);
+  }
+  for (const { id, returns } of configurations) finiteReturns(returns, `configuration "${id}" returns`);
   const benchmark = input.benchmark === undefined ? null : finiteReturns(input.benchmark, "benchmark");
-  if (benchmark !== null && benchmark.length !== periods) throw new Error(`benchmark has ${benchmark.length} returns; it must have ${periods}, like the configurations`);
   const meanBlock = input.mean_block === undefined ? Math.max(1, Math.round(Math.cbrt(periods))) : input.mean_block;
   if (!(isFiniteNumber(meanBlock) && meanBlock >= 1 && meanBlock <= periods / 2)) throw new Error(`mean_block must be a number from 1 to half the periods (${periods / 2})`);
   const draws = input.draws === undefined ? DEFAULT_DRAWS : input.draws;
@@ -115,6 +125,11 @@ export function stationaryBootstrapVariance(c: ArrayLike<number>, meanBlock: num
   return c0 / n + (2 * s) / n;
 }
 
+/** A t rounded to 12 decimal places, so a tie that rounding has split by a few ulps compares as one. */
+const roundT = (value: number) => Math.round(value * 1e12) / 1e12;
+/** A mean difference, in the input's unit, rounded to 12 significant digits for the same reason. */
+const roundMean = (value: number) => (value === 0 ? 0 : Number(value.toPrecision(12)));
+
 type Model = {
   id: string;
   identical: boolean;
@@ -129,7 +144,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
   const { configurations, benchmark, periods: n, meanBlock, meanBlockSource, draws, seed } = validate(input);
   const rootN = Math.sqrt(n);
 
-  const models: Model[] = []; const constant: string[] = [];
+  const models: Model[] = []; const constant: string[] = []; const nearlyConstant: string[] = [];
   for (const { id, returns } of configurations) {
     const differences = benchmark === null ? returns : returns.map((value, t) => value - benchmark[t]);
     let scale = 0; let min = Infinity; let max = -Infinity; let returnsScale = 0;
@@ -138,15 +153,25 @@ export function computeRealityCheck(input: RealityCheckInput) {
       scale = Math.max(scale, Math.abs(value)); min = Math.min(min, value); max = Math.max(max, value);
       returnsScale = Math.max(returnsScale, Math.abs(returns[t]));
     }
-    if (scale <= IDENTICAL_RELATIVE * returnsScale) {
+    if (scale <= ROUNDING_RELATIVE * returnsScale) {
       models.push({ id, identical: true, scale: 0, meanDifference: 0, omega: 0, t: 0, prefix: new Float64Array(0) });
       continue;
     }
-    if ((max - min) / scale <= CONSTANT_RELATIVE_RANGE) { constant.push(id); continue; }
-    // Normalised by the largest magnitude, so proportional inputs give the same statistics at any finite scale.
+    // Rounding in a difference is proportional to the returns it came from, so its variation is judged against the
+    // larger of the returns' magnitude and the differences' own: a benchmark plus a constant varies by the benchmark's
+    // rounding, not the constant's.
+    const range = (max - min) / Math.max(scale, returnsScale);
+    if (range <= ROUNDING_RELATIVE) { constant.push(id); continue; }
+    if (range <= NEGLIGIBLE_RELATIVE) nearlyConstant.push(id);
+    // Normalised by the largest magnitude, so proportional inputs give the same statistics at any finite scale. A
+    // second pass removes the first mean's rounding residue, so the centred values sum to 0 to rounding and the
+    // bootstrap means carry no drift.
     let sum = 0;
     for (let t = 0; t < n; t += 1) sum += differences[t] / scale;
-    const mean = sum / n;
+    let mean = sum / n;
+    let residue = 0;
+    for (let t = 0; t < n; t += 1) residue += differences[t] / scale - mean;
+    mean += residue / n;
     const centred = new Float64Array(n);
     for (let t = 0; t < n; t += 1) centred[t] = differences[t] / scale - mean;
     const omega = Math.sqrt(stationaryBootstrapVariance(centred, meanBlock));
@@ -158,18 +183,19 @@ export function computeRealityCheck(input: RealityCheckInput) {
   }
   const identicalCount = models.filter((model) => model.identical).length;
   if (constant.length > 0) {
-    return notEvaluable(`${constant.length} configuration(s) differ from the benchmark by a constant (at rounding level), so their standard error is 0 and the studentized statistic is undefined: ${constant.map((id) => `"${id}"`).join(", ")}`, { constant_configurations: constant });
+    return notEvaluable(`${constant.length} configuration(s) differ from the benchmark by a constant (varying only at rounding level), so their standard error is 0 and the studentized statistic is undefined: ${constant.map((id) => `"${id}"`).join(", ")}`, { constant_configurations: constant });
   }
   if (identicalCount === models.length) return notEvaluable("every configuration is identical to the benchmark (to rounding), so there is nothing to test", {});
 
-  // Statistics. Ties go to the earliest configuration. The Reality Check's best is over every configuration (an identical
-  // one has a mean difference of 0); SPA's is over those that differ, since an identical one has no t, and the maximum
-  // with 0 stands for it.
+  // Statistics. The Reality Check's best is over every configuration (an identical one has a mean difference of 0);
+  // SPA's is over those that differ, since an identical one has no t (T's maximum with 0, Hansen's definition, covers
+  // it). Comparisons use the rounded values, so ties go to the earliest configuration.
   const active = models.filter((model) => !model.identical);
+  const means = models.map((model) => roundMean(model.meanDifference)); const ts = active.map((model) => roundT(model.t));
   let bestMean = 0;
-  for (let k = 1; k < models.length; k += 1) if (models[k].meanDifference > models[bestMean].meanDifference) bestMean = k;
+  for (let k = 1; k < models.length; k += 1) if (means[k] > means[bestMean]) bestMean = k;
   let best = 0;
-  for (let k = 1; k < active.length; k += 1) if (active[k].t > active[best].t) best = k;
+  for (let k = 1; k < active.length; k += 1) if (ts[k] > ts[best]) best = k;
   const realityStatistic = rootN * models[bestMean].meanDifference;
   const spaStatistic = Math.max(active[best].t, 0);
   const threshold = Math.sqrt(2 * Math.log(Math.log(n)));
@@ -196,7 +222,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
       runLength[runs] = Math.min(length, n - filled);
       filled += runLength[runs];
     }
-    // Identical configurations contribute 0 to the Reality Check's maximum; to SPA's, the maximum with 0 covers them.
+    // Identical configurations contribute 0 to the Reality Check's maximum; SPA's maximum with 0 covers them.
     let realityMax = identicalCount > 0 ? 0 : -Infinity; let lowerMax = 0; let consistentMax = 0; let upperMax = 0;
     for (let k = 0; k < active.length; k += 1) {
       const { prefix, scale, omega } = active[k];
@@ -224,7 +250,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
 
   const top = models.map((model, index) => ({ model, index }))
     .filter(({ model }) => !model.identical)
-    .sort((a, b) => b.model.t - a.model.t || a.index - b.index)
+    .sort((a, b) => roundT(b.model.t) - roundT(a.model.t) || a.index - b.index)
     .slice(0, 10)
     .map(({ model }) => ({ id: model.id, mean_difference: model.meanDifference, t: model.t }));
   const warnings: string[] = [];
@@ -232,6 +258,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
   if (draws < 1_000) warnings.push("few_draws");
   if (meanBlock > n / 10) warnings.push("long_mean_block");
   if (identicalCount > 0) warnings.push("identical_to_benchmark");
+  if (nearlyConstant.length > 0) warnings.push("nearly_constant_difference");
 
   const consistentP = pValue(consistentCount); const realityP = pValue(realityCount);
   const result = {
@@ -256,6 +283,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
     },
     positive_mean_configurations: active.filter((model) => model.meanDifference > 0).length,
     identical_to_benchmark: identicalCount,
+    nearly_constant_configurations: nearlyConstant,
     top_by_t: top,
     warnings,
     limitations: LIMITATIONS,
