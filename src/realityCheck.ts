@@ -29,6 +29,9 @@ const NEGLIGIBLE_RELATIVE = 1e-6;
 // |V| and the widest bootstrap spread) counts as reaching it. Discrete returns make null statistics equal to the
 // observed one on paper, and rounding must not decide whether they count.
 const TIE_RELATIVE = 1e-9;
+// A mean difference below this share of its own configuration's largest difference is rounding level: 0 when means
+// are compared or counted as positive (its t is at most about √n · 3e-12).
+const ZERO_MEAN_RELATIVE = 1e-12;
 
 export type RealityCheckInput = {
   configurations: Array<{ id: string; returns: number[] }>;
@@ -195,9 +198,12 @@ export function computeRealityCheck(input: RealityCheckInput) {
 
   // Statistics. The Reality Check's best is over every configuration (an identical one has a mean difference of 0);
   // SPA's is over those that differ, since an identical one has no t (T's maximum with 0, Hansen's definition, covers
-  // it). Comparisons use the rounded values, so ties go to the earliest configuration.
+  // it). Comparisons use the rounded values, so ties go to the earliest configuration. Mean differences are compared
+  // in units of the largest scale, never in the input's unit, where subnormal means round to 0.
   const active = models.filter((model) => !model.identical);
-  const means = models.map((model) => roundMean(model.meanDifference)); const ts = active.map((model) => roundT(model.t));
+  const unit = active.reduce((max, model) => Math.max(max, model.scale), 0);
+  const signedMean = (model: Model) => (model.identical || Math.abs(model.meanNorm) < ZERO_MEAN_RELATIVE ? 0 : model.meanNorm);
+  const means = models.map((model) => roundMean(signedMean(model) * (model.scale / unit))); const ts = active.map((model) => roundT(model.t));
   let bestMean = 0;
   for (let k = 1; k < models.length; k += 1) if (means[k] > means[bestMean]) bestMean = k;
   let best = 0;
@@ -207,7 +213,6 @@ export function computeRealityCheck(input: RealityCheckInput) {
   // The bootstrap works in normalised units: t's within each configuration, so a tiny scale cannot round the standard
   // error to 0 (0/0 would make a statistic NaN); and the Reality Check's in units of the largest scale, which keeps the
   // configurations comparable.
-  const unit = active.reduce((max, model) => Math.max(max, model.scale), 0);
   const ratios = active.map((model) => model.scale / unit);
   const realityCommon = models[bestMean].identical ? 0 : rootN * models[bestMean].meanNorm * (models[bestMean].scale / unit);
   const spread = active.reduce((max, model, k) => Math.max(max, model.omegaNorm * ratios[k]), 0);
@@ -297,7 +302,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
       id: active[best].id, mean_difference: active[best].meanDifference, standard_error: active[best].omega / rootN,
       t: active[best].t, nominal_p_value: pValue(nominalCount),
     },
-    positive_mean_configurations: active.filter((model) => model.meanDifference > 0).length,
+    positive_mean_configurations: active.filter((model) => signedMean(model) > 0).length,
     identical_to_benchmark: identicalCount,
     nearly_constant_configurations: nearlyConstant,
     top_by_t: top,

@@ -333,3 +333,36 @@ test("null statistics equal to the observed one on paper count as reaching it at
   const zero = computeRealityCheck({ configurations: [{ id: "Z", returns: Array.from({ length: 21 }, (_, t) => [0.3, -0.1, -0.2][t % 3]) }, { id: "poor", returns: poor }], mean_block: 1, draws: 1000, seed: 11 });
   assert.deepEqual([zero.reality_check.best.id, zero.best.id, zero.reality_check.p_value, zero.best.nominal_p_value], ["Z", "Z", 0.7882117882117882, 0.5254745254745254]);
 });
+
+test("the Reality Check's best is chosen on means in units of the largest scale, so subnormal means do not tie at 0 (103-8 review 3)", () => {
+  // up = +x at period 0, down = −x at period 1 (or at period 0). In the input's unit, x = 5e-324 gives two means of 0,
+  // and the input order chose the best. Counted with integers (Python, same draws): 548 / 1001 and 629 / 1001.
+  for (const [period, expected] of [[1, 0.5474525474525475], [0, 0.6283716283716284]]) {
+    for (const x of [5e-324, 1e-300, 1]) {
+      const up = { id: "up", returns: [x, ...Array(19).fill(0)] };
+      const down = { id: "down", returns: Array.from({ length: 20 }, (_, t) => (t === period ? -x : 0)) };
+      for (const configurations of [[up, down], [down, up]]) {
+        const result = computeRealityCheck({ configurations, mean_block: 1, draws: 1000, seed: 11 });
+        assert.deepEqual([result.reality_check.best.id, result.reality_check.p_value, result.best.id, result.positive_mean_configurations], ["up", expected, "up", 1],
+          `period ${period}, x ${x}, ${configurations.map((c) => c.id)}`);
+      }
+    }
+  }
+  // Means are compared in the input's unit (rescaled), not per configuration: B's mean of 0.1 beats A's 0.05, although
+  // relative to its largest return (10) it is only 0.01 against A's 0.05.
+  const scales = computeRealityCheck({ configurations: [{ id: "A", returns: [1, ...Array(19).fill(0)] }, { id: "B", returns: [0, 10, -8, ...Array(17).fill(0)] }], mean_block: 1, draws: 200 });
+  assert.equal(scales.reality_check.best.id, "B");
+  close(scales.reality_check.best.mean_difference, 0.1, 1e-15, "B's mean");
+  // A small but real mean, about 1e-7 of the largest difference, is positive; only rounding-level means are 0.
+  const small = computeRealityCheck({ configurations: [{ id: "small", returns: Array.from({ length: 40 }, (_, t) => (t % 2 === 0 ? 0.01 : -0.01) + 1e-9) }, ...series(2, 40, () => -0.003, 6)], mean_block: 1, draws: 200 });
+  assert.deepEqual([small.positive_mean_configurations, small.reality_check.best.id], [1, "small"]);
+  // Means of exactly 0 in decimals compute as about ±1e-17: below 1e-12 of their largest difference they are 0, so the
+  // two mirror configurations tie (the earlier is the best) and neither counts as positive.
+  const minus = Array.from({ length: 21 }, (_, t) => [0.3, -0.1, -0.2][t % 3]); const plus = minus.map((v) => -v);
+  let state = 3;
+  const poor = Array.from({ length: 21 }, () => { state = (state * 48271) % 2147483647; return ((state % 2001) - 1000) / 100000 - 0.05; });
+  for (const [first, second] of [[["minus", minus], ["plus", plus]], [["plus", plus], ["minus", minus]]]) {
+    const result = computeRealityCheck({ configurations: [{ id: first[0], returns: first[1] }, { id: second[0], returns: second[1] }, { id: "poor", returns: poor }], mean_block: 1, draws: 1000, seed: 11 });
+    assert.deepEqual([result.reality_check.best.id, result.positive_mean_configurations, result.reality_check.p_value], [first[0], 0, 1]);
+  }
+});

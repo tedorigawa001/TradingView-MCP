@@ -67,6 +67,10 @@ Methods:
    - SPA: T = max(max_k t_k, 0), over the configurations that differ from the benchmark. The maximum with 0 is part of
      Hansen's definition, and also covers identical configurations, which have no t. Its best, reported as `best`, is
      the configuration with the highest t.
+   - Mean differences are compared in units of the largest scale among the configurations, never in the input's
+     unit, where subnormal means round to 0 (two losses and gains of 5e-324 would tie, and the input order would choose
+     the best). A mean below 1e-12 of its own configuration's largest difference is rounding level and counts as 0, in
+     the comparison and in `positive_mean_configurations`; its t is at most about √n · 3e-12.
    - The best configurations are chosen on rounded values: t to 12 decimal places, mean differences to 12 significant
      digits. Ties that rounding has split by a few ulps therefore go to the earliest configuration. Examples are a
      series and its reverse with a mean block of 1. Two values that straddle a rounding boundary can still differ;
@@ -122,7 +126,8 @@ Methods:
   - `recentred_configurations`: the number moved by the consistent recentring.
 - `best`: the configuration with the highest t among those that differ, with `id`, `mean_difference`,
   `standard_error` ω̂/√n, `t` and `nominal_p_value`.
-- `positive_mean_configurations` and `identical_to_benchmark`: counts.
+- `positive_mean_configurations` and `identical_to_benchmark`: counts. A mean below 1e-12 of its configuration's largest
+  difference is not positive (step 4).
 - `nearly_constant_configurations`: the ids of configurations whose differences vary by at most 1e-6 (see step 2).
 - `top_by_t`: up to 10 configurations that differ, by t, with id, mean difference and t. Ties go to input order.
 - `warnings` and `limitations`.
