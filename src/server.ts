@@ -5671,11 +5671,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: `Record 1-${RESEARCH_TRIALS_BATCH_MAX} trial sets in a local append-only journal: how many configurations one study evaluated, ` +
         "discarded ones included, on which stable series_ids, data_version and UTC interval [from,to). Requires confirm:true. " +
         "count_basis is enumerated, inferred or lower_bound; outcome_seen is pnl, forecast_only or none. " +
-        "reuses names earlier trial sets whose configurations were evaluated again, so checks can subtract them. " +
-        "Stores counts only, never metrics, returns or file paths. Every record is validated and conflict-checked before any write, so a rejected call writes nothing; " +
+        "reuses names the earlier trial sets (on a shared series, tried no later) where the configurations evaluated again were first evaluated, so checks count them once. " +
+        "Stores counts, never metrics, returns or file paths; note is free text the tool cannot check, so keep results and paths out of it. " +
+        "Every record is validated and conflict-checked before any write, so a rejected call writes nothing; series_ids and reuses are stored sorted; " +
         "retries with the same trial_set_id and input are idempotent, conflicts fail. Each result carries prior_trials, the counts recorded before it on its series and interval. " +
         "Not a preregistration, and counts are not independent trials.",
-      inputSchema: {records: researchTrialsBatchSchema, confirm: z.literal(true)},
+      // Strict, so a misspelt or unsupported top-level field is refused rather than ignored before a write.
+      inputSchema: z.object({records: researchTrialsBatchSchema, confirm: z.literal(true)}).strict(),
     },
     async ({records}) => {
       try {
@@ -5690,7 +5692,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     "check_research_trials",
     {
       description: "Count the recorded trial sets that share a series_id with the query and overlap the UTC interval [from,to), across all research IDs and data versions. " +
-        "Returns configurations reported, reused within the matches and net, split by count_basis and outcome_seen, per research ID. " +
+        "Returns the configurations reported; the net count, each match's first-evaluated configurations plus the largest reuse of each trial set outside the matches; " +
+        "and the split by count_basis, outcome_seen and research ID. " +
         "Every total is a lower bound: unrecorded studies are missing, counts are caller reported, and configurations are not independent trials. " +
         "Read-only; never reads data. summary_only:true omits the matching records.",
       inputSchema: z.object({...researchTrialsCheckSchema.shape, summary_only: z.boolean().default(false)

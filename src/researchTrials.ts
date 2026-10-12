@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -21,7 +22,9 @@ export const RESEARCH_TRIALS_LIMITATIONS = [
   "overlap_key_is_caller_supplied_series_ids_and_interval",
   "related_series_and_aliases_are_not_linked",
   "reuses_are_caller_declared",
+  "net_takes_the_largest_reuse_of_each_outside_trial_set",
   "counts_span_all_research_ids_and_data_versions",
+  "note_is_unchecked_free_text",
 ] as const;
 
 const identifier = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
@@ -51,11 +54,12 @@ const requiredFields = {
 const INPUT_KEYS = ["trial_set_id", "research_id", "series_ids", "data_version", "from", "to", "tried_at",
   "configuration_count", "count_basis", "outcome_seen", "configuration_list_sha256", "reuses", "note"] as const;
 
-type TrialFields = { trial_set_id: string; from: string; to: string; configuration_count: number;
+type TrialFields = { trial_set_id: string; from: string; to: string; tried_at: string; configuration_count: number;
   reuses: { trial_set_id: string; configuration_count: number }[] };
 /** The rules one trial set must keep on its own; the references to earlier ones are checked against the journal. */
 const withRules = <T extends z.ZodType<TrialFields>>(schema: T) => schema
   .refine((v) => v.from < v.to, "from must be before to")
+  .refine((v) => v.tried_at > v.from, "tried_at must be after from")
   .refine((v) => new Set(v.reuses.map((r) => r.trial_set_id)).size === v.reuses.length,
     "reuses must name each trial set at most once")
   .refine((v) => v.reuses.every((r) => r.trial_set_id !== v.trial_set_id), "a trial set cannot reuse itself")
@@ -103,14 +107,30 @@ function validateRecord(value: unknown): ResearchTrialRecord {
 
 const sameInput = (record: ResearchTrialRecord, request: ParsedInput) =>
   JSON.stringify(INPUT_KEYS.map((key) => record[key])) === JSON.stringify(INPUT_KEYS.map((key) => request[key]));
+const byId = <T extends { trial_set_id: string }>(a: T, b: T) => (a.trial_set_id < b.trial_set_id ? -1 : a.trial_set_id > b.trial_set_id ? 1 : 0);
+/** Series IDs and reuses are sets: stored sorted, so a retry listing them in another order is the same input. */
+const normalize = (request: ParsedInput): ParsedInput => ({ ...request, series_ids: [...request.series_ids].sort(),
+  reuses: [...request.reuses].sort(byId) });
+/** The configurations a trial set evaluated first; a reuse draws on these and nothing else. */
+const firstEvaluated = (entry: { configuration_count: number; reuses: { configuration_count: number }[] }) =>
+  entry.configuration_count - entry.reuses.reduce((sum, reuse) => sum + reuse.configuration_count, 0);
 
-/** Each reuse names a trial set recorded before, and reuses at most the configurations it holds. */
-function assertReuses(reuses: ParsedInput["reuses"], earlier: ResearchTrialRecord[]): void {
-  for (const reuse of reuses) {
-    const target = earlier.find((entry) => entry.trial_set_id === reuse.trial_set_id);
+/**
+ * Each reuse names a trial set recorded before, on a shared series, tried no later, and takes at most the
+ * configurations that trial set evaluated first. Naming where configurations were first evaluated, rather than the
+ * latest re-evaluation, gives every configuration one origin, which is what the check's net count rests on.
+ */
+function assertReuses(entry: Pick<ResearchTrialRecord, "reuses" | "series_ids" | "tried_at">,
+  earlier: Map<string, ResearchTrialRecord>): void {
+  for (const reuse of entry.reuses) {
+    const target = earlier.get(reuse.trial_set_id);
     if (!target) throw new Error(`reuses names ${reuse.trial_set_id}, which is not recorded before this trial set`);
-    if (reuse.configuration_count > target.configuration_count) {
-      throw new Error(`reuses takes more configurations from ${reuse.trial_set_id} than it holds`);
+    if (!target.series_ids.some((id) => entry.series_ids.includes(id))) {
+      throw new Error(`reuses names ${reuse.trial_set_id}, which shares no series with this trial set`);
+    }
+    if (target.tried_at > entry.tried_at) throw new Error(`reuses names ${reuse.trial_set_id}, which was tried after this trial set`);
+    if (reuse.configuration_count > firstEvaluated(target)) {
+      throw new Error(`reuses takes more configurations from ${reuse.trial_set_id} than it evaluated first`);
     }
   }
 }
@@ -120,7 +140,8 @@ export interface ResearchTrialsAssessment extends ResearchTrialsQuery {
   status: "recorded_trials" | "no_recorded_trials";
   matching_sets: number;
   configurations_reported: number;
-  configurations_reused_within: number;
+  configurations_new_within: number;
+  configurations_reused_from_outside: number;
   configurations_net: number;
   by_count_basis: Record<z.infer<typeof countBasis>, number>;
   by_outcome_seen: Record<z.infer<typeof outcomeSeen>, number>;
@@ -134,17 +155,25 @@ export interface ResearchTrialsAssessment extends ResearchTrialsQuery {
 }
 export type ResearchTrialsSummary = Omit<ResearchTrialsAssessment, "matches" | "truncated"> & { matches_omitted: number };
 
-/** Trial sets sharing a series ID with the query whose interval overlaps [from, to), half-open. */
+/**
+ * Trial sets sharing a series ID with the query whose interval overlaps [from, to), half-open. The net count is each
+ * match's first-evaluated configurations, plus, for each trial set outside the matches that they reuse, the largest
+ * reuse of it: matches reusing one trial set may have taken the same configurations, so the net is a lower bound.
+ */
 function assess(records: ResearchTrialRecord[], query: ResearchTrialsQuery): ResearchTrialsAssessment {
   const matches = records.filter((entry) => entry.series_ids.some((id) => query.series_ids.includes(id))
     && entry.from < query.to && query.from < entry.to);
   const matched = new Set(matches.map((entry) => entry.trial_set_id));
   const sum = (entries: ResearchTrialRecord[]) => entries.reduce((total, entry) => total + entry.configuration_count, 0);
   const reported = sum(matches);
-  // A reuse is subtracted only when the trial set it names is counted here too.
-  const reused = matches.reduce((total, entry) => total + entry.reuses
-    .filter((reuse) => matched.has(reuse.trial_set_id))
-    .reduce((subtotal, reuse) => subtotal + reuse.configuration_count, 0), 0);
+  const firstWithin = matches.reduce((total, entry) => total + firstEvaluated(entry), 0);
+  const largestOutside = new Map<string, number>();
+  for (const entry of matches) for (const reuse of entry.reuses) {
+    if (!matched.has(reuse.trial_set_id)) {
+      largestOutside.set(reuse.trial_set_id, Math.max(largestOutside.get(reuse.trial_set_id) ?? 0, reuse.configuration_count));
+    }
+  }
+  const reusedOutside = [...largestOutside.values()].reduce((total, value) => total + value, 0);
   const byResearch = new Map<string, { sets: number; configurations_reported: number }>();
   for (const entry of matches) {
     const current = byResearch.get(entry.research_id) ?? { sets: 0, configurations_reported: 0 };
@@ -159,8 +188,9 @@ function assess(records: ResearchTrialRecord[], query: ResearchTrialsQuery): Res
     status: matches.length ? "recorded_trials" : "no_recorded_trials",
     matching_sets: matches.length,
     configurations_reported: reported,
-    configurations_reused_within: reused,
-    configurations_net: reported - reused,
+    configurations_new_within: firstWithin,
+    configurations_reused_from_outside: reusedOutside,
+    configurations_net: firstWithin + reusedOutside,
     by_count_basis: { enumerated: sum(matches.filter((e) => e.count_basis === "enumerated")),
       inferred: sum(matches.filter((e) => e.count_basis === "inferred")),
       lower_bound: sum(matches.filter((e) => e.count_basis === "lower_bound")) },
@@ -208,23 +238,25 @@ export class ResearchTrialStore {
   }
 
   private async readUnlocked(now: string): Promise<ResearchTrialRecord[]> {
-    // The shared log accepts missing terminators and blank lines; this journal must not.
+    // The shared log accepts missing terminators and blank lines; this journal must not. An empty file, as a first
+    // append that failed after creating it leaves, is an empty journal.
     try {
-      const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-      if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
-        || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
-        throw new Error("invalid research trials JSONL framing or record size");
+      if ((await lstat(this.filePath)).size > 0) {
+        const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
+        if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
+          || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
+          throw new Error("invalid research trials JSONL framing or record size");
+        }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const records = await this.log.readAllUnlocked();
-    for (const [index, record] of records.entries()) {
-      const earlier = records.slice(0, index);
-      if (earlier.some((entry) => entry.trial_set_id === record.trial_set_id)) {
-        throw new Error("duplicate research trials trial_set_id");
-      }
-      assertReuses(record.reuses, earlier);
+    const earlier = new Map<string, ResearchTrialRecord>();
+    for (const record of records) {
+      if (earlier.has(record.trial_set_id)) throw new Error("duplicate research trials trial_set_id");
+      assertReuses(record, earlier);
+      earlier.set(record.trial_set_id, record);
     }
     if (records.length && records[records.length - 1].recorded_at > now) {
       throw new Error("research trials clock moved backwards");
@@ -240,17 +272,18 @@ export class ResearchTrialStore {
    */
   async recordBatch(input: unknown): Promise<ResearchTrialRecordResult[]> {
     // Parse before queueing to detach the request from caller-owned mutable data.
-    const requests = researchTrialsBatchSchema.parse(input);
+    const requests = researchTrialsBatchSchema.parse(input).map(normalize);
     return this.log.serialize(async () => {
       const now = this.clock().toISOString();
       const records = await this.readUnlocked(now);
       const planned: ResearchTrialRecord[] = [];
       const results: ResearchTrialRecordResult[] = [];
+      const known = new Map(records.map((entry) => [entry.trial_set_id, entry]));
       let retried = false;
       for (const request of requests) {
         // Earlier requests of this call are earlier trial sets in journal order.
         const current = [...records, ...planned];
-        const existing = current.find((entry) => entry.trial_set_id === request.trial_set_id);
+        const existing = known.get(request.trial_set_id);
         if (existing) {
           if (!sameInput(existing, request)) throw new Error("research trials trial_set_id conflicts with its original input");
           retried = true;
@@ -260,10 +293,11 @@ export class ResearchTrialStore {
           continue;
         }
         if (request.tried_at > now) throw new Error("tried_at must not be in the future");
-        assertReuses(request.reuses, current);
+        assertReuses(request, known);
         const record = validateRecord({ ...request, schema_version: "1.0", namespace: RESEARCH_TRIALS_NAMESPACE,
           sequence: current.length + 1, recorded_at: now, first_seen_at: now, observation_date: now.slice(0, 10) });
         planned.push(record);
+        known.set(record.trial_set_id, record);
         results.push({ ...record, idempotent: false, prior_trials: summarizeTrialsAssessment(assess(current, record)) });
       }
       // Nothing is written until every request has passed validation, the conflict check and the append checks.

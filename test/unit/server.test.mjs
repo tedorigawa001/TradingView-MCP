@@ -1091,7 +1091,8 @@ test('research trials record and check through the real MCP store (103-4)', asyn
   const retry=await call('record_research_trials',{records,confirm:true});
   assert.deepEqual([retry.recorded,retry.idempotent],[0,2]);
   const before=await readFile(path,'utf8');
-  for(const args of [{records:[set('c',{metric:1})],confirm:true},{records:[set('a',{configuration_count:11})],confirm:true},
+  // An unknown top-level field is refused too, not dropped before the write.
+  for(const args of [{records:[set('c')],confirm:true,dry_run:true},{records:[set('c',{metric:1})],confirm:true},{records:[set('a',{configuration_count:11})],confirm:true},
     {records:[set('c'),set('d',{tried_at:'2099-01-01T00:00:00.000Z'})],confirm:true},{records:[],confirm:true}]) {
     const r=await client.callTool({name:'record_research_trials',arguments:args});
     assert.equal(r.isError,true,JSON.stringify(args).slice(0,80));
@@ -1099,7 +1100,7 @@ test('research trials record and check through the real MCP store (103-4)', asyn
   assert.equal(await readFile(path,'utf8'),before,'a rejected call writes nothing');
   const q={series_ids:['fx:EURUSD'],from:'2024-01-15T00:00:00.000Z',to:'2024-03-01T00:00:00.000Z'};
   const full=await call('check_research_trials',q);
-  assert.deepEqual([full.configurations_reported,full.configurations_reused_within,full.configurations_net],[14,4,10]);
+  assert.deepEqual([full.configurations_reported,full.configurations_new_within,full.configurations_reused_from_outside,full.configurations_net],[14,10,0,10]);
   assert.equal(full.matches.length,2);
   const brief=await call('check_research_trials',{...q,summary_only:true});
   assert.equal('matches' in brief,false);
