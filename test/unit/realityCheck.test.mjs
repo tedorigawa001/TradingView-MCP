@@ -366,3 +366,18 @@ test("the Reality Check's best is chosen on means in units of the largest scale,
     assert.deepEqual([result.reality_check.best.id, result.positive_mean_configurations, result.reality_check.p_value], [first[0], 0, 1]);
   }
 });
+
+test("the mean takes a second pass, so a nearly constant configuration's bootstrap carries no drift (103-8 review 4)", () => {
+  // "neg" alternates 1e-12 around −1e-3 (nearly constant, far from 0) and has a small ω̂ with a long block. With one
+  // pass, the mean's rounding residue drifted its studentized bootstrap values by about 13 standard errors, and the upper
+  // p-value fell to that of the consistent one. Reference (Python): "good"'s bootstrap means summed with math.fsum and
+  // its ω̂ from Hansen's O(n²) form; "neg"'s from the count of even periods drawn, exactly.
+  let state = 5; const uniform = () => { state = (state * 48271) % 2147483647; return state / 2147483647 - 0.5; };
+  const n = 20_000;
+  const good = Array.from({ length: n }, () => uniform() / 100 + 2 * 0.00289 / Math.sqrt(n));
+  const neg = Array.from({ length: n }, (_, t) => -1e-3 + (t % 2 === 0 ? 1e-12 : -1e-12));
+  const result = computeRealityCheck({ configurations: [{ id: "good", returns: good }, { id: "neg", returns: neg }], mean_block: 1000, draws: 300 });
+  assert.deepEqual(result.nearly_constant_configurations, ["neg"]);
+  close(result.best.t, 1.00426279256054, 1e-10, "good's t");
+  assert.deepEqual(result.spa.p_values, { lower: 0.12956810631229235, consistent: 0.12956810631229235, upper: 0.2591362126245847 });
+});

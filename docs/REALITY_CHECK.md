@@ -59,7 +59,10 @@ Methods:
    - Each configuration is divided by the largest magnitude of its differences first, so proportional inputs give the
      same statistics and p-values at any finite scale.
    - The mean is computed in two passes: the second removes the first's rounding residue. The centred values then
-     sum to 0 to rounding, and the bootstrap means carry no drift.
+     sum to 0 to rounding, and the bootstrap means carry no drift. The residue matters for a nearly constant
+     configuration far from 0 with a small ω̂. With 20,000 periods alternating 1e-12 around −1e-3 and a mean block of
+     1,000, one pass put a drift of about 13 standard errors into its studentized bootstrap values. SPA's upper p-value
+     fell from 0.259 to 0.133.
    - The t of configuration k is t_k = √n d̄_k / ω̂_k.
 4. **Statistics.**
    - Reality Check: V = max_k √n d̄_k, over every configuration (an identical one counts with d̄ = 0). Its best is the
@@ -70,7 +73,8 @@ Methods:
    - Mean differences are compared in units of the largest scale among the configurations, never in the input's
      unit, where subnormal means round to 0 (two losses and gains of 5e-324 would tie, and the input order would choose
      the best). A mean below 1e-12 of its own configuration's largest difference is rounding level and counts as 0, in
-     the comparison and in `positive_mean_configurations`; its t is at most about √n · 3e-12.
+     the comparison and in `positive_mean_configurations`. This judges the mean alone: its t also depends on ω̂,
+     which negatively autocorrelated differences make small, so the share does not bound it.
    - The best configurations are chosen on rounded values: t to 12 decimal places, mean differences to 12 significant
      digits. Ties that rounding has split by a few ulps therefore go to the earliest configuration. Examples are a
      series and its reverse with a mean block of 1. Two values that straddle a rounding boundary can still differ;

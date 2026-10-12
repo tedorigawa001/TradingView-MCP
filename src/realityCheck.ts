@@ -30,7 +30,8 @@ const NEGLIGIBLE_RELATIVE = 1e-6;
 // observed one on paper, and rounding must not decide whether they count.
 const TIE_RELATIVE = 1e-9;
 // A mean difference below this share of its own configuration's largest difference is rounding level: 0 when means
-// are compared or counted as positive (its t is at most about √n · 3e-12).
+// are compared or counted as positive. This judges the mean alone; its t also depends on ω̂, which negatively
+// autocorrelated differences make small, so it is not bounded by this share.
 const ZERO_MEAN_RELATIVE = 1e-12;
 
 export type RealityCheckInput = {
