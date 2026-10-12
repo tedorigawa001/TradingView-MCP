@@ -1,8 +1,7 @@
-import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { readBacktestLedgerFile } from "./backtestLedger.js";
+import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { syncJournalForRetry } from "./fsDurability.js";
 
@@ -238,20 +237,12 @@ export class ResearchTrialStore {
   }
 
   private async readUnlocked(now: string): Promise<ResearchTrialRecord[]> {
-    // The shared log accepts missing terminators and blank lines; this journal must not. An empty regular file, as a
-    // first append that failed after creating it leaves, is an empty journal; anything else (a FIFO also reports size
-    // zero) goes through the framing read, which refuses what is not a regular file without waiting on it.
-    try {
-      const entry = await lstat(this.filePath);
-      if (!(entry.isFile() && entry.size === 0)) {
-        const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-        if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
-          || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
-          throw new Error("invalid research trials JSONL framing or record size");
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // The shared log accepts missing terminators and blank lines; this journal must not. A missing file and an empty
+    // regular file have nothing to check (BACKLOG 102-43); readAllUnlocked still checks the type, owner and mode.
+    const text = await readJournalForFraming(this.filePath);
+    if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
+      || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes))) {
+      throw new Error("invalid research trials JSONL framing or record size");
     }
     const records = await this.log.readAllUnlocked();
     const earlier = new Map<string, ResearchTrialRecord>();
