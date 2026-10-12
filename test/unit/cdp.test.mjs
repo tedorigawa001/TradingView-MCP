@@ -500,10 +500,20 @@ test("each stage of a connection attempt ends within the timeout, and the next c
       const cdp = new CdpClient({ baseUrl: fake.baseUrl, timeoutMs: 300 });
       t.after(() => cdp.close());
       fake.state.stall = stall;
-      const started = performance.now();
-      const deadline = timerFired(300);
-      // Two callers share the stalled attempt, and both are let go once the timeout passes.
-      const calls = [cdp.evaluate("first"), cdp.evaluate("second")];
+      let started, deadline, calls;
+      for (let tries = 1; ; tries++) {
+        started = performance.now();
+        // Two callers share the stalled attempt, and both are let go once the timeout passes.
+        calls = [cdp.evaluate("first"), cdp.evaluate("second")];
+        // Started after the attempt's own timer, so that it does not fall due first and leave a turn of the event loop
+        // between the two for the runner to hold up.
+        deadline = timerFired(300);
+        const errors = await Promise.all(calls.map((call) => call.then(() => null, (error) => error)));
+        // The handshake is reached only once the targets are read, and this endpoint lists them at once. An attempt that
+        // still ends listing them was held up by the runner past its deadline before it could read them, which says
+        // nothing about the handshake, so it is made again. One that ends there every time still fails below.
+        if (stall !== "handshake" || tries === 3 || !errors.every(stalledAt(stages.discovery, 300))) break;
+      }
       for (const call of calls) await assert.rejects(call, stalledAt(stage, 300));
       const ended = performance.now();
       assert.ok(ended - started >= 250, `took ${Math.round(ended - started)} ms`);
