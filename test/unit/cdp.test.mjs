@@ -94,10 +94,13 @@ test("screenshot forwards the clip region with a default scale", async (t) => {
 test("commands time out when the page never responds", async (t) => {
   const mock = await startMockCdp({ onCommand: () => null }); // swallow commands
   t.after(() => mock.close());
-  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 200 });
+  // The timeout also bounds connecting, and a runner short of CPU had 200 ms cut off three times running.
+  const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 300 });
   t.after(() => cdp.close());
 
-  await assert.rejects(() => cdp.evaluate("1"), /timed out after 200ms/);
+  // This endpoint connects at once, so a call that does not get past connecting was cut off by the runner.
+  const attempt = await connectionAttempt(() => [cdp.evaluate("1")], 300, cutOffConnecting(300));
+  await assert.rejects(attempt.calls[0], /timed out after 300ms/);
 });
 
 test("fails clearly when CDP endpoint is unreachable", async (t) => {
@@ -346,7 +349,9 @@ test("refuses a chart target whose debugger socket points off the CDP endpoint",
   const cdp = new CdpClient({ baseUrl: mock.baseUrl, timeoutMs: 500 });
   t.after(() => cdp.close());
 
-  const error = await cdp.evaluate("1").then(() => null, (err) => err);
+  // This endpoint lists its targets at once, so a call cut off listing them never reached the check.
+  const attempt = await connectionAttempt(() => [cdp.evaluate("1")], 500, stalledAt("listing its targets", 500));
+  const error = await attempt.calls[0].then(() => null, (err) => err);
   assert.ok(error instanceof TradingViewNotAvailableError, `expected a refusal, got: ${error}`);
   assert.match(error.message, /webSocketDebuggerUrl points somewhere other than/);
   assert.equal(elsewhereConnections, 0, "the client must not have opened the advertised socket");
@@ -589,9 +594,12 @@ test("a wall clock stepped back does not stretch the deadline", { timeout: 10_00
   t.after(() => cdp.close());
   const now = Date.now;
   t.after(() => { Date.now = now; });
-  // The clock steps back a minute between discovery and the handshake.
+  // The clock steps back a minute between discovery and the handshake. This endpoint lists its targets at once, so an
+  // attempt that ends listing them was cut off by the runner.
   Object.assign(fake.state, { stall: "handshake", onDiscovery: () => { Date.now = () => now() - 60_000; } });
-  await within(2_000, assert.rejects(cdp.evaluate("1"), stalledAt("in the debugger socket handshake", 300)), "the attempt outlived its deadline");
+  const attempt = await within(2_000, connectionAttempt(() => [cdp.evaluate("1")], 300, stalledAt("listing its targets", 300)),
+    "the attempt outlived its deadline");
+  await assert.rejects(attempt.calls[0], stalledAt("in the debugger socket handshake", 300));
 });
 
 test("a timeout that is not a whole number still bounds a connection attempt", { timeout: 10_000 }, async (t) => {
