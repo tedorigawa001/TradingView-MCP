@@ -485,6 +485,12 @@ async function within(ms, promise, what) {
 const stalledAt = (stage, ms) => (error) => error instanceof TradingViewNotAvailableError
   && error.message.includes(`did not finish connecting within ${ms}ms; it stalled ${stage}`);
 
+/**
+ * When a timer of `ms` started now actually fires. A runner short of CPU can hold this process up for most of a second,
+ * and no timer fires through that: one started alongside an attempt is held up as long as the client's own.
+ */
+const timerFired = (ms) => new Promise((resolve) => setTimeout(() => resolve(performance.now()), ms));
+
 test("each stage of a connection attempt ends within the timeout, and the next call connects again", { timeout: 10_000 }, async (t) => {
   const stages = { discovery: "listing its targets", body: "listing its targets", handshake: "in the debugger socket handshake" };
   for (const [stall, stage] of Object.entries(stages)) {
@@ -495,11 +501,17 @@ test("each stage of a connection attempt ends within the timeout, and the next c
       t.after(() => cdp.close());
       fake.state.stall = stall;
       const started = performance.now();
+      const deadline = timerFired(300);
       // Two callers share the stalled attempt, and both are let go once the timeout passes.
       const calls = [cdp.evaluate("first"), cdp.evaluate("second")];
       for (const call of calls) await assert.rejects(call, stalledAt(stage, 300));
-      const elapsed = performance.now() - started;
-      assert.ok(elapsed >= 250 && elapsed < 550, `took ${Math.round(elapsed)} ms`);
+      const ended = performance.now();
+      assert.ok(ended - started >= 250, `took ${Math.round(ended - started)} ms`);
+      // How late the attempt ended is measured from when a 300 ms timer started with it fired, not from 300 ms on the
+      // wall clock: a runner holding the process up overruns that with the client doing nothing wrong, as windows-latest
+      // did by 775 ms. On a runner that keeps up the two are the same, and the bound is the 550 ms it always was.
+      const late = ended - await deadline;
+      assert.ok(late < 250, `ended ${Math.round(late)} ms after a 300 ms timer started with it fired`);
       // The endpoint is named in the advice by its port, not its address.
       await assert.rejects(cdp.evaluate("third"), (error) => error.message.includes(cdpStallRemedy(fake.port)) && !error.message.includes(fake.baseUrl));
       // The client gives up the connection it stalled on rather than leaving it open: the endpoint sees it hang up.
@@ -509,6 +521,11 @@ test("each stage of a connection attempt ends within the timeout, and the next c
         : new Promise((resolve) => { socket.once("end", resolve); socket.once("close", resolve); });
       await within(2_000, Promise.all(fake.state.held.map(hungUp)), "a stalled connection was left open");
       fake.state.stall = null;
+      // The next call makes an attempt of its own. That the failed one was let go is what it shows, not how quickly the
+      // runner connects, so it gets more than 300 ms: windows-latest once took longer than that to reconnect. The field
+      // is private, and is checked first so that renaming it fails here instead of leaving this call at 300 ms.
+      assert.equal(cdp.timeoutMs, 300);
+      cdp.timeoutMs = 5_000;
       assert.deepEqual(await cdp.evaluate("again"), { echo: "again" });
     });
   }
