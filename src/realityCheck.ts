@@ -25,6 +25,10 @@ const ROUNDING_RELATIVE = 1e-9;
 // Variation in the differences at most this share is real but negligible: a t built on it reflects rounding or fee
 // granularity more than a strategy.
 const NEGLIGIBLE_RELATIVE = 1e-6;
+// A null statistic within this share of the observed one (at least 1 for a t; for the Reality Check, of the larger of
+// |V| and the widest bootstrap spread) counts as reaching it. Discrete returns make null statistics equal to the
+// observed one on paper, and rounding must not decide whether they count.
+const TIE_RELATIVE = 1e-9;
 
 export type RealityCheckInput = {
   configurations: Array<{ id: string; returns: number[] }>;
@@ -134,6 +138,8 @@ type Model = {
   id: string;
   identical: boolean;
   scale: number;          // largest magnitude of the differences
+  meanNorm: number;       // mean difference / scale
+  omegaNorm: number;      // ω̂ / scale
   meanDifference: number; // in the input's unit
   omega: number;          // ω̂, in the input's unit
   t: number;              // √n · mean / ω̂
@@ -154,7 +160,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
       returnsScale = Math.max(returnsScale, Math.abs(returns[t]));
     }
     if (scale <= ROUNDING_RELATIVE * returnsScale) {
-      models.push({ id, identical: true, scale: 0, meanDifference: 0, omega: 0, t: 0, prefix: new Float64Array(0) });
+      models.push({ id, identical: true, scale: 0, meanNorm: 0, omegaNorm: 0, meanDifference: 0, omega: 0, t: 0, prefix: new Float64Array(0) });
       continue;
     }
     // Rounding in a difference is proportional to the returns it came from, so its variation is judged against the
@@ -179,7 +185,7 @@ export function computeRealityCheck(input: RealityCheckInput) {
     if (!(omega > 0)) throw new Error(`compute_reality_check lost the variance of configuration "${id}" to the numerical range`);
     const prefix = new Float64Array(n + 1);
     for (let t = 0; t < n; t += 1) prefix[t + 1] = prefix[t] + centred[t];
-    models.push({ id, identical: false, scale, meanDifference: mean * scale, omega: omega * scale, t: (rootN * mean) / omega, prefix });
+    models.push({ id, identical: false, scale, meanNorm: mean, omegaNorm: omega, meanDifference: mean * scale, omega: omega * scale, t: (rootN * mean) / omega, prefix });
   }
   const identicalCount = models.filter((model) => model.identical).length;
   if (constant.length > 0) {
@@ -198,6 +204,16 @@ export function computeRealityCheck(input: RealityCheckInput) {
   for (let k = 1; k < active.length; k += 1) if (ts[k] > ts[best]) best = k;
   const realityStatistic = rootN * models[bestMean].meanDifference;
   const spaStatistic = Math.max(active[best].t, 0);
+  // The bootstrap works in normalised units: t's within each configuration, so a tiny scale cannot round the standard
+  // error to 0 (0/0 would make a statistic NaN); and the Reality Check's in units of the largest scale, which keeps the
+  // configurations comparable.
+  const unit = active.reduce((max, model) => Math.max(max, model.scale), 0);
+  const ratios = active.map((model) => model.scale / unit);
+  const realityCommon = models[bestMean].identical ? 0 : rootN * models[bestMean].meanNorm * (models[bestMean].scale / unit);
+  const spread = active.reduce((max, model, k) => Math.max(max, model.omegaNorm * ratios[k]), 0);
+  const realityTolerance = TIE_RELATIVE * Math.max(Math.abs(realityCommon), spread);
+  const spaTolerance = TIE_RELATIVE * Math.max(1, spaStatistic);
+  const nominalTolerance = TIE_RELATIVE * Math.max(1, Math.abs(active[best].t));
   const threshold = Math.sqrt(2 * Math.log(Math.log(n)));
   // Recentring (Hansen 2005): the bootstrap t of configuration k is z_k/ω̂_k + shift_k. Upper: 0 (every configuration at
   // the boundary of the null). Consistent: t_k when t_k < −√(2 log log n), else 0. Lower: min(t_k, 0).
@@ -225,25 +241,25 @@ export function computeRealityCheck(input: RealityCheckInput) {
     // Identical configurations contribute 0 to the Reality Check's maximum; SPA's maximum with 0 covers them.
     let realityMax = identicalCount > 0 ? 0 : -Infinity; let lowerMax = 0; let consistentMax = 0; let upperMax = 0;
     for (let k = 0; k < active.length; k += 1) {
-      const { prefix, scale, omega } = active[k];
+      const { prefix, omegaNorm } = active[k];
       let sum = 0;
       for (let r = 0; r < runs; r += 1) {
         const from = runStart[r]; const to = from + runLength[r];
         sum += to <= n ? prefix[to] - prefix[from] : prefix[n] - prefix[from] + prefix[to - n];
       }
-      // √n (d̄* − d̄) in the input's unit, and studentized.
-      const z = (sum / n) * rootN * scale;
-      const studentized = z / omega;
-      realityMax = Math.max(realityMax, z);
+      // √n (d̄* − d̄): in units of the largest scale for the Reality Check, and studentized in the configuration's own.
+      const centredMean = (sum / n) * rootN;
+      const studentized = centredMean / omegaNorm;
+      realityMax = Math.max(realityMax, centredMean * ratios[k]);
       upperMax = Math.max(upperMax, studentized);
       consistentMax = Math.max(consistentMax, studentized + shifts[k].consistent);
       lowerMax = Math.max(lowerMax, studentized + shifts[k].lower);
-      if (k === best && studentized >= active[best].t) nominalCount += 1;
+      if (k === best && studentized >= active[best].t - nominalTolerance) nominalCount += 1;
     }
-    if (realityMax >= realityStatistic) realityCount += 1;
-    if (lowerMax >= spaStatistic) lowerCount += 1;
-    if (consistentMax >= spaStatistic) consistentCount += 1;
-    if (upperMax >= spaStatistic) upperCount += 1;
+    if (realityMax >= realityCommon - realityTolerance) realityCount += 1;
+    if (lowerMax >= spaStatistic - spaTolerance) lowerCount += 1;
+    if (consistentMax >= spaStatistic - spaTolerance) consistentCount += 1;
+    if (upperMax >= spaStatistic - spaTolerance) upperCount += 1;
   }
   const pValue = (count: number) => (1 + count) / (1 + draws);
   const monteCarloError = (p: number) => Math.sqrt((p * (1 - p)) / draws);

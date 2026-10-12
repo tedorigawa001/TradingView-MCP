@@ -305,3 +305,31 @@ test("mathematically tied configurations are ranked by input order, not by round
     assert.deepEqual([result.best.id, result.reality_check.best.id, result.top_by_t[0].id], ["forward", "forward", "forward"], `seed ${seed}`);
   }
 });
+
+test("null statistics equal to the observed one on paper count as reaching it at any scale, and tiny scales stay finite (103-8 review 2)", () => {
+  // One profit x at period 0 of 20, mean block 1: a draw reaches the observed statistic exactly when it picks period 0
+  // at least twice. Counted with integers (Python, same draws): p = 270 / 1001 for all five p-values, whatever x is.
+  const one = (x) => computeRealityCheck({ configurations: [{ id: "one", returns: [x, ...Array(19).fill(0)] }], mean_block: 1, draws: 1000, seed: 11 });
+  for (const x of [1, 0.001, 1e-300, 5e-324]) {
+    const result = one(x);
+    assert.deepEqual([result.reality_check.p_value, result.spa.p_values.lower, result.spa.p_values.consistent, result.spa.p_values.upper, result.best.nominal_p_value],
+      Array(5).fill(0.26873126873126874), `x ${x}`);
+  }
+  // Two such configurations with profits x and x/2: the Reality Check's draw reaches V when period 0 is picked twice or
+  // period 1 three times, SPA's when either is picked twice (their t's are equal); the nominal p-value is the first's.
+  for (const x of [1, 1e-300, 1e-322]) {
+    const result = computeRealityCheck({ configurations: [{ id: "a", returns: [x, ...Array(19).fill(0)] }, { id: "b", returns: [0, x / 2, ...Array(18).fill(0)] }], mean_block: 1, draws: 1000, seed: 11 });
+    assert.deepEqual([result.best.id, result.reality_check.p_value, result.spa.p_values.consistent, result.best.nominal_p_value], ["a", 0.33466533466533466, 0.4645354645354645, 0.26873126873126874], `x ${x}`);
+  }
+  // A loss of the smallest subnormal: ω̂ in the input's unit rounds to 0, so the t's are computed in normalised units.
+  // SPA's statistic is 0 and every p-value is 1; the Reality Check's draw reaches V when period 0 is picked at most twice.
+  const tiny = computeRealityCheck({ configurations: [{ id: "tiny", returns: [-5e-324, ...Array(19).fill(0)] }], mean_block: 1, draws: 1000, seed: 11 });
+  assert.deepEqual(tiny.spa.p_values, { lower: 1, consistent: 1, upper: 1 });
+  assert.deepEqual([tiny.reality_check.p_value, tiny.best.nominal_p_value], [0.9270729270729271, 0.9270729270729271]);
+  // A mean of exactly 0 in decimals (0.3, -0.1, -0.2 repeated) computes as about -5e-17: the Reality Check's tolerance
+  // follows the bootstrap's spread, not V alone. Exact rational counts (Python): 789 / 1001 and 526 / 1001.
+  let state = 3;
+  const poor = Array.from({ length: 21 }, () => { state = (state * 48271) % 2147483647; return ((state % 2001) - 1000) / 100000 - 0.05; });
+  const zero = computeRealityCheck({ configurations: [{ id: "Z", returns: Array.from({ length: 21 }, (_, t) => [0.3, -0.1, -0.2][t % 3]) }, { id: "poor", returns: poor }], mean_block: 1, draws: 1000, seed: 11 });
+  assert.deepEqual([zero.reality_check.best.id, zero.best.id, zero.reality_check.p_value, zero.best.nominal_p_value], ["Z", "Z", 0.7882117882117882, 0.5254745254745254]);
+});

@@ -80,6 +80,10 @@ Methods:
    - The last run is cut at n periods.
    - Each run's sum is read from the prefix sums of the centred differences. One draw b gives z_{k,b} = √n (d̄*_{k,b} −
      d̄_k) for every configuration.
+   - The bootstrap works in normalised units. The studentized z_{k,b}/ω̂_k is formed within each configuration's own
+     units, so a tiny scale cannot round ω̂ to 0. (In the input's unit, a loss of 5e-324 has ω̂ = 0, and 0/0 made a
+     statistic NaN.) The Reality Check's z_{k,b} and V are taken in units of the largest scale among the
+     configurations, which keeps them comparable.
 6. **Null distributions.**
    - Reality Check: V*_b = max_k z_{k,b}, not studentized and not recentred.
    - SPA: T*_b = max(0, max_k (z_{k,b} / ω̂_k + s_k)), with Hansen's recentring s_k:
@@ -90,6 +94,15 @@ Methods:
      - lower: s_k = min(t_k, 0). The most liberal.
 7. **P-values** = (1 + the number of draws with a null statistic ≥ the observed one) / (1 + B). This form is never 0 and
    is valid at a finite B. With an observed SPA statistic of 0, every draw reaches it and p = 1.
+   - **Ties.** A null statistic counts as reaching the observed one when it is within 1e-9 of it. The share is taken
+     of the larger of 1 and |T| for SPA and the nominal p-value, and of the larger of |V| and the widest bootstrap
+     spread max_k ω̂_k for the Reality Check (in the units above).
+     - Discrete returns make null statistics equal to the observed one on paper. One profit among 20 periods with a
+       mean block of 1 is an example: a draw reaches the statistic exactly when it picks that period twice.
+     - Rounding must not decide whether such a draw counts. Without the tolerance, scaling that profit from 1 to
+       0.001 moved the SPA p-value from 0.095 to 0.161, against 0.269 counted with integers.
+     - The share is far above the rounding of a bootstrap statistic (about 1e-14 in units of t) and far below any
+       spacing that matters.
    - The best configuration's **nominal p-value** applies the same rule to its own studentized z alone. That is the
      Reality Check's p-value had it been the only configuration tried; with one configuration and t > 0, all five
      p-values coincide. It has no floor at t ≤ 0, where a lone SPA p-value would be 1. The gap between it and the
