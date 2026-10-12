@@ -3,7 +3,7 @@ import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
-import { readBacktestLedgerFile } from "./backtestLedger.js";
+import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
 import {
@@ -317,15 +317,12 @@ export class ResearchPeriodUsageStore {
   }
 
   private async readUnlocked(now: string): Promise<ResearchPeriodUsageRecord[]> {
-    // The shared log accepts missing terminators and blank lines; this ledger must not.
-    try {
-      const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-      if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
-        || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
-        throw new Error("invalid research period usage JSONL framing or record size");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // The shared log accepts missing terminators and blank lines; this ledger must not. A missing file and an empty
+    // regular file hold no records.
+    const text = await readJournalForFraming(this.filePath);
+    if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
+      || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes))) {
+      throw new Error("invalid research period usage JSONL framing or record size");
     }
     const records = await this.log.readAllUnlocked();
     const ids = new Set<string>();

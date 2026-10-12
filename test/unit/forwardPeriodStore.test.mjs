@@ -7,6 +7,7 @@ import { ResearchPeriodUsageStore } from '../../build/researchPeriodUsage.js';
 import { StrategyResearchJournalStore } from '../../build/strategyResearchJournal.js';
 import { AppendOnlyFirstSeenLog } from '../../build/firstSeenStore.js';
 import { FORWARD_PERIOD_LIMITATIONS } from '../../build/forwardPeriod.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 // docs/FORWARD_PERIOD_PLAN.md, step 3: declaring, shortening and the hypothesis lookup in the store.
 const HOUR = 3_600_000, DAY = 24 * HOUR;
@@ -254,6 +255,35 @@ test('the journal fails closed: unavailable, a regressed ledger, a backward cloc
     await assert.rejects(preflight(), code('forward_period_journal_unavailable'));
   } finally { await release(); }
   assert.equal((await store.declareForwardPeriod(declare({ declaration_id: 'd2', series_ids: ['fx:GBPUSD'] }))).idempotent, false);
+});
+
+test('an empty declarations file, as a first append that failed after creating it leaves, holds no declarations (BACKLOG 102-43)', async (t) => {
+  const { store, journal } = await setup(t);
+  await writeFile(journal, '', { mode: 0o600 });
+  const query = { series_id: 'fx:EURUSD', data_version: hash('b'), from: FROM, to: TO };
+  const { status, total } = (await store.check(query)).forward_period_declarations;
+  assert.deepEqual([status, total], ['available', 0]);
+  assert.equal((await store.preflightOos({ ...query, research_id: 'r1' })).status, 'review_required');
+  assert.equal((await store.record(access())).overlapped_forward_period_declarations.status, 'available');
+  await store.declareForwardPeriod(declare());
+  assert.deepEqual((await lines(journal)).map((line) => line.sequence), [1]);
+});
+
+test('a declarations path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { store, journal } = await setup(t);
+    await make(journal);
+    const before = await describePath(journal);
+    const query = { series_id: 'fx:EURUSD', data_version: hash('b'), from: FROM, to: TO };
+    assert.equal(await settle(() => store.check(query), journal), 'rejected', `${name}: check`);
+    assert.equal(await settle(() => store.preflightOos({ ...query, research_id: 'r1' }), journal), 'rejected', `${name}: preflight`);
+    assert.equal(await settle(() => store.declareForwardPeriod(declare()), journal), 'rejected', `${name}: declare`);
+    // A record never fails on the declarations journal (design G5): it reports it unreadable instead.
+    let recorded;
+    assert.equal(await settle(async () => { recorded = await store.record(access()); }, journal), 'resolved', `${name}: record`);
+    assert.deepEqual(recorded.overlapped_forward_period_declarations, { status: 'unavailable', reason: 'journal_unreadable' }, name);
+    assert.deepEqual(await describePath(journal), before, `${name}: left as it was`);
+  }
 });
 
 test('concurrent declares, shortenings, records and checks complete without deadlock (lock order ledger → declarations)', async (t) => {

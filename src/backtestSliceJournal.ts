@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BACKTEST_LEDGER_MAX_BYTES, backtestLedgerSummarySchema, readBacktestLedgerFile, type summarizeBacktestLedger } from "./backtestLedger.js";
+import { BACKTEST_LEDGER_MAX_BYTES, backtestLedgerSummarySchema, readJournalForFraming, type summarizeBacktestLedger } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 
 export const backtestSliceResearchIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
@@ -152,14 +152,9 @@ export class BacktestSliceJournalStore {
     return this.log.serialize(async () => {
       // The generic log tolerates blank lines and missing terminators. For an exposure
       // journal those can indicate a torn append, so reject them before another write.
-      try {
-        const body = await readBacktestLedgerFile(this.filePath, true);
-        const text = body.toString("utf8");
-        if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim())) {
-          throw new Error("invalid slice journal JSONL framing");
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const text = await readJournalForFraming(this.filePath);
+      if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()))) {
+        throw new Error("invalid slice journal JSONL framing");
       }
       const records = await this.log.readAllUnlocked();
       const artifacts = new Map<string, SliceRecord>();

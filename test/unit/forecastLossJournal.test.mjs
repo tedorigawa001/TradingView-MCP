@@ -10,6 +10,7 @@ import { BACKTEST_LEDGER_MAX_BYTES } from '../../build/backtestLedger.js';
 import { normalizeForecastSet } from '../../build/forecastSet.js';
 import { ResearchPeriodUsageStore } from '../../build/researchPeriodUsage.js';
 import { posixModeEnforced } from '../../build/fsDurability.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 const sha = (text) => 'sha256:' + createHash('sha256').update(text).digest('hex');
 const day = (i) => new Date(Date.UTC(2021, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
@@ -169,6 +170,25 @@ test('a torn or edited journal fails closed', async (t) => {
   await assert.rejects(store.record(exposure('r')), /sorted and unique/);
   await writeFile(path, JSON.stringify({ ...record, battery_outcome: 'passed' }) + '\n');
   await assert.rejects(store.record(exposure('r')));
+});
+
+test('an empty journal file, as a first append that failed after creating it leaves, reads as an empty journal (BACKLOG 102-43)', async (t) => {
+  const { path, store } = await setup(t);
+  await writeFile(path, '', { mode: 0o600 });
+  const search = await store.record(exposure('r'));
+  assert.equal(search.sequence, 1);
+  assert.equal(search.this_research_id.calls, 1);
+  assert.deepEqual((await saved(path)).map((r) => r.sequence), [1]);
+});
+
+test('a journal path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { path, store } = await setup(t);
+    await make(path);
+    const before = await describePath(path);
+    assert.equal(await settle(() => store.record(exposure('r')), path), 'rejected', `${name}: record`);
+    assert.deepEqual(await describePath(path), before, `${name}: left as it was`);
+  }
 });
 
 test('prior_overlap summary: per-series counts, source record as its own entry, research-ID union', async (t) => {

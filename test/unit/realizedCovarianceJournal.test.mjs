@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, appendFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, appendFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RealizedCovarianceJournalStore, REALIZED_COVARIANCE_JOURNAL_MAX_BYTES } from '../../build/realizedCovarianceJournal.js';
 import { canonicalizeRules } from '../../build/realizedCovarianceRules.js';
 import { BACKTEST_LEDGER_MAX_BYTES } from '../../build/backtestLedger.js';
 import { posixModeEnforced } from '../../build/fsDurability.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 const RULES = canonicalizeRules({ interval_minutes: 15, time_zone: 'America/New_York', day_end_local: '16:45', day_weekdays: [1, 2, 3, 4, 5],
   max_missing_slots: 6, first_interval: 'from_previous_endpoint', return_unit: 'log_percent' });
@@ -82,4 +83,27 @@ test('records are validated: rules hash, series lengths, dates; a torn journal f
   await appendFile(path, '{"schema_version":"1.0"');
   await assert.rejects(journal.record(exposure({ proxy_set_id: id('5') })), /framing/);
   await assert.rejects(journal.findByProxySetId(id('c')), /framing/);
+});
+
+test('an empty journal file, as a first append that failed after creating it leaves, reads as an empty journal (BACKLOG 102-43)', async (t) => {
+  const { path, journal } = await setup(t);
+  await writeFile(path, '', { mode: 0o600 });
+  const envelope = exposure().envelope;
+  assert.deepEqual(await journal.findByProxySetId(id('c')), []);
+  assert.equal((await journal.search(['fx:EURUSD'], envelope)).calls, 0);
+  const { sequence } = await journal.record(exposure());
+  assert.equal(sequence, 1);
+  assert.deepEqual((await lines(path)).map((r) => r.sequence), [1]);
+});
+
+test('a journal path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { path, journal } = await setup(t);
+    await make(path);
+    const before = await describePath(path);
+    assert.equal(await settle(() => journal.findByProxySetId(id('c')), path), 'rejected', `${name}: find`);
+    assert.equal(await settle(() => journal.search(['fx:EURUSD'], exposure().envelope), path), 'rejected', `${name}: search`);
+    assert.equal(await settle(() => journal.record(exposure()), path), 'rejected', `${name}: record`);
+    assert.deepEqual(await describePath(path), before, `${name}: left as it was`);
+  }
 });

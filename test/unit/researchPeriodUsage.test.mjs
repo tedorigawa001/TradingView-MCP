@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ResearchPeriodUsageStore, researchPeriodUsageRecordSchema, researchPeriodUsageCheckSchema, summarizeAssessment,
   RESEARCH_PERIOD_USAGE_BATCH_MAX } from '../../build/researchPeriodUsage.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 const ts = (day) => `2024-01-${String(day).padStart(2, '0')}T00:00:00.000Z`;
 const version = (char) => 'sha256:' + char.repeat(64);
@@ -300,7 +301,8 @@ test('corrupt framing, metadata, dates, IDs and sequences fail closed on reads a
   await store.record(input());
   const [original] = await saved(path);
   const line = JSON.stringify(original);
-  const corruptions = ['', '\n', '{broken\n', '{}\n', line, '\n' + line + '\n', line + '\n\n',
+  // An empty file is an empty ledger, as a missing one is (BACKLOG 102-43); a lone newline is not.
+  const corruptions = ['\n', '{broken\n', '{}\n', line, '\n' + line + '\n', line + '\n\n',
     line + ' '.repeat(16 * 1024) + '\n'];
   for (const patch of [{ schema_version: '2.0' }, { namespace: 'other' }, { source: 'tool_reported' },
     { origin: 'user_reported' }, { sequence: 2 }, { sequence: 1.5 }, { observation_date: '2024-02-30' },
@@ -456,6 +458,29 @@ test('unsafe file and lock paths fail closed; owner-only permissions are enforce
     await assert.rejects(store.check(query()), /permissions|owner-only/);
     await assert.rejects(store.record(input()), /permissions|owner-only/);
     await chmod(path, 0o600);
+  }
+});
+
+test('an empty ledger file, as a first append that failed after creating it leaves, reads as an empty ledger (BACKLOG 102-43)', async (t) => {
+  const { store, path } = await setup(t);
+  await writeFile(path, '', { mode: 0o600 });
+  assert.equal((await store.check(query())).overlapping_records, 0);
+  assert.equal((await store.preflightOos(query())).usage.overlapping_records, 0);
+  assert.equal((await store.record(input())).sequence, 1);
+  assert.deepEqual((await saved(path)).map((r) => r.sequence), [1]);
+  assert.equal((await store.recordBatch([input({ access_id: 'access:2' })]))[0].sequence, 2);
+});
+
+test('a ledger path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { store, path } = await setup(t);
+    await make(path);
+    const before = await describePath(path);
+    assert.equal(await settle(() => store.check(query()), path), 'rejected', `${name}: check`);
+    assert.equal(await settle(() => store.preflightOos(query()), path), 'rejected', `${name}: preflight`);
+    assert.equal(await settle(() => store.record(input()), path), 'rejected', `${name}: record`);
+    assert.equal(await settle(() => store.recordBatch([input()]), path), 'rejected', `${name}: batch`);
+    assert.deepEqual(await describePath(path), before, `${name}: left as it was`);
   }
 });
 

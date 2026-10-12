@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BACKTEST_LEDGER_MAX_BYTES, readBacktestLedgerFile } from "./backtestLedger.js";
+import { BACKTEST_LEDGER_MAX_BYTES, readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { RISK_BACKTEST_CONTRACT, VAR_LEVELS } from "./riskForecastBacktest.js";
 
@@ -148,15 +148,11 @@ export class RiskBacktestJournalStore {
       { maxFileBytes: RISK_BACKTEST_JOURNAL_MAX_BYTES, maxRecordBytes: 16 * 1024 });
   }
 
-  /** Strict framing, as the other journals; a missing file holds no records. */
+  /** Strict framing, as the other journals; a missing file and an empty regular file hold no records. */
   private async readChecked(): Promise<RiskBacktestJournalRecord[]> {
-    try {
-      const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-      if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim())) {
-        throw new Error("invalid risk backtest journal JSONL framing");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const text = await readJournalForFraming(this.filePath);
+    if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()))) {
+      throw new Error("invalid risk backtest journal JSONL framing");
     }
     return this.log.readAllUnlocked();
   }

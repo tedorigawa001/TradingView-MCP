@@ -1,6 +1,5 @@
-import { lstat } from "node:fs/promises";
 import { z } from "zod";
-import { readBacktestLedgerFile } from "./backtestLedger.js";
+import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 
 /**
@@ -203,21 +202,15 @@ export class ForwardPeriodJournal {
 
   /**
    * Strict framing, as the period usage ledger requires. A missing file holds no declarations, and so does an
-   * empty one, which a crash or a full disk during the first append can leave (N2): removing the file entirely is
-   * no more detectable, so failing closed on it would only block every period usage path until it is deleted.
+   * empty regular file, which a crash or a full disk during the first append can leave (N2): removing the file
+   * entirely is no more detectable, so failing closed on it would only block every period usage path until it is
+   * deleted. Its owner and mode are still checked, as for any other journal file (BACKLOG 102-43).
    */
   async readUnlocked(): Promise<ForwardPeriodLine[]> {
-    try {
-      const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-      if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
-        || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {
-        throw new Error("invalid forward period declarations JSONL framing or record size");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      const info = await lstat(this.filePath).catch(() => null);
-      if (info?.isFile() && info.size === 0) return [];
-      throw error;
+    const text = await readJournalForFraming(this.filePath);
+    if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
+      || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes))) {
+      throw new Error("invalid forward period declarations JSONL framing or record size");
     }
     const lines = await this.log.readAllUnlocked();
     validateJournal(lines);

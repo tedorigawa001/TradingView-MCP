@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BACKTEST_LEDGER_MAX_BYTES, readBacktestLedgerFile } from "./backtestLedger.js";
+import { BACKTEST_LEDGER_MAX_BYTES, readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { REALIZED_COVARIANCE_ALGORITHM } from "./realizedCovariance.js";
 import { hashRules, realizedCovarianceRulesSchema } from "./realizedCovarianceRules.js";
@@ -97,13 +97,9 @@ export class RealizedCovarianceJournalStore {
   }
 
   private async readChecked(): Promise<RealizedCovarianceJournalRecord[]> {
-    try {
-      const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-      if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim())) {
-        throw new Error("invalid realized covariance journal JSONL framing");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const text = await readJournalForFraming(this.filePath);
+    if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()))) {
+      throw new Error("invalid realized covariance journal JSONL framing");
     }
     return this.log.readAllUnlocked();
   }

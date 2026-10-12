@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BACKTEST_LEDGER_MAX_BYTES, readBacktestLedgerFile } from "./backtestLedger.js";
+import { BACKTEST_LEDGER_MAX_BYTES, readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { BATTERY_OUTCOMES, FORECAST_LOSS_CONTRACT, type BatteryOutcome, type ForecastLoss } from "./forecastLossComparison.js";
 import { FORECAST_SET_MAX_DIMENSION, forecastSetComponentHashes, type ForecastSet } from "./forecastSet.js";
@@ -140,13 +140,9 @@ export class ForecastLossJournalStore {
       battery_outcome: exposure.battery_outcome,
     });
     return this.log.serialize(async () => {
-      try {
-        const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
-        if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim())) {
-          throw new Error("invalid forecast loss journal JSONL framing");
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const text = await readJournalForFraming(this.filePath);
+      if (text !== null && (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()))) {
+        throw new Error("invalid forecast loss journal JSONL framing");
       }
       const records = await this.log.readAllUnlocked();
       // One artifact ID names one content: a record that disagrees means the journal or a hash is wrong.

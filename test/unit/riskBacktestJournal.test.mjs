@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { RiskBacktestJournalStore, weightsHash, RISK_BACKTEST_SEARCH_LIMITATIONS } from '../../build/riskBacktestJournal.js';
 import { ResearchPeriodUsageStore } from '../../build/researchPeriodUsage.js';
 import { summarizePriorOverlap } from '../../build/forecastLossJournal.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 // docs/RISK_FORECAST_BACKTEST_PLAN.md, step 5: the search journal, its counts, and the period-usage tool name.
 const hash = (c) => 'sha256:' + c.repeat(64);
@@ -94,6 +95,25 @@ test('reads fail closed: framing, a hand-edited weights hash, outcome and foreca
   await assert.rejects(journal.record(exposure({ weights: [1, 2, 3] })), /lengths differ/);
   await assert.rejects(journal.record(exposure({ outcome: 'not_evaluable' })), /disagree/);
   assert.equal(await readFile(path, 'utf8'), good);
+});
+
+test('an empty journal file, as a first append that failed after creating it leaves, reads as an empty journal (BACKLOG 102-43)', async (t) => {
+  const { path, journal } = await setup(t);
+  await writeFile(path, '', { mode: 0o600 });
+  const { sequence, search } = await journal.record(exposure());
+  assert.equal(sequence, 1);
+  assert.equal(search.this_research_id.calls, 1);
+  assert.deepEqual((await lines(path)).map((r) => r.sequence), [1]);
+});
+
+test('a journal path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { path, journal } = await setup(t);
+    await make(path);
+    const before = await describePath(path);
+    assert.equal(await settle(() => journal.record(exposure()), path), 'rejected', `${name}: record`);
+    assert.deepEqual(await describePath(path), before, `${name}: left as it was`);
+  }
 });
 
 test('period usage: the new tool name and scope, its limitation block, and active declarations in the summary', async (t) => {

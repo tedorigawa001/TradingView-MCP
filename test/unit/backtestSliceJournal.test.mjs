@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { BacktestSliceJournalStore, normalizeBacktestSliceConditions, backtestSliceResearchIdSchema } from '../../build/backtestSliceJournal.js';
 import { BACKTEST_LEDGER_MAX_BYTES, backtestLedgerSchema, summarizeBacktestLedger } from '../../build/backtestLedger.js';
+import { UNSAFE_EMPTY_JOURNAL_PATHS, describePath, settle } from './helpers/unsafe-journal-paths.mjs';
 
 const fixture = JSON.parse(await readFile(new URL('../fixtures/backtest-ledger.json', import.meta.url), 'utf8'));
 const artifactId = (ledger) => 'sha256:' + createHash('sha256').update(JSON.stringify(backtestLedgerSchema.parse(ledger))).digest('hex');
@@ -151,7 +152,8 @@ test('corrupt JSON and invalid persisted semantics fail closed without changing 
   const { path, store } = await setup(t);
   await store.recordSummary('r', summary({ group_by: 'symbol' }));
   const [original] = await records(path);
-  const corruptions = ['{broken\n', '{}\n', '', '\n', JSON.stringify(original), '\n' + JSON.stringify(original) + '\n'];
+  // An empty file is an empty journal, as a missing one is (BACKLOG 102-43); a lone newline is not.
+  const corruptions = ['{broken\n', '{}\n', '\n', JSON.stringify(original), '\n' + JSON.stringify(original) + '\n'];
   for (const mutate of [
     (r) => { r.condition_hash = 'sha256:' + '0'.repeat(64); },
     (r) => { r.conditions.include_symbols = ['USDJPY', 'EURUSD', 'EURUSD']; },
@@ -250,4 +252,23 @@ test('POSIX permissions are enforced and read failures never reset counters', as
   await assert.rejects(store.recordSummary('r', summary()), /permissions/);
   await chmod(directory, 0o700);
   assert.equal((await store.recordSummary('r', summary())).call_count, 2);
+});
+
+test('an empty journal file, as a first append that failed after creating it leaves, reads as an empty journal (BACKLOG 102-43)', async (t) => {
+  const { path, store } = await setup(t);
+  await writeFile(path, '', { mode: 0o600 });
+  const first = await store.recordSummary('r', summary());
+  assert.equal(first.sequence, 1);
+  assert.equal(first.call_count, 1);
+  assert.deepEqual((await records(path)).map((r) => r.sequence), [1]);
+});
+
+test('a journal path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
+    const { path, store } = await setup(t);
+    await make(path);
+    const before = await describePath(path);
+    assert.equal(await settle(() => store.recordSummary('r', summary()), path), 'rejected', `${name}: record`);
+    assert.deepEqual(await describePath(path), before, `${name}: left as it was`);
+  }
 });
