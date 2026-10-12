@@ -162,6 +162,40 @@ export async function syncDirectoryEntry(directory: string, platform = process.p
 }
 
 /**
+ * Syncs an append-only journal file and, where the host allows it, its directory, before an identical retry is
+ * acknowledged: an earlier append may have written its complete bytes and then failed either fsync. Each path must be
+ * a regular file or directory, not a symbolic link, the same one when opened, owned by the current user and, where
+ * POSIX modes are enforced, owner-only. Windows cannot open directories, so there only the file is synced.
+ */
+export async function syncJournalForRetry(filePath: string, label: string, platform = process.platform): Promise<void> {
+  const paths = [{ path: filePath, directory: false }];
+  if (platform !== "win32") paths.push({ path: dirname(filePath), directory: true });
+  for (const { path, directory } of paths) {
+    const before = await lstat(path);
+    if (before.isSymbolicLink() || !(directory ? before.isDirectory() : before.isFile())) {
+      throw new Error(`${label} retry sync path has unsafe file type`);
+    }
+    const handle = await open(path, (directory ? constants.O_RDONLY : constants.O_RDWR)
+      | noFollowFlag(platform) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const stat = await handle.stat();
+      if (!(directory ? stat.isDirectory() : stat.isFile()) || stat.dev !== before.dev || stat.ino !== before.ino) {
+        throw new Error(`${label} retry sync path changed while opening`);
+      }
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new Error(`${label} retry sync path must be owned by the current user`);
+      }
+      if (posixModeEnforced(platform) && (stat.mode & 0o077) !== 0) {
+        throw new Error(`${label} retry sync permissions must be owner-only`);
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+/**
  * Publishes `body` at `destination` as a new file and never replaces one already there (BACKLOG 102-25). The file is
  * written and synced in a fresh directory beside the destination and hard-linked into place, which fails if the name
  * is taken, so the destination never holds a partial file and a run that fails before the link leaves whatever was

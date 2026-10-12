@@ -559,6 +559,10 @@ function makeDeps(overrides = {}) {
       search: async () => { throw new Error('unexpected realized covariance journal read'); },
     },
     riskBacktestJournal: overrides.riskBacktestJournal ?? { record: async () => { throw new Error('unexpected risk backtest journal write'); } },
+    researchTrials: overrides.researchTrials ?? {
+      recordBatch: async () => { throw new Error('unexpected research trials write'); },
+      check: async () => { throw new Error('unexpected research trials read'); },
+    },
     zoneResolver: overrides.zoneResolver,
     cmeGoldOpenInterest: {
       getLatestGoldOpenInterest: async () => ({
@@ -1061,6 +1065,52 @@ test('research period usage detects cross-version access through the real MCP st
   assert.equal(chartCalls,0);
 });
 
+test('research trials record and check through the real MCP store (103-4)', async (t) => {
+  const {ResearchTrialStore}=await import('../../build/researchTrials.js');
+  const {rm,readFile}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'trials-mcp-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const path=join(dir,'trials.jsonl');
+  const client=await connectedClient(makeDeps({researchTrials:new ResearchTrialStore(path)}));
+  t.after(()=>client.close());
+  const set=(id,patch={})=>({trial_set_id:id,research_id:'study-a',series_ids:['fx:EURUSD'],data_version:'sha256:'+'a'.repeat(64),
+    from:'2024-01-01T00:00:00.000Z',to:'2024-02-01T00:00:00.000Z',tried_at:'2025-01-01T00:00:00.000Z',configuration_count:10,
+    count_basis:'enumerated',outcome_seen:'pnl',...patch});
+  const call=async(name,args)=>{
+    const r=await client.callTool({name,arguments:args});
+    assert.ok(!r.isError,r.content[0].text);
+    return JSON.parse(r.content[0].text);
+  };
+  const records=[set('a'),set('b',{configuration_count:4,reuses:[{trial_set_id:'a',configuration_count:4}]})];
+  const denied=await client.callTool({name:'record_research_trials',arguments:{records}});
+  assert.equal(denied.isError,true);
+  await assert.rejects(readFile(path),{code:'ENOENT'});
+  const first=await call('record_research_trials',{records,confirm:true});
+  assert.deepEqual([first.recorded,first.idempotent],[2,0]);
+  assert.equal(first.results[1].prior_trials.configurations_reported,10);
+  const retry=await call('record_research_trials',{records,confirm:true});
+  assert.deepEqual([retry.recorded,retry.idempotent],[0,2]);
+  const before=await readFile(path,'utf8');
+  for(const args of [{records:[set('c',{metric:1})],confirm:true},{records:[set('a',{configuration_count:11})],confirm:true},
+    {records:[set('c'),set('d',{tried_at:'2099-01-01T00:00:00.000Z'})],confirm:true},{records:[],confirm:true}]) {
+    const r=await client.callTool({name:'record_research_trials',arguments:args});
+    assert.equal(r.isError,true,JSON.stringify(args).slice(0,80));
+  }
+  assert.equal(await readFile(path,'utf8'),before,'a rejected call writes nothing');
+  const q={series_ids:['fx:EURUSD'],from:'2024-01-15T00:00:00.000Z',to:'2024-03-01T00:00:00.000Z'};
+  const full=await call('check_research_trials',q);
+  assert.deepEqual([full.configurations_reported,full.configurations_reused_within,full.configurations_net],[14,4,10]);
+  assert.equal(full.matches.length,2);
+  const brief=await call('check_research_trials',{...q,summary_only:true});
+  assert.equal('matches' in brief,false);
+  assert.equal(brief.matches_omitted,2);
+  for(const bad of [{...q,research_id:'study-a'},{...q,from:q.to}]) {
+    const r=await client.callTool({name:'check_research_trials',arguments:bad});
+    assert.equal(r.isError,true);
+  }
+  assert.equal(await readFile(path,'utf8'),before,'a check writes nothing');
+});
+
 test('research period usage batch and summary_only through the real MCP store', async (t) => {
   const {ResearchPeriodUsageStore}=await import('../../build/researchPeriodUsage.js');
   const {rm,readFile}=await import('node:fs/promises');
@@ -1180,7 +1230,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred fifteen expected tools", async () => {
+test("exposes exactly the one hundred seventeen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1192,6 +1242,7 @@ test("exposes exactly the one hundred fifteen expected tools", async () => {
       "backtest_risk_forecast",
       "carry_panel_preflight",
       "check_research_period_usage",
+      "check_research_trials",
       "classify_cross_asset_shocks",
       "compare_forecast_losses",
       "compare_indicator_observations",
@@ -1267,6 +1318,7 @@ test("exposes exactly the one hundred fifteen expected tools", async () => {
       "reconcile_gold_open_interest",
       "record_research_period_usage",
       "record_research_period_usage_batch",
+      "record_research_trials",
       "record_strategy_experiment",
       "register_event_study_hypothesis",
       "register_strategy_hypothesis",

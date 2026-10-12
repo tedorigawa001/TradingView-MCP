@@ -17,6 +17,8 @@ import { ResearchPeriodUsageStore, researchPeriodUsageRecordInputSchema, researc
   researchPeriodUsagePreflightSchema,
   RESEARCH_PERIOD_USAGE_BATCH_MAX, summarizeAssessment } from "./researchPeriodUsage.js";
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
+import { RESEARCH_TRIALS_BATCH_MAX, ResearchTrialStore, researchTrialsBatchSchema, researchTrialsCheckSchema,
+  summarizeTrialsAssessment } from "./researchTrials.js";
 import { BarSeriesStore, type BarSeries } from "./barSeries.js";
 import { ProxySetStore, normalizeProxySet, verifyForecastSetAgainstProxySet } from "./proxySet.js";
 import { REALIZED_COVARIANCE_SEARCH_LIMITATIONS, RealizedCovarianceJournalStore } from "./realizedCovarianceJournal.js";
@@ -228,6 +230,7 @@ export interface ServerDeps {
   proxySets?: Pick<ProxySetStore, "get" | "register">;
   realizedCovarianceJournal?: Pick<RealizedCovarianceJournalStore, "record" | "findByProxySetId" | "search">;
   riskBacktestJournal?: Pick<RiskBacktestJournalStore, "record">;
+  researchTrials?: Pick<ResearchTrialStore, "recordBatch" | "check">;
   /** Test seam for tzdata drift (design H6); production uses the runtime's Intl data. */
   zoneResolver?: ZoneResolver;
   /** Test seam; production uses the process-wide file lock by default. */
@@ -424,7 +427,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5658,6 +5661,46 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const {summary_only, ...query} = request;
         const result = await researchPeriodUsage.check(researchPeriodUsageCheckSchema.parse(query));
         return jsonResult(summary_only ? summarizeAssessment(result) : result);
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "record_research_trials",
+    {
+      description: `Record 1-${RESEARCH_TRIALS_BATCH_MAX} trial sets in a local append-only journal: how many configurations one study evaluated, ` +
+        "discarded ones included, on which stable series_ids, data_version and UTC interval [from,to). Requires confirm:true. " +
+        "count_basis is enumerated, inferred or lower_bound; outcome_seen is pnl, forecast_only or none. " +
+        "reuses names earlier trial sets whose configurations were evaluated again, so checks can subtract them. " +
+        "Stores counts only, never metrics, returns or file paths. Every record is validated and conflict-checked before any write, so a rejected call writes nothing; " +
+        "retries with the same trial_set_id and input are idempotent, conflicts fail. Each result carries prior_trials, the counts recorded before it on its series and interval. " +
+        "Not a preregistration, and counts are not independent trials.",
+      inputSchema: {records: researchTrialsBatchSchema, confirm: z.literal(true)},
+    },
+    async ({records}) => {
+      try {
+        const results = await researchTrials.recordBatch(records);
+        return jsonResult({recorded: results.filter((result) => !result.idempotent).length,
+          idempotent: results.filter((result) => result.idempotent).length, results});
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "check_research_trials",
+    {
+      description: "Count the recorded trial sets that share a series_id with the query and overlap the UTC interval [from,to), across all research IDs and data versions. " +
+        "Returns configurations reported, reused within the matches and net, split by count_basis and outcome_seen, per research ID. " +
+        "Every total is a lower bound: unrecorded studies are missing, counts are caller reported, and configurations are not independent trials. " +
+        "Read-only; never reads data. summary_only:true omits the matching records.",
+      inputSchema: z.object({...researchTrialsCheckSchema.shape, summary_only: z.boolean().default(false)
+        .describe("Return the counts and research IDs without the matching records.")}).strict(),
+    },
+    async (request) => {
+      try {
+        const {summary_only, ...query} = request;
+        const result = await researchTrials.check(researchTrialsCheckSchema.parse(query));
+        return jsonResult(summary_only ? summarizeTrialsAssessment(result) : result);
       } catch (err) { return errorResult(err); }
     },
   );

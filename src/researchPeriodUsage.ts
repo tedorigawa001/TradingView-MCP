@@ -1,11 +1,10 @@
-import { constants, existsSync, realpathSync } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
-import { noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { syncJournalForRetry } from "./fsDurability.js";
 import {
   FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_LISTED_CAP, FORWARD_PERIOD_MAX_LENGTH_MS,
   FORWARD_PERIOD_MIN_LENGTH_MS, FORWARD_PERIOD_NAMESPACE, AccessIndex, ForwardPeriodError, ForwardPeriodJournal, assertClockNotBehind,
@@ -339,31 +338,7 @@ export class ResearchPeriodUsageStore {
   private async syncRetryUnlocked(): Promise<void> {
     // A previous append may have written complete bytes but failed either fsync.
     // Re-establish both durability barriers before acknowledging an identical retry.
-    const paths = [{ path: this.filePath, directory: false }];
-    if (process.platform !== "win32") paths.push({ path: dirname(this.filePath), directory: true });
-    for (const { path, directory } of paths) {
-      const before = await lstat(path);
-      if (before.isSymbolicLink() || !(directory ? before.isDirectory() : before.isFile())) {
-        throw new Error("research period usage retry sync path has unsafe file type");
-      }
-      const handle = await open(path, (directory ? constants.O_RDONLY : constants.O_RDWR)
-        | noFollowFlag() | (constants.O_NONBLOCK ?? 0));
-      try {
-        const stat = await handle.stat();
-        if (!(directory ? stat.isDirectory() : stat.isFile()) || stat.dev !== before.dev || stat.ino !== before.ino) {
-          throw new Error("research period usage retry sync path changed while opening");
-        }
-        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-          throw new Error("research period usage retry sync path must be owned by the current user");
-        }
-        if (posixModeEnforced() && (stat.mode & 0o077) !== 0) {
-          throw new Error("research period usage retry sync permissions must be owner-only");
-        }
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-    }
+    await syncJournalForRetry(this.filePath, "research period usage");
   }
 
   async record(input: unknown): Promise<RecordResult> {
