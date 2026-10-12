@@ -16,7 +16,9 @@ interval. "Configuration" is the unit the study counts in (for example method ×
 the study's own documents should define it. Count every configuration evaluated, the discarded ones included.
 
 Evaluating configurations again (for example the next fold of a walk-forward, or a later data version) is a new record
-that names, in `reuses`, the trial sets where those configurations were first evaluated. A record's configurations
+that names, in `reuses`, the trial sets where those configurations were first evaluated. Record trial sets in the
+order they were tried: a re-evaluation recorded before its origin cannot name it, the journal cannot be corrected,
+and its configurations are counted twice. A record's configurations
 are its reused ones plus the ones it evaluated first: `configuration_count` minus the sum of its `reuses`. Naming the
 origin, not the latest re-evaluation, gives every configuration one origin, which the check's net count rests on.
 
@@ -94,8 +96,8 @@ Every read checks the whole journal and fails closed when a record breaks a rule
 blank line), the record size, the schema, a contiguous `sequence`, a first-seen clock that never moves backwards,
 `recorded_at` equal to `first_seen_at`, `tried_at` not after `recorded_at`, a duplicate `trial_set_id`, or a `reuses`
 entry that breaks the rules above against the records before it. A journal whose last record was saved after the
-store's clock reading is refused. An empty file, as a first append that failed after creating it leaves, is an empty
-journal.
+store's clock reading is refused. An empty regular file, as a first append that failed after creating it leaves, is
+an empty journal; a symbolic link, a FIFO or any other kind of file is refused without being waited on.
 
 ## What the counts are not
 
@@ -107,7 +109,8 @@ journal.
   which count to use. No tool takes these counts automatically.
 - The overlap key is the caller's series identifiers and interval. Different identifiers for related series, aliases
   or derived data are not linked.
-- `reuses` is declared by the caller; undeclared re-evaluations are counted twice.
+- `reuses` is declared by the caller; undeclared re-evaluations, and re-evaluations recorded before their origin, are
+  counted twice.
 - `note` is free text the tool cannot check.
 
 ## Storage

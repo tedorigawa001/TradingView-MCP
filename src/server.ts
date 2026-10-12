@@ -5671,7 +5671,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: `Record 1-${RESEARCH_TRIALS_BATCH_MAX} trial sets in a local append-only journal: how many configurations one study evaluated, ` +
         "discarded ones included, on which stable series_ids, data_version and UTC interval [from,to). Requires confirm:true. " +
         "count_basis is enumerated, inferred or lower_bound; outcome_seen is pnl, forecast_only or none. " +
-        "reuses names the earlier trial sets (on a shared series, tried no later) where the configurations evaluated again were first evaluated, so checks count them once. " +
+        "reuses names the earlier trial sets (on a shared series, tried no later) where the configurations evaluated again were first evaluated, so checks count them once; record trial sets in the order tried. " +
         "Stores counts, never metrics, returns or file paths; note is free text the tool cannot check, so keep results and paths out of it. " +
         "Every record is validated and conflict-checked before any write, so a rejected call writes nothing; series_ids and reuses are stored sorted; " +
         "retries with the same trial_set_id and input are idempotent, conflicts fail. Each result carries prior_trials, the counts recorded before it on its series and interval. " +

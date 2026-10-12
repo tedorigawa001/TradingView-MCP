@@ -238,10 +238,12 @@ export class ResearchTrialStore {
   }
 
   private async readUnlocked(now: string): Promise<ResearchTrialRecord[]> {
-    // The shared log accepts missing terminators and blank lines; this journal must not. An empty file, as a first
-    // append that failed after creating it leaves, is an empty journal.
+    // The shared log accepts missing terminators and blank lines; this journal must not. An empty regular file, as a
+    // first append that failed after creating it leaves, is an empty journal; anything else (a FIFO also reports size
+    // zero) goes through the framing read, which refuses what is not a regular file without waiting on it.
     try {
-      if ((await lstat(this.filePath)).size > 0) {
+      const entry = await lstat(this.filePath);
+      if (!(entry.isFile() && entry.size === 0)) {
         const text = (await readBacktestLedgerFile(this.filePath, true)).toString("utf8");
         if (!text.endsWith("\n") || text.slice(0, -1).split("\n").some((line) => !line.trim()
           || Buffer.byteLength(line, "utf8") + 1 > this.limits.maxRecordBytes)) {

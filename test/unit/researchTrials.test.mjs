@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, appendFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, appendFile, rm, stat, symlink, mkdir, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -308,6 +308,24 @@ test('an empty journal file, as a first append that failed after creating it lea
   assert.equal((await store.check(query())).status, 'no_recorded_trials');
   assert.equal((await store.recordBatch([trial('a')]))[0].sequence, 1);
   assert.equal((await saved(path)).length, 1);
+});
+
+test('a journal path that is not a regular owner-only file is refused without waiting, empty or not', { skip: process.platform === 'win32' }, async (t) => {
+  for (const [name, make] of [
+    // A FIFO reports size zero too; opening it to read would wait for a writer forever.
+    ['fifo', (path) => promisify(execFile)('mkfifo', ['-m', '600', path])],
+    ['symbolic link to an empty file', async (path, directory) => { await writeFile(join(directory, 'target'), '', { mode: 0o600 }); await symlink(join(directory, 'target'), path); }],
+    ['directory', (path) => mkdir(path, { mode: 0o700 })],
+    ['empty file others can read', (path) => writeFile(path, '', { mode: 0o644 })],
+  ]) {
+    const { store, path, directory } = await setup(t);
+    await make(path, directory);
+    if (name === 'empty file others can read') await chmod(path, 0o644);
+    const started = Date.now();
+    await assert.rejects(store.check(query()), undefined, name);
+    await assert.rejects(store.recordBatch([trial('a')]), undefined, name);
+    assert.ok(Date.now() - started < 5000, name);
+  }
 });
 
 for (const failure of ['file', 'directory']) {
