@@ -49,7 +49,8 @@ test('records trial sets with defaults, and a retry with the same input is idemp
   // Defaults given explicitly are the same input.
   const explicit = await store.recordBatch([trial('a', { configuration_list_sha256: null, reuses: [], note: '' })]);
   assert.equal(explicit[0].idempotent, true);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  // Windows has no POSIX modes; the shared log enforces owner-only files where they exist.
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
 test('a retry that changes any one field of its input is refused, and nothing is written', async (t) => {
