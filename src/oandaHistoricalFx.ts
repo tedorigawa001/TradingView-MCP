@@ -14,7 +14,7 @@ const MAX_RECORD_BYTES = 32 * 1024;
 const PAGE_ATTEMPTS = 3;
 const OANDA_HOSTS = { practice: "api-fxpractice.oanda.com", live: "api-fxtrade.oanda.com" } as const;
 
-type OandaEnvironment = keyof typeof OANDA_HOSTS;
+export type OandaEnvironment = keyof typeof OANDA_HOSTS;
 /**
  * The OANDA instruments the collector reads (BACKLOG 103-1): the majors against USD, AUD/NZD and gold. EUR_USD is the
  * default and keeps its files as before.
@@ -53,6 +53,23 @@ export const resolveFxHistoricalManifestPathFor = (instrument: OandaFxInstrument
   if (instrument === "EUR_USD") return path;
   return /\.jsonl$/i.test(path) ? path.replace(/(\.jsonl)$/i, `.${instrument}$1`) : `${path}.${instrument}`;
 };
+
+/** The key a collection's page checkpoints are kept under: the source, environment, instrument and exact requested range. */
+export const fxHistoryCollectionKey = (environment: OandaEnvironment, instrument: OandaFxInstrument, from: string, to: string) =>
+  digest(`oanda_v20|${environment}|${instrument}|M15|M|${from}|${to}`);
+/** The environment a manifest record was collected from, read from the host of its source URL template. */
+export function fxHistoryEnvironmentOf(sourceUrlTemplate: string): OandaEnvironment {
+  const host = /^https:\/\/([^/]+)\//.exec(sourceUrlTemplate)?.[1];
+  const found = (Object.keys(OANDA_HOSTS) as OandaEnvironment[]).find((environment) => OANDA_HOSTS[environment] === host);
+  if (!found) throw new Error("FX history record names an unknown OANDA host");
+  return found;
+}
+/** The configured manifest path is the base of every instrument's files: a directory there is refused for all of them. */
+export async function assertFxHistoryManifestBase() {
+  const base = resolveFxHistoricalManifestPath();
+  const found = await lstat(base).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  if (found?.isDirectory()) throw new Error(`FX history manifest path must name a file, not a directory: ${base}`);
+}
 
 const canonical = (value: string, label: string) => {
   if (!isCanonicalTimestamp(value)) throw new Error(`${label} must be a canonical ISO timestamp`);
@@ -195,10 +212,12 @@ const validateManifest = (value: unknown, instrument: OandaFxInstrument): FxHist
 
 export class FxHistoricalManifestStore {
   private readonly log: AppendOnlyFirstSeenLog<FxHistoricalManifest>;
+  readonly path: string;
   /** Bound to one instrument; without a path it uses that instrument's own manifest (BACKLOG 103-1). */
   constructor(path?: string, readonly instrument: OandaFxInstrument = "EUR_USD") {
     if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
-    this.log = new AppendOnlyFirstSeenLog(path ?? resolveFxHistoricalManifestPathFor(instrument), "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
+    this.path = path ?? resolveFxHistoricalManifestPathFor(instrument);
+    this.log = new AppendOnlyFirstSeenLog(this.path, "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
   async append(manifest: Omit<FxHistoricalManifest, "schema_version" | "sequence" | "series" | "evidence_tier" | "first_seen_at" | "observation_date">) {
     return this.log.serialize(async () => {
@@ -237,10 +256,12 @@ const validateCheckpoint = (value: unknown): FxHistoricalPageCheckpoint => {
 
 export class FxHistoricalCheckpointStore {
   private readonly log: AppendOnlyFirstSeenLog<FxHistoricalPageCheckpoint>;
+  readonly path: string;
   /** Bound to one instrument; without a path it uses the checkpoints beside that instrument's manifest (BACKLOG 103-1). */
   constructor(path?: string, readonly instrument: OandaFxInstrument = "EUR_USD") {
     if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
-    this.log = new AppendOnlyFirstSeenLog(path ?? `${resolveFxHistoricalManifestPathFor(instrument)}.checkpoints`, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
+    this.path = path ?? `${resolveFxHistoricalManifestPathFor(instrument)}.checkpoints`;
+    this.log = new AppendOnlyFirstSeenLog(this.path, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
   async completed(collectionKey: string) { return this.log.serialize(async () => (await this.log.readAllUnlocked()).filter((row) => row.collection_key === collectionKey)); }
   async append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string) {
@@ -280,17 +301,12 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const fetcher = input.fetch ?? ((url, init) => fetch(url, init) as Promise<BoundedResponse & { ok: boolean; status: number }>);
   const sleep = input.sleep ?? defaultSleep;
   const archive = input.archive ?? new FxHistoricalArchive(resolveFxHistoricalArchivePath());
-  if (input.store === undefined || input.checkpoints === undefined) {
-    // The configured manifest path is the base of every instrument's files: a directory there is refused for all of them.
-    const base = resolveFxHistoricalManifestPath();
-    const found = await lstat(base).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
-    if (found?.isDirectory()) throw new Error(`FX history manifest path must name a file, not a directory: ${base}`);
-  }
+  if (input.store === undefined || input.checkpoints === undefined) await assertFxHistoryManifestBase();
   const store = input.store ?? new FxHistoricalManifestStore(undefined, instrument);
   const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore(undefined, instrument);
   const rawSha256: string[] = []; const accumulator = createFxBarAccumulator(); const bars = accumulator.bars;
   // The key always named the instrument, so EUR_USD's checkpoints resume as before.
-  const collectionKey = digest(`oanda_v20|${environment}|${instrument}|M15|M|${from}|${to}`);
+  const collectionKey = fxHistoryCollectionKey(environment, instrument, from, to);
   // The latest checkpoint of each page; a later one replaces an earlier one written before the page was final.
   const completed = new Map((await checkpoints.completed(collectionKey)).sort((left, right) => left.sequence - right.sequence)
     .map((row) => [`${row.requested_from}:${row.requested_to}`, row]));
