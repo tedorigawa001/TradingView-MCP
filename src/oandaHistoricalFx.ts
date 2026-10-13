@@ -95,7 +95,7 @@ async function fetchOandaPage(url: string, token: string, fetcher: OandaHistoric
 }
 
 /** The complete candles of a page, and how many it returned that were not complete yet. */
-function parsePage(body: Uint8Array, instrument: OandaFxInstrument): { bars: FxM15Bar[]; incomplete: number } {
+export function parseOandaCandlePage(body: Uint8Array, instrument: OandaFxInstrument): { bars: FxM15Bar[]; incomplete: number } {
   let data: unknown;
   try { data = JSON.parse(new TextDecoder().decode(body)); } catch { throw new Error("OANDA candle response was not JSON"); }
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid OANDA candle response");
@@ -122,6 +122,56 @@ function parsePage(body: Uint8Array, instrument: OandaFxInstrument): { bars: FxM
     return [{ time, open, high, low, close, volume }];
   });
   return { bars, incomplete };
+}
+
+/**
+ * The pages a collection of [from, to] requests, in order: 4,000 candles each, the last one shorter. Each page's end is
+ * also the next page's start, which OANDA returns again (includeFirst), so the candle there is read twice.
+ */
+export function oandaPageRanges(from: string, to: string): { requestFrom: string; requestTo: string; start: number; end: number }[] {
+  const ranges = []; let cursor = new Date(from).getTime(); const end = new Date(to).getTime();
+  while (cursor < end) {
+    const pageEnd = Math.min(end, cursor + MAX_PAGE_BARS * FIFTEEN_MINUTES);
+    ranges.push({ requestFrom: new Date(cursor).toISOString(), requestTo: new Date(pageEnd).toISOString(), start: cursor, end: pageEnd });
+    cursor = pageEnd;
+  }
+  return ranges;
+}
+
+/**
+ * The bars of a collection, built page by page as the collector builds them (BACKLOG 103-6 rebuilds a recorded one the
+ * same way): each page's complete candles must fall in its range and in time order; a candle read twice is kept once
+ * and must not change; the normalized hash covers the kept bars as a JSON array. finish() also counts the weekday gaps
+ * that are not one candle long.
+ */
+export function createFxBarAccumulator() {
+  const bars: FxM15Bar[] = []; let duplicates = 0;
+  const normalizedHash = createHash("sha256"); normalizedHash.update("["); let firstNormalizedBar = true;
+  return {
+    bars,
+    append(pageBars: FxM15Bar[], cursor: number, pageEnd: number) {
+      for (const bar of pageBars) {
+        const instant = new Date(bar.time).getTime();
+        if (instant < cursor || instant > pageEnd) throw new Error("OANDA candle fell outside its requested page");
+        const prior = bars.at(-1);
+        if (prior && bar.time < prior.time) throw new Error("OANDA candle page was not time ordered");
+        if (prior?.time === bar.time) {
+          duplicates += 1;
+          if (!sameBar(prior, bar)) throw new Error("OANDA returned conflicting values for the same candle timestamp");
+          continue;
+        }
+        if (!firstNormalizedBar) normalizedHash.update(",");
+        normalizedHash.update(JSON.stringify(bar)); firstNormalizedBar = false;
+        bars.push(bar);
+      }
+    },
+    finish() {
+      let irregular = 0;
+      for (let i = 1; i < bars.length; i += 1) { const gap = new Date(bars[i].time).getTime() - new Date(bars[i - 1].time).getTime(); if (gap !== FIFTEEN_MINUTES && new Date(bars[i - 1].time).getUTCDay() !== 5) irregular += 1; }
+      normalizedHash.update("]");
+      return { bars, duplicates, irregular, normalizedSha256: `sha256:${normalizedHash.digest("hex")}` };
+    },
+  };
 }
 
 /**
@@ -159,6 +209,8 @@ export class FxHistoricalManifestStore {
       return { recorded: true, sequence: candidate.sequence };
     });
   }
+  /** Every collection recorded for the instrument, in order. */
+  async records(): Promise<FxHistoricalManifest[]> { return this.log.serialize(async () => this.log.readAllUnlocked()); }
   async coverage() { return this.log.serialize(async () => {
     const rows = await this.log.readAllUnlocked();
     const latest = rows.at(-1);
@@ -236,8 +288,7 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   }
   const store = input.store ?? new FxHistoricalManifestStore(undefined, instrument);
   const checkpoints = input.checkpoints ?? new FxHistoricalCheckpointStore(undefined, instrument);
-  const rawSha256: string[] = []; const bars: FxM15Bar[] = []; let duplicates = 0;
-  const normalizedHash = createHash("sha256"); normalizedHash.update("["); let firstNormalizedBar = true;
+  const rawSha256: string[] = []; const accumulator = createFxBarAccumulator(); const bars = accumulator.bars;
   // The key always named the instrument, so EUR_USD's checkpoints resume as before.
   const collectionKey = digest(`oanda_v20|${environment}|${instrument}|M15|M|${from}|${to}`);
   // The latest checkpoint of each page; a later one replaces an earlier one written before the page was final.
@@ -246,35 +297,16 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const now = () => (input.now ?? (() => new Date()))().toISOString();
   let resumedPages = 0;
   let unfinishedPages = 0;
-  const appendBars = (pageBars: FxM15Bar[], cursor: number, pageEnd: number) => {
-    for (const bar of pageBars) {
-      const instant = new Date(bar.time).getTime();
-      if (instant < cursor || instant > pageEnd) throw new Error("OANDA candle fell outside its requested page");
-      const prior = bars.at(-1);
-      if (prior && bar.time < prior.time) throw new Error("OANDA candle page was not time ordered");
-      if (prior?.time === bar.time) {
-        duplicates += 1;
-        if (!sameBar(prior, bar)) throw new Error("OANDA returned conflicting values for the same candle timestamp");
-        continue;
-      }
-      if (!firstNormalizedBar) normalizedHash.update(",");
-      normalizedHash.update(JSON.stringify(bar)); firstNormalizedBar = false;
-      bars.push(bar);
-    }
-  };
-  let cursor = new Date(from).getTime(); const end = new Date(to).getTime();
-  while (cursor < end) {
-    const pageEnd = Math.min(end, cursor + MAX_PAGE_BARS * FIFTEEN_MINUTES);
-    const requestFrom = new Date(cursor).toISOString(); const requestTo = new Date(pageEnd).toISOString();
+  for (const { requestFrom, requestTo, start: cursor, end: pageEnd } of oandaPageRanges(from, to)) {
     const priorCheckpoint = completed.get(`${requestFrom}:${requestTo}`);
     if (priorCheckpoint) {
       const body = await archive.read(priorCheckpoint.raw_sha256);
       if (body.byteLength !== priorCheckpoint.raw_bytes) throw new Error("FX history checkpoint raw payload size does not match");
-      const page = parsePage(body, instrument);
+      const page = parseOandaCandlePage(body, instrument);
       // Earlier versions checkpointed a page before it was final; such a page is fetched again below, and its
       // checkpoint and raw response are kept.
       if (pageFinal(page, pageEnd, priorCheckpoint.first_seen_at)) {
-        rawSha256.push(priorCheckpoint.raw_sha256); appendBars(page.bars, cursor, pageEnd); resumedPages += 1; cursor = pageEnd; continue;
+        rawSha256.push(priorCheckpoint.raw_sha256); accumulator.append(page.bars, cursor, pageEnd); resumedPages += 1; continue;
       }
     }
     const url = new URL(`https://${host}/v3/accounts/${encodeURIComponent(input.accountId)}/instruments/${instrument}/candles`);
@@ -283,20 +315,16 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
     const response = await fetchOandaPage(url.toString(), input.token, fetcher, sleep);
     const body = await readLimitedResponseBytes(response, MAX_RESPONSE_BYTES, "OANDA candle");
     const hash = digest(body); await archive.store(hash, Buffer.from(body)); rawSha256.push(hash);
-    const page = parsePage(body, instrument);
-    appendBars(page.bars, cursor, pageEnd);
+    const page = parseOandaCandlePage(body, instrument);
+    accumulator.append(page.bars, cursor, pageEnd);
     if (pageFinal(page, pageEnd, readAt)) {
       await checkpoints.append({ collection_key: collectionKey, requested_from: requestFrom, requested_to: requestTo, raw_sha256: hash, raw_bytes: body.byteLength,
         ...(priorCheckpoint ? { supersedes_sequence: priorCheckpoint.sequence } : {}) }, now());
     } else unfinishedPages += 1;
-    cursor = pageEnd;
   }
   if (!bars.length) throw new Error("OANDA returned no complete M15 candles for the requested range");
-  let irregular = 0;
-  for (let i = 1; i < bars.length; i += 1) { const gap = new Date(bars[i].time).getTime() - new Date(bars[i - 1].time).getTime(); if (gap !== FIFTEEN_MINUTES && new Date(bars[i - 1].time).getUTCDay() !== 5) irregular += 1; }
+  const { duplicates, irregular, normalizedSha256 } = accumulator.finish();
   const retrievedAt = now();
-  normalizedHash.update("]");
-  const normalizedSha256 = `sha256:${normalizedHash.digest("hex")}`;
   const sourceUrlTemplate = `https://${host}/v3/accounts/{account}/instruments/${instrument}/candles`;
   const persisted = await store.append({ source_id: "oanda_v20", source_url_template: sourceUrlTemplate, canonical_symbol: canonicalSymbol, instrument, granularity: "M15", price: "M", requested_from: from, requested_to: to, retrieved_at: retrievedAt, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, bar_count: bars.length, first_bar_at: bars[0].time, last_bar_at: bars.at(-1)!.time, duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular });
   return { source: "oanda_v20", evidence_tier: "official_revised_history", canonical_symbol: canonicalSymbol, instrument, bars, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, manifest: persisted, collection_key: collectionKey, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, quality: { duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular } };
