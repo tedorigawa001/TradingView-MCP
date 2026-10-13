@@ -1,5 +1,6 @@
 import { collectOandaM15History, isOandaFxInstrument, OANDA_FX_INSTRUMENTS, type OandaFxInstrument, type OandaHistoricalRequest } from "./oandaHistoricalFx.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
+import { FxHistoricalRunLog } from "./fxHistoryRunLog.js";
 
 export function parseFxHistoryCollectionCliArguments(argv: string[]) {
   let from: string | undefined; let to: string | undefined; let confirmed = false; let environment: "practice" | "live" = "practice";
@@ -25,7 +26,8 @@ export async function runFxHistoryCollection(argv: string[], env: Record<string,
   const accountId = env.OANDA_FX_HISTORY_ACCOUNT_ID;
   const token = env.OANDA_FX_HISTORY_ACCESS_TOKEN;
   if (!accountId || !token) throw new Error("set OANDA_FX_HISTORY_ACCOUNT_ID and OANDA_FX_HISTORY_ACCESS_TOKEN before collecting FX history");
-  const result = await collectOandaM15History({ ...args, ...deps, accountId, token });
+  // Every run through the CLI is recorded in the instrument's run log (BACKLOG 103-5).
+  const result = await collectOandaM15History({ ...args, ...deps, accountId, token, runs: new FxHistoricalRunLog(undefined, args.instrument), runTrigger: "manual" });
   const { bars, ...summary } = result;
   return { ...summary, bars_collected: bars.length };
 }

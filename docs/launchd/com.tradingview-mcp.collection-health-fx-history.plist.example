@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Replace the placeholders before loading: launchd expands neither ~ nor environment variables.
+     /ABSOLUTE/PATH/TO/node is `command -v node`, /ABSOLUTE/PATH/TO/node_modules is `npm root -g`, and YOUR_USERNAME is
+     your macOS user. The check looks at the latest deadline (08:00 New York time, Monday to Friday) before it runs:
+     22:30 JST on Monday to Friday is after that day's deadline in winter and summer. Name the instruments the daily
+     collection runs. -->
+<dict>
+  <key>Label</key>
+  <string>com.tradingview-mcp.collection-health-fx-history</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/node_modules/bushido-tradingview-mcp/build/collectionHealthCli.js</string>
+    <string>--scope</string>
+    <string>fx-history</string>
+    <string>--instrument</string><string>EUR_USD</string>
+    <string>--instrument</string><string>GBP_USD</string>
+    <string>--instrument</string><string>USD_JPY</string>
+    <string>--instrument</string><string>AUD_USD</string>
+    <string>--instrument</string><string>AUD_NZD</string>
+    <string>--notify</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/.tradingview-mcp/collection-health-fx-history.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/.tradingview-mcp/collection-health-fx-history.stderr.log</string>
+</dict>
+</plist>

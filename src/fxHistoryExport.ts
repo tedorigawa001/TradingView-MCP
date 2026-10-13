@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeBarSeries, type BarSeries } from "./barSeries.js";
 import { FxHistoricalArchive, resolveFxHistoricalArchivePath } from "./fxHistoricalArchive.js";
+import { FxHistoricalRunLog, type FxHistoricalRun } from "./fxHistoryRunLog.js";
 import { assertFxHistoryManifestBase, canonicalOandaSymbol, createFxBarAccumulator, FxHistoricalCheckpointStore, FxHistoricalManifestStore, fxHistoryCollectionKey,
   fxHistoryEnvironmentOf, isOandaFxInstrument, OANDA_FX_INSTRUMENTS, oandaPageRanges, parseOandaCandlePage, type FxHistoricalManifest, type FxM15Bar,
   type OandaEnvironment, type OandaFxInstrument } from "./oandaHistoricalFx.js";
@@ -14,17 +15,23 @@ const RUN_SPAN_MS = 60 * 60 * 1000;
 type ManifestReader = { readonly instrument: OandaFxInstrument; readonly path?: string; records(): Promise<FxHistoricalManifest[]> };
 type CheckpointReader = { readonly instrument: OandaFxInstrument; completed(collectionKey: string): Promise<{ requested_from: string; requested_to: string; raw_sha256: string }[]> };
 type RawReader = Pick<FxHistoricalArchive, "read">;
+type RunReader = { readonly instrument: OandaFxInstrument; records(): Promise<FxHistoricalRun[]> };
 /**
- * The manifest, its page checkpoints and the raw archive to read. By default the instrument's own files
- * (TRADINGVIEW_MCP_FX_HISTORY_* paths); a manifest given without its checkpoints, or the other way round, is refused.
+ * The manifest, its page checkpoints, its run log (BACKLOG 103-5) and the raw archive to read. By default the instrument's
+ * own files (TRADINGVIEW_MCP_FX_HISTORY_* paths); the manifest, checkpoints and run log are given all together or not at all.
  */
-export type FxHistoryExportSources = { store?: ManifestReader; checkpoints?: CheckpointReader; archive?: RawReader };
+export type FxHistoryExportSources = { store?: ManifestReader; checkpoints?: CheckpointReader; runs?: RunReader; archive?: RawReader };
 const RECORD_FIELDS = ["sequence", "requested_from", "requested_to", "retrieved_at", "source_url_template", "raw_sha256", "normalized_sha256", "bar_count",
   "first_bar_at", "last_bar_at", "duplicate_timestamps_removed", "non_contiguous_weekday_intervals"] as const;
 export type FxHistoryExportCollection = Pick<FxHistoricalManifest, (typeof RECORD_FIELDS)[number]> & { environment: OandaEnvironment; range_checkpointed: boolean; bars: FxM15Bar[] };
+const RUN_FIELDS = ["sequence", "trigger", "environment", "requested_from", "requested_to", "started_at", "retrieved_at", "raw_sha256", "normalized_sha256",
+  "bar_count", "resumed_pages", "unfinished_pages", "manifest_recorded"] as const;
+export type FxHistoryExportRun = Pick<FxHistoricalRun, (typeof RUN_FIELDS)[number]>;
 export type FxHistoryExport = {
   schema_version: "1.0"; series: "fx_historical_m15_export"; source_id: "oanda_v20"; evidence_tier: "official_revised_history"; instrument: OandaFxInstrument;
   canonical_symbol: string; granularity: "M15"; price: "M"; collections: FxHistoryExportCollection[];
+  /** The recorded runs (BACKLOG 103-5) whose content is one of the exported collections, in run-log order. */
+  runs: FxHistoryExportRun[];
 };
 
 const digest = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -93,14 +100,24 @@ export async function listFxHistoryCollections(input: { instrument: OandaFxInstr
  * Each is rebuilt and verified first (rebuildFxHistoryCollection); the export holds the record's fields, its environment,
  * whether a checkpoint binds its range, and its bars, in manifest order, and nothing that varies between runs, so the
  * same records give the same bytes. maxBars (default 1,000,000) is checked before any raw page is read.
+ * It also holds the runs of the instrument's run log whose content is an exported collection (BACKLOG 103-5): how each
+ * was started, when it started and finished, and what range it requested, which a point-in-time reading needs. The run
+ * log is read before the manifest, so every run read has its content recorded (a collection records its content before
+ * its run); a run whose content the manifest does not hold, or whose bar count differs from that content's, is refused.
  */
 export async function exportFxHistory(input: { instrument: OandaFxInstrument; sequences?: number[]; all?: boolean; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExport> {
-  const { instrument, store, checkpoints, archive } = await readers(input);
+  const { instrument, store, checkpoints, runs, archive } = await readers(input);
   const sequences = input.sequences ?? [];
   if (input.all ? sequences.length > 0 : sequences.length === 0) throw new Error("name the collections to export by sequence, or export all of them");
   if (sequences.some((sequence) => !Number.isSafeInteger(sequence) || sequence < 1)) throw new Error("a collection sequence must be a positive integer");
+  const runRecords = await runs.records();
   const records = await store.records();
   const where = store.path ? ` in ${store.path}` : "";
+  const barsOf = new Map(records.map((record) => [record.normalized_sha256, record.bar_count]));
+  for (const run of runRecords) {
+    if (!barsOf.has(run.normalized_sha256)) throw new Error(`FX history run ${run.sequence} names content the ${instrument} manifest${where} does not hold`);
+    if (barsOf.get(run.normalized_sha256) !== run.bar_count) throw new Error(`FX history run ${run.sequence} records ${run.bar_count} bars for content of ${barsOf.get(run.normalized_sha256)}`);
+  }
   const known = new Set(records.map((record) => record.sequence));
   const missing = sequences.filter((sequence) => !known.has(sequence));
   if (missing.length) throw new Error(`no ${instrument} FX history collection${where} has sequence ${missing.join(", ")}`);
@@ -115,8 +132,11 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
     const fields = Object.fromEntries(RECORD_FIELDS.map((field) => [field, record[field]])) as Pick<FxHistoricalManifest, (typeof RECORD_FIELDS)[number]>;
     collections.push({ ...fields, environment: fxHistoryEnvironmentOf(record.source_url_template), range_checkpointed: rangeCheckpointed, bars });
   }
+  const exported = new Set(chosen.map((record) => record.normalized_sha256));
+  const runRows = runRecords.filter((run) => exported.has(run.normalized_sha256))
+    .map((run) => Object.fromEntries(RUN_FIELDS.map((field) => [field, run[field]])) as FxHistoryExportRun);
   return { schema_version: "1.0", series: "fx_historical_m15_export", source_id: "oanda_v20", evidence_tier: "official_revised_history", instrument,
-    canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", collections };
+    canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", collections, runs: runRows };
 }
 
 /**
@@ -135,11 +155,12 @@ export function fxHistoryBarSeries(collection: Pick<FxHistoryExportCollection, "
 async function readers(input: { instrument: OandaFxInstrument } & FxHistoryExportSources) {
   const { instrument } = input;
   if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
-  if ((input.store === undefined) !== (input.checkpoints === undefined)) throw new Error("pass the FX history manifest store and its checkpoint store together");
-  for (const [label, port] of [["manifest store", input.store], ["checkpoint store", input.checkpoints]] as const) {
+  const given = [input.store, input.checkpoints, input.runs].filter((port) => port !== undefined).length;
+  if (given !== 0 && given !== 3) throw new Error("pass the FX history manifest store, its checkpoint store and its run log together");
+  for (const [label, port] of [["manifest store", input.store], ["checkpoint store", input.checkpoints], ["run log", input.runs]] as const) {
     if (port && port.instrument !== instrument) throw new Error(`the FX history ${label} is for ${port.instrument}, not ${instrument}`);
   }
   if (input.store === undefined) await assertFxHistoryManifestBase();
   return { instrument, store: input.store ?? new FxHistoricalManifestStore(undefined, instrument), checkpoints: input.checkpoints ?? new FxHistoricalCheckpointStore(undefined, instrument),
-    archive: input.archive ?? new FxHistoricalArchive(resolveFxHistoricalArchivePath()) };
+    runs: input.runs ?? new FxHistoricalRunLog(undefined, instrument), archive: input.archive ?? new FxHistoricalArchive(resolveFxHistoricalArchivePath()) };
 }

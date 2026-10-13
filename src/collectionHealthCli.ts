@@ -5,6 +5,8 @@ import { PolicyRateCollectionHeartbeatStore, resolvePolicyRateCollectionHeartbea
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
 import { FirstSeenCollectionHeartbeatStore, resolveFirstSeenCollectionHeartbeatPath } from "./firstSeenCollectionHeartbeat.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
+import { fxDailyCoverage, FxHistoricalRunLog } from "./fxHistoryRunLog.js";
+import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS, type OandaFxInstrument } from "./oandaHistoricalFx.js";
 
 const DEFAULT_MAX_POLICY_RATE_AGE_BUSINESS_DAYS = 0;
 const DEFAULT_MAX_RESEARCH_AGE_HOURS = 2;
@@ -14,6 +16,8 @@ export type CollectionHealthCliArguments = {
   maxPolicyRateAgeBusinessDays: number;
   maxResearchAgeHours: number;
   notify: boolean;
+  /** The instruments the fx-history scope checks; required by that scope and refused by the others. */
+  instruments?: OandaFxInstrument[];
 };
 
 function numericArgument(argv: string[], index: number, name: string): number {
@@ -29,13 +33,14 @@ export function parseCollectionHealthCliArguments(argv: string[]): CollectionHea
   let maxPolicyRateAgeBusinessDays = DEFAULT_MAX_POLICY_RATE_AGE_BUSINESS_DAYS;
   let maxResearchAgeHours = DEFAULT_MAX_RESEARCH_AGE_HOURS;
   let notify = false;
+  const instruments: OandaFxInstrument[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--notify") notify = true;
     else if (argument === "--scope") {
       const value = argv[index + 1];
-      if (value !== "all" && value !== "policy-rate" && value !== "first-seen" && value !== "research") {
-        throw new Error("--scope must be all, policy-rate, first-seen, or research");
+      if (value !== "all" && value !== "policy-rate" && value !== "first-seen" && value !== "research" && value !== "fx-history") {
+        throw new Error("--scope must be all, policy-rate, first-seen, research, or fx-history");
       }
       scope = value;
       index += 1;
@@ -47,11 +52,19 @@ export function parseCollectionHealthCliArguments(argv: string[]): CollectionHea
     } else if (argument === "--max-research-age-hours") {
       maxResearchAgeHours = numericArgument(argv, index, argument);
       index += 1;
+    } else if (argument === "--instrument") {
+      const value = argv[index + 1];
+      if (!isOandaFxInstrument(value)) throw new Error(`--instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
+      if (instruments.includes(value)) throw new Error("each --instrument may be named once");
+      instruments.push(value);
+      index += 1;
     } else {
       throw new Error(`unknown argument: ${argument}`);
     }
   }
-  return { scope, maxPolicyRateAgeBusinessDays, maxResearchAgeHours, notify };
+  if (scope === "fx-history" && !instruments.length) throw new Error("--scope fx-history needs at least one --instrument");
+  if (scope !== "fx-history" && instruments.length) throw new Error("--instrument belongs to --scope fx-history");
+  return { scope, maxPolicyRateAgeBusinessDays, maxResearchAgeHours, notify, ...(instruments.length ? { instruments } : {}) };
 }
 
 export async function sendMacNotification(message: string): Promise<void> {
@@ -84,6 +97,9 @@ export async function checkCollectionHealth(
   const firstSeen = args.scope === "first-seen" || args.scope === "all"
     ? await new FirstSeenCollectionHeartbeatStore(resolveFirstSeenCollectionHeartbeatPath()).coverage(now)
     : emptyFirstSeen;
+  const fxHistory = args.scope === "fx-history"
+    ? await Promise.all((args.instruments ?? []).map(async (instrument) => ({ instrument, ...fxDailyCoverage(await new FxHistoricalRunLog(undefined, instrument).records(), now) })))
+    : undefined;
   return evaluateCollectionHealth({
     scope: args.scope,
     checkedAt: now.toISOString(),
@@ -103,6 +119,7 @@ export async function checkCollectionHealth(
       latest_expected_run_at: firstSeen.latest_expected_run_at,
       latest_run_meets_schedule: firstSeen.latest_run_meets_schedule,
     },
+    ...(fxHistory ? { fxHistory } : {}),
   });
 }
 

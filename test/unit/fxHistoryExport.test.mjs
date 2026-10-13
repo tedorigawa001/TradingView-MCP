@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
 import { FxHistoricalArchive } from "../../build/fxHistoricalArchive.js";
+import { FxHistoricalRunLog } from "../../build/fxHistoryRunLog.js";
 import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, rebuildFxHistoryCollection } from "../../build/fxHistoryExport.js";
 import { runFxHistoryExport } from "../../build/fxHistoryExportCli.js";
 import { normalizeBarSeries } from "../../build/barSeries.js";
@@ -21,14 +22,15 @@ async function setup(instrument = "EUR_USD") {
   const store = new FxHistoricalManifestStore(manifestPath, instrument);
   const checkpoints = new FxHistoricalCheckpointStore(`${manifestPath}.checkpoints`, instrument);
   const archive = new FxHistoricalArchive(join(dir, "raw"));
+  const runs = new FxHistoricalRunLog(`${manifestPath}.runs`, instrument);
   const collect = (from, to, pages, at = "2026-07-31T00:00:00.000Z") => collectOandaM15History({
     accountId: "001-001-1234567-001", token: "a-valid-token-with-enough-length", instrument, from, to,
-    now: () => new Date(at), sleep: async () => {}, archive, store, checkpoints,
+    now: () => new Date(at), sleep: async () => {}, archive, store, checkpoints, runs,
     fetch: async (url) => response(pages(new URL(url).searchParams.get("from"))),
   });
   const reads = { count: 0 };
   const counting = { read: async (hash) => { reads.count += 1; return archive.read(hash); } };
-  return { dir, store, checkpoints, archive, counting, reads, collect, sources: { store, checkpoints, archive } };
+  return { dir, store, checkpoints, runs, archive, counting, reads, collect, sources: { store, checkpoints, runs, archive } };
 }
 // Two pages (42 days is more than 4,000 candles) with the boundary candle in both, nanosecond times, and an unfinished
 // candle at the end that the collection leaves out: the first page is checkpointed, the second is not final.
@@ -82,7 +84,8 @@ test("a record that does not match its raw pages, or whose range no checkpoint b
   await collect(FROM, TO, twoPages);
   const [record] = await store.records();
   const altered = (change) => ({ instrument: "EUR_USD", records: async () => [{ ...record, ...change }] });
-  const run = (change, extra = {}) => exportFxHistory({ instrument: "EUR_USD", sequences: [1], ...sources, store: altered(change), ...extra });
+  const noRuns = { instrument: "EUR_USD", records: async () => [] };   // so the rebuild itself is what refuses
+  const run = (change, extra = {}) => exportFxHistory({ instrument: "EUR_USD", sequences: [1], ...sources, store: altered(change), runs: noRuns, ...extra });
   for (const [change, pattern] of [
     [{ normalized_sha256: sha("other") }, /rebuilt normalized_sha256 does not match/],
     [{ bar_count: 5 }, /rebuilt bar_count does not match/],
@@ -100,6 +103,8 @@ test("a record that does not match its raw pages, or whose range no checkpoint b
     [{ source_url_template: "https://example.invalid/v3/accounts/{account}/instruments/EUR_USD/candles" }, /unknown OANDA host/],
   ]) await assert.rejects(() => run(change), pattern, JSON.stringify(change));
   // An archive that hands back other bytes than the hash names, and one that has lost a page.
+  // With the run log, a record whose hash changed leaves the recorded run without its content.
+  await assert.rejects(() => exportFxHistory({ instrument: "EUR_USD", sequences: [1], ...sources, store: altered({ normalized_sha256: sha("other") }) }), /run 1 names content/);
   await assert.rejects(() => run({}, { archive: { read: async () => Buffer.from(JSON.stringify({ candles: [] })) } }), /raw page 1 does not match its hash/);
   await assert.rejects(() => run({}, { archive: { read: async (hash) => { if (hash === record.raw_sha256[1]) throw new Error("ENOENT"); return sources.archive.read(hash); } } }),
     /collection 1, raw page 2: ENOENT/);
@@ -124,7 +129,7 @@ test("a collection whose pages could all still have been forming exports without
 });
 
 test("collections are chosen by sequence or all, for the instrument of the stores, within the size limit", async (t) => {
-  const { store, checkpoints, sources, collect } = await setup("USD_JPY");
+  const { store, checkpoints, runs, sources, collect } = await setup("USD_JPY");
   const flat = (time, c) => ({ complete: true, volume: 5, time, mid: { o: c, h: c, l: c, c } });
   const yen = (start) => [flat(start, "150.10"), flat(new Date(new Date(start).getTime() + 900_000).toISOString(), "150.12")];
   await collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", yen);
@@ -132,22 +137,35 @@ test("collections are chosen by sequence or all, for the instrument of the store
   const listed = await listFxHistoryCollections({ instrument: "USD_JPY", ...sources });
   assert.equal(listed.manifest_path, store.path);
   assert.deepEqual(listed.collections.map((row) => [row.sequence, row.pages, row.bar_count, row.environment]), [[1, 1, 2, "practice"], [2, 1, 2, "practice"]]);
+  await collect("2026-03-03T00:00:00.000Z", "2026-03-03T00:30:00.000Z", yen, "2026-08-01T00:00:00.000Z");   // the same content again, later
   const both = await exportFxHistory({ instrument: "USD_JPY", sequences: [2, 1], ...sources });
   assert.deepEqual(both.collections.map((c) => c.sequence), [1, 2], "manifest order");
+  assert.deepEqual(both.runs.map((run) => [run.sequence, run.trigger, run.retrieved_at, run.manifest_recorded, run.normalized_sha256 === both.collections[1].normalized_sha256]),
+    [[1, "manual", "2026-07-31T00:00:00.000Z", true, false], [2, "manual", "2026-07-31T00:00:00.000Z", true, true], [3, "manual", "2026-08-01T00:00:00.000Z", false, true]]);
+  assert.deepEqual(Object.keys(both.runs[0]), ["sequence", "trigger", "environment", "requested_from", "requested_to", "started_at", "retrieved_at", "raw_sha256",
+    "normalized_sha256", "bar_count", "resumed_pages", "unfinished_pages", "manifest_recorded"]);
+  assert.deepEqual((await exportFxHistory({ instrument: "USD_JPY", sequences: [1], ...sources })).runs.map((run) => run.sequence), [1]);
+  // A run whose content the manifest does not hold, or whose bar count differs from it, is refused.
+  const [firstRun] = await runs.records();
+  const oneRun = (change) => ({ instrument: "USD_JPY", records: async () => [{ ...firstRun, ...change }] });
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, ...sources, runs: oneRun({ normalized_sha256: sha("gone") }) }), /run 1 names content the USD_JPY manifest in .* does not hold/);
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, ...sources, runs: oneRun({ bar_count: 3 }) }), /run 1 records 3 bars for content of 2/);
   assert.equal(both.canonical_symbol, "OANDA:USDJPY");
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", sequences: [3], ...sources }), /no USD_JPY FX history collection in .*manifest\.USD_JPY\.jsonl has sequence 3/);
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", sequences: [1], all: true, ...sources }), /by sequence, or export all/);
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", ...sources }), /by sequence, or export all/);
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", sequences: [0], ...sources }), /positive integer/);
   await assert.rejects(() => exportFxHistory({ instrument: "EUR_USD", all: true, ...sources }), /manifest store is for USD_JPY, not EUR_USD/);
-  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, store, archive: sources.archive }), /manifest store and its checkpoint store together/);
-  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, archive: sources.archive }), /manifest store and its checkpoint store together/);
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, store, checkpoints, archive: sources.archive }), /checkpoint store and its run log together/);
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, runs, archive: sources.archive }), /checkpoint store and its run log together/);
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, ...sources, runs: { instrument: "EUR_USD", records: async () => [] } }), /run log is for EUR_USD, not USD_JPY/);
   const [record] = await store.records();
   let reads = 0;
-  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] },
+  const emptyRuns = { instrument: "USD_JPY", records: async () => [] };
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, runs: emptyRuns, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] },
     archive: { read: async () => { reads += 1; return Buffer.from(""); } } }), /more than 1000000/);
   assert.equal(reads, 0, "the size is checked before any page is read");
-  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, store: { instrument: "USD_JPY", records: async () => [] }, archive: sources.archive }),
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, runs: emptyRuns, store: { instrument: "USD_JPY", records: async () => [] }, archive: sources.archive }),
     /no USD_JPY FX history collection is recorded/);
   // A directory at the configured manifest path is refused for every instrument, as the collector refuses it.
   const directory = await mkdtemp(join(tmpdir(), "fx-export-dir-")); await mkdir(join(directory, "base"));

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AppendOnlyFirstSeenLog, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { assertExpectedResponseHost, readLimitedResponseBytes, type BoundedResponse } from "./boundedResponse.js";
 import { FxHistoricalArchive, resolveFxHistoricalArchivePath } from "./fxHistoricalArchive.js";
+import type { FxHistoricalRunLogPort } from "./fxHistoryRunLog.js";
 
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 const MAX_PAGE_BARS = 4_000;
@@ -35,7 +36,12 @@ export type FxHistoricalManifest = {
 export type OandaHistoricalFetch = (url: string, init: RequestInit) => Promise<BoundedResponse & { ok: boolean; status: number }>;
 type FxHistoricalCheckpointPort = { readonly instrument?: OandaFxInstrument; completed(collectionKey: string): Promise<FxHistoricalPageCheckpoint[]>; append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string): Promise<{ recorded: boolean; sequence: number | null }> };
 type FxHistoricalManifestPort = Pick<FxHistoricalManifestStore, "append"> & { readonly instrument?: OandaFxInstrument };
-export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; instrument?: OandaFxInstrument; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestPort; checkpoints?: FxHistoricalCheckpointPort };
+/**
+ * runs, when given, records the run once it is recorded in the manifest, also when the manifest already held its content,
+ * as started by runTrigger ("manual" unless said otherwise); the run log is read, and a clock behind its latest run
+ * refused, before anything is fetched (BACKLOG 103-5).
+ */
+export type OandaHistoricalRequest = { accountId: string; token: string; from: string; to: string; instrument?: OandaFxInstrument; environment?: OandaEnvironment; fetch?: OandaHistoricalFetch; now?: () => Date; sleep?: (milliseconds: number) => Promise<void>; archive?: FxHistoricalArchive; store?: FxHistoricalManifestPort; checkpoints?: FxHistoricalCheckpointPort; runs?: FxHistoricalRunLogPort; runTrigger?: "daily" | "manual" };
 
 export const resolveFxHistoricalManifestPath = (configuredPath = process.env.TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH): string =>
   configuredPath?.trim() || join(homedir(), ".tradingview-mcp", "fx-history-m15-manifest.jsonl");
@@ -224,6 +230,9 @@ export class FxHistoricalManifestStore {
       const records = await this.log.readAllUnlocked();
       const candidate = validateManifest({ ...manifest, schema_version: "1.0", sequence: records.length + 1, series: "fx_historical_m15", evidence_tier: "official_revised_history", first_seen_at: manifest.retrieved_at, observation_date: manifest.retrieved_at.slice(0, 10) }, this.instrument);
       if (records.some((record) => record.normalized_sha256 === candidate.normalized_sha256)) return { recorded: false, sequence: null };
+      // A record stamped before the latest one (a clock moved back, or a run that lost the race to the lock) is refused and
+      // nothing is written; written, it would make every later read fail (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, [candidate]);
       await this.log.appendUnlocked(candidate);
       return { recorded: true, sequence: candidate.sequence };
     });
@@ -278,6 +287,7 @@ export class FxHistoricalCheckpointStore {
       // Otherwise a checkpoint must name the page's latest one as the one it replaces, or be the page's first.
       if (row.supersedes_sequence !== latest?.sequence) throw new Error("FX history page checkpoint conflicts with a prior raw response");
       const candidate = validateCheckpoint({ ...row, schema_version: "1.0", sequence: records.length + 1, series: "fx_historical_m15_page_checkpoint", first_seen_at: now, observation_date: now.slice(0, 10) });
+      await this.log.assertAppendableUnlocked(records, [candidate]);   // as the manifest (BACKLOG 102-36)
       await this.log.appendUnlocked(candidate);
       return { recorded: true, sequence: candidate.sequence };
     });
@@ -292,7 +302,7 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
   const canonicalSymbol = canonicalOandaSymbol(instrument);
   // A manifest or checkpoint store given for another instrument is refused before anything is fetched or written.
-  for (const [label, port] of [["manifest store", input.store], ["checkpoint store", input.checkpoints]] as const) {
+  for (const [label, port] of [["manifest store", input.store], ["checkpoint store", input.checkpoints], ["run log", input.runs]] as const) {
     if (port?.instrument !== undefined && port.instrument !== instrument) throw new Error(`the FX history ${label} is for ${port.instrument}, not ${instrument}`);
   }
   if (!/^[A-Za-z0-9_-]{3,128}$/.test(input.accountId) || input.token.trim().length < 16) throw new Error("OANDA credentials are missing or malformed");
@@ -311,6 +321,8 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const completed = new Map((await checkpoints.completed(collectionKey)).sort((left, right) => left.sequence - right.sequence)
     .map((row) => [`${row.requested_from}:${row.requested_to}`, row]));
   const now = () => (input.now ?? (() => new Date()))().toISOString();
+  const startedAt = input.runs ? now() : null;
+  if (input.runs) await input.runs.prepare(startedAt!);
   let resumedPages = 0;
   let unfinishedPages = 0;
   for (const { requestFrom, requestTo, start: cursor, end: pageEnd } of oandaPageRanges(from, to)) {
@@ -343,7 +355,9 @@ export async function collectOandaM15History(input: OandaHistoricalRequest) {
   const retrievedAt = now();
   const sourceUrlTemplate = `https://${host}/v3/accounts/{account}/instruments/${instrument}/candles`;
   const persisted = await store.append({ source_id: "oanda_v20", source_url_template: sourceUrlTemplate, canonical_symbol: canonicalSymbol, instrument, granularity: "M15", price: "M", requested_from: from, requested_to: to, retrieved_at: retrievedAt, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, bar_count: bars.length, first_bar_at: bars[0].time, last_bar_at: bars.at(-1)!.time, duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular });
-  return { source: "oanda_v20", evidence_tier: "official_revised_history", canonical_symbol: canonicalSymbol, instrument, bars, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, manifest: persisted, collection_key: collectionKey, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, quality: { duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular } };
+  const run = input.runs ? await input.runs.append({ trigger: input.runTrigger ?? "manual", environment, requested_from: from, requested_to: to, started_at: startedAt!, retrieved_at: retrievedAt, raw_sha256: rawSha256, normalized_sha256: normalizedSha256,
+    bar_count: bars.length, first_bar_at: bars[0].time, last_bar_at: bars.at(-1)!.time, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, manifest_recorded: persisted.recorded }) : null;
+  return { source: "oanda_v20", evidence_tier: "official_revised_history", canonical_symbol: canonicalSymbol, instrument, bars, raw_sha256: rawSha256, normalized_sha256: normalizedSha256, manifest: persisted, run, collection_key: collectionKey, resumed_pages: resumedPages, unfinished_pages: unfinishedPages, quality: { duplicate_timestamps_removed: duplicates, non_contiguous_weekday_intervals: irregular } };
 }
 
 /** The EUR_USD collection, as before BACKLOG 103-1. */

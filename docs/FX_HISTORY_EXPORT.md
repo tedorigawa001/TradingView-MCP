@@ -29,12 +29,15 @@ response per page, in order. The export:
    forming, such as a range ending just before it was collected, may have no checkpoint; it is exported with
    `range_checkpointed: false`.
 
-Any difference refuses the whole export. The manifest and its checkpoints are read together: by default both are the
+Any difference refuses the whole export. The manifest, its checkpoints and its run log are read together: by default all three are the
 instrument's own files, and a directory at `TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH` is refused as the collector refuses
 it. Errors name the manifest read, and a raw page that cannot be read is named by collection and page.
 
-Identical reruns of a collection are not recorded again (the manifest keeps one record per normalized hash), so the
-export lists each distinct content once, at the time it was first recorded.
+Identical reruns of a collection are not recorded again in the manifest (it keeps one record per normalized hash), so
+the export lists each distinct content once, at the time it was first recorded. The run log (BACKLOG 103-5,
+[daily FX history collection](FX_HISTORY_DAILY.md)) records every run; the export carries those runs (below). The run log
+is read before the manifest, so every run read has its content recorded (a collection records its content before its
+run). A run whose content the manifest does not hold, or whose bar count differs from that content's, refuses the export.
 
 ## Usage
 
@@ -69,12 +72,19 @@ file and each collection's sequence, bar count and normalized hash.
     "source_url_template": "https://api-fxpractice.oanda.com/v3/accounts/{account}/instruments/EUR_USD/candles", "raw_sha256": ["sha256:..."],
     "normalized_sha256": "sha256:...", "bar_count": 4, "first_bar_at": "...", "last_bar_at": "...",
     "duplicate_timestamps_removed": 1, "non_contiguous_weekday_intervals": 0, "environment": "practice", "range_checkpointed": true,
-    "bars": [{ "time": "2026-01-01T00:00:00.000Z", "open": 1.1, "high": 1.1004, "low": 1.0998, "close": 1.1002, "volume": 17 }] }] }
+    "bars": [{ "time": "2026-01-01T00:00:00.000Z", "open": 1.1, "high": 1.1004, "low": 1.0998, "close": 1.1002, "volume": 17 }] }],
+  "runs": [{ "sequence": 1, "trigger": "manual", "environment": "practice", "requested_from": "...", "requested_to": "...", "started_at": "...",
+    "retrieved_at": "...", "raw_sha256": ["sha256:..."], "normalized_sha256": "sha256:...", "bar_count": 4, "resumed_pages": 0,
+    "unfinished_pages": 1, "manifest_recorded": true }] }
 ```
+
+`runs` holds the instrument's recorded runs whose content is one of the exported collections, in run-log order. A run's
+bars are the collection with its `normalized_sha256`; its own range, `trigger` (`daily` for the daily schedule, `manual`
+otherwise) and finishing time are what a point-in-time reading uses. An instrument without a run log exports no runs.
 
 The bars are exactly the collector's normalized bars (OANDA midpoint candles, the time of each candle's open in UTC with
 milliseconds): their JSON array hashes to `normalized_sha256`. Nothing in the document depends on when the export ran,
-so the same records always give the same bytes.
+so the same records always give the same bytes (a later run of the same content adds a run).
 
 `--format bar-series` writes one collection, named by one `--sequence`, as the input of
 `tradingview-mcp-import-bar-series`: `open_time` in Unix seconds, `close`, `interval_minutes` 15, `source_id` `oanda_v20`

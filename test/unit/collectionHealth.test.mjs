@@ -163,12 +163,25 @@ test("launchd health monitors are repository-location independent and cover week
 
   assert.doesNotMatch(firstSeenCollector, /WorkingDirectory/);
   assert.match(firstSeenCollector, /node_modules\/bushido-tradingview-mcp\/build\/collectionCli\.js/);
+
+  // BACKLOG 103-5: the daily FX history run, twice on Monday to Friday mornings JST, and its check after each deadline.
+  const fxDaily = await readFile(new URL("../../docs/launchd/com.tradingview-mcp.fx-history-daily-collection.plist.example", import.meta.url), "utf8");
+  const fxHealth = await readFile(new URL("../../docs/launchd/com.tradingview-mcp.collection-health-fx-history.plist.example", import.meta.url), "utf8");
+  assert.doesNotMatch(fxDaily, /WorkingDirectory|OANDA_FX_HISTORY_ACCESS_TOKEN<\/key>/);
+  assert.match(fxDaily, /node_modules\/bushido-tradingview-mcp\/build\/fxHistoryDailyCli\.js/);
+  assert.match(fxDaily, /<string>--confirm-external-fetch<\/string>/);
+  assert.equal((fxDaily.match(/<key>Weekday<\/key>/g) ?? []).length, 10);
+  assert.doesNotMatch(fxHealth, /WorkingDirectory/);
+  assert.match(fxHealth, /<string>--scope<\/string>\s*<string>fx-history<\/string>/);
+  assert.equal((fxHealth.match(/<key>Weekday<\/key>/g) ?? []).length, 5);
+  const instruments = (text) => [...text.matchAll(/<string>--instrument<\/string><string>(\w+)<\/string>/g)].map((match) => match[1]);
+  assert.deepEqual(instruments(fxHealth), instruments(fxDaily));
 });
 
 test("launchd examples hold placeholders, not a real home directory, Node install or checkout", async () => {
   const directory = new URL("../../docs/launchd/", import.meta.url);
   const names = (await readdir(directory)).filter((name) => name.endsWith(".plist.example"));
-  assert.equal(names.length, 9);
+  assert.equal(names.length, 11);
   for (const name of names) {
     const text = await readFile(new URL(name, directory), "utf8");
     const paths = [...text.matchAll(/<string>(\/[^<]*)<\/string>/g)].map((match) => match[1]);
