@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
@@ -37,6 +39,9 @@ export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSo
     if (!seriesId || !TIERS.includes(tier as (typeof TIERS)[number])) throw new Error(`--format bar-series requires --series-id and --evidence-tier (${TIERS.join(", ")})`);
     if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(seriesId) || ENTRY_RESERVED_SERIES_PREFIXES.some((prefix) => seriesId.startsWith(prefix))) throw new Error("--series-id must be 1-120 of A-Z a-z 0-9 _ . : - and must not use a reserved prefix");
   } else if (seriesId || tier) throw new Error("--series-id and --evidence-tier belong to --format bar-series");
+  const parent = await lstat(dirname(values.output)).catch(() => null);
+  if (!parent?.isDirectory()) throw new Error(`--output must be in an existing directory: ${values.output}`);
+  if ((await lstat(values.output).catch(() => null))?.isDirectory()) throw new Error(`--output names a directory: ${values.output}`);
   const exported = await exportFxHistory({ instrument, sequences, all: values.all === true, ...(format === "bar-series" ? { maxBars: BAR_SERIES_MAX_BARS } : {}), ...deps });
   const body = format === "bar-series"
     ? `${JSON.stringify(fxHistoryBarSeries(exported.collections[0], { seriesId: seriesId!, evidenceTier: tier as (typeof TIERS)[number] }))}\n`

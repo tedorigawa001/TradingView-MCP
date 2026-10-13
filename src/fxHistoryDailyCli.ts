@@ -24,8 +24,8 @@ export function parseFxHistoryDailyArguments(argv: string[]) {
 
 /**
  * One daily run (BACKLOG 103-5): the range from the start of the session `--lookback-weekdays` weekdays back (10 by
- * default) to the last 15-minute boundary at least 15 minutes ago, collected for each instrument in turn and recorded in
- * its run log. An instrument that fails does not stop the others; the run then reports ok: false.
+ * default) to the open of the last candle closed at least a minute ago (dailyFxHistoryRange), collected for each
+ * instrument in turn and recorded in its run log with trigger "daily". An instrument that fails does not stop the others; the run then reports ok: false.
  */
 export async function runFxHistoryDaily(argv: string[], env: Record<string, string | undefined> = process.env,
   deps: Pick<OandaHistoricalRequest, "fetch" | "now" | "sleep"> = {}) {

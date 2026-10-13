@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- Replace the placeholders before loading: launchd expands neither ~ nor environment variables.
-     /ABSOLUTE/PATH/TO/node is `command -v node`, /ABSOLUTE/PATH/TO/node_modules is `npm root -g`, and YOUR_USERNAME is
-     your macOS user. Set OANDA_FX_HISTORY_ACCOUNT_ID and OANDA_FX_HISTORY_ACCESS_TOKEN in the launchd environment before
-     loading; keep them out of this file. The daily run must fall on Sunday to Thursday nights between 17:15 and 08:00
-     New York time: 08:30 and 13:00 JST on Monday to Friday do, in winter and summer. Elsewhere, pick local times that
-     do. The second run is a spare; either one meets the schedule. -->
+<!-- Replace the placeholders before loading: launchd expands neither ~ nor environment variables. YOUR_USERNAME is your
+     macOS user. The program is the owner-only wrapper script of docs/FX_HISTORY_DAILY.md, which reads
+     OANDA_FX_HISTORY_ACCOUNT_ID and OANDA_FX_HISTORY_ACCESS_TOKEN from the login Keychain and runs
+     build/fxHistoryDailyCli.js with these arguments; keep the token out of this file and out of `launchctl setenv`.
+     The daily run must fall on Sunday to Thursday nights between 17:15 and 08:00 New York time: 08:30 and 13:00 JST on
+     Monday to Friday do, in winter and summer. Elsewhere, pick local times that do. Of the runs before each deadline,
+     the last one counts. -->
 <dict>
   <key>Label</key>
   <string>com.tradingview-mcp.fx-history-daily-collection</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/ABSOLUTE/PATH/TO/node</string>
-    <string>/ABSOLUTE/PATH/TO/node_modules/bushido-tradingview-mcp/build/fxHistoryDailyCli.js</string>
+    <string>/Users/YOUR_USERNAME/bin/tradingview-mcp-fx-daily</string>
     <string>--instrument</string><string>EUR_USD</string>
     <string>--instrument</string><string>GBP_USD</string>
     <string>--instrument</string><string>USD_JPY</string>

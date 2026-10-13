@@ -47,7 +47,8 @@ test("a recorded collection is rebuilt from its raw pages into the bars the coll
   // Pinned, so a change in how bars are normalized cannot pass unnoticed.
   assert.equal(collected.normalized_sha256, "sha256:f5cb053d75def564770878bd42df75b71d5cefd808a1436615daf727631470db");
   const [record] = await store.records();
-  assert.deepEqual(await rebuildFxHistoryCollection(record, sources.archive, sources.checkpoints), { bars: collected.bars, rangeCheckpointed: true });
+  // Page 1 is checkpointed under the exact range; page 2 still had a forming candle, so not every page is.
+  assert.deepEqual(await rebuildFxHistoryCollection(record, sources.archive, sources.checkpoints), { bars: collected.bars, rangeCheckpointed: false });
   const exported = await exportFxHistory({ instrument: "EUR_USD", sequences: [1], ...sources });
   assert.deepEqual([exported.evidence_tier, exported.granularity, exported.price, exported.canonical_symbol], ["official_revised_history", "M15", "M", "OANDA:EURUSD"]);
   const { bars, ...fields } = exported.collections[0];
@@ -55,7 +56,7 @@ test("a recorded collection is rebuilt from its raw pages into the bars the coll
   assert.deepEqual(fields, { sequence: 1, requested_from: FROM, requested_to: TO, retrieved_at: record.retrieved_at, source_url_template: record.source_url_template,
     raw_sha256: record.raw_sha256, normalized_sha256: collected.normalized_sha256, bar_count: 4, first_bar_at: "2026-01-01T00:00:00.000Z",
     last_bar_at: "2026-02-11T16:15:00.000Z", duplicate_timestamps_removed: 1, non_contiguous_weekday_intervals: record.non_contiguous_weekday_intervals,
-    environment: "practice", range_checkpointed: true });
+    environment: "practice", range_checkpointed: false });
   assert.equal(sha(JSON.stringify(bars)), collected.normalized_sha256, "the normalized hash is the hash of the bars as a JSON array");
   // The same records give the same bytes.
   assert.equal(JSON.stringify(await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources })), JSON.stringify(exported));
@@ -70,7 +71,8 @@ test("a collection that resumed a checkpointed page, and one with an empty page,
   assert.equal(second.resumed_pages, 1);
   const records = await store.records();
   assert.equal(records[1].raw_sha256[0], records[0].raw_sha256[0]);
-  assert.deepEqual((await exportFxHistory({ instrument: "EUR_USD", sequences: [2], ...sources })).collections[0].bars, second.bars);
+  const resumed = (await exportFxHistory({ instrument: "EUR_USD", sequences: [2], ...sources })).collections[0];
+  assert.deepEqual([resumed.bars, resumed.range_checkpointed], [second.bars, true]);
   // Three pages, the middle one empty.
   const three = (start) => start === "2026-03-01T00:00:00.000Z" ? [candle("2026-03-02T00:00:00.000Z")] : start === "2026-04-11T16:00:00.000Z" ? [] : [candle("2026-05-25T00:00:00.000Z")];
   const collected = await collect("2026-03-01T00:00:00.000Z", "2026-06-01T00:00:00.000Z", three, "2026-08-02T00:00:00.000Z");
@@ -97,7 +99,7 @@ test("a record that does not match its raw pages, or whose range no checkpoint b
     [{ raw_sha256: [...record.raw_sha256].reverse() }, /outside its requested page|not time ordered/],
     [{ requested_from: "2025-12-31T00:00:00.000Z" }, /outside its requested page/],   // the pages move, and a bar leaves its page
     // Ranges the raw pages alone cannot tell apart: the checkpoints, kept under the exact range, refuse them.
-    [{ requested_to: "2026-02-13T00:00:00.000Z" }, /no page checkpoint binds its requested range/],
+    [{ requested_to: "2026-02-13T00:00:00.000Z" }, /no page checkpoint binds page 1 of its requested range/],
     [{ requested_from: "2025-12-31T23:45:00.000Z", requested_to: "2026-02-11T23:45:00.000Z" }, /no page checkpoint binds|outside its requested page/],
     [{ source_url_template: "https://api-fxtrade.oanda.com/v3/accounts/{account}/instruments/EUR_USD/candles" }, /no page checkpoint binds/],   // another environment
     [{ source_url_template: "https://example.invalid/v3/accounts/{account}/instruments/EUR_USD/candles" }, /unknown OANDA host/],
@@ -118,14 +120,15 @@ test("a collection whose pages could all still have been forming exports without
   assert.equal(collected.unfinished_pages, 1);
   const exported = await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources });
   assert.deepEqual([exported.collections[0].range_checkpointed, exported.collections[0].bar_count], [false, 1]);
-  // A final page that ended within the hour before the record need not be checkpointed; one that ended earlier must be.
+  // A final page that ended within six hours and 15 minutes before the record need not be checkpointed; one that ended earlier must be.
   const body = Buffer.from(JSON.stringify({ candles: [candle("2026-07-30T23:30:00.000Z")] }));
   const archive = { read: async () => body }, none = { instrument: "EUR_USD", completed: async () => [] };
   const bars = [{ time: "2026-07-30T23:30:00.000Z", open: 1.1, high: 1.1004, low: 1.0998, close: 1.1002, volume: 17 }];
   const record = { ...exported.collections[0], instrument: "EUR_USD", raw_sha256: [sha(body)], normalized_sha256: sha(JSON.stringify(bars)), bar_count: 1,
     first_bar_at: bars[0].time, last_bar_at: bars[0].time, duplicate_timestamps_removed: 0, non_contiguous_weekday_intervals: 0 };
   assert.equal((await rebuildFxHistoryCollection({ ...record, retrieved_at: "2026-07-31T00:00:00.000Z" }, archive, none)).rangeCheckpointed, false);
-  await assert.rejects(() => rebuildFxHistoryCollection({ ...record, retrieved_at: "2026-07-31T01:01:00.000Z" }, archive, none), /no page checkpoint binds/);
+  assert.equal((await rebuildFxHistoryCollection({ ...record, retrieved_at: "2026-07-31T05:59:00.000Z" }, archive, none)).rangeCheckpointed, false);
+  await assert.rejects(() => rebuildFxHistoryCollection({ ...record, retrieved_at: "2026-07-31T06:01:00.000Z" }, archive, none), /no page checkpoint binds page 1/);
 });
 
 test("collections are chosen by sequence or all, for the instrument of the stores, within the size limit", async (t) => {
@@ -196,7 +199,7 @@ test("the CLI checks every argument before reading, writes a new file once, refu
   assert.equal(first.result, "created");
   const body = await readFile(output, "utf8");
   assert.equal(first.sha256, sha(body));
-  assert.deepEqual(first.collections, [{ sequence: 1, bar_count: 4, normalized_sha256: JSON.parse(body).collections[0].normalized_sha256, range_checkpointed: true }]);
+  assert.deepEqual(first.collections, [{ sequence: 1, bar_count: 4, normalized_sha256: JSON.parse(body).collections[0].normalized_sha256, range_checkpointed: false }]);
   assert.equal((await runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", output], deps)).result, "identical");
   const other = join(dir, "other.json"); await writeFile(other, "{}\n");
   await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", other], deps), /a different file already exists/);
@@ -217,4 +220,54 @@ test("the CLI checks every argument before reading, writes a new file once, refu
 test("a bar series refuses bars off the 15-minute grid", () => {
   const collection = { normalized_sha256: sha("x"), bars: [{ time: "2026-01-01T00:07:00.000Z", open: 1, high: 1, low: 1, close: 1, volume: 1 }] };
   assert.throws(() => fxHistoryBarSeries(collection, { seriesId: "s", evidenceTier: "synthetic_test" }), /15-minute grid/);
+});
+
+test("every page that must have been final needs its own checkpoint: a shared first page does not bind another range", async () => {
+  const { store, sources, collect } = await setup();
+  // Two collections from the same start, two final pages each, the first page identical.
+  const pages = (end) => (start) => start === FROM ? [candle("2026-01-01T00:00:00.000Z")] : [candle("2026-02-11T16:00:00.000Z"), candle(end)];
+  await collect(FROM, "2026-02-13T00:00:00.000Z", pages("2026-02-12T00:00:00.000Z"));
+  await collect(FROM, "2026-02-16T00:00:00.000Z", pages("2026-02-13T12:00:00.000Z"), "2026-08-01T00:00:00.000Z");
+  const [a, b] = await store.records();
+  assert.equal(a.raw_sha256[0], b.raw_sha256[0]);
+  assert.deepEqual((await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources })).collections.map((c) => c.range_checkpointed), [true, true]);
+  // A's record moved to B's range: its first page is checkpointed there, its second is not.
+  const moved = { instrument: "EUR_USD", records: async () => [{ ...a, requested_to: b.requested_to }] };
+  await assert.rejects(() => exportFxHistory({ instrument: "EUR_USD", all: true, ...sources, store: moved, runs: { instrument: "EUR_USD", records: async () => [] } }),
+    /no page checkpoint binds page 2/);
+});
+
+test("a page re-fetched after a checkpoint written before it was final rebuilds and is bound by the checkpoint that replaced it", async () => {
+  const { store, checkpoints, archive, sources, collect } = await setup();
+  // An earlier collector version checkpointed this page while its last candle was still forming.
+  const early = Buffer.from(JSON.stringify({ candles: [candle("2026-03-02T00:00:00.000Z"), candle("2026-03-02T00:15:00.000Z", "1.1003", false)] }));
+  const earlyHash = sha(early);
+  await archive.store(earlyHash, early);
+  const { fxHistoryCollectionKey } = await import("../../build/oandaHistoricalFx.js");
+  const key = fxHistoryCollectionKey("practice", "EUR_USD", "2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z");
+  await checkpoints.append({ collection_key: key, requested_from: "2026-03-02T00:00:00.000Z", requested_to: "2026-03-02T00:30:00.000Z", raw_sha256: earlyHash, raw_bytes: early.byteLength },
+    "2026-03-02T00:20:00.000Z");
+  const collected = await collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", () => [candle("2026-03-02T00:00:00.000Z"), candle("2026-03-02T00:15:00.000Z", "1.1003")]);
+  assert.equal(collected.resumed_pages, 0);
+  const rows = await checkpoints.completed(key);
+  assert.deepEqual(rows.map((row) => row.supersedes_sequence ?? null), [null, 1]);
+  const exported = await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources });
+  assert.deepEqual([exported.collections[0].bars, exported.collections[0].range_checkpointed], [collected.bars, true]);
+  assert.equal((await store.records())[0].raw_sha256[0], rows[1].raw_sha256);
+});
+
+test("a bar series holds at most 600,000 bars, checked before any page is read", async () => {
+  const { store, checkpoints, runs, collect, dir } = await setup();
+  await collect(FROM, TO, twoPages);
+  const [record] = await store.records();
+  let reads = 0;
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--sequence", "1", "--format", "bar-series", "--series-id", "s", "--evidence-tier", "historical_exploration",
+    "--output", join(dir, "big.json")], { checkpoints, runs: { instrument: "EUR_USD", records: async () => [] },
+    store: { instrument: "EUR_USD", records: async () => [{ ...record, bar_count: 600_001 }] }, archive: { read: async () => { reads += 1; return Buffer.from(""); } } }), /more than 600000/);
+  assert.equal(reads, 0);
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", join(dir, "missing", "x.json")], { store, checkpoints, runs, archive: { read: async () => { reads += 1; return Buffer.from(""); } } }),
+    /--output must be in an existing directory/);
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", dir], { store, checkpoints, runs, archive: { read: async () => { reads += 1; return Buffer.from(""); } } }),
+    /--output names a directory/);
+  assert.equal(reads, 0);
 });

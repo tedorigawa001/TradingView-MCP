@@ -37,7 +37,8 @@ export type OandaHistoricalFetch = (url: string, init: RequestInit) => Promise<B
 type FxHistoricalCheckpointPort = { readonly instrument?: OandaFxInstrument; completed(collectionKey: string): Promise<FxHistoricalPageCheckpoint[]>; append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string): Promise<{ recorded: boolean; sequence: number | null }> };
 type FxHistoricalManifestPort = Pick<FxHistoricalManifestStore, "append"> & { readonly instrument?: OandaFxInstrument };
 /**
- * runs, when given, records the run once it is recorded in the manifest, also when the manifest already held its content,
+ * runs, when given, records the run once it is recorded in the manifest, also when the manifest already held its content
+ * (pass the run log that sits beside the manifest passed, or an export will refuse the runs as naming unknown content),
  * as started by runTrigger ("manual" unless said otherwise); the run log is read, and a clock behind its latest run
  * refused, before anything is fetched (BACKLOG 103-5).
  */

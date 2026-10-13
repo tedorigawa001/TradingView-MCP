@@ -168,7 +168,11 @@ test("launchd health monitors are repository-location independent and cover week
   const fxDaily = await readFile(new URL("../../docs/launchd/com.tradingview-mcp.fx-history-daily-collection.plist.example", import.meta.url), "utf8");
   const fxHealth = await readFile(new URL("../../docs/launchd/com.tradingview-mcp.collection-health-fx-history.plist.example", import.meta.url), "utf8");
   assert.doesNotMatch(fxDaily, /WorkingDirectory|OANDA_FX_HISTORY_ACCESS_TOKEN<\/key>/);
-  assert.match(fxDaily, /node_modules\/bushido-tradingview-mcp\/build\/fxHistoryDailyCli\.js/);
+  // It runs the Keychain wrapper the guide shows, which runs the daily CLI; the token stays out of the plist.
+  assert.match(fxDaily, /<key>ProgramArguments<\/key>\s*<array>\s*<string>\/Users\/YOUR_USERNAME\/bin\/tradingview-mcp-fx-daily<\/string>/);
+  const guide = await readFile(new URL("../../docs/FX_HISTORY_DAILY.md", import.meta.url), "utf8");
+  assert.match(guide, /# ~\/bin\/tradingview-mcp-fx-daily \(chmod 700\)/);
+  assert.match(guide, /exec \/ABSOLUTE\/PATH\/TO\/node \/ABSOLUTE\/PATH\/TO\/node_modules\/bushido-tradingview-mcp\/build\/fxHistoryDailyCli\.js "\$@"/);
   assert.match(fxDaily, /<string>--confirm-external-fetch<\/string>/);
   assert.equal((fxDaily.match(/<key>Weekday<\/key>/g) ?? []).length, 10);
   assert.doesNotMatch(fxHealth, /WorkingDirectory/);

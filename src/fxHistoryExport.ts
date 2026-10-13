@@ -10,7 +10,7 @@ import { assertFxHistoryManifestBase, canonicalOandaSymbol, createFxBarAccumulat
 export const FX_HISTORY_EXPORT_MAX_BARS = 1_000_000;
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 /** A collection reads its pages within this long before it is recorded (BACKLOG 103-6, see rebuildFxHistoryCollection). */
-const RUN_SPAN_MS = 60 * 60 * 1000;
+const RUN_SPAN_MS = 6 * 60 * 60 * 1000;
 
 type ManifestReader = { readonly instrument: OandaFxInstrument; readonly path?: string; records(): Promise<FxHistoricalManifest[]> };
 type CheckpointReader = { readonly instrument: OandaFxInstrument; completed(collectionKey: string): Promise<{ requested_from: string; requested_to: string; raw_sha256: string }[]> };
@@ -45,18 +45,17 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
  *
  * The raw responses do not carry the range they answered: any range with the same page count, under which each page's
  * bars still fall in its page, would rebuild the same bars. The range is bound by the page checkpoints instead, which are
- * kept under a key of the environment, instrument and exact range: rangeCheckpointed says whether a checkpoint under the
- * record's key holds one of its pages with its raw hash. A page with no forming candle that ended more than 15 minutes
- * and an hour before the record was made (a collection reads its pages within an hour) was final when read, and every
- * collector version checkpoints such a page; a record with one and no matching checkpoint is refused. A record whose
- * pages could all still have been forming (a range ending near the time it was collected) may have none, and is
- * returned with rangeCheckpointed false.
+ * kept under a key of the environment, instrument and exact range. A page with no forming candle that ended more than 15
+ * minutes and six hours before the record was made (a collection reads its pages within six hours) was final when read,
+ * and every collector version checkpoints such a page: each such page must have a checkpoint under the record's key for
+ * its own range and raw hash, or the record is refused. rangeCheckpointed says whether every page has one; a page that
+ * could still have been forming (one with a forming candle, or ending just before the collection) may have none.
  */
 export async function rebuildFxHistoryCollection(record: FxHistoricalManifest, archive: RawReader, checkpoints: CheckpointReader): Promise<{ bars: FxM15Bar[]; rangeCheckpointed: boolean }> {
   const ranges = oandaPageRanges(record.requested_from, record.requested_to);
   if (ranges.length !== record.raw_sha256.length) throw new Error(`FX history collection ${record.sequence} records ${record.raw_sha256.length} raw pages for a range of ${ranges.length}`);
   const accumulator = createFxBarAccumulator(), recordedAt = Date.parse(record.retrieved_at);
-  let mustBeCheckpointed = false;
+  const mustBeCheckpointed: boolean[] = [];
   for (const [index, range] of ranges.entries()) {
     const hash = record.raw_sha256[index];
     let body: Buffer;
@@ -64,7 +63,7 @@ export async function rebuildFxHistoryCollection(record: FxHistoricalManifest, a
     if (digest(body) !== hash) throw new Error(`FX history collection ${record.sequence}: raw page ${index + 1} does not match its hash`);
     const page = parseOandaCandlePage(body, record.instrument);
     accumulator.append(page.bars, range.start, range.end);
-    if (page.incomplete === 0 && range.end + FIFTEEN_MINUTES + RUN_SPAN_MS <= recordedAt) mustBeCheckpointed = true;
+    mustBeCheckpointed.push(page.incomplete === 0 && range.end + FIFTEEN_MINUTES + RUN_SPAN_MS <= recordedAt);
   }
   const rebuilt = accumulator.finish();
   const found: Record<string, string | number | null> = {
@@ -76,10 +75,11 @@ export async function rebuildFxHistoryCollection(record: FxHistoricalManifest, a
   }
   const key = fxHistoryCollectionKey(fxHistoryEnvironmentOf(record.source_url_template), record.instrument, record.requested_from, record.requested_to);
   const rows = await checkpoints.completed(key);
-  const rangeCheckpointed = rows.some((row) => ranges.some((range, index) =>
+  const checkpointed = ranges.map((range, index) => rows.some((row) =>
     row.requested_from === range.requestFrom && row.requested_to === range.requestTo && row.raw_sha256 === record.raw_sha256[index]));
-  if (mustBeCheckpointed && !rangeCheckpointed) throw new Error(`FX history collection ${record.sequence}: no page checkpoint binds its requested range [${record.requested_from}, ${record.requested_to}]`);
-  return { bars: rebuilt.bars, rangeCheckpointed };
+  const unbound = checkpointed.findIndex((found, index) => mustBeCheckpointed[index] && !found);
+  if (unbound >= 0) throw new Error(`FX history collection ${record.sequence}: no page checkpoint binds page ${unbound + 1} of its requested range [${record.requested_from}, ${record.requested_to}]`);
+  return { bars: rebuilt.bars, rangeCheckpointed: checkpointed.every(Boolean) };
 }
 
 /** The recorded collections of an instrument without their bars, for choosing what to export, and the manifest read. */
@@ -128,7 +128,9 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   if (total > maxBars) throw new Error(`the export would hold ${total} bars, more than ${maxBars}; export fewer collections at a time`);
   const collections: FxHistoryExportCollection[] = [];
   for (const record of chosen) {
-    const { bars, rangeCheckpointed } = await rebuildFxHistoryCollection(record, archive, checkpoints);
+    let rebuilt: Awaited<ReturnType<typeof rebuildFxHistoryCollection>>;
+    try { rebuilt = await rebuildFxHistoryCollection(record, archive, checkpoints); } catch (error) { throw new Error(`${message(error)}${where ? ` (manifest ${store.path})` : ""}`, { cause: error }); }
+    const { bars, rangeCheckpointed } = rebuilt;
     const fields = Object.fromEntries(RECORD_FIELDS.map((field) => [field, record[field]])) as Pick<FxHistoricalManifest, (typeof RECORD_FIELDS)[number]>;
     collections.push({ ...fields, environment: fxHistoryEnvironmentOf(record.source_url_template), range_checkpointed: rangeCheckpointed, bars });
   }

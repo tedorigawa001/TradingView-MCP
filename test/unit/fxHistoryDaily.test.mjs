@@ -110,6 +110,18 @@ test("the run log keeps every run, identical content included, beside the instru
     fetch: async () => response([candle("2026-01-07T00:00:00.000Z")]) }), /first-seen clock moved backwards/);
   assert.equal((await manifest.records()).length, 1);
   assert.ok(Array.isArray(await checkpoints.completed("sha256:" + "0".repeat(64))));
+  // A page that is not final yet writes no checkpoint, so here the manifest itself refuses, and stays readable.
+  const manifestBytes = await readFile(manifest.path);
+  await assert.rejects(collectOandaM15History({ accountId: credentials.OANDA_FX_HISTORY_ACCOUNT_ID, token: credentials.OANDA_FX_HISTORY_ACCESS_TOKEN, from: "2026-01-31T23:00:00.000Z",
+    to: "2026-01-31T23:30:00.000Z", instrument: "EUR_USD", store: manifest, checkpoints, now: () => new Date("2026-01-31T23:40:00.000Z"),
+    fetch: async () => response([candle("2026-01-31T23:00:00.000Z")]) }), /FX history manifest first-seen clock moved backwards/);
+  assert.deepEqual(await readFile(manifest.path), manifestBytes);
+  // The run log refuses a run finishing before its latest one, and writes nothing.
+  const log = new FxHistoricalRunLog(undefined, "EUR_USD"), logBytes = await readFile(resolveFxHistoricalRunLogPathFor("EUR_USD"));
+  const [latest] = (await log.records()).slice(-1);
+  const { sequence, schema_version, series, observation_date, first_seen_at, instrument, ...input } = latest;
+  await assert.rejects(log.append({ ...input, started_at: "2026-02-01T23:00:00.000Z", retrieved_at: "2026-02-01T23:30:00.000Z" }), /finished before the latest recorded run/);
+  assert.deepEqual(await readFile(resolveFxHistoricalRunLogPathFor("EUR_USD")), logBytes);
   // A run log of another instrument is refused before anything is fetched, and a log with an unknown field fails closed.
   await assert.rejects(collectOandaM15History({ accountId: credentials.OANDA_FX_HISTORY_ACCOUNT_ID, token: credentials.OANDA_FX_HISTORY_ACCESS_TOKEN,
     from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z", instrument: "EUR_USD", runs: new FxHistoricalRunLog(join(directory, "x.runs"), "USD_JPY"),

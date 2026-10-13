@@ -61,8 +61,8 @@ Friday at 08:30 and 13:00 JST: both fall on Sunday to Thursday nights between 17
 and summer.
 
 Keep the OANDA token out of the plist. `launchctl setenv` would hand it to every process launchd starts for you and is
-lost at reboot. One way is a small owner-only wrapper script that reads the two values from the login Keychain and
-runs the CLI; point the plist's `ProgramArguments` at it instead of `node`:
+lost at reboot. The example runs a small owner-only wrapper script that reads the two values from the login Keychain and
+runs the CLI with the plist's arguments:
 
 ```bash
 #!/bin/sh
