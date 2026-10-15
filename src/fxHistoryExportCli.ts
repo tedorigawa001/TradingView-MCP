@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 import { ENTRY_RESERVED_SERIES_PREFIXES } from "./forecastSet.js";
-import { publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
+import { noFollowFlag, publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
 import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, splitFxHistoryExport, type FxHistoryExportSources, type FxHistoryExportSplit } from "./fxHistoryExport.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS } from "./oandaHistoricalFx.js";
 
@@ -37,12 +37,19 @@ async function partBody(split: FxHistoryExportSplit, index: number) {
  */
 async function interruptedPart(path: string): Promise<{ index: number; of: number } | null> {
   const name = /^(.*)\.part\d+\.json$/.exec(path);
-  if (!name || !(await lstat(path).catch(() => null))?.isFile()) return null;
+  const entry = name ? await lstat(path).catch(() => null) : null;
+  if (!name || !entry?.isFile()) return null;
   let head = "";
   try {
-    const handle = await open(path, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK));
-    try { const buffer = Buffer.alloc(4096); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); head = buffer.subarray(0, bytesRead).toString("utf8"); }
-    finally { await handle.close(); }
+    // Opened as settleExistingFile opens a file: no link followed, no FIFO waited on, and the file the lstat saw.
+    const handle = await open(path, constants.O_RDONLY | noFollowFlag() | (process.platform === "win32" ? 0 : constants.O_NONBLOCK));
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) return null;
+      const buffer = Buffer.alloc(4096);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      head = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally { await handle.close(); }
   } catch { return null; }
   const part = /"part":\{"index":(\d+),"of":(\d+)\}/.exec(head);
   if (!part || Number(part[2]) < 1 || Number(part[2]) > 10_000) return null;

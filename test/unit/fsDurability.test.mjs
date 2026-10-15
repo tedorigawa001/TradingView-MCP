@@ -183,25 +183,48 @@ test("publishImmutableFiles writes nothing when a later file fails to build or a
 
 test("publishImmutableFiles removes what it linked when a destination is taken while it links, and says which those were", async () => {
   const { paths, bodies, staging } = await publishSet(["a.json", "b.json", "c.json", "d.json"]);
-  await writeFile(paths[0], "file 0\n");   // already there, identical
   // Another writer puts other bytes at the third destination after it was found free and staged. The second was linked
-  // before it and is removed again; the first, found identical, was not written by this run and stays.
-  const takeThird = async () => { await writeFile(paths[2], "theirs\n"); return "file 2\n"; };
-  await assert.rejects(() => publishImmutableFiles(paths, bodies({ 2: takeThird }), "test set"),
+  // before it and is removed again; the first is linked last, so it was never linked.
+  const takeThird = (set) => async () => { await writeFile(set.paths[2], "theirs\n"); return "file 2\n"; };
+  await assert.rejects(() => publishImmutableFiles(paths, bodies({ 2: takeThird({ paths }) }), "test set"),
     (error) => error.message === `test set path ${paths[2]} was taken by a different file while the files were published; nothing was written (${paths[1]} was linked and removed again)`);
-  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8").catch(() => null))), ["file 0\n", null, "theirs\n", null]);
+  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8").catch(() => null))), [null, null, "theirs\n", null]);
   assert.deepEqual(await staging(), []);
-  // A file found identical that changes before the set is complete stops it the same way.
-  const changing = await publishSet(["a.json", "b.json"]);
-  await writeFile(changing.paths[0], "file 0\n");
-  const changeFirst = async () => { await writeFile(changing.paths[0], "file 0, changed\n"); return "file 1\n"; };
-  await assert.rejects(() => publishImmutableFiles(changing.paths, changing.bodies({ 1: changeFirst }), "test set"),
-    (error) => error.message === `test set path ${changing.paths[0]} changed after it was found identical; nothing was written (${changing.paths[1]} was linked and removed again)`);
-  assert.equal(await absent(changing.paths[1]), true);
+  // With the first destination already there, and not this run's, nothing is removed: a first destination there means
+  // a whole set, so its parts are never taken away.
+  const kept = await publishSet(["a.json", "b.json", "c.json", "d.json"]);
+  await writeFile(kept.paths[0], "file 0\n");
+  await assert.rejects(() => publishImmutableFiles(kept.paths, kept.bodies({ 2: takeThird(kept) }), "test set"),
+    (error) => error.message === `test set path ${kept.paths[2]} was taken by a different file while the files were published; ${kept.paths[1]} was written and left in place, since ${kept.paths[0]} is there and is not this run's file`);
+  assert.deepEqual(await Promise.all(kept.paths.map((path) => readFile(path, "utf8").catch(() => null))), ["file 0\n", "file 1\n", "theirs\n", null]);
+  assert.deepEqual(await kept.staging(), []);
+  // A file found identical that changes before the set is complete stops it.
+  const changing = await publishSet(["a.json", "b.json", "c.json"]);
+  await writeFile(changing.paths[1], "file 1\n");
+  const changeSecond = async () => { await writeFile(changing.paths[1], "file 1, changed\n"); return "file 2\n"; };
+  await assert.rejects(() => publishImmutableFiles(changing.paths, changing.bodies({ 2: changeSecond }), "test set"),
+    (error) => error.message === `test set path ${changing.paths[1]} changed after it was found identical; nothing was written (${changing.paths[2]} was linked and removed again)`);
+  assert.deepEqual([await absent(changing.paths[0]), await absent(changing.paths[2])], [true, true]);
   // Taken by the same bytes, it is identical.
   const same = await publishSet(["a.json", "b.json"]);
   const sameBytes = async () => { await writeFile(same.paths[1], "file 1\n"); return "file 1\n"; };
   assert.deepEqual(await publishImmutableFiles(same.paths, same.bodies({ 1: sameBytes }), "test set"), { published: true, results: ["created", "identical"] });
+});
+
+test("publishImmutableFiles removes the first destination first, then the rest in reverse, when a step after its link fails", async () => {
+  const { paths, bodies, staging } = await publishSet(["p1.json", "p2.json", "p3.json", "p4.json"]);
+  const events = [];
+  const name = (path) => path.slice(-7, -5);
+  // The sync after the first destination is linked fails, as an EIO would.
+  const observe = (step, path) => {
+    if (step === "sync" && events.includes("link p1")) throw new Error("EIO: injected at the last sync");
+    if (step !== "sync") events.push(`${step} ${name(path)}`);
+  };
+  await assert.rejects(() => publishImmutableFiles(paths, bodies(), "test set", { observe }),
+    (error) => error.message === `EIO: injected at the last sync; nothing was written (${[paths[0], paths[3], paths[2], paths[1]].join(", ")} were linked and removed again)`);
+  assert.deepEqual(events, ["link p2", "link p3", "link p4", "link p1", "unlink p1", "unlink p4", "unlink p3", "unlink p2"]);
+  assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true, true]);
+  assert.deepEqual(await staging(), []);
 });
 
 test("publishImmutableFiles links the first destination last, and removes what it linked when a link is refused", async (t) => {
@@ -211,16 +234,16 @@ test("publishImmutableFiles links the first destination last, and removes what i
   await mkdir(open); await mkdir(closed);
   t.after(async () => { await chmod(closed, 0o700).catch(() => undefined); await rm(base, { recursive: true, force: true }); });
   // The first destination is in a directory that refuses new entries by the time the files are linked: the others,
-  // linked before it, are removed again.
+  // linked before it, are removed again, the last linked first.
   const paths = [join(closed, "set.part01.json"), join(open, "set.part02.json"), join(open, "set.part03.json")];
   const bytesOf = async (index) => { if (index === 2) await chmod(closed, 0o500); return `part ${index + 1}\n`; };
   await assert.rejects(() => publishImmutableFiles(paths, bytesOf, "test set"), (error) => /EACCES|permission denied/i.test(error.message)
-    && error.message.endsWith(`; nothing was written (${paths[1]}, ${paths[2]} were linked and removed again)`));
+    && error.message.endsWith(`; nothing was written (${paths[2]}, ${paths[1]} were linked and removed again)`));
   assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true]);
   assert.deepEqual((await readdir(open)).filter((name) => name.startsWith(".publish-")), []);
 });
 
-test("publishImmutableFiles removes the staging directories that killed runs of the same stem left, and no others", async (t) => {
+test("publishImmutableFiles removes only this user's staging that killed runs of the same stem left, and only its numbered files", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-stale-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   // A process that has ended: its pid is free (and, for the test's few milliseconds, not reused).
@@ -229,32 +252,110 @@ test("publishImmutableFiles removes the staging directories that killed runs of 
   const names = {
     dead: `.publish-set-${ended.pid}-abc123`, live: `.publish-set-${process.pid}-def456`, old: `.publish-set-${process.pid}-ghi789`,
     otherStem: `.publish-other-${ended.pid}-jkl012`, otherShape: `.publish-set-${ended.pid}-mno3456`, single: ".publish-pqr678",
+    foreignMode: `.publish-set-${ended.pid}-stu901`, foreignFile: `.publish-set-${ended.pid}-vwx234`, foreignEntry: `.publish-set-${ended.pid}-yza567`,
   };
-  for (const name of Object.values(names)) { await mkdir(join(directory, name)); await writeFile(join(directory, name, "0"), "staged\n"); }
+  for (const name of Object.values(names)) { await mkdir(join(directory, name), { mode: 0o700 }); await writeFile(join(directory, name, "0"), "staged\n"); }
   const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
   await utimes(join(directory, names.old), dayAgo, dayAgo);
+  // Shaped like a staging directory, but not one: another mode, a file it never writes, a numbered directory.
+  await chmod(join(directory, names.foreignMode), 0o755);
+  await writeFile(join(directory, names.foreignFile, "notes.txt"), "mine\n");
+  await mkdir(join(directory, names.foreignEntry, "1"));
   const result = await publishImmutableFiles([join(directory, "set.part01.json")], async () => "part 1\n", "test set", { stem: "set" });
   assert.deepEqual(result, { published: true, results: ["created"] });
-  assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".publish-")).sort(),
-    [names.live, names.otherShape, names.otherStem, names.single].sort());
+  const kept = [names.live, names.otherShape, names.otherStem, names.single, names.foreignFile, names.foreignEntry];
+  if (process.platform !== "win32") kept.push(names.foreignMode);
+  assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".publish-")).sort(), kept.sort());
+  // Of those shaped like its own, only the numbered regular files went.
+  assert.deepEqual(await readdir(join(directory, names.foreignFile)), ["notes.txt"]);
+  assert.deepEqual(await readdir(join(directory, names.foreignEntry)), ["1"]);
+  if (process.platform !== "win32") assert.deepEqual(await readdir(join(directory, names.foreignMode)), ["0"]);
 });
 
-test("publishImmutableFiles stopped by SIGTERM while it stages removes its staging and ends by the signal", async (t) => {
+/** A child process running publishImmutableFiles with `script`'s body; resolves with it and its first line of output. */
+async function publishingChild(script) {
+  const module = new URL("../../build/fsDurability.js", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `const { publishImmutableFiles } = await import(${JSON.stringify(module)});\n${script}`],
+    { stdio: ["ignore", "pipe", "inherit"] });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  const line = async () => { while (!output.includes("\n")) await once(child.stdout, "data"); return output.split("\n")[0]; };
+  return { child, line, output: () => output };
+}
+
+test("publishImmutableFiles stopped by SIGTERM while it stages removes its staging and its lock, and ends by the signal", async (t) => {
   if (process.platform === "win32") { t.skip("POSIX signals"); return; }
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-signal-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const module = new URL("../../build/fsDurability.js", import.meta.url).href;
   const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
-  const script = `const { publishImmutableFiles } = await import(${JSON.stringify(module)});
-    await publishImmutableFiles(${JSON.stringify(paths)}, async (index) => {
+  const { child, line } = await publishingChild(`await publishImmutableFiles(${JSON.stringify(paths)}, async (index) => {
       if (index === 1) { process.stdout.write("staged\\n"); await new Promise(() => setInterval(() => {}, 1000)); }
       return "part " + (index + 1) + "\\n";
-    }, "test set", { stem: "set" });`;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
-  await once(child.stdout, "data");
-  assert.equal((await readdir(directory)).filter((name) => name.startsWith(`.publish-set-${child.pid}-`)).length, 1);
+    }, "test set", { stem: "set" });`);
+  assert.equal(await line(), "staged");
+  assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".publish-set")).length, 2, "its staging and its lock");
   child.kill("SIGTERM");
   const [code, signal] = await once(child, "exit");
   assert.deepEqual([code, signal], [null, "SIGTERM"]);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("two publishes of the same files do not interleave: the second is refused while the first runs, and takes over after it is stopped or killed", async (t) => {
+  if (process.platform === "win32") { t.skip("POSIX signals"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-concurrent-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json"), join(directory, "set.part03.json")];
+  const body = async (index) => `part ${index + 1}\n`;
+  const holding = () => publishingChild(`await publishImmutableFiles(${JSON.stringify(paths)}, async (index) => {
+      if (index === 2) { process.stdout.write("staged\\n"); await new Promise(() => setInterval(() => {}, 1000)); }
+      return "part " + (index + 1) + "\\n";
+    }, "test set", { stem: "set" });`);
+  // A first run holds the lock while it stages: a second is refused, writing nothing.
+  const first = await holding();
+  assert.equal(await first.line(), "staged");
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set", { stem: "set" }),
+    new RegExp(`another test set of the same files is running \\(process ${first.child.pid}\\): .*\\.publish-set\\.lock; nothing was written`));
+  // Stopped, it removes its staging and its lock: the second run then writes the set.
+  first.child.kill("SIGTERM");
+  await once(first.child, "exit");
+  assert.deepEqual(await publishImmutableFiles(paths, body, "test set", { stem: "set" }), { published: true, results: ["created", "created", "created"] });
+  // Killed outright, a run leaves its lock and its staging: the next run removes both and goes on.
+  for (const path of paths) await rm(path);
+  const killed = await holding();
+  assert.equal(await killed.line(), "staged");
+  killed.child.kill("SIGKILL");
+  await once(killed.child, "exit");
+  const left = await readdir(directory);
+  assert.deepEqual([left.includes(".publish-set.lock"), left.some((name) => name.startsWith(`.publish-set-${killed.child.pid}-`))], [true, true]);
+  assert.deepEqual(await publishImmutableFiles(paths, body, "test set", { stem: "set" }), { published: true, results: ["created", "created", "created"] });
+  assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json", "set.part03.json"]);
+});
+
+test("publishImmutableFiles interrupted where the host keeps its own signal listener ends with an error that it was, and writes nothing", async (t) => {
+  if (process.platform === "win32") { t.skip("POSIX signals"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-host-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const staged = [join(directory, "a.part01.json"), join(directory, "a.part02.json")];
+  const linking = [join(directory, "b.part01.json"), join(directory, "b.part02.json"), join(directory, "b.part03.json")];
+  const run = await publishingChild(`process.on("SIGTERM", () => {});
+    const outcome = async (run) => { try { return JSON.stringify(await run()); } catch (error) { return error.message; } };
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
+    // Interrupted while it stages.
+    process.stdout.write(await outcome(() => publishImmutableFiles(${JSON.stringify(staged)}, async (index) => {
+      if (index === 1) { process.kill(process.pid, "SIGTERM"); await pause(); }
+      return "part " + (index + 1) + "\\n";
+    }, "test set", { stem: "a" })) + "\\n");
+    // Interrupted while it links: the signal arrives during the second link.
+    let signalled = false;
+    process.stdout.write(await outcome(() => publishImmutableFiles(${JSON.stringify(linking)}, async (index) => "part " + (index + 1) + "\\n", "test set", {
+      stem: "b", observe: (step) => { if (step === "link" && !signalled) { signalled = true; } else if (step === "link") { process.kill(process.pid, "SIGTERM"); } },
+    })) + "\\n");
+    process.exit(0);`);
+  const [code] = await once(run.child, "close");
+  assert.equal(code, 0);
+  const [whileStaging, whileLinking] = run.output().trim().split("\n");
+  assert.equal(whileStaging, "test set was interrupted; nothing was written");
+  assert.match(whileLinking, /^test set was interrupted; nothing was written/);
+  // Neither left a part, a staging directory or a lock.
   assert.deepEqual(await readdir(directory), []);
 });

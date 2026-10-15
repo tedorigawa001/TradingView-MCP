@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { constants, createReadStream, lstatSync, rmSync, unlinkSync, type Stats } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
 import { link, lstat, mkdtemp, open, readdir, readFile, realpath, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
@@ -253,7 +253,7 @@ export async function publishImmutableFile(
   }
 }
 
-/** A staging directory of publishImmutableFiles older than this is removed by the next run of the same stem, whatever its pid. */
+/** A staging directory or publish lock older than this is removed by the next run of the same stem, whatever its pid. */
 const STALE_STAGING_MS = 24 * 60 * 60 * 1000;
 
 /** The stem in a staging directory's name: the characters a file name can safely carry, at most 64 of them. */
@@ -265,10 +265,34 @@ function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
+/** Whether a directory found by its name is one this user's publishImmutableFiles made: owned by the user, mode 0700. */
+function ownStaging(entry: Stats): boolean {
+  if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
+  if (typeof process.getuid === "function" && entry.uid !== process.getuid()) return false;
+  return !posixModeEnforced() || (entry.mode & 0o777) === 0o700;
+}
+
+/**
+ * Removes a staging directory the way it was filled: its top-level regular files named by a number, then the
+ * directory itself if that left it empty. Anything else in it stays, and so does the directory; nothing is removed
+ * recursively. Synchronous, so a signal handler can use it.
+ */
+function removeStagingSync(path: string): void {
+  let names: string[];
+  try { names = readdirSync(path); } catch { return; }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    try { if (lstatSync(join(path, name)).isFile()) unlinkSync(join(path, name)); } catch { /* left in place */ }
+  }
+  try { rmdirSync(path); } catch { /* not empty, or gone: left in place */ }
+}
+
 /**
  * Removes, from `directory`, the staging directories `.publish-<stem>-<pid>-XXXXXX` that publishImmutableFiles runs of the
  * same stem left behind when they were killed (BACKLOG 103-10 review 2): those whose process is gone, and those older
- * than a day. A directory of a live run of the same stem, of another stem, or of any other name is never touched.
+ * than a day, and only those that are this user's (owner and mode 0700), and only their numbered files
+ * (removeStagingSync). A directory of a live run of the same stem, of another stem, of another shape, or of another
+ * owner or mode is never touched (BACKLOG 103-10 review 3).
  */
 async function removeStaleStagings(directory: string, stem: string): Promise<void> {
   const pattern = new RegExp(`^\\.publish-${stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)-[A-Za-z0-9]{6}$`);
@@ -279,43 +303,116 @@ async function removeStaleStagings(directory: string, stem: string): Promise<voi
     if (!match) continue;
     const path = join(directory, name);
     const entry = await lstat(path).catch(() => null);
-    if (!entry?.isDirectory()) continue;
+    if (entry === null || !ownStaging(entry)) continue;
     if (processAlive(Number(match[1])) && Date.now() - entry.mtimeMs < STALE_STAGING_MS) continue;
-    await rm(path, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    removeStagingSync(path);
   }
 }
 
-async function fileDigest(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-  return hash.digest("hex");
+/** The SHA-256 of the regular file at `path`, opened as settleExistingFile opens one; null when it is not that file. */
+async function fileDigest(path: string, platform = process.platform): Promise<string | null> {
+  const entry = await lstat(path).catch(() => null);
+  if (!entry?.isFile()) return null;
+  let handle: FileHandle;
+  try { handle = await open(path, constants.O_RDONLY | noFollowFlag(platform) | (platform === "win32" ? 0 : constants.O_NONBLOCK)); } catch { return null; }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) return null;
+    const hash = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer);
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+/** fsync of a directory, synchronous for a signal handler; Windows cannot open a directory, as syncDirectoryEntry says. */
+function syncDirectorySync(directory: string): void {
+  if (process.platform === "win32") return;
+  const descriptor = openSync(directory, constants.O_RDONLY);
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+/** Removes the publish lock at `path` if it is still the one holding `token`; synchronous, for a signal handler too. */
+function releasePublishLockSync(path: string, token: string): void {
+  try {
+    const descriptor = openSync(path, constants.O_RDONLY | noFollowFlag());
+    let contents: string, opened: Stats;
+    try { opened = fstatSync(descriptor); contents = readFileSync(descriptor, "utf8"); } finally { closeSync(descriptor); }
+    const current = lstatSync(path);
+    if (opened.isFile() && current.ino === opened.ino && current.dev === opened.dev && contents.startsWith(`${token} `)) unlinkSync(path);
+  } catch { /* gone, or not ours: left as it is */ }
+}
+
+/**
+ * Takes the lock a publishImmutableFiles run holds for its whole run, `.publish-<stem>.lock` beside its first
+ * destination (BACKLOG 103-10 review 3), so that two runs for the same files never interleave. A lock of this user
+ * whose process is gone, or older than a day, is removed and taken; one of a live run refuses this run.
+ */
+async function takePublishLock(path: string, label: string): Promise<string> {
+  const token = randomUUID();
+  for (let attempt = 1; ; attempt += 1) {
+    const taken = await attemptLockFile(path, `${label} lock`, `${token} ${process.pid}\n`);
+    if (taken.taken) return token;
+    const held = taken.held;
+    if (held && (!held.isFile() || held.isSymbolicLink())) throw new Error(`${label} lock path is unsafe: ${path}; nothing was written`);
+    let owner: number | null = null;
+    if (held) {
+      if (typeof process.getuid === "function" && held.uid !== process.getuid()) throw new Error(`${label} lock is another user's: ${path}; nothing was written`);
+      let contents = "", opened: Stats | null = null;
+      try {
+        const handle = await open(path, constants.O_RDONLY | noFollowFlag());
+        try { opened = await handle.stat(); contents = await handle.readFile("utf8"); } finally { await handle.close(); }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const parsed = /^[0-9a-f-]{36} (\d+)\n$/i.exec(contents)?.[1];
+      owner = parsed === undefined ? null : Number(parsed);
+      const stale = opened !== null && opened.ino === held.ino && ((owner !== null && !processAlive(owner)) || Date.now() - held.mtimeMs > STALE_STAGING_MS);
+      if (stale && attempt < 5) {
+        const current = await lstat(path).catch(() => null);
+        if (current && current.ino === held.ino && current.dev === held.dev) await unlink(path).catch(() => undefined);
+        continue;
+      }
+      if (opened === null && attempt < 5) continue;   // gone since it was found: look again
+    } else if (attempt < 5) {
+      // Gone, or being deleted (Windows): look again shortly.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
+    throw new Error(`another ${label} of the same files is running${owner === null ? "" : ` (process ${owner})`}: ${path}; nothing was written`);
+  }
 }
 
 /**
  * Publishes several new immutable files together, all of them or none (BACKLOG 103-10 review): publishImmutableFile for
- * a set, on the same primitives. The bytes of each destination are asked for in turn, so only one file's bytes are held
- * at once. A destination already holding exactly those bytes is "identical" (synced as publishImmutableFile syncs it);
- * one holding other bytes, or anything but a regular file, is "different"; a symbolic link there is refused. The bytes
- * of a new destination are written to a staging file and synced, in a directory `.publish-<stem>-<pid>-XXXXXX` beside
- * it; a run first removes such directories that runs of the same stem left when they were killed (removeStaleStagings).
- * Nothing is linked into place before every destination is staged or found identical: when bytesOf fails, or a
- * destination is "different", the staging files are removed and nothing is written. Once one destination is
- * "different", only destinations that already exist are still compared, so that every different one is returned.
+ * a set, on the same primitives. The run holds `.publish-<stem>.lock` beside the first destination throughout
+ * (takePublishLock), so two runs for the same files do not interleave. The bytes of each destination are asked for in
+ * turn, so only one file's bytes are held at once. A destination already holding exactly those bytes is "identical"
+ * (synced as publishImmutableFile syncs it); one holding other bytes, or anything but a regular file, is "different"; a
+ * symbolic link there is refused. The bytes of a new destination are written to a staging file and synced, in a
+ * directory `.publish-<stem>-<pid>-XXXXXX` beside it; a run first removes such directories that runs of the same stem
+ * left when they were killed (removeStaleStagings). Nothing is linked into place before every destination is staged or
+ * found identical: when bytesOf fails, or a destination is "different", the staging files are removed and nothing is
+ * written. Once one destination is "different", only destinations that already exist are still compared, so that every
+ * different one is returned.
  *
  * Then the staged files are linked to their destinations, the first destination last: the others are linked and their
  * directories synced, the destinations found identical are checked to be so still, and only then is the first one
- * linked and synced, so the first destination there means the set was whole when it was written. A link that fails (a
- * destination taken meanwhile by other bytes, a denied or full directory) removes again every file this run linked,
- * each checked to be the staged file, and the error says so; destinations found identical were not written by it. A
- * SIGINT or SIGTERM during the run removes what it linked and its staging directories, then takes its usual course.
- * A crash or power loss while linking can still leave some destinations without the first. The staging directories
- * are removed when the run ends, as a best effort.
+ * linked and synced, so the first destination there means the set was whole when it was written. A step that fails (a
+ * destination taken meanwhile by other bytes, a denied or full directory, a failed sync) removes again what this run
+ * linked: the first destination first, its directory synced, then the others in the reverse of their order, each only
+ * while it is still the file this run staged; and nothing at all when the first destination is there and is not this
+ * run's, since its set is whole. The error says what was removed, what was already gone, what another file had
+ * replaced, and what could not be removed. A SIGINT or SIGTERM during the run does the same and removes its staging
+ * and its lock; it then takes its usual course, or, when the host has its own listener, the run ends with an error that
+ * it was interrupted. A crash or power loss while linking can still leave some destinations without the first.
+ * `observe`, for tests, is called before each link and each sync of the link phase (a throw fails that step) and after
+ * each unlink of a removal.
  */
 export async function publishImmutableFiles(
   destinations: readonly string[],
   bytesOf: (index: number) => Promise<string | Buffer>,
   label: string,
-  options: { stem?: string } = {},
+  options: { stem?: string; observe?: (step: "link" | "sync" | "unlink", path: string) => void } = {},
 ): Promise<{ published: true; results: ("created" | "identical")[] } | { published: false; different: string[] }> {
   const targets: { destination: string; directory: string; target: string }[] = [];
   for (const destination of destinations) {
@@ -326,43 +423,97 @@ export async function publishImmutableFiles(
     const directory = await realpath(dirname(destination));
     targets.push({ destination, directory, target: join(directory, name) });
   }
+  if (targets.length === 0) return { published: true, results: [] };
   if (new Set(targets.map((item) => item.target)).size !== targets.length) throw new Error(`${label} paths must be distinct`);
-  const stem = stagingStem(options.stem ?? basename(destinations[0] ?? "files").replace(/\.[^.]*$/, ""));
+  const observe = options.observe ?? (() => undefined);
+  const stem = stagingStem(options.stem ?? basename(destinations[0]).replace(/\.[^.]*$/, ""));
   const directories = [...new Set(targets.map((item) => item.directory))];
-  for (const directory of directories) await removeStaleStagings(directory, stem);
+  const lockPath = join(targets[0].directory, `.publish-${stem}.lock`);
+  const token = await takePublishLock(lockPath, label);
   const stagings = new Map<string, string>();
   const staged: (string | null)[] = [];
+  /** Each staged file's identity, kept from when it was written: the removal checks a destination against it even after a
+   * signal has removed the staging. */
+  const stagedIds = new Map<number, BigIntStats>();
   const results: ("created" | "identical" | null)[] = [];
   const identical = new Map<number, string>();
   const different: string[] = [];
-  const created: { destination: string; target: string; file: string }[] = [];
-  /** Unlinks what this run linked, each only while it is still the staged file; synchronous, so a signal handler can use it. */
-  const unlinkCreated = () => {
-    const removed: string[] = [], left: string[] = [];
-    for (const { destination, target, file } of created.splice(0)) {
-      try {
-        const [placed, ours] = [lstatSync(target), lstatSync(file)];
-        if (placed.dev === ours.dev && placed.ino === ours.ino) { unlinkSync(target); removed.push(destination); } else left.push(destination);
-      } catch { left.push(destination); }
+  const created: { index: number; destination: string; target: string; file: string }[] = [];
+  type Removal = { removed: string[]; gone: string[]; replaced: string[]; failed: string[]; kept: string[] };
+  const removals: Removal = { removed: [], gone: [], replaced: [], failed: [], kept: [] };
+  const sameFile = (left: BigIntStats, right: BigIntStats | undefined) => right !== undefined && left.dev === right.dev && left.ino === right.ino;
+  const lstatOrNull = (path: string) => { try { return lstatSync(path, { bigint: true }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } };
+  /**
+   * Removes again what this run linked: the first destination first, then the rest in reverse. Nothing when the first
+   * destination is there and is not this run's file. Synchronous, so a signal handler can use it.
+   */
+  const removeCreated = () => {
+    const entries = created.splice(0);
+    if (entries.length === 0) return;
+    const first = entries.find((entry) => entry.index === 0);
+    try {
+      const placedFirst = lstatOrNull(targets[0].target);
+      if (placedFirst !== null && (first === undefined || !sameFile(placedFirst, stagedIds.get(0)))) {
+        removals.kept.push(...entries.map((entry) => entry.destination));
+        return;
+      }
+    } catch {
+      removals.kept.push(...entries.map((entry) => entry.destination));
+      return;
     }
-    return { removed, left };
+    const order = first ? [first, ...entries.filter((entry) => entry !== first).reverse()] : [...entries].reverse();
+    for (const { index, destination, target } of order) {
+      try {
+        const placed = lstatOrNull(target);
+        if (placed === null) removals.gone.push(destination);
+        else {
+          if (!sameFile(placed, stagedIds.get(index))) removals.replaced.push(destination);
+          else { unlinkSync(target); removals.removed.push(destination); observe("unlink", destination); }
+        }
+      } catch { removals.failed.push(destination); }
+      if (index === 0) { try { syncDirectorySync(targets[0].directory); } catch { /* the removal stands; its sync is a best effort */ } }
+    }
+  };
+  const describeRemovals = () => {
+    const list = (items: string[]) => `${items.join(", ")} ${items.length === 1 ? "was" : "were"}`;
+    const notes = [
+      ...(removals.removed.length ? [`${list(removals.removed)} linked and removed again`] : []),
+      ...(removals.gone.filter((item) => !removals.removed.includes(item)).length
+        ? [`${list(removals.gone.filter((item) => !removals.removed.includes(item)))} already gone`] : []),
+      ...(removals.replaced.length ? [`${list(removals.replaced)} replaced by another file, left alone`] : []),
+    ];
+    const outcome = removals.failed.length > 0 ? `${list(removals.failed)} written and could not be removed`
+      : removals.kept.length > 0 ? `${list(removals.kept)} written and left in place, since ${targets[0].destination} is there and is not this run's file`
+        : "nothing was written";
+    return `${outcome}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`;
+  };
+  let interrupted = false;
+  const stillRunning = () => { if (interrupted) throw new Error(`${label} was interrupted`); };
+  const cleanUpSync = () => {
+    for (const staging of stagings.values()) removeStagingSync(staging);
+    releasePublishLockSync(lockPath, token);
   };
   const onSignal = (signal: NodeJS.Signals) => {
-    unlinkCreated();
-    for (const staging of stagings.values()) { try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ } }
+    interrupted = true;
+    removeCreated();
+    cleanUpSync();
     process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
     if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
   };
   process.on("SIGINT", onSignal); process.on("SIGTERM", onSignal);
   try {
     try {
+      await removeStaleStagings(targets[0].directory, stem);
+      for (const directory of directories.slice(1)) await removeStaleStagings(directory, stem);
       for (const [index, { destination, directory, target }] of targets.entries()) {
+        stillRunning();
         staged.push(null); results.push(null);
         let entry: Stats | null;
         try { entry = await lstat(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entry = null; }
         if (entry?.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link: ${destination}`);
         if (different.length > 0 && entry === null) continue;
         const raw = await bytesOf(index);
+        stillRunning();
         const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : raw;
         const found = entry === null ? null : await settleExistingFile(target, directory, bytes, label);
         if (found === "different") { different.push(destination); continue; }
@@ -372,10 +523,12 @@ export async function publishImmutableFiles(
         if (staging === undefined) { staging = await mkdtemp(join(directory, `.publish-${stem}-${process.pid}-`)); stagings.set(directory, staging); }
         const file = join(staging, String(index));
         const handle = await openExclusiveFile(file, label);
-        try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+        try { await handle.writeFile(bytes); await handle.sync(); stagedIds.set(index, await handle.stat({ bigint: true })); } finally { await handle.close(); }
         staged[index] = file;
       }
+      stillRunning();
     } catch (error) {
+      if (interrupted) throw new Error(`${label} was interrupted; ${describeRemovals()}`, { cause: error });
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(message.endsWith("nothing was written") ? message : `${message}; nothing was written`, { cause: error });
     }
@@ -383,43 +536,57 @@ export async function publishImmutableFiles(
     const linkOne = async (index: number) => {
       const { destination, directory, target } = targets[index], file = staged[index]!;
       for (let attempt = 1; ; attempt += 1) {
+        // Recorded before the link, so that a signal while it is in flight removes it too; dropped when it fails.
+        const entry = { index, destination, target, file };
+        created.push(entry);
+        let linked = false;
         try {
+          observe("link", destination);
           await link(file, target);
-          created.push({ destination, target, file }); results[index] = "created";
+          linked = true;
+          stillRunning();
+          results[index] = "created";
           return;
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const at = created.indexOf(entry);
+          // Not linked: nothing to remove. Linked after a signal's removal already ran: kept for the removal that follows.
+          if (!linked && at >= 0) created.splice(at, 1);
+          if (linked && at < 0) created.push(entry);
+          if (interrupted || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           const settled = await settleExistingFile(target, directory, await readFile(file), label);
+          stillRunning();
           if (settled === "identical") { results[index] = "identical"; return; }
           if (settled === "different") throw new Error(`${label} path ${destination} was taken by a different file while the files were published`);
           if (attempt === 2) throw new Error(`${label} path ${destination} kept changing while it was being published`);
         }
       }
     };
+    const sync = async (directory: string) => { observe("sync", directory); await syncDirectoryEntry(directory); stillRunning(); };
     try {
       for (const [index, file] of staged.entries()) if (index > 0 && file !== null) await linkOne(index);
-      for (const directory of directories) await syncDirectoryEntry(directory);
+      for (const directory of directories) await sync(directory);
       for (const [index, digest] of identical) {
         const { destination, target } = targets[index];
-        const entry = await lstat(target).catch(() => null);
-        if (!entry?.isFile() || await fileDigest(target) !== digest) throw new Error(`${label} path ${destination} changed after it was found identical`);
+        const found = await fileDigest(target);
+        stillRunning();
+        if (found !== digest) throw new Error(`${label} path ${destination} changed after it was found identical`);
       }
       if (staged[0] !== null && staged[0] !== undefined) {
         await linkOne(0);
-        await syncDirectoryEntry(targets[0].directory);
+        await sync(targets[0].directory);
       }
+      stillRunning();
     } catch (error) {
-      const { removed, left } = unlinkCreated();
+      removeCreated();
       for (const directory of directories) await syncDirectoryEntry(directory).catch(() => undefined);
+      if (interrupted) throw new Error(`${label} was interrupted; ${describeRemovals()}`, { cause: error });
       const message = error instanceof Error ? error.message : String(error);
-      const verb = (list: string[]) => (list.length === 1 ? "was" : "were");
-      const outcome = left.length > 0 ? `${left.join(", ")} ${verb(left)} written and could not be removed` : "nothing was written";
-      throw new Error(`${message}; ${outcome}${removed.length > 0 ? ` (${removed.join(", ")} ${verb(removed)} linked and removed again)` : ""}`, { cause: error });
+      throw new Error(`${message}; ${describeRemovals()}`, { cause: error });
     }
     return { published: true, results: results as ("created" | "identical")[] };
   } finally {
     process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
-    for (const staging of stagings.values()) await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    cleanUpSync();
   }
 }
 
