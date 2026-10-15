@@ -39,6 +39,9 @@ the export lists each distinct content once, at the time it was first recorded. 
 [daily FX history collection](FX_HISTORY_DAILY.md)) records every run; the export carries those runs (below). The run log
 is read before the manifest, so every run read has its content recorded (a collection records its content before its
 run). A run whose content the manifest does not hold, or whose bar count differs from that content's, refuses the export.
+The run log is read again after the manifest: when both reads hold as many runs, no run was recorded meanwhile, so the
+manifest and the run log (and the totals below) describe one moment, the one the manifest was read at. Otherwise both
+are read again, up to five times in all, and the export fails if a collection kept recording runs throughout.
 
 ## Usage
 
@@ -61,14 +64,15 @@ bars go into one export, checked before any raw response is read.
 
 The output is published as a new immutable file: the same bytes already there is reported as `identical`, other bytes
 are refused and left as they were. The command prints the output path, `created` or `identical`, the SHA-256 of the
-file and each collection's sequence, bar count, normalized hash and `range_checkpointed`.
+file, the totals `manifest_records` and `run_records` with the number of `runs` exported, and each collection's
+sequence, bar count, normalized hash and `range_checkpointed`.
 
 ## Formats
 
 `--format collections` (the default) writes one JSON document:
 
 ```json
-{ "schema_version": "1.0", "series": "fx_historical_m15_export", "source_id": "oanda_v20", "evidence_tier": "official_revised_history",
+{ "schema_version": "1.1", "series": "fx_historical_m15_export", "source_id": "oanda_v20", "evidence_tier": "official_revised_history",
   "instrument": "EUR_USD", "canonical_symbol": "OANDA:EURUSD", "granularity": "M15", "price": "M", "manifest_records": 1, "run_records": 1,
   "collections": [{ "sequence": 1, "requested_from": "...", "requested_to": "...", "retrieved_at": "...",
     "source_url_template": "https://api-fxpractice.oanda.com/v3/accounts/{account}/instruments/EUR_USD/candles", "raw_sha256": ["sha256:..."],
@@ -80,10 +84,13 @@ file and each collection's sequence, bar count, normalized hash and `range_check
     "unfinished_pages": 1, "manifest_recorded": true }] }
 ```
 
-`manifest_records` and `run_records` are how many records the manifest and the run log held when the export read them
-(BACKLOG 103-9). An export is whole exactly when `collections` holds `manifest_records` entries and `runs` holds
-`run_records`: a reader that needs every collection and run (a point-in-time reading does) checks both, which also
+`manifest_records` and `run_records` are how many records the manifest and the run log held when the export read them,
+at one moment (BACKLOG 103-9). An export is whole exactly when `collections` holds `manifest_records` entries and `runs`
+holds `run_records`: a reader that needs every collection and run (a point-in-time reading does) checks both, which also
 catches a cut-off tail that numbering alone cannot.
+
+`schema_version` is `1.1` since 0.1.43, which added the two totals; a `1.0` export, written by 0.1.42, has neither and
+cannot show whether it is whole.
 
 `runs` holds the instrument's recorded runs whose content is one of the exported collections, in run-log order. A run's
 bars are the collection with its `normalized_sha256`; its own range, `trigger` (`daily` for the daily schedule, `manual`
@@ -91,7 +98,10 @@ otherwise) and finishing time are what a point-in-time reading uses. An instrume
 
 The bars are exactly the collector's normalized bars (OANDA midpoint candles, the time of each candle's open in UTC with
 milliseconds): their JSON array hashes to `normalized_sha256`. Nothing in the document depends on when the export ran,
-so the same records always give the same bytes (a later run of the same content adds a run).
+so the same manifest and run log give the same bytes. A record added to either changes them: a whole export (`--all`)
+gains the new collection or run, as it always did (a later run of the same content adds a run), and since 1.1 a partial
+export (`--sequence`) changes too, even when its own collections and runs do not, because its totals count the whole
+logs. The output is never overwritten, so export again to a new name.
 
 `--format bar-series` writes one collection, named by one `--sequence`, as the input of
 `tradingview-mcp-import-bar-series`: `open_time` in Unix seconds, `close`, `interval_minutes` 15, `source_id` `oanda_v20`

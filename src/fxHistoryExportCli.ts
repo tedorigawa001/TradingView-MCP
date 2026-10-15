@@ -50,6 +50,8 @@ export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSo
   if (result === "different") throw new Error(`a different file already exists at ${values.output}; nothing was written`);
   return {
     output: values.output, result, format, instrument, sha256: `sha256:${createHash("sha256").update(body).digest("hex")}`,
+    // The totals the export read (BACKLOG 103-9): a collections export is whole when it holds as many collections and runs.
+    manifest_records: exported.manifest_records, run_records: exported.run_records, runs: exported.runs.length,
     collections: exported.collections.map((collection) => ({ sequence: collection.sequence, bar_count: collection.bar_count, normalized_sha256: collection.normalized_sha256,
       range_checkpointed: collection.range_checkpointed })),
   };

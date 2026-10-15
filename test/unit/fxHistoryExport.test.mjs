@@ -277,3 +277,35 @@ test("a bar series holds at most 600,000 bars, checked before any page is read",
     /--output names a directory/);
   assert.equal(reads, 0);
 });
+
+test("the totals describe one moment: the run log is read again after the manifest until both reads agree (BACKLOG 103-9 review)", async () => {
+  const { store, checkpoints, runs, archive, sources, collect, dir } = await setup("USD_JPY");
+  const flat = (time, c) => ({ complete: true, volume: 5, time, mid: { o: c, h: c, l: c, c } });
+  const yen = (start) => [flat(start, "150.10"), flat(new Date(new Date(start).getTime() + 900_000).toISOString(), "150.12")];
+  await collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", yen);
+  await collect("2026-03-03T00:00:00.000Z", "2026-03-03T00:30:00.000Z", yen);
+  const all = await runs.records();
+  // A run log that grows while the manifest is read: the first reads see one run, then both; the export reads again.
+  const reads = { runs: 0, manifest: 0 };
+  const growing = (counts) => ({ instrument: "USD_JPY", records: async () => all.slice(0, counts[Math.min(reads.runs++, counts.length - 1)]) });
+  const counted = { instrument: "USD_JPY", path: store.path, records: async () => { reads.manifest += 1; return store.records(); } };
+  const settled = await exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, archive, runs: growing([1, 2, 2, 2]) });
+  assert.deepEqual([settled.schema_version, settled.manifest_records, settled.run_records, settled.runs.length, reads.manifest], ["1.1", 2, 2, 2, 2]);
+  // One that grows every time is given up on after five reads of the manifest, before any raw page is read.
+  reads.runs = 0; reads.manifest = 0;
+  let pages = 0;
+  const everGrowing = { instrument: "USD_JPY", records: async () => Array.from({ length: reads.runs++ }, () => all[0]) };
+  await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, runs: everGrowing,
+    archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), /USD_JPY FX history run log grew each of the 5 times the manifest in .* was read; export again when no collection is running/);
+  assert.deepEqual([reads.manifest, pages], [5, 0]);
+  // The CLI prints the totals. A partial export's bytes change when a run is recorded, though its own collection did not
+  // change: export again to a new name.
+  const output = join(dir, "usdjpy-1.json");
+  const first = await runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", output], sources);
+  assert.deepEqual([first.manifest_records, first.run_records, first.runs, first.collections.length], [2, 2, 1, 1]);
+  assert.equal(JSON.parse(await readFile(output, "utf8")).schema_version, "1.1");
+  await collect("2026-03-03T00:00:00.000Z", "2026-03-03T00:30:00.000Z", yen, "2026-08-01T00:00:00.000Z");   // collection 2's content again
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", output], sources), /a different file already exists/);
+  const again = await runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", join(dir, "usdjpy-1b.json")], sources);
+  assert.deepEqual([again.result, again.run_records, again.runs, again.collections[0].normalized_sha256], ["created", 3, 1, first.collections[0].normalized_sha256]);
+});

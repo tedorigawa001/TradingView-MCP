@@ -11,6 +11,8 @@ export const FX_HISTORY_EXPORT_MAX_BARS = 1_000_000;
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 /** A collection reads its pages within this long before it is recorded (BACKLOG 103-6, see rebuildFxHistoryCollection). */
 const RUN_SPAN_MS = 6 * 60 * 60 * 1000;
+/** How many times the run log and the manifest are read before an export gives up on reading them at one moment. */
+const SNAPSHOT_ATTEMPTS = 5;
 
 type ManifestReader = { readonly instrument: OandaFxInstrument; readonly path?: string; records(): Promise<FxHistoricalManifest[]> };
 type CheckpointReader = { readonly instrument: OandaFxInstrument; completed(collectionKey: string): Promise<{ requested_from: string; requested_to: string; raw_sha256: string }[]> };
@@ -27,12 +29,14 @@ export type FxHistoryExportCollection = Pick<FxHistoricalManifest, (typeof RECOR
 const RUN_FIELDS = ["sequence", "trigger", "environment", "requested_from", "requested_to", "started_at", "retrieved_at", "raw_sha256", "normalized_sha256",
   "bar_count", "resumed_pages", "unfinished_pages", "manifest_recorded"] as const;
 export type FxHistoryExportRun = Pick<FxHistoricalRun, (typeof RUN_FIELDS)[number]>;
+/** schema_version 1.1 (0.1.43) adds manifest_records and run_records to 1.0 (0.1.42), which had neither (BACKLOG 103-9). */
 export type FxHistoryExport = {
-  schema_version: "1.0"; series: "fx_historical_m15_export"; source_id: "oanda_v20"; evidence_tier: "official_revised_history"; instrument: OandaFxInstrument;
+  schema_version: "1.1"; series: "fx_historical_m15_export"; source_id: "oanda_v20"; evidence_tier: "official_revised_history"; instrument: OandaFxInstrument;
   canonical_symbol: string; granularity: "M15"; price: "M";
   /**
-   * How many records the manifest and the run log held when the export read them (BACKLOG 103-9): a reader compares
-   * them with collections.length and runs.length to tell a whole export from a partial one, a cut-off tail included.
+   * How many records the manifest and the run log held when the export read them, at one moment (BACKLOG 103-9): a
+   * reader compares them with collections.length and runs.length to tell a whole export from a partial one, a cut-off
+   * tail included. They count the whole logs, so every export, a partial one too, changes when a record is added.
    */
   manifest_records: number; run_records: number;
   collections: FxHistoryExportCollection[];
@@ -102,28 +106,49 @@ export async function listFxHistoryCollections(input: { instrument: OandaFxInstr
 }
 
 /**
+ * The manifest and the run log of an instrument as they were at one moment (BACKLOG 103-9 review). The run log is read
+ * before the manifest, so every run read has its content recorded (a collection records its content before its run),
+ * and again after it: when both reads of the run log, which only grows, hold as many records, no run was recorded while
+ * the manifest was read, and the two describe the moment the manifest was read. Otherwise both are read again, up to
+ * five times in all. A run whose content the manifest does not hold, or whose bar count differs from that content's,
+ * is refused.
+ */
+async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: ManifestReader, runs: RunReader) {
+  const where = store.path ? ` in ${store.path}` : "";
+  for (let attempt = 1; ; attempt += 1) {
+    const runRecords = await runs.records();
+    const records = await store.records();
+    if ((await runs.records()).length === runRecords.length) {
+      const barsOf = new Map(records.map((record) => [record.normalized_sha256, record.bar_count]));
+      for (const run of runRecords) {
+        if (!barsOf.has(run.normalized_sha256)) throw new Error(`FX history run ${run.sequence} names content the ${instrument} manifest${where} does not hold`);
+        if (barsOf.get(run.normalized_sha256) !== run.bar_count) throw new Error(`FX history run ${run.sequence} records ${run.bar_count} bars for content of ${barsOf.get(run.normalized_sha256)}`);
+      }
+      return { records, runRecords, where };
+    }
+    if (attempt === SNAPSHOT_ATTEMPTS) {
+      throw new Error(`the ${instrument} FX history run log grew each of the ${SNAPSHOT_ATTEMPTS} times the manifest${where} was read; export again when no collection is running`);
+    }
+  }
+}
+
+/**
  * Exports recorded collections of one instrument with their bars (BACKLOG 103-6): the ones named by sequence, or all.
  * Each is rebuilt and verified first (rebuildFxHistoryCollection); the export holds the record's fields, its environment,
- * whether a checkpoint binds its range, and its bars, in manifest order, and nothing that varies between runs, so the
- * same records give the same bytes. maxBars (default 1,000,000) is checked before any raw page is read.
+ * whether a checkpoint binds its range, and its bars, in manifest order. maxBars (default 1,000,000) is checked before
+ * any raw page is read.
  * It also holds the runs of the instrument's run log whose content is an exported collection (BACKLOG 103-5): how each
- * was started, when it started and finished, and what range it requested, which a point-in-time reading needs. The run
- * log is read before the manifest, so every run read has its content recorded (a collection records its content before
- * its run); a run whose content the manifest does not hold, or whose bar count differs from that content's, is refused.
+ * was started, when it started and finished, and what range it requested, which a point-in-time reading needs. The
+ * manifest and the run log are read at one moment (readFxHistorySnapshot), and their totals are in the export
+ * (BACKLOG 103-9). Nothing in it depends on when the export ran, so the same manifest and run log give the same bytes;
+ * a record added to either changes them, a partial export's too, since the totals count the whole logs.
  */
 export async function exportFxHistory(input: { instrument: OandaFxInstrument; sequences?: number[]; all?: boolean; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExport> {
   const { instrument, store, checkpoints, runs, archive } = await readers(input);
   const sequences = input.sequences ?? [];
   if (input.all ? sequences.length > 0 : sequences.length === 0) throw new Error("name the collections to export by sequence, or export all of them");
   if (sequences.some((sequence) => !Number.isSafeInteger(sequence) || sequence < 1)) throw new Error("a collection sequence must be a positive integer");
-  const runRecords = await runs.records();
-  const records = await store.records();
-  const where = store.path ? ` in ${store.path}` : "";
-  const barsOf = new Map(records.map((record) => [record.normalized_sha256, record.bar_count]));
-  for (const run of runRecords) {
-    if (!barsOf.has(run.normalized_sha256)) throw new Error(`FX history run ${run.sequence} names content the ${instrument} manifest${where} does not hold`);
-    if (barsOf.get(run.normalized_sha256) !== run.bar_count) throw new Error(`FX history run ${run.sequence} records ${run.bar_count} bars for content of ${barsOf.get(run.normalized_sha256)}`);
-  }
+  const { records, runRecords, where } = await readFxHistorySnapshot(instrument, store, runs);
   const known = new Set(records.map((record) => record.sequence));
   const missing = sequences.filter((sequence) => !known.has(sequence));
   if (missing.length) throw new Error(`no ${instrument} FX history collection${where} has sequence ${missing.join(", ")}`);
@@ -143,7 +168,7 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   const exported = new Set(chosen.map((record) => record.normalized_sha256));
   const runRows = runRecords.filter((run) => exported.has(run.normalized_sha256))
     .map((run) => Object.fromEntries(RUN_FIELDS.map((field) => [field, run[field]])) as FxHistoryExportRun);
-  return { schema_version: "1.0", series: "fx_historical_m15_export", source_id: "oanda_v20", evidence_tier: "official_revised_history", instrument,
+  return { schema_version: "1.1", series: "fx_historical_m15_export", source_id: "oanda_v20", evidence_tier: "official_revised_history", instrument,
     canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", manifest_records: records.length, run_records: runRecords.length,
     collections, runs: runRows };
 }
