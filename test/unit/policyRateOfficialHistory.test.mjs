@@ -29,6 +29,20 @@ test("official revised history is stored separately and retains downloaded revis
   assert.equal((await store.coverage()).source_coverage.ecb_deposit_facility.source_observation_count, 10);
 });
 
+test("a raw snapshot stamped before the latest one is refused and writes nothing (BACKLOG 102-36)", async () => {
+  const path = join(await mkdtemp(join(tmpdir(), "tv-mcp-official-policy-rate-")), "history.jsonl");
+  const store = new OfficialPolicyRateHistoryStore(path);
+  const snapshot = (digit, retrieved_at) => ({ source_id: "ecb_deposit_facility", source_url: "https://data-api.ecb.europa.eu/service/data/FM",
+    raw_sha256: `sha256:${digit.repeat(64)}`, source_observation_count: 10, source_first_observation_date: "2020-01-01",
+    source_last_observation_date: "2020-03-15", raw_bytes: 100, retrieved_at });
+  await store.observeRawSnapshot(snapshot("1", "2026-07-30T12:00:00.000Z"));
+  const before = await readFile(`${path}.raw-snapshots`);
+  await assert.rejects(() => store.observeRawSnapshot(snapshot("2", "2026-07-30T11:59:59.999Z")), /official policy-rate raw snapshot clock moved backwards/);
+  assert.deepEqual(await readFile(`${path}.raw-snapshots`), before);
+  assert.equal((await store.coverage()).raw_snapshots, 1);
+  assert.equal((await store.observeRawSnapshot(snapshot("2", "2026-07-30T12:00:00.000Z"))).sequence, 2);
+});
+
 test("official revised history does not treat a response-level vintage timestamp as a value revision", async () => {
   const path = join(await mkdtemp(join(tmpdir(), "tv-mcp-official-policy-rate-")), "history.jsonl");
   const store = new OfficialPolicyRateHistoryStore(path);

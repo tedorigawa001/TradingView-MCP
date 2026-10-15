@@ -96,6 +96,18 @@ test('an empty journal file, as a first append that failed after creating it lea
   assert.deepEqual((await lines(path)).map((r) => r.sequence), [1]);
 });
 
+test('a clock behind the latest record is refused and writes nothing; the journal still reads (BACKLOG 102-36)', async (t) => {
+  const { path, journal } = await setup(t);
+  await journal.record(exposure());
+  const [record] = await lines(path);
+  const text = JSON.stringify({ ...record, first_seen_at: '9999-01-01T00:00:00.000Z', observation_date: '9999-01-01' }) + '\n';
+  await writeFile(path, text);
+  await assert.rejects(journal.record(exposure()), /realized covariance journal clock moved backwards/);
+  assert.equal(await readFile(path, 'utf8'), text);
+  assert.equal((await journal.findByProxySetId(id('c'))).length, 1);
+  assert.equal((await journal.search(['fx:EURUSD'], exposure().envelope)).calls, 1);
+});
+
 test('a journal path that is not a regular owner-only file is refused without waiting, empty or not (BACKLOG 102-43)', { skip: process.platform === 'win32' }, async (t) => {
   for (const [name, make] of UNSAFE_EMPTY_JOURNAL_PATHS) {
     const { path, journal } = await setup(t);

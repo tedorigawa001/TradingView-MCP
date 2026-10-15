@@ -85,6 +85,10 @@ export class FirstSeenCollectionHeartbeatStore {
         cme_gold_open_interest_status: input.cme_gold_open_interest_status,
         coverage_status: input.coverage_status,
       });
+      // A run takes its time before it waits for the lock, so a run that records after another that took a later time, or a
+      // clock moved back, would stamp a heartbeat before the latest; written, it would make every later read of the log, and
+      // so the health check, fail. It is refused and nothing is written; the later heartbeat already stands (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, [record]);
       await this.log.appendUnlocked(record);
       return record;
     });

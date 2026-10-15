@@ -74,6 +74,7 @@ export class CotFirstSeenStore {
       }
       let sequence = records.length;
       const results: CotFirstSeenRecord[] = [];
+      const planned: CotFirstSeenRecord[] = [];
       for (const candidate of candidates) {
         const current = currentFor(candidate);
         if (current?.value_hash === candidate.value_hash) {
@@ -81,10 +82,15 @@ export class CotFirstSeenStore {
           continue;
         }
         const next = { ...candidate, sequence: ++sequence };
-        await this.log.appendUnlocked(next);
-        records.push(next);
+        planned.push(next);
         results.push(next);
       }
+      // The check above compares each version only with the log's last. The versions to append are also checked in the
+      // order they are written, against each other, and each one's observation date against its stamp: a batch whose later
+      // version is stamped earlier, or one dated after it was seen, would be written and make every later read fail.
+      // Nothing is written when any of it fails (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, planned);
+      for (const next of planned) await this.log.appendUnlocked(next);
       return results;
     });
   }

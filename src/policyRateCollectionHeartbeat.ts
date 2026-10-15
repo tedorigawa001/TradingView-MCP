@@ -66,6 +66,9 @@ export class PolicyRateCollectionHeartbeatStore {
         chart_index: input.chart_index,
         currencies: input.currencies,
       });
+      // A heartbeat stamped before the latest (a clock moved back, or a run that took its time before another recorded) is
+      // refused and nothing is written; written, it would make every later read of the log fail (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, [record]);
       await this.log.appendUnlocked(record);
       return record;
     });

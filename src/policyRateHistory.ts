@@ -94,11 +94,13 @@ export class PolicyRateFirstSeenStore {
         const current = currentFor(candidate);
         if (current?.value === candidate.value) { unchanged += 1; continue; }
         if (current) revisions += 1;
-        const record = { ...candidate, sequence: ++sequence };
-        await this.log.appendUnlocked(record);
-        records.push(record);
-        recorded.push(record);
+        recorded.push({ ...candidate, sequence: ++sequence });
       }
+      // The versions to append are also checked in the order they are written, against each other: a batch whose later
+      // version is stamped earlier would be written and make every later read fail. Nothing is written when any of it
+      // fails (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, recorded);
+      for (const record of recorded) await this.log.appendUnlocked(record);
       return { recorded, unchanged, revisions };
     });
   }

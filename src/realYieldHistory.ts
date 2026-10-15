@@ -129,6 +129,7 @@ export class RealYieldFirstSeenStore {
         throw new Error("real-yield first-seen clock moved backwards");
       }
       const results: RealYieldFirstSeenRecord[] = [];
+      const planned: RealYieldFirstSeenRecord[] = [];
       let nextSequence = records.reduce((maximum, record) => Math.max(maximum, record.sequence), 0);
       for (const candidate of candidates) {
         const current = latestForDate(candidate);
@@ -137,10 +138,14 @@ export class RealYieldFirstSeenStore {
           continue;
         }
         const version = { ...candidate, sequence: ++nextSequence };
-        await this.appendUnlocked(version);
-        records.push(version);
+        planned.push(version);
         results.push(version);
       }
+      // The versions to append are also checked in the order they are written, against each other: a batch whose later
+      // version is stamped earlier would be written and make every later read fail. Nothing is written when any of it
+      // fails (BACKLOG 102-36).
+      await this.log.assertAppendableUnlocked(records, planned);
+      for (const version of planned) await this.appendUnlocked(version);
       return results;
     });
   }
