@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
@@ -31,12 +32,33 @@ async function partBody(split: FxHistoryExportSplit, index: number) {
 }
 
 /**
+ * A part file of a split export whose set is not all there (fewer of its `part.of` files of its stem exist): what an
+ * export interrupted while it linked its parts leaves (part01 is linked last). Read from the head of the file only.
+ */
+async function interruptedPart(path: string): Promise<{ index: number; of: number } | null> {
+  const name = /^(.*)\.part\d+\.json$/.exec(path);
+  if (!name || !(await lstat(path).catch(() => null))?.isFile()) return null;
+  let head = "";
+  try {
+    const handle = await open(path, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK));
+    try { const buffer = Buffer.alloc(4096); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); head = buffer.subarray(0, bytesRead).toString("utf8"); }
+    finally { await handle.close(); }
+  } catch { return null; }
+  const part = /"part":\{"index":(\d+),"of":(\d+)\}/.exec(head);
+  if (!part || Number(part[2]) < 1 || Number(part[2]) > 10_000) return null;
+  const of = Number(part[2]);
+  const present = await Promise.all(fxHistoryExportPartPaths(`${name[1]}.json`, of).map((file) => lstat(file).then((entry) => entry.isFile(), () => false)));
+  return present.filter(Boolean).length < of ? { index: Number(part[1]), of } : null;
+}
+
+/**
  * Writes a whole export in parts (BACKLOG 103-10) to fxHistoryExportPartPaths(output), all of them or none
  * (publishImmutableFiles). A directory or a symbolic link at a part's path refuses the export before any raw page is
  * read. Each part is then built in turn, so only one part's bars are held at once: a part whose file already exists is
  * compared with it, any other is written to a synced staging file beside it. A part that fails to build, or a file with
- * other bytes, removes the staging files and writes nothing. Only when every part is staged or found identical are the
- * staged parts linked into place: each part is created, or identical when its file already held it.
+ * other bytes, removes the staging files and writes nothing; a file with other bytes that is a part of an incomplete
+ * set is named as the debris of an interrupted export. Only when every part is staged or found identical are the staged
+ * parts linked into place, part01 last: each part is created, or identical when its file already held it.
  */
 export async function writeFxHistoryExportParts(split: FxHistoryExportSplit, output: string) {
   const paths = fxHistoryExportPartPaths(output, split.parts.length);
@@ -51,8 +73,15 @@ export async function writeFxHistoryExportParts(split: FxHistoryExportSplit, out
     digests[index] = digest(built.body);
     collections[index] = built.collections;
     return built.body;
-  }, "FX history export");
-  if (!published.published) throw new Error(`a different file already exists at ${published.different.join(", ")}; nothing was written`);
+  }, "FX history export", { stem: basename(output).replace(/\.json$/, "") });
+  if (!published.published) {
+    const named = await Promise.all(published.different.map(async (path) => {
+      const part = await interruptedPart(path);
+      return part === null ? path
+        : `${path} (part ${part.index} of ${part.of} of an export whose other parts are not all there: it looks like debris of an interrupted export; delete it)`;
+    }));
+    throw new Error(`a different file already exists at ${named.join(", ")}; nothing was written`);
+  }
   return {
     parts: split.parts.map((part, index) => ({ index: part.index, output: paths[index], result: published.results[index], sha256: digests[index],
       collections: part.sequences.length, runs: part.runs, bars: part.bars })),

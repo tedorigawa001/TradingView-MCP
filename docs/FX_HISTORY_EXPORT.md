@@ -43,7 +43,10 @@ After the manifest the page checkpoints are read, once and whole, then the manif
 second read holds as many records as the first, neither log changed meanwhile, so the manifest, the run log (and the
 totals below) and the checkpoints describe one moment, the one the checkpoints were read at; a checkpoint a later run
 writes is not read. Otherwise all are read again, up to five times in all, and the export fails if collections kept
-recording throughout. The manifest holds each content once; one that holds a content twice refuses the export.
+recording throughout. The totals count only the manifest and the run log: a later run of an identical range can add a
+checkpoint that turns a collection's `range_checkpointed` true while they stay the same. The manifest holds each
+content once; one that holds a content twice refuses the export. Every collection's source URL must name an OANDA host,
+checked before any raw page is read.
 
 ## Usage
 
@@ -103,10 +106,12 @@ otherwise) and finishing time are what a point-in-time reading uses. An instrume
 
 The bars are exactly the collector's normalized bars (OANDA midpoint candles, the time of each candle's open in UTC with
 milliseconds): their JSON array hashes to `normalized_sha256`. Nothing in the document depends on when the export ran,
-so the same manifest and run log give the same bytes. A record added to either changes them: a whole export (`--all`)
-gains the new collection or run, as it always did (a later run of the same content adds a run), and since 1.1 a partial
-export (`--sequence`) changes too, even when its own collections and runs do not, because its totals count the whole
-logs. The output is never overwritten, so export again to a new name.
+so the same manifest, run log and page checkpoints give the same bytes. A record added to the manifest or the run log
+changes them: a whole export (`--all`) gains the new collection or run, as it always did (a later run of the same
+content adds a run), and since 1.1 a partial export (`--sequence`) changes too, even when its own collections and runs
+do not, because its totals count the whole logs. A checkpoint alone can change them too: a later run of an identical
+range can turn a collection's `range_checkpointed` true without changing the totals. The output is never overwritten,
+so export again to a new name.
 
 `--format bar-series` writes one collection, named by one `--sequence`, as the input of
 `tradingview-mcp-import-bar-series`: `open_time` in Unix seconds, `close`, `interval_minutes` 15, `source_id` `oanda_v20`
@@ -149,20 +154,31 @@ Each part is a complete export document with the header of the whole export, the
 
 The parts are written all together or not at all. A directory or a symbolic link at a part's path refuses the export
 before any raw page is read. Then each part is built in turn, once, and only one part's bars are held at once: a part
-whose file already exists is compared with it, and any other is written to a staging file beside the output and
-synced. A part that fails to build (a raw page missing or not matching its hash, a page no checkpoint binds), or a file
-with other bytes at a part's path, removes the staging files and writes nothing; every file with other bytes is named.
-Only when every part is staged or found identical are the staged parts linked into place and the directory synced:
-each part is `created`, or `identical` when its file already held it. A file with other bytes that appears at a part's
-path while the parts are being linked stops the export, and the error names exactly the parts this run created before
-it (not those found identical); the rest are not written. The command prints the totals, the number of runs, each
-part's index, path, result, SHA-256, number of collections and runs, and bars, and each collection's sequence, bar
-count, normalized hash, `range_checkpointed` and part.
+whose file already exists is compared with it, and any other is written and synced to a staging file in a hidden
+directory beside the output, `.publish-<output name without .json>-<process id>-XXXXXX`. A part that fails to build (a
+raw page missing or not matching its hash, a page no checkpoint binds), or a file with other bytes at a part's path,
+removes the staging directory and writes nothing, and says so; every file with other bytes is named. Only when every
+part is staged or found identical are the staged parts linked into place, `part01` last: the other parts are linked
+and the directory synced, the parts found identical are checked to be so still, and then `part01` is linked and
+synced. Each part is `created`, or `identical` when its file already held it. A link that fails (a file with other
+bytes appearing at a part's path meanwhile, a directory denied or full) removes again every part this run linked, and
+the error says so; parts found identical were not written by this run.
+
+An export stopped by SIGINT or SIGTERM removes what it linked and its staging directory before it ends. One killed
+outright (SIGKILL) leaves its staging directory, which the next export to the same output name removes, as it does
+any such directory of the same name whose process is gone or that is older than a day; directories of a running export
+or of another output name are left alone. A crash or power loss while the parts are being linked can leave some of
+`part02` onwards without `part01`. A later export to that name then finds a different file there and refuses; the error
+calls such a part, one whose set is not all there, the debris of an interrupted export, to be deleted.
+
+The command prints the totals, the number of runs, each part's index, path, result, SHA-256, number of collections and
+runs, and bars, and each collection's sequence, bar count, normalized hash, `range_checkpointed` and part.
 
 A reader recombines the parts of one export so:
 
-1. It reads `part.of` files, `<stem>.part01.json` to the last, and requires every one to have the same `part.of` and
-   each `part.index` from 1 to `part.of` exactly once.
+1. It starts from `<stem>.part01.json`, which is linked last, so it is there only when the whole set was written. It
+   reads `part01`'s `part.of` files, `part01` to the last, and requires every one to have the same `part.of` and each
+   `part.index` from 1 to `part.of` exactly once. Parts without a `part01` are not an export.
 2. It requires every part to have the same header: `schema_version`, `series`, `source_id`, `evidence_tier`,
    `instrument`, `canonical_symbol`, `granularity`, `price`, `manifest_records` and `run_records`. Parts with other
    totals come from exports of other moments and are not mixed.

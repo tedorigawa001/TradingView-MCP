@@ -184,9 +184,10 @@ async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: Manif
  * It also holds the runs of the instrument's run log whose content is an exported collection (BACKLOG 103-5): how each
  * was started, when it started and finished, and what range it requested, which a point-in-time reading needs. The
  * manifest, the run log and the page checkpoints are read at one moment (readFxHistorySnapshot), and the totals of the
- * first two are in the export (BACKLOG 103-9). Nothing in it depends on when the export ran, so the same logs give the
- * same bytes; a record added to the manifest or the run log changes them, a partial export's too, since the totals
- * count the whole logs.
+ * first two are in the export (BACKLOG 103-9). Nothing in it depends on when the export ran, so the same manifest, run
+ * log and page checkpoints give the same bytes; a record added to the manifest or the run log changes them, a partial
+ * export's too, since the totals count the whole logs, and a checkpoint added by a later run of an identical range can
+ * turn a collection's range_checkpointed true while the totals stay the same.
  */
 export async function exportFxHistory(input: { instrument: OandaFxInstrument; sequences?: number[]; all?: boolean; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExport> {
   const { instrument, store, checkpoints: checkpointLog, runs, archive } = await readers(input);
@@ -204,7 +205,19 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   if (total > maxBars) {
     throw new Error(`the export would hold ${total} bars, more than ${maxBars}; ${input.all ? "write a whole export in parts with --split" : "export fewer collections at a time"}`);
   }
+  assertKnownHosts(chosen, store.path);
   return exportDocument({ instrument, records, runRecords, manifestPath: store.path }, chosen, archive, checkpoints);
+}
+
+/**
+ * Checks, before any raw page is read, that every collection's source URL names an OANDA host: its environment keys
+ * its page checkpoints, and the rebuild would otherwise refuse it only after reading its pages (BACKLOG 103-10 review 2).
+ */
+function assertKnownHosts(records: FxHistoricalManifest[], manifestPath?: string): void {
+  for (const record of records) {
+    try { fxHistoryEnvironmentOf(record.source_url_template); }
+    catch (error) { throw new Error(`FX history collection ${record.sequence}: ${message(error)}${manifestPath ? ` (manifest ${manifestPath})` : ""}`, { cause: error }); }
+  }
 }
 
 /**
@@ -254,6 +267,7 @@ export async function splitFxHistoryExport(input: { instrument: OandaFxInstrumen
   for (const limit of [maxPartBars, maxBars]) if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("an export's bar limits must be positive integers");
   const { records, runRecords, checkpoints, where } = await readFxHistorySnapshot(instrument, store, runs, checkpointLog);
   if (!records.length) throw new Error(`no ${instrument} FX history collection is recorded${where}`);
+  assertKnownHosts(records, store.path);
   const total = records.reduce((sum, record) => sum + record.bar_count, 0);
   if (total > maxBars) throw new Error(`the whole export would hold ${total} bars, more than ${maxBars}, the most an export in parts holds`);
   const groups: FxHistoricalManifest[][] = [];

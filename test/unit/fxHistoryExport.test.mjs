@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readdir, readFile, stat, symlink, writeFile, mkdir } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
@@ -441,10 +441,10 @@ test("a split export writes all its parts or none: a later part that fails to bu
   // The first part is built and staged; the second cannot be built: neither is written.
   const output = join(dir, "broken.json"), paths = fxHistoryExportPartPaths(output, 2);
   await assert.rejects(async () => writeFxHistoryExportParts(await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted, archive: broken }), output),
-    /FX history collection 3, raw page 1: ENOENT: the raw page is gone/);
+    /FX history collection 3, raw page 1: ENOENT: the raw page is gone.*; nothing was written$/);
   assert.deepEqual([await lstatOrNull(paths[0]), await lstatOrNull(paths[1]), await staging()], [null, null, []]);
   // The same through the CLI, in one part.
-  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--all", "--split", "--output", output], { ...sources, archive: broken }), /raw page 1: ENOENT/);
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--all", "--split", "--output", output], { ...sources, archive: broken }), /raw page 1: ENOENT.*; nothing was written$/);
   assert.deepEqual([await lstatOrNull(paths[0]), await staging()], [null, []]);
   // A symbolic link at a part's path is refused before any raw page is read.
   const linked = join(dir, "linked.json"), [linkedFirst, linkedSecond] = fxHistoryExportPartPaths(linked, 2);
@@ -498,4 +498,33 @@ test("the page checkpoints are read with the snapshot, once and whole: one writt
     archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), new RegExp(`EUR_USD FX history manifest in .* records content ${record.normalized_sha256} twice, as collections 1 and 2`));
   await assert.rejects(() => splitFxHistoryExport({ instrument: "EUR_USD", ...sources, store: twice, runs: { instrument: "EUR_USD", records: async () => [] } }), /twice, as collections 1 and 2/);
   assert.equal(pages, 0);
+});
+
+test("parts an interrupted export left are named as its debris, and every collection's host is checked before a raw page is read (BACKLOG 103-10 review 2)", async () => {
+  const { counted, reads, sources, collect, dir } = await fourCollections();
+  const split = () => splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted });
+  const output = join(dir, "usdjpy.json"), [first, second] = fxHistoryExportPartPaths(output, 2);
+  await writeFxHistoryExportParts(await split(), output);
+  // Part01 is linked last: an export cut off while linking leaves part02 without it. The logs then grow.
+  await rm(first);
+  const flat = (time, c) => ({ complete: true, volume: 5, time, mid: { o: c, h: c, l: c, c } });
+  await collect("2026-03-03T00:00:00.000Z", "2026-03-03T00:30:00.000Z", (start) => [flat(start, "150.10"), flat(new Date(Date.parse(start) + 900_000).toISOString(), "150.11")],
+    "2026-08-02T00:00:00.000Z");
+  const escaped = second.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await assert.rejects(async () => writeFxHistoryExportParts(await split(), output), new RegExp(`a different file already exists at ${escaped} \\(part 2 of 2 of an export whose `
+    + "other parts are not all there: it looks like debris of an interrupted export; delete it\\); nothing was written$"));
+  assert.equal(await lstatOrNull(first), null);
+  // A whole set from an earlier moment is not debris: it is named plainly.
+  const whole = join(dir, "whole.json"), wholePaths = fxHistoryExportPartPaths(whole, 2);
+  await writeFile(wholePaths[0], `${JSON.stringify({ schema_version: "1.1", part: { index: 1, of: 2 } })}\n`);
+  await writeFile(wholePaths[1], `${JSON.stringify({ schema_version: "1.1", part: { index: 2, of: 2 } })}\n`);
+  await assert.rejects(async () => writeFxHistoryExportParts(await split(), whole),
+    (error) => error.message === `a different file already exists at ${wholePaths[0]}, ${wholePaths[1]}; nothing was written`);
+  // A collection whose source URL names no OANDA host refuses the split export before any raw page is read.
+  const [record] = await sources.store.records();
+  reads.count = 0;
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", ...counted, runs: { instrument: "USD_JPY", records: async () => [] },
+    store: { instrument: "USD_JPY", path: sources.store.path, records: async () => [{ ...record, source_url_template: "https://example.invalid/v3/accounts/{account}/instruments/USD_JPY/candles" }] } }),
+  /FX history collection 1: .*unknown OANDA host \(manifest .*\)/);
+  assert.equal(reads.count, 0);
 });

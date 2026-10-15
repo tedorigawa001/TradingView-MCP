@@ -1,5 +1,6 @@
-import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdtemp, open, readFile, realpath, rm, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants, createReadStream, lstatSync, rmSync, unlinkSync, type Stats } from "node:fs";
+import { link, lstat, mkdtemp, open, readdir, readFile, realpath, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
@@ -252,23 +253,69 @@ export async function publishImmutableFile(
   }
 }
 
+/** A staging directory of publishImmutableFiles older than this is removed by the next run of the same stem, whatever its pid. */
+const STALE_STAGING_MS = 24 * 60 * 60 * 1000;
+
+/** The stem in a staging directory's name: the characters a file name can safely carry, at most 64 of them. */
+const stagingStem = (stem: string) => stem.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "files";
+
+/** Whether a process with this id exists: signal 0 checks without sending anything (EPERM: it exists, as another user). */
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/**
+ * Removes, from `directory`, the staging directories `.publish-<stem>-<pid>-XXXXXX` that publishImmutableFiles runs of the
+ * same stem left behind when they were killed (BACKLOG 103-10 review 2): those whose process is gone, and those older
+ * than a day. A directory of a live run of the same stem, of another stem, or of any other name is never touched.
+ */
+async function removeStaleStagings(directory: string, stem: string): Promise<void> {
+  const pattern = new RegExp(`^\\.publish-${stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)-[A-Za-z0-9]{6}$`);
+  let names: string[];
+  try { names = await readdir(directory); } catch { return; }
+  for (const name of names) {
+    const match = pattern.exec(name);
+    if (!match) continue;
+    const path = join(directory, name);
+    const entry = await lstat(path).catch(() => null);
+    if (!entry?.isDirectory()) continue;
+    if (processAlive(Number(match[1])) && Date.now() - entry.mtimeMs < STALE_STAGING_MS) continue;
+    await rm(path, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+  }
+}
+
+async function fileDigest(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
 /**
  * Publishes several new immutable files together, all of them or none (BACKLOG 103-10 review): publishImmutableFile for
  * a set, on the same primitives. The bytes of each destination are asked for in turn, so only one file's bytes are held
  * at once. A destination already holding exactly those bytes is "identical" (synced as publishImmutableFile syncs it);
  * one holding other bytes, or anything but a regular file, is "different"; a symbolic link there is refused. The bytes
- * of a new destination are written to a staging file in its directory and synced. Nothing is linked into place before
- * every destination is staged or found identical: when bytesOf fails, or a destination is "different", the staging
- * files are removed and nothing is written. Once one destination is "different", only destinations that already exist
- * are still compared, so that every different one is returned. Then each staged file is linked to its destination and
- * the directories are synced. A destination taken meanwhile by other bytes (another writer) stops the run with an error
- * that names exactly the destinations this run created before it; those found identical were not written by it, and
- * the rest are not linked. The staging directories are removed when the run ends, as a best effort.
+ * of a new destination are written to a staging file and synced, in a directory `.publish-<stem>-<pid>-XXXXXX` beside
+ * it; a run first removes such directories that runs of the same stem left when they were killed (removeStaleStagings).
+ * Nothing is linked into place before every destination is staged or found identical: when bytesOf fails, or a
+ * destination is "different", the staging files are removed and nothing is written. Once one destination is
+ * "different", only destinations that already exist are still compared, so that every different one is returned.
+ *
+ * Then the staged files are linked to their destinations, the first destination last: the others are linked and their
+ * directories synced, the destinations found identical are checked to be so still, and only then is the first one
+ * linked and synced, so the first destination there means the set was whole when it was written. A link that fails (a
+ * destination taken meanwhile by other bytes, a denied or full directory) removes again every file this run linked,
+ * each checked to be the staged file, and the error says so; destinations found identical were not written by it. A
+ * SIGINT or SIGTERM during the run removes what it linked and its staging directories, then takes its usual course.
+ * A crash or power loss while linking can still leave some destinations without the first. The staging directories
+ * are removed when the run ends, as a best effort.
  */
 export async function publishImmutableFiles(
   destinations: readonly string[],
   bytesOf: (index: number) => Promise<string | Buffer>,
   label: string,
+  options: { stem?: string } = {},
 ): Promise<{ published: true; results: ("created" | "identical")[] } | { published: false; different: string[] }> {
   const targets: { destination: string; directory: string; target: string }[] = [];
   for (const destination of destinations) {
@@ -280,60 +327,98 @@ export async function publishImmutableFiles(
     targets.push({ destination, directory, target: join(directory, name) });
   }
   if (new Set(targets.map((item) => item.target)).size !== targets.length) throw new Error(`${label} paths must be distinct`);
+  const stem = stagingStem(options.stem ?? basename(destinations[0] ?? "files").replace(/\.[^.]*$/, ""));
+  const directories = [...new Set(targets.map((item) => item.directory))];
+  for (const directory of directories) await removeStaleStagings(directory, stem);
   const stagings = new Map<string, string>();
   const staged: (string | null)[] = [];
   const results: ("created" | "identical" | null)[] = [];
+  const identical = new Map<number, string>();
   const different: string[] = [];
-  try {
-    for (const [index, { destination, directory, target }] of targets.entries()) {
-      staged.push(null); results.push(null);
-      let entry: Stats | null;
-      try { entry = await lstat(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entry = null; }
-      if (entry?.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link: ${destination}`);
-      if (different.length > 0 && entry === null) continue;
-      const raw = await bytesOf(index);
-      const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : raw;
-      const found = entry === null ? null : await settleExistingFile(target, directory, bytes, label);
-      if (found === "different") { different.push(destination); continue; }
-      if (found === "identical") { results[index] = "identical"; continue; }
-      if (different.length > 0) continue;
-      let staging = stagings.get(directory);
-      if (staging === undefined) { staging = await mkdtemp(join(directory, ".publish-")); stagings.set(directory, staging); }
-      const file = join(staging, String(index));
-      const handle = await openExclusiveFile(file, label);
-      try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-      staged[index] = file;
+  const created: { destination: string; target: string; file: string }[] = [];
+  /** Unlinks what this run linked, each only while it is still the staged file; synchronous, so a signal handler can use it. */
+  const unlinkCreated = () => {
+    const removed: string[] = [], left: string[] = [];
+    for (const { destination, target, file } of created.splice(0)) {
+      try {
+        const [placed, ours] = [lstatSync(target), lstatSync(file)];
+        if (placed.dev === ours.dev && placed.ino === ours.ino) { unlinkSync(target); removed.push(destination); } else left.push(destination);
+      } catch { left.push(destination); }
     }
-    if (different.length > 0) return { published: false, different };
-    const created: string[] = [];
-    const directories = [...new Set(targets.map((item) => item.directory))];
+    return { removed, left };
+  };
+  const onSignal = (signal: NodeJS.Signals) => {
+    unlinkCreated();
+    for (const staging of stagings.values()) { try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ } }
+    process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  process.on("SIGINT", onSignal); process.on("SIGTERM", onSignal);
+  try {
     try {
-      for (const [index, file] of staged.entries()) {
-        if (file === null) continue;
-        const { destination, directory, target } = targets[index];
-        for (let attempt = 1; ; attempt += 1) {
-          try {
-            await link(file, target);
-            results[index] = "created"; created.push(destination);
-            break;
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            const settled = await settleExistingFile(target, directory, await readFile(file), label);
-            if (settled === "identical") { results[index] = "identical"; break; }
-            if (settled === "different") throw new Error(`${label} path ${destination} was taken by a different file while the files were published`);
-            if (attempt === 2) throw new Error(`${label} path ${destination} kept changing while it was being published`);
-          }
-        }
+      for (const [index, { destination, directory, target }] of targets.entries()) {
+        staged.push(null); results.push(null);
+        let entry: Stats | null;
+        try { entry = await lstat(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entry = null; }
+        if (entry?.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link: ${destination}`);
+        if (different.length > 0 && entry === null) continue;
+        const raw = await bytesOf(index);
+        const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : raw;
+        const found = entry === null ? null : await settleExistingFile(target, directory, bytes, label);
+        if (found === "different") { different.push(destination); continue; }
+        if (found === "identical") { results[index] = "identical"; identical.set(index, createHash("sha256").update(bytes).digest("hex")); continue; }
+        if (different.length > 0) continue;
+        let staging = stagings.get(directory);
+        if (staging === undefined) { staging = await mkdtemp(join(directory, `.publish-${stem}-${process.pid}-`)); stagings.set(directory, staging); }
+        const file = join(staging, String(index));
+        const handle = await openExclusiveFile(file, label);
+        try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+        staged[index] = file;
       }
     } catch (error) {
-      // What this run did link stays, synced as far as it goes; the error says exactly which those are.
-      if (created.length > 0) for (const directory of directories) await syncDirectoryEntry(directory).catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}; ${created.length > 0 ? `only ${created.join(", ")} ${created.length === 1 ? "was" : "were"} written` : "nothing was written"}`, { cause: error });
+      throw new Error(message.endsWith("nothing was written") ? message : `${message}; nothing was written`, { cause: error });
     }
-    for (const directory of directories) await syncDirectoryEntry(directory);
+    if (different.length > 0) return { published: false, different };
+    const linkOne = async (index: number) => {
+      const { destination, directory, target } = targets[index], file = staged[index]!;
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await link(file, target);
+          created.push({ destination, target, file }); results[index] = "created";
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const settled = await settleExistingFile(target, directory, await readFile(file), label);
+          if (settled === "identical") { results[index] = "identical"; return; }
+          if (settled === "different") throw new Error(`${label} path ${destination} was taken by a different file while the files were published`);
+          if (attempt === 2) throw new Error(`${label} path ${destination} kept changing while it was being published`);
+        }
+      }
+    };
+    try {
+      for (const [index, file] of staged.entries()) if (index > 0 && file !== null) await linkOne(index);
+      for (const directory of directories) await syncDirectoryEntry(directory);
+      for (const [index, digest] of identical) {
+        const { destination, target } = targets[index];
+        const entry = await lstat(target).catch(() => null);
+        if (!entry?.isFile() || await fileDigest(target) !== digest) throw new Error(`${label} path ${destination} changed after it was found identical`);
+      }
+      if (staged[0] !== null && staged[0] !== undefined) {
+        await linkOne(0);
+        await syncDirectoryEntry(targets[0].directory);
+      }
+    } catch (error) {
+      const { removed, left } = unlinkCreated();
+      for (const directory of directories) await syncDirectoryEntry(directory).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      const verb = (list: string[]) => (list.length === 1 ? "was" : "were");
+      const outcome = left.length > 0 ? `${left.join(", ")} ${verb(left)} written and could not be removed` : "nothing was written";
+      throw new Error(`${message}; ${outcome}${removed.length > 0 ? ` (${removed.join(", ")} ${verb(removed)} linked and removed again)` : ""}`, { cause: error });
+    }
     return { published: true, results: results as ("created" | "identical")[] };
   } finally {
+    process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
     for (const staging of stagings.values()) await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
   }
 }

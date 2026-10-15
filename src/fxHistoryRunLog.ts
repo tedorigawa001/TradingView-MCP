@@ -154,8 +154,9 @@ export function latestFxDailyWindow(now: Date) {
  * finished by the deadline, the last one (manual runs do not count) must have finished in the window, requested the
  * session before it whole (from its start to its last candle, which opens 15 minutes before its end), and read only
  * final pages. latest_run_at is the latest daily run's finishing time, null when there is none. latest_in_future says
- * that run is stamped ahead of the clock (after `now` and after `readAt`, when the log was read; see stampedAhead): the
- * log refuses every later run until the clock reaches it (BACKLOG 102-36 review). A manual run stamped ahead blocks the
+ * that run is stamped ahead of the clock (after `now`, and more than a minute after `readAt`, when the log was read; see
+ * stampedAhead and CLOCK_AHEAD_TOLERANCE_MS): the log refuses every later run until the clock reaches it (BACKLOG 102-36
+ * review). A manual run stamped ahead blocks the
  * daily runs too; it shows as a missed window at the next deadline.
  */
 export function fxDailyCoverage(runs: Pick<FxHistoricalRun, "trigger" | "retrieved_at" | "requested_from" | "requested_to" | "unfinished_pages">[], now: Date, readAt = now.getTime()) {
