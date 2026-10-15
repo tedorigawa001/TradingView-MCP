@@ -25,6 +25,18 @@ export function parsePolicyRateCollectionCliArguments(argv: string[], env = proc
   return { chartIndex, confirmChartSwitch };
 }
 
+/**
+ * A run whose first-seen values were written but whose heartbeat was refused (one stamped before the latest, BACKLOG
+ * 102-36): `result` is the run's result with heartbeat null, which the CLI still prints before it fails with the
+ * heartbeat's error, as the first-seen collection does (102-07 review). The message is the heartbeat's own.
+ */
+export class PolicyRateHeartbeatError extends Error {
+  constructor(readonly result: Omit<Awaited<ReturnType<typeof collectPolicyRates>>, "heartbeat"> & { heartbeat: null }, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "PolicyRateHeartbeatError";
+  }
+}
+
 export async function collectPolicyRates(
   tv: Pick<TradingView, "getOhlcv" | "setSymbol" | "setResolution" | "getChartContext">,
   store: Pick<PolicyRateFirstSeenStore, "observeMany">,
@@ -48,14 +60,36 @@ export async function collectPolicyRates(
       observations.push({ currency, bars: transaction.value.bars, observation: transaction.value.observation });
     }
     const persisted = await store.observeMany(observations.map((item) => item.observation));
-    const heartbeatRecord = await heartbeat.recordRun({
-      observed_at: now.toISOString(),
-      chart_index: chartIndex,
-      currencies: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, decision_observation_date: observation.observation_date, bars })),
-    });
-    return { observed_at: now.toISOString(), status: "complete" as const, observations: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, observation_date: observation.observation_date, value: observation.value, available_at: observation.available_at, bars })), first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions }, heartbeat: { sequence: heartbeatRecord.sequence, recorded_at: heartbeatRecord.first_seen_at } };
+    const result = { observed_at: now.toISOString(), status: "complete" as const, observations: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, observation_date: observation.observation_date, value: observation.value, available_at: observation.available_at, bars })), first_seen: { recorded: persisted.recorded.length, unchanged: persisted.unchanged, revisions: persisted.revisions } };
+    let heartbeatRecord;
+    try {
+      heartbeatRecord = await heartbeat.recordRun({
+        observed_at: now.toISOString(),
+        chart_index: chartIndex,
+        currencies: observations.map(({ currency, bars, observation }) => ({ currency, source_symbol: observation.source_symbol, decision_observation_date: observation.observation_date, bars })),
+      });
+    } catch (error) {
+      throw new PolicyRateHeartbeatError({ ...result, heartbeat: null }, error);
+    }
+    return { ...result, heartbeat: { sequence: heartbeatRecord.sequence, recorded_at: heartbeatRecord.first_seen_at } };
   } finally {
     await release();
+  }
+}
+
+/**
+ * Prints a run's result. A run whose heartbeat was refused still prints its result, with heartbeat null, since its values
+ * are already written, and then fails with the heartbeat's error, which the CLI writes to stderr with exit status 1.
+ */
+export async function printPolicyRateCollection(
+  collect: () => ReturnType<typeof collectPolicyRates>,
+  write: (line: string) => void = (line) => { process.stdout.write(line); },
+): Promise<void> {
+  try {
+    write(`${JSON.stringify(await collect())}\n`);
+  } catch (error) {
+    if (error instanceof PolicyRateHeartbeatError) write(`${JSON.stringify(error.result)}\n`);
+    throw error;
   }
 }
 
@@ -63,8 +97,8 @@ async function main(): Promise<void> {
   const args = parsePolicyRateCollectionCliArguments(process.argv.slice(2));
   const cdp = new CdpClient();
   try {
-    const result = await collectPolicyRates(new TradingView(cdp), new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()), new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath()), args.chartIndex);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    await printPolicyRateCollection(() => collectPolicyRates(new TradingView(cdp), new PolicyRateFirstSeenStore(resolvePolicyRateHistoryPath()),
+      new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath()), args.chartIndex));
   } finally {
     cdp.close();
   }

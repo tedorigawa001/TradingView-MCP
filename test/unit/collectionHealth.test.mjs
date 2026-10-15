@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
-import { evaluateCollectionHealth } from "../../build/collectionHealth.js";
+import { collectionHealthNotification, evaluateCollectionHealth } from "../../build/collectionHealth.js";
 import { parseCollectionHealthCliArguments, runCollectionHealthCli } from "../../build/collectionHealthCli.js";
 
 const freshFirstSeen = {
@@ -74,6 +74,55 @@ test("collection health rejects nonsensical thresholds and ages", () => {
   };
   assert.throws(() => evaluateCollectionHealth({ ...valid, maxResearchAgeHours: -1 }), /threshold/);
   assert.throws(() => evaluateCollectionHealth({ ...valid, research: { ...valid.research, latest_run_age_hours: -1 } }), /age/);
+});
+
+test("a latest heartbeat stamped after the check is reported as clock_ahead, and the check is stale and notifies (BACKLOG 102-36 review)", () => {
+  const checkedAt = "2026-09-07T02:15:00.000Z", twoHoursAhead = "2026-09-07T04:15:00.000Z";
+  const base = { checkedAt, maxPolicyRateAgeBusinessDays: 0, maxResearchAgeHours: 2 };
+  // Each reads as fresh: an age of 0 business days, a negative age, a run that meets the schedule. Each log refuses every
+  // later heartbeat until the clock reaches the stamp, so without the check nothing would be noticed until then.
+  const ahead = evaluateCollectionHealth({
+    ...base,
+    policyRate: { latest_collected_at: twoHoursAhead, latest_run_age_business_days: 0, latest_in_future: true },
+    research: { latest_collected_at: twoHoursAhead, latest_run_age_hours: -2, latest_in_future: true },
+    firstSeen: { ...freshFirstSeen, latest_collected_at: twoHoursAhead, latest_expected_run_at: "2026-09-07T01:30:00.000Z", latest_in_future: true },
+  });
+  assert.deepEqual([ahead.status, ahead.should_notify], ["stale", true]);
+  assert.deepEqual(ahead.issues, [
+    { code: "policy_rate_clock_ahead", collector: "policy_rate", age: -2, threshold: 0, unit: "hours" },
+    { code: "research_clock_ahead", collector: "research", age: -2, threshold: 0, unit: "hours" },
+    { code: "first_seen_clock_ahead", collector: "first_seen", age: -2, threshold: 0, unit: "hours" },
+  ]);
+  assert.deepEqual([ahead.policy_rate.latest_in_future, ahead.research.latest_in_future, ahead.first_seen.latest_in_future], [true, true, true]);
+  assert.equal(collectionHealthNotification(ahead), "Collection heartbeat unhealthy: policy-rate, research, first-seen. Inspect collector and scheduler logs; "
+    + "CDP-dependent collectors also require TradingView debugging. A heartbeat is stamped after the check: check the system clock.");
+  // A partial first-seen run is still reported beside it.
+  const partial = evaluateCollectionHealth({ ...base, scope: "first-seen", policyRate: { latest_collected_at: null, latest_run_age_business_days: null }, research: { latest_collected_at: null, latest_run_age_hours: null },
+    firstSeen: { ...ahead.first_seen, latest_run_status: "partial" } });
+  assert.deepEqual(partial.issues.map((issue) => issue.code), ["first_seen_clock_ahead", "first_seen_collection_partial"]);
+  // The normal notification is unchanged.
+  const stale = evaluateCollectionHealth({ ...base, scope: "research", policyRate: { latest_collected_at: null, latest_run_age_business_days: null },
+    research: { latest_collected_at: "2026-09-06T23:00:00.000Z", latest_run_age_hours: 3.25, latest_in_future: false }, firstSeen: freshFirstSeen });
+  assert.equal(collectionHealthNotification(stale), "Collection heartbeat unhealthy: research. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.");
+  // A heartbeat written while the check waited for its log is stamped after checked_at but is not ahead: its negative age,
+  // which the check used to refuse, is healthy.
+  const waited = evaluateCollectionHealth({ ...base, scope: "research", policyRate: { latest_collected_at: null, latest_run_age_business_days: null },
+    research: { latest_collected_at: "2026-09-07T02:15:40.000Z", latest_run_age_hours: -0.01, latest_in_future: false }, firstSeen: freshFirstSeen });
+  assert.deepEqual([waited.status, waited.issues], ["healthy", []]);
+  // A negative age needs a heartbeat stamped after checked_at, and latest_in_future one stamped after checked_at.
+  assert.throws(() => evaluateCollectionHealth({ ...base, scope: "research", policyRate: { latest_collected_at: null, latest_run_age_business_days: null },
+    research: { latest_collected_at: "2026-09-07T02:14:00.000Z", latest_run_age_hours: -0.02 }, firstSeen: freshFirstSeen }), /age must be a non-negative number/);
+  assert.throws(() => evaluateCollectionHealth({ ...base, policyRate: { latest_collected_at: "2026-09-07T01:45:00.000Z", latest_run_age_business_days: 0, latest_in_future: true },
+    research: ahead.research, firstSeen: freshFirstSeen }), /latest_in_future needs a latest heartbeat stamped after checked_at/);
+  assert.throws(() => evaluateCollectionHealth({ ...base, scope: "first-seen", policyRate: ahead.policy_rate, research: ahead.research,
+    firstSeen: { ...freshFirstSeen, latest_in_future: "yes" } }), /latest_in_future must be a boolean/);
+  // The daily FX history collection, by its latest daily run.
+  const fx = evaluateCollectionHealth({ ...base, scope: "fx-history", policyRate: ahead.policy_rate, research: ahead.research, firstSeen: freshFirstSeen, fxHistory: [
+    { instrument: "EUR_USD", latest_run_at: "2026-09-07T03:15:00.000Z", window_opens_at: "2026-09-03T21:15:00.000Z", window_closes_at: "2026-09-04T12:00:00.000Z", latest_window_met: false, latest_in_future: true },
+    { instrument: "USD_JPY", latest_run_at: "2026-09-03T23:30:00.000Z", window_opens_at: "2026-09-03T21:15:00.000Z", window_closes_at: "2026-09-04T12:00:00.000Z", latest_window_met: true, latest_in_future: false },
+  ] });
+  assert.deepEqual(fx.issues, [{ code: "fx_history_clock_ahead", collector: "fx_history", instrument: "EUR_USD", age: -1, threshold: 0, unit: "hours" }]);
+  assert.match(collectionHealthNotification(fx), /^Collection heartbeat unhealthy: fx-history EUR_USD\..*check the system clock\.$/);
 });
 
 test("collection health CLI keeps strict defaults and accepts explicit thresholds", () => {

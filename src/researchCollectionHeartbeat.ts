@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { stampedAhead } from "./collectionHealth.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 
 /**
@@ -95,6 +96,7 @@ export class ResearchCollectionHeartbeatStore {
     if (!Number.isFinite(asOf.getTime())) throw new Error("as_of must be a valid timestamp");
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();
+      const readAt = Date.now();
       const times = records.map((record) => Date.parse(record.first_seen_at));
       // The job is hourly, so continuity is measured in hours rather than in the
       // business days a weekday-scheduled collector is judged by.
@@ -117,6 +119,9 @@ export class ResearchCollectionHeartbeatStore {
         latest_collected_at: latest?.first_seen_at ?? null,
         maximum_gap_hours: gapHours.length === 0 ? null : Number(Math.max(...gapHours).toFixed(2)),
         latest_run_age_hours: latest === undefined ? null : Number(((asOf.getTime() - Date.parse(latest.first_seen_at)) / 3_600_000).toFixed(2)),
+        // Stamped ahead of the clock: its age is negative, and the log refuses every later heartbeat until the clock reaches
+        // it, so the health check reports it (BACKLOG 102-36 review).
+        latest_in_future: latest !== undefined && stampedAhead(latest.first_seen_at, asOf, readAt),
         chart_restoration_failures: records.filter((record) => !record.chart_restored).length,
         by_hypothesis: Object.fromEntries([...perHypothesis].map(([id, entry]) => [id, entry])),
       };

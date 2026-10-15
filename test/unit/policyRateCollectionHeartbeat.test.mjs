@@ -31,6 +31,7 @@ test("policy-rate collection heartbeat records complete successful runs independ
     maximum_business_day_age_between_runs: 1,
     intervals_exceeding_primary_max_gap: 0,
     latest_run_age_business_days: 0,
+    latest_in_future: false,
   });
 });
 

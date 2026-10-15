@@ -10,10 +10,15 @@ export type CollectionHealthIssue = {
     | "research_collection_missing"
     | "research_collection_stale"
     | "fx_history_collection_missing"
-    | "fx_history_collection_stale";
+    | "fx_history_collection_stale"
+    | "policy_rate_clock_ahead"
+    | "first_seen_clock_ahead"
+    | "research_clock_ahead"
+    | "fx_history_clock_ahead";
   collector: "policy_rate" | "first_seen" | "research" | "fx_history";
   /** The instrument, for the FX history collector only. */
   instrument?: string;
+  /** For a `_clock_ahead` issue, the latest heartbeat's age in hours at checked_at: negative, since it is stamped later. */
   age: number | null;
   threshold: number;
   unit: "business_days" | "hours" | "scheduled_runs";
@@ -21,7 +26,8 @@ export type CollectionHealthIssue = {
 
 /** "all" covers the three collectors every setup runs; the daily FX history collection is checked only by its own scope. */
 export type CollectionHealthScope = "all" | "policy-rate" | "first-seen" | "research" | "fx-history";
-export type FxHistoryHealth = { instrument: string; latest_run_at: string | null; window_opens_at: string; window_closes_at: string; latest_window_met: boolean };
+/** latest_in_future: the latest daily run (latest_run_at) is stamped after the check read the run log (see stampedAhead). */
+export type FxHistoryHealth = { instrument: string; latest_run_at: string | null; window_opens_at: string; window_closes_at: string; latest_window_met: boolean; latest_in_future: boolean };
 
 export type CollectionHealthResult = {
   checked_at: string;
@@ -32,12 +38,26 @@ export type CollectionHealthResult = {
     max_policy_rate_age_business_days: number;
     max_research_age_hours: number;
   };
-  policy_rate: { latest_collected_at: string | null; latest_run_age_business_days: number | null } | null;
-  research: { latest_collected_at: string | null; latest_run_age_hours: number | null } | null;
-  first_seen: { latest_collected_at: string | null; latest_run_status: "complete" | "partial" | null; latest_expected_run_at: string; latest_run_meets_schedule: boolean } | null;
+  /** latest_in_future, in each collector: its latest heartbeat is stamped after the check read it (see stampedAhead). */
+  policy_rate: { latest_collected_at: string | null; latest_run_age_business_days: number | null; latest_in_future: boolean } | null;
+  research: { latest_collected_at: string | null; latest_run_age_hours: number | null; latest_in_future: boolean } | null;
+  first_seen: { latest_collected_at: string | null; latest_run_status: "complete" | "partial" | null; latest_expected_run_at: string; latest_run_meets_schedule: boolean; latest_in_future: boolean } | null;
   fx_history: FxHistoryHealth[] | null;
   issues: CollectionHealthIssue[];
 };
+
+/**
+ * Whether a heartbeat stamped `stamp` was stamped ahead of the clock that read it (BACKLOG 102-36 review): later than
+ * `asOf` and later than `readAt`, the moment its log was read. A record that was read had already been written, so its
+ * stamp can be later than the read only when the clock that stamped it ran ahead (and has since been set back) or the
+ * reader's clock was set back. Each heartbeat log refuses a heartbeat stamped before its latest one, so until the
+ * clock reaches that stamp every later run fails to record, while the stamp itself reads as fresh. A heartbeat stamped
+ * after `asOf` but before the read was written while the check waited for the log, and is not ahead.
+ */
+export function stampedAhead(stamp: string, asOf: Date, readAt: number): boolean {
+  const at = Date.parse(stamp);
+  return at > asOf.getTime() && at > readAt;
+}
 
 type CollectionHealthInput = {
   scope?: CollectionHealthScope;
@@ -56,14 +76,28 @@ function assertThreshold(value: number, integer: boolean): void {
   }
 }
 
-function assertCoverageAge(age: number | null, latest: string | null): void {
+/** Whether a canonical latest heartbeat is stamped after checked_at; its age at checked_at is then below zero. */
+const after = (latest: string | null, checkedAt: string) => latest !== null && isCanonicalTimestamp(latest) && latest > checkedAt;
+
+function assertCoverageAge(age: number | null, latest: string | null, checkedAt: string): void {
   if (age === null) {
     if (latest !== null) throw new Error("collection health age is missing for a recorded heartbeat");
     return;
   }
-  if (!Number.isFinite(age) || age < 0) throw new Error("collection health age must be a non-negative number");
+  // A heartbeat stamped after checked_at has a negative age: one written while the check waited for its log, or one
+  // stamped ahead, which is reported as clock_ahead (BACKLOG 102-36 review). Any other negative age is refused.
+  if (!Number.isFinite(age) || (age < 0 && !after(latest, checkedAt))) throw new Error("collection health age must be a non-negative number");
   if (latest === null || !isCanonicalTimestamp(latest)) throw new Error("collection health latest heartbeat must be canonical");
 }
+
+/** latest_in_future, when set, must name a latest heartbeat stamped after checked_at. */
+function assertInFuture(value: unknown, latest: string | null, checkedAt: string): void {
+  if (value !== undefined && typeof value !== "boolean") throw new Error("collection health latest_in_future must be a boolean");
+  if (value === true && !after(latest, checkedAt)) throw new Error("collection health latest_in_future needs a latest heartbeat stamped after checked_at");
+}
+
+/** The latest heartbeat's age in hours at checked_at, for a clock_ahead issue: negative. */
+const hoursBefore = (checkedAt: string, latest: string) => Number(((Date.parse(checkedAt) - Date.parse(latest)) / 3_600_000).toFixed(2));
 
 export function evaluateCollectionHealth(input: CollectionHealthInput): CollectionHealthResult {
   const scope = input.scope ?? "all";
@@ -79,19 +113,33 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
     for (const row of input.fxHistory) {
       if (!isCanonicalTimestamp(row.window_opens_at) || !isCanonicalTimestamp(row.window_closes_at)) throw new Error("FX history window must be canonical");
       if (row.latest_run_at !== null && !isCanonicalTimestamp(row.latest_run_at)) throw new Error("FX history latest run must be canonical");
+      assertInFuture(row.latest_in_future, row.latest_run_at, input.checkedAt);
     }
   }
-  if (checkPolicyRate) assertCoverageAge(input.policyRate.latest_run_age_business_days, input.policyRate.latest_collected_at);
-  if (checkResearch) assertCoverageAge(input.research.latest_run_age_hours, input.research.latest_collected_at);
+  if (checkPolicyRate) {
+    assertCoverageAge(input.policyRate.latest_run_age_business_days, input.policyRate.latest_collected_at, input.checkedAt);
+    assertInFuture(input.policyRate.latest_in_future, input.policyRate.latest_collected_at, input.checkedAt);
+  }
+  if (checkResearch) {
+    assertCoverageAge(input.research.latest_run_age_hours, input.research.latest_collected_at, input.checkedAt);
+    assertInFuture(input.research.latest_in_future, input.research.latest_collected_at, input.checkedAt);
+  }
   if (checkFirstSeen) {
     if (!isCanonicalTimestamp(input.firstSeen.latest_expected_run_at)) throw new Error("first-seen expected run must be canonical");
     if (input.firstSeen.latest_collected_at !== null && !isCanonicalTimestamp(input.firstSeen.latest_collected_at)) throw new Error("first-seen latest heartbeat must be canonical");
+    assertInFuture(input.firstSeen.latest_in_future, input.firstSeen.latest_collected_at, input.checkedAt);
   }
 
+  // A latest heartbeat stamped ahead of the clock reads as fresh, while its log refuses every later heartbeat until the
+  // clock reaches it (BACKLOG 102-36 review): it is reported as <collector>_clock_ahead, in place of the age checks it passes.
   const issues: CollectionHealthIssue[] = [];
+  const ahead = (collector: CollectionHealthIssue["collector"], latest: string | null, instrument?: string): CollectionHealthIssue =>
+    ({ code: `${collector}_clock_ahead`, collector, ...(instrument === undefined ? {} : { instrument }), age: hoursBefore(input.checkedAt, latest!), threshold: 0, unit: "hours" });
   const policyAge = input.policyRate.latest_run_age_business_days;
   if (checkPolicyRate && policyAge === null) {
     issues.push({ code: "policy_rate_collection_missing", collector: "policy_rate", age: null, threshold: input.maxPolicyRateAgeBusinessDays, unit: "business_days" });
+  } else if (checkPolicyRate && input.policyRate.latest_in_future === true) {
+    issues.push(ahead("policy_rate", input.policyRate.latest_collected_at));
   } else if (checkPolicyRate && policyAge !== null && policyAge > input.maxPolicyRateAgeBusinessDays) {
     issues.push({ code: "policy_rate_collection_stale", collector: "policy_rate", age: policyAge, threshold: input.maxPolicyRateAgeBusinessDays, unit: "business_days" });
   }
@@ -99,12 +147,16 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
   const researchAge = input.research.latest_run_age_hours;
   if (checkResearch && researchAge === null) {
     issues.push({ code: "research_collection_missing", collector: "research", age: null, threshold: input.maxResearchAgeHours, unit: "hours" });
+  } else if (checkResearch && input.research.latest_in_future === true) {
+    issues.push(ahead("research", input.research.latest_collected_at));
   } else if (checkResearch && researchAge !== null && researchAge > input.maxResearchAgeHours) {
     issues.push({ code: "research_collection_stale", collector: "research", age: researchAge, threshold: input.maxResearchAgeHours, unit: "hours" });
   }
 
   if (checkFirstSeen && input.firstSeen.latest_collected_at === null) {
     issues.push({ code: "first_seen_collection_missing", collector: "first_seen", age: null, threshold: 0, unit: "scheduled_runs" });
+  } else if (checkFirstSeen && input.firstSeen.latest_in_future === true) {
+    issues.push(ahead("first_seen", input.firstSeen.latest_collected_at));
   } else if (checkFirstSeen && !input.firstSeen.latest_run_meets_schedule) {
     issues.push({ code: "first_seen_collection_stale", collector: "first_seen", age: 1, threshold: 0, unit: "scheduled_runs" });
   }
@@ -114,6 +166,7 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
   // The daily FX history collection needs a run in the latest window, covering the session before it (BACKLOG 103-5).
   if (checkFxHistory) for (const row of input.fxHistory!) {
     if (row.latest_run_at === null) issues.push({ code: "fx_history_collection_missing", collector: "fx_history", instrument: row.instrument, age: null, threshold: 0, unit: "scheduled_runs" });
+    else if (row.latest_in_future === true) issues.push(ahead("fx_history", row.latest_run_at, row.instrument));
     else if (!row.latest_window_met) issues.push({ code: "fx_history_collection_stale", collector: "fx_history", instrument: row.instrument, age: 1, threshold: 0, unit: "scheduled_runs" });
   }
 
@@ -138,5 +191,6 @@ export function collectionHealthNotification(result: CollectionHealthResult): st
   if (!result.should_notify) return "";
   const names = result.issues.map((issue) => issue.collector === "policy_rate" ? "policy-rate" : issue.collector === "first_seen" ? "first-seen"
     : issue.collector === "fx_history" ? `fx-history ${issue.instrument}` : "research");
-  return `Collection heartbeat unhealthy: ${[...new Set(names)].join(", ")}. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.`;
+  const clock = result.issues.some((issue) => issue.code.endsWith("_clock_ahead")) ? " A heartbeat is stamped after the check: check the system clock." : "";
+  return `Collection heartbeat unhealthy: ${[...new Set(names)].join(", ")}. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.${clock}`;
 }

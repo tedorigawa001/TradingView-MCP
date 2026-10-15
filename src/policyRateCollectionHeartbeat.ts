@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { POLICY_RATE_SYMBOLS, type PolicyRateCurrency } from "./policyRateHistory.js";
 import { businessDaysSince } from "./businessDays.js";
+import { stampedAhead } from "./collectionHealth.js";
 import { CARRY_CORE_PRIMARY_TEST_V1 } from "./carryPanelPrimaryTest.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
@@ -78,6 +79,7 @@ export class PolicyRateCollectionHeartbeatStore {
     if (!Number.isFinite(asOf.getTime())) throw new Error("as_of must be a valid timestamp");
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();
+      const readAt = Date.now();
       const dates = [...new Set(records.map((record) => record.observation_date))].sort();
       const businessDayAges = dates.slice(1).map((date, index) => businessDaysSince(dates[index], date));
       const latestDate = dates.at(-1) ?? null;
@@ -91,6 +93,9 @@ export class PolicyRateCollectionHeartbeatStore {
         maximum_business_day_age_between_runs: businessDayAges.length === 0 ? null : Math.max(...businessDayAges),
         intervals_exceeding_primary_max_gap: businessDayAges.filter((age) => age > CARRY_CORE_PRIMARY_TEST_V1.max_heartbeat_gap_business_days).length,
         latest_run_age_business_days: latestDate === null ? null : businessDaysSince(latestDate, asOf.toISOString().slice(0, 10)),
+        // Stamped ahead of the clock: its age reads 0, but the log refuses every later heartbeat until the clock reaches it,
+        // so the health check reports it (BACKLOG 102-36 review).
+        latest_in_future: records.length > 0 && stampedAhead(records.at(-1)!.first_seen_at, asOf, readAt),
       };
     });
   }

@@ -1,7 +1,7 @@
 import { assertAppendableJsonl, posixModeEnforced } from "./fsDurability.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, lstat, mkdir, open } from "node:fs/promises";
-import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath } from "./researchCollectionHeartbeat.js";
+import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath, type ResearchCollectionHeartbeatRecord } from "./researchCollectionHeartbeat.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CdpClient } from "./cdp.js";
@@ -150,6 +150,50 @@ export function summarizeResearchCollection(
   };
 }
 
+/**
+ * What a research run records as its heartbeat, written whether or not anything was observed: the evidence file only
+ * grows when a hypothesis fires, so without it a silent week and a dead collector are the same record, and the second
+ * cannot be recovered later.
+ */
+export function researchHeartbeatRun(
+  records: Awaited<ReturnType<typeof runResearchCollection>>,
+  recorded: ReadonlySet<string>,
+  observedAt: string,
+): Parameters<ResearchCollectionHeartbeatStore["recordRun"]>[0] {
+  return {
+    observed_at: observedAt,
+    hypotheses: records.map((record, index) => record.status === "complete"
+      ? {
+        hypothesis_id: record.value.hypothesis_id,
+        status: record.value.coverage.sufficient ? "complete" as const : "partial" as const,
+        events: record.value.primary_available_events,
+        recorded: recorded.has(record.value.hypothesis_id),
+      }
+      : { hypothesis_id: HYPOTHESIS_IDS[index], status: "partial" as const, events: 0, recorded: false }),
+    chart_restored: records.every((record) => record.status === "complete"),
+  };
+}
+
+/**
+ * Records a run's heartbeat and prints the run's summary with it. The evidence rows are already written when the
+ * heartbeat is refused (one stamped before the latest, BACKLOG 102-36), so the summary is still printed, with heartbeat
+ * null, and the error is thrown on: the run exits 1 with it on stderr, as the first-seen collection does (102-07 review).
+ */
+export async function printResearchCollection(
+  summary: ReturnType<typeof summarizeResearchCollection>,
+  recordHeartbeat: () => Promise<Pick<ResearchCollectionHeartbeatRecord, "sequence" | "first_seen_at">>,
+  write: (line: string) => void = (line) => { process.stdout.write(line); },
+): Promise<void> {
+  let heartbeat;
+  try {
+    heartbeat = await recordHeartbeat();
+  } catch (error) {
+    write(`${JSON.stringify({ ...summary, heartbeat: null })}\n`);
+    throw error;
+  }
+  write(`${JSON.stringify({ ...summary, heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
+}
+
 /** Appends a collection row unless the output already holds as many primary events for its hypothesis. */
 export async function appendOwnerOnly(path: string, row: { hypothesis_id: string; primary_available_events: number }): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -218,22 +262,9 @@ async function main(): Promise<void> {
     for (const record of records) if (record.status === "complete" && record.value.coverage.sufficient && record.value.primary_available_events > 0) {
       if (await appendOwnerOnly(args.outputPath, record.value)) { written += 1; recorded.add(record.value.hypothesis_id); }
     }
-    // Written whether or not anything was observed. The evidence file only grows
-    // when a hypothesis fires, so without this a silent week and a dead
-    // collector are the same record, and the second cannot be recovered later.
-    const heartbeat = await new ResearchCollectionHeartbeatStore(resolveResearchCollectionHeartbeatPath()).recordRun({
-      observed_at: new Date().toISOString(),
-      hypotheses: records.map((record, index) => record.status === "complete"
-        ? {
-          hypothesis_id: record.value.hypothesis_id,
-          status: record.value.coverage.sufficient ? "complete" as const : "partial" as const,
-          events: record.value.primary_available_events,
-          recorded: recorded.has(record.value.hypothesis_id),
-        }
-        : { hypothesis_id: HYPOTHESIS_IDS[index], status: "partial" as const, events: 0, recorded: false }),
-      chart_restored: records.every((record) => record.status === "complete"),
-    });
-    process.stdout.write(`${JSON.stringify({ ...summarizeResearchCollection(records, args.outputPath, written), heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
+    const heartbeats = new ResearchCollectionHeartbeatStore(resolveResearchCollectionHeartbeatPath());
+    await printResearchCollection(summarizeResearchCollection(records, args.outputPath, written),
+      () => heartbeats.recordRun(researchHeartbeatRun(records, recorded, new Date().toISOString())));
     if (records.some((item) => item.status === "error")) process.exitCode = 1;
   } finally {
     cdp.close();

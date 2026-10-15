@@ -85,9 +85,9 @@ export async function checkCollectionHealth(
   args: CollectionHealthCliArguments,
   now = new Date(),
 ): Promise<CollectionHealthResult> {
-  const emptyPolicyRate = { latest_collected_at: null, latest_run_age_business_days: null };
-  const emptyResearch = { latest_collected_at: null, latest_run_age_hours: null };
-  const emptyFirstSeen = { latest_collected_at: null, latest_run_status: null, latest_expected_run_at: now.toISOString(), latest_run_meets_schedule: false };
+  const emptyPolicyRate = { latest_collected_at: null, latest_run_age_business_days: null, latest_in_future: false };
+  const emptyResearch = { latest_collected_at: null, latest_run_age_hours: null, latest_in_future: false };
+  const emptyFirstSeen = { latest_collected_at: null, latest_run_status: null, latest_expected_run_at: now.toISOString(), latest_run_meets_schedule: false, latest_in_future: false };
   const policyRate = args.scope === "policy-rate" || args.scope === "all"
     ? await new PolicyRateCollectionHeartbeatStore(resolvePolicyRateCollectionHeartbeatPath()).coverage(now)
     : emptyPolicyRate;
@@ -98,7 +98,10 @@ export async function checkCollectionHealth(
     ? await new FirstSeenCollectionHeartbeatStore(resolveFirstSeenCollectionHeartbeatPath()).coverage(now)
     : emptyFirstSeen;
   const fxHistory = args.scope === "fx-history"
-    ? await Promise.all((args.instruments ?? []).map(async (instrument) => ({ instrument, ...fxDailyCoverage(await new FxHistoricalRunLog(undefined, instrument).records(), now) })))
+    ? await Promise.all((args.instruments ?? []).map(async (instrument) => {
+      const runs = await new FxHistoricalRunLog(undefined, instrument).records();
+      return { instrument, ...fxDailyCoverage(runs, now, Date.now()) };
+    }))
     : undefined;
   return evaluateCollectionHealth({
     scope: args.scope,
@@ -108,16 +111,19 @@ export async function checkCollectionHealth(
     policyRate: {
       latest_collected_at: policyRate.latest_collected_at,
       latest_run_age_business_days: policyRate.latest_run_age_business_days,
+      latest_in_future: policyRate.latest_in_future,
     },
     research: {
       latest_collected_at: research.latest_collected_at,
       latest_run_age_hours: research.latest_run_age_hours,
+      latest_in_future: research.latest_in_future,
     },
     firstSeen: {
       latest_collected_at: firstSeen.latest_collected_at,
       latest_run_status: firstSeen.latest_run_status,
       latest_expected_run_at: firstSeen.latest_expected_run_at,
       latest_run_meets_schedule: firstSeen.latest_run_meets_schedule,
+      latest_in_future: firstSeen.latest_in_future,
     },
     ...(fxHistory ? { fxHistory } : {}),
   });

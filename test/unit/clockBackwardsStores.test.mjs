@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CotFirstSeenStore } from "../../build/cotFirstSeenHistory.js";
@@ -9,6 +9,7 @@ import { PolicyRateCollectionHeartbeatStore } from "../../build/policyRateCollec
 import { PolicyRateFirstSeenStore } from "../../build/policyRateHistory.js";
 import { RealYieldFirstSeenStore } from "../../build/realYieldHistory.js";
 import { ResearchCollectionHeartbeatStore } from "../../build/researchCollectionHeartbeat.js";
+import { checkCollectionHealth, parseCollectionHealthCliArguments } from "../../build/collectionHealthCli.js";
 
 // BACKLOG 102-36: a store on AppendOnlyFirstSeenLog refuses, before it writes, a record the log's reader would refuse
 // afterwards: one stamped before the latest record (a clock moved back, or a run that took its time before another run
@@ -88,6 +89,58 @@ test("the research collection heartbeat refuses a run stamped before the latest 
   assert.equal((await store.coverage(new Date("2026-08-15T03:00:00.000Z"))).maximum_gap_hours, 1);
 });
 
+/** Points the health check at the given heartbeat logs for one test. */
+function withHeartbeatPaths(t, paths) {
+  const names = { first: "TRADINGVIEW_MCP_FIRST_SEEN_COLLECTION_HEARTBEAT_PATH", policy: "TRADINGVIEW_MCP_POLICY_RATE_COLLECTION_HEARTBEAT_PATH",
+    research: "TRADINGVIEW_MCP_RESEARCH_COLLECTION_HEARTBEAT_PATH" };
+  const saved = Object.fromEntries(Object.values(names).map((name) => [name, process.env[name]]));
+  for (const [key, name] of Object.entries(names)) process.env[name] = paths[key];
+  t.after(() => { for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value; });
+}
+
+test("a heartbeat stamped ahead of the clock holds off every later one, and each coverage and the health check report it (BACKLOG 102-36 review)", async (t) => {
+  const paths = { first: await newPath(t, "first-seen-collection-heartbeats.jsonl"), policy: await newPath(t, "policy-rate-collection-heartbeats.jsonl"),
+    research: await newPath(t, "research-collection-heartbeats.jsonl") };
+  withHeartbeatPaths(t, paths);
+  const firstSeen = new FirstSeenCollectionHeartbeatStore(paths.first), policy = new PolicyRateCollectionHeartbeatStore(paths.policy);
+  const research = new ResearchCollectionHeartbeatStore(paths.research);
+  // A clock two hours ahead stamped one run of each collector, and has since been set right.
+  const now = new Date(), ahead = new Date(now.getTime() + 2 * 3_600_000).toISOString(), later = new Date(now.getTime() + 60_000).toISOString();
+  await firstSeen.recordRun(firstSeenRun(ahead));
+  await policy.recordRun(policyRateRun(ahead));
+  await research.recordRun({ observed_at: ahead, hypotheses: researchHypotheses, chart_restored: true });
+  // Every heartbeat the corrected clock stamps is refused until it reaches the stamp, while the stamp reads as fresh.
+  await assert.rejects(() => firstSeen.recordRun(firstSeenRun(later)), /clock moved backwards/);
+  await assert.rejects(() => policy.recordRun(policyRateRun(later)), /clock moved backwards/);
+  await assert.rejects(() => research.recordRun({ observed_at: later, hypotheses: researchHypotheses, chart_restored: true }), /clock moved backwards/);
+  const [first, rate, hourly] = [await firstSeen.coverage(now), await policy.coverage(now), await research.coverage(now)];
+  assert.deepEqual([first.latest_run_meets_schedule, rate.latest_run_age_business_days, hourly.latest_run_age_hours], [true, 0, -2]);
+  // Each coverage says the latest heartbeat is stamped ahead; as of a moment after the stamp it is not.
+  assert.deepEqual([first.latest_in_future, rate.latest_in_future, hourly.latest_in_future], [true, true, true]);
+  const afterStamp = new Date(Date.parse(ahead) + 1_000);
+  assert.deepEqual([(await firstSeen.coverage(afterStamp)).latest_in_future, (await policy.coverage(afterStamp)).latest_in_future,
+    (await research.coverage(afterStamp)).latest_in_future], [false, false, false]);
+  // The health check, which read every one of them as healthy, is stale and notifies.
+  const result = await checkCollectionHealth(parseCollectionHealthCliArguments([]), now);
+  assert.deepEqual([result.status, result.should_notify], ["stale", true]);
+  assert.deepEqual(result.issues.map((issue) => [issue.code, issue.age, issue.unit]),
+    [["policy_rate_clock_ahead", -2, "hours"], ["research_clock_ahead", -2, "hours"], ["first_seen_clock_ahead", -2, "hours"]]);
+  assert.deepEqual([result.policy_rate.latest_in_future, result.research.latest_in_future, result.first_seen.latest_in_future], [true, true, true]);
+  const researchOnly = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "research"]), now);
+  assert.deepEqual(researchOnly.issues.map((issue) => issue.code), ["research_clock_ahead"]);
+});
+
+test("a heartbeat written while the check waited for its log is not ahead, and its negative age no longer fails the check (BACKLOG 102-36 review)", async (t) => {
+  const paths = { first: await newPath(t, "first-seen-collection-heartbeats.jsonl"), policy: await newPath(t, "policy-rate-collection-heartbeats.jsonl"),
+    research: await newPath(t, "research-collection-heartbeats.jsonl") };
+  withHeartbeatPaths(t, paths);
+  // The check took its time a minute ago; a run stamped half a minute later recorded while the check waited for the lock.
+  const checkedAt = new Date(Date.now() - 60_000);
+  await new ResearchCollectionHeartbeatStore(paths.research).recordRun({ observed_at: new Date(checkedAt.getTime() + 30_000).toISOString(), hypotheses: researchHypotheses, chart_restored: true });
+  const result = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "research"]), checkedAt);
+  assert.deepEqual([result.status, result.research.latest_in_future, result.research.latest_run_age_hours, result.issues], ["healthy", false, -0.01, []]);
+});
+
 const cotVersion = (overrides = {}) => ({
   symbol: "OANDA:EURUSD", observation_date: "2026-07-21", value: { open_interest: 800061 }, observed_at: "2026-07-24T19:30:00.000Z", ...overrides,
 });
@@ -115,6 +168,36 @@ test("the COT store refuses a batch stamped out of order or a version dated afte
     cotVersion({ symbol: "OANDA:XAUUSD", observed_at: "2026-07-24T21:00:00.000Z" })]);
   assert.deepEqual(recorded.map((record) => record.sequence), [2, 3]);
   assert.equal((await store.coverage()).records, 3);
+});
+
+test("the COT store refuses, whole, a batch that would take its file over the size limit, and writes nothing (BACKLOG 102-36 review)", async (t) => {
+  const path = await newPath(t, "cot-first-seen.jsonl");
+  const MAX_FILE_BYTES = 8 * 1024 * 1024;
+  // A record as the store writes it; every value hash has the same length, so this one's length is the written one's.
+  const line = (sequence, symbol, first_seen_at = "2026-07-24T19:30:00.000Z") => `${JSON.stringify({ schema_version: "1.0", sequence, series: "cftc_cot", symbol,
+    observation_date: "2026-07-21", value_hash: `sha256:${"0".repeat(64)}`, first_seen_at })}\n`;
+  const first = { symbol: "OANDA:USDJPY", observed_at: "2026-07-25T19:30:00.000Z" }, second = { symbol: "OANDA:XAUUSD", observed_at: "2026-07-25T19:30:00.000Z" };
+  // Fill the log with short records until the first version of the batch still fits but the first two do not: the
+  // second is longer than the next short record would have been.
+  const lines = [];
+  let size = 0;
+  const firstBytes = (sequence) => Buffer.byteLength(line(sequence, first.symbol, "2026-07-25T19:30:00.000Z"));
+  while (size + Buffer.byteLength(line(lines.length + 1, "X")) <= MAX_FILE_BYTES - firstBytes(lines.length + 2)) {
+    const next = line(lines.length + 1, "X");
+    lines.push(next);
+    size += Buffer.byteLength(next);
+  }
+  await writeFile(path, lines.join(""), { mode: 0o600 });
+  const count = lines.length;
+  assert.ok(size + firstBytes(count + 1) <= MAX_FILE_BYTES);
+  assert.ok(size + firstBytes(count + 1) + Buffer.byteLength(line(count + 2, second.symbol, second.observed_at)) > MAX_FILE_BYTES);
+  const store = new CotFirstSeenStore(path);
+  const reads = async () => assert.equal((await new CotFirstSeenStore(path).coverage()).records, count);
+  // Before 102-36 the first version was written and the second then failed on the size, leaving half a batch.
+  await assertRefusedUnchanged(path, () => store.observeMany([cotVersion(first), cotVersion(second)]), /COT first-seen history file is too large/, reads);
+  // Alone, the first version fits.
+  assert.deepEqual((await store.observeMany([cotVersion(first)])).map((record) => record.sequence), [count + 1]);
+  assert.equal((await lstat(path)).size <= MAX_FILE_BYTES, true);
 });
 
 const policyRate = (overrides = {}) => ({

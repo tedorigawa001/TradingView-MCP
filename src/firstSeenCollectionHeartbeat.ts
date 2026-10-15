@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { stampedAhead } from "./collectionHealth.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
@@ -98,6 +99,7 @@ export class FirstSeenCollectionHeartbeatStore {
     const expected = latestExpectedFirstSeenRunAt(asOf);
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();
+      const readAt = Date.now();
       const latest = records.at(-1);
       return {
         records: records.length,
@@ -107,6 +109,9 @@ export class FirstSeenCollectionHeartbeatStore {
         partial_runs: records.filter((record) => record.status === "partial").length,
         latest_expected_run_at: expected,
         latest_run_meets_schedule: latest !== undefined && latest.first_seen_at >= expected,
+        // Stamped ahead of the clock: it meets the schedule, but the log refuses every later heartbeat until the clock reaches
+        // it, so the health check reports it (BACKLOG 102-36 review).
+        latest_in_future: latest !== undefined && stampedAhead(latest.first_seen_at, asOf, readAt),
       };
     });
   }

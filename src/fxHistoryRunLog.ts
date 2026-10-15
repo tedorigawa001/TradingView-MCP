@@ -1,3 +1,4 @@
+import { stampedAhead } from "./collectionHealth.js";
 import { AppendOnlyFirstSeenLog, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS, oandaPageRanges, resolveFxHistoricalManifestPathFor, type OandaFxInstrument } from "./oandaHistoricalFx.js";
 import { wallTimeToUtc } from "./zonedTime.js";
@@ -152,9 +153,12 @@ export function latestFxDailyWindow(now: Date) {
  * Whether the schedule held at the latest deadline, by the rule a forward study reads the log with: of the daily runs that
  * finished by the deadline, the last one (manual runs do not count) must have finished in the window, requested the
  * session before it whole (from its start to its last candle, which opens 15 minutes before its end), and read only
- * final pages. latest_run_at is the latest daily run's finishing time, null when there is none.
+ * final pages. latest_run_at is the latest daily run's finishing time, null when there is none. latest_in_future says
+ * that run is stamped ahead of the clock (after `now` and after `readAt`, when the log was read; see stampedAhead): the
+ * log refuses every later run until the clock reaches it (BACKLOG 102-36 review). A manual run stamped ahead blocks the
+ * daily runs too; it shows as a missed window at the next deadline.
  */
-export function fxDailyCoverage(runs: Pick<FxHistoricalRun, "trigger" | "retrieved_at" | "requested_from" | "requested_to" | "unfinished_pages">[], now: Date) {
+export function fxDailyCoverage(runs: Pick<FxHistoricalRun, "trigger" | "retrieved_at" | "requested_from" | "requested_to" | "unfinished_pages">[], now: Date, readAt = now.getTime()) {
   const window = latestFxDailyWindow(now);
   const daily = runs.filter((run) => run.trigger === "daily");
   const latest = daily.length ? daily.map((run) => run.retrieved_at).sort().at(-1)! : null;
@@ -162,5 +166,6 @@ export function fxDailyCoverage(runs: Pick<FxHistoricalRun, "trigger" | "retriev
   for (const run of daily) if (Date.parse(run.retrieved_at) <= window.deadline && (!last || run.retrieved_at >= last.retrieved_at)) last = run;
   const meets = last !== undefined && Date.parse(last.retrieved_at) >= window.opens_at && Date.parse(last.requested_from) <= window.session.start
     && Date.parse(last.requested_to) >= window.session.end - FIFTEEN_MINUTES && last.unfinished_pages === 0;
-  return { latest_run_at: latest, window_opens_at: new Date(window.opens_at).toISOString(), window_closes_at: new Date(window.deadline).toISOString(), latest_window_met: meets };
+  return { latest_run_at: latest, window_opens_at: new Date(window.opens_at).toISOString(), window_closes_at: new Date(window.deadline).toISOString(), latest_window_met: meets,
+    latest_in_future: latest !== null && stampedAhead(latest, now, readAt) };
 }

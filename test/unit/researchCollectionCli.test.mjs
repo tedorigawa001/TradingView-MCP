@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { FORWARD_SIGNAL_START, loadRequiredHistory, parseResearchCollectionCliArguments, sourceFor, summarizeResearchCollection } from "../../build/researchCollectionCli.js";
+import { mkdtemp, readFile as readBytes, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FORWARD_SIGNAL_START, loadRequiredHistory, parseResearchCollectionCliArguments, printResearchCollection, researchHeartbeatRun, sourceFor,
+  summarizeResearchCollection } from "../../build/researchCollectionCli.js";
+import { ResearchCollectionHeartbeatStore } from "../../build/researchCollectionHeartbeat.js";
 
 test("research collection CLI requires an explicit chart-switch confirmation", () => {
   assert.throws(() => parseResearchCollectionCliArguments([], {}), /chart switching is disabled/);
@@ -86,6 +91,36 @@ test("research collection distinguishes successful transport from partial resear
   assert.equal(summary.collection_status, "complete");
   assert.equal(summary.research_status, "partial");
   assert.equal(summary.status, "partial");
+});
+
+test("a research run whose heartbeat is refused still prints its summary, with heartbeat null, and fails with the heartbeat's error (BACKLOG 102-36 review)", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-research-heartbeat-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const heartbeats = new ResearchCollectionHeartbeatStore(join(directory, "research-collection-heartbeats.jsonl"));
+  const records = [
+    { status: "complete", value: { hypothesis_id: "xauusd-15m-bearish-fvg-trend-down-forward-20260726", status: "complete", coverage: { sufficient: true }, primary_available_events: 3 } },
+    { status: "error", hypothesisId: "eurusd-us10y-nonconfirmation-daily-20260726", error: "chart failed" },
+    { status: "complete", value: { hypothesis_id: "eurusd-50m-lower-wick-trend-down-forward-20260727", status: "partial", coverage: { sufficient: false }, primary_available_events: 0 } },
+  ];
+  const recorded = new Set(["xauusd-15m-bearish-fvg-trend-down-forward-20260726"]);
+  assert.deepEqual(researchHeartbeatRun(records, recorded, "2026-08-15T02:00:00.000Z"), { observed_at: "2026-08-15T02:00:00.000Z", chart_restored: false, hypotheses: [
+    { hypothesis_id: "xauusd-15m-bearish-fvg-trend-down-forward-20260726", status: "complete", events: 3, recorded: true },
+    { hypothesis_id: "eurusd-us10y-nonconfirmation-daily-20260726", status: "partial", events: 0, recorded: false },
+    { hypothesis_id: "eurusd-50m-lower-wick-trend-down-forward-20260727", status: "partial", events: 0, recorded: false },
+  ] });
+  const summary = summarizeResearchCollection(records, join(directory, "research-collection.jsonl"), 1);
+  const lines = [];
+  const write = (line) => lines.push(line);
+  await printResearchCollection(summary, () => heartbeats.recordRun(researchHeartbeatRun(records, recorded, "2026-08-15T02:00:00.000Z")), write);
+  assert.deepEqual(JSON.parse(lines[0]), { ...summary, heartbeat: { sequence: 1, recorded_at: "2026-08-15T02:00:00.000Z" } });
+  // A run that took its time before the latest heartbeat: its evidence row was already written, so its summary is kept.
+  const before = await readBytes(join(directory, "research-collection-heartbeats.jsonl"));
+  await assert.rejects(() => printResearchCollection(summary, () => heartbeats.recordRun(researchHeartbeatRun(records, recorded, "2026-08-15T01:59:59.999Z")), write),
+    /research collection heartbeat first-seen clock moved backwards/);
+  assert.equal(lines.length, 2);
+  assert.deepEqual(JSON.parse(lines[1]), { ...summary, heartbeat: null });
+  assert.equal(JSON.parse(lines[1]).written, 1);
+  assert.deepEqual(await readBytes(join(directory, "research-collection-heartbeats.jsonl")), before);
 });
 
 const BAR_MS = 900_000;
