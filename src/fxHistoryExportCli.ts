@@ -69,6 +69,11 @@ async function interruptedPart(path: string): Promise<{ index: number; of: numbe
  */
 export async function writeFxHistoryExportParts(split: FxHistoryExportSplit, output: string) {
   const paths = fxHistoryExportPartPaths(output, split.parts.length);
+  // The lock is named after part01 exactly (publishImmutableFiles): a name too long for it is refused, not shortened.
+  const lockName = `.${basename(paths[0])}.publish-lock.takeover`;
+  if (Buffer.byteLength(lockName, "utf8") > 255) {
+    throw new Error(`--output is too long: the lock of ${basename(paths[0])} would need ${Buffer.byteLength(lockName, "utf8")} bytes of a file name's 255; choose a shorter --output; nothing was written`);
+  }
   for (const path of paths) {
     const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
     if (entry?.isDirectory()) throw new Error(`a part of the export would replace a directory: ${path}; nothing was written`);

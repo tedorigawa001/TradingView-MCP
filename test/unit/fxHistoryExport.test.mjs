@@ -528,3 +528,11 @@ test("parts an interrupted export left are named as its debris, and every collec
   /FX history collection 1: .*unknown OANDA host \(manifest .*\)/);
   assert.equal(reads.count, 0);
 });
+
+test("an --output too long for the lock of its first part is refused before anything is read or written (BACKLOG 103-10 review 5)", async () => {
+  const { counted, reads, dir } = await fourCollections();
+  const output = join(dir, `${"u".repeat(230)}.json`);
+  await assert.rejects(async () => writeFxHistoryExportParts(await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted }), output),
+    /--output is too long: the lock of u+\.part01\.json would need 265 bytes of a file name's 255; choose a shorter --output; nothing was written/);
+  assert.deepEqual([reads.count, (await readdir(dir)).filter((name) => name.startsWith("uuu"))], [0, []]);
+});

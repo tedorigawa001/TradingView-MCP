@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -245,16 +245,19 @@ test("publishImmutableFiles links the first destination last, and removes what i
   assert.deepEqual((await readdir(open)).filter((name) => name.startsWith(".publish-")), []);
 });
 
-test("publishImmutableFiles removes only this user's staging that killed runs of the same stem left, and only its numbered files", async (t) => {
+test("publishImmutableFiles removes only this user's staging that killed runs of the same set left, and only its numbered files", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-stale-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   // A process that has ended: its pid is free (and, for the test's few milliseconds, not reused).
   const ended = spawn(process.execPath, ["-e", ""]);
   await once(ended, "exit");
+  // Staging directories carry a tag of the first destination's exact name: only the set the lock covers is looked at.
+  const tag = createHash("sha256").update("set.part01.json").digest("hex").slice(0, 8);
   const names = {
-    dead: `.publish-set-${ended.pid}-abc123`, live: `.publish-set-${process.pid}-def456`, old: `.publish-set-${process.pid}-ghi789`,
-    otherStem: `.publish-other-${ended.pid}-jkl012`, otherShape: `.publish-set-${ended.pid}-mno3456`, single: ".publish-pqr678",
-    foreignMode: `.publish-set-${ended.pid}-stu901`, foreignFile: `.publish-set-${ended.pid}-vwx234`, foreignEntry: `.publish-set-${ended.pid}-yza567`,
+    dead: `.publish-set-${tag}-${ended.pid}-abc123`, live: `.publish-set-${tag}-${process.pid}-def456`, old: `.publish-set-${tag}-${process.pid}-ghi789`,
+    otherStem: `.publish-other-${tag}-${ended.pid}-jkl012`, otherShape: `.publish-set-${tag}-${ended.pid}-mno3456`, single: ".publish-pqr678",
+    otherSet: `.publish-set-0123abcd-${ended.pid}-bcd890`, untagged: `.publish-set-${ended.pid}-cde901`,
+    foreignMode: `.publish-set-${tag}-${ended.pid}-stu901`, foreignFile: `.publish-set-${tag}-${ended.pid}-vwx234`, foreignEntry: `.publish-set-${tag}-${ended.pid}-yza567`,
   };
   for (const name of Object.values(names)) { await mkdir(join(directory, name), { mode: 0o700 }); await writeFile(join(directory, name, "0"), "staged\n"); }
   const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
@@ -265,14 +268,11 @@ test("publishImmutableFiles removes only this user's staging that killed runs of
   await mkdir(join(directory, names.foreignEntry, "1"));
   const result = await publishImmutableFiles([join(directory, "set.part01.json")], async () => "part 1\n", "test set", { stem: "set" });
   assert.deepEqual(result, { published: true, results: ["created"] });
-  // A stale directory is renamed (to pid 0, no process) before it is worked on; what it holds that a staging directory
-  // never does stays, under that name.
-  const kept = [names.live, names.otherShape, names.otherStem, names.single];
+  // A directory holding anything a staging directory never holds is left alone, under its own name and whole.
+  const kept = [names.live, names.otherShape, names.otherStem, names.single, names.otherSet, names.untagged, names.foreignFile, names.foreignEntry];
   if (process.platform !== "win32") kept.push(names.foreignMode);
-  const left = (await readdir(directory)).filter((name) => name.startsWith(".publish-"));
-  assert.deepEqual(left.filter((name) => !name.startsWith(".publish-set-0-")).sort(), kept.sort());
-  const renamed = left.filter((name) => /^\.publish-set-0-[0-9a-f]{6}$/.test(name));
-  assert.deepEqual((await Promise.all(renamed.map((name) => readdir(join(directory, name))))).map((names) => names.join()).sort(), ["1", "notes.txt"]);
+  assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".publish-")).sort(), kept.sort());
+  assert.deepEqual([await readdir(join(directory, names.foreignFile)), await readdir(join(directory, names.foreignEntry))].map((list) => list.sort()), [["0", "notes.txt"], ["0", "1"]]);
   if (process.platform !== "win32") assert.deepEqual(await readdir(join(directory, names.foreignMode)), ["0"]);
 });
 
@@ -333,7 +333,7 @@ test("two publishes of the same files do not interleave: the second is refused w
   killed.child.kill("SIGKILL");
   await once(killed.child, "exit");
   const left = await readdir(directory);
-  assert.deepEqual([left.includes(".set.part01.json.publish-lock"), left.some((name) => name.startsWith(`.publish-set-${killed.child.pid}-`))], [true, true]);
+  assert.deepEqual([left.includes(".set.part01.json.publish-lock"), left.some((name) => new RegExp(`^\\.publish-set-[0-9a-f]{8}-${killed.child.pid}-`).test(name))], [true, true]);
   assert.deepEqual(await publishImmutableFiles(paths, body, "test set", { stem: "set" }), { published: true, results: ["created", "created", "created"] });
   assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json", "set.part03.json"]);
 });
@@ -391,53 +391,122 @@ test("a signal while the first destination's link is in flight leaves no first d
   }
 });
 
-test("of two runs that find the same stale lock, only one takes it: the other's mistaken rename is put back", { timeout: 60_000 }, async (t) => {
+test("of two runs that find the same stale lock, only one takes it over, and a third run meanwhile is refused", { timeout: 60_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-takeover-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const ended = spawn(process.execPath, ["-e", ""]);
   await once(ended, "exit");
-  // The first run's rename of the stale lock waits until the second has judged it stale too; the second's rename then
-  // waits until the first has made its own lock, and so moves that one away instead (only real calls are reordered).
+  // B judges the stale lock as A does, but places its takeover marker only once A has taken the lock over and is inside;
+  // C starts while A is inside. The lock is never moved but by A, and only A writes (only real calls are reordered).
   const module = new URL("../../build/fsDurability.js", import.meta.url).href;
-  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
-  const lock = join(directory, ".set.part01.json.publish-lock");
-  const stale = `${randomUUID()} ${ended.pid}\n`;
-  await writeFile(lock, stale, { mode: 0o600 });
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json"), join(directory, "set.part03.json")];
+  await writeFile(join(directory, ".set.part01.json.publish-lock"), `${randomUUID()} ${ended.pid}\n`, { mode: 0o600 });
   const script = `import { createRequire, syncBuiltinESMExports } from "node:module";
-    import { readFileSync } from "node:fs";
-    const require = createRequire(import.meta.url), fsp = require("fs/promises"), realRename = fsp.rename;
-    const lock = ${JSON.stringify(lock)}, stale = ${JSON.stringify(stale)};
-    let renames = 0, releaseFirst;
-    const bothJudged = new Promise((resolve) => { releaseFirst = resolve; });
+    import { AsyncLocalStorage } from "node:async_hooks";
+    const require = createRequire(import.meta.url), fsp = require("fs/promises"), real = { link: fsp.link, rename: fsp.rename };
+    const als = new AsyncLocalStorage();
+    let aInside, cDone;
+    const aIsInside = new Promise((resolve) => { aInside = resolve; }), cIsDone = new Promise((resolve) => { cDone = resolve; });
+    const lockMoves = [];
+    fsp.link = async (from, to) => {
+      if (als.getStore() === "B" && String(to).endsWith(".publish-lock.takeover")) await cIsDone;
+      return real.link(from, to);
+    };
     fsp.rename = async (from, to) => {
-      const ofLock = String(from).endsWith("/.set.part01.json.publish-lock");   // the lock, by its real path
-      if (ofLock && ++renames === 1) await bothJudged;
-      else if (ofLock && renames === 2) {
-        releaseFirst();
-        for (let i = 0; i < 400; i += 1) { try { if (readFileSync(lock, "utf8") !== stale) break; } catch {} await new Promise((r) => setTimeout(r, 5)); }
-      }
-      return realRename(from, to);
+      if (String(from).endsWith("/.set.part01.json.publish-lock")) lockMoves.push(als.getStore());
+      return real.rename(from, to);
     };
     syncBuiltinESMExports();
     const { publishImmutableFiles } = await import(${JSON.stringify(module)});
     let inside = 0, most = 0;
-    const run = () => publishImmutableFiles(${JSON.stringify(paths)}, async (index) => {
-      if (index === 0) { inside += 1; most = Math.max(most, inside); await new Promise((r) => setTimeout(r, 200)); inside -= 1; }
-      return "part " + (index + 1) + "\\n";
-    }, "test set", { stem: "set" }).then((result) => JSON.stringify(result), (error) => error.message);
-    const outcomes = await Promise.all([run(), run()]);
-    process.stdout.write(JSON.stringify({ outcomes, most, renames }) + "\\n");`;
+    const run = (who, bytesOf) => als.run(who, () => publishImmutableFiles(${JSON.stringify(paths)}, bytesOf, "test set", { stem: "set" }))
+      .then((result) => who + ": " + JSON.stringify(result), (error) => who + ": " + error.message.replace(/: \\/.*$/, ""));
+    const body = async (index) => "part " + (index + 1) + "\\n";
+    const A = run("A", async (index) => {
+      if (index === 0) { inside += 1; most = Math.max(most, inside); aInside(); await cIsDone; await new Promise((r) => setTimeout(r, 100)); inside -= 1; }
+      return body(index);
+    });
+    const B = run("B", async (index) => { inside += 1; most = Math.max(most, inside); inside -= 1; return body(index); });
+    await aIsInside;
+    const C = run("C", async (index) => { inside += 1; most = Math.max(most, inside); inside -= 1; return body(index); }).finally(() => cDone());
+    const outcomes = await Promise.all([A, B, C]);
+    process.stdout.write(JSON.stringify({ outcomes, most, lockMoves }) + "\\n");`;
   const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
   t.after(() => child.kill("SIGKILL"));
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   await once(child, "close");
-  const { outcomes, most, renames } = JSON.parse(output);
-  assert.equal(renames >= 2, true, `both runs judged the lock stale and renamed what was there: ${output}`);
-  assert.equal(most, 1, "only one run was ever inside the lock");
-  assert.deepEqual(outcomes.filter((outcome) => outcome.startsWith("{")), [JSON.stringify({ published: true, results: ["created", "created"] })]);
-  assert.equal(outcomes.filter((outcome) => /^another test set of the same files is running \(process \d+\): .*; nothing was written$/.test(outcome)).length, 1);
+  const { outcomes, most, lockMoves } = JSON.parse(output);
+  assert.deepEqual(outcomes, [`A: ${JSON.stringify({ published: true, results: ["created", "created", "created"] })}`,
+    "B: another test set of the same files is running (process " + outcomes[1].match(/process (\d+)/)?.[1] + ")",
+    "C: another test set of the same files is running (process " + outcomes[2].match(/process (\d+)/)?.[1] + ")"]);
+  assert.deepEqual([most, lockMoves], [1, ["A"]], "only A ran, and only A moved the stale lock");
+  assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json", "set.part03.json"]);
+});
+
+test("a lock moved away for a moment by another run is still this run's, and its released lock is never put back", { timeout: 30_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-moved-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
+  const lock = join(directory, ".set.part01.json.publish-lock");
+  // While the run stages, its lock is renamed to a tombstone (as a mistaken taker would) and put back 60 ms later.
+  const moveAndPutBack = async (index) => {
+    if (index === 1) {
+      const tombstone = join(directory, `.${randomUUID()}.publish-lock-stale`);
+      await rename(lock, tombstone);
+      setTimeout(async () => { await link(tombstone, lock); await rm(tombstone); }, 60);
+    }
+    return `part ${index + 1}\n`;
+  };
+  assert.deepEqual(await publishImmutableFiles(paths, moveAndPutBack, "test set"), { published: true, results: ["created", "created"] });
+  await new Promise((resolve) => setTimeout(resolve, 150));
   assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json"]);
+  // Moved away while the run ends: the run removes its tombstone in the end, so the put-back finds nothing to restore.
+  const late = [join(directory, "late.part01.json")];
+  const lateLock = join(directory, ".late.part01.json.publish-lock");
+  let putBack;
+  const moveForGood = async () => {
+    const tombstone = join(directory, `.${randomUUID()}.publish-lock-stale`);
+    await rename(lateLock, tombstone);
+    putBack = async () => { await link(tombstone, lateLock).catch(() => undefined); await rm(tombstone, { force: true }); };
+    return "late\n";
+  };
+  await assert.rejects(() => publishImmutableFiles(late, moveForGood, "test set"), /test set lock .* was taken over; nothing was written$/);
+  await putBack();
+  assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json"], "no lock of an ended run came back");
+});
+
+test("a temporary lock that cannot be written is removed, and a day-old tombstone a killed run left is cleaned", { timeout: 30_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-leftovers-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const module = new URL("../../build/fsDurability.js", import.meta.url).href;
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
+  const script = `import { createRequire, syncBuiltinESMExports } from "node:module";
+    const require = createRequire(import.meta.url), fsp = require("fs/promises"), realOpen = fsp.open;
+    fsp.open = async (path, ...rest) => {
+      const handle = await realOpen(path, ...rest);
+      if (String(path).endsWith(".publish-lock-new")) handle.writeFile = async () => { throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" }); };
+      return handle;
+    };
+    syncBuiltinESMExports();
+    const { publishImmutableFiles } = await import(${JSON.stringify(module)});
+    const outcome = await publishImmutableFiles(${JSON.stringify(paths)}, async (index) => "part " + index + "\\n", "test set", { stem: "set" })
+      .then((result) => JSON.stringify(result), (error) => error.message);
+    process.stdout.write(outcome + "\\n");`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => child.kill("SIGKILL"));
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  await once(child, "close");
+  assert.match(output.trim(), /^test set could not write its lock .*\.set\.part01\.json\.publish-lock \(ENOSPC: no space left on device, write\); nothing was written$/);
+  assert.deepEqual(await readdir(directory), []);
+  // A tombstone and a temporary lock a day old are a killed run's: removed. Fresh ones may be a running takeover's: kept.
+  const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  const old = [`.${randomUUID()}.publish-lock-stale`, `.${randomUUID()}.publish-lock-new`], fresh = `.${randomUUID()}.publish-lock-stale`;
+  for (const name of [...old, fresh]) await writeFile(join(directory, name), `${randomUUID()} 1\n`, { mode: 0o600 });
+  for (const name of old) await utimes(join(directory, name), dayAgo, dayAgo);
+  assert.deepEqual((await publishImmutableFiles(paths, async (index) => `part ${index}\n`, "test set")).published, true);
+  assert.deepEqual((await readdir(directory)).sort(), [fresh, "set.part01.json", "set.part02.json"].sort());
 });
 
 test("a run whose lock was taken over, or replaced by a FIFO, stops before it links anything", { timeout: 30_000 }, async (t) => {
@@ -485,7 +554,7 @@ test("when the first destination cannot be removed, or its directory not synced,
   assert.deepEqual(await Promise.all(syncFails.paths.map(absent)), [true, false, false]);
 });
 
-test("the lock is named by the first destination's exact name: other names do not share it, and a long name is hashed", async (t) => {
+test("the lock is named by the first destination's exact name: other names do not share it, and a name too long for it is refused", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-lockname-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const parts = (stem) => [1, 2].map((n) => join(directory, `${stem}.part0${n}.json`));
@@ -508,14 +577,15 @@ test("the lock is named by the first destination's exact name: other names do no
     await assert.rejects(() => publishImmutableFiles(parts(nfd), async (index) => `c ${index}\n`, "test set"), /another test set of the same files is running/);
     assert.deepEqual(await slow, { published: true, results: ["created", "created"] });
   }
-  // A name whose lock would be longer than a file name may be is hashed.
-  const long = `${"x".repeat(236)}.part01.json`;
-  let hashed;
-  await publishImmutableFiles([join(directory, long)], async () => {
-    hashed = (await readdir(directory)).filter((name) => name.endsWith(".publish-lock"));
-    return "long\n";
-  }, "test set");
-  assert.deepEqual(hashed, [`.${createHash("sha256").update(long).digest("hex")}.publish-lock`]);
+  // A name whose lock would be longer than a file name may be is refused: a hash would lose the sameness of names.
+  const before = (await readdir(directory)).sort();
+  const long = `${"x".repeat(222)}.part01.json`;   // 234 bytes; its lock's takeover marker would need 257
+  let asked = 0;
+  await assert.rejects(() => publishImmutableFiles([join(directory, long)], async () => { asked += 1; return "long\n"; }, "test set"),
+    /test set cannot name its lock after x+\.part01\.json: the name is too long by 2 bytes; choose a shorter name; nothing was written$/);
+  assert.deepEqual([asked, (await readdir(directory)).sort()], [0, before]);
+  const fits = `${"x".repeat(220)}.part01.json`;
+  assert.deepEqual(await publishImmutableFiles([join(directory, fits)], async () => "fits\n", "test set"), { published: true, results: ["created"] });
 });
 
 test("a re-run over a whole set in a directory that denies the lock confirms it without writing", async (t) => {
