@@ -69,7 +69,7 @@ file and each collection's sequence, bar count, normalized hash and `range_check
 
 ```json
 { "schema_version": "1.0", "series": "fx_historical_m15_export", "source_id": "oanda_v20", "evidence_tier": "official_revised_history",
-  "instrument": "EUR_USD", "canonical_symbol": "OANDA:EURUSD", "granularity": "M15", "price": "M",
+  "instrument": "EUR_USD", "canonical_symbol": "OANDA:EURUSD", "granularity": "M15", "price": "M", "manifest_records": 1, "run_records": 1,
   "collections": [{ "sequence": 1, "requested_from": "...", "requested_to": "...", "retrieved_at": "...",
     "source_url_template": "https://api-fxpractice.oanda.com/v3/accounts/{account}/instruments/EUR_USD/candles", "raw_sha256": ["sha256:..."],
     "normalized_sha256": "sha256:...", "bar_count": 4, "first_bar_at": "...", "last_bar_at": "...",
@@ -79,6 +79,11 @@ file and each collection's sequence, bar count, normalized hash and `range_check
     "retrieved_at": "...", "raw_sha256": ["sha256:..."], "normalized_sha256": "sha256:...", "bar_count": 4, "resumed_pages": 0,
     "unfinished_pages": 1, "manifest_recorded": true }] }
 ```
+
+`manifest_records` and `run_records` are how many records the manifest and the run log held when the export read them
+(BACKLOG 103-9). An export is whole exactly when `collections` holds `manifest_records` entries and `runs` holds
+`run_records`: a reader that needs every collection and run (a point-in-time reading does) checks both, which also
+catches a cut-off tail that numbering alone cannot.
 
 `runs` holds the instrument's recorded runs whose content is one of the exported collections, in run-log order. A run's
 bars are the collection with its `normalized_sha256`; its own range, `trigger` (`daily` for the daily schedule, `manual`

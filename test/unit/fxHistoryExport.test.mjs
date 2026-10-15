@@ -148,6 +148,12 @@ test("collections are chosen by sequence or all, for the instrument of the store
   assert.deepEqual(Object.keys(both.runs[0]), ["sequence", "trigger", "environment", "requested_from", "requested_to", "started_at", "retrieved_at", "raw_sha256",
     "normalized_sha256", "bar_count", "resumed_pages", "unfinished_pages", "manifest_recorded"]);
   assert.deepEqual((await exportFxHistory({ instrument: "USD_JPY", sequences: [1], ...sources })).runs.map((run) => run.sequence), [1]);
+  // The totals tell a whole export from a partial one (BACKLOG 103-9).
+  assert.deepEqual([both.manifest_records, both.collections.length, both.run_records, both.runs.length], [2, 2, 3, 3]);
+  const part = await exportFxHistory({ instrument: "USD_JPY", sequences: [1], ...sources });
+  assert.deepEqual([part.manifest_records, part.collections.length, part.run_records, part.runs.length], [2, 1, 3, 1]);
+  assert.deepEqual(Object.keys(both).slice(0, 12), ["schema_version", "series", "source_id", "evidence_tier", "instrument", "canonical_symbol", "granularity", "price",
+    "manifest_records", "run_records", "collections", "runs"]);
   // A run whose content the manifest does not hold, or whose bar count differs from it, is refused.
   const [firstRun] = await runs.records();
   const oneRun = (change) => ({ instrument: "USD_JPY", records: async () => [{ ...firstRun, ...change }] });

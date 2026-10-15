@@ -29,7 +29,13 @@ const RUN_FIELDS = ["sequence", "trigger", "environment", "requested_from", "req
 export type FxHistoryExportRun = Pick<FxHistoricalRun, (typeof RUN_FIELDS)[number]>;
 export type FxHistoryExport = {
   schema_version: "1.0"; series: "fx_historical_m15_export"; source_id: "oanda_v20"; evidence_tier: "official_revised_history"; instrument: OandaFxInstrument;
-  canonical_symbol: string; granularity: "M15"; price: "M"; collections: FxHistoryExportCollection[];
+  canonical_symbol: string; granularity: "M15"; price: "M";
+  /**
+   * How many records the manifest and the run log held when the export read them (BACKLOG 103-9): a reader compares
+   * them with collections.length and runs.length to tell a whole export from a partial one, a cut-off tail included.
+   */
+  manifest_records: number; run_records: number;
+  collections: FxHistoryExportCollection[];
   /** The recorded runs (BACKLOG 103-5) whose content is one of the exported collections, in run-log order. */
   runs: FxHistoryExportRun[];
 };
@@ -138,7 +144,8 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   const runRows = runRecords.filter((run) => exported.has(run.normalized_sha256))
     .map((run) => Object.fromEntries(RUN_FIELDS.map((field) => [field, run[field]])) as FxHistoryExportRun);
   return { schema_version: "1.0", series: "fx_historical_m15_export", source_id: "oanda_v20", evidence_tier: "official_revised_history", instrument,
-    canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", collections, runs: runRows };
+    canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", manifest_records: records.length, run_records: runRecords.length,
+    collections, runs: runRows };
 }
 
 /**
