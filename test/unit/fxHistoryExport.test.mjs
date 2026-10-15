@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, stat, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
@@ -173,7 +173,7 @@ test("collections are chosen by sequence or all, for the instrument of the store
   let reads = 0;
   const emptyRuns = { instrument: "USD_JPY", records: async () => [] };
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, runs: emptyRuns, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] },
-    archive: { read: async () => { reads += 1; return Buffer.from(""); } } }), /more than 1000000/);
+    archive: { read: async () => { reads += 1; return Buffer.from(""); } } }), /more than 1000000; write a whole export in parts with --split/);
   assert.equal(reads, 0, "the size is checked before any page is read");
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, checkpoints, runs: emptyRuns, store: { instrument: "USD_JPY", records: async () => [] }, archive: sources.archive }),
     /no USD_JPY FX history collection is recorded/);
@@ -291,14 +291,15 @@ test("the totals describe one moment: the run log is read again after the manife
   const growing = (counts) => ({ instrument: "USD_JPY", records: async () => all.slice(0, counts[Math.min(reads.runs++, counts.length - 1)]) });
   const counted = { instrument: "USD_JPY", path: store.path, records: async () => { reads.manifest += 1; return store.records(); } };
   const settled = await exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, archive, runs: growing([1, 2, 2, 2]) });
-  assert.deepEqual([settled.schema_version, settled.manifest_records, settled.run_records, settled.runs.length, reads.manifest], ["1.1", 2, 2, 2, 2]);
+  // Each attempt reads the manifest twice: before the checkpoints and after them.
+  assert.deepEqual([settled.schema_version, settled.manifest_records, settled.run_records, settled.runs.length, reads.manifest], ["1.1", 2, 2, 2, 4]);
   // One that grows every time is given up on after five reads of the manifest, before any raw page is read.
   reads.runs = 0; reads.manifest = 0;
   let pages = 0;
   const everGrowing = { instrument: "USD_JPY", records: async () => Array.from({ length: reads.runs++ }, () => all[0]) };
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, runs: everGrowing,
-    archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), /USD_JPY FX history run log grew each of the 5 times the manifest in .* was read; export again when no collection is running/);
-  assert.deepEqual([reads.manifest, pages], [5, 0]);
+    archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), /USD_JPY FX history manifest in .* or its run log grew each of the 5 times they were read; export again when no collection is running/);
+  assert.deepEqual([reads.manifest, pages], [10, 0]);
   // The CLI prints the totals. A partial export's bytes change when a run is recorded, though its own collection did not
   // change: export again to a new name.
   const output = join(dir, "usdjpy-1.json");
@@ -324,10 +325,11 @@ async function fourCollections() {
   await env.collect("2026-03-04T00:00:00.000Z", "2026-03-04T00:45:00.000Z", bars(3));
   await env.collect("2026-03-05T00:00:00.000Z", "2026-03-05T00:30:00.000Z", bars(2));
   await env.collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", bars(2), "2026-08-01T00:00:00.000Z");
-  const logReads = { manifest: 0, runs: 0, checkpoints: 0 };
+  const logReads = { manifest: 0, runs: 0, checkpoints: 0, byKey: 0 };
   const store = { instrument: "USD_JPY", path: env.store.path, records: async () => { logReads.manifest += 1; return env.store.records(); } };
   const runs = { instrument: "USD_JPY", records: async () => { logReads.runs += 1; return env.runs.records(); } };
-  const checkpoints = { instrument: "USD_JPY", completed: async (key) => { logReads.checkpoints += 1; return env.checkpoints.completed(key); } };
+  const checkpoints = { instrument: "USD_JPY", records: async () => { logReads.checkpoints += 1; return env.checkpoints.records(); },
+    completed: async (key) => { logReads.byKey += 1; return env.checkpoints.completed(key); } };
   return { ...env, logReads, counted: { store, runs, checkpoints, archive: env.counting } };
 }
 
@@ -335,13 +337,13 @@ test("a whole export is split into parts of at most the limit, collections whole
   const { counted, reads, logReads, sources } = await fourCollections();
   assert.deepEqual((await sources.store.records()).map((record) => record.bar_count), [2, 2, 3, 2]);
   const split = await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted });
-  // Planned from one read of the manifest (and the run log, read before and after it) and of each collection's page
-  // checkpoints, before any raw page is read.
-  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints, reads.count], [1, 2, 4, 0]);
+  // Planned from one snapshot, before any raw page is read: the run log, the manifest, the whole checkpoint log once
+  // (not key by key), then the manifest and the run log again.
+  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints, logReads.byKey, reads.count], [2, 2, 1, 0, 0]);
   assert.deepEqual([split.manifest_records, split.run_records], [4, 5]);
   assert.deepEqual(split.parts, [{ index: 1, of: 2, sequences: [1, 2], bars: 4, runs: 3 }, { index: 2, of: 2, sequences: [3, 4], bars: 5, runs: 2 }]);
   const [one, two] = [await split.build(1), await split.build(2)];
-  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints], [1, 2, 4], "building a part reads none of them again");
+  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints, logReads.byKey], [2, 2, 1, 0], "building a part reads none of them again");
   // Each part is a whole document with the same header and totals, and says which part of how many it is.
   const { collections: c1, runs: r1, ...header1 } = one, { collections: c2, runs: r2, ...header2 } = two;
   assert.deepEqual(Object.keys(one), ["schema_version", "series", "source_id", "evidence_tier", "instrument", "canonical_symbol", "granularity", "price",
@@ -374,7 +376,7 @@ test("a whole export is split into parts of at most the limit, collections whole
   await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", ...huge }), /would hold 20000001 bars, more than 20000000/);
   const large = { ...huge, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] } };
   await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", ...large }), /holds 1000001 bars, more than 1000000, the most one part holds/);
-  const twoLarge = { ...huge, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 600_000 }, { ...record, sequence: 2, bar_count: 600_000 }] } };
+  const twoLarge = { ...huge, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 600_000 }, { ...record, sequence: 2, bar_count: 600_000, normalized_sha256: sha("second") }] } };
   assert.deepEqual((await splitFxHistoryExport({ instrument: "USD_JPY", ...twoLarge })).parts.map((part) => [part.sequences, part.bars]), [[[1], 600_000], [[2], 600_000]]);
   assert.equal(reads.count, 0);
   await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 0, ...sources }), /bar limits must be positive integers/);
@@ -429,4 +431,71 @@ test("the CLI writes a split export's parts once each, checks every target befor
   assert.deepEqual([reads.count, await lstatOrNull(blockedFirst)], [0, null]);
   assert.deepEqual((await readdir(dir)).filter((name) => name.startsWith(".publish-")), [], "no staging is left behind");
   assert.equal((await stat(first)).isFile(), true);
+});
+
+test("a split export writes all its parts or none: a later part that fails to build, or a symbolic link at a part's path, leaves no part (BACKLOG 103-10 review)", async () => {
+  const { counted, reads, sources, dir } = await fourCollections();
+  const third = (await sources.store.records())[2];
+  const broken = { read: async (hash) => { if (hash === third.raw_sha256[0]) throw new Error("ENOENT: the raw page is gone"); return sources.archive.read(hash); } };
+  const staging = async () => (await readdir(dir)).filter((name) => name.startsWith(".publish-"));
+  // The first part is built and staged; the second cannot be built: neither is written.
+  const output = join(dir, "broken.json"), paths = fxHistoryExportPartPaths(output, 2);
+  await assert.rejects(async () => writeFxHistoryExportParts(await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted, archive: broken }), output),
+    /FX history collection 3, raw page 1: ENOENT: the raw page is gone/);
+  assert.deepEqual([await lstatOrNull(paths[0]), await lstatOrNull(paths[1]), await staging()], [null, null, []]);
+  // The same through the CLI, in one part.
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--all", "--split", "--output", output], { ...sources, archive: broken }), /raw page 1: ENOENT/);
+  assert.deepEqual([await lstatOrNull(paths[0]), await staging()], [null, []]);
+  // A symbolic link at a part's path is refused before any raw page is read.
+  const linked = join(dir, "linked.json"), [linkedFirst, linkedSecond] = fxHistoryExportPartPaths(linked, 2);
+  await symlink(join(dir, "elsewhere.json"), linkedSecond);
+  reads.count = 0;
+  await assert.rejects(async () => writeFxHistoryExportParts(await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted }), linked),
+    /a part of the export would replace a symbolic link: .*linked\.part02\.json; nothing was written/);
+  assert.deepEqual([reads.count, await lstatOrNull(linkedFirst), await lstatOrNull(join(dir, "elsewhere.json"))], [0, null, null]);
+  // Without --split, a whole export over the limit points to --split; a chosen one does not.
+  const [record] = await sources.store.records();
+  const big = { ...sources, runs: { instrument: "USD_JPY", records: async () => [] }, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] } };
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--all", "--output", join(dir, "big.json")], big), /more than 1000000; write a whole export in parts with --split/);
+  await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", join(dir, "big.json")], big), /more than 1000000; export fewer collections at a time/);
+});
+
+test("the page checkpoints are read with the snapshot, once and whole: one written later is not read, and a manifest with a content twice is refused (BACKLOG 103-10 review)", async () => {
+  const { store, checkpoints, archive, sources, collect } = await setup();
+  await collect(FROM, TO, twoPages);
+  const [record] = await store.records();
+  // Page 2 had a forming candle and has no checkpoint. A later run of the same range checkpoints the same response while
+  // the export reads its raw pages, after its snapshot: this export does not see it, the next one does.
+  const { fxHistoryCollectionKey } = await import("../../build/oandaHistoricalFx.js");
+  const key = fxHistoryCollectionKey("practice", "EUR_USD", FROM, TO), page2 = oandaPageRanges(FROM, TO)[1];
+  let appended = false;
+  const appending = { read: async (hash) => {
+    if (!appended) {
+      appended = true;
+      const body = await archive.read(record.raw_sha256[1]);
+      await checkpoints.append({ collection_key: key, requested_from: page2.requestFrom, requested_to: page2.requestTo, raw_sha256: record.raw_sha256[1], raw_bytes: body.byteLength },
+        "2026-08-01T00:00:00.000Z");
+    }
+    return archive.read(hash);
+  } };
+  const calls = { records: 0, completed: 0 };
+  const counted = { instrument: "EUR_USD", records: async () => { calls.records += 1; return checkpoints.records(); }, completed: async (k) => { calls.completed += 1; return checkpoints.completed(k); } };
+  const during = await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources, checkpoints: counted, archive: appending });
+  assert.deepEqual([appended, during.collections[0].range_checkpointed, calls.records, calls.completed], [true, false, 1, 0]);
+  assert.equal((await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources })).collections[0].range_checkpointed, true);
+  // A reader without records() is asked key by key, with the same result.
+  assert.equal((await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources, checkpoints: { instrument: "EUR_USD", completed: (k) => checkpoints.completed(k) } }))
+    .collections[0].range_checkpointed, true);
+  // A manifest that grew between its two reads is read again.
+  const manifestReads = [];
+  const growing = { instrument: "EUR_USD", path: store.path, records: async () => { manifestReads.push(1); return manifestReads.length === 1 ? [] : store.records(); } };
+  const settled = await exportFxHistory({ instrument: "EUR_USD", all: true, ...sources, store: growing });
+  assert.deepEqual([settled.manifest_records, manifestReads.length], [1, 4]);
+  // The manifest keeps each content once; one that holds a content twice is refused before any raw page is read.
+  let pages = 0;
+  const twice = { instrument: "EUR_USD", path: store.path, records: async () => [record, { ...record, sequence: 2 }] };
+  await assert.rejects(() => exportFxHistory({ instrument: "EUR_USD", all: true, ...sources, store: twice, runs: { instrument: "EUR_USD", records: async () => [] },
+    archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), new RegExp(`EUR_USD FX history manifest in .* records content ${record.normalized_sha256} twice, as collections 1 and 2`));
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "EUR_USD", ...sources, store: twice, runs: { instrument: "EUR_USD", records: async () => [] } }), /twice, as collections 1 and 2/);
+  assert.equal(pages, 0);
 });

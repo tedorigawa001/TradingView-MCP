@@ -274,6 +274,8 @@ export class FxHistoricalCheckpointStore {
     this.log = new AppendOnlyFirstSeenLog(this.path, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
   async completed(collectionKey: string) { return this.log.serialize(async () => (await this.log.readAllUnlocked()).filter((row) => row.collection_key === collectionKey)); }
+  /** Every checkpoint, in log order: an export reads the log once and groups it by collection key (BACKLOG 103-10 review). */
+  async records() { return this.log.serialize(async () => this.log.readAllUnlocked()); }
   async append(row: Omit<FxHistoricalPageCheckpoint, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at">, now: string) {
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();

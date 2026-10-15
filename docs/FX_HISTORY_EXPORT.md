@@ -39,9 +39,11 @@ the export lists each distinct content once, at the time it was first recorded. 
 [daily FX history collection](FX_HISTORY_DAILY.md)) records every run; the export carries those runs (below). The run log
 is read before the manifest, so every run read has its content recorded (a collection records its content before its
 run). A run whose content the manifest does not hold, or whose bar count differs from that content's, refuses the export.
-The run log is read again after the manifest: when both reads hold as many runs, no run was recorded meanwhile, so the
-manifest and the run log (and the totals below) describe one moment, the one the manifest was read at. Otherwise both
-are read again, up to five times in all, and the export fails if a collection kept recording runs throughout.
+After the manifest the page checkpoints are read, once and whole, then the manifest and the run log again: when each
+second read holds as many records as the first, neither log changed meanwhile, so the manifest, the run log (and the
+totals below) and the checkpoints describe one moment, the one the checkpoints were read at; a checkpoint a later run
+writes is not read. Otherwise all are read again, up to five times in all, and the export fails if collections kept
+recording throughout. The manifest holds each content once; one that holds a content twice refuses the export.
 
 ## Usage
 
@@ -119,15 +121,16 @@ caller, since overlapping collections can differ.
 ## Whole exports in parts (`--split`)
 
 BACKLOG 103-10. The daily collection with its default ten-weekday lookback, run twice a night, records a collection of
-about 1,000 bars at every run, so an instrument's manifest passes 1,000,000 bars within about a year, and a reader that
+about 1,000 bars at every run (about 520 runs and 508,000 bars a year), so an instrument's manifest passes 1,000,000
+bars in about two years, and a reader that
 needs the whole record (every collection and every run, as a point-in-time reading does) can no longer have it in one
 export. `--split`, which goes only with `--all` and `--format collections`, writes a whole export in as many parts as it
 needs:
 
-- the manifest and the run log are read once, at one moment, as for any export, and every collection's page checkpoints
-  with them; the parts are planned from them before any raw page is read, and the whole may hold at most 20,000,000
-  bars, also checked before any raw page is read. Every part is built from this one reading (the raw archive is
-  addressed by hash), so the parts describe one moment;
+- the manifest, the run log and the page checkpoints are read once, at one moment, as for any export; the parts are
+  planned from them before any raw page is read, and the whole may hold at most 20,000,000 bars, also checked before
+  any raw page is read. Every part is built from this one reading (the raw archive is addressed by hash), so the parts
+  describe one moment;
 - each part holds at most 1,000,000 bars. The collections go whole, in manifest order, into consecutive parts: a part
   closes when the next collection would take it over 1,000,000 bars. A single collection over 1,000,000 bars is
   refused;
@@ -144,14 +147,17 @@ Each part is a complete export document with the header of the whole export, the
   "part": { "index": 1, "of": 2 }, "collections": [...], "runs": [...] }
 ```
 
-Every target is checked before anything is written. A directory or a symbolic link at a part's path refuses the export
-before any raw page is read. Each part whose file already exists is built and compared with it, and any one with other
-bytes refuses the export with nothing written. Then the parts are built (again, for those compared) and published one at
-a time, each as a new immutable file, `created` or `identical`; only one part's bars are held at once. A file with
-other bytes that appears at a part's path while the parts are being written stops the export, and the error names the
-parts already written. The command prints the totals, the number of runs, each part's index, path, result, SHA-256,
-number of collections and runs, and bars, and each collection's sequence, bar count, normalized hash,
-`range_checkpointed` and part.
+The parts are written all together or not at all. A directory or a symbolic link at a part's path refuses the export
+before any raw page is read. Then each part is built in turn, once, and only one part's bars are held at once: a part
+whose file already exists is compared with it, and any other is written to a staging file beside the output and
+synced. A part that fails to build (a raw page missing or not matching its hash, a page no checkpoint binds), or a file
+with other bytes at a part's path, removes the staging files and writes nothing; every file with other bytes is named.
+Only when every part is staged or found identical are the staged parts linked into place and the directory synced:
+each part is `created`, or `identical` when its file already held it. A file with other bytes that appears at a part's
+path while the parts are being linked stops the export, and the error names exactly the parts this run created before
+it (not those found identical); the rest are not written. The command prints the totals, the number of runs, each
+part's index, path, result, SHA-256, number of collections and runs, and bars, and each collection's sequence, bar
+count, normalized hash, `range_checkpointed` and part.
 
 A reader recombines the parts of one export so:
 

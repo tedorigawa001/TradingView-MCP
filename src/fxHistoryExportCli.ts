@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { createReadStream, type Stats } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 import { ENTRY_RESERVED_SERIES_PREFIXES } from "./forecastSet.js";
-import { publishImmutableFile } from "./fsDurability.js";
+import { publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
 import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, splitFxHistoryExport, type FxHistoryExportSources, type FxHistoryExportSplit } from "./fxHistoryExport.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS } from "./oandaHistoricalFx.js";
 
@@ -31,48 +30,34 @@ async function partBody(split: FxHistoryExportSplit, index: number) {
     normalized_sha256: collection.normalized_sha256, range_checkpointed: collection.range_checkpointed, part: index })) };
 }
 
-async function fileDigest(path: string) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-  return `sha256:${hash.digest("hex")}`;
-}
-
 /**
- * Writes a whole export in parts (BACKLOG 103-10) to fxHistoryExportPartPaths(output), one part at a time, so that only
- * one part's bars are held at once. Every target is checked before anything is written: a directory or a symbolic link
- * there refuses the export before any raw page is read, and each part whose file already exists is built and compared
- * with it; one with other bytes refuses the export, and nothing is written. Each part is then built again (the archive
- * is addressed by hash and the part's checkpoints are kept, so it is the same) and published as a new immutable file:
- * created, or identical when the file already held it.
+ * Writes a whole export in parts (BACKLOG 103-10) to fxHistoryExportPartPaths(output), all of them or none
+ * (publishImmutableFiles). A directory or a symbolic link at a part's path refuses the export before any raw page is
+ * read. Each part is then built in turn, so only one part's bars are held at once: a part whose file already exists is
+ * compared with it, any other is written to a synced staging file beside it. A part that fails to build, or a file with
+ * other bytes, removes the staging files and writes nothing. Only when every part is staged or found identical are the
+ * staged parts linked into place: each part is created, or identical when its file already held it.
  */
 export async function writeFxHistoryExportParts(split: FxHistoryExportSplit, output: string) {
   const paths = fxHistoryExportPartPaths(output, split.parts.length);
-  const found: (Stats | null)[] = [];
   for (const path of paths) {
     const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
     if (entry?.isDirectory()) throw new Error(`a part of the export would replace a directory: ${path}; nothing was written`);
     if (entry?.isSymbolicLink()) throw new Error(`a part of the export would replace a symbolic link: ${path}; nothing was written`);
-    found.push(entry);
   }
-  const different: string[] = [];
-  for (const [index, entry] of found.entries()) {
-    if (entry === null) continue;
-    if (!entry.isFile()) { different.push(paths[index]); continue; }
-    const { body } = await partBody(split, index + 1);
-    if (entry.size !== Buffer.byteLength(body) || await fileDigest(paths[index]) !== digest(body)) different.push(paths[index]);
-  }
-  if (different.length) throw new Error(`a different file already exists at ${different.join(", ")}; nothing was written`);
-  const parts = [], collections = [];
-  for (const [index, part] of split.parts.entries()) {
-    const built = await partBody(split, part.index);
-    const result = await publishImmutableFile(paths[index], built.body, "FX history export");
-    if (result === "different") {
-      throw new Error(`a different file appeared at ${paths[index]} while the export was written; ${parts.length ? `only ${parts.map((row) => row.output).join(", ")} were written` : "nothing was written"}`);
-    }
-    parts.push({ index: part.index, output: paths[index], result, sha256: digest(built.body), collections: part.sequences.length, runs: part.runs, bars: part.bars });
-    collections.push(...built.collections);
-  }
-  return { parts, collections };
+  const digests: string[] = [], collections: Awaited<ReturnType<typeof partBody>>["collections"][] = [];
+  const published = await publishImmutableFiles(paths, async (index) => {
+    const built = await partBody(split, index + 1);
+    digests[index] = digest(built.body);
+    collections[index] = built.collections;
+    return built.body;
+  }, "FX history export");
+  if (!published.published) throw new Error(`a different file already exists at ${published.different.join(", ")}; nothing was written`);
+  return {
+    parts: split.parts.map((part, index) => ({ index: part.index, output: paths[index], result: published.results[index], sha256: digests[index],
+      collections: part.sequences.length, runs: part.runs, bars: part.bars })),
+    collections: collections.flat(),
+  };
 }
 
 /**

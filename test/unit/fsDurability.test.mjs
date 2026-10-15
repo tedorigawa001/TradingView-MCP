@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lstat, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced, syncDirectoryEntry } from "../../build/fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, publishImmutableFiles, syncDirectoryEntry } from "../../build/fsDurability.js";
 
 test("directory durability remains available on Unix and is an explicit no-op on Windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-durability-"));
@@ -130,4 +130,66 @@ test("no store reads a stat mode without asking whether the host has one", async
     }
   }
   assert.deepEqual(offenders, [], `unguarded mode checks:\n${offenders.join("\n")}`);
+});
+
+// BACKLOG 103-10 review: several immutable files, all of them or none.
+async function publishSet(names) {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-set-"));
+  const paths = names.map((name) => join(directory, name));
+  const asked = [];
+  const bodies = (overrides = {}) => async (index) => { asked.push(index); if (overrides[index]) return overrides[index](); return `file ${index}\n`; };
+  const staging = async () => (await readdir(directory)).filter((name) => name.startsWith(".publish-"));
+  return { directory, paths, asked, bodies, staging };
+}
+const absent = async (path) => (await lstat(path).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)))) === null;
+
+test("publishImmutableFiles writes every file once, then finds each identical", async () => {
+  const { paths, asked, bodies, staging } = await publishSet(["a.json", "b.json", "c.json"]);
+  assert.deepEqual(await publishImmutableFiles(paths, bodies(), "test set"), { published: true, results: ["created", "created", "created"] });
+  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8"))), ["file 0\n", "file 1\n", "file 2\n"]);
+  assert.deepEqual(asked, [0, 1, 2], "each file's bytes are asked for once");
+  assert.deepEqual(await publishImmutableFiles(paths, bodies(), "test set"), { published: true, results: ["identical", "identical", "identical"] });
+  assert.deepEqual(await staging(), []);
+  await assert.rejects(() => publishImmutableFiles([paths[0], paths[0]], bodies(), "test set"), /test set paths must be distinct/);
+  await assert.rejects(() => publishImmutableFiles([`${paths[0]}/`], bodies(), "test set"), /test set path must name a file/);
+});
+
+test("publishImmutableFiles writes nothing when a later file fails to build or an existing one differs", async () => {
+  const { paths, asked, bodies, staging } = await publishSet(["a.json", "b.json", "c.json", "d.json", "e.json"]);
+  // The third fails after the first two were staged: nothing is linked, and the staging is gone.
+  await assert.rejects(() => publishImmutableFiles(paths, bodies({ 2: async () => { throw new Error("page 3 is missing"); } }), "test set"), /page 3 is missing/);
+  assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true, true, true]);
+  assert.deepEqual(await staging(), []);
+  // Other bytes at the second and fifth, a directory at the fourth: each is named, the first is not created, and once
+  // one differs only what already exists is still built, to be compared (the third is not).
+  await writeFile(paths[1], "other\n");
+  await mkdir(paths[3]);
+  await writeFile(paths[4], "other\n");
+  asked.length = 0;
+  assert.deepEqual(await publishImmutableFiles(paths, bodies(), "test set"), { published: false, different: [paths[1], paths[3], paths[4]] });
+  assert.deepEqual([await absent(paths[0]), await absent(paths[2])], [true, true]);
+  assert.deepEqual(asked, [0, 1, 3, 4]);
+  assert.equal(await readFile(paths[1], "utf8"), "other\n");
+  assert.deepEqual(await staging(), []);
+  // A symbolic link is refused, not followed.
+  const linked = await publishSet(["a.json", "b.json"]);
+  await symlink(join(linked.directory, "elsewhere"), linked.paths[1]);
+  await assert.rejects(() => publishImmutableFiles(linked.paths, linked.bodies(), "test set"), /test set path must be a regular file, not a symbolic link/);
+  assert.equal(await absent(linked.paths[0]), true);
+  assert.deepEqual(await linked.staging(), []);
+});
+
+test("publishImmutableFiles names exactly the files it created when a destination is taken while it links", async () => {
+  const { paths, bodies, staging } = await publishSet(["a.json", "b.json", "c.json", "d.json"]);
+  await writeFile(paths[0], "file 0\n");   // already there, identical
+  // Another writer puts other bytes at the third destination after it was found free and staged.
+  const takeThird = async () => { await writeFile(paths[2], "theirs\n"); return "file 2\n"; };
+  await assert.rejects(() => publishImmutableFiles(paths, bodies({ 2: takeThird }), "test set"),
+    (error) => error.message === `test set path ${paths[2]} was taken by a different file while the files were published; only ${paths[1]} was written`);
+  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8").catch(() => null))), ["file 0\n", "file 1\n", "theirs\n", null]);
+  assert.deepEqual(await staging(), []);
+  // Taken by the same bytes, it is identical.
+  const same = await publishSet(["a.json", "b.json"]);
+  const sameBytes = async () => { await writeFile(same.paths[1], "file 1\n"); return "file 1\n"; };
+  assert.deepEqual(await publishImmutableFiles(same.paths, same.bodies({ 1: sameBytes }), "test set"), { published: true, results: ["created", "identical"] });
 });

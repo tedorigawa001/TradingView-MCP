@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdtemp, open, realpath, rm, unlink } from "node:fs/promises";
+import { link, lstat, mkdtemp, open, readFile, realpath, rm, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
@@ -249,6 +249,92 @@ export async function publishImmutableFile(
     return "created";
   } finally {
     await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+  }
+}
+
+/**
+ * Publishes several new immutable files together, all of them or none (BACKLOG 103-10 review): publishImmutableFile for
+ * a set, on the same primitives. The bytes of each destination are asked for in turn, so only one file's bytes are held
+ * at once. A destination already holding exactly those bytes is "identical" (synced as publishImmutableFile syncs it);
+ * one holding other bytes, or anything but a regular file, is "different"; a symbolic link there is refused. The bytes
+ * of a new destination are written to a staging file in its directory and synced. Nothing is linked into place before
+ * every destination is staged or found identical: when bytesOf fails, or a destination is "different", the staging
+ * files are removed and nothing is written. Once one destination is "different", only destinations that already exist
+ * are still compared, so that every different one is returned. Then each staged file is linked to its destination and
+ * the directories are synced. A destination taken meanwhile by other bytes (another writer) stops the run with an error
+ * that names exactly the destinations this run created before it; those found identical were not written by it, and
+ * the rest are not linked. The staging directories are removed when the run ends, as a best effort.
+ */
+export async function publishImmutableFiles(
+  destinations: readonly string[],
+  bytesOf: (index: number) => Promise<string | Buffer>,
+  label: string,
+): Promise<{ published: true; results: ("created" | "identical")[] } | { published: false; different: string[] }> {
+  const targets: { destination: string; directory: string; target: string }[] = [];
+  for (const destination of destinations) {
+    const name = basename(destination);
+    if (name === "" || name === "." || name === ".." || destination.endsWith(sep) || destination.endsWith("/")) {
+      throw new Error(`${label} path must name a file: ${JSON.stringify(destination)}`);
+    }
+    const directory = await realpath(dirname(destination));
+    targets.push({ destination, directory, target: join(directory, name) });
+  }
+  if (new Set(targets.map((item) => item.target)).size !== targets.length) throw new Error(`${label} paths must be distinct`);
+  const stagings = new Map<string, string>();
+  const staged: (string | null)[] = [];
+  const results: ("created" | "identical" | null)[] = [];
+  const different: string[] = [];
+  try {
+    for (const [index, { destination, directory, target }] of targets.entries()) {
+      staged.push(null); results.push(null);
+      let entry: Stats | null;
+      try { entry = await lstat(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; entry = null; }
+      if (entry?.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link: ${destination}`);
+      if (different.length > 0 && entry === null) continue;
+      const raw = await bytesOf(index);
+      const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : raw;
+      const found = entry === null ? null : await settleExistingFile(target, directory, bytes, label);
+      if (found === "different") { different.push(destination); continue; }
+      if (found === "identical") { results[index] = "identical"; continue; }
+      if (different.length > 0) continue;
+      let staging = stagings.get(directory);
+      if (staging === undefined) { staging = await mkdtemp(join(directory, ".publish-")); stagings.set(directory, staging); }
+      const file = join(staging, String(index));
+      const handle = await openExclusiveFile(file, label);
+      try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+      staged[index] = file;
+    }
+    if (different.length > 0) return { published: false, different };
+    const created: string[] = [];
+    const directories = [...new Set(targets.map((item) => item.directory))];
+    try {
+      for (const [index, file] of staged.entries()) {
+        if (file === null) continue;
+        const { destination, directory, target } = targets[index];
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            await link(file, target);
+            results[index] = "created"; created.push(destination);
+            break;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            const settled = await settleExistingFile(target, directory, await readFile(file), label);
+            if (settled === "identical") { results[index] = "identical"; break; }
+            if (settled === "different") throw new Error(`${label} path ${destination} was taken by a different file while the files were published`);
+            if (attempt === 2) throw new Error(`${label} path ${destination} kept changing while it was being published`);
+          }
+        }
+      }
+    } catch (error) {
+      // What this run did link stays, synced as far as it goes; the error says exactly which those are.
+      if (created.length > 0) for (const directory of directories) await syncDirectoryEntry(directory).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message}; ${created.length > 0 ? `only ${created.join(", ")} ${created.length === 1 ? "was" : "were"} written` : "nothing was written"}`, { cause: error });
+    }
+    for (const directory of directories) await syncDirectoryEntry(directory);
+    return { published: true, results: results as ("created" | "identical")[] };
+  } finally {
+    for (const staging of stagings.values()) await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
   }
 }
 

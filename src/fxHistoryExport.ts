@@ -13,11 +13,19 @@ export const FX_HISTORY_EXPORT_SPLIT_MAX_BARS = 20_000_000;
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 /** A collection reads its pages within this long before it is recorded (BACKLOG 103-6, see rebuildFxHistoryCollection). */
 const RUN_SPAN_MS = 6 * 60 * 60 * 1000;
-/** How many times the run log and the manifest are read before an export gives up on reading them at one moment. */
+/** How many times the logs are read before an export gives up on reading them at one moment. */
 const SNAPSHOT_ATTEMPTS = 5;
 
 type ManifestReader = { readonly instrument: OandaFxInstrument; readonly path?: string; records(): Promise<FxHistoricalManifest[]> };
-type CheckpointReader = { readonly instrument: OandaFxInstrument; completed(collectionKey: string): Promise<{ requested_from: string; requested_to: string; raw_sha256: string }[]> };
+type CheckpointRow = { requested_from: string; requested_to: string; raw_sha256: string };
+/**
+ * The page checkpoints of a collection key, in log order. A reader with records() is read once, whole, and grouped by
+ * key (BACKLOG 103-10 review); one without is asked key by key.
+ */
+type CheckpointReader = {
+  readonly instrument: OandaFxInstrument; completed(collectionKey: string): Promise<CheckpointRow[]>;
+  records?(): Promise<(CheckpointRow & { collection_key: string })[]>;
+};
 type RawReader = Pick<FxHistoricalArchive, "read">;
 type RunReader = { readonly instrument: OandaFxInstrument; records(): Promise<FxHistoricalRun[]> };
 /**
@@ -112,29 +120,58 @@ export async function listFxHistoryCollections(input: { instrument: OandaFxInstr
   };
 }
 
+/** The page checkpoints of the collections of `records`, by collection key: the whole log read once when it can be. */
+async function readCheckpointRows(checkpoints: CheckpointReader, records: FxHistoricalManifest[]): Promise<Map<string, CheckpointRow[]>> {
+  const grouped = new Map<string, CheckpointRow[]>();
+  if (checkpoints.records) {
+    for (const row of await checkpoints.records()) {
+      const rows = grouped.get(row.collection_key);
+      if (rows) rows.push(row); else grouped.set(row.collection_key, [row]);
+    }
+    return grouped;
+  }
+  for (const record of records) {
+    let key: string;
+    // A record whose key cannot be made is refused by its rebuild, naming it.
+    try { key = fxHistoryCollectionKey(fxHistoryEnvironmentOf(record.source_url_template), record.instrument, record.requested_from, record.requested_to); } catch { continue; }
+    if (!grouped.has(key)) grouped.set(key, await checkpoints.completed(key));
+  }
+  return grouped;
+}
+
 /**
- * The manifest and the run log of an instrument as they were at one moment (BACKLOG 103-9 review). The run log is read
- * before the manifest, so every run read has its content recorded (a collection records its content before its run),
- * and again after it: when both reads of the run log, which only grows, hold as many records, no run was recorded while
- * the manifest was read, and the two describe the moment the manifest was read. Otherwise both are read again, up to
- * five times in all. A run whose content the manifest does not hold, or whose bar count differs from that content's,
- * is refused.
+ * The manifest, the run log and the page checkpoints of an instrument as they were at one moment (BACKLOG 103-9 review,
+ * 103-10 review). The run log is read first, so every run read has its content recorded (a collection records its
+ * content before its run); then the manifest, then the checkpoints, whole and once; then the manifest and the run log
+ * again. Both only grow, so when each second read holds as many records as the first, neither changed meanwhile, and
+ * all three describe the moment the checkpoints were read: a checkpoint written after that moment, by a later run of a
+ * recorded range, is not in the snapshot. Otherwise all are read again, up to five times in all. The manifest holds
+ * each content once; a manifest with a content twice is refused, as is a run whose content the manifest does not hold,
+ * or whose bar count differs from that content's.
  */
-async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: ManifestReader, runs: RunReader) {
+async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: ManifestReader, runs: RunReader, checkpoints: CheckpointReader) {
   const where = store.path ? ` in ${store.path}` : "";
   for (let attempt = 1; ; attempt += 1) {
     const runRecords = await runs.records();
     const records = await store.records();
-    if ((await runs.records()).length === runRecords.length) {
+    const checkpointRows = await readCheckpointRows(checkpoints, records);
+    if ((await store.records()).length === records.length && (await runs.records()).length === runRecords.length) {
+      const sequenceOf = new Map<string, number>();
+      for (const record of records) {
+        const earlier = sequenceOf.get(record.normalized_sha256);
+        if (earlier !== undefined) throw new Error(`the ${instrument} FX history manifest${where} records content ${record.normalized_sha256} twice, as collections ${earlier} and ${record.sequence}`);
+        sequenceOf.set(record.normalized_sha256, record.sequence);
+      }
       const barsOf = new Map(records.map((record) => [record.normalized_sha256, record.bar_count]));
       for (const run of runRecords) {
         if (!barsOf.has(run.normalized_sha256)) throw new Error(`FX history run ${run.sequence} names content the ${instrument} manifest${where} does not hold`);
         if (barsOf.get(run.normalized_sha256) !== run.bar_count) throw new Error(`FX history run ${run.sequence} records ${run.bar_count} bars for content of ${barsOf.get(run.normalized_sha256)}`);
       }
-      return { records, runRecords, where };
+      const snapshotCheckpoints: CheckpointReader = { instrument: checkpoints.instrument, completed: async (key) => checkpointRows.get(key) ?? [] };
+      return { records, runRecords, checkpoints: snapshotCheckpoints, where };
     }
     if (attempt === SNAPSHOT_ATTEMPTS) {
-      throw new Error(`the ${instrument} FX history run log grew each of the ${SNAPSHOT_ATTEMPTS} times the manifest${where} was read; export again when no collection is running`);
+      throw new Error(`the ${instrument} FX history manifest${where} or its run log grew each of the ${SNAPSHOT_ATTEMPTS} times they were read; export again when no collection is running`);
     }
   }
 }
@@ -146,16 +183,17 @@ async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: Manif
  * any raw page is read.
  * It also holds the runs of the instrument's run log whose content is an exported collection (BACKLOG 103-5): how each
  * was started, when it started and finished, and what range it requested, which a point-in-time reading needs. The
- * manifest and the run log are read at one moment (readFxHistorySnapshot), and their totals are in the export
- * (BACKLOG 103-9). Nothing in it depends on when the export ran, so the same manifest and run log give the same bytes;
- * a record added to either changes them, a partial export's too, since the totals count the whole logs.
+ * manifest, the run log and the page checkpoints are read at one moment (readFxHistorySnapshot), and the totals of the
+ * first two are in the export (BACKLOG 103-9). Nothing in it depends on when the export ran, so the same logs give the
+ * same bytes; a record added to the manifest or the run log changes them, a partial export's too, since the totals
+ * count the whole logs.
  */
 export async function exportFxHistory(input: { instrument: OandaFxInstrument; sequences?: number[]; all?: boolean; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExport> {
-  const { instrument, store, checkpoints, runs, archive } = await readers(input);
+  const { instrument, store, checkpoints: checkpointLog, runs, archive } = await readers(input);
   const sequences = input.sequences ?? [];
   if (input.all ? sequences.length > 0 : sequences.length === 0) throw new Error("name the collections to export by sequence, or export all of them");
   if (sequences.some((sequence) => !Number.isSafeInteger(sequence) || sequence < 1)) throw new Error("a collection sequence must be a positive integer");
-  const { records, runRecords, where } = await readFxHistorySnapshot(instrument, store, runs);
+  const { records, runRecords, checkpoints, where } = await readFxHistorySnapshot(instrument, store, runs, checkpointLog);
   const known = new Set(records.map((record) => record.sequence));
   const missing = sequences.filter((sequence) => !known.has(sequence));
   if (missing.length) throw new Error(`no ${instrument} FX history collection${where} has sequence ${missing.join(", ")}`);
@@ -163,7 +201,9 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   if (!chosen.length) throw new Error(`no ${instrument} FX history collection is recorded${where}`);
   const maxBars = input.maxBars ?? FX_HISTORY_EXPORT_MAX_BARS;
   const total = chosen.reduce((sum, record) => sum + record.bar_count, 0);
-  if (total > maxBars) throw new Error(`the export would hold ${total} bars, more than ${maxBars}; export fewer collections at a time`);
+  if (total > maxBars) {
+    throw new Error(`the export would hold ${total} bars, more than ${maxBars}; ${input.all ? "write a whole export in parts with --split" : "export fewer collections at a time"}`);
+  }
   return exportDocument({ instrument, records, runRecords, manifestPath: store.path }, chosen, archive, checkpoints);
 }
 
@@ -198,20 +238,21 @@ export type FxHistoryExportSplit = { instrument: OandaFxInstrument; manifest_rec
 
 /**
  * A whole export (every collection and every run of the instrument) in parts of at most maxPartBars bars each (default
- * 1,000,000; BACKLOG 103-10). Only one snapshot of the manifest and the run log (readFxHistorySnapshot) is read here:
- * the collections go whole, in manifest order, into consecutive parts, a part closing when the next collection would
- * take it over the limit (a single collection over it is refused), and each run goes into the part holding its content.
- * The total, at most maxBars (default 20,000,000), and the parts are fixed before any raw page is read. build(index)
- * rebuilds one part's collections from their raw pages and returns its document: the whole export's header, the same
- * totals in every part, then `part: { index, of }` and the part's collections and runs. Parts are built one at a time,
- * so only one part's bars need be held at once. Every collection's page checkpoints are read with the snapshot and kept,
- * and the archive is addressed by hash, so every part reflects the same moment and a part built again is the same.
+ * 1,000,000; BACKLOG 103-10). Only one snapshot of the manifest, the run log and the page checkpoints
+ * (readFxHistorySnapshot) is read here: the collections go whole, in manifest order, into consecutive parts, a part
+ * closing when the next collection would take it over the limit (a single collection over it is refused), and each run
+ * goes into the part holding its content. The total, at most maxBars (default 20,000,000), and the parts are fixed
+ * before any raw page is read. build(index) rebuilds one part's collections from their raw pages and returns its
+ * document: the whole export's header, the same totals in every part, then `part: { index, of }` and the part's
+ * collections and runs. Parts are built one at a time, so only one part's bars need be held at once. Every part is
+ * built from the snapshot's checkpoints, and the archive is addressed by hash, so every part reflects the same moment
+ * and a part built again is the same.
  */
 export async function splitFxHistoryExport(input: { instrument: OandaFxInstrument; maxPartBars?: number; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExportSplit> {
-  const { instrument, store, checkpoints, runs, archive } = await readers(input);
+  const { instrument, store, checkpoints: checkpointLog, runs, archive } = await readers(input);
   const maxPartBars = input.maxPartBars ?? FX_HISTORY_EXPORT_MAX_BARS, maxBars = input.maxBars ?? FX_HISTORY_EXPORT_SPLIT_MAX_BARS;
   for (const limit of [maxPartBars, maxBars]) if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("an export's bar limits must be positive integers");
-  const { records, runRecords, where } = await readFxHistorySnapshot(instrument, store, runs);
+  const { records, runRecords, checkpoints, where } = await readFxHistorySnapshot(instrument, store, runs, checkpointLog);
   if (!records.length) throw new Error(`no ${instrument} FX history collection is recorded${where}`);
   const total = records.reduce((sum, record) => sum + record.bar_count, 0);
   if (total > maxBars) throw new Error(`the whole export would hold ${total} bars, more than ${maxBars}, the most an export in parts holds`);
@@ -226,24 +267,11 @@ export async function splitFxHistoryExport(input: { instrument: OandaFxInstrumen
   const partOf = new Map(groups.flatMap((group, index) => group.map((record) => [record.normalized_sha256, index + 1] as const)));
   const parts = groups.map((group, index) => ({ index: index + 1, of: groups.length, sequences: group.map((record) => record.sequence),
     bars: group.reduce((sum, record) => sum + record.bar_count, 0), runs: runRecords.filter((run) => partOf.get(run.normalized_sha256) === index + 1).length }));
-  // The page checkpoints of every collection are read now, with the snapshot, and kept: every part is built from them.
-  const kept = new Map<string, Awaited<ReturnType<CheckpointReader["completed"]>>>();
-  for (const record of records) {
-    let key: string;
-    try { key = fxHistoryCollectionKey(fxHistoryEnvironmentOf(record.source_url_template), record.instrument, record.requested_from, record.requested_to); }
-    catch (error) { throw new Error(`FX history collection ${record.sequence}: ${message(error)}${store.path ? ` (manifest ${store.path})` : ""}`, { cause: error }); }
-    if (!kept.has(key)) kept.set(key, await checkpoints.completed(key));
-  }
-  const keptCheckpoints: CheckpointReader = { instrument: checkpoints.instrument, completed: async (key) => {
-    const rows = kept.get(key);
-    if (rows === undefined) throw new Error("the FX history export read no page checkpoints for this collection");
-    return rows;
-  } };
   const snapshot = { instrument, records, runRecords, manifestPath: store.path };
   return { instrument, manifest_records: records.length, run_records: runRecords.length, parts, build: async (index) => {
     const group = groups[index - 1];
     if (!Number.isSafeInteger(index) || group === undefined) throw new Error(`the export has parts 1 to ${groups.length}, not ${index}`);
-    return exportDocument(snapshot, group, archive, keptCheckpoints, { index, of: groups.length });
+    return exportDocument(snapshot, group, archive, checkpoints, { index, of: groups.length });
   } };
 }
 
