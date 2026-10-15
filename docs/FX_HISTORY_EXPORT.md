@@ -49,6 +49,7 @@ are read again, up to five times in all, and the export fails if a collection ke
 tradingview-mcp-export-fx-history --instrument USD_JPY --list
 tradingview-mcp-export-fx-history --instrument USD_JPY --sequence 3 --sequence 4 --output usdjpy.json
 tradingview-mcp-export-fx-history --instrument EUR_USD --all --output eurusd.json
+tradingview-mcp-export-fx-history --instrument EUR_USD --all --split --output eurusd.json   # eurusd.part01.json, ...
 tradingview-mcp-export-fx-history --instrument EUR_USD --sequence 2 --format bar-series --series-id oanda:EUR_USD:M15 \
   --evidence-tier historical_exploration --output eurusd-series.json
 ```
@@ -60,7 +61,8 @@ first and last bar, normalized hash. Every argument, `--output` included (an exi
 itself), is checked before any raw page is read.
 
 Choose collections with one or more `--sequence`, or `--all`; they are written in manifest order. At most 1,000,000
-bars go into one export, checked before any raw response is read.
+bars go into one export, checked before any raw response is read. A whole export over that goes into parts with
+`--split` ([below](#whole-exports-in-parts---split)).
 
 The output is published as a new immutable file: the same bytes already there is reported as `identical`, other bytes
 are refused and left as they were. The command prints the output path, `created` or `identical`, the SHA-256 of the
@@ -89,8 +91,9 @@ at one moment (BACKLOG 103-9). An export is whole exactly when `collections` hol
 holds `run_records`: a reader that needs every collection and run (a point-in-time reading does) checks both, which also
 catches a cut-off tail that numbering alone cannot.
 
-`schema_version` is `1.1` since 0.1.43, which added the two totals; a `1.0` export, written by 0.1.42, has neither and
-cannot show whether it is whole.
+`schema_version` is `1.1` since 0.1.43, which added the two totals, and `part` in each part of a whole export split into
+parts ([below](#whole-exports-in-parts---split)); a `1.0` export, written by 0.1.42, has neither total and cannot show
+whether it is whole.
 
 `runs` holds the instrument's recorded runs whose content is one of the exported collections, in run-log order. A run's
 bars are the collection with its `normalized_sha256`; its own range, `trigger` (`daily` for the daily schedule, `manual`
@@ -112,3 +115,53 @@ revised, not first-seen: `historical_exploration` fits a collection of the past,
 made by the daily schedule during a declared forward period. A daily collection also holds its lookback weekdays, which
 can predate the forward period; the bar series holds them all, so drop those bars before using it as prospective data. Joining several collections into one series is left to the
 caller, since overlapping collections can differ.
+
+## Whole exports in parts (`--split`)
+
+BACKLOG 103-10. The daily collection with its default ten-weekday lookback, run twice a night, records a collection of
+about 1,000 bars at every run, so an instrument's manifest passes 1,000,000 bars within about a year, and a reader that
+needs the whole record (every collection and every run, as a point-in-time reading does) can no longer have it in one
+export. `--split`, which goes only with `--all` and `--format collections`, writes a whole export in as many parts as it
+needs:
+
+- the manifest and the run log are read once, at one moment, as for any export, and every collection's page checkpoints
+  with them; the parts are planned from them before any raw page is read, and the whole may hold at most 20,000,000
+  bars, also checked before any raw page is read. Every part is built from this one reading (the raw archive is
+  addressed by hash), so the parts describe one moment;
+- each part holds at most 1,000,000 bars. The collections go whole, in manifest order, into consecutive parts: a part
+  closes when the next collection would take it over 1,000,000 bars. A single collection over 1,000,000 bars is
+  refused;
+- each run goes into the part holding the collection that is its content, in run-log order within the part;
+- the parts are `<output without .json>.part01.json`, `.part02.json`, ... (two digits, more when there are more than 99
+  parts), beside `--output`, which itself is not written. A whole export of one part is still `part01`.
+
+Each part is a complete export document with the header of the whole export, the same `manifest_records` and
+`run_records` in every part, then `part`, which part of how many it is:
+
+```json
+{ "schema_version": "1.1", "series": "fx_historical_m15_export", "source_id": "oanda_v20", "evidence_tier": "official_revised_history",
+  "instrument": "EUR_USD", "canonical_symbol": "OANDA:EURUSD", "granularity": "M15", "price": "M", "manifest_records": 1040, "run_records": 1052,
+  "part": { "index": 1, "of": 2 }, "collections": [...], "runs": [...] }
+```
+
+Every target is checked before anything is written. A directory or a symbolic link at a part's path refuses the export
+before any raw page is read. Each part whose file already exists is built and compared with it, and any one with other
+bytes refuses the export with nothing written. Then the parts are built (again, for those compared) and published one at
+a time, each as a new immutable file, `created` or `identical`; only one part's bars are held at once. A file with
+other bytes that appears at a part's path while the parts are being written stops the export, and the error names the
+parts already written. The command prints the totals, the number of runs, each part's index, path, result, SHA-256,
+number of collections and runs, and bars, and each collection's sequence, bar count, normalized hash,
+`range_checkpointed` and part.
+
+A reader recombines the parts of one export so:
+
+1. It reads `part.of` files, `<stem>.part01.json` to the last, and requires every one to have the same `part.of` and
+   each `part.index` from 1 to `part.of` exactly once.
+2. It requires every part to have the same header: `schema_version`, `series`, `source_id`, `evidence_tier`,
+   `instrument`, `canonical_symbol`, `granularity`, `price`, `manifest_records` and `run_records`. Parts with other
+   totals come from exports of other moments and are not mixed.
+3. It joins the parts' `collections` in part order, which is manifest order, and their `runs`, sorted by `sequence`,
+   which is run-log order, and requires the collections to be numbered 1 to `manifest_records` and the runs 1 to
+   `run_records`, each exactly once. A run's content is a collection of its own part.
+
+The result is the whole export: what `--all` without `--split` writes when it fits in 1,000,000 bars.

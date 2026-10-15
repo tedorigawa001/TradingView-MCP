@@ -1,19 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
 import { FxHistoricalArchive } from "../../build/fxHistoricalArchive.js";
 import { FxHistoricalRunLog } from "../../build/fxHistoryRunLog.js";
-import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, rebuildFxHistoryCollection } from "../../build/fxHistoryExport.js";
-import { runFxHistoryExport } from "../../build/fxHistoryExportCli.js";
+import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, rebuildFxHistoryCollection, splitFxHistoryExport } from "../../build/fxHistoryExport.js";
+import { fxHistoryExportPartPaths, runFxHistoryExport, writeFxHistoryExportParts } from "../../build/fxHistoryExportCli.js";
 import { normalizeBarSeries } from "../../build/barSeries.js";
 
 const candle = (time, close = "1.1002", complete = true) => ({ complete, volume: 17, time, mid: { o: "1.1000", h: "1.1004", l: "1.0998", c: close } });
 const response = (candles) => new Response(JSON.stringify({ candles }), { status: 200, headers: { "content-type": "application/json" } });
 const sha = (text) => `sha256:${createHash("sha256").update(text).digest("hex")}`;
+const lstatOrNull = (path) => lstat(path).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
 
 /** A temporary home for one instrument's manifest, checkpoints and raw archive, and a collection run against a fake OANDA. */
 async function setup(instrument = "EUR_USD") {
@@ -308,4 +309,124 @@ test("the totals describe one moment: the run log is read again after the manife
   await assert.rejects(() => runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", output], sources), /a different file already exists/);
   const again = await runFxHistoryExport(["--instrument", "USD_JPY", "--sequence", "1", "--output", join(dir, "usdjpy-1b.json")], sources);
   assert.deepEqual([again.result, again.run_records, again.runs, again.collections[0].normalized_sha256], ["created", 3, 1, first.collections[0].normalized_sha256]);
+});
+
+/**
+ * Four USD_JPY collections of 2, 2, 3 and 2 bars, and five runs: one per collection, then the first collection's content
+ * again. Manifest and run-log reads, and raw page reads, are counted.
+ */
+async function fourCollections() {
+  const env = await setup("USD_JPY");
+  const flat = (time, c) => ({ complete: true, volume: 5, time, mid: { o: c, h: c, l: c, c } });
+  const bars = (n) => (start) => Array.from({ length: n }, (_, i) => flat(new Date(Date.parse(start) + i * 900_000).toISOString(), (150.1 + i / 100).toFixed(2)));
+  await env.collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", bars(2));
+  await env.collect("2026-03-03T00:00:00.000Z", "2026-03-03T00:30:00.000Z", bars(2));
+  await env.collect("2026-03-04T00:00:00.000Z", "2026-03-04T00:45:00.000Z", bars(3));
+  await env.collect("2026-03-05T00:00:00.000Z", "2026-03-05T00:30:00.000Z", bars(2));
+  await env.collect("2026-03-02T00:00:00.000Z", "2026-03-02T00:30:00.000Z", bars(2), "2026-08-01T00:00:00.000Z");
+  const logReads = { manifest: 0, runs: 0, checkpoints: 0 };
+  const store = { instrument: "USD_JPY", path: env.store.path, records: async () => { logReads.manifest += 1; return env.store.records(); } };
+  const runs = { instrument: "USD_JPY", records: async () => { logReads.runs += 1; return env.runs.records(); } };
+  const checkpoints = { instrument: "USD_JPY", completed: async (key) => { logReads.checkpoints += 1; return env.checkpoints.completed(key); } };
+  return { ...env, logReads, counted: { store, runs, checkpoints, archive: env.counting } };
+}
+
+test("a whole export is split into parts of at most the limit, collections whole and runs with their content, from one snapshot (BACKLOG 103-10)", async () => {
+  const { counted, reads, logReads, sources } = await fourCollections();
+  assert.deepEqual((await sources.store.records()).map((record) => record.bar_count), [2, 2, 3, 2]);
+  const split = await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted });
+  // Planned from one read of the manifest (and the run log, read before and after it) and of each collection's page
+  // checkpoints, before any raw page is read.
+  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints, reads.count], [1, 2, 4, 0]);
+  assert.deepEqual([split.manifest_records, split.run_records], [4, 5]);
+  assert.deepEqual(split.parts, [{ index: 1, of: 2, sequences: [1, 2], bars: 4, runs: 3 }, { index: 2, of: 2, sequences: [3, 4], bars: 5, runs: 2 }]);
+  const [one, two] = [await split.build(1), await split.build(2)];
+  assert.deepEqual([logReads.manifest, logReads.runs, logReads.checkpoints], [1, 2, 4], "building a part reads none of them again");
+  // Each part is a whole document with the same header and totals, and says which part of how many it is.
+  const { collections: c1, runs: r1, ...header1 } = one, { collections: c2, runs: r2, ...header2 } = two;
+  assert.deepEqual(Object.keys(one), ["schema_version", "series", "source_id", "evidence_tier", "instrument", "canonical_symbol", "granularity", "price",
+    "manifest_records", "run_records", "part", "collections", "runs"]);
+  assert.deepEqual([header1.part, header2.part], [{ index: 1, of: 2 }, { index: 2, of: 2 }]);
+  assert.deepEqual({ ...header1, part: null }, { ...header2, part: null });
+  assert.deepEqual([header1.schema_version, header1.manifest_records, header1.run_records], ["1.1", 4, 5]);
+  assert.deepEqual([c1.map((c) => c.sequence), c2.map((c) => c.sequence)], [[1, 2], [3, 4]]);
+  // Each run is in the part holding its content, in run-log order: the fifth repeats the first collection's content.
+  assert.deepEqual([r1.map((run) => run.sequence), r2.map((run) => run.sequence)], [[1, 2, 5], [3, 4]]);
+  assert.ok(r1.every((run) => c1.some((c) => c.normalized_sha256 === run.normalized_sha256)) && r2.every((run) => c2.some((c) => c.normalized_sha256 === run.normalized_sha256)));
+  // Recombined, the parts are the whole export: every collection and every run exactly once.
+  const whole = await exportFxHistory({ instrument: "USD_JPY", all: true, ...sources });
+  assert.deepEqual([...c1, ...c2], whole.collections);
+  assert.deepEqual([...r1, ...r2].sort((a, b) => a.sequence - b.sequence), whole.runs);
+  assert.deepEqual([whole.collections.length, whole.runs.length], [whole.manifest_records, whole.run_records]);
+  // A part built again is the same.
+  assert.equal(JSON.stringify(await split.build(1)), JSON.stringify(one));
+  await assert.rejects(() => split.build(3), /parts 1 to 2, not 3/);
+  await assert.rejects(() => split.build(0), /parts 1 to 2, not 0/);
+  // One part when all fit, as many as collections when each fills a part.
+  assert.deepEqual((await splitFxHistoryExport({ instrument: "USD_JPY", ...sources })).parts.map((part) => [part.index, part.of, part.sequences]), [[1, 1, [1, 2, 3, 4]]]);
+  assert.deepEqual((await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 3, ...sources })).parts.map((part) => part.sequences), [[1], [2], [3], [4]]);
+  // A collection over the part limit, or a whole over the total limit, is refused before any raw page is read.
+  reads.count = 0;
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 2, ...counted }), /FX history collection 3 in .* holds 3 bars, more than 2, the most one part holds/);
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", maxBars: 8, ...counted }), /the whole export would hold 9 bars, more than 8, the most an export in parts holds/);
+  const [record] = await sources.store.records();
+  const huge = { ...counted, runs: { instrument: "USD_JPY", records: async () => [] }, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 20_000_001 }] } };
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", ...huge }), /would hold 20000001 bars, more than 20000000/);
+  const large = { ...huge, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 1_000_001 }] } };
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", ...large }), /holds 1000001 bars, more than 1000000, the most one part holds/);
+  const twoLarge = { ...huge, store: { instrument: "USD_JPY", records: async () => [{ ...record, bar_count: 600_000 }, { ...record, sequence: 2, bar_count: 600_000 }] } };
+  assert.deepEqual((await splitFxHistoryExport({ instrument: "USD_JPY", ...twoLarge })).parts.map((part) => [part.sequences, part.bars]), [[[1], 600_000], [[2], 600_000]]);
+  assert.equal(reads.count, 0);
+  await assert.rejects(() => splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 0, ...sources }), /bar limits must be positive integers/);
+});
+
+test("the CLI writes a split export's parts once each, checks every target before writing any, and lists them (BACKLOG 103-10)", async () => {
+  const { counted, reads, sources, dir } = await fourCollections();
+  assert.deepEqual(fxHistoryExportPartPaths(join(dir, "usdjpy.json"), 2), [join(dir, "usdjpy.part01.json"), join(dir, "usdjpy.part02.json")]);
+  assert.deepEqual(fxHistoryExportPartPaths("usdjpy", 1), ["usdjpy.part01.json"]);
+  assert.deepEqual(fxHistoryExportPartPaths("usdjpy.json", 100).slice(-2), ["usdjpy.part099.json", "usdjpy.part100.json"]);
+  // --split splits a whole collections export only, and every argument is checked before a raw page is read.
+  for (const [argv, pattern] of [
+    [["--instrument", "USD_JPY", "--split", "--output", join(dir, "a.json")], /--split goes only with --all and --format collections/],
+    [["--instrument", "USD_JPY", "--split", "--sequence", "1", "--output", join(dir, "a.json")], /--split goes only with --all/],
+    [["--instrument", "USD_JPY", "--split", "--all", "--format", "bar-series", "--output", join(dir, "a.json")], /--split goes only with --all and --format collections/],
+    [["--instrument", "USD_JPY", "--list", "--split"], /--list takes only --instrument/],
+    [["--instrument", "USD_JPY", "--split", "--all", "--output", join(dir, "missing", "a.json")], /--output must be in an existing directory/],
+  ]) await assert.rejects(() => runFxHistoryExport(argv, counted), pattern, JSON.stringify(argv));
+  assert.equal(reads.count, 0);
+  // Under the default limit everything fits in one part, written as part01.
+  const single = await runFxHistoryExport(["--instrument", "USD_JPY", "--all", "--split", "--output", join(dir, "usdjpy.json")], sources);
+  assert.deepEqual([single.split, single.manifest_records, single.run_records, single.runs], [true, 4, 5, 5]);
+  assert.deepEqual(single.parts.map((part) => [part.output, part.result, part.collections, part.runs, part.bars]), [[join(dir, "usdjpy.part01.json"), "created", 4, 5, 9]]);
+  const body = await readFile(join(dir, "usdjpy.part01.json"), "utf8");
+  assert.equal(single.parts[0].sha256, sha(body));
+  assert.deepEqual(JSON.parse(body).part, { index: 1, of: 1 });
+  assert.deepEqual(single.collections.map((c) => [c.sequence, c.part, c.range_checkpointed]), [[1, 1, true], [2, 1, true], [3, 1, true], [4, 1, true]]);
+  assert.equal(await lstatOrNull(join(dir, "usdjpy.json")), null, "--output itself is not written");
+  // In two parts: each written, then each found identical.
+  const output = join(dir, "two.json"), [first, second] = fxHistoryExportPartPaths(output, 2);
+  const split = () => splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted });
+  const written = await writeFxHistoryExportParts(await split(), output);
+  assert.deepEqual(written.parts.map((part) => [part.index, part.output, part.result, part.collections, part.runs, part.bars]),
+    [[1, first, "created", 2, 3, 4], [2, second, "created", 2, 2, 5]]);
+  const files = [JSON.parse(await readFile(first, "utf8")), JSON.parse(await readFile(second, "utf8"))];
+  assert.deepEqual(files.map((file) => [file.part, file.manifest_records, file.run_records, file.collections.length, file.runs.length]),
+    [[{ index: 1, of: 2 }, 4, 5, 2, 3], [{ index: 2, of: 2 }, 4, 5, 2, 2]]);
+  assert.deepEqual(written.parts.map((part) => part.sha256), [sha(await readFile(first, "utf8")), sha(await readFile(second, "utf8"))]);
+  assert.deepEqual(written.collections.map((c) => [c.sequence, c.part]), [[1, 1], [2, 1], [3, 2], [4, 2]]);
+  assert.deepEqual((await writeFxHistoryExportParts(await split(), output)).parts.map((part) => part.result), ["identical", "identical"]);
+  // A part found with other bytes refuses the export before anything is written: a missing first part is not created.
+  const changed = join(dir, "changed.json"), [changedFirst, changedSecond] = fxHistoryExportPartPaths(changed, 2);
+  await writeFile(changedSecond, "{}\n");
+  await assert.rejects(async () => writeFxHistoryExportParts(await split(), changed), new RegExp(`a different file already exists at ${changedSecond.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}; nothing was written`));
+  assert.equal(await lstatOrNull(changedFirst), null);
+  assert.equal(await readFile(changedSecond, "utf8"), "{}\n");
+  // A directory at a part's path is refused before any raw page is read.
+  const blocked = join(dir, "blocked.json"), [blockedFirst, blockedSecond] = fxHistoryExportPartPaths(blocked, 2);
+  await mkdir(blockedSecond);
+  reads.count = 0;
+  await assert.rejects(async () => writeFxHistoryExportParts(await split(), blocked), /a part of the export would replace a directory: .*blocked\.part02\.json; nothing was written/);
+  assert.deepEqual([reads.count, await lstatOrNull(blockedFirst)], [0, null]);
+  assert.deepEqual((await readdir(dir)).filter((name) => name.startsWith(".publish-")), [], "no staging is left behind");
+  assert.equal((await stat(first)).isFile(), true);
 });

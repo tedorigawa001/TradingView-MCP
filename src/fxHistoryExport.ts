@@ -6,8 +6,10 @@ import { assertFxHistoryManifestBase, canonicalOandaSymbol, createFxBarAccumulat
   fxHistoryEnvironmentOf, isOandaFxInstrument, OANDA_FX_INSTRUMENTS, oandaPageRanges, parseOandaCandlePage, type FxHistoricalManifest, type FxM15Bar,
   type OandaEnvironment, type OandaFxInstrument } from "./oandaHistoricalFx.js";
 
-/** At most this many bars in one export (a five-year M15 collection of one instrument has about 125,000). */
+/** At most this many bars in one export, or one part of a split one (a five-year M15 collection of one instrument has about 125,000). */
 export const FX_HISTORY_EXPORT_MAX_BARS = 1_000_000;
+/** At most this many bars in all the parts of a whole export split into parts (BACKLOG 103-10). */
+export const FX_HISTORY_EXPORT_SPLIT_MAX_BARS = 20_000_000;
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 /** A collection reads its pages within this long before it is recorded (BACKLOG 103-6, see rebuildFxHistoryCollection). */
 const RUN_SPAN_MS = 6 * 60 * 60 * 1000;
@@ -29,7 +31,10 @@ export type FxHistoryExportCollection = Pick<FxHistoricalManifest, (typeof RECOR
 const RUN_FIELDS = ["sequence", "trigger", "environment", "requested_from", "requested_to", "started_at", "retrieved_at", "raw_sha256", "normalized_sha256",
   "bar_count", "resumed_pages", "unfinished_pages", "manifest_recorded"] as const;
 export type FxHistoryExportRun = Pick<FxHistoricalRun, (typeof RUN_FIELDS)[number]>;
-/** schema_version 1.1 (0.1.43) adds manifest_records and run_records to 1.0 (0.1.42), which had neither (BACKLOG 103-9). */
+/**
+ * schema_version 1.1 (0.1.43) adds manifest_records and run_records to 1.0 (0.1.42), which had neither (BACKLOG 103-9),
+ * and `part` in each part of a whole export split into parts (BACKLOG 103-10).
+ */
 export type FxHistoryExport = {
   schema_version: "1.1"; series: "fx_historical_m15_export"; source_id: "oanda_v20"; evidence_tier: "official_revised_history"; instrument: OandaFxInstrument;
   canonical_symbol: string; granularity: "M15"; price: "M";
@@ -39,6 +44,8 @@ export type FxHistoryExport = {
    * tail included. They count the whole logs, so every export, a partial one too, changes when a record is added.
    */
   manifest_records: number; run_records: number;
+  /** In a whole export split into parts only (BACKLOG 103-10): this document is part `index` of `of`. */
+  part?: { index: number; of: number };
   collections: FxHistoryExportCollection[];
   /** The recorded runs (BACKLOG 103-5) whose content is one of the exported collections, in run-log order. */
   runs: FxHistoryExportRun[];
@@ -157,10 +164,21 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
   const maxBars = input.maxBars ?? FX_HISTORY_EXPORT_MAX_BARS;
   const total = chosen.reduce((sum, record) => sum + record.bar_count, 0);
   if (total > maxBars) throw new Error(`the export would hold ${total} bars, more than ${maxBars}; export fewer collections at a time`);
+  return exportDocument({ instrument, records, runRecords, manifestPath: store.path }, chosen, archive, checkpoints);
+}
+
+/**
+ * The export document of `chosen`, records of one snapshot in manifest order, each rebuilt from its raw pages and checked
+ * (rebuildFxHistoryCollection), with the snapshot's runs whose content is one of them, in run-log order, and, for a part
+ * of a split export, which part it is.
+ */
+async function exportDocument(snapshot: { instrument: OandaFxInstrument; records: FxHistoricalManifest[]; runRecords: FxHistoricalRun[]; manifestPath?: string },
+  chosen: FxHistoricalManifest[], archive: RawReader, checkpoints: CheckpointReader, part?: FxHistoryExport["part"]): Promise<FxHistoryExport> {
+  const { instrument, records, runRecords, manifestPath } = snapshot;
   const collections: FxHistoryExportCollection[] = [];
   for (const record of chosen) {
     let rebuilt: Awaited<ReturnType<typeof rebuildFxHistoryCollection>>;
-    try { rebuilt = await rebuildFxHistoryCollection(record, archive, checkpoints); } catch (error) { throw new Error(`${message(error)}${where ? ` (manifest ${store.path})` : ""}`, { cause: error }); }
+    try { rebuilt = await rebuildFxHistoryCollection(record, archive, checkpoints); } catch (error) { throw new Error(`${message(error)}${manifestPath ? ` (manifest ${manifestPath})` : ""}`, { cause: error }); }
     const { bars, rangeCheckpointed } = rebuilt;
     const fields = Object.fromEntries(RECORD_FIELDS.map((field) => [field, record[field]])) as Pick<FxHistoricalManifest, (typeof RECORD_FIELDS)[number]>;
     collections.push({ ...fields, environment: fxHistoryEnvironmentOf(record.source_url_template), range_checkpointed: rangeCheckpointed, bars });
@@ -170,7 +188,63 @@ export async function exportFxHistory(input: { instrument: OandaFxInstrument; se
     .map((run) => Object.fromEntries(RUN_FIELDS.map((field) => [field, run[field]])) as FxHistoryExportRun);
   return { schema_version: "1.1", series: "fx_historical_m15_export", source_id: "oanda_v20", evidence_tier: "official_revised_history", instrument,
     canonical_symbol: canonicalOandaSymbol(instrument), granularity: "M15", price: "M", manifest_records: records.length, run_records: runRecords.length,
-    collections, runs: runRows };
+    ...(part === undefined ? {} : { part }), collections, runs: runRows };
+}
+
+/** One part of a split export: its place, the sequences of its collections, its bars and how many runs it holds. */
+export type FxHistoryExportPart = { index: number; of: number; sequences: number[]; bars: number; runs: number };
+/** A whole export in parts, planned from one snapshot; build(index) makes one part's document. */
+export type FxHistoryExportSplit = { instrument: OandaFxInstrument; manifest_records: number; run_records: number; parts: FxHistoryExportPart[]; build(index: number): Promise<FxHistoryExport> };
+
+/**
+ * A whole export (every collection and every run of the instrument) in parts of at most maxPartBars bars each (default
+ * 1,000,000; BACKLOG 103-10). Only one snapshot of the manifest and the run log (readFxHistorySnapshot) is read here:
+ * the collections go whole, in manifest order, into consecutive parts, a part closing when the next collection would
+ * take it over the limit (a single collection over it is refused), and each run goes into the part holding its content.
+ * The total, at most maxBars (default 20,000,000), and the parts are fixed before any raw page is read. build(index)
+ * rebuilds one part's collections from their raw pages and returns its document: the whole export's header, the same
+ * totals in every part, then `part: { index, of }` and the part's collections and runs. Parts are built one at a time,
+ * so only one part's bars need be held at once. Every collection's page checkpoints are read with the snapshot and kept,
+ * and the archive is addressed by hash, so every part reflects the same moment and a part built again is the same.
+ */
+export async function splitFxHistoryExport(input: { instrument: OandaFxInstrument; maxPartBars?: number; maxBars?: number } & FxHistoryExportSources): Promise<FxHistoryExportSplit> {
+  const { instrument, store, checkpoints, runs, archive } = await readers(input);
+  const maxPartBars = input.maxPartBars ?? FX_HISTORY_EXPORT_MAX_BARS, maxBars = input.maxBars ?? FX_HISTORY_EXPORT_SPLIT_MAX_BARS;
+  for (const limit of [maxPartBars, maxBars]) if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("an export's bar limits must be positive integers");
+  const { records, runRecords, where } = await readFxHistorySnapshot(instrument, store, runs);
+  if (!records.length) throw new Error(`no ${instrument} FX history collection is recorded${where}`);
+  const total = records.reduce((sum, record) => sum + record.bar_count, 0);
+  if (total > maxBars) throw new Error(`the whole export would hold ${total} bars, more than ${maxBars}, the most an export in parts holds`);
+  const groups: FxHistoricalManifest[][] = [];
+  let bars = 0;
+  for (const record of records) {
+    if (record.bar_count > maxPartBars) throw new Error(`FX history collection ${record.sequence}${where} holds ${record.bar_count} bars, more than ${maxPartBars}, the most one part holds`);
+    if (!groups.length || bars + record.bar_count > maxPartBars) { groups.push([]); bars = 0; }
+    groups.at(-1)!.push(record);
+    bars += record.bar_count;
+  }
+  const partOf = new Map(groups.flatMap((group, index) => group.map((record) => [record.normalized_sha256, index + 1] as const)));
+  const parts = groups.map((group, index) => ({ index: index + 1, of: groups.length, sequences: group.map((record) => record.sequence),
+    bars: group.reduce((sum, record) => sum + record.bar_count, 0), runs: runRecords.filter((run) => partOf.get(run.normalized_sha256) === index + 1).length }));
+  // The page checkpoints of every collection are read now, with the snapshot, and kept: every part is built from them.
+  const kept = new Map<string, Awaited<ReturnType<CheckpointReader["completed"]>>>();
+  for (const record of records) {
+    let key: string;
+    try { key = fxHistoryCollectionKey(fxHistoryEnvironmentOf(record.source_url_template), record.instrument, record.requested_from, record.requested_to); }
+    catch (error) { throw new Error(`FX history collection ${record.sequence}: ${message(error)}${store.path ? ` (manifest ${store.path})` : ""}`, { cause: error }); }
+    if (!kept.has(key)) kept.set(key, await checkpoints.completed(key));
+  }
+  const keptCheckpoints: CheckpointReader = { instrument: checkpoints.instrument, completed: async (key) => {
+    const rows = kept.get(key);
+    if (rows === undefined) throw new Error("the FX history export read no page checkpoints for this collection");
+    return rows;
+  } };
+  const snapshot = { instrument, records, runRecords, manifestPath: store.path };
+  return { instrument, manifest_records: records.length, run_records: runRecords.length, parts, build: async (index) => {
+    const group = groups[index - 1];
+    if (!Number.isSafeInteger(index) || group === undefined) throw new Error(`the export has parts 1 to ${groups.length}, not ${index}`);
+    return exportDocument(snapshot, group, archive, keptCheckpoints, { index, of: groups.length });
+  } };
 }
 
 /**

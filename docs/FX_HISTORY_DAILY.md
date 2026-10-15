@@ -29,7 +29,8 @@ but what it wrote before (raw pages, checkpoints, and its manifest record if it 
 from the checkpoints. Run one collection of an instrument at a time.
 
 `tradingview-mcp-export-fx-history` exports, with the collections, the runs whose content they are (see
-[FX history export](FX_HISTORY_EXPORT.md)).
+[FX history export](FX_HISTORY_EXPORT.md)). Daily runs pass 1,000,000 bars in an instrument's manifest within about a
+year; `--all --split` then exports the whole record in parts.
 
 ## The daily run
 

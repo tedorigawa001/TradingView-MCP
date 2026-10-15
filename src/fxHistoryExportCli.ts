@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { createReadStream, type Stats } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
@@ -7,30 +8,94 @@ import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 import { ENTRY_RESERVED_SERIES_PREFIXES } from "./forecastSet.js";
 import { publishImmutableFile } from "./fsDurability.js";
-import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, type FxHistoryExportSources } from "./fxHistoryExport.js";
+import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, splitFxHistoryExport, type FxHistoryExportSources, type FxHistoryExportSplit } from "./fxHistoryExport.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS } from "./oandaHistoricalFx.js";
 
 const TIERS = ["historical_exploration", "prospective", "synthetic_test"] as const;
+const digest = (body: string) => `sha256:${createHash("sha256").update(body).digest("hex")}`;
+
+/**
+ * The files of a whole export in parts (BACKLOG 103-10): `<output without .json>.part01.json`, `.part02.json`, …, in
+ * two digits, or as many as the number of parts needs.
+ */
+export function fxHistoryExportPartPaths(output: string, count: number): string[] {
+  const stem = output.endsWith(".json") ? output.slice(0, -".json".length) : output;
+  const width = Math.max(2, String(count).length);
+  return Array.from({ length: count }, (_, index) => `${stem}.part${String(index + 1).padStart(width, "0")}.json`);
+}
+
+/** One part's bytes and what its collections are, built from its raw pages; the part's bars are dropped on return. */
+async function partBody(split: FxHistoryExportSplit, index: number) {
+  const document = await split.build(index);
+  return { body: `${JSON.stringify(document)}\n`, collections: document.collections.map((collection) => ({ sequence: collection.sequence, bar_count: collection.bar_count,
+    normalized_sha256: collection.normalized_sha256, range_checkpointed: collection.range_checkpointed, part: index })) };
+}
+
+async function fileDigest(path: string) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/**
+ * Writes a whole export in parts (BACKLOG 103-10) to fxHistoryExportPartPaths(output), one part at a time, so that only
+ * one part's bars are held at once. Every target is checked before anything is written: a directory or a symbolic link
+ * there refuses the export before any raw page is read, and each part whose file already exists is built and compared
+ * with it; one with other bytes refuses the export, and nothing is written. Each part is then built again (the archive
+ * is addressed by hash and the part's checkpoints are kept, so it is the same) and published as a new immutable file:
+ * created, or identical when the file already held it.
+ */
+export async function writeFxHistoryExportParts(split: FxHistoryExportSplit, output: string) {
+  const paths = fxHistoryExportPartPaths(output, split.parts.length);
+  const found: (Stats | null)[] = [];
+  for (const path of paths) {
+    const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    if (entry?.isDirectory()) throw new Error(`a part of the export would replace a directory: ${path}; nothing was written`);
+    if (entry?.isSymbolicLink()) throw new Error(`a part of the export would replace a symbolic link: ${path}; nothing was written`);
+    found.push(entry);
+  }
+  const different: string[] = [];
+  for (const [index, entry] of found.entries()) {
+    if (entry === null) continue;
+    if (!entry.isFile()) { different.push(paths[index]); continue; }
+    const { body } = await partBody(split, index + 1);
+    if (entry.size !== Buffer.byteLength(body) || await fileDigest(paths[index]) !== digest(body)) different.push(paths[index]);
+  }
+  if (different.length) throw new Error(`a different file already exists at ${different.join(", ")}; nothing was written`);
+  const parts = [], collections = [];
+  for (const [index, part] of split.parts.entries()) {
+    const built = await partBody(split, part.index);
+    const result = await publishImmutableFile(paths[index], built.body, "FX history export");
+    if (result === "different") {
+      throw new Error(`a different file appeared at ${paths[index]} while the export was written; ${parts.length ? `only ${parts.map((row) => row.output).join(", ")} were written` : "nothing was written"}`);
+    }
+    parts.push({ index: part.index, output: paths[index], result, sha256: digest(built.body), collections: part.sequences.length, runs: part.runs, bars: part.bars });
+    collections.push(...built.collections);
+  }
+  return { parts, collections };
+}
 
 /**
  * tradingview-mcp-export-fx-history (BACKLOG 103-6): writes recorded OANDA M15 collections, rebuilt from their raw pages
- * and verified against their manifest records, to a new file. `--list` prints the records instead. Every argument is
- * checked before any raw page is read. The output is never overwritten: the same bytes again is reported as identical,
- * other bytes there are refused.
+ * and verified against their manifest records, to a new file. `--list` prints the records instead. With `--all
+ * --split`, a whole export goes into as many parts of at most 1,000,000 bars as it needs (BACKLOG 103-10). Every argument
+ * is checked before any raw page is read. The output is never overwritten: the same bytes again is reported as
+ * identical, other bytes there are refused.
  */
 export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSources = {}) {
   const { values } = parseArgs({ args, options: {
     instrument: { type: "string" }, sequence: { type: "string", multiple: true }, all: { type: "boolean" }, list: { type: "boolean" },
-    format: { type: "string" }, "series-id": { type: "string" }, "evidence-tier": { type: "string" }, output: { type: "string" },
+    format: { type: "string" }, "series-id": { type: "string" }, "evidence-tier": { type: "string" }, output: { type: "string" }, split: { type: "boolean" },
   }, strict: true, allowPositionals: false });
   const instrument = values.instrument;
   if (!isOandaFxInstrument(instrument)) throw new Error(`--instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
   if (values.list) {
-    if (values.sequence || values.all || values.format || values["series-id"] || values["evidence-tier"] || values.output) throw new Error("--list takes only --instrument");
+    if (values.sequence || values.all || values.format || values["series-id"] || values["evidence-tier"] || values.output || values.split) throw new Error("--list takes only --instrument");
     return { instrument, ...await listFxHistoryCollections({ instrument, ...deps }) };
   }
   const format = values.format ?? "collections";
   if (format !== "collections" && format !== "bar-series") throw new Error("--format must be collections or bar-series");
+  if (values.split && (!values.all || values.sequence || format !== "collections")) throw new Error("--split goes only with --all and --format collections: it splits a whole export");
   if (!values.output) throw new Error("--output is required");
   const sequences = (values.sequence ?? []).map((value) => { if (!/^[1-9][0-9]{0,15}$/.test(value)) throw new Error("--sequence must be a positive integer"); return Number(value); });
   const seriesId = values["series-id"], tier = values["evidence-tier"];
@@ -42,6 +107,13 @@ export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSo
   const parent = await lstat(dirname(values.output)).catch(() => null);
   if (!parent?.isDirectory()) throw new Error(`--output must be in an existing directory: ${values.output}`);
   if ((await lstat(values.output).catch(() => null))?.isDirectory()) throw new Error(`--output names a directory: ${values.output}`);
+  if (values.split) {
+    // One snapshot, its parts fixed and the 20,000,000-bar total checked before any raw page is read.
+    const split = await splitFxHistoryExport({ instrument, ...deps });
+    const { parts, collections } = await writeFxHistoryExportParts(split, values.output);
+    return { format, split: true, instrument, manifest_records: split.manifest_records, run_records: split.run_records,
+      runs: parts.reduce((sum, part) => sum + part.runs, 0), parts, collections };
+  }
   const exported = await exportFxHistory({ instrument, sequences, all: values.all === true, ...(format === "bar-series" ? { maxBars: BAR_SERIES_MAX_BARS } : {}), ...deps });
   const body = format === "bar-series"
     ? `${JSON.stringify(fxHistoryBarSeries(exported.collections[0], { seriesId: seriesId!, evidenceTier: tier as (typeof TIERS)[number] }))}\n`
