@@ -81,9 +81,10 @@ latest deadline at or before the check: 08:00 New York time on a Monday to Frida
 does, by the last daily run before the deadline (manual runs do not count): that run must have finished after 17:15
 New York time the day before, requested the session of the weekday before the deadline's day whole (from its start to
 its last candle), and left no page unfinished. No daily run at all is `fx_history_collection_missing`; otherwise a miss
-is `fx_history_collection_stale`. A latest daily run stamped after the check, by a clock that ran ahead and was then set
-back, holds off every later run until the clock reaches it (the run log refuses a run that starts before the latest one
-finished): the instrument's `latest_in_future` is true and the issue is `fx_history_clock_ahead`, with its age in hours,
-negative (BACKLOG 102-36 review). A manual run stamped ahead holds them off too, and shows as a miss at the next deadline. `--scope all` does not include this check, which needs its instruments
+is `fx_history_collection_stale`. A latest daily run stamped more than a minute after the check read the run log, by a
+clock that ran ahead and was then set back, holds off every later run until the clock reaches it (the run log refuses a
+run that starts before the latest one finished): the instrument's `latest_in_future` is true and the issue is
+`fx_history_clock_ahead`, with its age in hours, negative and rounded away from zero to 0.01 hour (BACKLOG 102-36
+review). A manual run stamped ahead holds them off too, and shows as a miss at the next deadline. `--scope all` does not include this check, which needs its instruments
 named. The [health example](launchd/com.tradingview-mcp.collection-health-fx-history.plist.example) runs at 22:30 JST
 on Monday to Friday, after each deadline, and notifies.

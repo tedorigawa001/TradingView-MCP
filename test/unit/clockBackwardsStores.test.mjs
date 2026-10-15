@@ -141,6 +141,25 @@ test("a heartbeat written while the check waited for its log is not ahead, and i
   assert.deepEqual([result.status, result.research.latest_in_future, result.research.latest_run_age_hours, result.issues], ["healthy", false, -0.01, []]);
 });
 
+test("a heartbeat less than a minute ahead of the read is not reported; two minutes ahead is, its age never shown as 0 (BACKLOG 102-36 review)", async (t) => {
+  const paths = { first: await newPath(t, "first-seen-collection-heartbeats.jsonl"), policy: await newPath(t, "policy-rate-collection-heartbeats.jsonl"),
+    research: await newPath(t, "research-collection-heartbeats.jsonl") };
+  withHeartbeatPaths(t, paths);
+  const research = new ResearchCollectionHeartbeatStore(paths.research);
+  const run = (observed_at) => research.recordRun({ observed_at, hypotheses: researchHypotheses, chart_restored: true });
+  const now = new Date();
+  // Five seconds ahead: a skew that holds off no hourly run.
+  await run(new Date(now.getTime() + 5_000).toISOString());
+  const close = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "research"]), now);
+  assert.deepEqual([close.status, close.research.latest_in_future, close.issues], ["healthy", false, []]);
+  assert.equal((await research.coverage(now)).latest_in_future, false);
+  // Two minutes ahead: reported, its age rounded away from zero to 0.01 hour.
+  await run(new Date(now.getTime() + 120_000).toISOString());
+  const ahead = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "research"]), now);
+  assert.deepEqual([ahead.status, ahead.research.latest_in_future], ["stale", true]);
+  assert.deepEqual(ahead.issues, [{ code: "research_clock_ahead", collector: "research", age: -0.04, threshold: 0, unit: "hours" }]);
+});
+
 const cotVersion = (overrides = {}) => ({
   symbol: "OANDA:EURUSD", observation_date: "2026-07-21", value: { open_interest: 800061 }, observed_at: "2026-07-24T19:30:00.000Z", ...overrides,
 });

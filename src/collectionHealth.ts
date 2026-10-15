@@ -18,7 +18,10 @@ export type CollectionHealthIssue = {
   collector: "policy_rate" | "first_seen" | "research" | "fx_history";
   /** The instrument, for the FX history collector only. */
   instrument?: string;
-  /** For a `_clock_ahead` issue, the latest heartbeat's age in hours at checked_at: negative, since it is stamped later. */
+  /**
+   * For a `_clock_ahead` issue, the latest heartbeat's age in hours at checked_at: negative, since it is stamped later,
+   * rounded away from zero to the next 0.01 hour.
+   */
   age: number | null;
   threshold: number;
   unit: "business_days" | "hours" | "scheduled_runs";
@@ -46,17 +49,22 @@ export type CollectionHealthResult = {
   issues: CollectionHealthIssue[];
 };
 
+/** How far past the read of its log a heartbeat must be stamped to count as ahead of the clock (BACKLOG 102-36 review). */
+export const CLOCK_AHEAD_TOLERANCE_MS = 60_000;
+
 /**
  * Whether a heartbeat stamped `stamp` was stamped ahead of the clock that read it (BACKLOG 102-36 review): later than
- * `asOf` and later than `readAt`, the moment its log was read. A record that was read had already been written, so its
- * stamp can be later than the read only when the clock that stamped it ran ahead (and has since been set back) or the
- * reader's clock was set back. Each heartbeat log refuses a heartbeat stamped before its latest one, so until the
- * clock reaches that stamp every later run fails to record, while the stamp itself reads as fresh. A heartbeat stamped
- * after `asOf` but before the read was written while the check waited for the log, and is not ahead.
+ * `asOf`, and more than CLOCK_AHEAD_TOLERANCE_MS (a minute) later than `readAt`, the moment its log was read. A record
+ * that was read had already been written, so its stamp can be later than the read only when the clock that stamped it
+ * ran ahead (and has since been set back) or the reader's clock was set back. Each heartbeat log refuses a heartbeat
+ * stamped before its latest one, so until the clock reaches that stamp every later run fails to record, while the stamp
+ * itself reads as fresh. A heartbeat stamped after `asOf` but before the read was written while the check waited for
+ * the log, and is not ahead; nor is one less than a minute ahead, a skew that holds off no scheduled run (the most
+ * frequent is hourly).
  */
 export function stampedAhead(stamp: string, asOf: Date, readAt: number): boolean {
   const at = Date.parse(stamp);
-  return at > asOf.getTime() && at > readAt;
+  return at > asOf.getTime() && at - readAt > CLOCK_AHEAD_TOLERANCE_MS;
 }
 
 type CollectionHealthInput = {
@@ -96,8 +104,11 @@ function assertInFuture(value: unknown, latest: string | null, checkedAt: string
   if (value === true && !after(latest, checkedAt)) throw new Error("collection health latest_in_future needs a latest heartbeat stamped after checked_at");
 }
 
-/** The latest heartbeat's age in hours at checked_at, for a clock_ahead issue: negative. */
-const hoursBefore = (checkedAt: string, latest: string) => Number(((Date.parse(checkedAt) - Date.parse(latest)) / 3_600_000).toFixed(2));
+/**
+ * The latest heartbeat's age in hours at checked_at, for a clock_ahead issue: negative, how far ahead it is rounded up
+ * to the next 0.01 hour (36 seconds), so never shown as 0.
+ */
+const hoursBefore = (checkedAt: string, latest: string) => -Math.max(1, Math.ceil((Date.parse(latest) - Date.parse(checkedAt)) / 36_000)) / 100;
 
 export function evaluateCollectionHealth(input: CollectionHealthInput): CollectionHealthResult {
   const scope = input.scope ?? "all";

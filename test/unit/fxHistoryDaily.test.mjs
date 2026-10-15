@@ -85,6 +85,9 @@ test("the health window is the latest Monday-to-Friday 08:00 New York deadline, 
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z")], now).latest_in_future, true);
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z")], now, Date.parse("2026-01-12T15:00:01Z")).latest_in_future, false);
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z", { trigger: "manual" })], now).latest_in_future, false);
+  // Within a minute of the read it is not ahead.
+  assert.equal(fxDailyCoverage([run("2026-01-12T14:00:30Z")], now).latest_in_future, false);
+  assert.equal(fxDailyCoverage([run("2026-01-12T14:01:01Z")], now).latest_in_future, true);
 });
 
 test("the run log keeps every run, identical content included, beside the instrument's manifest", async (t) => {
