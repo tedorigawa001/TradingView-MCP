@@ -153,13 +153,21 @@ Each part is a complete export document with the header of the whole export, the
 ```
 
 The parts are written all together or not at all. A directory or a symbolic link at a part's path refuses the export
-before any raw page is read. An export holds a lock beside the output, `.publish-<output name without .json>.lock`,
-from before it builds its first part until it ends: a second export to the same output name while one runs is refused,
-writing nothing, so two exports never interleave their parts (a lock whose process is gone, or older than a day, is
-taken over). Then each part is built in turn, once, and only one part's bars are held at once: a part whose file
-already exists is compared with it, and any other is written and synced to a staging file in a hidden directory beside
-the output, `.publish-<output name without .json>-<process id>-XXXXXX`. A part that fails to build (a raw page missing
-or not matching its hash, a page no checkpoint binds), or a file with other bytes at a part's path, removes the staging
+before any raw page is read. An export holds a lock beside the output, named after `part01` exactly,
+`.<output name without .json>.part01.json.publish-lock` (a hash of that name when it would be too long for a file
+name), from before it builds its first part until it ends, so the file system's own sameness of names (case, Unicode
+normalisation) applies to the lock as to the parts. A second export to the same output while one runs is refused,
+writing nothing, so two exports never interleave their parts. The lock is written whole (a temporary file synced, then
+linked into place); a lock whose process is gone, one naming no process that is a minute old, or one a day old is
+taken over atomically (renamed away, checked to be still that stale lock, then removed). Before it links anything, and
+before it removes anything, an export checks that the lock is still its own, and stops if it was taken over. Where the
+directory denies it the lock (made read-only, say), an export only confirms that every part is already there and
+identical, and writes nothing; a part missing refuses it.
+
+Then each part is built in turn, once, and only one part's bars are held at once: a part whose file already exists is
+compared with it, and any other is written and synced to a staging file in a hidden directory beside the output,
+`.publish-<output name without .json>-<process id>-XXXXXX`. A part that fails to build (a raw page missing or not
+matching its hash, a page no checkpoint binds), or a file with other bytes at a part's path, removes the staging
 directory and writes nothing, and says so; every file with other bytes is named. Only when every part is staged or
 found identical are the staged parts linked into place, `part01` last: the other parts are linked and the directory
 synced, the parts found identical are checked to be so still, and then `part01` is linked and synced. Each part is
@@ -168,20 +176,24 @@ written, also when exports to one output run at once.
 
 A step of linking that fails (a file with other bytes appearing at a part's path, a directory denied or full, a failed
 sync) removes again what this run linked: `part01` first, with its directory synced, then the other parts in the
-reverse of their order, each only while it is still the file this run staged. When a `part01` is there that this run did
-not link, nothing is removed, since a `part01` stands for a whole set. The error says which parts were removed, which
-were already gone, which another file had replaced (left alone), and which could not be removed; parts found identical
-were not written by this run.
+reverse of their order, each only while it is still the file this run staged. When `part01` cannot be removed, the
+removal stops and the set stays published, whole; when its directory cannot be synced after its removal, the removal
+stops there too and the other parts stay. When a `part01` is there that this run did not link, or the lock is no longer
+this run's, nothing is removed. The error says which parts were removed, which were already gone, which another file
+had replaced (left alone), and which stayed and why; parts found identical were not written by this run.
 
-An export stopped by SIGINT or SIGTERM removes in the same way what it linked, its staging directory and its lock, and
-then ends by the signal; in a process that keeps its own listener for the signal, the export ends instead with an error
-that it was interrupted. One killed outright (SIGKILL) leaves its lock and its staging directory. The next export to the
-same output name takes the lock over, and removes such a staging directory of the same name when its process is gone
-or it is older than a day, but only one that is this user's (owned by the user, mode 0700) and only its numbered files,
-then the directory if that left it empty; anything else, a directory of a running export, of another output name, or
-of another owner or mode, is left alone. A crash or power loss while the parts are being linked, or a removal cut short,
-can leave some of `part02` onwards without `part01`. A later export to that name then finds a different file there and
-refuses; the error calls such a part, one whose set is not all there, the debris of an interrupted export, to be deleted.
+An export stopped by SIGINT, SIGTERM or SIGHUP first removes its staging files (so that a link still in flight fails),
+then, in the same way, what it linked, then its lock, and ends by the signal; in a process that keeps its own listener
+for the signal, the export ends instead with an error that it was interrupted. One killed outright (SIGKILL) leaves its
+lock and its staging directory. The next export to the same output takes the lock over, and removes such a staging
+directory of the same name when its process is gone or (except on Windows) it is older than a day, but only one that is
+this user's (owned by the user, mode 0700): it renames it first, checks the renamed entry is still that directory, and
+removes only its numbered files, then the directory if that left it empty. Anything else, a directory of a running
+export, of another output name, or of another owner or mode, is left alone. Windows reports neither owner nor mode
+here, so there a staging directory is removed only once its process is known to be gone. A crash or power loss while
+the parts are being linked, or a removal cut short, can leave some of `part02` onwards without `part01`. A later export
+to that name then finds a different file there and refuses; the error calls such a part, one whose set is not all
+there, the debris of an interrupted export, to be deleted.
 
 The command prints the totals, the number of runs, each part's index, path, result, SHA-256, number of collections and
 runs, and bars, and each collection's sequence, bar count, normalized hash, `range_checkpointed` and part.
