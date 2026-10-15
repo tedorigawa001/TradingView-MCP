@@ -157,15 +157,17 @@ before any raw page is read. An export holds a lock beside the output, named aft
 `.<output name without .json>.part01.json.publish-lock`, from before it builds its first part until it ends, so the file
 system's own sameness of names (case, Unicode normalisation) applies to the lock as to the parts. An output name too
 long for that lock (and its takeover marker, below) within a file name's 255 bytes is refused: choose a shorter
-`--output`. A second export to the same output while one runs is refused, writing nothing, so two exports never
-interleave their parts. The lock is written whole (a temporary file synced, then linked into place). A lock whose
+`--output`. A second export to the same output while one runs is refused, writing nothing. The lock is written whole (a temporary file synced, then linked into place). A lock whose
 process is gone, one naming no process that is a minute old, or one a day old is taken over, by one export at a time:
 the export holds a takeover marker, `<lock>.takeover`, while it reads the lock again, moves it to a tombstone, checks
 the tombstone is still that stale lock, removes it and places its own; an export that finds the marker held reads the
-lock again instead, so no export ever moves another's live lock. Before the link phase, before it links `part01`, and
-before it removes anything, an export checks that the lock is still its own, and stops if it was taken over. Where the
-directory denies it the lock (made read-only, say), an export only confirms that every part is already there and
-identical, and writes nothing; a part missing refuses it.
+lock again instead. Only an export that stalls for more than 30 seconds in the middle of a takeover (its marker then
+counts as stale) can move a newer export's lock aside for a moment; the lock checks then stop one of them, and nothing is
+removed, so `part01` still means the whole set. Before the link phase, before it links `part01`, and before it removes
+anything, an export checks that the lock is still its own, and stops if it was taken over. Where the directory denies
+it the lock (made read-only, say), an export only confirms that every part is already there and identical, and writes
+nothing; a part missing refuses it. On Windows, where a denied directory and a lock being deleted both report EPERM, a
+re-run in a read-only directory retries for about two seconds and then fails, writing nothing, instead of confirming.
 
 Then each part is built in turn, once, and only one part's bars are held at once: a part whose file already exists is
 compared with it, and any other is written and synced to a staging file in a hidden directory beside the output,
