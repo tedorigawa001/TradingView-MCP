@@ -249,8 +249,7 @@ test("publishImmutableFiles removes only this user's staging that killed runs of
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-stale-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   // A process that has ended: its pid is free (and, for the test's few milliseconds, not reused).
-  const ended = spawn(process.execPath, ["-e", ""]);
-  await once(ended, "exit");
+  const ended = { pid: await endedPid() };
   // Staging directories carry a tag of the first destination's exact name: only the set the lock covers is looked at.
   const tag = createHash("sha256").update("set.part01.json").digest("hex").slice(0, 8);
   const names = {
@@ -271,10 +270,22 @@ test("publishImmutableFiles removes only this user's staging that killed runs of
   // A directory holding anything a staging directory never holds is left alone, under its own name and whole.
   const kept = [names.live, names.otherShape, names.otherStem, names.single, names.otherSet, names.untagged, names.foreignFile, names.foreignEntry];
   if (process.platform !== "win32") kept.push(names.foreignMode);
+  else kept.push(names.old);   // Windows: a live process's staging stays, whatever its age (its owner and mode are not known there)
   assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith(".publish-")).sort(), kept.sort());
   assert.deepEqual([await readdir(join(directory, names.foreignFile)), await readdir(join(directory, names.foreignEntry))].map((list) => list.sort()), [["0", "notes.txt"], ["0", "1"]]);
   if (process.platform !== "win32") assert.deepEqual(await readdir(join(directory, names.foreignMode)), ["0"]);
 });
+
+/** The pid of a process that has ended and no longer answers (on Windows a process object outlives its exit while any handle to it is open). */
+async function endedPid() {
+  const ended = spawn(process.execPath, ["-e", ""]);
+  await once(ended, "exit");
+  for (let look = 0; look < 200; look += 1) {
+    try { process.kill(ended.pid, 0); } catch (error) { if (error.code === "ESRCH") return ended.pid; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`process ${ended.pid} still answers after it ended`);
+}
 
 /** A child process running publishImmutableFiles with `script`'s body; resolves with it and its first line of output. */
 async function publishingChild(script) {
@@ -394,8 +405,7 @@ test("a signal while the first destination's link is in flight leaves no first d
 test("of two runs that find the same stale lock, only one takes it over, and a third run meanwhile is refused", { timeout: 60_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-takeover-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const ended = spawn(process.execPath, ["-e", ""]);
-  await once(ended, "exit");
+  const ended = { pid: await endedPid() };
   // B judges the stale lock as A does, but places its takeover marker only once A has taken the lock over and is inside;
   // C starts while A is inside. The lock is never moved but by A, and only A writes (only real calls are reordered).
   const module = new URL("../../build/fsDurability.js", import.meta.url).href;
@@ -413,7 +423,7 @@ test("of two runs that find the same stale lock, only one takes it over, and a t
       return real.link(from, to);
     };
     fsp.rename = async (from, to) => {
-      if (String(from).endsWith("/.set.part01.json.publish-lock")) lockMoves.push(als.getStore());
+      if (/[\\\\/]\\.set\\.part01\\.json\\.publish-lock$/.test(String(from))) lockMoves.push(als.getStore());
       return real.rename(from, to);
     };
     syncBuiltinESMExports();
@@ -427,7 +437,12 @@ test("of two runs that find the same stale lock, only one takes it over, and a t
       return body(index);
     });
     const B = run("B", async (index) => { inside += 1; most = Math.max(most, inside); inside -= 1; return body(index); });
-    await aIsInside;
+    // Should A not get inside (refused, or failed), C is not started and the outcomes are printed as they are.
+    if (await Promise.race([aIsInside.then(() => false), A.then(() => true)])) {
+      cDone();   // B may be waiting for C at the marker
+      process.stdout.write(JSON.stringify({ outcomes: [await A, await B, "C: not started"], most, lockMoves }) + "\\n");
+      process.exit(0);
+    }
     const C = run("C", async (index) => { inside += 1; most = Math.max(most, inside); inside -= 1; return body(index); }).finally(() => cDone());
     const outcomes = await Promise.all([A, B, C]);
     process.stdout.write(JSON.stringify({ outcomes, most, lockMoves }) + "\\n");`;
@@ -503,7 +518,8 @@ test("a temporary lock that cannot be written is removed, and a day-old tombston
   // A tombstone and a temporary lock a day old are a killed run's: removed. Fresh ones may be a running takeover's: kept.
   const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
   const old = [`.${randomUUID()}.publish-lock-stale`, `.${randomUUID()}.publish-lock-new`], fresh = `.${randomUUID()}.publish-lock-stale`;
-  for (const name of [...old, fresh]) await writeFile(join(directory, name), `${randomUUID()} 1\n`, { mode: 0o600 });
+  // Each names this test's own process, which is alive on every platform (pid 1 is not a process on Windows).
+  for (const name of [...old, fresh]) await writeFile(join(directory, name), `${randomUUID()} ${process.pid}\n`, { mode: 0o600 });
   for (const name of old) await utimes(join(directory, name), dayAgo, dayAgo);
   assert.deepEqual((await publishImmutableFiles(paths, async (index) => `part ${index}\n`, "test set")).published, true);
   assert.deepEqual((await readdir(directory)).sort(), [fresh, "set.part01.json", "set.part02.json"].sort());
