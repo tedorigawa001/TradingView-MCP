@@ -430,7 +430,7 @@ test("of two runs that find the same stale lock, only one takes it over, and a t
     const { publishImmutableFiles } = await import(${JSON.stringify(module)});
     let inside = 0, most = 0;
     const run = (who, bytesOf) => als.run(who, () => publishImmutableFiles(${JSON.stringify(paths)}, bytesOf, "test set", { stem: "set" }))
-      .then((result) => who + ": " + JSON.stringify(result), (error) => who + ": " + error.message.replace(/: \\/.*$/, ""));
+      .then((result) => who + ": " + JSON.stringify(result), (error) => who + ": " + error.message.replace(/: (?:\\/|[A-Za-z]:\\\\).*$/, ""));   // the lock's path, POSIX or Windows
     const body = async (index) => "part " + (index + 1) + "\\n";
     const A = run("A", async (index) => {
       if (index === 0) { inside += 1; most = Math.max(most, inside); aInside(); await cIsDone; await new Promise((r) => setTimeout(r, 100)); inside -= 1; }
