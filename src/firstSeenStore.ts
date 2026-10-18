@@ -3,7 +3,7 @@ import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { dirname, resolve } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, type LockFileAttempt } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, nonBlockingFlag, posixModeEnforced, attemptLockFile, type LockFileAttempt } from "./fsDurability.js";
 
 const DEFAULT_LOCK_WAIT_MS = 30_000;
 function lockWaitMilliseconds(): number {
@@ -111,7 +111,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const stat = await handle.stat();
             if (!stat.isFile()) throw new Error(`${this.label} history lock path is unsafe`);
             const contents = await handle.readFile("utf8");
@@ -146,7 +146,9 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
     let handle;
     await assertNotSymbolicLink(this.filePath, `${this.label} history`);
     try {
-      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+      // Without waiting on a FIFO (BACKLOG 103-11): the open would wait for a writer, holding the lock, and the regular
+      // file check below could never refuse it.
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error(`unable to open ${this.label} history as a regular file`, { cause: err });

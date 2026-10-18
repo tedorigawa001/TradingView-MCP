@@ -56,6 +56,22 @@ test("no evidence store passes O_NOFOLLOW unconditionally any more", async () =>
   assert.deepEqual(offenders, [], `these still use constants.O_NOFOLLOW directly: ${offenders.join(", ")}`);
 });
 
+test("no store opens a file for reading in a way that waits on a FIFO (BACKLOG 103-11)", async () => {
+  // A read-only open of a FIFO waits for a writer, before any regular-file check after it can refuse the FIFO: a log's
+  // reader then hung for good with the log's lock held. Directories (synced in fsDurability.ts) are not looked at.
+  const directory = new URL("../../src/", import.meta.url);
+  const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");
+  const offenders = [];
+  for (const name of files) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    for (const match of source.matchAll(/O_RDONLY \| noFollowFlag\(\)/g)) {
+      const statement = source.slice(match.index, source.indexOf(";", match.index));
+      if (!/nonBlockingFlag\(|O_NONBLOCK|NON_BLOCKING_OPEN/.test(statement)) offenders.push(`${name}: ${statement.trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `read-only opens that wait on a FIFO:\n${offenders.join("\n")}`);
+});
+
 test("all exclusive file creation goes through the shared symlink guard", async () => {
   const directory = new URL("../../src/", import.meta.url);
   const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");

@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, attemptLockFile } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, nonBlockingFlag, attemptLockFile } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -35,7 +35,7 @@ export class AppendOnlyEvaluationLog {
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const stat = await handle.stat();
             const contents = await handle.readFile("utf8");
             await handle.close();
@@ -75,7 +75,7 @@ export class AppendOnlyEvaluationLog {
     let handle;
     try {
       await assertNotSymbolicLink(this.filePath, "evaluation log");
-      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("evaluation log path must be a regular file", { cause: err });

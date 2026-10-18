@@ -3,7 +3,7 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 
@@ -28,7 +28,7 @@ export class FxHistoricalArchive {
       return { stored: true, bytes: raw.byteLength };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new Error("unable to write FX historical raw archive", { cause: error });
-      const existing = await open(path, constants.O_RDONLY | noFollowFlag());
+      const existing = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
       try {
         const stat = await existing.stat();
         if (!stat.isFile() || stat.size !== raw.byteLength || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("FX historical raw archive existing payload is unsafe");
@@ -43,7 +43,7 @@ export class FxHistoricalArchive {
     if (!/^sha256:[a-f0-9]{64}$/.test(rawSha256)) throw new Error("FX historical raw archive requires a SHA-256 key");
     await this.ensureDirectory();
     const path = join(this.directory, `${rawSha256.slice(7)}.raw`);
-    const handle = await open(path, constants.O_RDONLY | noFollowFlag());
+    const handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     try {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size < 1 || stat.size > MAX_ARCHIVE_BYTES || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new Error("FX historical raw archive payload is unsafe");

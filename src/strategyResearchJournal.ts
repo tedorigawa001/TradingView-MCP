@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, nonBlockingFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
@@ -389,7 +389,7 @@ export class StrategyResearchJournalStore {
     if (typeof process.getuid === "function" && observed.uid !== process.getuid()) throw new Error(`strategy research journal lock must be owned by the current user: ${lockPath}`);
     let handle;
     try {
-      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
@@ -434,7 +434,7 @@ export class StrategyResearchJournalStore {
         return async () => {
           let lock;
           try {
-            lock = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+            lock = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const stat = await lock.stat();
             const contents = await lock.readFile("utf8");
             await lock.close(); lock = undefined;
@@ -467,7 +467,7 @@ export class StrategyResearchJournalStore {
   private async readUnlocked(): Promise<ResearchJournalEntry[]> {
     let handle;
     await assertNotSymbolicLink(this.filePath, "strategy research journal");
-    try { handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag()); } catch (err) {
+    try { handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag()); } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("unable to open strategy research journal as a regular file", { cause: err });
     }

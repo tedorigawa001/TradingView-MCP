@@ -3,7 +3,7 @@ import { mkdir, open, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { syncDirectoryEntry, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { syncDirectoryEntry, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_RAW_BYTES = 32 * 1024 * 1024;
 
@@ -54,7 +54,7 @@ export class OfficialPolicyRateRawArchive {
   private async assertExistingPayload(path: string, expectedHash: string, expectedBytes: number): Promise<void> {
     const pathStat = await lstat(path);
     if (!pathStat.isFile() || pathStat.isSymbolicLink()) throw new Error("official policy-rate raw archive existing path is unsafe");
-    const handle = await open(path, constants.O_RDONLY | noFollowFlag());
+    const handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error("official policy-rate raw archive path must be a regular file");

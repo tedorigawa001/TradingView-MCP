@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -197,7 +197,7 @@ export class MacroSurpriseEvidenceStore {
           // makes the next owner wait (BACKLOG 102-39).
           let handle;
           try {
-            handle = await open(path, constants.O_RDONLY | noFollowFlag());
+            handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const stat = await handle.stat(); const contents = await handle.readFile("utf8");
             await handle.close(); handle = undefined;
             const current = await lstat(path);
@@ -214,7 +214,7 @@ export class MacroSurpriseEvidenceStore {
       if (attempt.held) {
         let handle;
         try {
-          handle = await open(path, constants.O_RDONLY | noFollowFlag());
+          handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
           const stat = await handle.stat();
           if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
           if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {

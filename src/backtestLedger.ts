@@ -86,9 +86,10 @@ export async function readBacktestLedgerFile(path: string, privateFile = false):
 /**
  * An append-only journal's text for its strict framing check, or null when there is nothing to check: a missing file,
  * or an empty regular file, which a first append that failed after creating the file (a full disk) leaves (BACKLOG
- * 102-43). Only an empty regular file is let through: a FIFO reports size zero too, and AppendOnlyFirstSeenLog's
- * readAllUnlocked opens without O_NONBLOCK, so anything else goes through readBacktestLedgerFile, which refuses what is
- * not a regular owner-only file without waiting on it. The caller's readAllUnlocked still checks the type, owner and mode.
+ * 102-43). Only an empty regular file is let through: a FIFO reports size zero too, so anything else goes through
+ * readBacktestLedgerFile, which refuses what is not a regular owner-only file without waiting on it (as
+ * AppendOnlyFirstSeenLog's readAllUnlocked does since BACKLOG 103-11). The caller's readAllUnlocked still checks the
+ * type, owner and mode.
  */
 export async function readJournalForFraming(path: string): Promise<string | null> {
   try {

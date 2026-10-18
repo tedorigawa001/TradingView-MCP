@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { attemptLockFile, lockBeingReleased, noFollowFlag, posixModeEnforced } from "./fsDurability.js";
+import { attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, posixModeEnforced } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 30_000;
 const STALE_LOCK_MS = 10 * 60_000;
@@ -36,7 +36,7 @@ export class ChartOperationLock {
     }
     let handle;
     try {
-      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
@@ -82,7 +82,7 @@ export class ChartOperationLock {
           // makes the next owner wait (BACKLOG 102-39).
           let owner;
           try {
-            owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+            owner = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const before = await owner.stat();
             const contents = await owner.readFile("utf8");
             await owner.close();

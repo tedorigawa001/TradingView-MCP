@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, nonBlockingFlag, posixModeEnforced, attemptLockFile, lockBeingReleased } from "./fsDurability.js";
 import { binaryCalibration } from "./calibration.js";
 import { asksForMoreHistory, isLegacyUncoveredComplete, isTerminalWithoutGapCheck, recordedHistoryRequest } from "./analysisOutcomeEvidence.js";
 import type { AnalysisBias, AnalysisOverlayState } from "./analysisOverlay.js";
@@ -388,7 +388,7 @@ export class AnalysisJournalStore {
 
     let handle;
     try {
-      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+      handle = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
       const opened = await handle.stat();
       if (!opened.isFile() || opened.ino !== observed.ino) return true;
       const contents = await handle.readFile("utf8");
@@ -440,7 +440,7 @@ export class AnalysisJournalStore {
         return async () => {
           let handle;
           try {
-            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag());
+            handle = await open(lockPath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
             const stat = await handle.stat();
             const contents = await handle.readFile("utf8");
             await handle.close();
@@ -479,7 +479,7 @@ export class AnalysisJournalStore {
     let handle;
     try {
       await assertNotSymbolicLink(this.filePath, "analysis journal");
-      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag());
+      handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error("unable to open analysis journal as a regular file", { cause: err });

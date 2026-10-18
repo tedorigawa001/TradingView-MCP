@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { closeSync, constants, existsSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AppendOnlyFirstSeenLog } from '../../build/firstSeenStore.js';
+import { runCollectionHealthCli } from '../../build/collectionHealthCli.js';
 
 const variable='TV_MCP_HISTORY_LOCK_WAIT_MS';
 const log=path=>new AppendOnlyFirstSeenLog(path,'test',x=>x,{maxFileBytes:10000,maxRecordBytes:1000});
@@ -129,4 +131,33 @@ test('serializeWithin runs operations in order when nothing blocks, and releases
   await assert.rejects(log(path).serializeWithin(2000,async()=>{throw new Error('boom');}),/boom/);
   assert.equal(await log(path).serializeWithin(2000,async()=>'next'),'next');
   await assert.rejects(readFile(path+'.lock','utf8'),{code:'ENOENT'},'no lock is left behind');
+});
+
+// BACKLOG 103-11 (L3): the log was opened for reading without O_NONBLOCK, before its regular-file check. A FIFO at its
+// path made the open wait for a writer forever, with the log's lock held: the health check and the collectors hung.
+/** Resolves with how `promise` settled, or with 'still waiting' after `ms`; a writer then lets a read waiting on `fifo` go. */
+async function settledWithin(promise,ms,fifo){
+  let timer;
+  const waited=new Promise(resolve=>{timer=setTimeout(()=>resolve('still waiting'),ms);});
+  const outcome=await Promise.race([promise.then(value=>({value}),error=>({error:error.message})),waited]);
+  clearTimeout(timer);
+  // Opened for reading and writing, a FIFO does not wait, and a reader waiting on it is let go: the test fails, not hangs.
+  if(outcome==='still waiting'){try{closeSync(openSync(fifo,constants.O_RDWR|constants.O_NONBLOCK));}catch{/* gone */} await promise.catch(()=>undefined);}
+  return outcome;
+}
+test('a FIFO at the log path is refused at once, and its lock released (BACKLOG 103-11)',{skip:process.platform==='win32'&&'mkfifo is POSIX'},async t=>{
+  const path=await setup(t);
+  await promisify(execFile)('mkfifo',['-m','600',path]);
+  const reader=log(path);
+  assert.deepEqual(await settledWithin(reader.serialize(()=>reader.readAllUnlocked()),5000,path),{error:'test history path must be a regular file'});
+  assert.equal(existsSync(`${path}.lock`),false,'the lock is released');
+  // The health check over a heartbeat log that is a FIFO fails at once, saying why, as the reviewer's repro asked.
+  const variable='TRADINGVIEW_MCP_RESEARCH_COLLECTION_HEARTBEAT_PATH', saved=process.env[variable];
+  process.env[variable]=path;
+  t.after(()=>{if(saved===undefined) delete process.env[variable]; else process.env[variable]=saved;});
+  let stderr='';
+  const health=runCollectionHealthCli(['--scope','research'],{writeOutput:()=>{},writeError:message=>{stderr+=message;},notificationsSupported:false});
+  assert.deepEqual(await settledWithin(health,5000,path),{value:1});
+  assert.equal(stderr,'collection health check failed: research collection heartbeat history path must be a regular file\n');
+  assert.equal(existsSync(`${path}.lock`),false);
 });
