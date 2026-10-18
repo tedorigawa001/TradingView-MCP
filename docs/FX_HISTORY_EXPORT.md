@@ -62,8 +62,10 @@ tradingview-mcp-export-fx-history --instrument EUR_USD --sequence 2 --format bar
 `npm run export:fx-history -- ...` runs the same CLI from a built checkout. `--instrument` is required and selects the
 instrument's own manifest (`TRADINGVIEW_MCP_FX_HISTORY_MANIFEST_PATH` as for the collector). `--list` prints the manifest
 path and the records without their bars: sequence, requested range, retrieval time, environment, pages, bar count,
-first and last bar, normalized hash. Every argument, `--output` included (an existing directory, not a directory
-itself), is checked before any raw page is read.
+first and last bar, normalized hash. Every argument, `--output` included (in an existing directory, and neither a
+directory nor, without `--split`, a symbolic link itself), is checked before any raw page is read. `--output`'s
+directory is resolved first, so it may be reached through a symbolic link (`/tmp` on macOS is one), and is then checked
+as [below](#the-output-directory).
 
 ### The output directory
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 import { ENTRY_RESERVED_SERIES_PREFIXES } from "./forecastSet.js";
-import { noFollowFlag, publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
+import { assertPublishDirectory, noFollowFlag, publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
 import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, splitFxHistoryExport, type FxHistoryExportSources, type FxHistoryExportSplit } from "./fxHistoryExport.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS } from "./oandaHistoricalFx.js";
 
@@ -130,9 +130,14 @@ export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSo
     if (!seriesId || !TIERS.includes(tier as (typeof TIERS)[number])) throw new Error(`--format bar-series requires --series-id and --evidence-tier (${TIERS.join(", ")})`);
     if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(seriesId) || ENTRY_RESERVED_SERIES_PREFIXES.some((prefix) => seriesId.startsWith(prefix))) throw new Error("--series-id must be 1-120 of A-Z a-z 0-9 _ . : - and must not use a reserved prefix");
   } else if (seriesId || tier) throw new Error("--series-id and --evidence-tier belong to --format bar-series");
-  const parent = await lstat(dirname(values.output)).catch(() => null);
-  if (!parent?.isDirectory()) throw new Error(`--output must be in an existing directory: ${values.output}`);
-  if ((await lstat(values.output).catch(() => null))?.isDirectory()) throw new Error(`--output names a directory: ${values.output}`);
+  // The directory is resolved first, as the publish resolves it, so it may be reached through a symbolic link (/tmp on
+  // macOS), and must be one no other user can swap the staging in (BACKLOG 103-11); the output's own name must not be a link.
+  const parent = await realpath(dirname(values.output)).catch(() => null);
+  if (parent === null || !(await stat(parent).catch(() => null))?.isDirectory()) throw new Error(`--output must be in an existing directory: ${values.output}`);
+  await assertPublishDirectory(parent, "FX history export");
+  const target = await lstat(values.output).catch(() => null);
+  if (target?.isDirectory()) throw new Error(`--output names a directory: ${values.output}`);
+  if (!values.split && target?.isSymbolicLink()) throw new Error(`--output names a symbolic link: ${values.output}; nothing was written`);
   if (values.split) {
     // One snapshot, its parts fixed and the 20,000,000-bar total checked before any raw page is read.
     const split = await splitFxHistoryExport({ instrument, ...deps });

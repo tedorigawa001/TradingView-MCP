@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile, mkdir } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
@@ -277,6 +277,34 @@ test("a bar series holds at most 600,000 bars, checked before any page is read",
   await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", dir], { store, checkpoints, runs, archive: { read: async () => { reads += 1; return Buffer.from(""); } } }),
     /--output names a directory/);
   assert.equal(reads, 0);
+});
+
+test("--output is judged in its resolved directory: one reached through a link is written into; a link as its own name, and a directory others can write to, are refused before any raw page is read (BACKLOG 103-11)", async () => {
+  const { dir, store, checkpoints, runs, archive, collect } = await setup();
+  await collect(FROM, TO, twoPages);
+  let reads = 0;
+  const deps = { store, checkpoints, runs, archive: { read: async (hash) => { reads += 1; return archive.read(hash); } } };
+  // A directory whose own name is a link (/tmp on macOS was refused as not a directory).
+  const real = join(dir, "real"), alias = join(dir, "alias");
+  await mkdir(real, { mode: 0o700 });
+  await symlink(real, alias, "junction");   // a junction on Windows, which needs no privilege
+  if (process.platform !== "win32") {   // a symbolic link to a file needs privileges on Windows; owners and modes are POSIX
+    await symlink(join(dir, "elsewhere.json"), join(real, "linked.json"));
+    await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", join(alias, "linked.json")], deps),
+      /--output names a symbolic link: .*linked\.json; nothing was written$/);
+    const shared = join(dir, "shared");
+    await mkdir(shared); await chmod(shared, 0o777);
+    for (const split of [[], ["--split"]]) {
+      await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", ...split, "--output", join(shared, "eurusd.json")], deps),
+        /FX history export will not publish into .*shared: other users can write to it and it has no sticky bit.*; nothing was written$/);
+    }
+    assert.deepEqual(await readdir(shared), []);
+  }
+  assert.equal(reads, 0);
+  const result = await runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", join(alias, "eurusd.json")], deps);
+  assert.equal(result.result, "created");
+  assert.equal(result.sha256, sha(await readFile(join(real, "eurusd.json"), "utf8")));
+  assert.deepEqual(await readdir(real), process.platform === "win32" ? ["eurusd.json"] : ["eurusd.json", "linked.json"]);
 });
 
 test("the totals describe one moment: the run log is read again after the manifest until both reads agree (BACKLOG 103-9 review)", async () => {
