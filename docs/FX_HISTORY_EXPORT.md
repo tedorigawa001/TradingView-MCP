@@ -74,7 +74,8 @@ files in. On macOS and Linux an export refuses, before any raw page is read and 
 or others can write to unless it has the sticky bit (as `/tmp` has), and a directory owned by neither you nor root. In
 such a directory another user could rename the hidden staging directory the export writes in and put a symbolic link
 in its place: the export would then create its files in, link files from, and remove files in the directory the link
-names. Choose a directory only you can write to (`chmod go-w`), or one with the sticky bit. Within an accepted
+names. Choose a directory only you can write to (`chmod go-w`; under a umask of 002 new directories are
+group-writable), or one with the sticky bit. Within an accepted
 directory the export still keeps each staging directory's identity from when it made it, checks it before it stages a
 file there and before each link, checks the staged file before it is linked, and removes only the files it created, so
 a staging directory swapped all the same is refused, not followed. The check is of the output's own directory: keep it

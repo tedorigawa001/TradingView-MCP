@@ -291,7 +291,7 @@ const stagingLeft = async (out) => (await readdir(dirname(out))).filter((name) =
 
 test("a reproduction never overwrites a different file at its output path", async (t) => {
   const { dir, out, argv } = await reproductionWorkspace(t);
-  await mkdir(dirname(out));
+  await mkdir(dirname(out), { mode: 0o700 });
   await writeFile(out, earlierEvidence);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TRADINGVIEW_MCP|TV_MCP|TV_CDP|OANDA)/.test(key)));
   const run = spawnSync(process.execPath, [CLI, ...argv], {
@@ -480,7 +480,7 @@ test("a reproduction another run publishes meanwhile is kept, and agreed with on
 test("a symbolic link at the output path is refused and what it points at left alone", { skip: process.platform === "win32" && "symbolic links need privileges on Windows" }, async (t) => {
   const { dir, out, argv } = await reproductionWorkspace(t);
   const target = join(dir, "elsewhere.json");
-  await mkdir(dirname(out));
+  await mkdir(dirname(out), { mode: 0o700 });
   await symlink(target, out);
   for (const contents of ["untouched\n", publishedBody()]) {
     await writeFile(target, contents);
@@ -495,7 +495,7 @@ test("an output directory reached through a symbolic link is published into, as 
   const { dir, argv } = await reproductionWorkspace(t);
   const real = join(dir, "real-evidence");
   const linked = join(dir, "linked-evidence");
-  await mkdir(real);
+  await mkdir(real, { mode: 0o700 });
   // A junction on Windows, which needs no privilege; a symbolic link elsewhere (as /tmp is on macOS).
   await symlink(real, linked, "junction");
   const args = [...argv.slice(0, -1), join(linked, "four-bar-trap-v1.json")];
@@ -628,7 +628,7 @@ test("a file that vanishes between the link and the look is linked again once, a
 // for another file, even one with the same bytes, it is not taken as the evidence that was looked at.
 async function swappedWhileCompared(t, swap) {
   const { out, argv } = await reproductionWorkspace(t);
-  await mkdir(dirname(out));
+  await mkdir(dirname(out), { mode: 0o700 });
   await writeFile(out, publishedBody());
   const realLstat = fsp.lstat;
   let swapped = false;

@@ -756,7 +756,11 @@ test("a staging swapped for a link to another directory is caught before a file 
   const realOpen = fsp.open;
   fsp.open = async (path, ...rest) => {
     const handle = await realOpen(path, ...rest);
-    if (/[\\/]\.publish-\w{6}[\\/]file$/.test(String(path))) swapStagingSync(single, victim);
+    // Swapped once the staged file is closed (Windows will not rename a directory holding an open file).
+    if (/[\\/]\.publish-\w{6}[\\/]file$/.test(String(path))) {
+      const close = handle.close.bind(handle);
+      handle.close = async () => { await close(); swapStagingSync(single, victim); };
+    }
     return handle;
   };
   syncBuiltinESMExports();
