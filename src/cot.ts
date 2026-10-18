@@ -18,8 +18,12 @@ type CotSpec = {
 };
 type CotRow = Record<string, unknown>;
 export type CotPosition = { group: string; long: number | null; short: number | null; net: number | null };
-/** A fetched report not recorded as first seen, and why: one dated after the moment it was observed (BACKLOG 103-11). */
-export type CotFirstSeenSkip = { report_date: string; reason: string };
+/**
+ * A fetched row dated after the day it was fetched (BACKLOG 103-11): no report is dated after its publication, so it is
+ * an upstream error (a mistyped year, say). It is kept out of the history, the latest report, the positioning features
+ * and the first-seen record, and returned on its own with why.
+ */
+export type CotFutureDatedObservation = CotObservation & { exclusion_reason: string };
 export type CotObservation = {
   symbol: string;
   report_type: string;
@@ -362,27 +366,25 @@ export class CotClient {
       }
       seenDates.add(reportDateKey);
     }
-    if (matching.length < weeks) {
-      throw new Error(`requested ${weeks} COT weeks for ${spec.market}, but only ${matching.length} are available`);
+    // A row dated after the day it was fetched is no report yet (BACKLOG 103-11): it is kept out of everything below, as
+    // only closed sessions of open interest are recorded. Left in, it headed the history, so the latest report, the
+    // positioning features' as_of and every context built on them came from it, and the first-seen store refused the
+    // whole batch for it, leaving every week without available_at. It is returned on its own, with why.
+    const observedAt = new Date().toISOString();
+    const fetchedOn = observedAt.slice(0, 10);
+    const futureDated: CotFutureDatedObservation[] = matching
+      .filter((row) => String(row.report_date_as_yyyy_mm_dd).slice(0, 10) > fetchedOn)
+      .map((row) => ({ ...this.normalizeRow(symbol, spec, row), exclusion_reason: `report_date ${String(row.report_date_as_yyyy_mm_dd).slice(0, 10)} is after ${fetchedOn}, the date it was fetched: `
+        + "no report is dated after it is published, so the row is left out of the history, the latest report, the positioning features and the first-seen record" }));
+    const current = matching.filter((row) => String(row.report_date_as_yyyy_mm_dd).slice(0, 10) <= fetchedOn);
+    if (current.length < weeks) {
+      throw new Error(`requested ${weeks} COT weeks for ${spec.market}, but only ${current.length} are available${futureDated.length > 0 ? ` (${futureDated.length} more dated after today left out)` : ""}`);
     }
-    let observations = matching.map((row) => this.normalizeRow(symbol, spec, row));
+    let observations = current.map((row) => this.normalizeRow(symbol, spec, row));
     let firstSeenError: string | null = null;
-    const firstSeenSkipped: CotFirstSeenSkip[] = [];
     if (this.firstSeenStore) {
       try {
-        const observedAt = new Date().toISOString();
-        // Only a report dated by the stamp's date can have been seen then (BACKLOG 103-11), as only closed sessions of open
-        // interest are recorded: the store refuses a batch holding one dated later whole, so a single upstream row dated
-        // in the future (a mistyped year) left every week of the symbol without available_at. Such rows are not recorded,
-        // and the result names them; the rest are recorded as before.
-        const seenOn = observedAt.slice(0, 10);
-        const recordable = observations.filter((observation) => {
-          const reportDate = observation.report_date!.slice(0, 10);
-          if (reportDate <= seenOn) return true;
-          firstSeenSkipped.push({ report_date: observation.report_date!, reason: `report_date ${reportDate} is after ${seenOn}, the date it was observed, so it cannot have been first seen then` });
-          return false;
-        });
-        const records = recordable.length === 0 ? [] : await this.firstSeenStore.observeMany(recordable.map((observation) => ({
+        const records = await this.firstSeenStore.observeMany(observations.map((observation) => ({
           symbol: observation.symbol,
           observation_date: observation.report_date!.slice(0, 10),
           value: { report_type: observation.report_type, market: observation.market, open_interest: observation.open_interest,
@@ -407,7 +409,7 @@ export class CotClient {
       positioning_features: computeCotPositioningFeatures(observations),
       cache_status: cacheStatus,
       first_seen_error: firstSeenError,
-      first_seen_skipped: firstSeenSkipped,
+      future_dated_observations: futureDated,
     };
   }
 
@@ -418,7 +420,7 @@ export class CotClient {
       positioning_features: history.positioning_features,
       cache_status: history.cache_status,
       first_seen_error: history.first_seen_error,
-      first_seen_skipped: history.first_seen_skipped,
+      future_dated_observations: history.future_dated_observations,
     };
   }
 }

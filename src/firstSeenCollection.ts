@@ -74,7 +74,7 @@ export async function collectFirstSeenSources(input: {
 }): Promise<{
   observed_at: string;
   status: "complete" | "partial";
-  cot: Array<{ symbol: string; status: "complete" | "error"; observations?: number; error?: string }>;
+  cot: Array<{ symbol: string; status: "complete" | "error"; observations?: number; error?: string; future_dated?: Array<{ report_date: string | null; exclusion_reason: string }> }>;
   real_yield: { status: "complete" | "error"; observation_date?: string; available_at?: string | null; error?: string };
   cme_gold_open_interest: {
     status: "complete" | "error";
@@ -97,14 +97,14 @@ export async function collectFirstSeenSources(input: {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
       const unrecorded = history.observations.filter((observation) => typeof observation.available_at !== "string").length;
       if (unrecorded > 0) {
-        // With the store's own error when it failed, so the log says why (BACKLOG 102-30), and why a report was not
-        // offered to it at all: one dated after it was observed (BACKLOG 103-11).
-        const causes = [...(typeof history.first_seen_error === "string" ? [history.first_seen_error] : []),
-          ...(history.first_seen_skipped ?? []).map((skip) => skip.reason)];
-        const cause = causes.length > 0 ? `: ${causes.join("; ")}` : "";
+        // With the store's own error when it failed, so the log says why (BACKLOG 102-30).
+        const cause = typeof history.first_seen_error === "string" ? `: ${history.first_seen_error}` : "";
         throw new Error(`${unrecorded} of ${history.observations.length} COT observations were fetched but not recorded as first seen${cause}`);
       }
-      return { symbol, status: "complete" as const, observations: history.observations.length };
+      // A row dated after it was fetched is left out of the history by the client and named here, so the run's log keeps
+      // the upstream error while the real weeks are recorded (BACKLOG 103-11).
+      const futureDated = (history.future_dated_observations ?? []).map((row) => ({ report_date: row.report_date, exclusion_reason: row.exclusion_reason }));
+      return { symbol, status: "complete" as const, observations: history.observations.length, ...(futureDated.length > 0 ? { future_dated: futureDated } : {}) };
     } catch (error) {
       return { symbol, status: "error" as const, error: errorMessage(error) };
     }

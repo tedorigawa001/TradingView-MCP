@@ -111,13 +111,13 @@ test("CotClient keeps a fetch usable when its first-seen store fails, and says w
   assert.equal((await new CotClient(base).getHistory("OANDA:EURUSD", 1)).first_seen_error, null);
 });
 
-test("a report dated after it was observed is not recorded but named, and the real weeks are still recorded as first seen (BACKLOG 103-11)", async (t) => {
+test("a row dated after it was fetched is left out of the history, the latest report and the features, and returned on its own with why; the real weeks are recorded (BACKLOG 103-11)", async (t) => {
   // Offline: fetch is stubbed. Four weekly reports up to a week ago, and one upstream row with a mistyped year.
   const day = 86_400_000;
   const reportDate = (weeksAgo) => `${new Date(Date.now() - weeksAgo * 7 * day).toISOString().slice(0, 10)}T00:00:00.000`;
   const rows = [1, 2, 3, 4].map((weeksAgo) => ({ cftc_contract_market_code: "099741", market_and_exchange_names: "EURO FX", report_date_as_yyyy_mm_dd: reportDate(weeksAgo),
     open_interest_all: "1000", dealer_positions_long_all: "1", dealer_positions_short_all: "2", asset_mgr_positions_long: "3", asset_mgr_positions_short: "4" }));
-  rows.push({ ...rows[0], report_date_as_yyyy_mm_dd: "2206-10-13T00:00:00.000" });
+  rows.push({ ...rows[0], report_date_as_yyyy_mm_dd: "2206-10-13T00:00:00.000", open_interest_all: "999999" });
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const response = new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
@@ -128,27 +128,32 @@ test("a report dated after it was observed is not recorded but named, and the re
   const dir = await mkdtemp(join(tmpdir(), "tv-mcp-cot-future-row-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = new CotFirstSeenStore(join(dir, "history.jsonl"));
-  const history = await new CotClient(undefined, 15_000, store).getHistory("OANDA:EURUSD", 5);
-  // Before, the store refused the whole batch for that one row: no week had available_at, and first_seen_error said why.
+  const history = await new CotClient(undefined, 15_000, store).getHistory("OANDA:EURUSD", 4);
+  // Before, the row headed the history and the store refused the whole batch for it: no week had available_at.
   assert.equal(history.first_seen_error, null);
-  assert.equal(history.first_seen_skipped.length, 1);
-  assert.equal(history.first_seen_skipped[0].report_date, "2206-10-13T00:00:00.000");
-  assert.match(history.first_seen_skipped[0].reason, /^report_date 2206-10-13 is after \d{4}-\d{2}-\d{2}, the date it was observed, so it cannot have been first seen then$/);
-  // The row is returned as it was fetched, without available_at; every real week has its first-seen time.
-  assert.deepEqual(history.observations.map((row) => [row.report_date.slice(0, 4) === "2206", typeof row.available_at]),
-    [[true, "object"], [false, "string"], [false, "string"], [false, "string"], [false, "string"]]);
+  assert.deepEqual(history.observations.map((row) => [row.report_date, typeof row.available_at]), [1, 2, 3, 4].map((weeksAgo) => [reportDate(weeksAgo), "string"]));
+  assert.equal(history.positioning_features.as_of, reportDate(1));
+  assert.equal(history.positioning_features.point_in_time_status, "observed_first_seen");
+  assert.equal(history.future_dated_observations.length, 1);
+  assert.deepEqual([history.future_dated_observations[0].report_date, history.future_dated_observations[0].open_interest, history.future_dated_observations[0].available_at],
+    ["2206-10-13T00:00:00.000", 999999, null]);
+  assert.match(history.future_dated_observations[0].exclusion_reason, /^report_date 2206-10-13 is after \d{4}-\d{2}-\d{2}, the date it was fetched: no report is dated after it is published, so the row is left out of the history, the latest report, the positioning features and the first-seen record$/);
   assert.equal((await store.coverage()).records, 4);
-  // A collection run says which report was not recorded, and why.
+  // The latest report, as get_positioning_context and the trade decision context read it, is the latest real one.
+  const latest = await new CotClient(undefined, 15_000, store).getLatest("OANDA:EURUSD");
+  assert.deepEqual([latest.report_date, typeof latest.available_at, latest.positioning_features.as_of, latest.future_dated_observations.length], [reportDate(1), "string", reportDate(1), 1]);
+  // Asking for more weeks than the real rows hold says the future-dated one was left out.
+  await assert.rejects(() => new CotClient(undefined, 15_000, store).getHistory("OANDA:EURUSD", 5), /requested 5 COT weeks for EURO FX, but only 4 are available \(1 more dated after today left out\)/);
+  // A collection run records the real weeks, is complete, and names the row left out.
   const collected = await collectFirstSeenSources({
     cot: new CotClient(undefined, 15_000, store),
     realYield: { getLatest: async () => ({ observation_date: "2026-07-25", available_at: "2026-07-26T00:00:00.000Z", value_status: "valid", quality_issues: [] }) },
     cmeGoldOpenInterest: { getLatestGoldOpenInterest: async () => ({ observation_date: "2026-07-24", open_interest: 1, report_status: "final", source: "cme_daily_bulletin",
       source_detail: "GC_FUT", observed_at: "2026-07-26T00:00:00.000Z" }) },
     futuresOpenInterest: { observeMany: async () => ({ recorded: [{}], unchanged: 0, revisions: 0 }) },
-    cotSymbols: ["OANDA:EURUSD"], cotWeeks: 5, coverage: async () => ({ status: "complete" }),
+    cotSymbols: ["OANDA:EURUSD"], cotWeeks: 4, coverage: async () => ({ status: "complete" }),
   });
-  assert.equal(collected.cot[0].status, "error");
-  assert.match(collected.cot[0].error, /^1 of 5 COT observations were fetched but not recorded as first seen: report_date 2206-10-13 is after /);
+  assert.deepEqual([collected.cot[0].status, collected.cot[0].observations, collected.cot[0].future_dated.map((row) => row.report_date)], ["complete", 4, ["2206-10-13T00:00:00.000"]]);
   assert.equal((await store.coverage()).records, 4, "the real weeks were recorded once; unchanged, they are not recorded again");
 });
 
