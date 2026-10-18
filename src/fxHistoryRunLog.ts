@@ -153,20 +153,25 @@ export function latestFxDailyWindow(now: Date) {
  * Whether the schedule held at the latest deadline, by the rule a forward study reads the log with: of the daily runs that
  * finished by the deadline, the last one (manual runs do not count) must have finished in the window, requested the
  * session before it whole (from its start to its last candle, which opens 15 minutes before its end), and read only
- * final pages. latest_run_at is the latest daily run's finishing time, null when there is none. latest_in_future says
- * that run is stamped ahead of the clock (after `now`, and more than a minute after `readAt`, when the log was read; see
- * stampedAhead and CLOCK_AHEAD_TOLERANCE_MS): the log refuses every later run until the clock reaches it (BACKLOG 102-36
- * review). A manual run stamped ahead blocks the
- * daily runs too; it shows as a missed window at the next deadline.
+ * final pages. latest_run_at is the latest daily run's finishing time, null when there is none. The log orders every
+ * run, daily or manual, by its finishing time and refuses one that starts before the latest finished, so the run that
+ * holds the others off is the latest of either trigger: latest_recorded_run_at and latest_recorded_trigger name it, and
+ * latest_in_future says it is stamped ahead of the clock (after `now`, and more than a minute after `readAt`, when the
+ * log was read; see stampedAhead and CLOCK_AHEAD_TOLERANCE_MS): the log refuses every later run until the clock reaches
+ * it (BACKLOG 102-36 review). A manual run stamped ahead used to go unreported, while it blocked the daily runs and
+ * showed only as a missed window at the next deadline (BACKLOG 103-11).
  */
 export function fxDailyCoverage(runs: Pick<FxHistoricalRun, "trigger" | "retrieved_at" | "requested_from" | "requested_to" | "unfinished_pages">[], now: Date, readAt = now.getTime()) {
   const window = latestFxDailyWindow(now);
   const daily = runs.filter((run) => run.trigger === "daily");
   const latest = daily.length ? daily.map((run) => run.retrieved_at).sort().at(-1)! : null;
+  let recorded: (typeof runs)[number] | undefined;
+  for (const run of runs) if (!recorded || run.retrieved_at >= recorded.retrieved_at) recorded = run;
   let last: (typeof daily)[number] | undefined;
   for (const run of daily) if (Date.parse(run.retrieved_at) <= window.deadline && (!last || run.retrieved_at >= last.retrieved_at)) last = run;
   const meets = last !== undefined && Date.parse(last.retrieved_at) >= window.opens_at && Date.parse(last.requested_from) <= window.session.start
     && Date.parse(last.requested_to) >= window.session.end - FIFTEEN_MINUTES && last.unfinished_pages === 0;
   return { latest_run_at: latest, window_opens_at: new Date(window.opens_at).toISOString(), window_closes_at: new Date(window.deadline).toISOString(), latest_window_met: meets,
-    latest_in_future: latest !== null && stampedAhead(latest, now, readAt) };
+    latest_recorded_run_at: recorded?.retrieved_at ?? null, latest_recorded_trigger: recorded?.trigger ?? null,
+    latest_in_future: recorded !== undefined && stampedAhead(recorded.retrieved_at, now, readAt) };
 }

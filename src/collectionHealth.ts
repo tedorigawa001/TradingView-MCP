@@ -18,6 +18,8 @@ export type CollectionHealthIssue = {
   collector: "policy_rate" | "first_seen" | "research" | "fx_history";
   /** The instrument, for the FX history collector only. */
   instrument?: string;
+  /** For fx_history_clock_ahead, the trigger of the run stamped ahead: a manual run blocks the daily runs too (BACKLOG 103-11). */
+  trigger?: "daily" | "manual";
   /**
    * For a `_clock_ahead` issue, the latest heartbeat's age in hours at checked_at: negative, since it is stamped later,
    * rounded away from zero to the next 0.01 hour.
@@ -29,8 +31,15 @@ export type CollectionHealthIssue = {
 
 /** "all" covers the three collectors every setup runs; the daily FX history collection is checked only by its own scope. */
 export type CollectionHealthScope = "all" | "policy-rate" | "first-seen" | "research" | "fx-history";
-/** latest_in_future: the latest daily run (latest_run_at) is stamped after the check read the run log (see stampedAhead). */
-export type FxHistoryHealth = { instrument: string; latest_run_at: string | null; window_opens_at: string; window_closes_at: string; latest_window_met: boolean; latest_in_future: boolean };
+/**
+ * latest_run_at is the latest daily run; latest_recorded_run_at and latest_recorded_trigger the latest run of either
+ * trigger, which the run log orders every run after; latest_in_future: that run is stamped after the check read the run
+ * log (see stampedAhead). Without latest_recorded_run_at, latest_run_at is taken for it.
+ */
+export type FxHistoryHealth = {
+  instrument: string; latest_run_at: string | null; window_opens_at: string; window_closes_at: string; latest_window_met: boolean; latest_in_future: boolean;
+  latest_recorded_run_at?: string | null; latest_recorded_trigger?: "daily" | "manual" | null;
+};
 
 export type CollectionHealthResult = {
   checked_at: string;
@@ -110,6 +119,9 @@ function assertInFuture(value: unknown, latest: string | null, checkedAt: string
  */
 const hoursBefore = (checkedAt: string, latest: string) => -Math.max(1, Math.ceil((Date.parse(latest) - Date.parse(checkedAt)) / 36_000)) / 100;
 
+/** The FX history run the log orders the others after: the latest of either trigger, or the latest daily run when not given. */
+const latestRecorded = (row: FxHistoryHealth) => (row.latest_recorded_run_at === undefined ? row.latest_run_at : row.latest_recorded_run_at);
+
 export function evaluateCollectionHealth(input: CollectionHealthInput): CollectionHealthResult {
   const scope = input.scope ?? "all";
   if (!isCanonicalTimestamp(input.checkedAt)) throw new Error("collection health checked_at must be canonical");
@@ -124,7 +136,9 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
     for (const row of input.fxHistory) {
       if (!isCanonicalTimestamp(row.window_opens_at) || !isCanonicalTimestamp(row.window_closes_at)) throw new Error("FX history window must be canonical");
       if (row.latest_run_at !== null && !isCanonicalTimestamp(row.latest_run_at)) throw new Error("FX history latest run must be canonical");
-      assertInFuture(row.latest_in_future, row.latest_run_at, input.checkedAt);
+      if (row.latest_recorded_run_at !== undefined && row.latest_recorded_run_at !== null && !isCanonicalTimestamp(row.latest_recorded_run_at)) throw new Error("FX history latest recorded run must be canonical");
+      if (row.latest_recorded_trigger !== undefined && row.latest_recorded_trigger !== null && row.latest_recorded_trigger !== "daily" && row.latest_recorded_trigger !== "manual") throw new Error("FX history latest recorded trigger must be daily or manual");
+      assertInFuture(row.latest_in_future, latestRecorded(row), input.checkedAt);
     }
   }
   if (checkPolicyRate) {
@@ -174,10 +188,13 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
   if (checkFirstSeen && input.firstSeen.latest_run_status === "partial") {
     issues.push({ code: "first_seen_collection_partial", collector: "first_seen", age: 1, threshold: 0, unit: "scheduled_runs" });
   }
-  // The daily FX history collection needs a run in the latest window, covering the session before it (BACKLOG 103-5).
+  // The daily FX history collection needs a run in the latest window, covering the session before it (BACKLOG 103-5). A
+  // run of either trigger stamped ahead holds off every later one, so it is reported first, with its trigger: a manual
+  // one may stand before any daily run at all (BACKLOG 103-11).
   if (checkFxHistory) for (const row of input.fxHistory!) {
-    if (row.latest_run_at === null) issues.push({ code: "fx_history_collection_missing", collector: "fx_history", instrument: row.instrument, age: null, threshold: 0, unit: "scheduled_runs" });
-    else if (row.latest_in_future === true) issues.push(ahead("fx_history", row.latest_run_at, row.instrument));
+    if (row.latest_in_future === true) {
+      issues.push({ ...ahead("fx_history", latestRecorded(row), row.instrument), ...(row.latest_recorded_trigger ? { trigger: row.latest_recorded_trigger } : {}) });
+    } else if (row.latest_run_at === null) issues.push({ code: "fx_history_collection_missing", collector: "fx_history", instrument: row.instrument, age: null, threshold: 0, unit: "scheduled_runs" });
     else if (!row.latest_window_met) issues.push({ code: "fx_history_collection_stale", collector: "fx_history", instrument: row.instrument, age: 1, threshold: 0, unit: "scheduled_runs" });
   }
 

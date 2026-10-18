@@ -78,13 +78,19 @@ test("the health window is the latest Monday-to-Friday 08:00 New York deadline, 
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z", { trigger: "manual" })], now).latest_run_at, null);
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T13:30:00Z", { unfinished_pages: 1 })], now).latest_window_met, true, "a run after the deadline is not read");
   assert.deepEqual(fxDailyCoverage([], now), { latest_run_at: null, window_opens_at: iso("2026-01-11T22:15:00Z"), window_closes_at: iso("2026-01-12T13:00:00Z"), latest_window_met: false,
-    latest_in_future: false });
-  // The latest daily run stamped ahead of the clock that read the log, after now and after the read, blocks every later
-  // run until the clock reaches it (BACKLOG 102-36 review); one written before the read is not ahead. Manual runs do not count.
+    latest_recorded_run_at: null, latest_recorded_trigger: null, latest_in_future: false });
+  // The latest run stamped ahead of the clock that read the log, after now and after the read, blocks every later run
+  // until the clock reaches it (BACKLOG 102-36 review); one written before the read is not ahead. The log orders daily
+  // and manual runs alike, so the latest of either trigger is the one, and its trigger is named (BACKLOG 103-11).
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z")], now).latest_in_future, false);
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z")], now).latest_in_future, true);
   assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z")], now, Date.parse("2026-01-12T15:00:01Z")).latest_in_future, false);
-  assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z", { trigger: "manual" })], now).latest_in_future, false);
+  const manualAhead = fxDailyCoverage([run("2026-01-11T23:30:00Z"), run("2026-01-12T15:00:00Z", { trigger: "manual" })], now);
+  assert.deepEqual([manualAhead.latest_run_at, manualAhead.latest_recorded_run_at, manualAhead.latest_recorded_trigger, manualAhead.latest_in_future, manualAhead.latest_window_met],
+    [iso("2026-01-11T23:30:00Z"), iso("2026-01-12T15:00:00Z"), "manual", true, true]);
+  assert.deepEqual([fxDailyCoverage([run("2026-01-12T15:00:00Z", { trigger: "manual" })], now)].map((row) => [row.latest_run_at, row.latest_recorded_trigger, row.latest_in_future]),
+    [[null, "manual", true]], "with no daily run at all");
+  assert.equal(fxDailyCoverage([run("2026-01-11T23:30:00Z", { trigger: "manual" }), run("2026-01-12T15:00:00Z")], now).latest_recorded_trigger, "daily");
   // Within a minute of the read it is not ahead.
   assert.equal(fxDailyCoverage([run("2026-01-12T14:00:30Z")], now).latest_in_future, false);
   assert.equal(fxDailyCoverage([run("2026-01-12T14:01:01Z")], now).latest_in_future, true);
@@ -209,6 +215,16 @@ test("the fx-history health scope checks each named instrument's run log against
     first_bar_at: iso("2026-01-09T21:30:00Z"), last_bar_at: iso("2026-01-09T21:45:00Z"), resumed_pages: 0, unfinished_pages: 0, manifest_recorded: true });
   const clock = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "fx-history", "--instrument", "GBP_USD", "--instrument", "EUR_USD"]), new Date());
   assert.deepEqual(clock.fx_history.map((row) => [row.instrument, row.latest_in_future]), [["GBP_USD", true], ["EUR_USD", false]]);
-  assert.deepEqual(clock.issues.map((issue) => [issue.code, issue.instrument]), [["fx_history_clock_ahead", "GBP_USD"], ["fx_history_collection_stale", "EUR_USD"]]);
+  assert.deepEqual(clock.issues.map((issue) => [issue.code, issue.instrument, issue.trigger]), [["fx_history_clock_ahead", "GBP_USD", "daily"], ["fx_history_collection_stale", "EUR_USD", undefined]]);
   assert.match(collectionHealthNotification(clock), /fx-history GBP_USD, fx-history EUR_USD\..*check the system clock/);
+  // A manual run stamped ahead holds off the daily runs as well (the log refuses a run that starts before it finished):
+  // it is reported as clock_ahead, naming its trigger, also where no daily run was ever recorded (BACKLOG 103-11).
+  await new FxHistoricalRunLog(undefined, "AUD_USD").append({ trigger: "manual", environment: "practice", requested_from: new Date(session.start).toISOString(), requested_to: iso("2026-01-11T23:15:00Z"),
+    started_at: new Date(ahead - 60_000).toISOString(), retrieved_at: new Date(ahead).toISOString(), raw_sha256: [`sha256:${"a".repeat(64)}`], normalized_sha256: `sha256:${"b".repeat(64)}`, bar_count: 2,
+    first_bar_at: iso("2026-01-09T21:30:00Z"), last_bar_at: iso("2026-01-09T21:45:00Z"), resumed_pages: 0, unfinished_pages: 0, manifest_recorded: true });
+  await assert.rejects(() => new FxHistoricalRunLog(undefined, "AUD_USD").prepare(new Date().toISOString()), /the clock moved back/, "the daily run that follows is refused");
+  const manual = await checkCollectionHealth(parseCollectionHealthCliArguments(["--scope", "fx-history", "--instrument", "AUD_USD"]), new Date());
+  assert.deepEqual(manual.fx_history.map((row) => [row.latest_run_at, row.latest_recorded_trigger, row.latest_in_future]), [[null, "manual", true]]);
+  assert.deepEqual(manual.issues.map((issue) => [issue.code, issue.instrument, issue.trigger, issue.age]), [["fx_history_clock_ahead", "AUD_USD", "manual", -2]]);
+  assert.match(collectionHealthNotification(manual), /fx-history AUD_USD\..*check the system clock/);
 });
