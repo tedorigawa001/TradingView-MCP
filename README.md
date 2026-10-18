@@ -437,7 +437,7 @@ the preflight, but a record is still appended. See
 
 ## Security
 
-See [docs/security-review.md](docs/security-review.md) for the full review. At minimum:
+To report a vulnerability, see [SECURITY.md](SECURITY.md) (GitHub private vulnerability reporting). See [docs/security-review.md](docs/security-review.md) for the full review. At minimum:
 
 - While the debug port is open, any program on the same machine can control the signed-in TradingView session. Launch in debug mode **only while using the AI**, use normal mode otherwise, and do not use this setup on a shared machine.
 - The server is **read-oriented**. Writes are limited to non-destructive user-owned Pine versioning, adding/changing/removing verified owned studies, creating expiring alerts from audited analysis, and starting/stepping/stopping Bar Replay. Confirmation gates protect the relevant tools. Orders, Replay Trading, Replay autoplay, modification/resume/deletion of existing alerts, webhooks, watchlist changes, and Pine-library deletion are intentionally absent.
@@ -543,5 +543,6 @@ E2E verifies rejection of incorrect chart binding, deterministic dry-runs, train
 
 - [docs/STRATEGY.md](docs/STRATEGY.md) - overall strategy and progress
 - [docs/phase0-findings.md](docs/phase0-findings.md) / [phase3](docs/phase3-findings.md) / [phase4](docs/phase4-findings.md) / [phase5](docs/phase5-findings.md) - internal API research
+- [SECURITY.md](SECURITY.md) - security policy and how to report a vulnerability
 - [docs/security-review.md](docs/security-review.md) - security review
 - [docs/BACKLOG.md](docs/BACKLOG.md) - future improvements
