@@ -18,6 +18,8 @@ type CotSpec = {
 };
 type CotRow = Record<string, unknown>;
 export type CotPosition = { group: string; long: number | null; short: number | null; net: number | null };
+/** A fetched report not recorded as first seen, and why: one dated after the moment it was observed (BACKLOG 103-11). */
+export type CotFirstSeenSkip = { report_date: string; reason: string };
 export type CotObservation = {
   symbol: string;
   report_type: string;
@@ -365,10 +367,22 @@ export class CotClient {
     }
     let observations = matching.map((row) => this.normalizeRow(symbol, spec, row));
     let firstSeenError: string | null = null;
+    const firstSeenSkipped: CotFirstSeenSkip[] = [];
     if (this.firstSeenStore) {
       try {
         const observedAt = new Date().toISOString();
-        const records = await this.firstSeenStore.observeMany(observations.map((observation) => ({
+        // Only a report dated by the stamp's date can have been seen then (BACKLOG 103-11), as only closed sessions of open
+        // interest are recorded: the store refuses a batch holding one dated later whole, so a single upstream row dated
+        // in the future (a mistyped year) left every week of the symbol without available_at. Such rows are not recorded,
+        // and the result names them; the rest are recorded as before.
+        const seenOn = observedAt.slice(0, 10);
+        const recordable = observations.filter((observation) => {
+          const reportDate = observation.report_date!.slice(0, 10);
+          if (reportDate <= seenOn) return true;
+          firstSeenSkipped.push({ report_date: observation.report_date!, reason: `report_date ${reportDate} is after ${seenOn}, the date it was observed, so it cannot have been first seen then` });
+          return false;
+        });
+        const records = recordable.length === 0 ? [] : await this.firstSeenStore.observeMany(recordable.map((observation) => ({
           symbol: observation.symbol,
           observation_date: observation.report_date!.slice(0, 10),
           value: { report_type: observation.report_type, market: observation.market, open_interest: observation.open_interest,
@@ -393,6 +407,7 @@ export class CotClient {
       positioning_features: computeCotPositioningFeatures(observations),
       cache_status: cacheStatus,
       first_seen_error: firstSeenError,
+      first_seen_skipped: firstSeenSkipped,
     };
   }
 
@@ -403,6 +418,7 @@ export class CotClient {
       positioning_features: history.positioning_features,
       cache_status: history.cache_status,
       first_seen_error: history.first_seen_error,
+      first_seen_skipped: history.first_seen_skipped,
     };
   }
 }

@@ -97,8 +97,11 @@ export async function collectFirstSeenSources(input: {
       const history = await input.cot.getHistory(symbol, input.cotWeeks);
       const unrecorded = history.observations.filter((observation) => typeof observation.available_at !== "string").length;
       if (unrecorded > 0) {
-        // With the store's own error when it failed, so the log says why (BACKLOG 102-30).
-        const cause = typeof history.first_seen_error === "string" ? `: ${history.first_seen_error}` : "";
+        // With the store's own error when it failed, so the log says why (BACKLOG 102-30), and why a report was not
+        // offered to it at all: one dated after it was observed (BACKLOG 103-11).
+        const causes = [...(typeof history.first_seen_error === "string" ? [history.first_seen_error] : []),
+          ...(history.first_seen_skipped ?? []).map((skip) => skip.reason)];
+        const cause = causes.length > 0 ? `: ${causes.join("; ")}` : "";
         throw new Error(`${unrecorded} of ${history.observations.length} COT observations were fetched but not recorded as first seen${cause}`);
       }
       return { symbol, status: "complete" as const, observations: history.observations.length };

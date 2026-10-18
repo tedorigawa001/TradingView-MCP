@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { CotClient, computeCotPositioningFeatures, cotFreshness, scheduledCotAvailability } from "../../build/cot.js";
 import { CotFirstSeenStore } from "../../build/cotFirstSeenHistory.js";
-import { mkdtemp } from "node:fs/promises";
+import { collectFirstSeenSources } from "../../build/firstSeenCollection.js";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -108,6 +109,47 @@ test("CotClient keeps a fetch usable when its first-seen store fails, and says w
   const dir = await mkdtemp(join(tmpdir(), "tv-mcp-cot-client-"));
   assert.equal((await new CotClient(base, 15_000, new CotFirstSeenStore(join(dir, "history.jsonl"))).getHistory("OANDA:EURUSD", 1)).first_seen_error, null);
   assert.equal((await new CotClient(base).getHistory("OANDA:EURUSD", 1)).first_seen_error, null);
+});
+
+test("a report dated after it was observed is not recorded but named, and the real weeks are still recorded as first seen (BACKLOG 103-11)", async (t) => {
+  // Offline: fetch is stubbed. Four weekly reports up to a week ago, and one upstream row with a mistyped year.
+  const day = 86_400_000;
+  const reportDate = (weeksAgo) => `${new Date(Date.now() - weeksAgo * 7 * day).toISOString().slice(0, 10)}T00:00:00.000`;
+  const rows = [1, 2, 3, 4].map((weeksAgo) => ({ cftc_contract_market_code: "099741", market_and_exchange_names: "EURO FX", report_date_as_yyyy_mm_dd: reportDate(weeksAgo),
+    open_interest_all: "1000", dealer_positions_long_all: "1", dealer_positions_short_all: "2", asset_mgr_positions_long: "3", asset_mgr_positions_short: "4" }));
+  rows.push({ ...rows[0], report_date_as_yyyy_mm_dd: "2206-10-13T00:00:00.000" });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const response = new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+    Object.defineProperty(response, "url", { value: String(url) });
+    return response;
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  const dir = await mkdtemp(join(tmpdir(), "tv-mcp-cot-future-row-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new CotFirstSeenStore(join(dir, "history.jsonl"));
+  const history = await new CotClient(undefined, 15_000, store).getHistory("OANDA:EURUSD", 5);
+  // Before, the store refused the whole batch for that one row: no week had available_at, and first_seen_error said why.
+  assert.equal(history.first_seen_error, null);
+  assert.equal(history.first_seen_skipped.length, 1);
+  assert.equal(history.first_seen_skipped[0].report_date, "2206-10-13T00:00:00.000");
+  assert.match(history.first_seen_skipped[0].reason, /^report_date 2206-10-13 is after \d{4}-\d{2}-\d{2}, the date it was observed, so it cannot have been first seen then$/);
+  // The row is returned as it was fetched, without available_at; every real week has its first-seen time.
+  assert.deepEqual(history.observations.map((row) => [row.report_date.slice(0, 4) === "2206", typeof row.available_at]),
+    [[true, "object"], [false, "string"], [false, "string"], [false, "string"], [false, "string"]]);
+  assert.equal((await store.coverage()).records, 4);
+  // A collection run says which report was not recorded, and why.
+  const collected = await collectFirstSeenSources({
+    cot: new CotClient(undefined, 15_000, store),
+    realYield: { getLatest: async () => ({ observation_date: "2026-07-25", available_at: "2026-07-26T00:00:00.000Z", value_status: "valid", quality_issues: [] }) },
+    cmeGoldOpenInterest: { getLatestGoldOpenInterest: async () => ({ observation_date: "2026-07-24", open_interest: 1, report_status: "final", source: "cme_daily_bulletin",
+      source_detail: "GC_FUT", observed_at: "2026-07-26T00:00:00.000Z" }) },
+    futuresOpenInterest: { observeMany: async () => ({ recorded: [{}], unchanged: 0, revisions: 0 }) },
+    cotSymbols: ["OANDA:EURUSD"], cotWeeks: 5, coverage: async () => ({ status: "complete" }),
+  });
+  assert.equal(collected.cot[0].status, "error");
+  assert.match(collected.cot[0].error, /^1 of 5 COT observations were fetched but not recorded as first seen: report_date 2206-10-13 is after /);
+  assert.equal((await store.coverage()).records, 4, "the real weeks were recorded once; unchanged, they are not recorded again");
 });
 
 test("CotClient validates history weeks and rejects incomplete history", async (t) => {
