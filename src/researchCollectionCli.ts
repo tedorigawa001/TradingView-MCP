@@ -1,7 +1,7 @@
-import { assertAppendableJsonl, posixModeEnforced, noFollowFlag, nonBlockingFlag } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, posixModeEnforced, noFollowFlag, nonBlockingFlag, symbolicLinkRefused } from "./fsDurability.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { appendFile, lstat, mkdir, open } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath, type ResearchCollectionHeartbeatRecord } from "./researchCollectionHeartbeat.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -195,15 +195,23 @@ export async function printResearchCollection(
   write(`${JSON.stringify({ ...summary, heartbeat: { sequence: heartbeat.sequence, recorded_at: heartbeat.first_seen_at } })}\n`);
 }
 
-/** Appends a collection row unless the output already holds as many primary events for its hypothesis. */
+/**
+ * Appends a collection row unless the output already holds as many primary events for its hypothesis. The output is
+ * opened without following a symbolic link, to read and to append (BACKLOG 103-11 review): a link there is refused,
+ * naming the file it leads to, which can be given instead.
+ */
 export async function appendOwnerOnly(path: string, row: { hypothesis_id: string; primary_available_events: number }): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const directory = await lstat(dirname(path));
   if (!directory.isDirectory() || directory.isSymbolicLink() || (posixModeEnforced() && (directory.mode & 0o077) !== 0)) throw new Error("research collection directory is unsafe");
+  await assertNotSymbolicLink(path, "research collection output");
+  // A link put there after that check is refused by O_NOFOLLOW, with the same message.
+  const linked = async (error: unknown) => (error as NodeJS.ErrnoException).code === "ELOOP"
+    ? symbolicLinkRefused(path, "research collection output", await realpath(path).catch(() => null)) : error;
   let existingPrimaryEvents = 0;
   try {
     // Not waiting on a FIFO, nor following a link, before the regular-file check below (BACKLOG 103-11 review).
-    const existing = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
+    const existing = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag()).catch(async (error: unknown) => { throw await linked(error); });
     try {
       const stat = await existing.stat();
       if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) throw new Error("research collection output is unsafe");
@@ -219,7 +227,7 @@ export async function appendOwnerOnly(path: string, row: { hypothesis_id: string
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (row.primary_available_events <= existingPrimaryEvents) return false;
-  const handle = await open(path, "a+", 0o600);
+  const handle = await open(path, constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | noFollowFlag(), 0o600).catch(async (error: unknown) => { throw await linked(error); });
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) throw new Error("research collection output is unsafe");

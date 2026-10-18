@@ -60,7 +60,8 @@ test("no store reads a file in a way that waits on a FIFO or follows a link (BAC
   // A read-only open of a FIFO waits for a writer, before any regular-file check after it can refuse the FIFO: a log's
   // reader then hung for good with the log's lock held. Every read-only open passes O_NONBLOCK, whatever the order of its
   // flags, and a store reads a whole file only through readRegularFile, never by readFile(path), open(path, "r") or a read
-  // stream of a path. The CLIs below read files a user names on the command line, theirs to choose; fsDurability.ts holds
+  // stream of a path; nor does it open one by a flag string ("a+", "w" ...), which cannot refuse a link (BACKLOG 103-11
+  // review: the research collection output was appended to through one). The CLIs below read files a user names on the command line, theirs to choose; fsDurability.ts holds
   // the helpers and syncs directories. The scan reads comments too, so keep it free of a literal example.
   const userInputs = new Set(["evaluate.ts", "eventStudyFalsificationCli.ts", "fxCsvM1AggregationCli.ts", "fxCsvFeatureScanCli.ts", "macroEvent60mCli.ts",
     "macroEvent60mPreflightCli.ts", "macroEventResponseCli.ts", "macroSurpriseCoverageCli.ts", "officialMacroActualCollectionCli.ts", "priceActionTrapReproductionCli.ts",
@@ -76,7 +77,7 @@ test("no store reads a file in a way that waits on a FIFO or follows a link (BAC
       if (!/nonBlockingFlag\(|O_NONBLOCK|NON_BLOCKING_OPEN/.test(statement)) offenders.push(`${name}: ${statement.trim()}`);
     }
     if (userInputs.has(name)) continue;
-    for (const match of source.matchAll(/(?<![.\w])(?:readFile|readFileSync|createReadStream)\(|(?<![.\w])open\([^;]*?,\s*["']r["']/g)) {
+    for (const match of source.matchAll(/(?<![.\w])(?:readFile|readFileSync|createReadStream)\(|(?<![.\w])open(?:Sync)?\([^;]*?,\s*["'](?:r|rs|w|wx|a|ax|as)\+?["']/g)) {
       offenders.push(`${name}: ${source.slice(match.index, source.indexOf("\n", match.index)).trim()}`);
     }
   }

@@ -334,6 +334,8 @@ Futures-OI first-seen history is appended to `~/.tradingview-mcp/futures-open-in
 
 If a process crashes while writing history and leaves a `.lock`, history access stops rather than deleting it automatically. Confirm that no other TradingView-MCP process is running before deleting only the adjacent `.lock` file.
 
+History stores and their outputs are opened without following symbolic links (0.1.44): every history log, the research collection output (`--output-path` or `TRADINGVIEW_MCP_RESEARCH_COLLECTION_PATH`) and the evaluation log (`--log`) must name the file itself. A symbolic link there is refused with a message that names the file it leads to; give that path instead.
+
 The evaluation CLI uses the snapshot's `request_completed_at` as evaluation time and binds `evaluation_context.real_yield_10y` only to a version first seen by that time. It never falls back to the current value or a later revision.
 
 ```bash

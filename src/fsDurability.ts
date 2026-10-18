@@ -70,7 +70,17 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (stat.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link`);
+  if (stat.isSymbolicLink()) throw symbolicLinkRefused(path, label, await realpath(path).catch(() => null));
+}
+
+/**
+ * The refusal of a symbolic link where a file is opened without following one (BACKLOG 103-11 review): it names the
+ * path, says links are not followed there, and names the file the link leads to (`leadsTo`, when it leads to one), to be
+ * given instead.
+ */
+export function symbolicLinkRefused(path: string, label: string, leadsTo: string | null): Error {
+  return new Error(`${label} path must be a regular file, not a symbolic link: ${path} is a symbolic link, which is not followed here; `
+    + (leadsTo === null ? "give the path of a regular file instead" : `give the path of the file it leads to, ${leadsTo}, instead`));
 }
 
 /**
