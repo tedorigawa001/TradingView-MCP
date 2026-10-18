@@ -57,6 +57,8 @@ export class FxHistoricalRunLog implements FxHistoricalRunLogPort {
     if (!isOandaFxInstrument(instrument)) throw new Error(`instrument must be one of ${OANDA_FX_INSTRUMENTS.join(", ")}`);
     this.log = new AppendOnlyFirstSeenLog(path ?? resolveFxHistoricalRunLogPathFor(instrument), "FX history run", (value) => validateRun(value, instrument), { maxFileBytes: MAX_RUN_LOG_BYTES, maxRecordBytes: MAX_RUN_RECORD_BYTES });
   }
+  /** The log's repair of a tail stamped ahead of the clock (by first_seen_at, which is retrieved_at), for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
   /** Reads (and so checks) the log before a run fetches anything; a start before the latest recorded run is refused. */
   async prepare(startedAt: string) {
     await this.log.serialize(async () => {

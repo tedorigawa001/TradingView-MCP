@@ -50,6 +50,9 @@ export class CotFirstSeenStore {
       { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
   async observeMany(versions: CotObservationVersion[]): Promise<CotFirstSeenRecord[]> {
     if (versions.length < 1 || versions.length > 300) throw new Error("COT first-seen batch must contain 1 to 300 versions");
     return this.log.serialize(async () => {

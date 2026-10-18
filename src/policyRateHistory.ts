@@ -65,6 +65,9 @@ export class PolicyRateFirstSeenStore {
     this.log = new AppendOnlyFirstSeenLog(filePath, "policy-rate", validateRecord, { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
   async observeMany(versions: PolicyRateObservationVersion[]): Promise<{ recorded: PolicyRateFirstSeenRecord[]; unchanged: number; revisions: number }> {
     if (versions.length < 1 || versions.length > CURRENCIES.length) throw new Error("policy-rate observation batch must contain 1 to 8 versions");
     return this.log.serialize(async () => {

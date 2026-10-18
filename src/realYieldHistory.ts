@@ -75,6 +75,9 @@ export class RealYieldFirstSeenStore {
       { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
   private readAllUnlocked(): Promise<RealYieldFirstSeenRecord[]> {
     return this.log.readAllUnlocked();
   }

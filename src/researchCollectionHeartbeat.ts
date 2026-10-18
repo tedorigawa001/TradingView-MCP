@@ -71,6 +71,9 @@ export class ResearchCollectionHeartbeatStore {
     this.log = new AppendOnlyFirstSeenLog(filePath, "research collection heartbeat", validateRecord, { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
   async recordRun(input: Omit<ResearchCollectionHeartbeatRecord, "schema_version" | "sequence" | "series" | "observation_date" | "first_seen_at"> & { observed_at: string }) {
     if (!isCanonicalTimestamp(input.observed_at)) throw new Error("research collection heartbeat observed_at must be a canonical timestamp");
     return this.log.serialize(async () => {

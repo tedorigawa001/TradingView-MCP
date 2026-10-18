@@ -94,8 +94,11 @@ test("a latest heartbeat stamped after the check is reported as clock_ahead, and
     { code: "first_seen_clock_ahead", collector: "first_seen", age: -2, threshold: 0, unit: "hours" },
   ]);
   assert.deepEqual([ahead.policy_rate.latest_in_future, ahead.research.latest_in_future, ahead.first_seen.latest_in_future], [true, true, true]);
+  // Setting the clock right does not clear a stamp ahead: the notification names the repair of each store (BACKLOG 103-11).
   assert.equal(collectionHealthNotification(ahead), "Collection heartbeat unhealthy: policy-rate, research, first-seen. Inspect collector and scheduler logs; "
-    + "CDP-dependent collectors also require TradingView debugging. A heartbeat is stamped after the check: check the system clock.");
+    + "CDP-dependent collectors also require TradingView debugging. A heartbeat is stamped after the check: check the system clock. Setting it right does not "
+    + "clear the block; once it is right, run tradingview-mcp-repair-first-seen --store policy-rate-heartbeat, tradingview-mcp-repair-first-seen --store research-heartbeat, "
+    + "tradingview-mcp-repair-first-seen --store first-seen-heartbeat (a dry run) and then again with --apply.");
   // A partial first-seen run is still reported beside it.
   const partial = evaluateCollectionHealth({ ...base, scope: "first-seen", policyRate: { latest_collected_at: null, latest_run_age_business_days: null }, research: { latest_collected_at: null, latest_run_age_hours: null },
     firstSeen: { ...ahead.first_seen, latest_run_status: "partial" } });
@@ -122,7 +125,7 @@ test("a latest heartbeat stamped after the check is reported as clock_ahead, and
     { instrument: "USD_JPY", latest_run_at: "2026-09-03T23:30:00.000Z", window_opens_at: "2026-09-03T21:15:00.000Z", window_closes_at: "2026-09-04T12:00:00.000Z", latest_window_met: true, latest_in_future: false },
   ] });
   assert.deepEqual(fx.issues, [{ code: "fx_history_clock_ahead", collector: "fx_history", instrument: "EUR_USD", age: -1, threshold: 0, unit: "hours" }]);
-  assert.match(collectionHealthNotification(fx), /^Collection heartbeat unhealthy: fx-history EUR_USD\..*check the system clock\.$/);
+  assert.match(collectionHealthNotification(fx), /^Collection heartbeat unhealthy: fx-history EUR_USD\..*check the system clock\. .*run tradingview-mcp-repair-first-seen --store fx-history --instrument EUR_USD \(a dry run\) and then again with --apply\.$/);
   // However little ahead a heartbeat the stores report is, its age is not shown as 0.
   const seconds = evaluateCollectionHealth({ ...base, scope: "research", policyRate: { latest_collected_at: null, latest_run_age_business_days: null },
     research: { latest_collected_at: "2026-09-07T02:15:05.000Z", latest_run_age_hours: 0, latest_in_future: true }, firstSeen: freshFirstSeen });

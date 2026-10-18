@@ -215,10 +215,25 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
   };
 }
 
+/**
+ * The tradingview-mcp-repair-first-seen store, with its instrument for the FX history, that holds a `_clock_ahead`
+ * issue's record stamped ahead (BACKLOG 103-11).
+ */
+export function clockAheadRepairStore(issue: CollectionHealthIssue): string {
+  return issue.collector === "policy_rate" ? "policy-rate-heartbeat" : issue.collector === "first_seen" ? "first-seen-heartbeat"
+    : issue.collector === "fx_history" ? `fx-history --instrument ${issue.instrument}` : "research-heartbeat";
+}
+
+/**
+ * The notification for an unhealthy check. A record stamped ahead keeps holding its log off after the clock is set
+ * right, until the clock reaches it, so the notification names the repair for each store it was found in (BACKLOG 103-11).
+ */
 export function collectionHealthNotification(result: CollectionHealthResult): string {
   if (!result.should_notify) return "";
   const names = result.issues.map((issue) => issue.collector === "policy_rate" ? "policy-rate" : issue.collector === "first_seen" ? "first-seen"
     : issue.collector === "fx_history" ? `fx-history ${issue.instrument}` : "research");
-  const clock = result.issues.some((issue) => issue.code.endsWith("_clock_ahead")) ? " A heartbeat is stamped after the check: check the system clock." : "";
+  const repairs = [...new Set(result.issues.filter((issue) => issue.code.endsWith("_clock_ahead")).map((issue) => `tradingview-mcp-repair-first-seen --store ${clockAheadRepairStore(issue)}`))];
+  const clock = repairs.length === 0 ? "" : " A heartbeat is stamped after the check: check the system clock. Setting it right does not clear the block;"
+    + ` once it is right, run ${repairs.join(", ")} (a dry run) and then again with --apply.`;
   return `Collection heartbeat unhealthy: ${[...new Set(names)].join(", ")}. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.${clock}`;
 }

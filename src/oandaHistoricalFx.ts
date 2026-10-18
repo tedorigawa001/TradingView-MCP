@@ -226,6 +226,8 @@ export class FxHistoricalManifestStore {
     this.path = path ?? resolveFxHistoricalManifestPathFor(instrument);
     this.log = new AppendOnlyFirstSeenLog(this.path, "FX history manifest", (value) => validateManifest(value, instrument), { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
+  /** The log's repair of a tail stamped ahead of the clock (by first_seen_at, which is retrieved_at), for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
   async append(manifest: Omit<FxHistoricalManifest, "schema_version" | "sequence" | "series" | "evidence_tier" | "first_seen_at" | "observation_date">) {
     return this.log.serialize(async () => {
       const records = await this.log.readAllUnlocked();
@@ -273,6 +275,8 @@ export class FxHistoricalCheckpointStore {
     this.path = path ?? `${resolveFxHistoricalManifestPathFor(instrument)}.checkpoints`;
     this.log = new AppendOnlyFirstSeenLog(this.path, "FX history page checkpoint", validateCheckpoint, { maxFileBytes: MAX_MANIFEST_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
   async completed(collectionKey: string) { return this.log.serialize(async () => (await this.log.readAllUnlocked()).filter((row) => row.collection_key === collectionKey)); }
   /** Every checkpoint, in log order: an export reads the log once and groups it by collection key (BACKLOG 103-10 review). */
   async records() { return this.log.serialize(async () => this.log.readAllUnlocked()); }

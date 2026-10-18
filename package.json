@@ -23,7 +23,8 @@
     "tradingview-mcp-generate-evidence": "build/researchEvidenceCli.js",
     "tradingview-mcp-reproduce": "build/researchReproductionCli.js",
     "tradingview-mcp-health": "build/collectionHealthCli.js",
-    "tradingview-mcp-collect-first-seen": "build/collectionCli.js"
+    "tradingview-mcp-collect-first-seen": "build/collectionCli.js",
+    "tradingview-mcp-repair-first-seen": "build/firstSeenRepairCli.js"
   },
   "main": "build/index.js",
   "files": [
@@ -58,6 +59,7 @@
     "collect:first-seen": "node build/collectionCli.js collect",
     "coverage:first-seen": "node build/collectionCli.js coverage",
     "health:collections": "node build/collectionHealthCli.js",
+    "repair:first-seen": "node build/firstSeenRepairCli.js",
     "collect:policy-rates": "node build/policyRateCollectionCli.js --confirm-chart-switch",
     "collect:official-policy-rates": "node build/officialPolicyRateCollectionCli.js --confirm-exploratory-import",
     "collect:fx-history": "node build/fxHistoryCollectionCli.js --confirm-external-fetch",

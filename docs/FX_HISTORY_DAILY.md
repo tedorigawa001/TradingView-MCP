@@ -88,6 +88,13 @@ instrument's `latest_recorded_run_at` and `latest_recorded_trigger` name that ru
 issue is `fx_history_clock_ahead`, with the run's `trigger` and its age in hours, negative and rounded away from zero
 to 0.01 hour (BACKLOG 102-36 review). It is reported in place of a missing or stale daily run, since a manual run
 stamped ahead may stand before any daily run at all (until 0.1.43 only a daily run was looked at, and a manual one
-showed only as a miss at the next deadline; BACKLOG 103-11). `--scope all` does not include this check, which needs its
-instruments named. The [health example](launchd/com.tradingview-mcp.collection-health-fx-history.plist.example) runs at 22:30 JST
+showed only as a miss at the next deadline; BACKLOG 103-11). Setting the clock right does not clear it: a run stamped
+ahead also stamped its page checkpoints and its manifest record, which refuse later ones the same way. Once the clock
+is right, `tradingview-mcp-repair-first-seen --store fx-history --instrument EUR_USD` prints, for the instrument's run
+log, manifest and page checkpoints, which tail of records is stamped more than a minute ahead, changing nothing; with
+`--apply --force` it moves those tails, runs first, to owner-only sidecars `<log>.ahead-<time>.jsonl` and rewrites
+each log without its tail, so the next run records. `--force` is needed because exports already written cite the moved
+sequences (`collections[].sequence`, `runs[].sequence` and the totals), and the next records take those sequences
+again. It refuses when a kept run would name content only a moved manifest record holds, or a kept record lose a
+checkpoint. `--scope all` does not include this check, which needs its instruments named. The [health example](launchd/com.tradingview-mcp.collection-health-fx-history.plist.example) runs at 22:30 JST
 on Monday to Friday, after each deadline, and notifies.

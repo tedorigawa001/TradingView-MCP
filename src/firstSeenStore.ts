@@ -1,9 +1,9 @@
-import { constants } from "node:fs";
-import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { dirname, resolve } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, nonBlockingFlag, posixModeEnforced, attemptLockFile, type LockFileAttempt } from "./fsDurability.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { assertAppendableJsonl, assertNotSymbolicLink, syncDirectoryEntry, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced, attemptLockFile, type LockFileAttempt } from "./fsDurability.js";
 
 const DEFAULT_LOCK_WAIT_MS = 30_000;
 function lockWaitMilliseconds(): number {
@@ -39,6 +39,31 @@ export interface FirstSeenRecordBase {
   observation_date: string;
   first_seen_at: string;
 }
+
+/**
+ * A first-seen log as a repair of its records stamped ahead of the clock found it, under the log's lock (BACKLOG
+ * 103-11): every record as the store read and validated it, each record's own line, the file's identity (null when
+ * there is no log), and `keep`, how many records stay; the records from `keep` on are the tail stamped ahead.
+ */
+export type StampedAheadPlan<T extends FirstSeenRecordBase> = {
+  readonly label: string; readonly path: string; readonly records: readonly T[]; readonly lines: readonly string[]; readonly identity: Stats | null; readonly keep: number;
+};
+
+/**
+ * What tradingview-mcp-repair-first-seen may do with a store's log (BACKLOG 103-11): name it, take its lock (serialize,
+ * with the store's own queue and lock file), find the tail stamped ahead (plan) and move it out (apply), both under that
+ * lock. Nothing here appends.
+ */
+export type StampedAheadRepair<T extends FirstSeenRecordBase> = {
+  readonly label: string;
+  readonly path: string;
+  serialize<R>(operation: () => Promise<R>): Promise<R>;
+  plan(now: Date, toleranceMs: number): Promise<StampedAheadPlan<T>>;
+  apply(plan: StampedAheadPlan<T>, now: Date): Promise<{ sidecar: string; kept: number }>;
+};
+
+/** The name of a repair's sidecar: `<log>.ahead-<now, ISO 8601 basic>.jsonl`, with no colon, so Windows takes it too. */
+export const stampedAheadSidecarPath = (path: string, now: Date) => `${path}.ahead-${now.toISOString().replace(/[-:]/g, "")}.jsonl`;
 
 /**
  * Append-only, owner-only JSONL log shared by every first-seen series.
@@ -143,6 +168,11 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
   }
 
   async readAllUnlocked(): Promise<T[]> {
+    return (await this.readLogUnlocked()).records;
+  }
+
+  /** readAllUnlocked's read, with each record's own line, the file's text and its identity (null when there is no log). */
+  private async readLogUnlocked(): Promise<{ records: T[]; lines: string[]; text: string; identity: Stats | null }> {
     let handle;
     await assertNotSymbolicLink(this.filePath, `${this.label} history`);
     try {
@@ -150,7 +180,7 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       // file check below could never refuse it.
       handle = await open(this.filePath, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { records: [], lines: [], text: "", identity: null };
       throw new Error(`unable to open ${this.label} history as a regular file`, { cause: err });
     }
     try {
@@ -162,7 +192,8 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
       if ((posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error(`${this.label} history file permissions must be 0600 or stricter`);
       if (stat.size > this.limits.maxFileBytes) throw new Error(`${this.label} history file is too large`);
       const text = await handle.readFile("utf8");
-      const records = text.trim().split("\n").filter(Boolean).map((line, index) => {
+      const lines = text.trim().split("\n").filter(Boolean);
+      const records = lines.map((line, index) => {
         if (Buffer.byteLength(line, "utf8") > this.limits.maxRecordBytes) {
           throw new Error(`${this.label} history record is too large at line ${index + 1}`);
         }
@@ -188,10 +219,99 @@ export class AppendOnlyFirstSeenLog<T extends FirstSeenRecordBase> {
         }
         previousFirstSeen = record.first_seen_at;
       }
-      return records;
+      return { records, lines, text, identity: stat };
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * Under this log's lock: reads it as readAllUnlocked does, with every check, and finds the tail of records whose
+   * first-seen stamp is more than `toleranceMs` after `now` (BACKLOG 103-11). Stamps never decrease in a log that reads,
+   * so the records stamped ahead are always a tail; that is checked all the same. A log that is not framed exactly as
+   * appendUnlocked writes it (one record per line, each ending in a newline, nothing else) is refused, since rewriting
+   * it would change more than the tail.
+   */
+  async planStampedAheadUnlocked(now: Date, toleranceMs: number): Promise<StampedAheadPlan<T>> {
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(toleranceMs) || toleranceMs < 0) throw new Error(`${this.label} repair needs a valid time and tolerance`);
+    const { records, lines, text, identity } = await this.readLogUnlocked();
+    if (identity !== null && text !== lines.map((line) => `${line}\n`).join("")) {
+      throw new Error(`${this.label} history is not framed as the store writes it (one record per line, each ending in a newline, nothing else): `
+        + `${this.filePath}; settle it by hand; nothing was changed`);
+    }
+    const ahead = (record: T) => Date.parse(record.first_seen_at) - now.getTime() > toleranceMs;
+    let keep = records.length;
+    while (keep > 0 && ahead(records[keep - 1])) keep -= 1;
+    if (records.slice(0, keep).some(ahead)) throw new Error(`${this.label} history holds records stamped ahead that are not its tail: ${this.filePath}; nothing was changed`);
+    return { label: this.label, path: this.filePath, records, lines, identity, keep };
+  }
+
+  /**
+   * Under this log's lock, with a plan made under the same hold (BACKLOG 103-11): moves the tail stamped ahead out of the
+   * log. The tail's lines go, byte for byte, to a new sidecar `<log>.ahead-<now>.jsonl` (exclusive create, owner-only
+   * 0600, synced with its directory entry); the records that stay go to a new file beside the log, with the log's mode,
+   * synced, which must read back as the store reads it, the kept records with their sequences from 1; it is then renamed
+   * over the log and the directory synced. The log must still be the file that was read (identity, size, mtime) before
+   * the sidecar is written and before the rename. Anything that fails before the rename removes what this repair wrote and
+   * changes nothing; the error says so. Windows has no POSIX mode or directory sync, as appendUnlocked has none there.
+   */
+  async applyStampedAheadUnlocked(plan: StampedAheadPlan<T>, now: Date): Promise<{ sidecar: string; kept: number }> {
+    const identity = plan.identity;
+    if (plan.path !== this.filePath || identity === null || plan.keep >= plan.records.length) throw new Error(`${this.label} repair has nothing stamped ahead to move: ${this.filePath}; nothing was changed`);
+    const directory = dirname(this.filePath);
+    const unchanged = async () => {
+      const current = await lstat(this.filePath).catch(() => null);
+      return current !== null && current.isFile() && current.dev === identity.dev && current.ino === identity.ino && current.size === identity.size && current.mtimeMs === identity.mtimeMs;
+    };
+    const changed = () => new Error(`${this.label} history changed after the repair read it`);
+    const sidecar = stampedAheadSidecarPath(this.filePath, now);
+    const temporary = join(directory, `.${basename(this.filePath)}.repair-${randomUUID()}.tmp`);
+    const written: { path: string; stat: Stats }[] = [];
+    const writeNew = async (path: string, lines: readonly string[], mode: number) => {
+      const handle = await openExclusiveFile(path, `${this.label} repair`);
+      try {
+        written.push({ path, stat: await handle.stat() });
+        await handle.writeFile(lines.map((line) => `${line}\n`).join(""), "utf8");
+        if (posixModeEnforced()) await handle.chmod(mode);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    };
+    let renamed = false;
+    try {
+      if (!(await unchanged())) throw changed();
+      await writeNew(sidecar, plan.lines.slice(plan.keep), 0o600);
+      await syncDirectoryEntry(directory);
+      await writeNew(temporary, plan.lines.slice(0, plan.keep), identity.mode & 0o777);
+      const rewritten = await new AppendOnlyFirstSeenLog(temporary, this.label, this.validateRecord, this.limits).readAllUnlocked();
+      if (rewritten.length !== plan.keep || rewritten.at(-1)?.sequence !== plan.records[plan.keep - 1]?.sequence) throw new Error(`${this.label} history rewritten without its tail does not read back as its kept records`);
+      if (!(await unchanged())) throw changed();
+      await rename(temporary, this.filePath);
+      renamed = true;
+      await syncDirectoryEntry(directory);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (renamed) throw new Error(`${this.label} history ${this.filePath} was rewritten without its records stamped ahead, which are in ${sidecar}, but syncing its directory failed (${message})`, { cause: error });
+      for (const { path, stat } of written) {
+        const current = await lstat(path).catch(() => null);
+        if (current !== null && current.dev === stat.dev && current.ino === stat.ino) await unlink(path).catch(() => undefined);
+      }
+      throw new Error(`${this.label} repair failed (${message}): ${this.filePath}; nothing was changed`, { cause: error });
+    }
+    const kept = await this.readAllUnlocked();
+    return { sidecar, kept: kept.length };
+  }
+
+  /** This log's StampedAheadRepair, for a store to hand to tradingview-mcp-repair-first-seen (BACKLOG 103-11). */
+  stampedAheadRepair(): StampedAheadRepair<T> {
+    return {
+      label: this.label,
+      path: this.filePath,
+      serialize: (operation) => this.serialize(operation),
+      plan: (now, toleranceMs) => this.planStampedAheadUnlocked(now, toleranceMs),
+      apply: (plan, now) => this.applyStampedAheadUnlocked(plan, now),
+    };
   }
 
   /**
