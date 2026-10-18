@@ -246,7 +246,10 @@ export function collectionHealthNotification(result: CollectionHealthResult): st
   const listed = [...stores.keys()].map((store) => `--store ${store}`).join(", ");
   const forced = [...stores].filter(([, force]) => force).map(([store]) => `--store ${store}`);
   const force = forced.length === 0 ? "" : ` (with --apply --force for ${forced.join(", ")}, whose sequences files elsewhere may cite)`;
-  const clock = stores.size === 0 ? "" : " A heartbeat is stamped after the check: check the system clock. Setting it right does not clear the block;"
+  // An FX history run log holds collection runs, not heartbeats (BACKLOG 103-11 review).
+  const ahead = result.issues.filter((issue) => issue.code.endsWith("_clock_ahead"));
+  const stamped = ahead.every((issue) => issue.collector === "fx_history") ? "A collection run is" : ahead.some((issue) => issue.collector === "fx_history") ? "A heartbeat or collection run is" : "A heartbeat is";
+  const clock = stores.size === 0 ? "" : ` ${stamped} stamped after the check: check the system clock. Setting it right does not clear the block;`
     + ` once it is right, run tradingview-mcp-repair-first-seen with each of ${listed} (a dry run; a store with nothing ahead says so), then again with --apply${force}.`;
   return `Collection heartbeat unhealthy: ${[...new Set(names)].join(", ")}. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.${clock}`;
 }
