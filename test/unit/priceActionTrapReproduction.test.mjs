@@ -533,14 +533,14 @@ test("the same eight aggregates give the same reproduction whatever order they a
   assert.equal((await runPriceActionTrapReproductionCli(argv)).written, false);
 });
 
-test("a staging directory that cannot be removed does not change what the run reports", async (t) => {
+test("a staged file that cannot be removed does not change what the run reports", async (t) => {
   const { out, argv } = await reproductionWorkspace(t);
-  // The staging is removed file by file, then the directory if empty (BACKLOG 103-11): its directory is what stays.
+  // The file is staged beside the evidence and removed when the run ends (BACKLOG 103-11): here its removal fails.
   const fs = createRequire(import.meta.url)("node:fs");
-  const realRmdir = fs.rmdirSync;
-  fs.rmdirSync = (path, ...rest) => {
-    if (basename(String(path)).startsWith(".publish-")) throw Object.assign(new Error("EBUSY: injected"), { code: "EBUSY" });
-    return realRmdir(path, ...rest);
+  const realUnlink = fs.unlinkSync;
+  fs.unlinkSync = (path, ...rest) => {
+    if (String(path).endsWith(".stage")) throw Object.assign(new Error("EBUSY: injected"), { code: "EBUSY" });
+    return realUnlink(path, ...rest);
   };
   syncBuiltinESMExports();
   try {
@@ -556,15 +556,14 @@ test("a staging directory that cannot be removed does not change what the run re
     await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
     assert.equal(await readFile(out, "utf8"), earlierEvidence);
   } finally {
-    fs.rmdirSync = realRmdir;
+    fs.unlinkSync = realUnlink;
     fsp.link = realLink;
     syncBuiltinESMExports();
   }
-  // What is left is the two staging directories, beside the evidence, emptied of the file each run staged.
+  // What is left is the file each run staged, beside the evidence.
   const left = await stagingLeft(out);
   assert.equal(left.length, 2);
-  assert.ok(left.every((name) => name.startsWith(".publish-")), left.join(", "));
-  for (const name of left) assert.deepEqual(await readdir(join(dirname(out), name)), []);
+  assert.ok(left.every((name) => /^\.four-bar-trap-v1-[0-9a-f]{8}-\d+-[0-9a-f]{12}\.stage$/.test(name)), left.join(", "));
 });
 
 test("a file that vanishes between the link and the look is linked again once, and a path in flux is given up", async (t) => {

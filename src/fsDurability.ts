@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
-import { link, lstat, mkdtemp, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
@@ -206,49 +206,124 @@ export async function syncJournalForRetry(filePath: string, label: string, platf
 }
 
 /**
- * Refuses to publish into `directory`, already resolved by realpath, when another user could swap what a run stages
- * there (BACKLOG 103-11): one group- or other-writable without the sticky bit, or owned by neither this user nor root.
- * There another user can rename a run's staging directory aside and put a symbolic link in its place, through which the
- * run would write, link and remove files elsewhere. POSIX only: Windows has no owner or mode here (posixModeEnforced).
+ * Why a destination's directory is refused for publishing (BACKLOG 103-11): `reason` says which directory, why and the
+ * command that fixes it; the message adds that nothing was written. publishImmutableFiles takes it as it takes a lock
+ * the directory denies: it only confirms what is already there.
  */
-export async function assertPublishDirectory(directory: string, label: string, platform = process.platform): Promise<void> {
-  if (!posixModeEnforced(platform)) return;
-  const entry = await lstat(directory);
-  if (!entry.isDirectory()) throw new Error(`${label} directory is not a directory: ${directory}; nothing was written`);
+export class PublishDirectoryRefused extends Error {
+  constructor(readonly reason: string) { super(`${reason}; nothing was written`); }
+}
+
+/** `path` quoted for a POSIX shell, for a command a message gives to be pasted. */
+const shellQuote = (path: string) => `'${path.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Why another user could move or replace entries in the directory `entry` at `path`, or null: it can be written by its
+ * group or by every user and has no sticky bit, or it is owned by neither this user (`uid`) nor root.
+ */
+function unsafeDirectory(path: string, entry: Stats, uid: number | undefined): string | null {
   if ((entry.mode & 0o022) !== 0 && (entry.mode & 0o1000) === 0) {
-    throw new Error(`${label} will not publish into ${directory}: other users can write to it and it has no sticky bit, so they could swap the files `
-      + "being published; use a directory only you can write to (chmod go-w), or one with the sticky bit set (as /tmp); nothing was written");
+    const writers = [(entry.mode & 0o020) !== 0 ? `its group (gid ${entry.gid})` : null, (entry.mode & 0o002) !== 0 ? "every user" : null].filter((item) => item !== null).join(" and ");
+    return `${path} (mode ${(entry.mode & 0o7777).toString(8).padStart(4, "0")}, gid ${entry.gid}) can be written by ${writers} and has no sticky bit, so another user `
+      + `could move or replace entries in it (run chmod g-w,o-w ${shellQuote(path)}, or choose a directory only you can write to)`;
   }
-  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   if (uid !== undefined && entry.uid !== uid && entry.uid !== 0) {
-    throw new Error(`${label} will not publish into ${directory}: it is owned by another user (uid ${entry.uid}), who could swap the files being `
-      + "published; use a directory you own; nothing was written");
+    return `${path} is owned by uid ${entry.uid}, neither you (uid ${uid}) nor root, who could move or replace entries in it (choose a directory you own)`;
   }
+  return null;
 }
 
 /**
- * The identity of a staging directory mkdtemp just made (BACKLOG 103-11), taken at once: it must be this user's own
- * staging directory (ownStaging), or it was swapped before it was looked at and nothing is staged in it. `suffix` ends
- * the message where the caller adds nothing to it.
+ * Refuses to publish into `directory`, already resolved by realpath, when another user could move or replace what a run
+ * stages and links there (BACKLOG 103-11): when it, or any directory above it up to /, can be written by its group or by
+ * every user without the sticky bit, or is owned by neither this user nor root. A run stages its files in that directory
+ * itself, so these checks leave no directory on the way another user could swap. POSIX only: Windows has no owner or
+ * mode here (posixModeEnforced). Access control lists, and volumes mounted with ownership ignored, are not seen: a writer
+ * there can still make a run fail, though the identity checks keep it from redirecting anything. The error is a
+ * PublishDirectoryRefused naming the directory, its mode and group, and the chmod that fixes it.
  */
-async function stagingIdentity(path: string, label: string, suffix = ""): Promise<BigIntStats> {
-  const entry = await lstat(path, { bigint: true });
-  if (!ownStaging(entry)) throw new Error(`${label} staging directory ${path} was replaced as soon as it was made${suffix}`);
-  return entry;
+export async function assertPublishDirectory(directory: string, label: string, platform = process.platform): Promise<void> {
+  if (!posixModeEnforced(platform)) return;
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  for (let current = directory; ; current = dirname(current)) {
+    const entry = await lstat(current);
+    if (current === directory && !entry.isDirectory()) throw new PublishDirectoryRefused(`${label} directory is not a directory: ${directory}`);
+    const unsafe = unsafeDirectory(current, entry, uid);
+    if (unsafe !== null) throw new PublishDirectoryRefused(`${label} will not publish into ${directory}: ${current === directory ? "" : "a directory above it, "}${unsafe}`);
+    if (dirname(current) === current) return;
+  }
 }
 
-/** Throws unless `path` is still the staging directory `expected`: checked before each staged open and each link (BACKLOG 103-11). */
-function assertStagingSync(path: string, expected: BigIntStats, label: string, suffix = ""): void {
-  let entry: BigIntStats | undefined;
-  try { entry = lstatSync(path, { bigint: true }); } catch { /* gone: refused below */ }
-  if (entry === undefined || !entry.isDirectory() || !sameEntry(entry, expected)) throw new Error(`${label} staging directory ${path} was replaced while the files were published${suffix}`);
+/** A file a run stages in a destination's own directory: its random name there, and its identity at creation and once written and synced. */
+type StagedFile = { path: string; createdId: BigIntStats | null; id: BigIntStats | null };
+
+/** A random part for a staged file's name: twelve hex digits. */
+const stagedRandom = () => randomUUID().replace(/-/g, "").slice(0, 12);
+
+/**
+ * Writes `bytes` to the new file `staged.path`, in the destination's own (checked) directory: created exclusively,
+ * without following a link, owner-only, and synced (BACKLOG 103-11). The identity at creation is kept at once, so a
+ * removal can find the file even if the run stops while writing; the identity the run checks before and after linking is
+ * taken once the data is written and synced, since on exFAT and FAT a file's identity changes when its first data is
+ * written.
+ */
+async function stageFile(staged: StagedFile, bytes: Buffer, label: string): Promise<void> {
+  const handle = await openExclusiveFile(staged.path, label);
+  try {
+    staged.createdId = await handle.stat({ bigint: true });
+    await handle.writeFile(bytes);
+    await handle.sync();
+    staged.id = await handle.stat({ bigint: true });
+  } finally {
+    await handle.close();
+  }
 }
 
-/** Throws unless `path` is still the regular file `expected` this run staged: checked before it is linked (BACKLOG 103-11). */
-function assertStagedFileSync(path: string, expected: BigIntStats | undefined, label: string, suffix = ""): void {
+/** Throws unless the staged file is still at its name, the regular file written: checked before it is linked (BACKLOG 103-11). */
+function assertStagedFileSync(staged: StagedFile, label: string, suffix = ""): void {
   let entry: BigIntStats | undefined;
-  try { entry = lstatSync(path, { bigint: true }); } catch { /* gone: refused below */ }
-  if (expected === undefined || entry === undefined || !entry.isFile() || !sameEntry(entry, expected)) throw new Error(`${label} staged file ${path} was replaced while the files were published${suffix}`);
+  try { entry = lstatSync(staged.path, { bigint: true }); } catch { /* gone: refused below */ }
+  if (staged.id === null || entry === undefined || !entry.isFile() || !sameEntry(entry, staged.id)) throw new Error(`${label} staged file ${staged.path} was replaced while the files were published${suffix}`);
+}
+
+/**
+ * Removes a staged file if it is still the file staged, its identity checked again just before the unlink (BACKLOG
+ * 103-11); anything else at its name stays. Synchronous, so a signal handler can use it.
+ */
+function removeStagedSync(staged: StagedFile): void {
+  const ids = [staged.id, staged.createdId].filter((id): id is BigIntStats => id !== null);
+  try {
+    const entry = lstatSync(staged.path, { bigint: true });
+    if (entry.isFile() && ids.some((id) => sameEntry(entry, id))) unlinkSync(staged.path);
+  } catch { /* gone, or left in place */ }
+}
+
+/**
+ * After a link, the destination must be the file staged (BACKLOG 103-11). Otherwise another file was at the staged name
+ * when the link was made, after its check: the destination is removed again when it is that same file (identity checked
+ * against the staged name, and again just before the unlink), and left when it is not. Returns why the run must fail and
+ * whether the destination was removed, or null when it is the staged file.
+ */
+function linkedOtherSync(staged: StagedFile, target: string): { why: string; removed: boolean } | null {
+  let placed: BigIntStats | null = null;
+  try { placed = lstatSync(target, { bigint: true }); } catch { /* gone */ }
+  if (placed !== null && staged.id !== null && placed.isFile() && sameEntry(placed, staged.id)) return null;
+  let removed = false;
+  try {
+    const through = lstatSync(staged.path, { bigint: true });
+    if (placed !== null && placed.isFile() && sameEntry(placed, through) && sameEntry(lstatSync(target, { bigint: true }), placed)) { unlinkSync(target); removed = true; }
+  } catch { /* left as it is */ }
+  return { why: placed === null ? "was gone right after it was linked" : `held another file once linked: the staged file had been replaced after its check${removed ? "" : "; that file was left as it is"}`, removed };
+}
+
+/** The codes a link fails with where the volume (exFAT, FAT) has no hard links. */
+const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV"]);
+
+/** The error for a link a volume refuses, saying so, or the error itself (BACKLOG 103-11). */
+function linkError(error: unknown, directory: string, label: string): unknown {
+  const code = (error as NodeJS.ErrnoException).code ?? "";
+  if (!NO_HARD_LINKS.has(code)) return error;
+  return new Error(`${label} cannot publish into ${directory}: this volume does not support hard links, or refused one (${code}); export to another directory`, { cause: error });
 }
 
 /**
@@ -262,13 +337,15 @@ function assertStagedFileSync(path: string, expected: BigIntStats | undefined, l
  * entry are synced as a new one's are, since the file may be one an earlier run linked into place before its directory
  * sync failed, or one written without a sync; a sync that fails is thrown. Windows flushes neither a directory nor a
  * file opened only for reading, so there "identical" syncs nothing. The destination's directory is resolved first, so
- * it may itself be reached through a symbolic link (/tmp on macOS), as it could be when the file was simply written;
- * the resolved directory must be one no other user can swap the staging in (assertPublishDirectory, BACKLOG 103-11).
- * The staging directory's identity is kept from when it was made and checked before the file is staged in it and
- * before the link, and the staged file before the link. The staging is removed when the run ends, the file this run
- * staged only, then the directory if empty (removeStagingSync), as a best effort that never changes the result: a run
- * killed meanwhile, or a removal that fails (Windows refuses to delete a file another process holds open), leaves a
- * `.publish-*` directory beside the destination.
+ * it may itself be reached through a symbolic link (/tmp on macOS), as it could be when the file was simply written.
+ * A re-run that finds its file stages nothing, so it confirms evidence in any directory, one made read-only included;
+ * only a run that must write needs a directory no other user can change (assertPublishDirectory, BACKLOG 103-11). The
+ * file is staged in that directory itself, under a random name `.<stem>-<tag>-<pid>-<random>.stage`, and is checked to
+ * be the file written before the link and at the destination after it: a destination that holds another file once
+ * linked is removed again when it is the file that was at the staged name, and the run fails. A volume without hard
+ * links (exFAT, FAT) is named as such. The staged file is removed when the run ends, after its identity is checked
+ * again, as a best effort that never changes the result: a run killed meanwhile, or a removal that fails (Windows
+ * refuses to delete a file another process holds open), leaves it beside the destination.
  */
 export async function publishImmutableFile(
   destination: string,
@@ -283,42 +360,42 @@ export async function publishImmutableFile(
     throw new Error(`${label} path must name a file: ${JSON.stringify(destination)}`);
   }
   const directory = await realpath(dirname(destination));
-  await assertPublishDirectory(directory, label);
   const target = join(directory, basename(destination));
   // A re-run that finds its file needs no staging, so it can confirm evidence in a directory made read-only.
   const found = await settleExistingFile(target, directory, bytes, label);
   if (found !== null) return found;
-  const staging = await mkdtemp(join(directory, ".publish-"));
+  await assertPublishDirectory(directory, label);
   const unwritten = "; nothing was written";
-  const stagingId = await stagingIdentity(staging, label, unwritten);
-  const stagedIds: BigIntStats[] = [];
+  const staged: StagedFile = { path: join(directory, `.${stagingStem(name.replace(/\.[^.]*$/, ""))}-${setTag(name)}-${process.pid}-${stagedRandom()}.stage`), createdId: null, id: null };
   try {
-    const staged = join(staging, "file");
-    assertStagingSync(staging, stagingId, label, unwritten);
-    const handle = await openExclusiveFile(staged, label);
-    try { stagedIds.push(await handle.stat({ bigint: true })); await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    await stageFile(staged, bytes, label);
     for (let attempt = 1; ; attempt += 1) {
       try {
-        assertStagingSync(staging, stagingId, label, unwritten);
-        assertStagedFileSync(staged, stagedIds[0], label, unwritten);
-        await link(staged, target);
-        break;
+        assertStagedFileSync(staged, label, unwritten);
+        await link(staged.path, target);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          const named = linkError(error, directory, label);
+          throw named === error ? error : new Error(`${(named as Error).message}${unwritten}`, { cause: error });
+        }
         const settled = await settleExistingFile(target, directory, bytes, label);
         if (settled !== null) return settled;
         // Gone again between the link and the look: once is a removal racing this run, twice is a path in flux.
         if (attempt === 2) throw new Error(`${label} path kept changing while it was being published; nothing was published`);
+        continue;
       }
+      const other = linkedOtherSync(staged, target);
+      if (other !== null) throw new Error(`${label} path ${destination} ${other.why}${other.removed ? "; it was removed again, so nothing was written" : ""}`);
+      break;
     }
     await syncDirectoryEntry(directory);
     return "created";
   } finally {
-    removeStagingSync(staging, stagingId, stagedIds);
+    removeStagedSync(staged);
   }
 }
 
-/** A staging directory, publish lock or leftover of a takeover older than this is removed by a later run, whatever its pid. */
+/** A staged file, staging directory, publish lock or leftover of a takeover older than this is removed by a later run, whatever its pid. */
 const STALE_STAGING_MS = 24 * 60 * 60 * 1000;
 /** A publish lock naming no process (empty or cut short) is taken over once it is this old (BACKLOG 103-10 review 4). */
 const OWNERLESS_LOCK_GRACE_MS = 60 * 1000;
@@ -331,7 +408,7 @@ const PUBLISH_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 const TEMPORARY_LOCK = /^\.[0-9a-f-]{36}\.publish-lock-new$/;
 const LOCK_TOMBSTONE = /^\.[0-9a-f-]{36}\.publish-lock-stale$/;
 
-/** The stem in a staging directory's name: the characters a file name can safely carry, at most 64 of them. */
+/** The stem in a staged file's name: the characters a file name can safely carry, at most 64 of them. */
 const stagingStem = (stem: string) => stem.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "files";
 
 /**
@@ -364,9 +441,9 @@ function processAlive(pid: number): boolean {
 }
 
 /**
- * Whether an entry found by its name is a staging directory this user's publishImmutableFiles made: a directory (not a
- * link) owned by the user, mode 0700. Windows has neither owner nor mode here, so any directory passes there; that is
- * why a staging directory is removed there only when its process is known to be gone, never by age alone.
+ * Whether an entry found by its name is a staging directory this user's publishImmutableFiles of 0.1.43 or earlier made:
+ * a directory (not a link) owned by the user, mode 0700. Windows has neither owner nor mode here, so any directory passes
+ * there; that is why a staging directory is removed there only when its process is known to be gone, never by age alone.
  */
 function ownStaging(entry: Stats | BigIntStats): boolean {
   if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
@@ -374,27 +451,29 @@ function ownStaging(entry: Stats | BigIntStats): boolean {
   return !posixModeEnforced() || (Number(entry.mode) & 0o777) === 0o700;
 }
 
+/** Whether an entry found by its name is a file this user's run staged (BACKLOG 103-11): a regular file (not a link) owned by the user, mode 0600. */
+function ownStagedFile(entry: Stats | BigIntStats): boolean {
+  if (!entry.isFile() || entry.isSymbolicLink()) return false;
+  if (typeof process.getuid === "function" && Number(entry.uid) !== process.getuid()) return false;
+  return !posixModeEnforced() || (Number(entry.mode) & 0o777) === 0o600;
+}
+
 const sameEntry = (left: Stats | BigIntStats, right: Stats | BigIntStats) => String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
 
 /**
- * Removes a staging directory the way it was filled, then the directory itself if that left it empty. Anything else in
- * it stays, and so does the directory; nothing is removed recursively. The directory must still be `expected` (its
- * identity when it was made or judged) before it is read and before each file goes. With `staged`, the identities of
- * the files this run created in it, only those files go (BACKLOG 103-11), so a run whose staging was swapped for a link
- * to another directory never removes a file it did not make; without it (a killed run's staging, judged by
- * removeStaleStagings), its top-level regular files named by a number go. Synchronous, so a signal handler can use it.
+ * Removes a staging directory of 0.1.43 or earlier the way it was filled: its top-level regular files named by a number,
+ * then the directory itself if that left it empty. Anything else in it stays, and so does the directory; nothing is
+ * removed recursively. The directory must still be `expected` (its identity when it was judged) before it is read and
+ * before each file goes. Synchronous, like the removal of staged files.
  */
-function removeStagingSync(path: string, expected: BigIntStats, staged?: readonly BigIntStats[]): void {
+function removeStagingSync(path: string, expected: BigIntStats): void {
   const still = () => { try { const now = lstatSync(path, { bigint: true }); return now.isDirectory() && sameEntry(now, expected); } catch { return false; } };
   if (!still()) return;
   let names: string[];
   try { names = readdirSync(path); } catch { return; }
   for (const name of names) {
-    if ((staged === undefined && !/^\d+$/.test(name)) || !still()) continue;
-    try {
-      const entry = lstatSync(join(path, name), { bigint: true });
-      if (entry.isFile() && (staged === undefined || staged.some((id) => sameEntry(entry, id)))) unlinkSync(join(path, name));
-    } catch { /* left in place */ }
+    if (!/^\d+$/.test(name) || !still()) continue;
+    try { if (lstatSync(join(path, name), { bigint: true }).isFile()) unlinkSync(join(path, name)); } catch { /* left in place */ }
   }
   if (still()) { try { rmdirSync(path); } catch { /* not empty, or gone: left in place */ } }
 }
@@ -411,23 +490,35 @@ async function onlyStagedFiles(path: string): Promise<boolean> {
 }
 
 /**
- * Removes, from `directory`, what killed publishImmutableFiles runs of the same set left (BACKLOG 103-10 review 2-5):
- * staging directories `.publish-<stem>-<tag>-<pid>-XXXXXX`, the tag a hash of the first destination's exact name, so
- * only runs the same lock covers are looked at, whose process is gone, or older than a day (off Windows only), and
- * only this user's (ownStaging) holding nothing but numbered files. Each is first renamed to a fresh name of the same
- * shape with pid 0 (no process), so the name it is worked on can no longer be swapped for a link to elsewhere; the
- * renamed entry must still be the directory that was judged, and only its numbered files go (removeStagingSync). A
- * directory of a live run, of another set, of another shape, owner or mode, or holding anything else, is never touched.
- * This user's temporary locks (`.<uuid>.publish-lock-new`) and lock tombstones (`.<uuid>.publish-lock-stale`) that a run
- * killed in the middle of taking a lock left are removed too: those naming a process that is gone (or none, a minute
- * on), and any a day old. Another user's, one too large to be a lock, or one that cannot be read is left unread (readLockSync).
+ * Removes, from `directory`, what killed publishImmutableFiles runs of the same set left (BACKLOG 103-10 review 2-5,
+ * 103-11): staged files `.<stem>-<tag>-<pid>-<random>.<index>.stage`, the tag a hash of the first destination's exact
+ * name, so only runs the same lock covers are looked at, whose process is gone, or older than a day (off Windows only),
+ * and only this user's (ownStagedFile, mode 0600), each checked again to be the file judged just before it is
+ * unlinked. A killed run of 0.1.43 or earlier left staging directories `.publish-<stem>-<tag>-<pid>-XXXXXX` instead,
+ * judged the same way, this user's (ownStaging) and holding nothing but numbered files: each is first renamed to a fresh
+ * name of the same shape with pid 0 (no process), the renamed entry must still be the directory that was judged, and
+ * only its numbered files go (removeStagingSync). A file or directory of a live run, of another set, of another shape,
+ * owner or mode, or (a directory) holding anything else, is never touched. This user's temporary locks
+ * (`.<uuid>.publish-lock-new`) and lock tombstones (`.<uuid>.publish-lock-stale`) that a run killed in the middle of
+ * taking a lock left are removed too: those naming a process that is gone (or none, a minute on), and any a day old.
+ * Another user's, one too large to be a lock, or one that cannot be read is left unread (readLockSync).
  */
 async function removeStaleStagings(directory: string, stem: string, tag: string): Promise<void> {
-  const pattern = new RegExp(`^\\.publish-${stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-${tag}-(\\d+)-[A-Za-z0-9]{6}$`);
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^\\.publish-${escaped}-${tag}-(\\d+)-[A-Za-z0-9]{6}$`);
+  const stagedPattern = new RegExp(`^\\.${escaped}-${tag}-(\\d+)-[0-9a-f]{12}\\.\\d+\\.stage$`);
+  const gone = (pid: number, mtimeMs: number) => !processAlive(pid) || (process.platform !== "win32" && Date.now() - mtimeMs >= STALE_STAGING_MS);
   let names: string[];
   try { names = await readdir(directory); } catch { return; }
   for (const name of names) {
     const path = join(directory, name);
+    const staged = stagedPattern.exec(name);
+    if (staged) {
+      const entry = await lstat(path, { bigint: true }).catch(() => null);
+      if (entry === null || !ownStagedFile(entry) || !gone(Number(staged[1]), Number(entry.mtimeMs))) continue;
+      removeStagedSync({ path, createdId: null, id: entry });
+      continue;
+    }
     if (TEMPORARY_LOCK.test(name) || LOCK_TOMBSTONE.test(name)) {
       // A killed run's: the process it names is gone (or it names none, a minute on), or it is a day old. One naming a
       // live process may be a lock another run is moving, and stays.
@@ -442,8 +533,7 @@ async function removeStaleStagings(directory: string, stem: string, tag: string)
     if (!match) continue;
     const entry = await lstat(path, { bigint: true }).catch(() => null);
     if (entry === null || !ownStaging(entry)) continue;
-    const pid = Number(match[1]);
-    if (processAlive(pid) && (process.platform === "win32" || Date.now() - Number(entry.mtimeMs) < STALE_STAGING_MS)) continue;
+    if (!gone(Number(match[1]), Number(entry.mtimeMs))) continue;
     if (!(await onlyStagedFiles(path))) continue;
     const moved = join(directory, `.publish-${stem}-${tag}-0-${randomUUID().replace(/-/g, "").slice(0, 6)}`);
     try { await rename(path, moved); } catch { continue; }
@@ -586,6 +676,9 @@ async function placeOwned(path: string, token: string, label: string): Promise<b
       throw new Error(`${label} could not sync its lock ${path} (${(error as Error).message}); nothing was written`, { cause: error });
     }
     if ((error as NodeJS.ErrnoException).code === "EEXIST" || lockBeingReleased(error)) return false;
+    // The lock is linked into place as the files are: a volume without hard links is named here already (BACKLOG 103-11).
+    const named = linkError(error, directory, label);
+    if (named !== error) throw new Error(`${(named as Error).message}; nothing was written`, { cause: error });
     throw error;
   } finally {
     await unlink(temporary).catch(() => undefined);
@@ -739,20 +832,25 @@ async function releasePublishLock(lock: PublishLock): Promise<void> {
 }
 
 /**
- * Confirms, without writing anything, that every destination already holds exactly its bytes: the run of a set whose
- * directory denies it its lock (a directory made read-only for evidence, as publishImmutableFile allows). All
- * identical is a success; a destination missing refuses the run; one with other bytes is "different".
+ * Confirms, without writing anything, that every destination already holds exactly its bytes: the run of a set that
+ * may not write, because its directory denies it its lock (a directory made read-only for evidence, as
+ * publishImmutableFile allows) or because another user could change a directory it would write in (BACKLOG 103-11).
+ * `because` says which. Every destination is looked at before any bytes are asked for: one missing refuses the run, a
+ * symbolic link is refused. All identical is a success; one with other bytes is "different".
  */
 async function confirmImmutableFiles(targets: { destination: string; directory: string; target: string }[], bytesOf: (index: number) => Promise<string | Buffer>,
-  label: string, denied: PublishLockDenied): Promise<{ published: true; results: "identical"[] } | { published: false; different: string[] }> {
-  const different: string[] = [];
-  for (const [index, { destination, directory, target }] of targets.entries()) {
+  label: string, because: string): Promise<{ published: true; results: "identical"[] } | { published: false; different: string[] }> {
+  const missing = (destination: string) => new Error(`${because}, and ${destination} is not there to be confirmed; nothing was written`);
+  for (const { destination, target } of targets) {
     const entry = await lstat(target).catch(() => null);
     if (entry?.isSymbolicLink()) throw new Error(`${label} path must be a regular file, not a symbolic link: ${destination}; nothing was written`);
-    if (entry === null) throw new Error(`${denied.message}, and ${destination} is not there to be confirmed; nothing was written`);
+    if (entry === null) throw missing(destination);
+  }
+  const different: string[] = [];
+  for (const [index, { destination, directory, target }] of targets.entries()) {
     const raw = await bytesOf(index);
     const found = await settleExistingFile(target, directory, typeof raw === "string" ? Buffer.from(raw, "utf8") : raw, label);
-    if (found === null) throw new Error(`${denied.message}, and ${destination} is not there to be confirmed; nothing was written`);
+    if (found === null) throw missing(destination);
     if (found === "different") different.push(destination);
   }
   return different.length > 0 ? { published: false, different } : { published: true, results: targets.map(() => "identical" as const) };
@@ -760,36 +858,39 @@ async function confirmImmutableFiles(targets: { destination: string; directory: 
 
 /**
  * Publishes several new immutable files together, all of them or none (BACKLOG 103-10 review): publishImmutableFile for
- * a set, on the same primitives. The run holds a lock beside the first destination throughout, `.<its exact name>.publish-lock`
- * (takePublishLock; a name too long for it is refused), so two runs for the same files do not interleave; it checks
- * the lock is still its own before the link phase, before it links the first destination and before it removes
- * anything. Where the directory denies it the lock, it only confirms that every
- * destination is already identical (confirmImmutableFiles). The bytes of each destination are asked for in turn, so
- * only one file's bytes are held at once. A destination already holding exactly those bytes is "identical" (synced as
+ * a set, on the same primitives. Every destination's resolved directory, and every directory above it, must be one no
+ * other user can change (assertPublishDirectory, BACKLOG 103-11); where one can, or where the directory denies the run
+ * its lock, the run only confirms that every destination is already identical and writes nothing (confirmImmutableFiles),
+ * so a re-run over evidence already in place still succeeds. Otherwise the run holds a lock beside the first destination
+ * throughout, `.<its exact name>.publish-lock` (takePublishLock; a name too long for it is refused), so two runs for the
+ * same files do not interleave; it checks the lock is still its own before the link phase, before it links the first
+ * destination and before it removes anything. The bytes of each destination are asked for in turn, so only one file's
+ * bytes are held at once. A destination already holding exactly those bytes is "identical" (synced as
  * publishImmutableFile syncs it); one holding other bytes, or anything but a regular file, is "different"; a symbolic
- * link there is refused. The bytes of a new destination are written to a staging file and synced, in a directory
- * `.publish-<stem>-<tag>-<pid>-XXXXXX` beside it, the tag a hash of the first destination's exact name; a run first
- * removes what killed runs of the same set left (removeStaleStagings). Every destination's resolved directory must be
- * one no other user can swap the staging in (assertPublishDirectory), and each staging's identity is kept from when it
- * was made: it is checked before each staged file is created and after, and with the staged file before each link, and
- * only the files this run created there are ever removed from it (BACKLOG 103-11). Nothing is linked into place before every destination is staged or found identical: when
- * bytesOf fails, or a destination is "different", the staging files are removed and nothing is written. Once one
- * destination is "different", only destinations that already exist are still compared, so that every different one is
- * returned.
+ * link there is refused. The bytes of a new destination are written to a staged file and synced, in the destination's
+ * own directory, under a random name `.<stem>-<tag>-<pid>-<random>.<index>.stage`, the tag a hash of the first
+ * destination's exact name (stageFile; BACKLOG 103-11: no directory of its own another user could swap); a run first
+ * removes what killed runs of the same set left (removeStaleStagings). Nothing is linked into place before every
+ * destination is staged or found identical: when bytesOf fails, or a destination is "different", the staged files are
+ * removed and nothing is written. Once one destination is "different", only destinations that already exist are still
+ * compared, so that every different one is returned.
  *
  * Then the staged files are linked to their destinations, the first destination last: the others are linked and their
  * directories synced, the destinations found identical are checked to be so still, and only then is the first one
- * linked and synced, so the first destination there means the set was whole when it was written. A step that fails (a
- * destination taken meanwhile by other bytes, a denied or full directory, a failed sync) removes again what this run
- * linked: the first destination first, with its directory synced, then the others in the reverse of their order, each
- * only while it is still the file this run staged. When the first destination cannot be removed, or its directory not
- * synced, nothing else is: the set stays whole. Nothing is removed at all when the first destination is there and is
- * not this run's, or when the lock is no longer this run's. The error says what was removed, already gone, replaced by
- * another file, or left. A SIGINT, SIGTERM or SIGHUP removes the staging files first (so a link still in flight fails),
- * then what was linked, then the lock; it then takes its usual course, or, when the host has its own listener, the run
- * ends with an error that it was interrupted. A crash or power loss while linking can still leave some destinations
- * without the first. `observe`, for tests, is called before each link, each directory sync and each unlink of a removal;
- * a throw fails that step.
+ * linked and synced, so the first destination there means the set was whole when it was written. Each staged file is
+ * checked to be the file written before it is linked, and each destination to be that file after: one holding another
+ * file is removed again when it is the file that was at the staged name (linkedOtherSync), and the run fails. A volume
+ * without hard links is named as such. A step that fails (a destination taken meanwhile by other bytes, a denied or full
+ * directory, a failed sync) removes again what this run linked: the first destination first, with its directory synced,
+ * then the others in the reverse of their order, each only while it is still the file this run staged. When the first
+ * destination cannot be removed, or its directory not synced, nothing else is: the set stays whole. Nothing is removed at
+ * all when the first destination is there and is not this run's, or when the lock is no longer this run's. The error
+ * says what was removed, already gone, replaced by another file, or left. A SIGINT, SIGTERM or SIGHUP removes the staged
+ * files first (so a link still in flight fails), then what was linked, then the lock; it then takes its usual course, or,
+ * when the host has its own listener, the run ends with an error that it was interrupted. Staged files are removed only
+ * while their identity is the one written, checked just before each unlink. A crash or power loss while linking can
+ * still leave some destinations without the first. `observe`, for tests, is called before each link, each directory sync
+ * and each unlink of a removal; a throw fails that step.
  */
 export async function publishImmutableFiles(
   destinations: readonly string[],
@@ -812,28 +913,30 @@ export async function publishImmutableFiles(
   const stem = stagingStem(options.stem ?? basename(destinations[0]).replace(/\.[^.]*$/, ""));
   const first = basename(targets[0].target), tag = setTag(first);
   const directories = [...new Set(targets.map((item) => item.directory))];
-  // Every destination's directory, resolved: none may let another user swap the staging (BACKLOG 103-11).
-  for (const directory of directories) await assertPublishDirectory(directory, label);
+  // Every destination's directory, and those above it: where another user could change one, the run only confirms what
+  // is there, before any lock, cleanup or staging (BACKLOG 103-11).
+  for (const directory of directories) {
+    try { await assertPublishDirectory(directory, label); } catch (error) {
+      if (error instanceof PublishDirectoryRefused) return confirmImmutableFiles(targets, bytesOf, label, error.reason);
+      throw error;
+    }
+  }
   const names = publishLockNames(first, label);
   let lock: PublishLock;
   try { lock = await takePublishLock(join(targets[0].directory, names.lock), join(targets[0].directory, names.takeover), label); } catch (error) {
-    if (error instanceof PublishLockDenied) return confirmImmutableFiles(targets, bytesOf, label, error);
+    if (error instanceof PublishLockDenied) return confirmImmutableFiles(targets, bytesOf, label, error.message);
     throw error;
   }
   const lockTakenOver = () => new Error(`${label} lock ${lock.path} was taken over`);
-  /** Each directory's staging, with its identity from when mkdtemp made it: checked before each staged open and each
-   * link, and before anything in it is removed (BACKLOG 103-11). */
-  const stagings = new Map<string, { path: string; id: BigIntStats }>();
-  const staged: (string | null)[] = [];
-  /** Each staged file's identity, kept from when it was created: a removal checks a destination against it even after a
-   * signal has removed the staging, and the staging's removal removes only these files. */
-  const stagedIds = new Map<number, BigIntStats>();
+  /** Each staged file, by destination: its name and its identity. A removal checks a destination against that identity
+   * even after a signal has removed the staged file, and only a file with it is ever removed from a staged name. */
+  const staged: (StagedFile | null)[] = [];
   const results: ("created" | "identical" | null)[] = [];
   const identical = new Map<number, string>();
   const different: string[] = [];
   const created: { index: number; destination: string; target: string }[] = [];
   const removals = { removed: [] as string[], gone: [] as string[], replaced: [] as string[], failed: [] as string[], kept: [] as string[], keptBecause: "", stopped: "", stoppedWhole: false };
-  const sameAsStaged = (placed: BigIntStats, index: number) => { const ours = stagedIds.get(index); return ours !== undefined && placed.dev === ours.dev && placed.ino === ours.ino; };
+  const sameAsStaged = (placed: BigIntStats, index: number) => { const ours = staged[index]?.id; return ours !== undefined && ours !== null && placed.dev === ours.dev && placed.ino === ours.ino; };
   const lstatOrNull = (path: string) => { try { return lstatSync(path, { bigint: true }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } };
   /** The entries that are this run's files where they were linked: what a removal left behind is reported from these. */
   const linkedOf = (entries: typeof created) => entries.filter(({ index, target }) => { try { const placed = lstatOrNull(target); return placed !== null && sameAsStaged(placed, index); } catch { return true; } });
@@ -899,10 +1002,10 @@ export async function publishImmutableFiles(
   };
   let interrupted = false;
   const stillRunning = () => { if (interrupted) throw new Error(`${label} was interrupted`); };
-  const removeStagings = () => { for (const { path, id } of stagings.values()) removeStagingSync(path, id, [...stagedIds.values()]); };
+  const removeStagings = () => { for (const file of staged) if (file !== null) removeStagedSync(file); };
   const onSignal = (signal: NodeJS.Signals) => {
     interrupted = true;
-    // The staging files go first: a link still in flight then fails, rather than land after the removal looked.
+    // The staged files go first: a link still in flight then fails, rather than land after the removal looked.
     removeStagings();
     removeCreated();
     releasePublishLockSync(lock);
@@ -935,21 +1038,11 @@ export async function publishImmutableFiles(
         if (found === "different") { different.push(destination); continue; }
         if (found === "identical") { results[index] = "identical"; identical.set(index, createHash("sha256").update(bytes).digest("hex")); continue; }
         if (different.length > 0) continue;
-        let staging = stagings.get(directory);
-        if (staging === undefined) {
-          const path = await mkdtemp(join(directory, `.publish-${stem}-${tag}-${process.pid}-`));
-          staging = { path, id: await stagingIdentity(path, label) };
-          stagings.set(directory, staging);
-        }
-        const file = join(staging.path, String(index));
-        // The staging is used by its name, so it must still be the directory made, before the file is created in it and
-        // after (the file then is where it was created); the file's identity is kept before anything is written to it.
-        assertStagingSync(staging.path, staging.id, label);
-        const handle = await openExclusiveFile(file, label);
-        try { stagedIds.set(index, await handle.stat({ bigint: true })); await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-        assertStagingSync(staging.path, staging.id, label);
-        assertStagedFileSync(file, stagedIds.get(index), label);
+        // Staged in the destination's own directory, which the checks above cover: recorded before it is created, so a
+        // signal while it is written removes it too.
+        const file: StagedFile = { path: join(directory, `.${stem}-${tag}-${process.pid}-${stagedRandom()}.${index}.stage`), createdId: null, id: null };
         staged[index] = file;
+        await stageFile(file, bytes, label);
       }
       stillRunning();
       if (different.length === 0 && !(await lockStillOurs(lock))) throw lockTakenOver();
@@ -968,28 +1061,33 @@ export async function publishImmutableFiles(
         let linked = false;
         try {
           observe("link", destination);
-          // What is linked is the file this run staged, in the staging it made (BACKLOG 103-11): a staging swapped for a
-          // link to another directory would otherwise hand that directory's file of the same name to the destination.
-          const staging = stagings.get(directory)!;
-          assertStagingSync(staging.path, staging.id, label);
-          assertStagedFileSync(file, stagedIds.get(index), label);
-          await link(file, target);
+          // What is linked is the file this run staged (BACKLOG 103-11).
+          assertStagedFileSync(file, label);
+          try { await link(file.path, target); } catch (error) { throw linkError(error, directory, label); }
           linked = true;
           stillRunning();
-          results[index] = "created";
-          return;
         } catch (error) {
           const at = created.indexOf(entry);
           // Not linked: nothing to remove. Linked after a signal's removal already ran: kept for the removal that follows.
           if (!linked && at >= 0) created.splice(at, 1);
           if (linked && at < 0) created.push(entry);
           if (interrupted || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-          const settled = await settleExistingFile(target, directory, await readFile(file), label);
+          const settled = await settleExistingFile(target, directory, await readFile(file.path), label);
           stillRunning();
           if (settled === "identical") { results[index] = "identical"; return; }
           if (settled === "different") throw new Error(`${label} path ${destination} was taken by a different file while the files were published`);
           if (attempt === 2) throw new Error(`${label} path ${destination} kept changing while it was being published`);
+          continue;
         }
+        // The destination must now be the staged file: another file linked from the staged name is removed again here
+        // and is no longer this run's to report; one that is not that file is left for the removal to name.
+        const other = linkedOtherSync(file, target);
+        if (other !== null) {
+          if (other.removed) { const at = created.indexOf(entry); if (at >= 0) created.splice(at, 1); }
+          throw new Error(`${label} path ${destination} ${other.why}${other.removed ? ", and was removed again" : ""}`);
+        }
+        results[index] = "created";
+        return;
       }
     };
     const sync = async (directory: string) => { observe("sync", directory); await syncDirectoryEntry(directory); stillRunning(); };

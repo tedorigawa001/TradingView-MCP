@@ -39,7 +39,9 @@ export function parsePriceActionTrapReproductionCliArguments(argv: string[]): Pr
  * kept. A reproduction of changed inputs goes to a new path with --out, or to the default once the earlier file has
  * been moved away. The study reads its inputs in the order given, which orders its ledger and the placebo pools its
  * seeded draws index into, so the aggregates are put in the contract's symbol order first: the same eight files give
- * the same bytes whatever order --aggregate names them in.
+ * the same bytes whatever order --aggregate names them in. The output's directory, made owner-only when it is created
+ * here, must be one no other user can change, nor any directory above it, when the file is to be written
+ * (publishImmutableFile, BACKLOG 103-11); a re-run that finds the same bytes already there confirms them in any directory.
  */
 export async function runPriceActionTrapReproductionCli(argv: string[]) {
   const args = parsePriceActionTrapReproductionCliArguments(argv);
