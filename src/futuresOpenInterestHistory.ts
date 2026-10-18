@@ -138,6 +138,9 @@ export class FuturesOpenInterestFirstSeenStore {
       { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11 review). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
   /**
    * Appends only observations whose value or publication status differs from the newest one already
    * held for the same symbol, scope, source definition and date. Re-reading an unchanged series is

@@ -194,6 +194,12 @@ export class OfficialPolicyRateHistoryStore {
     this.rawSnapshotLog = new AppendOnlyFirstSeenLog(`${filePath}.raw-snapshots`, "official policy-rate raw snapshot", validateRawSnapshot, { maxFileBytes: MAX_HISTORY_BYTES, maxRecordBytes: MAX_RECORD_BYTES });
   }
 
+  /** The history log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11 review). */
+  stampedAheadRepair() { return this.log.stampedAheadRepair(); }
+
+  /** The raw snapshot log's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11 review). */
+  rawSnapshotStampedAheadRepair() { return this.rawSnapshotLog.stampedAheadRepair(); }
+
   /**
    * Records the change points of one download. Without spans each observation is recorded unless its date already holds
    * it, and nothing is withdrawn. With the download's spans (BACKLOG 102-09) the store rebuilds the series as it stands

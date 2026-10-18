@@ -80,13 +80,18 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
  * callers that take it as empty. For stores and archives; a file a user names on the command line is theirs to choose.
  */
 export async function readRegularFile(path: string, label: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<Buffer> {
+  return (await readRegularFileWithStat(path, label, maxBytes)).bytes;
+}
+
+/** readRegularFile, with the fstat of the file read: its identity, owner, mode and size as it was opened. */
+export async function readRegularFileWithStat(path: string, label: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<{ bytes: Buffer; stat: Stats }> {
   await assertNotSymbolicLink(path, label);
   const handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error(`${label} path must be a regular file`);
     if (stat.size > maxBytes) throw new Error(`${label} file is too large`);
-    return await handle.readFile();
+    return { bytes: await handle.readFile(), stat };
   } finally {
     await handle.close();
   }
@@ -623,6 +628,32 @@ function inspectLockSync(path: string): { contents: string; stat: Stats } | { fo
 function readLockSync(path: string): { contents: string; stat: Stats } | null {
   const found = inspectLockSync(path);
   return found !== null && "contents" in found ? found : null;
+}
+
+/**
+ * Removes the lock file at `path` if it still holds what its holder wrote (`ours` of its contents), read as a publish
+ * lock is read (this user's, at most 128 bytes) and checked to be that same file just before the unlink (BACKLOG
+ * 103-11 review). Synchronous, so a signal handler can release a store's lock; anything else there is left.
+ */
+export function releaseLockFileSync(path: string, ours: (contents: string) => boolean): boolean {
+  const held = readLockSync(path);
+  if (held === null || !ours(held.contents)) return false;
+  try {
+    if (sameEntry(lstatSync(path), held.stat)) { unlinkSync(path); return true; }
+  } catch { /* gone, or left */ }
+  return false;
+}
+
+/**
+ * The process a store's lock file names (`<token> <pid>\n`), read as readLockSync reads, and whether it is alive:
+ * null when nothing there is a lock of this user's. A lock naming a process that is gone was left by a run killed
+ * while it held it (BACKLOG 103-11 review).
+ */
+export function lockOwnerSync(path: string): { pid: number | null; alive: boolean } | null {
+  const held = readLockSync(path);
+  if (held === null) return null;
+  const pid = /^\S+ (\d+)\n$/.exec(held.contents)?.[1];
+  return { pid: pid === undefined ? null : Number(pid), alive: pid !== undefined && processAlive(Number(pid)) };
 }
 
 /** The SHA-256 of the regular file at `path`, opened as settleExistingFile opens one; null when it is not that file. */

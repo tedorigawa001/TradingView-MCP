@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced, readRegularFile } from "./fsDurability.js";
+import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced, readRegularFile, readRegularFileWithStat, releaseLockFileSync } from "./fsDurability.js";
+import { stampedAheadRepairOf } from "./stampedAheadRepair.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -155,13 +156,21 @@ export class MacroSurpriseEvidenceStore {
   constructor(private readonly filePath: string, private readonly now: () => Date = () => new Date()) { if (!filePath) throw new Error("macro-surprise evidence path is required"); }
 
   private async readUnlocked(): Promise<MacroSurpriseEvidenceRecord[]> {
-    try {
-      const stat = await lstat(this.filePath);
-      if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || stat.size > MAX_HISTORY_BYTES) throw new Error("macro-surprise evidence path is unsafe");
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
-    // Opened again, as the file the lstat judged may have been replaced: not followed, not waited on (BACKLOG 103-11 review).
-    const text = (await readRegularFile(this.filePath, "macro-surprise evidence", MAX_HISTORY_BYTES)).toString("utf8");
-    const records = text.trim().split("\n").filter(Boolean).map((line, index) => {
+    return (await this.readLog()).records;
+  }
+
+  /** readUnlocked's read of the log at `path`, with each record's line as decoded, the raw bytes and the file's identity (null when there is none). */
+  private async readLog(path = this.filePath): Promise<{ records: MacroSurpriseEvidenceRecord[]; lines: string[]; raw: Buffer; identity: Stats | null }> {
+    let read: { bytes: Buffer; stat: Stats };
+    // Not followed, not waited on, and judged as opened (BACKLOG 103-11 review).
+    try { read = await readRegularFileWithStat(path, "macro-surprise evidence", MAX_HISTORY_BYTES); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], lines: [], raw: Buffer.alloc(0), identity: null };
+      throw new Error("macro-surprise evidence path is unsafe", { cause: error });
+    }
+    const { bytes: raw, stat } = read;
+    if ((typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence path is unsafe");
+    const lines = raw.toString("utf8").trim().split("\n").filter(Boolean);
+    const records = lines.map((line, index) => {
       if (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES) throw new Error(`macro-surprise evidence record is too large at line ${index + 1}`);
       try { return validateRecord(JSON.parse(line), index + 1); } catch (error) { throw error instanceof Error ? error : new Error("invalid macro-surprise evidence JSON"); }
     });
@@ -169,7 +178,27 @@ export class MacroSurpriseEvidenceStore {
       if (record.sequence !== index + 1) throw new Error(`non-contiguous macro-surprise evidence sequence at line ${index + 1}`);
       if (index > 0 && record.first_seen_at < records[index - 1].first_seen_at) throw new Error(`macro-surprise first_seen_at moved backwards at line ${index + 1}`);
     }
-    return records;
+    return { records, lines, raw, identity: stat };
+  }
+
+  /**
+   * One attempt at this store's lock, never waiting, with a synchronous release (BACKLOG 103-11 review); null when
+   * another holds it. For tradingview-mcp-repair-first-seen, which holds several locks and waits on none.
+   */
+  private async tryLockOnce(): Promise<{ releaseSync(): void } | null> {
+    await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
+    const path = `${this.filePath}.lock`, token = randomUUID();
+    const attempt = await attemptLockFile(path, "macro surprise evidence lock", `${token}\n`);
+    if (!attempt.taken) return null;
+    return { releaseSync: () => { releaseLockFileSync(path, (contents) => contents === `${token}\n`); } };
+  }
+
+  /** This store's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11 review). */
+  stampedAheadRepair() {
+    return stampedAheadRepairOf<MacroSurpriseEvidenceRecord>({
+      label: "macro-surprise evidence", path: this.filePath, lockPath: `${this.filePath}.lock`,
+      read: () => this.readLog(), readBack: async (path) => (await this.readLog(path)).records, tryLock: () => this.tryLockOnce(),
+    });
   }
 
   private async appendUnlocked(record: MacroSurpriseEvidenceRecord): Promise<void> {
