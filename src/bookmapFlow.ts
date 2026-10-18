@@ -1,6 +1,7 @@
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { OhlcvBar } from "./tradingview.js";
+import { readRegularFile } from "./fsDurability.js";
 import { defaultBookmapFlowDirectory, earlierDefaultBookmapFlowDirectory } from "./platformSupport.js";
 
 const SESSION_FILE = /^bookmap-flow-(?!signals-)[A-Za-z0-9._-]+\.jsonl$/;
@@ -149,7 +150,9 @@ export async function readBookmapFlowSession(directory: string, fileName: string
   const fileStat = await lstat(path);
   if (!fileStat.isFile() || fileStat.isSymbolicLink()) throw new Error("bookmap session file must be a real regular file");
   if (fileStat.size > MAX_SESSION_BYTES) throw new Error(`bookmap session exceeds ${MAX_SESSION_BYTES} byte limit`);
-  return parseBookmapFlowSession(await readFile(path, "utf8"), fileName, fileStat.size);
+  // Opened again without following a link or waiting on a FIFO: the file the lstat judged may have been replaced (BACKLOG 103-11 review).
+  const raw = await readRegularFile(path, "bookmap session", MAX_SESSION_BYTES);
+  return parseBookmapFlowSession(raw.toString("utf8"), fileName, raw.byteLength);
 }
 
 export function parseBookmapFlowSession(content: string, fileName = "bookmap-flow-test.jsonl", bytes = Buffer.byteLength(content)): BookmapFlowSession {

@@ -1,5 +1,6 @@
-import { assertAppendableJsonl, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, posixModeEnforced, noFollowFlag, nonBlockingFlag } from "./fsDurability.js";
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { appendFile, lstat, mkdir, open } from "node:fs/promises";
 import { ResearchCollectionHeartbeatStore, resolveResearchCollectionHeartbeatPath, type ResearchCollectionHeartbeatRecord } from "./researchCollectionHeartbeat.js";
 import { homedir } from "node:os";
@@ -201,7 +202,8 @@ export async function appendOwnerOnly(path: string, row: { hypothesis_id: string
   if (!directory.isDirectory() || directory.isSymbolicLink() || (posixModeEnforced() && (directory.mode & 0o077) !== 0)) throw new Error("research collection directory is unsafe");
   let existingPrimaryEvents = 0;
   try {
-    const existing = await open(path, "r");
+    // Not waiting on a FIFO, nor following a link, before the regular-file check below (BACKLOG 103-11 review).
+    const existing = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
     try {
       const stat = await existing.stat();
       if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) throw new Error("research collection output is unsafe");

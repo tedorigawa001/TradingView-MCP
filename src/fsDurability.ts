@@ -74,6 +74,25 @@ export async function assertNotSymbolicLink(path: string, label: string): Promis
 }
 
 /**
+ * The whole regular file at `path` (BACKLOG 103-11 review): a symbolic link there is refused on every platform (and by
+ * O_NOFOLLOW where the host has it), the open does not wait on a FIFO (nonBlockingFlag), and only a regular file of at
+ * most `maxBytes`, judged from fstat before a byte is read, is read. A missing file throws ENOENT as readFile does, for
+ * callers that take it as empty. For stores and archives; a file a user names on the command line is theirs to choose.
+ */
+export async function readRegularFile(path: string, label: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<Buffer> {
+  await assertNotSymbolicLink(path, label);
+  const handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`${label} path must be a regular file`);
+    if (stat.size > maxBytes) throw new Error(`${label} file is too large`);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
  * Create a new owner-only file without following an existing symbolic link.
  *
  * O_EXCL alone does not reject a dangling symlink on Windows. Keep the explicit

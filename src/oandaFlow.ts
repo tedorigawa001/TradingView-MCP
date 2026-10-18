@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile } from "node:fs/promises";
+import { lstat, mkdir, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, readRegularFile } from "./fsDurability.js";
 
 export const OANDA_FLOW_INSTRUMENTS = ["EUR_USD", "USD_JPY"] as const;
 export type OandaFlowInstrument = typeof OANDA_FLOW_INSTRUMENTS[number];
@@ -132,7 +132,7 @@ export class OandaFlowRawArchive {
       return { stored: true, bytes: body.byteLength };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new Error("unable to write OANDA flow raw archive", { cause: error });
-      const existing = await readFile(path);
+      const existing = await readRegularFile(path, "OANDA flow raw archive", MAX_RAW_BYTES);   // not followed, not waited on (BACKLOG 103-11 review)
       if (existing.byteLength !== body.byteLength || digest(existing.toString("utf8")) !== rawSha256) throw new Error("OANDA flow raw archive existing payload does not match");
       return { stored: false, bytes: body.byteLength };
     }

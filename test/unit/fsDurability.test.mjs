@@ -9,7 +9,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced, publishImmutableFile, publishImmutableFiles, syncDirectoryEntry } from "../../build/fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, publishImmutableFile, publishImmutableFiles, readRegularFile, syncDirectoryEntry } from "../../build/fsDurability.js";
 
 test("directory durability remains available on Unix and is an explicit no-op on Windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-durability-"));
@@ -56,20 +56,31 @@ test("no evidence store passes O_NOFOLLOW unconditionally any more", async () =>
   assert.deepEqual(offenders, [], `these still use constants.O_NOFOLLOW directly: ${offenders.join(", ")}`);
 });
 
-test("no store opens a file for reading in a way that waits on a FIFO (BACKLOG 103-11)", async () => {
+test("no store reads a file in a way that waits on a FIFO or follows a link (BACKLOG 103-11)", async () => {
   // A read-only open of a FIFO waits for a writer, before any regular-file check after it can refuse the FIFO: a log's
-  // reader then hung for good with the log's lock held. Directories (synced in fsDurability.ts) are not looked at.
+  // reader then hung for good with the log's lock held. Every read-only open passes O_NONBLOCK, whatever the order of its
+  // flags, and a store reads a whole file only through readRegularFile, never by readFile(path), open(path, "r") or a read
+  // stream of a path. The CLIs below read files a user names on the command line, theirs to choose; fsDurability.ts holds
+  // the helpers and syncs directories. The scan reads comments too, so keep it free of a literal example.
+  const userInputs = new Set(["evaluate.ts", "eventStudyFalsificationCli.ts", "fxCsvM1AggregationCli.ts", "fxCsvFeatureScanCli.ts", "macroEvent60mCli.ts",
+    "macroEvent60mPreflightCli.ts", "macroEventResponseCli.ts", "macroSurpriseCoverageCli.ts", "officialMacroActualCollectionCli.ts", "priceActionTrapReproductionCli.ts",
+    "tradingEconomicsMacroConsensusCli.ts", "server.ts"]);
   const directory = new URL("../../src/", import.meta.url);
   const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");
   const offenders = [];
   for (const name of files) {
     const source = await readFile(new URL(name, directory), "utf8");
-    for (const match of source.matchAll(/O_RDONLY \| noFollowFlag\(\)/g)) {
-      const statement = source.slice(match.index, source.indexOf(";", match.index));
+    for (const match of source.matchAll(/O_RDONLY/g)) {
+      const from = Math.max(source.lastIndexOf(";", match.index), source.lastIndexOf("{", match.index)) + 1;
+      const statement = source.slice(from, source.indexOf(";", match.index));
       if (!/nonBlockingFlag\(|O_NONBLOCK|NON_BLOCKING_OPEN/.test(statement)) offenders.push(`${name}: ${statement.trim()}`);
     }
+    if (userInputs.has(name)) continue;
+    for (const match of source.matchAll(/(?<![.\w])(?:readFile|readFileSync|createReadStream)\(|(?<![.\w])open\([^;]*?,\s*["']r["']/g)) {
+      offenders.push(`${name}: ${source.slice(match.index, source.indexOf("\n", match.index)).trim()}`);
+    }
   }
-  assert.deepEqual(offenders, [], `read-only opens that wait on a FIFO:\n${offenders.join("\n")}`);
+  assert.deepEqual(offenders, [], `reads that wait on a FIFO or follow a link:\n${offenders.join("\n")}`);
 });
 
 test("all exclusive file creation goes through the shared symlink guard", async () => {
@@ -920,4 +931,21 @@ test("another user's lock-named files are left unread, and another user's lock o
   await writeFile(`${lock}.takeover`, `${randomUUID()} ${ended}\n`, { mode: 0o600 });
   await chown(`${lock}.takeover`, 65534, 65534);
   await assert.rejects(() => publishImmutableFiles(paths, body, "test set"), /^Error: test set takeover marker path holds a file that is not this user's marker \(it is owned by another user \(uid 65534\)\): .*; nothing was written$/);
+});
+
+test("readRegularFile reads a regular file, and refuses a link, a FIFO (without waiting) and a file over its limit (BACKLOG 103-11)", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-read-regular-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "store.jsonl");
+  await writeFile(path, "record\n", { mode: 0o600 });
+  assert.equal((await readRegularFile(path, "test store")).toString("utf8"), "record\n");
+  await assert.rejects(() => readRegularFile(path, "test store", 3), /^Error: test store file is too large$/);
+  await assert.rejects(() => readRegularFile(join(directory, "missing"), "test store"), { code: "ENOENT" });
+  if (process.platform === "win32") return;   // symbolic links need privileges there, and mkfifo is POSIX
+  await symlink(path, join(directory, "linked"));
+  await assert.rejects(() => readRegularFile(join(directory, "linked"), "test store"), /test store path must be a regular file, not a symbolic link/);
+  execFileSync("mkfifo", [join(directory, "fifo")]);
+  const started = Date.now();
+  await assert.rejects(() => readRegularFile(join(directory, "fifo"), "test store"), /^Error: test store path must be a regular file$/);
+  assert.ok(Date.now() - started < 5_000, "the FIFO was not waited on");
 });

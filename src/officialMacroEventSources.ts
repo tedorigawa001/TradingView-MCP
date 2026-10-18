@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertExpectedResponseHost, readLimitedResponseText, type BoundedResponse } from "./boundedResponse.js";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, readRegularFile } from "./fsDurability.js";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
 
 export type OfficialMacroEventKind = "us_cpi" | "us_nfp" | "fomc_statement";
@@ -145,7 +145,7 @@ export async function archiveOfficialMacroRaw(directory: string, sha256: string,
     try { await handle.writeFile(raw, "utf8"); await handle.sync(); } finally { await handle.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = await readFile(path, "utf8");
+    const existing = (await readRegularFile(path, "official macro raw archive")).toString("utf8");   // not followed, not waited on (BACKLOG 103-11 review)
     if (sourceHash(existing) !== sha256) throw new Error("official macro raw archive existing payload hash does not match");
   }
 }

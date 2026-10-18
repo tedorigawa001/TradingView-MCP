@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isCanonicalTimestamp } from "./firstSeenStore.js";
-import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced } from "./fsDurability.js";
+import { assertAppendableJsonl, attemptLockFile, lockBeingReleased, noFollowFlag, nonBlockingFlag, openExclusiveFile, posixModeEnforced, readRegularFile } from "./fsDurability.js";
 
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4_096;
@@ -143,7 +143,7 @@ export class MacroSurpriseRawArchive {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const stat = await lstat(path);
       if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || stat.size !== body.byteLength || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise raw archive existing payload is unsafe");
-      const existing = await readFile(path);
+      const existing = await readRegularFile(path, "macro-surprise raw archive", MAX_RAW_BYTES);   // not followed, not waited on (BACKLOG 103-11 review)
       if (`sha256:${createHash("sha256").update(existing).digest("hex")}` !== rawSha256) throw new Error("macro-surprise raw archive existing payload hash does not match");
       return { stored: false, bytes: body.byteLength };
     }
@@ -159,7 +159,8 @@ export class MacroSurpriseEvidenceStore {
       const stat = await lstat(this.filePath);
       if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0) || stat.size > MAX_HISTORY_BYTES) throw new Error("macro-surprise evidence path is unsafe");
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
-    const text = await readFile(this.filePath, "utf8");
+    // Opened again, as the file the lstat judged may have been replaced: not followed, not waited on (BACKLOG 103-11 review).
+    const text = (await readRegularFile(this.filePath, "macro-surprise evidence", MAX_HISTORY_BYTES)).toString("utf8");
     const records = text.trim().split("\n").filter(Boolean).map((line, index) => {
       if (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES) throw new Error(`macro-surprise evidence record is too large at line ${index + 1}`);
       try { return validateRecord(JSON.parse(line), index + 1); } catch (error) { throw error instanceof Error ? error : new Error("invalid macro-surprise evidence JSON"); }

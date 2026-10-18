@@ -1,8 +1,8 @@
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, nonBlockingFlag, attemptLockFile } from "./fsDurability.js";
+import { assertAppendableJsonl, assertNotSymbolicLink, noFollowFlag, nonBlockingFlag, attemptLockFile, readRegularFile } from "./fsDurability.js";
 
 const LOCK_WAIT_MS = 2_000;
 
@@ -135,7 +135,8 @@ export class AppendOnlyEvaluationLog {
   async readBySnapshotId(snapshotId: string): Promise<EvaluationLogEntry[]> {
     if (!/^[0-9a-f-]{36}$/i.test(snapshotId)) throw new Error("snapshot_id must be a UUID");
     let text: string;
-    try { text = await readFile(this.filePath, "utf8"); } catch (err) {
+    // Not waiting on a FIFO, nor following a link, and only a regular file (BACKLOG 103-11 review).
+    try { text = (await readRegularFile(this.filePath, "evaluation log")).toString("utf8"); } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
@@ -146,7 +147,7 @@ export class AppendOnlyEvaluationLog {
 
   async readAll(): Promise<EvaluationLogEntry[]> {
     try {
-      const text = await readFile(this.filePath, "utf8");
+      const text = (await readRegularFile(this.filePath, "evaluation log")).toString("utf8");
       return text.trim().split("\n").filter(Boolean).map((line, index) => {
         try { return JSON.parse(line) as EvaluationLogEntry; } catch { throw new Error(`invalid JSONL record at line ${index + 1}`); }
       });
