@@ -338,6 +338,14 @@ test("the totals describe one moment: the run log is read again after the manife
   await assert.rejects(() => exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, runs: everGrowing,
     archive: { read: async (hash) => { pages += 1; return archive.read(hash); } } }), /USD_JPY FX history manifest in .* or its run log grew each of the 5 times they were read; export again when no collection is running/);
   assert.deepEqual([reads.manifest, pages], [10, 0]);
+  // A run log a repair rewrote, and a new run brought back to its count, between the two reads (BACKLOG 103-11 review):
+  // as many records, but another last one, so the export reads again and exports the runs as they settled.
+  reads.runs = 0; reads.manifest = 0;
+  const later = { ...all[1], started_at: "2026-08-02T00:00:00.000Z", retrieved_at: "2026-08-02T00:00:01.000Z", first_seen_at: "2026-08-02T00:00:01.000Z", observation_date: "2026-08-02" };
+  const lists = [[all[0], all[1]], [all[0], later], [all[0], later], [all[0], later]];
+  const rewritten = { instrument: "USD_JPY", records: async () => lists[Math.min(reads.runs++, lists.length - 1)] };
+  const resettled = await exportFxHistory({ instrument: "USD_JPY", all: true, store: counted, checkpoints, archive, runs: rewritten });
+  assert.deepEqual([resettled.run_records, resettled.runs.map((run) => run.retrieved_at), reads.manifest], [2, [all[0].retrieved_at, later.retrieved_at], 4]);
   // The CLI prints the totals. A partial export's bytes change when a run is recorded, though its own collection did not
   // change: export again to a new name.
   const output = join(dir, "usdjpy-1.json");

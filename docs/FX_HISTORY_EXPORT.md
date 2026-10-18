@@ -40,8 +40,9 @@ the export lists each distinct content once, at the time it was first recorded. 
 is read before the manifest, so every run read has its content recorded (a collection records its content before its
 run). A run whose content the manifest does not hold, or whose bar count differs from that content's, refuses the export.
 After the manifest the page checkpoints are read, once and whole, then the manifest and the run log again: when each
-second read holds as many records as the first, neither log changed meanwhile, so the manifest, the run log (and the
-totals below) and the checkpoints describe one moment, the one the checkpoints were read at; a checkpoint a later run
+second read holds as many records as the first, ending with the same last record, neither log changed meanwhile (both
+only grow, but a repair of records stamped ahead can shrink one that later records bring back to its count), so the
+manifest, the run log (and the totals below) and the checkpoints describe one moment, the one the checkpoints were read at; a checkpoint a later run
 writes is not read. Otherwise all are read again, up to five times in all, and the export fails if collections kept
 recording throughout. The totals count only the manifest and the run log: a later run of an identical range can add a
 checkpoint that turns a collection's `range_checkpointed` true while they stay the same. The manifest holds each

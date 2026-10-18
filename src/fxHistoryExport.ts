@@ -143,19 +143,24 @@ async function readCheckpointRows(checkpoints: CheckpointReader, records: FxHist
  * The manifest, the run log and the page checkpoints of an instrument as they were at one moment (BACKLOG 103-9 review,
  * 103-10 review). The run log is read first, so every run read has its content recorded (a collection records its
  * content before its run); then the manifest, then the checkpoints, whole and once; then the manifest and the run log
- * again. Both only grow, so when each second read holds as many records as the first, neither changed meanwhile, and
+ * again. Both only grow, except when tradingview-mcp-repair-first-seen moves a tail stamped ahead out of them, after which
+ * new records can bring a log back to the count it had (BACKLOG 103-11 review); so when each second read holds as many
+ * records as the first, ending with the same last record (its sequence, stamp and content), neither changed meanwhile, and
  * all three describe the moment the checkpoints were read: a checkpoint written after that moment, by a later run of a
  * recorded range, is not in the snapshot. Otherwise all are read again, up to five times in all. The manifest holds
  * each content once; a manifest with a content twice is refused, as is a run whose content the manifest does not hold,
  * or whose bar count differs from that content's.
  */
+/** Whether two reads of a log hold the same records: as many, ending with the same last record. A log only grows but for a repair, so this is the whole log. */
+const sameLog = (again: readonly unknown[], first: readonly unknown[]) => again.length === first.length && JSON.stringify(again.at(-1)) === JSON.stringify(first.at(-1));
+
 async function readFxHistorySnapshot(instrument: OandaFxInstrument, store: ManifestReader, runs: RunReader, checkpoints: CheckpointReader) {
   const where = store.path ? ` in ${store.path}` : "";
   for (let attempt = 1; ; attempt += 1) {
     const runRecords = await runs.records();
     const records = await store.records();
     const checkpointRows = await readCheckpointRows(checkpoints, records);
-    if ((await store.records()).length === records.length && (await runs.records()).length === runRecords.length) {
+    if (sameLog(await store.records(), records) && sameLog(await runs.records(), runRecords)) {
       const sequenceOf = new Map<string, number>();
       for (const record of records) {
         const earlier = sequenceOf.get(record.normalized_sha256);
