@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { BAR_SERIES_MAX_BARS } from "./barSeries.js";
 import { isCliEntrypoint } from "./cliEntrypoint.js";
 import { ENTRY_RESERVED_SERIES_PREFIXES } from "./forecastSet.js";
-import { assertPublishDirectory, noFollowFlag, publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
+import { assertPublishDirectory, noFollowFlag, PublishDirectoryRefused, publishImmutableFile, publishImmutableFiles } from "./fsDurability.js";
 import { exportFxHistory, fxHistoryBarSeries, listFxHistoryCollections, splitFxHistoryExport, type FxHistoryExportSources, type FxHistoryExportSplit } from "./fxHistoryExport.js";
 import { isOandaFxInstrument, OANDA_FX_INSTRUMENTS } from "./oandaHistoricalFx.js";
 
@@ -131,20 +131,29 @@ export async function runFxHistoryExport(args: string[], deps: FxHistoryExportSo
     if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(seriesId) || ENTRY_RESERVED_SERIES_PREFIXES.some((prefix) => seriesId.startsWith(prefix))) throw new Error("--series-id must be 1-120 of A-Z a-z 0-9 _ . : - and must not use a reserved prefix");
   } else if (seriesId || tier) throw new Error("--series-id and --evidence-tier belong to --format bar-series");
   // The directory is resolved first, as the publish resolves it, so it may be reached through a symbolic link (/tmp on
-  // macOS), and must be one no other user can swap the staging in (BACKLOG 103-11); the output's own name must not be a link.
+  // macOS); the output's own name must not be a link. A directory another user could change (assertPublishDirectory,
+  // BACKLOG 103-11) may only be confirmed in: an export that would write a file there is refused before any raw page is
+  // read, while one whose files are all there already compares them, as the publish then does, and writes nothing.
   const parent = await realpath(dirname(values.output)).catch(() => null);
   if (parent === null || !(await stat(parent).catch(() => null))?.isDirectory()) throw new Error(`--output must be in an existing directory: ${values.output}`);
-  await assertPublishDirectory(parent, "FX history export");
+  const refusal = await assertPublishDirectory(parent, "FX history export").then(() => null, (error: unknown) => {
+    if (error instanceof PublishDirectoryRefused) return error;
+    throw error;
+  });
   const target = await lstat(values.output).catch(() => null);
   if (target?.isDirectory()) throw new Error(`--output names a directory: ${values.output}`);
   if (!values.split && target?.isSymbolicLink()) throw new Error(`--output names a symbolic link: ${values.output}; nothing was written`);
   if (values.split) {
     // One snapshot, its parts fixed and the 20,000,000-bar total checked before any raw page is read.
     const split = await splitFxHistoryExport({ instrument, ...deps });
+    if (refusal !== null) {
+      for (const path of fxHistoryExportPartPaths(values.output, split.parts.length)) if ((await lstat(path).catch(() => null)) === null) throw refusal;
+    }
     const { parts, collections } = await writeFxHistoryExportParts(split, values.output);
     return { format, split: true, instrument, manifest_records: split.manifest_records, run_records: split.run_records,
       runs: parts.reduce((sum, part) => sum + part.runs, 0), parts, collections };
   }
+  if (refusal !== null && target === null) throw refusal;
   const exported = await exportFxHistory({ instrument, sequences, all: values.all === true, ...(format === "bar-series" ? { maxBars: BAR_SERIES_MAX_BARS } : {}), ...deps });
   const body = format === "bar-series"
     ? `${JSON.stringify(fxHistoryBarSeries(exported.collections[0], { seriesId: seriesId!, evidenceTier: tier as (typeof TIERS)[number] }))}\n`

@@ -69,18 +69,35 @@ as [below](#the-output-directory).
 
 ### The output directory
 
-BACKLOG 103-11. The resolved directory of the output (of every part with `--split`) must be one no other user can swap
-files in. On macOS and Linux an export refuses, before any raw page is read and writing nothing, a directory the group
-or others can write to unless it has the sticky bit (as `/tmp` has), and a directory owned by neither you nor root. In
-such a directory another user could rename the hidden staging directory the export writes in and put a symbolic link
-in its place: the export would then create its files in, link files from, and remove files in the directory the link
-names. Choose a directory only you can write to (`chmod go-w`; under a umask of 002 new directories are
-group-writable), or one with the sticky bit. Within an accepted
-directory the export still keeps each staging directory's identity from when it made it, checks it before it stages a
-file there and before each link, checks the staged file before it is linked, and removes only the files it created, so
-a staging directory swapped all the same is refused, not followed. The check is of the output's own directory: keep it
-under directories only you (or root) can write to. Windows has neither owner nor mode here, so there the check is not
-made, and the directory's access control list decides who can change it.
+BACKLOG 103-11. An export that must write a file needs an output directory (the directory of every part with
+`--split`) that no other user can change. On macOS and Linux it refuses, before any raw page is read and writing
+nothing, a directory that its group or every user can write to unless it has the sticky bit (as `/tmp` has), or one
+owned by neither you nor root, and the same of every directory above it, up to `/`. The message names the directory,
+its mode and group, and the command that fixes it, for instance `chmod g-w,o-w '/path/to/dir'`. In such a directory
+another user could move or replace what the export stages and links there. An export whose files are all there already
+writes nothing: it only compares them, in any directory, so a re-run over evidence in place (in a directory made
+group-writable or read-only, or owned by someone else) still reports `identical`.
+
+On Linux systems that give each user a private group, the default umask is often 002, so new directories are
+group-writable (mode 0775) even though only you are in that group. The check cannot tell such a group from a shared
+one and refuses it: run the `chmod g-w` the message gives, or `umask 022` before making the directory.
+
+An export stages each new file in the output directory itself, under a random hidden name
+`.<output name>-<tag>-<process id>-<random>.<part>.stage`, created exclusively, owner-only, without following a link, so
+no directory on the way is one another user could swap. It checks a staged file is still the file it wrote before it
+links it, and that the destination is that file after the link: a destination holding another file is removed again
+when it is the file found at the staged name, and the export fails. It removes a staged file only while it is still the
+file written, checked just before the unlink. Between one of these checks and the step after it, whoever can write the
+directory could still act; the directory checks above leave that to you and root. Two things are not seen: access
+control lists (`chmod +a` on macOS, POSIX ACLs on Linux) that let others write a directory whose mode does not, and
+volumes mounted with ownership ignored (many external disks). A writer there can still make an export fail, but with
+the identity checks it can no longer redirect what the export writes, links or removes. A volume without hard links
+(exFAT, FAT) cannot hold an export: the link is refused, and the export says so and writes nothing; export to another
+directory.
+
+Windows has neither owner nor mode here, so there the check is not made, and the directory's access control list
+decides who can change it. A folder made directly under `C:\` lets every signed-in user (Authenticated Users) modify
+it, so export under your profile (`%USERPROFILE%`), whose folders only you can change.
 
 Choose collections with one or more `--sequence`, or `--all`; they are written in manifest order. At most 1,000,000
 bars go into one export, checked before any raw response is read. A whole export over that goes into parts with
@@ -182,18 +199,18 @@ lock again instead. Only an export that stalls for more than 30 seconds in the m
 counts as stale) can move a newer export's lock aside for a moment; the lock checks then stop one of them, and nothing is
 removed, so `part01` still means the whole set. Before the link phase, before it links `part01`, and before it removes
 anything, an export checks that the lock is still its own, and stops if it was taken over. Where the directory denies
-it the lock (made read-only, say), an export only confirms that every part is already there and identical, and writes
-nothing; a part missing refuses it. On Windows, where a denied directory and a lock being deleted both report EPERM, a
+it the lock (made read-only, say), or where another user could change it ([above](#the-output-directory)), an export
+only confirms that every part is already there and identical, and writes nothing; a part missing refuses it. On Windows, where a denied directory and a lock being deleted both report EPERM, a
 re-run in a read-only directory retries for about two seconds and then fails, writing nothing, instead of confirming.
 
 Then each part is built in turn, once, and only one part's bars are held at once: a part whose file already exists is
-compared with it, and any other is written and synced to a staging file in a hidden directory beside the output,
-`.publish-<output name without .json>-<tag>-<process id>-XXXXXX`, the tag a short hash of `part01`'s exact name, so
-that the staging directories an export looks at are those of the exports its lock covers. A part that fails to build (a
-raw page missing or not matching its hash, a page no checkpoint binds), or a file with other bytes at a part's path,
-removes the files it staged, then the staging directory, and writes nothing, and says so; every file with other bytes
-is named. A staging directory that is no longer the one the export made, or a staged file that is no longer the one it
-wrote, stops the export the same way ([above](#the-output-directory)). Only when every
+compared with it, and any other is written and synced to a hidden staged file beside the output,
+`.<output name without .json>-<tag>-<process id>-<random>.<part index>.stage`, the tag a short hash of `part01`'s
+exact name, so that the staged files an export looks at are those of the exports its lock covers. A part that fails to
+build (a raw page missing or not matching its hash, a page no checkpoint binds), or a file with other bytes at a part's
+path, removes the files it staged and writes nothing, and says so; every file with other bytes is named. A staged file
+that is no longer the one the export wrote stops the export the same way, and a part that holds another file once
+linked is removed again ([above](#the-output-directory)). Only when every
 part is staged or found identical are the staged parts linked into place, `part01` last: the other parts are linked and
 the directory synced, the parts found identical are checked to be so still, and then `part01` is linked and synced. Each
 part is `created`, or `identical` when its file already held it. With the lock, `part01` there means that its whole set
@@ -207,20 +224,25 @@ stops there too and the other parts stay. When a `part01` is there that this run
 this run's, nothing is removed. The error says which parts were removed, which were already gone, which another file
 had replaced (left alone), and which stayed and why; parts found identical were not written by this run.
 
-An export stopped by SIGINT, SIGTERM or SIGHUP first removes its staging files (so that a link still in flight fails),
+An export stopped by SIGINT, SIGTERM or SIGHUP first removes its staged files (so that a link still in flight fails),
 then, in the same way, what it linked, then its lock, and ends by the signal; in a process that keeps its own listener
 for the signal, the export ends instead with an error that it was interrupted. One killed outright (SIGKILL) leaves its
-lock and its staging directory, and, if it was killed while taking a lock over, a takeover marker, a temporary lock
+lock and its staged files, and, if it was killed while taking a lock over, a takeover marker, a temporary lock
 (`.<uuid>.publish-lock-new`) or a tombstone (`.<uuid>.publish-lock-stale`). The next export to the same output takes
 the lock over, and the next takeover the marker; a temporary lock or tombstone of this user that is a day old is
 removed. A lock, marker, temporary lock or tombstone is judged by its owner and size before it is read (BACKLOG
-103-11): another user's, one larger than a lock (128 bytes) or one that cannot be opened is never read; such a file is
-left alone, and at the export's own lock or marker path it refuses the export, writing nothing. The next export also
-removes a staging directory of its own set when its process is gone or (except on Windows) it is older than a day,
-but only one that is this user's (owned by the user, mode 0700) and holds nothing but numbered files: it renames it first, checks the renamed entry is still that directory, and removes its numbered files,
-then the directory. Anything else, a directory of a running export, of another output, of another owner or mode, or
-holding other files, is left alone. Windows reports neither owner nor mode here, so there a staging directory is
-removed only once its process is known to be gone. A crash or power loss while the parts are being linked, or a removal
+103-11): another user's, one larger than a lock (128 bytes) or one that cannot be opened is never read. Such a
+temporary lock or tombstone is left alone, and such a lock at the export's own lock path refuses the export, writing
+nothing. Such a takeover marker is passed over when an export starts, and refuses the export only when the export finds
+its lock stale and must take it over. The next export also removes the staged files of its own set whose process is
+gone or (except on Windows) that are older than a day, but only this user's (owned by the user, mode 0600), each
+checked again to be the file judged just before it is removed. Exports of 0.1.43 or earlier staged in a hidden
+directory, `.publish-<output name without .json>-<tag>-<process id>-XXXXXX`, instead: such a directory a killed run left
+is removed by the same rule, when it is this user's (mode 0700) and holds nothing but numbered files; it is renamed
+first, checked to be still that directory, and its numbered files removed, then the directory. Anything else, a staged
+file or directory of a running export, of another output, of another owner or mode, or a directory holding other
+files, is left alone. Windows reports neither owner nor mode here, so there a staged file or directory is removed only
+once its process is known to be gone. A crash or power loss while the parts are being linked, or a removal
 cut short, can leave some of `part02` onwards without `part01`. A later export to that name then finds a different file
 there and refuses; the error calls such a part, one whose set is not all there, the debris of an interrupted export, to
 be deleted.

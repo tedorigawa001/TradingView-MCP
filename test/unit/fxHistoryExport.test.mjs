@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { collectOandaM15History, FxHistoricalCheckpointStore, FxHistoricalManifestStore, oandaPageRanges } from "../../build/oandaHistoricalFx.js";
 import { FxHistoricalArchive } from "../../build/fxHistoricalArchive.js";
 import { FxHistoricalRunLog } from "../../build/fxHistoryRunLog.js";
@@ -296,7 +296,7 @@ test("--output is judged in its resolved directory: one reached through a link i
     await mkdir(shared); await chmod(shared, 0o777);
     for (const split of [[], ["--split"]]) {
       await assert.rejects(() => runFxHistoryExport(["--instrument", "EUR_USD", "--all", ...split, "--output", join(shared, "eurusd.json")], deps),
-        /FX history export will not publish into .*shared: other users can write to it and it has no sticky bit.*; nothing was written$/);
+        /FX history export will not publish into .*shared: .*shared \(mode 0777, gid \d+\) can be written by its group \(gid \d+\) and every user and has no sticky bit, .*\(run chmod g-w,o-w '.*shared', or choose a directory only you can write to\); nothing was written$/);
     }
     assert.deepEqual(await readdir(shared), []);
   }
@@ -305,6 +305,16 @@ test("--output is judged in its resolved directory: one reached through a link i
   assert.equal(result.result, "created");
   assert.equal(result.sha256, sha(await readFile(join(real, "eurusd.json"), "utf8")));
   assert.deepEqual(await readdir(real), process.platform === "win32" ? ["eurusd.json"] : ["eurusd.json", "linked.json"]);
+  if (process.platform === "win32") return;
+  // An export already in such a directory is confirmed, and nothing is written there (BACKLOG 103-11 review): a re-run
+  // over evidence in place need not move it.
+  const shared = join(dir, "shared");
+  await writeFile(join(shared, "eurusd.json"), await readFile(join(real, "eurusd.json")), { mode: 0o600 });
+  assert.equal((await runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--output", join(shared, "eurusd.json")], deps)).result, "identical");
+  const parts = await runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--split", "--output", join(real, "split.json")], deps);
+  for (const part of parts.parts) await writeFile(join(shared, basename(part.output)), await readFile(part.output), { mode: 0o600 });
+  assert.deepEqual((await runFxHistoryExport(["--instrument", "EUR_USD", "--all", "--split", "--output", join(shared, "split.json")], deps)).parts.map((part) => part.result), ["identical"]);
+  assert.deepEqual((await readdir(shared)).sort(), ["eurusd.json", "split.part01.json"]);
 });
 
 test("the totals describe one moment: the run log is read again after the manifest until both reads agree (BACKLOG 103-9 review)", async () => {
@@ -457,7 +467,7 @@ test("the CLI writes a split export's parts once each, checks every target befor
   reads.count = 0;
   await assert.rejects(async () => writeFxHistoryExportParts(await split(), blocked), /a part of the export would replace a directory: .*blocked\.part02\.json; nothing was written/);
   assert.deepEqual([reads.count, await lstatOrNull(blockedFirst)], [0, null]);
-  assert.deepEqual((await readdir(dir)).filter((name) => name.startsWith(".publish-")), [], "no staging is left behind");
+  assert.deepEqual((await readdir(dir)).filter((name) => name.startsWith(".publish-") || name.endsWith(".stage")), [], "no staging is left behind");
   assert.equal((await stat(first)).isFile(), true);
 });
 
@@ -465,7 +475,7 @@ test("a split export writes all its parts or none: a later part that fails to bu
   const { counted, reads, sources, dir } = await fourCollections();
   const third = (await sources.store.records())[2];
   const broken = { read: async (hash) => { if (hash === third.raw_sha256[0]) throw new Error("ENOENT: the raw page is gone"); return sources.archive.read(hash); } };
-  const staging = async () => (await readdir(dir)).filter((name) => name.startsWith(".publish-"));
+  const staging = async () => (await readdir(dir)).filter((name) => name.startsWith(".publish-") || name.endsWith(".stage"));
   // The first part is built and staged; the second cannot be built: neither is written.
   const output = join(dir, "broken.json"), paths = fxHistoryExportPartPaths(output, 2);
   await assert.rejects(async () => writeFxHistoryExportParts(await splitFxHistoryExport({ instrument: "USD_JPY", maxPartBars: 5, ...counted, archive: broken }), output),
