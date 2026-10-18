@@ -183,20 +183,49 @@ export class MacroSurpriseEvidenceStore {
 
   /**
    * One attempt at this store's lock, never waiting, with a synchronous release (BACKLOG 103-11 review); null when
-   * another holds it. For tradingview-mcp-repair-first-seen, which holds several locks and waits on none.
+   * another holds it. For tradingview-mcp-repair-first-seen, which holds several locks and waits on none. A lock older
+   * than LOCK_STALE_MS is taken over as acquireLock takes it over (takeOverStaleLock), then tried once more.
    */
   private async tryLockOnce(): Promise<{ releaseSync(): void } | null> {
     await ensureOwnerDirectory(dirname(this.filePath), "macro-surprise evidence");
     const path = `${this.filePath}.lock`, token = randomUUID();
-    const attempt = await attemptLockFile(path, "macro surprise evidence lock", `${token}\n`);
-    if (!attempt.taken) return null;
-    return { releaseSync: () => { releaseLockFileSync(path, (contents) => contents === `${token}\n`); } };
+    for (let tried = 0; ; tried += 1) {
+      const attempt = await attemptLockFile(path, "macro surprise evidence lock", `${token}\n`);
+      if (attempt.taken) return { releaseSync: () => { releaseLockFileSync(path, (contents) => contents === `${token}\n`); } };
+      if (!attempt.held || tried > 0 || !(await this.takeOverStaleLock(path)).again) return null;
+    }
+  }
+
+  /**
+   * Looks at the lock another holds, which names no process to ask: one older than LOCK_STALE_MS was left by a holder
+   * that stopped, and is removed, checked to be the file judged just before; one removed meanwhile is gone too. Either
+   * way the caller tries again at once (`again`). One being deleted on Windows is waited for (`refusal`); an unsafe one
+   * is refused (BACKLOG 102-39).
+   */
+  private async takeOverStaleLock(path: string): Promise<{ again: boolean; refusal: NodeJS.ErrnoException | null }> {
+    let handle;
+    try {
+      handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
+      const stat = await handle.stat();
+      if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
+      if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+        await handle.readFile("utf8");
+        const current = await lstat(path);
+        if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); return { again: true, refusal: null }; }
+      }
+      return { again: false, refusal: null };
+    } catch (inspectError) {
+      // Removed since it was found: try again at once. Being deleted on Windows: wait for it.
+      if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") return { again: true, refusal: null };
+      if (lockBeingReleased(inspectError)) return { again: false, refusal: inspectError as NodeJS.ErrnoException };
+      throw inspectError;
+    } finally { await handle?.close(); }
   }
 
   /** This store's repair of a tail stamped ahead of the clock, for tradingview-mcp-repair-first-seen (BACKLOG 103-11 review). */
   stampedAheadRepair() {
     return stampedAheadRepairOf<MacroSurpriseEvidenceRecord>({
-      label: "macro-surprise evidence", path: this.filePath, lockPath: `${this.filePath}.lock`,
+      label: "macro-surprise evidence", path: this.filePath, lockPath: `${this.filePath}.lock`, lockStaleMs: LOCK_STALE_MS,
       read: () => this.readLog(), readBack: async (path) => (await this.readLog(path)).records, tryLock: () => this.tryLockOnce(),
     });
   }
@@ -242,22 +271,9 @@ export class MacroSurpriseEvidenceStore {
       refusal = attempt.refusal;
       let again = false;
       if (attempt.held) {
-        let handle;
-        try {
-          handle = await open(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag());
-          const stat = await handle.stat();
-          if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (posixModeEnforced() && (stat.mode & 0o077) !== 0)) throw new Error("macro-surprise evidence lock path is unsafe");
-          if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-            await handle.readFile("utf8");
-            const current = await lstat(path);
-            if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs && current.size === stat.size) { await handle.close(); handle = undefined; await unlink(path); again = true; }
-          }
-        } catch (inspectError) {
-          // Removed since it was found: try again at once. Being deleted on Windows: wait for it.
-          if ((inspectError as NodeJS.ErrnoException).code === "ENOENT") again = true;
-          else if (lockBeingReleased(inspectError)) refusal = inspectError as NodeJS.ErrnoException;
-          else throw inspectError;
-        } finally { await handle?.close(); }
+        const looked = await this.takeOverStaleLock(path);
+        again = looked.again;
+        if (looked.refusal !== null) refusal = looked.refusal;
       }
       if (again && !retriedAtOnce) { retriedAtOnce = true; continue; }
       retriedAtOnce = false;

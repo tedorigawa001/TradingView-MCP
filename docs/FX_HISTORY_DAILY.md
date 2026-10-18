@@ -98,8 +98,11 @@ sequences (`collections[].sequence`, `runs[].sequence` and the totals), and the 
 again. It takes the three logs' locks together, never waiting on one while holding another, and a dry run takes none.
 A kept collection may still need a record that would be moved: a run naming content only a moved manifest record
 holds, or a collection whose page is bound only by a moved checkpoint (matched by collection key, page range and raw
-hash, as the export matches them). It then refuses, naming them; `--recollect` moves those records all the same and
-names the ranges to collect again, which fetches those pages again, checkpoints them and records their content. If it
+hash, as the export matches them). It then refuses, naming them; `--recollect` moves them too, with the records
+after them in their logs (a log keeps only the records before the first moved), and lists in `collect_again` the ranges
+to collect again. Collecting each again fetches the pages no checkpoint holds, checkpoints them and records the content
+anew, bound by those checkpoints, so it is restored even when OANDA answers with other bytes for the same bars; until
+then the logs still export together, without those collections. If it
 stops after rewriting the run log or the manifest, it says which logs it rewrote, with their sidecars; running it
 again finishes the rest. `--scope all` does not include this check, which needs its instruments named. The [health example](launchd/com.tradingview-mcp.collection-health-fx-history.plist.example) runs at 22:30 JST
 on Monday to Friday, after each deadline, and notifies.

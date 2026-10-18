@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { lstat, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,6 +49,7 @@ const holdLock = (path) => new AppendOnlyFirstSeenLog(path, "test", (value) => v
 const RESEARCH = "TRADINGVIEW_MCP_RESEARCH_COLLECTION_HEARTBEAT_PATH";
 const hypotheses = [{ hypothesis_id: "xauusd-15m-bearish-fvg", status: "complete", events: 0, recorded: false }];
 const lines = (text) => text.split("\n").filter(Boolean);
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** A research heartbeat log of two runs, then two stamped by a clock years ahead; the clock is right again at `now`. */
 async function researchLogAhead(t) {
@@ -104,6 +105,9 @@ test("--apply takes the time once its locks are held and moves exactly the tail 
   await assert.rejects(() => runFirstSeenRepair(["--store", "research-heartbeat", "--apply"], now),
     (error) => error instanceof FirstSeenRepairRefused && /^nothing in the research-heartbeat store is stamped more than 60 s after 2026-10-18T00:00:30\.000Z; nothing was changed$/.test(error.message)
       && error.summary.logs[0].moved === null);
+  // The sidecar holds records the log no longer does: an earlier repair's, listed apart, not as an interrupted one's (BACKLOG 103-11 review).
+  const later = await runFirstSeenRepair(["--store", "research-heartbeat"], now).catch((error) => error.summary);
+  assert.deepEqual([later.logs[0].leftovers, later.logs[0].earlier_sidecars], [undefined, [sidecar]]);
 });
 
 test("records holding bytes that are not UTF-8 are kept and moved byte for byte (BACKLOG 103-11)", async (t) => {
@@ -253,7 +257,7 @@ test("a busy lock is waited for with none of the others held, and a lock a kille
   const release = await holdLock(files.checkpoints);
   try {
     await assert.rejects(() => runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"], now),
-      new RegExp(`^Error: timed out after \\d+ ms waiting for .*fx-history-m15-manifest\\.jsonl\\.checkpoints\\.lock, which another process holds; run the repair again when no collector is running; nothing was changed$`));
+      new RegExp(`^Error: timed out after \\d+ ms waiting for .*fx-history-m15-manifest\\.jsonl\\.checkpoints\\.lock, which process ${process.pid} holds; run the repair again when no collector is running; nothing was changed$`));
     assert.deepEqual([existsSync(`${files.runs}.lock`), existsSync(`${files.manifest}.lock`)], [false, false], "the locks it took were given back");
     // A dry run is not held up by it.
     assert.equal((await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD"], now)).logs.length, 3);
@@ -263,10 +267,40 @@ test("a busy lock is waited for with none of the others held, and a lock a kille
   for (let look = 0; look < 200; look += 1) { try { process.kill(ended.pid, 0); await new Promise((resolve) => setTimeout(resolve, 50)); } catch { break; } }
   await writeFile(`${files.manifest}.lock`, `${randomUUID()} ${ended.pid}\n`, { mode: 0o600 });
   const dry = await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD"], now);
-  assert.deepEqual(dry.logs[1].leftovers.stale_lock, { path: `${files.manifest}.lock`, pid: ended.pid, note: "a run killed while it held the lock left it: remove it when no collector, server or repair is running" });
+  assert.deepEqual(dry.logs[1].leftovers.stale_lock, { path: `${files.manifest}.lock`, pid: ended.pid, note: `it names process ${ended.pid}, which is gone: a run killed while it held the lock left it; remove it when no collector, server or repair is running` });
   await assert.rejects(() => runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"], now),
     new RegExp(`^Error: the lock .*\\.jsonl\\.lock names process ${ended.pid}, which is gone: a run killed while it held the lock left it; remove it if no collector, server or repair is running, then run the repair again; nothing was changed$`));
   assert.deepEqual([existsSync(`${files.runs}.lock`), existsSync(`${files.checkpoints}.lock`)], [false, false]);
+});
+
+test("a lock naming no process is never called a killed run's: the macro-surprise store's lock is waited for while young, and taken over by the store's own rule once old (BACKLOG 103-11 review)", async (t) => {
+  const directory = await withPaths(t, { TRADINGVIEW_MCP_MACRO_SURPRISE_EVIDENCE_PATH: "macro.jsonl" });
+  lockWait(t, 400);
+  const path = process.env.TRADINGVIEW_MCP_MACRO_SURPRISE_EVIDENCE_PATH, lock = `${path}.lock`;
+  let clock = new Date("2026-08-07T12:00:00.000Z");
+  const macro = new MacroSurpriseEvidenceStore(path, () => clock);
+  const consensus = { event_id: "us_nfp:2026-08-07", event_kind: "us_nfp", occurred_at: "2026-08-07T12:30:00.000Z", metric_id: "us_nfp_total_nonfarm_change_thousands", role: "consensus",
+    value: 75, source_id: "licensed_calendar", source_url: "https://calendar.example.test/nfp", raw_sha256: `sha256:${"a".repeat(64)}` };
+  await macro.observe(consensus);
+  clock = new Date("2099-01-02T13:31:00.000Z");
+  await macro.observe({ ...consensus, event_id: "us_nfp:2099-01-02", occurred_at: "2099-01-02T13:30:00.000Z", role: "actual", value: 110, source_id: "bls_official", source_url: "https://www.bls.gov/news.release/archives/empsit_01022099.htm" });
+  // A collector's lock just taken, as the store writes it: a token and no process to ask.
+  await writeFile(lock, `${randomUUID()}\n`, { mode: 0o600 });
+  const now = new Date("2026-10-18T02:00:00.000Z");
+  const dry = await runFirstSeenRepair(["--store", "macro-surprise"], now);
+  assert.equal(dry.logs[0].leftovers, undefined, "a lock whose holder may run is no leftover");
+  await assert.rejects(() => runFirstSeenRepair(["--store", "macro-surprise", "--apply"], now),
+    (error) => new RegExp(`^timed out after \\d+ ms waiting for ${escapeRegExp(lock)}, which names no process, so whether its holder still runs cannot be told: do not remove it while a collector, the server or a repair may be running; `
+      + "run the repair again later \\(the store's own writer takes it over once it is 60 s old\\); nothing was changed$").test(error.message));
+  assert.equal(existsSync(lock), true, "left for its holder");
+  // Older than the store's own limit: a leftover, which --apply takes over as the store's writer would.
+  const old = new Date(Date.now() - 120_000);
+  await utimes(lock, old, old);
+  const stale = await runFirstSeenRepair(["--store", "macro-surprise"], now);
+  assert.deepEqual(stale.logs[0].leftovers.stale_lock, { path: lock, pid: null, note: "it names no process and is older than the 60 s after which the store's own writer, and --apply, take such a lock over" });
+  const applied = await runFirstSeenRepair(["--store", "macro-surprise", "--apply"], now);
+  assert.deepEqual([applied.applied, applied.logs[0].records_after, existsSync(lock)], [true, 1, false]);
+  assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".lock")), []);
 });
 
 /** A child process running the built repair CLI with `args`, the test's store paths, and `preload` (a module path) if any. */
@@ -295,6 +329,65 @@ test("a signal while --apply waits for a lock releases every lock it took (BACKL
   const [code, signal] = await once(child, "exit");
   assert.deepEqual([code, signal], [null, "SIGINT"]);
   assert.deepEqual([existsSync(`${files.runs}.lock`), existsSync(`${files.manifest}.lock`)], [false, false], "the reviewer's repro left the run log's lock here");
+});
+
+/** A preload module for repairChild that stalls, once, the sync of the `nth` file opened whose path matches `pattern` (and the open's flags `flags`, if any), printing STALLED first. */
+const stallPreload = (pattern, nth, ms, flags = 0) => `import { createRequire, syncBuiltinESMExports } from "node:module";
+const fs = createRequire(import.meta.url)("node:fs");
+const real = fs.promises.open;
+let seen = 0;
+fs.promises.open = async (...args) => {
+  const handle = await real(...args);
+  if (${pattern}.test(String(args[0])) && (Number(args[1]) & ${flags}) === ${flags} && ++seen === ${nth}) {
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => { process.stdout.write("STALLED\\n"); await new Promise((resolve) => setTimeout(resolve, ${ms})); return sync(); };
+  }
+  return handle;
+};
+syncBuiltinESMExports();
+`;
+
+test("a signal while a lock is being taken releases that lock too, once it is taken, and says so (BACKLOG 103-11 review)", { timeout: 60_000 }, async (t) => {
+  if (process.platform === "win32") { t.skip("POSIX signals"); return; }
+  const { directory, path } = await researchLogAhead(t);
+  const before = await readFile(path);
+  const preload = join(directory, "stall-lock.mjs");
+  await writeFile(preload, stallPreload(String(/\.lock$/), 1, 1_500, constants.O_EXCL));
+  const { child, until, output } = repairChild(["--store", "research-heartbeat", "--apply"], preload);
+  t.after(() => child.kill("SIGKILL"));
+  await until("STALLED");
+  child.kill("SIGINT");
+  const [code, signal] = await once(child, "exit");
+  assert.deepEqual([code, signal], [null, "SIGINT"]);
+  assert.match(output(), /first-seen repair stopped: the repair was interrupted by SIGINT while it took its locks, and released every lock it took; nothing was changed\n/);
+  assert.deepEqual((await readdir(directory)).filter((name) => name !== "stall-lock.mjs"), ["research-collection-heartbeats.jsonl"], "the reviewer's repro left the lock being taken");
+  assert.deepEqual(await readFile(path), before);
+});
+
+test("a signal that stops a repair of several logs after one is rewritten prints what was done before ending by the signal, and running again finishes (BACKLOG 103-11 review)", { timeout: 60_000 }, async (t) => {
+  if (process.platform === "win32") { t.skip("POSIX signals"); return; }
+  const directory = await withFxPaths(t);
+  await collect("2026-01-05T00:00:00.000Z", "2026-02-01T00:00:00.000Z");
+  await collect("2026-01-06T00:00:00.000Z", "2099-02-01T00:00:00.000Z");
+  const paths = fxFiles(directory);
+  // The child stalls at the sync of the manifest's rewritten copy (the third temporary file it opens: the run log's is
+  // written and read back first), after the run log is rewritten.
+  const preload = join(directory, "stall-third.mjs");
+  await writeFile(preload, stallPreload(String(/\.tmp$/), 3, 1_500));
+  const { child, until, output } = repairChild(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"], preload);
+  t.after(() => child.kill("SIGKILL"));
+  await until("STALLED");
+  child.kill("SIGINT");
+  const [code, signal] = await once(child, "exit");
+  assert.deepEqual([code, signal], [null, "SIGINT"], "the reviewer's repro printed nothing: the signal ended it before its output");
+  const summary = JSON.parse(lines(output()).find((line) => line.startsWith("{")));
+  assert.deepEqual([summary.applied, summary.logs.map((log) => log.sidecar ?? null)], ["partial", [`${paths.runs}.ahead-${summary.now.replace(/[-:]/g, "")}.jsonl`, null, null]]);
+  assert.ok(output().includes(`first-seen repair stopped: the repair stopped part-way for SIGINT: ${paths.runs} (its records stamped ahead are in ${summary.logs[0].sidecar}) was rewritten and read as its store reads it, `
+    + `then FX history manifest repair was interrupted: nothing in ${paths.manifest} was changed; run the repair again to finish\n`), output());
+  assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".lock") || name.endsWith(".tmp")), []);
+  const again = await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"]);
+  assert.deepEqual(again.logs.map((log) => log.moved?.records ?? 0), [0, 1, 1]);
+  assert.deepEqual(again.logs[0].earlier_sidecars, [summary.logs[0].sidecar], "the first run's sidecar is an earlier repair's, not a leftover");
 });
 
 test("a repair killed before its rename leaves what the next dry run reports, and the next --apply finishes it without a second sidecar (BACKLOG 103-11)", { timeout: 60_000 }, async (t) => {
@@ -411,13 +504,55 @@ test("records the repair would move that kept FX history records need are named 
   const files = fxFiles(other);
   const [first, second] = lines(await readFile(files.runs, "utf8"));
   const kept = { ...JSON.parse(second), started_at: "2026-02-01T00:30:00.000Z", retrieved_at: "2026-02-01T01:00:00.000Z", first_seen_at: "2026-02-01T01:00:00.000Z", observation_date: "2026-02-01" };
-  await writeFile(files.runs, `${first}\n${JSON.stringify(kept)}\n`, { mode: 0o600 });
+  // And a later run of the first collection's range, fine itself, after it: a log keeps only the records before the first moved.
+  const after = { ...JSON.parse(first), sequence: 3, started_at: "2026-02-01T01:30:00.000Z", retrieved_at: "2026-02-01T02:00:00.000Z", first_seen_at: "2026-02-01T02:00:00.000Z", observation_date: "2026-02-01" };
+  await writeFile(files.runs, `${first}\n${JSON.stringify(kept)}\n${JSON.stringify(after)}\n`, { mode: 0o600 });
   const before = await readFile(files.manifest);
   const at = new Date("2026-02-02T00:00:00.000Z");
   await assert.rejects(() => runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"], at),
-    (error) => error instanceof FirstSeenRepairRefused && error.message.startsWith("FX history run 2 would name content only a moved manifest record holds; run again with --recollect")
+    (error) => error instanceof FirstSeenRepairRefused && error.message.startsWith("FX history run 2 would name content only a moved manifest record holds; "
+      + "FX history run 3 follows a run moved with it (a log keeps only the records before the first moved); run again with --recollect")
       && error.summary.dependents[0].collect_again.from === "2026-01-06T00:00:00.000Z");
   assert.deepEqual(await readFile(files.manifest), before);
   const recollected = await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force", "--recollect"], at);
-  assert.deepEqual([recollected.applied, recollected.dependents.map((item) => item.collect_again)], [true, [{ from: "2026-01-06T00:00:00.000Z", to: "2026-01-06T00:30:00.000Z" }]]);
+  const ranges = [{ from: "2026-01-06T00:00:00.000Z", to: "2026-01-06T00:30:00.000Z" }, { from: "2026-01-05T00:00:00.000Z", to: "2026-01-05T00:30:00.000Z" }];
+  assert.deepEqual([recollected.applied, recollected.logs.map((log) => log.moved?.records ?? 0), recollected.dependents.map((item) => item.collect_again), recollected.collect_again],
+    [true, [2, 1, 1], ranges, ranges]);
+  // Collecting those ranges again leaves logs that export together.
+  await collect(ranges[0].from, "2026-02-02T00:00:10.000Z");
+  await collect(ranges[1].from, "2026-02-02T00:00:20.000Z");
+  const exported = await exportFxHistory({ instrument: "EUR_USD", all: true });
+  assert.deepEqual([exported.manifest_records, exported.run_records], [2, 3]);
+});
+
+test("with --recollect a kept collection whose page checkpoint is moved goes too, so collecting its range again records it anew, bound by its own checkpoint, even when OANDA's bytes differ (BACKLOG 103-11 review)", async (t) => {
+  await withFxPaths(t);
+  await collect("2026-01-05T00:00:00.000Z", "2026-02-01T00:00:00.000Z");
+  // A run whose clock was set right while it ran: its page checkpoint is stamped ahead, its content is not (and its run,
+  // stamped as starting after it finished, is refused).
+  let phase = "before";
+  const stepped = () => {
+    if (phase === "before") return new Date("2099-02-01T00:00:00.000Z");
+    if (phase === "fetched") { phase = "after"; return new Date("2099-02-01T00:00:01.000Z"); }
+    return new Date("2026-02-01T01:00:00.000Z");
+  };
+  const halfHour = (start) => [candle(new Date(start).toISOString()), candle(new Date(start + 15 * 60_000).toISOString())];
+  const range = { from: "2026-01-06T00:00:00.000Z", to: "2026-01-06T00:30:00.000Z" };
+  await assert.rejects(() => runFxHistoryCollection(["--from", range.from, "--to", range.to, "--confirm-external-fetch"], credentials,
+    { now: stepped, fetch: async (url) => { phase = "fetched"; return respond(halfHour(Date.parse(new URL(url).searchParams.get("from")))); } }), /invalid FX history run fields/);
+  const at = new Date("2026-02-02T00:00:00.000Z");
+  const dry = await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD"], at);
+  assert.deepEqual([dry.logs.map((log) => log.moved?.records ?? 0), dry.dependents.map((item) => item.why), dry.with_recollect.map((log) => log.moved_records), dry.collect_again],
+    [[0, 0, 1], ["FX history collection 2 would lose the checkpoint that binds its page 1"], [0, 1, 1], [range]]);
+  await assert.rejects(() => runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force"], at),
+    (error) => error instanceof FirstSeenRepairRefused && error.message.startsWith("FX history collection 2 would lose the checkpoint that binds its page 1; run again with --recollect to move those records too"));
+  const applied = await runFirstSeenRepair(["--store", "fx-history", "--instrument", "EUR_USD", "--apply", "--force", "--recollect"], at);
+  assert.deepEqual([applied.applied, applied.logs.map((log) => log.moved?.records ?? 0), applied.collect_again], [true, [0, 1, 1], [range]]);
+  assert.equal((await exportFxHistory({ instrument: "EUR_USD", all: true })).collections.length, 1, "what is kept exports");
+  // Collected again, OANDA answering with the same bars in other bytes: its content is recorded anew, under its new hash.
+  const next = await runFxHistoryCollection(["--from", range.from, "--to", range.to, "--confirm-external-fetch"], credentials, { now: () => new Date("2026-02-02T00:00:10.000Z"),
+    fetch: async (url) => new Response(JSON.stringify({ candles: halfHour(Date.parse(new URL(url).searchParams.get("from"))) }, null, 1), { status: 200, headers: { "content-type": "application/json" } }) });
+  assert.deepEqual([next.manifest.recorded, next.run.sequence], [true, 2]);
+  const exported = await exportFxHistory({ instrument: "EUR_USD", all: true });
+  assert.deepEqual([exported.manifest_records, exported.collections.map((collection) => collection.range_checkpointed)], [2, [true, true]]);
 });

@@ -20,6 +20,11 @@ export type StampedAheadSource<T extends StampedRecord> = {
   readonly path: string;
   /** The store's lock file, for a message about one a killed run left. */
   readonly lockPath: string;
+  /**
+   * How old a lock naming no process must be before the store's own writer takes it over (the macro-surprise store's
+   * rule; its tryLock takes it over the same way). A store without one never takes a lock over, and names its process.
+   */
+  readonly lockStaleMs?: number;
   /** The log as the store reads it, with every check: its records, each record's own line as decoded, the raw bytes, its identity (null when there is no log). */
   read(): Promise<{ records: T[]; lines: string[]; raw: Buffer; identity: Stats | null }>;
   /** A file at `path` read as the log would be, with every check. */
@@ -29,14 +34,36 @@ export type StampedAheadSource<T extends StampedRecord> = {
 };
 
 /**
+ * What a store's lock file shows of its holder (BACKLOG 103-11 review): `held`, it names a process that is running;
+ * `gone`, it names a process that is not, so a run killed while it held the lock left it; `stale`, it names no process
+ * and is older than the store's own takeover age (lockStaleMs), so the store's next writer takes it over; `unknown`, it
+ * names no process and is younger than that, or the store takes no lock over, so whether its holder still runs cannot be
+ * told: it is never called a killed run's.
+ */
+export type StampedAheadLockState = { path: string; pid: number | null; state: "held" | "gone" | "stale" | "unknown"; staleMs: number | null };
+
+/** The state of a source's lock file (StampedAheadLockState), or null when nothing there is a lock of this user's. */
+export function stampedAheadLockState(source: Pick<StampedAheadSource<StampedRecord>, "lockPath" | "lockStaleMs">): StampedAheadLockState | null {
+  const owner = lockOwnerSync(source.lockPath);
+  if (owner === null) return null;
+  const staleMs = source.lockStaleMs ?? null;
+  if (owner.pid !== null) return { path: source.lockPath, pid: owner.pid, state: owner.alive ? "held" : "gone", staleMs };
+  return { path: source.lockPath, pid: null, state: staleMs !== null && Date.now() - owner.mtimeMs > staleMs ? "stale" : "unknown", staleMs };
+}
+
+/**
  * A log as a repair found it: every record, each record's line, the raw bytes and where each record's line starts in
  * them, the file's identity (null when there is no log), and `keep`, how many records stay: the records from `keep` on
- * are the tail stamped ahead. `leftovers` are what an interrupted repair of this log may have left beside it.
+ * are moved (planStampedAhead sets it to the tail stamped ahead; a caller may move more, never fewer). `leftovers` are
+ * what an interrupted repair of this log may have left beside it: temporary files, sidecars whose every record the log
+ * still holds, and a lock whose holder is gone or stale (never one whose holder cannot be told). `earlierSidecars` are
+ * the other sidecars beside it, those of earlier repairs, whose records the log no longer holds.
  */
 export type StampedAheadPlan<T extends StampedRecord> = {
   readonly label: string; readonly path: string; readonly records: readonly T[]; readonly lines: readonly string[];
   readonly raw: Buffer; readonly starts: readonly number[]; readonly identity: Stats | null; readonly keep: number;
-  readonly leftovers: { temporaries: string[]; sidecars: string[]; staleLock: { path: string; pid: number | null } | null };
+  readonly leftovers: { temporaries: string[]; sidecars: string[]; staleLock: StampedAheadLockState | null };
+  readonly earlierSidecars: string[];
 };
 
 /** What tradingview-mcp-repair-first-seen does with a store's log: its source, a plan of it, and moving the tail out. */
@@ -56,6 +83,9 @@ export const stampedAheadSidecarPath = (path: string, now: Date) => `${path}.ahe
 const sidecarName = (path: string) => new RegExp(`^${basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.ahead-[0-9TZ.]+(?:-\\d+)?\\.jsonl$`);
 const temporaryName = (path: string) => new RegExp(`^\\.${basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.repair-[0-9a-f-]{36}\\.tmp$`);
 
+/** The lines of `bytes`, each with its newline, for comparing records byte for byte. */
+const linesOf = (bytes: Buffer) => { const out: string[] = []; let from = 0; for (let index = 0; index < bytes.length; index += 1) if (bytes[index] === 0x0a) { out.push(bytes.subarray(from, index + 1).toString("latin1")); from = index + 1; } return out; };
+
 /** This user's regular files beside `path` whose names match `pattern`. */
 function filesBeside(path: string, pattern: RegExp): string[] {
   let names: string[];
@@ -74,8 +104,10 @@ function filesBeside(path: string, pattern: RegExp): string[] {
  * log must be framed exactly as its store writes it, judged on its raw bytes: each record on a line of its own ending in
  * a newline, nothing else, so the kept records and the tail can be cut at a newline byte and written back byte for byte
  * (BACKLOG 103-11 review: a record holding bytes that are not UTF-8 came back changed when rewritten from its decoded
- * text). It also notes what an interrupted repair may have left: temporary files, sidecars, and a lock naming a process
- * that is gone. Takes no lock: read under the store's lock for an apply, or alone for a dry run.
+ * text). It also notes what an interrupted repair may have left: temporary files, sidecars whose every record the log
+ * still holds (an earlier repair's sidecar holds records the log no longer does: it is listed apart), and a lock whose
+ * holder is gone, or stale by the store's own rule (stampedAheadLockState). Takes no lock: read under the store's lock
+ * for an apply, or alone for a dry run.
  */
 export async function planStampedAhead<T extends StampedRecord>(source: StampedAheadSource<T>, now: Date, toleranceMs: number): Promise<StampedAheadPlan<T>> {
   if (!Number.isFinite(now.getTime()) || !Number.isFinite(toleranceMs) || toleranceMs < 0) throw new Error(`${source.label} repair needs a valid time and tolerance`);
@@ -92,16 +124,24 @@ export async function planStampedAhead<T extends StampedRecord>(source: StampedA
   let keep = records.length;
   while (keep > 0 && ahead(records[keep - 1])) keep -= 1;
   if (records.slice(0, keep).some(ahead)) throw new Error(`${source.label} history holds records stamped ahead that are not its tail: ${source.path}; nothing in it was changed`);
-  const owner = lockOwnerSync(source.lockPath);
+  const lock = stampedAheadLockState(source);
+  // A sidecar whose every record the log still holds is an interrupted repair's copy of a tail; one larger than the log,
+  // or holding a record the log does not, is an earlier repair's (BACKLOG 103-11 review).
+  const logLines = new Set(linesOf(raw));
+  const sidecars: string[] = [], earlierSidecars: string[] = [];
+  for (const file of filesBeside(source.path, sidecarName(source.path))) {
+    let bytes: Buffer | null = null;
+    try { bytes = await readRegularFile(file, `${source.label} sidecar`, raw.length); } catch { /* larger than the log, or not a file to read */ }
+    const held = bytes !== null && bytes.length > 0 && bytes[bytes.length - 1] === 0x0a && linesOf(bytes).every((line) => logLines.has(line));
+    (held ? sidecars : earlierSidecars).push(file);
+  }
   return {
     label: source.label, path: source.path, records, lines, raw, starts, identity, keep,
-    leftovers: { temporaries: filesBeside(source.path, temporaryName(source.path)), sidecars: filesBeside(source.path, sidecarName(source.path)),
-      staleLock: owner !== null && !owner.alive ? { path: source.lockPath, pid: owner.pid } : null },
+    leftovers: { temporaries: filesBeside(source.path, temporaryName(source.path)), sidecars,
+      staleLock: lock !== null && (lock.state === "gone" || lock.state === "stale") ? lock : null },
+    earlierSidecars,
   };
 }
-
-/** The lines of `bytes`, each with its newline, for comparing records byte for byte. */
-const linesOf = (bytes: Buffer) => { const out: string[] = []; let from = 0; for (let index = 0; index < bytes.length; index += 1) if (bytes[index] === 0x0a) { out.push(bytes.subarray(from, index + 1).toString("latin1")); from = index + 1; } return out; };
 
 /**
  * With the store's lock held and a plan made under that same hold, moves the tail stamped ahead out of the log. The

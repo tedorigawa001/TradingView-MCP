@@ -650,15 +650,16 @@ export function releaseLockFileSync(path: string, ours: (contents: string) => bo
 }
 
 /**
- * The process a store's lock file names (`<token> <pid>\n`), read as readLockSync reads, and whether it is alive:
- * null when nothing there is a lock of this user's. A lock naming a process that is gone was left by a run killed
- * while it held it (BACKLOG 103-11 review).
+ * The process a store's lock file names (`<token> <pid>\n`), read as readLockSync reads, whether it is alive (null when
+ * the lock names none, as the macro-surprise store's `<token>\n` does: its holder cannot be asked), and the lock's mtime;
+ * null when nothing there is a lock of this user's. A lock naming a process that is gone was left by a run killed while
+ * it held it (BACKLOG 103-11 review).
  */
-export function lockOwnerSync(path: string): { pid: number | null; alive: boolean } | null {
+export function lockOwnerSync(path: string): { pid: number | null; alive: boolean | null; mtimeMs: number } | null {
   const held = readLockSync(path);
   if (held === null) return null;
   const pid = /^\S+ (\d+)\n$/.exec(held.contents)?.[1];
-  return { pid: pid === undefined ? null : Number(pid), alive: pid !== undefined && processAlive(Number(pid)) };
+  return { pid: pid === undefined ? null : Number(pid), alive: pid === undefined ? null : processAlive(Number(pid)), mtimeMs: held.stat.mtimeMs };
 }
 
 /** The SHA-256 of the regular file at `path`, opened as settleExistingFile opens one; null when it is not that file. */
