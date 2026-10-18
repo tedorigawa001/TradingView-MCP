@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, rmdirSync, statSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
 import { link, lstat, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
@@ -262,8 +262,9 @@ function unsafeDirectory(path: string, entry: Stats, uid: number | undefined): s
  * stages and links there (BACKLOG 103-11): when it, or any directory above it up to /, can be written by its group or by
  * every user without the sticky bit, or is owned by neither this user nor root. A run stages its files in that directory
  * itself, so these checks leave no directory on the way another user could swap. POSIX only: Windows has no owner or
- * mode here (posixModeEnforced). Access control lists, and volumes mounted with ownership ignored, are not seen: a writer
- * there can still make a run fail, though the identity checks keep it from redirecting anything. The error is a
+ * mode here (posixModeEnforced). A Linux POSIX ACL granting a write shows in the group bits (its mask), so it is refused;
+ * a macOS access control list (chmod +a), and volumes mounted with ownership ignored, are not seen: a writer there can
+ * still make a run fail, and swap a staged file just before its link, which linkedOtherSync then undoes. The error is a
  * PublishDirectoryRefused naming the directory, its mode and group, and the chmod that fixes it.
  */
 export async function assertPublishDirectory(directory: string, label: string, platform = process.platform): Promise<void> {
@@ -323,20 +324,24 @@ function removeStagedSync(staged: StagedFile): void {
 }
 
 /**
- * After a link, the destination must be the file staged (BACKLOG 103-11). Otherwise another file was at the staged name
- * when the link was made, after its check: the destination is removed again when it is that same file (identity checked
- * against the staged name, and again just before the unlink), and left when it is not. Returns why the run must fail and
- * whether the destination was removed, or null when it is the staged file.
+ * After a link, the destination must be the file staged (BACKLOG 103-11). Otherwise another entry was at the staged name
+ * when the link was made, after its check, and the link made the destination another name of what it reached: that entry
+ * itself, or, where link(2) follows a symbolic link given as its source (macOS), the file the link names (BACKLOG 103-11
+ * review). The destination is removed again when it is the entry at the staged name, the file that name leads to, or
+ * any file with another name besides (the name was made by this run's link, so removing it loses no file), its identity
+ * checked again just before the unlink; it is left when it is none of these. Returns why the run must fail and whether
+ * the destination was removed, or null when it is the staged file.
  */
 function linkedOtherSync(staged: StagedFile, target: string): { why: string; removed: boolean } | null {
   let placed: BigIntStats | null = null;
   try { placed = lstatSync(target, { bigint: true }); } catch { /* gone */ }
   if (placed !== null && staged.id !== null && placed.isFile() && sameEntry(placed, staged.id)) return null;
+  const sameAs = (read: () => BigIntStats) => { try { return placed !== null && sameEntry(read(), placed); } catch { return false; } };
   let removed = false;
-  try {
-    const through = lstatSync(staged.path, { bigint: true });
-    if (placed !== null && placed.isFile() && sameEntry(placed, through) && sameEntry(lstatSync(target, { bigint: true }), placed)) { unlinkSync(target); removed = true; }
-  } catch { /* left as it is */ }
+  if (placed !== null && (placed.isFile() || placed.isSymbolicLink())
+    && (sameAs(() => lstatSync(staged.path, { bigint: true })) || sameAs(() => statSync(staged.path, { bigint: true })) || placed.nlink >= 2n)) {
+    try { if (sameAs(() => lstatSync(target, { bigint: true }))) { unlinkSync(target); removed = true; } } catch { /* left as it is */ }
+  }
   return { why: placed === null ? "was gone right after it was linked" : `held another file once linked: the staged file had been replaced after its check${removed ? "" : "; that file was left as it is"}`, removed };
 }
 
@@ -366,7 +371,7 @@ function linkError(error: unknown, directory: string, label: string): unknown {
  * only a run that must write needs a directory no other user can change (assertPublishDirectory, BACKLOG 103-11). The
  * file is staged in that directory itself, under a random name `.<stem>-<tag>-<pid>-<random>.stage`, and is checked to
  * be the file written before the link and at the destination after it: a destination that holds another file once
- * linked is removed again when it is the file that was at the staged name, and the run fails. A volume without hard
+ * linked is removed again (linkedOtherSync), and the run fails. A volume without hard
  * links (exFAT, FAT) is named as such. The staged file is removed when the run ends, after its identity is checked
  * again, as a best effort that never changes the result: a run killed meanwhile, or a removal that fails (Windows
  * refuses to delete a file another process holds open), leaves it beside the destination.
@@ -929,7 +934,7 @@ async function confirmImmutableFiles(targets: { destination: string; directory: 
  * directories synced, the destinations found identical are checked to be so still, and only then is the first one
  * linked and synced, so the first destination there means the set was whole when it was written. Each staged file is
  * checked to be the file written before it is linked, and each destination to be that file after: one holding another
- * file is removed again when it is the file that was at the staged name (linkedOtherSync), and the run fails. A volume
+ * file is removed again (linkedOtherSync), and the run fails. A volume
  * without hard links is named as such. A step that fails (a destination taken meanwhile by other bytes, a denied or full
  * directory, a failed sync) removes again what this run linked: the first destination first, with its directory synced,
  * then the others in the reverse of their order, each only while it is still the file this run staged. When the first

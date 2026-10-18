@@ -83,18 +83,32 @@ On Linux systems that give each user a private group, the default umask is often
 group-writable (mode 0775) even though only you are in that group. The check cannot tell such a group from a shared
 one and refuses it: run the `chmod g-w` the message gives, or `umask 022` before making the directory.
 
-An export stages each new file in the output directory itself, under a random hidden name
-`.<output name>-<tag>-<process id>-<random>.<part>.stage`, created exclusively, owner-only, without following a link, so
-no directory on the way is one another user could swap. It checks a staged file is still the file it wrote before it
-links it, and that the destination is that file after the link: a destination holding another file is removed again
-when it is the file found at the staged name, and the export fails. It removes a staged file only while it is still the
+External volumes often have a root that its group or every user can write (on macOS, a disk under `/Volumes` is
+commonly mounted 0775 or 0777), and as the check covers every directory above the output, it then refuses every
+directory on that volume, naming its root. Export to a directory on your internal disk and copy the files to the volume
+afterwards, or, if only you use the volume, tighten its root with the `chmod g-w,o-w` the message gives.
+
+An export stages each new file in the output directory itself, under a random hidden name, created exclusively,
+owner-only, without following a link, so no directory on the way is one another user could swap. With `--split` it is
+`.<output name>-<tag>-<process id>-<random>.<index>.stage`, where `<index>` is the part's position counted from 0 (0
+for `part01`); a single file is `.<output name>-<tag>-<process id>-<random>.stage`. It checks a staged file is still the
+file it wrote before it links it, and that the destination is that file after the link. A destination holding another
+file is removed again, and the export fails, when it is what was found at the staged name, the file a symbolic link
+found there leads to (macOS follows a symbolic link given to link(2)), or any file with another name besides: the name
+was made by the export's own link, so removing it loses no file. It removes a staged file only while it is still the
 file written, checked just before the unlink. Between one of these checks and the step after it, whoever can write the
-directory could still act; the directory checks above leave that to you and root. Two things are not seen: access
-control lists (`chmod +a` on macOS, POSIX ACLs on Linux) that let others write a directory whose mode does not, and
-volumes mounted with ownership ignored (many external disks). A writer there can still make an export fail, but with
-the identity checks it can no longer redirect what the export writes, links or removes. A volume without hard links
-(exFAT, FAT) cannot hold an export: the link is refused, and the export says so and writes nothing; export to another
-directory.
+directory could still act, and a destination that a swapped staged name made another name of a file holds that name
+until it is removed: the directory checks above leave that to you and root. Two things are not seen: access control
+lists on macOS (`chmod +a`) that let others write a directory whose mode does not, and volumes mounted with ownership
+ignored (many external disks). A POSIX ACL on Linux that lets a user or group write a directory shows in its group
+bits (through the ACL mask), so that directory is refused as group-writable. A writer the check does not see can still
+make an export fail, and can swap a staged file in the moment before its link; the export then removes the destination
+again as above. A volume without hard links (exFAT, FAT) cannot hold an export: the link is refused, and the export
+says so and writes nothing; export to another directory.
+
+A `--split` export removes the staged files a killed run of the same output left (its process gone, or a day old). A
+single-file export does not, as before 0.1.44: a single-file export killed while it staged leaves its `.stage` file
+beside the output, to remove by hand once no export of that name is running.
 
 Windows has neither owner nor mode here, so there the check is not made, and the directory's access control list
 decides who can change it. A folder made directly under `C:\` lets every signed-in user (Authenticated Users) modify

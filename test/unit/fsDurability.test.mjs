@@ -842,6 +842,52 @@ test("a staged file replaced before its link is refused, and a destination holdi
   }
 });
 
+test("a symbolic link put at the staged name just before its link, which macOS's link(2) follows, leaves no destination naming its file (BACKLOG 103-11 review)",
+  { skip: process.platform === "win32" ? "making a symbolic link needs a privilege on Windows, and its link does not follow one" : false }, async (t) => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), "tv-mcp-publish-symlink-")));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const secret = await victimFile(base);
+  const fsp = createRequire(import.meta.url)("node:fs/promises");
+  const realLink = fsp.link;
+  // The link itself puts a symbolic link to the victim's file at the staged name, after the run's check, and then links:
+  // the file it leads to, as macOS does ("follow"), or as this host's link(2) does ("native": the same on macOS, the
+  // symbolic link itself on Linux).
+  const swapAtLink = (follow) => {
+    let done = false;
+    fsp.link = async (from, to) => {
+      if (done || !String(from).endsWith(".stage")) return realLink(from, to);
+      done = true;
+      await symlink(secret, `${from}.link`); await rename(`${from}.link`, from);
+      return realLink(follow ? await realpath(from) : from, to);
+    };
+    syncBuiltinESMExports();
+  };
+  const restore = () => { fsp.link = realLink; syncBuiltinESMExports(); };
+  t.after(restore);
+  for (const mode of ["follow", "native"]) {
+    const directory = join(base, mode);
+    await mkdir(directory, { mode: 0o700 });
+    const set = [1, 2].map((n) => join(directory, `set.part0${n}.json`)), single = join(directory, "single.json");
+    swapAtLink(mode === "follow");
+    try {
+      await assert.rejects(() => publishImmutableFiles(set, async (index) => `part ${index + 1}\n`, "test set", { stem: "set" }),
+        (error) => error.message === `test set path ${set[1]} held another file once linked: the staged file had been replaced after its check, and was removed again; nothing was written`);
+    } finally { restore(); }
+    swapAtLink(mode === "follow");
+    try {
+      await assert.rejects(() => publishImmutableFile(single, "single\n", "test file"),
+        (error) => error.message === `test file path ${single} held another file once linked: the staged file had been replaced after its check; it was removed again, so nothing was written`);
+    } finally { restore(); }
+    assert.deepEqual(await Promise.all([...set, single].map(absent)), [true, true, true], mode);
+    // Left: the two symbolic links the test put at the staged names; the victim's file has no other name.
+    const left = await readdir(directory);
+    assert.equal(left.length, 2, mode);
+    for (const name of left) { assert.match(name, /\.stage$/); assert.equal((await lstat(join(directory, name))).isSymbolicLink(), true); }
+    assert.equal((await lstat(secret)).nlink, 1, mode);
+    assert.equal(await readFile(secret, "utf8"), "victim secret\n");
+  }
+});
+
 test("a run removes only the staged files it wrote, each checked to be the file written just before it goes (BACKLOG 103-11)", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-own-files-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
