@@ -210,9 +210,11 @@ for the signal, the export ends instead with an error that it was interrupted. O
 lock and its staging directory, and, if it was killed while taking a lock over, a takeover marker, a temporary lock
 (`.<uuid>.publish-lock-new`) or a tombstone (`.<uuid>.publish-lock-stale`). The next export to the same output takes
 the lock over, and the next takeover the marker; a temporary lock or tombstone of this user that is a day old is
-removed. The next export also removes a staging directory of its own set when its process is gone or (except on
-Windows) it is older than a day, but only one that is this user's (owned by the user, mode 0700) and holds nothing but
-numbered files: it renames it first, checks the renamed entry is still that directory, and removes its numbered files,
+removed. A lock, marker, temporary lock or tombstone is judged by its owner and size before it is read (BACKLOG
+103-11): another user's, one larger than a lock (128 bytes) or one that cannot be opened is never read; such a file is
+left alone, and at the export's own lock or marker path it refuses the export, writing nothing. The next export also
+removes a staging directory of its own set when its process is gone or (except on Windows) it is older than a day,
+but only one that is this user's (owned by the user, mode 0700) and holds nothing but numbered files: it renames it first, checks the renamed entry is still that directory, and removes its numbered files,
 then the directory. Anything else, a directory of a running export, of another output, of another owner or mode, or
 holding other files, is left alone. Windows reports neither owner nor mode here, so there a staging directory is
 removed only once its process is known to be gone. A crash or power loss while the parts are being linked, or a removal

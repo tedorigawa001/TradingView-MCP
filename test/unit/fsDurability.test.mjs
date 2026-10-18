@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, link, lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, chown, link, lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -771,4 +771,74 @@ test("a run removes from its staging only the files it created there, and leaves
   }, "test set", { stem: "set" }), /^Error: part 3 is missing; nothing was written$/);
   assert.deepEqual(await contentsOf(staging), { 5: "not this run's\n" }, "its own staged files 0 and 1 are gone, the other numbered file stays");
   assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true]);
+});
+
+// BACKLOG 103-11 (L1): a lock-named file is judged by its owner and size before a byte of it is read.
+
+test("lock-named files larger than any lock, or unreadable, are left unread: a killed run's leftovers stay, and at the lock or marker path they refuse the run (BACKLOG 103-11)", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-big-locks-"));
+  t.after(async () => { await chmod(directory, 0o700).catch(() => undefined); await rm(directory, { recursive: true, force: true }); });
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
+  const body = async (index) => `part ${index + 1}\n`;
+  const ended = await endedPid();
+  const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  const plant = async (path, size, owner = ended) => {
+    await writeFile(path, `${randomUUID()} ${owner}\n`, { mode: 0o600 });
+    if (size !== undefined) await truncate(path, size);   // a hole where the file system allows: it costs no disk
+  };
+  // Day-old leftovers naming a gone process are a killed run's and removed; larger than a lock, they are not this
+  // program's and stay, unread (a sparse one of 600 MiB took a run's memory to 1.4 GiB, and its export failed).
+  const small = `.${randomUUID()}.publish-lock-new`, big = `.${randomUUID()}.publish-lock-new`, bigTombstone = `.${randomUUID()}.publish-lock-stale`;
+  await plant(join(directory, small));
+  await plant(join(directory, big), 4096);
+  await plant(join(directory, bigTombstone), 4096);
+  for (const name of [small, big, bigTombstone]) await utimes(join(directory, name), dayAgo, dayAgo);
+  assert.deepEqual(await publishImmutableFiles(paths, body, "test set"), { published: true, results: ["created", "created"] });
+  assert.deepEqual((await readdir(directory)).sort(), [big, bigTombstone, "set.part01.json", "set.part02.json"].sort());
+  for (const path of paths) await rm(path);
+  // At the set's own lock path: refused, nothing written.
+  const lock = join(directory, ".set.part01.json.publish-lock");
+  await plant(lock, 4096);
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set"),
+    /^Error: test set lock path holds a file that is not a lock \(it holds 4096 bytes, more than a lock does\): .*\.set\.part01\.json\.publish-lock; nothing was written$/);
+  // A stale lock (its process gone) whose takeover marker is larger than a marker: refused, the lock left as it was.
+  await plant(lock);
+  const stale = await readFile(lock, "utf8");
+  await plant(`${lock}.takeover`, 4096, process.pid);
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set"),
+    /^Error: test set takeover marker path holds a file that is not this user's marker \(it holds 4096 bytes, more than a lock does\): .*\.publish-lock\.takeover; nothing was written$/);
+  assert.equal(await readFile(lock, "utf8"), stale);
+  assert.deepEqual(await Promise.all(paths.map(absent)), [true, true]);
+  await rm(`${lock}.takeover`);
+  if (process.platform === "win32" || process.getuid() === 0) return;   // POSIX modes, and a user they bind
+  // A lock this user cannot read is no lock of its own either: refused at once, not waited on until it "kept changing".
+  await chmod(lock, 0o000);
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set"), /^Error: test set lock path holds a file that is not a lock \(it cannot be opened: EACCES\): .*; nothing was written$/);
+  await rm(lock);
+  assert.deepEqual((await readdir(directory)).sort(), [big, bigTombstone].sort());
+});
+
+test("another user's lock-named files are left unread, and another user's lock or marker still refuses the run (BACKLOG 103-11)", async (t) => {
+  if (process.platform === "win32" || process.getuid() !== 0) { t.skip("needs root to give files to another user"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-foreign-locks-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = [join(directory, "set.part01.json"), join(directory, "set.part02.json")];
+  const body = async (index) => `part ${index + 1}\n`;
+  const ended = await endedPid();
+  const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  const temporary = join(directory, `.${randomUUID()}.publish-lock-new`);
+  await writeFile(temporary, `${randomUUID()} ${ended}\n`, { mode: 0o600 });
+  await chown(temporary, 65534, 65534);
+  await utimes(temporary, dayAgo, dayAgo);
+  assert.deepEqual((await publishImmutableFiles(paths, body, "test set")).published, true);
+  assert.equal(await absent(temporary), false, "another user's leftover is not this run's to remove");
+  for (const path of paths) await rm(path);
+  const lock = join(directory, ".set.part01.json.publish-lock");
+  await writeFile(lock, `${randomUUID()} ${ended}\n`, { mode: 0o600 });
+  await chown(lock, 65534, 65534);
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set"), /^Error: test set lock is another user's: .*; nothing was written$/);
+  await chown(lock, 0, 0);
+  await writeFile(`${lock}.takeover`, `${randomUUID()} ${ended}\n`, { mode: 0o600 });
+  await chown(`${lock}.takeover`, 65534, 65534);
+  await assert.rejects(() => publishImmutableFiles(paths, body, "test set"), /^Error: test set takeover marker path holds a file that is not this user's marker \(it is owned by another user \(uid 65534\)\): .*; nothing was written$/);
 });

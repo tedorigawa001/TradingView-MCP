@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from "node:fs";
 import { link, lstat, mkdtemp, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
@@ -21,6 +21,15 @@ import { basename, dirname, join, sep } from "node:path";
  */
 export function noFollowFlag(platform = process.platform): number {
   return platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+}
+
+/**
+ * O_NONBLOCK where the host has it, and zero on Windows (BACKLOG 103-11). A read-only open of a FIFO waits for a writer;
+ * with this flag it returns at once, so the regular-file check after it can refuse the FIFO instead of hanging the
+ * reader (and any lock it holds) forever. It changes nothing for a regular file.
+ */
+export function nonBlockingFlag(platform = process.platform): number {
+  return platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0);
 }
 
 /**
@@ -411,7 +420,7 @@ async function onlyStagedFiles(path: string): Promise<boolean> {
  * directory of a live run, of another set, of another shape, owner or mode, or holding anything else, is never touched.
  * This user's temporary locks (`.<uuid>.publish-lock-new`) and lock tombstones (`.<uuid>.publish-lock-stale`) that a run
  * killed in the middle of taking a lock left are removed too: those naming a process that is gone (or none, a minute
- * on), and any a day old.
+ * on), and any a day old. Another user's, one too large to be a lock, or one that cannot be read is left unread (readLockSync).
  */
 async function removeStaleStagings(directory: string, stem: string, tag: string): Promise<void> {
   const pattern = new RegExp(`^\\.publish-${stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-${tag}-(\\d+)-[A-Za-z0-9]{6}$`);
@@ -423,7 +432,7 @@ async function removeStaleStagings(directory: string, stem: string, tag: string)
       // A killed run's: the process it names is gone (or it names none, a minute on), or it is a day old. One naming a
       // live process may be a lock another run is moving, and stays.
       const held = readLockSync(path);
-      if (held !== null && (typeof process.getuid !== "function" || held.stat.uid === process.getuid()) && staleOwned(held, STALE_STAGING_MS).stale) {
+      if (held !== null && staleOwned(held, STALE_STAGING_MS).stale) {
         const current = await lstat(path).catch(() => null);
         if (current !== null && sameEntry(current, held.stat)) await unlink(path).catch(() => undefined);
       }
@@ -448,20 +457,63 @@ async function removeStaleStagings(directory: string, stem: string, tag: string)
   }
 }
 
-/** Opens a file as settleExistingFile does: without following a link or waiting on a FIFO, and only a regular file. */
-function openRegularSync(path: string): { descriptor: number; stat: Stats } | null {
+/** The most a publish lock or takeover marker holds: `<uuid> <pid>\n` is under 60 bytes, so a larger file is no lock of this program's (BACKLOG 103-11). */
+const LOCK_MAX_BYTES = 128;
+
+/**
+ * Opens a file as settleExistingFile does: without following a link or waiting on a FIFO, and only a regular file.
+ * null when nothing, or not a regular file, is there, or it cannot be opened for another reason; `refused` (the code,
+ * with the lstat of the regular file there) when access to it is denied, other than for a Windows deletion in progress
+ * (lockBeingReleased), which is looked at again as before.
+ */
+function openRegularSync(path: string): { descriptor: number; stat: Stats } | { refused: string; stat: Stats } | null {
   let descriptor: number;
-  try { descriptor = openSync(path, constants.O_RDONLY | noFollowFlag() | (process.platform === "win32" ? 0 : constants.O_NONBLOCK)); } catch { return null; }
-  const stat = fstatSync(descriptor);
-  if (!stat.isFile()) { closeSync(descriptor); return null; }
-  return { descriptor, stat };
+  try { descriptor = openSync(path, constants.O_RDONLY | noFollowFlag() | nonBlockingFlag()); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if ((code !== "EACCES" && code !== "EPERM") || lockBeingReleased(error)) return null;
+    try { const entry = lstatSync(path); return entry.isFile() ? { refused: code, stat: entry } : null; } catch { return null; }
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (stat.isFile()) return { descriptor, stat };
+  } catch { /* closed below and taken as nothing there */ }
+  closeSync(descriptor);
+  return null;
 }
 
-/** A publish lock's (or marker's) contents and identity, or null when nothing (or not a regular file) is there. */
-function readLockSync(path: string): { contents: string; stat: Stats } | null {
+/**
+ * What is at a publish lock's (or marker's, temporary lock's, tombstone's) path (BACKLOG 103-11): null when nothing, or
+ * not a regular file, is there; `foreign` (why, with its identity, and nothing read) when it is another user's (where
+ * the host has owners), larger than any lock (LOCK_MAX_BYTES), or cannot be opened, all judged from fstat before a byte
+ * is read; otherwise its contents, at most LOCK_MAX_BYTES of them, and its identity. Never throws.
+ */
+function inspectLockSync(path: string): { contents: string; stat: Stats } | { foreign: string; stat: Stats } | null {
   const opened = openRegularSync(path);
   if (opened === null) return null;
-  try { return { contents: readFileSync(opened.descriptor, "utf8"), stat: opened.stat }; } finally { closeSync(opened.descriptor); }
+  if ("refused" in opened) return { foreign: `it cannot be opened: ${opened.refused}`, stat: opened.stat };
+  const { descriptor, stat } = opened;
+  try {
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return { foreign: `it is owned by another user (uid ${stat.uid})`, stat };
+    if (stat.size > LOCK_MAX_BYTES) return { foreign: `it holds ${stat.size} bytes, more than a lock does`, stat };
+    const buffer = Buffer.alloc(LOCK_MAX_BYTES + 1);
+    let length = 0;
+    for (let read = -1; read !== 0 && length < buffer.length;) { read = readSync(descriptor, buffer, length, buffer.length - length, length); length += read; }
+    if (length > LOCK_MAX_BYTES) return { foreign: "it grew past what a lock holds", stat };
+    return { contents: buffer.subarray(0, length).toString("utf8"), stat };
+  } catch {
+    return null;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/**
+ * A publish lock's (or marker's) contents and identity, or null when nothing there is a lock of this user's: nothing,
+ * not a regular file, another user's, too large, or unreadable (inspectLockSync). Never throws.
+ */
+function readLockSync(path: string): { contents: string; stat: Stats } | null {
+  const found = inspectLockSync(path);
+  return found !== null && "contents" in found ? found : null;
 }
 
 /** The SHA-256 of the regular file at `path`, opened as settleExistingFile opens one; null when it is not that file. */
@@ -569,24 +621,30 @@ const ownerText = (owner: number | null) => (owner === null ? "it names no proce
  * time holds while it reads the lock again, judges it, removes it atomically (removeStaleOwned) and places its own; a
  * run that finds the marker held waits briefly and reads the lock again, so no run ever moves another's live lock. A
  * marker whose process is gone, or 30 seconds old, is removed the same way. A lock path that is not a regular file is
- * refused; write access denied to the directory is PublishLockDenied, for the caller to confirm instead.
+ * refused, and so is another user's lock or marker, or one larger than any lock, without reading it (BACKLOG 103-11);
+ * write access denied to the directory is PublishLockDenied, for the caller to confirm instead.
  */
 async function takePublishLock(path: string, markerPath: string, label: string): Promise<PublishLock> {
   const token = randomUUID();
   for (let attempt = 1; attempt <= 80; attempt += 1) {
     if (await placeOwned(path, token, label)) return { path, token };
-    const held = readLockSync(path);
+    // Another user's lock, or a file no lock could be, is refused before a byte of it is read (BACKLOG 103-11).
+    const held = inspectLockSync(path);
     if (held === null) {
       if ((await lstat(path).catch(() => null))?.isFile() === false) throw new Error(`${label} lock path is not a regular file: ${path}; nothing was written`);
       await sleep(LOCK_RETRY_MS);   // gone since, or being deleted (Windows): look again shortly
       continue;
     }
     if (typeof process.getuid === "function" && held.stat.uid !== process.getuid()) throw new Error(`${label} lock is another user's: ${path}; nothing was written`);
+    if ("foreign" in held) throw new Error(`${label} lock path holds a file that is not a lock (${held.foreign}): ${path}; nothing was written`);
     const { stale, owner } = staleOwned(held, STALE_STAGING_MS);
     if (!stale) throw new Error(`another ${label} of the same files is running${owner === null ? " (its lock names no process yet)" : ` (process ${owner})`}: ${path}; nothing was written`);
     const markerToken = randomUUID();
     if (!(await placeOwned(markerPath, markerToken, label))) {
-      const marker = readLockSync(markerPath);
+      // A marker only this user's runs place: another user's, or a file no marker could be, is refused unread.
+      const found = inspectLockSync(markerPath);
+      if (found !== null && "foreign" in found) throw new Error(`${label} takeover marker path holds a file that is not this user's marker (${found.foreign}): ${markerPath}; nothing was written`);
+      const marker = found;
       if (marker !== null) {
         const judged = staleOwned(marker, STALE_TAKEOVER_MS);
         if (judged.stale) await removeStaleOwned(markerPath, marker, label, ownerText(judged.owner));
