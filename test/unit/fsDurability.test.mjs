@@ -836,8 +836,12 @@ test("a staged file replaced before its link is refused, and a destination holdi
     try {
       await assert.rejects(() => publishImmutableFile(join(volume, "single.json"), "single\n", "test file"),
         new RegExp(`^Error: test file cannot publish into ${escapeRegExp(volume)}: this volume does not support hard links, or refused one \\(${code}\\); export to another directory; nothing was written$`));
-      await assert.rejects(() => publishImmutableFiles([join(volume, "set.part01.json")], async () => "part 1\n", "test set"),
-        new RegExp(`^Error: test set cannot publish into ${escapeRegExp(volume)}: this volume does not support hard links, or refused one \\(${code}\\); export to another directory; nothing was written$`));
+      // On Windows an EPERM from link can also mean the lock's name is being deleted, so a set's lock is looked at again
+      // until it gives up; the volume is named only where the error cannot mean that.
+      const setRefusal = process.platform === "win32" && code === "EPERM"
+        ? new RegExp(`^Error: test set could not take its lock ${escapeRegExp(join(volume, ".set.part01.json.publish-lock"))}: it kept changing; nothing was written$`)
+        : new RegExp(`^Error: test set cannot publish into ${escapeRegExp(volume)}: this volume does not support hard links, or refused one \\(${code}\\); export to another directory; nothing was written$`);
+      await assert.rejects(() => publishImmutableFiles([join(volume, "set.part01.json")], async () => "part 1\n", "test set"), setRefusal);
     } finally { restore(); }
     assert.deepEqual(await readdir(volume), []);
   }
