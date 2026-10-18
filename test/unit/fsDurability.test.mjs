@@ -634,23 +634,31 @@ test("the lock is named by the first destination's exact name: other names do no
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-lockname-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const parts = (stem) => [1, 2].map((n) => join(directory, `${stem}.part0${n}.json`));
-  // "FX export" and "FX_export" make the same staging stem, but are other files: their exports run side by side.
-  let locks;
+  // "FX export" and "FX_export" make the same staging stem, but are other files: their exports run side by side. The
+  // second starts only once the first holds its lock, and the first goes on only once the second has finished (no timing).
+  let locks, inside, release;
+  const isInside = new Promise((resolve) => { inside = resolve; }), mayGoOn = new Promise((resolve) => { release = resolve; });
   const first = publishImmutableFiles(parts("FX export"), async (index) => {
-    if (index === 0) { locks = (await readdir(directory)).filter((name) => name.endsWith(".publish-lock")); await new Promise((r) => setTimeout(r, 150)); }
+    if (index === 0) { locks = (await readdir(directory)).filter((name) => name.endsWith(".publish-lock")); inside(); await mayGoOn; }
     return `a ${index}\n`;
   }, "test set", { stem: "FX export" });
-  await new Promise((r) => setTimeout(r, 30));
-  assert.deepEqual(await publishImmutableFiles(parts("FX_export"), async (index) => `b ${index}\n`, "test set", { stem: "FX_export" }), { published: true, results: ["created", "created"] });
+  await isInside;
+  try {
+    assert.deepEqual(await publishImmutableFiles(parts("FX_export"), async (index) => `b ${index}\n`, "test set", { stem: "FX_export" }), { published: true, results: ["created", "created"] });
+  } finally { release(); }
   assert.deepEqual(await first, { published: true, results: ["created", "created"] });
   assert.deepEqual(locks, [".FX export.part01.json.publish-lock"]);
   // Where the file system takes two names for one file, they take one lock too.
   const nfc = "デ".normalize("NFC"), nfd = "デ".normalize("NFD");
   await writeFile(join(directory, `${nfc}.probe`), "");
   if (!(await absent(join(directory, `${nfd}.probe`)))) {
-    const slow = publishImmutableFiles(parts(nfc), async (index) => { if (index === 0) await new Promise((r) => setTimeout(r, 150)); return `c ${index}\n`; }, "test set");
-    await new Promise((r) => setTimeout(r, 30));
-    await assert.rejects(() => publishImmutableFiles(parts(nfd), async (index) => `c ${index}\n`, "test set"), /another test set of the same files is running/);
+    let slowInside, slowRelease;
+    const slowIsInside = new Promise((resolve) => { slowInside = resolve; }), slowMayGoOn = new Promise((resolve) => { slowRelease = resolve; });
+    const slow = publishImmutableFiles(parts(nfc), async (index) => { if (index === 0) { slowInside(); await slowMayGoOn; } return `c ${index}\n`; }, "test set");
+    await slowIsInside;
+    try {
+      await assert.rejects(() => publishImmutableFiles(parts(nfd), async (index) => `c ${index}\n`, "test set"), /another test set of the same files is running/);
+    } finally { slowRelease(); }
     assert.deepEqual(await slow, { published: true, results: ["created", "created"] });
   }
   // A name whose lock would be longer than a file name may be is refused: a hash would lose the sameness of names.
