@@ -216,24 +216,37 @@ export function evaluateCollectionHealth(input: CollectionHealthInput): Collecti
 }
 
 /**
- * The tradingview-mcp-repair-first-seen store, with its instrument for the FX history, that holds a `_clock_ahead`
- * issue's record stamped ahead (BACKLOG 103-11).
+ * The tradingview-mcp-repair-first-seen stores a `_clock_ahead` issue's collector writes with the clock that stamped its
+ * heartbeat (BACKLOG 103-11 review): its heartbeat and every data log its run appends to, each with whether --apply needs
+ * --force there. The first-seen collection writes COT, real-yield and CME gold open-interest first-seen records; the
+ * policy-rate collection writes policy-rate first-seen records; the research collection writes only its heartbeat among
+ * the logs that refuse a backward stamp; an FX history run, its run log, manifest and page checkpoints (one store).
  */
-export function clockAheadRepairStore(issue: CollectionHealthIssue): string {
-  return issue.collector === "policy_rate" ? "policy-rate-heartbeat" : issue.collector === "first_seen" ? "first-seen-heartbeat"
-    : issue.collector === "fx_history" ? `fx-history --instrument ${issue.instrument}` : "research-heartbeat";
+export function clockAheadRepairStores(issue: CollectionHealthIssue): { store: string; force: boolean }[] {
+  switch (issue.collector) {
+    case "first_seen": return [{ store: "first-seen-heartbeat", force: false }, { store: "cot", force: false }, { store: "real-yield", force: true }, { store: "futures-open-interest", force: false }];
+    case "policy_rate": return [{ store: "policy-rate-heartbeat", force: false }, { store: "policy-rate", force: false }];
+    case "fx_history": return [{ store: `fx-history --instrument ${issue.instrument}`, force: true }];
+    default: return [{ store: "research-heartbeat", force: false }];
+  }
 }
 
 /**
  * The notification for an unhealthy check. A record stamped ahead keeps holding its log off after the clock is set
- * right, until the clock reaches it, so the notification names the repair for each store it was found in (BACKLOG 103-11).
+ * right, until the clock reaches it, so the notification names the repair of every store the collector wrote with that
+ * clock: a dry run of each first (one with nothing ahead says so and changes nothing), then --apply, with --force where
+ * the store needs it (BACKLOG 103-11).
  */
 export function collectionHealthNotification(result: CollectionHealthResult): string {
   if (!result.should_notify) return "";
   const names = result.issues.map((issue) => issue.collector === "policy_rate" ? "policy-rate" : issue.collector === "first_seen" ? "first-seen"
     : issue.collector === "fx_history" ? `fx-history ${issue.instrument}` : "research");
-  const repairs = [...new Set(result.issues.filter((issue) => issue.code.endsWith("_clock_ahead")).map((issue) => `tradingview-mcp-repair-first-seen --store ${clockAheadRepairStore(issue)}`))];
-  const clock = repairs.length === 0 ? "" : " A heartbeat is stamped after the check: check the system clock. Setting it right does not clear the block;"
-    + ` once it is right, run ${repairs.join(", ")} (a dry run) and then again with --apply.`;
+  const stores = new Map<string, boolean>();
+  for (const issue of result.issues) if (issue.code.endsWith("_clock_ahead")) for (const { store, force } of clockAheadRepairStores(issue)) stores.set(store, force);
+  const listed = [...stores.keys()].map((store) => `--store ${store}`).join(", ");
+  const forced = [...stores].filter(([, force]) => force).map(([store]) => `--store ${store}`);
+  const force = forced.length === 0 ? "" : ` (with --apply --force for ${forced.join(", ")}, whose sequences files elsewhere may cite)`;
+  const clock = stores.size === 0 ? "" : " A heartbeat is stamped after the check: check the system clock. Setting it right does not clear the block;"
+    + ` once it is right, run tradingview-mcp-repair-first-seen with each of ${listed} (a dry run; a store with nothing ahead says so), then again with --apply${force}.`;
   return `Collection heartbeat unhealthy: ${[...new Set(names)].join(", ")}. Inspect collector and scheduler logs; CDP-dependent collectors also require TradingView debugging.${clock}`;
 }
