@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { constants } from "node:fs";
+import { constants, readdirSync, renameSync, symlinkSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { noFollowFlag, openExclusiveFile, posixModeEnforced, publishImmutableFiles, syncDirectoryEntry } from "../../build/fsDurability.js";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { noFollowFlag, openExclusiveFile, posixModeEnforced, publishImmutableFile, publishImmutableFiles, syncDirectoryEntry } from "../../build/fsDurability.js";
 
 test("directory durability remains available on Unix and is an explicit no-op on Windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tv-mcp-durability-"));
@@ -233,7 +234,8 @@ test("publishImmutableFiles links the first destination last, and removes what i
   if (process.platform === "win32" || process.getuid?.() === 0) { t.skip("needs POSIX permissions and a non-root user"); return; }
   const base = await mkdtemp(join(tmpdir(), "tv-mcp-publish-order-"));
   const [open, closed] = [join(base, "open"), join(base, "closed")];
-  await mkdir(open); await mkdir(closed);
+  // Owner-only whatever the umask: a directory others can write to is refused before anything (BACKLOG 103-11).
+  await mkdir(open, { mode: 0o700 }); await mkdir(closed, { mode: 0o700 });
   t.after(async () => { await chmod(closed, 0o700).catch(() => undefined); await rm(base, { recursive: true, force: true }); });
   // The first destination is in a directory that refuses new entries by the time the files are linked: the others,
   // linked before it, are removed again, the last linked first.
@@ -635,4 +637,138 @@ test("a lock that names no process is another run's for a minute, then taken ove
     assert.deepEqual((await publishImmutableFiles(paths, body, "test set")).published, true);
     assert.deepEqual((await readdir(directory)).sort(), ["set.part01.json", "set.part02.json"]);
   }
+});
+
+// BACKLOG 103-11 (security review of 0.1.43, M1): a directory another user could swap the staging in is refused; a
+// staging swapped for a link to another directory is caught before a file is staged in it or linked from it, and that
+// directory loses nothing; a run removes only the files it created.
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("both publishes refuse a directory others can write to without the sticky bit, or another user's, before writing anything (BACKLOG 103-11)", async (t) => {
+  if (process.platform === "win32") { t.skip("POSIX owners and modes: Windows has neither here, and access there is an ACL matter"); return; }
+  const base = await mkdtemp(join(tmpdir(), "tv-mcp-publish-shared-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const body = async (index) => `part ${index + 1}\n`;
+  const refusal = /will not publish into .*: other users can write to it and it has no sticky bit, so they could swap the files being published; .*; nothing was written$/;
+  for (const mode of [0o777, 0o770, 0o703]) {
+    const shared = join(base, `shared-${mode.toString(8)}`);
+    await mkdir(shared); await chmod(shared, mode);
+    await assert.rejects(() => publishImmutableFiles([join(shared, "set.part01.json"), join(shared, "set.part02.json")], body, "test set"), refusal);
+    await assert.rejects(() => publishImmutableFile(join(shared, "single.json"), "single\n", "test file"), refusal);
+    assert.deepEqual(await readdir(shared), [], `mode ${mode.toString(8)}: no lock, staging or file`);
+  }
+  // Every destination's directory is checked, not only the first's: refused before the first's lock is taken.
+  const own = join(base, "own"), shared = join(base, "shared-777");
+  await mkdir(own, { mode: 0o700 });
+  await assert.rejects(() => publishImmutableFiles([join(own, "set.part01.json"), join(shared, "set.part02.json")], body, "test set"), refusal);
+  assert.deepEqual(await readdir(own), []);
+  // A directory reached through a link is judged where it resolves.
+  const alias = join(base, "alias");
+  await symlink(shared, alias);
+  await assert.rejects(() => publishImmutableFile(join(alias, "single.json"), "single\n", "test file"),
+    new RegExp(`^Error: test file will not publish into ${escapeRegExp(await realpath(shared))}: other users can write to it`));
+  // The sticky bit (as /tmp has) keeps others from moving this user's entries: such a directory, and one only its owner
+  // can write to, are published into.
+  const sticky = join(base, "sticky");
+  await mkdir(sticky); await chmod(sticky, 0o1777);
+  assert.deepEqual(await publishImmutableFiles([join(sticky, "set.part01.json"), join(sticky, "set.part02.json")], body, "test set"), { published: true, results: ["created", "created"] });
+  assert.equal(await publishImmutableFile(join(sticky, "single.json"), "single\n", "test file"), "created");
+  await chmod(own, 0o755);
+  assert.equal(await publishImmutableFile(join(own, "single.json"), "single\n", "test file"), "created");
+  // Owned by another user: refused (root's is not). The process is made to take itself for another user here.
+  if (process.getuid() !== 0) {
+    const realGetuid = process.getuid;
+    process.getuid = () => realGetuid() + 1;
+    try {
+      await assert.rejects(() => publishImmutableFile(join(own, "other.json"), "other\n", "test file"),
+        new RegExp(`^Error: test file will not publish into .*: it is owned by another user \\(uid ${realGetuid()}\\), who could swap the files being published; use a directory you own; nothing was written$`));
+      await assert.rejects(() => publishImmutableFiles([join(own, "other.part01.json")], async () => "other\n", "test set"), /it is owned by another user/);
+    } finally {
+      process.getuid = realGetuid;
+    }
+    assert.deepEqual(await readdir(own), ["single.json"]);
+  }
+});
+
+/** A directory only its owner can enter, holding files named as staged files are, and others: what a swapped staging would point at. */
+async function victimDirectory(base) {
+  const victim = join(base, "victim");
+  await mkdir(victim, { mode: 0o700 });
+  for (const name of ["0", "1", "2", "7", "file", "notes.txt"]) await writeFile(join(victim, name), `victim ${name}\n`, { mode: 0o644 });
+  return victim;
+}
+const contentsOf = async (directory) => Object.fromEntries(await Promise.all((await readdir(directory)).sort().map(async (name) => [name, await readFile(join(directory, name), "utf8")])));
+/** Moves the staging directory in `directory` aside and puts a link to `victim` in its place, as another user could where the directory let them. */
+function swapStagingSync(directory, victim) {
+  const name = readdirSync(directory).find((entry) => entry.startsWith(".publish-"));
+  renameSync(join(directory, name), join(directory, ".moved-aside"));
+  symlinkSync(victim, join(directory, name), "junction");   // a junction on Windows, which needs no privilege
+}
+
+test("a staging swapped for a link to another directory is caught before a file is staged in it or linked from it, and that directory loses nothing (BACKLOG 103-11)", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "tv-mcp-publish-swap-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const victim = await victimDirectory(base);
+  const before = await contentsOf(victim);
+  const replaced = "was replaced while the files were published; nothing was written";
+  // While a later file is built: its staged file would be created in the other directory, and the removal at the end
+  // would take that directory's numbered files.
+  const building = join(base, "building");
+  await mkdir(building, { mode: 0o700 });
+  const paths = [1, 2, 3].map((n) => join(building, `set.part0${n}.json`));
+  await assert.rejects(() => publishImmutableFiles(paths, async (index) => { if (index === 1) swapStagingSync(building, victim); return `part ${index + 1}\n`; }, "test set", { stem: "set" }),
+    (error) => new RegExp(`^test set staging directory .*\\.publish-set-[0-9a-f]{8}-\\d+-\\w{6} ${replaced}$`).test(error.message));
+  assert.deepEqual(await contentsOf(victim), before);
+  assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true]);
+  assert.deepEqual(await readdir(join(building, ".moved-aside")), ["0"], "what the run staged stays where it was made");
+  // While the files are linked, after the second was: the other directory's file of the third's name would be linked
+  // to the third destination. The second is removed again.
+  const linking = join(base, "linking");
+  await mkdir(linking, { mode: 0o700 });
+  const linked = [1, 2, 3].map((n) => join(linking, `set.part0${n}.json`));
+  let swapped = false;
+  const observe = (step, path) => { if (step === "link" && path === linked[2] && !swapped) { swapped = true; swapStagingSync(linking, victim); } };
+  await assert.rejects(() => publishImmutableFiles(linked, async (index) => `part ${index + 1}\n`, "test set", { stem: "set", observe }),
+    (error) => error.message.endsWith(`${replaced} (${linked[1]} was linked and removed again)`) && /^test set staging directory /.test(error.message));
+  assert.deepEqual(await contentsOf(victim), before);
+  assert.deepEqual(await Promise.all(linked.map(absent)), [true, true, true]);
+  // publishImmutableFile, swapped once its file is staged: the other directory's `file` is not linked into place.
+  const single = join(base, "single");
+  await mkdir(single, { mode: 0o700 });
+  const fsp = createRequire(import.meta.url)("node:fs/promises");
+  const realOpen = fsp.open;
+  fsp.open = async (path, ...rest) => {
+    const handle = await realOpen(path, ...rest);
+    if (/[\\/]\.publish-\w{6}[\\/]file$/.test(String(path))) swapStagingSync(single, victim);
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(() => publishImmutableFile(join(single, "evidence.json"), "evidence\n", "test file"),
+      (error) => new RegExp(`^test file staging directory .*\\.publish-\\w{6} ${replaced}$`).test(error.message));
+  } finally {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(await contentsOf(victim), before);
+  assert.equal(await absent(join(single, "evidence.json")), true);
+  assert.deepEqual(await contentsOf(join(single, ".moved-aside")), { file: "evidence\n" });
+});
+
+test("a run removes from its staging only the files it created there, and leaves the directory when anything else is in it (BACKLOG 103-11)", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tv-mcp-publish-own-files-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = [1, 2, 3].map((n) => join(directory, `set.part0${n}.json`));
+  let staging;
+  await assert.rejects(() => publishImmutableFiles(paths, async (index) => {
+    if (index === 1) {
+      staging = join(directory, (await readdir(directory)).find((name) => name.startsWith(".publish-")));
+      await writeFile(join(staging, "5"), "not this run's\n", { mode: 0o600 });
+    }
+    if (index === 2) throw new Error("part 3 is missing");
+    return `part ${index + 1}\n`;
+  }, "test set", { stem: "set" }), /^Error: part 3 is missing; nothing was written$/);
+  assert.deepEqual(await contentsOf(staging), { 5: "not this run's\n" }, "its own staged files 0 and 1 are gone, the other numbered file stays");
+  assert.deepEqual(await Promise.all(paths.map(absent)), [true, true, true]);
 });

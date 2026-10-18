@@ -535,10 +535,12 @@ test("the same eight aggregates give the same reproduction whatever order they a
 
 test("a staging directory that cannot be removed does not change what the run reports", async (t) => {
   const { out, argv } = await reproductionWorkspace(t);
-  const realRm = fsp.rm;
-  fsp.rm = async (path, ...rest) => {
+  // The staging is removed file by file, then the directory if empty (BACKLOG 103-11): its directory is what stays.
+  const fs = createRequire(import.meta.url)("node:fs");
+  const realRmdir = fs.rmdirSync;
+  fs.rmdirSync = (path, ...rest) => {
     if (basename(String(path)).startsWith(".publish-")) throw Object.assign(new Error("EBUSY: injected"), { code: "EBUSY" });
-    return realRm(path, ...rest);
+    return realRmdir(path, ...rest);
   };
   syncBuiltinESMExports();
   try {
@@ -554,14 +556,15 @@ test("a staging directory that cannot be removed does not change what the run re
     await assert.rejects(runPriceActionTrapReproductionCli(argv), /never overwritten/);
     assert.equal(await readFile(out, "utf8"), earlierEvidence);
   } finally {
-    fsp.rm = realRm;
+    fs.rmdirSync = realRmdir;
     fsp.link = realLink;
     syncBuiltinESMExports();
   }
-  // What is left is the two staging directories, beside the evidence.
+  // What is left is the two staging directories, beside the evidence, emptied of the file each run staged.
   const left = await stagingLeft(out);
   assert.equal(left.length, 2);
   assert.ok(left.every((name) => name.startsWith(".publish-")), left.join(", "));
+  for (const name of left) assert.deepEqual(await readdir(join(dirname(out), name)), []);
 });
 
 test("a file that vanishes between the link and the look is linked again once, and a path in flux is given up", async (t) => {

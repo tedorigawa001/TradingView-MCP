@@ -65,6 +65,20 @@ path and the records without their bars: sequence, requested range, retrieval ti
 first and last bar, normalized hash. Every argument, `--output` included (an existing directory, not a directory
 itself), is checked before any raw page is read.
 
+### The output directory
+
+BACKLOG 103-11. The resolved directory of the output (of every part with `--split`) must be one no other user can swap
+files in. On macOS and Linux an export refuses, before any raw page is read and writing nothing, a directory the group
+or others can write to unless it has the sticky bit (as `/tmp` has), and a directory owned by neither you nor root. In
+such a directory another user could rename the hidden staging directory the export writes in and put a symbolic link
+in its place: the export would then create its files in, link files from, and remove files in the directory the link
+names. Choose a directory only you can write to (`chmod go-w`), or one with the sticky bit. Within an accepted
+directory the export still keeps each staging directory's identity from when it made it, checks it before it stages a
+file there and before each link, checks the staged file before it is linked, and removes only the files it created, so
+a staging directory swapped all the same is refused, not followed. The check is of the output's own directory: keep it
+under directories only you (or root) can write to. Windows has neither owner nor mode here, so there the check is not
+made, and the directory's access control list decides who can change it.
+
 Choose collections with one or more `--sequence`, or `--all`; they are written in manifest order. At most 1,000,000
 bars go into one export, checked before any raw response is read. A whole export over that goes into parts with
 `--split` ([below](#whole-exports-in-parts---split)).
@@ -174,7 +188,9 @@ compared with it, and any other is written and synced to a staging file in a hid
 `.publish-<output name without .json>-<tag>-<process id>-XXXXXX`, the tag a short hash of `part01`'s exact name, so
 that the staging directories an export looks at are those of the exports its lock covers. A part that fails to build (a
 raw page missing or not matching its hash, a page no checkpoint binds), or a file with other bytes at a part's path,
-removes the staging directory and writes nothing, and says so; every file with other bytes is named. Only when every
+removes the files it staged, then the staging directory, and writes nothing, and says so; every file with other bytes
+is named. A staging directory that is no longer the one the export made, or a staged file that is no longer the one it
+wrote, stops the export the same way ([above](#the-output-directory)). Only when every
 part is staged or found identical are the staged parts linked into place, `part01` last: the other parts are linked and
 the directory synced, the parts found identical are checked to be so still, and then `part01` is linked and synced. Each
 part is `created`, or `identical` when its file already held it. With the lock, `part01` there means that its whole set
