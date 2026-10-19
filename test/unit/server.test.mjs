@@ -1231,7 +1231,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred seventeen expected tools", async () => {
+test("exposes exactly the one hundred eighteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1277,6 +1277,7 @@ test("exposes exactly the one hundred seventeen expected tools", async () => {
       "get_carry_core_primary_readiness",
       "get_chart_context",
       "get_chart_screenshot",
+      "get_closed_mtf_summary",
       "get_cme_gold_open_interest",
       "get_cot_crowding_unwind_context",
       "get_cot_crowding_unwind_overlay_template",
@@ -1572,6 +1573,107 @@ test("a tool error carrying Authorization headers reaches neither the client nor
     for (const call of logged.mock.calls) assert.ok(!call.arguments.join(" ").includes(secret), "stderr must not carry it either");
   }
   assert.ok(logged.mock.calls.length > 0, "the redacted detail goes to stderr");
+});
+
+test("get_closed_mtf_summary previews missing native timeframes without reading OHLC or scanner values", async () => {
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getOhlcv: async () => { reads++; throw new Error("unexpected OHLC read"); },
+    setResolution: async () => { throw new Error("unexpected change"); },
+  }, scanner: { getMtfOverview: async () => { throw new Error("scanner must not be used"); } } }));
+  try {
+    const response = await client.callTool({ name: "get_closed_mtf_summary", arguments: {
+      symbol: "EURUSD", expected_timeframe: "1D", timeframes: ["60", "240"],
+    } });
+    assert.notEqual(response.isError, true);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.status, "confirmation_required"); assert.equal(reads, 0);
+    assert.deepEqual(result.summaries, []);
+    assert.ok(result.chart_changes.every((item) => item.temporary_switch));
+  } finally { await client.close(); }
+});
+
+test("get_closed_mtf_summary confirms serial native reads under the shared lock, restores, and omits raw bars", async () => {
+  let resolution = "1D", held = false, releases = 0;
+  const changes = [], reads = [];
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { assert.equal(held, false); held = true; return async () => { held = false; releases++; }; } },
+    tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "EURUSD", resolution, studies: [] }] }),
+      setResolution: async (next, index) => { assert.equal(held, true); assert.equal(index, 0); changes.push(next); resolution = next; },
+      getOhlcv: async (count, index) => {
+        assert.equal(held, true); reads.push({ count, index, resolution });
+        const interval = resolution === "1D" ? 86400 : Number(resolution) * 60;
+        return { symbol: "EURUSD", resolution, count, bars: Array.from({ length: count }, (_, i) => {
+          const time = Date.parse("2020-01-01T00:00:00Z") / 1000 + i * interval;
+          return { time, timeIso: new Date(time * 1000).toISOString(), open: 100 + i, high: 101 + i, low: 99 + i, close: 100 + i, volume: null };
+        }) };
+      },
+    },
+  }));
+  try {
+    const response = await client.callTool({ name: "get_closed_mtf_summary", arguments: {
+      symbol: "EURUSD", expected_timeframe: "1D", chart_index: 0, timeframes: ["60", "240"], count: 201, confirm: true,
+    } });
+    assert.notEqual(response.isError, true);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.status, "complete"); assert.equal(result.chart_restored, true);
+    assert.deepEqual(changes, ["60", "1D", "240", "1D"]);
+    assert.equal(resolution, "1D"); assert.equal(held, false); assert.equal(releases, 1);
+    assert.deepEqual(reads.map((r) => r.resolution), ["60", "240"]);
+    assert.ok(result.summaries.every((row) => row.as_of === result.as_of && row.close === 299 && row.history.closed_bars_used === 200));
+    assert.equal(JSON.stringify(result).includes('"bars"'), false);
+    assert.equal(result.candidateEligible, false);
+  } finally { await client.close(); }
+});
+
+test("get_closed_mtf_summary MCP never exposes statistics for readiness timeouts or relabelled stale bars", async () => {
+  for (const mode of ["change_timeout", "stale", "rollback_timeout"]) {
+    let resolution = "1D", reads = 0;
+    const client = await connectedClient(makeDeps({ tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution, studies: [] }] }),
+      setResolution: async (next) => {
+        resolution = next;
+        return { symbol: "OANDA:EURUSD", resolution, changed: true, bars: 201,
+          ...((mode !== "stale" && next === "240") || mode === "rollback_timeout" ? { note: "data-ready callback did not fire within 8s" } : {}) };
+      },
+      getOhlcv: async (count) => {
+        reads++;
+        const interval = mode === "stale" ? 3600 : resolution === "1D" ? 86400 : Number(resolution) * 60;
+        return { symbol: "OANDA:EURUSD", resolution, count, bars: Array.from({ length: count }, (_, i) => {
+          const time = Date.parse("2020-01-01T00:00:00Z") / 1000 + i * interval;
+          return { time, timeIso: new Date(time * 1000).toISOString(), open: 100 + i, high: 101 + i, low: 99 + i, close: 100 + i, volume: null };
+        }) };
+      },
+    } }));
+    try {
+      const response = await client.callTool({ name: "get_closed_mtf_summary", arguments: {
+        symbol: "EURUSD", expected_timeframe: "1D", timeframes: mode === "rollback_timeout" ? ["1D", "240", "60"] : ["240"], count: 201, confirm: true,
+      } });
+      assert.notEqual(response.isError, true);
+      const result = JSON.parse(response.content[0].text);
+      assert.equal(result.status, mode === "rollback_timeout" ? "blocked" : "partial"); assert.deepEqual(result.summaries, []);
+      assert.equal(result.symbol, "OANDA:EURUSD");
+      assert.equal(result.chart_restored, mode !== "rollback_timeout"); assert.equal(resolution, "1D");
+      assert.equal(reads, mode === "change_timeout" ? 0 : 1);
+      assert.deepEqual(result.quality_issues, [mode === "rollback_timeout" ? "chart_restore_failed" : "timeframe_read_failed:240"]);
+    } finally { await client.close(); }
+  }
+});
+
+test("get_closed_mtf_summary MCP rejects unsupported/duplicate frames, oversized counts, Replay and wrong binding", async () => {
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => { reads++; throw new Error("unexpected read"); } } }));
+  const base = { symbol: "EURUSD", expected_timeframe: "1D", timeframes: ["1D"] };
+  try {
+    for (const patch of [{ timeframes: ["1M"] }, { timeframes: ["1D", "1D"] }, { count: 1001 }, { symbol: "OANDA:USDJPY" }]) {
+      assert.equal((await client.callTool({ name: "get_closed_mtf_summary", arguments: { ...base, ...patch } })).isError, true);
+    }
+    assert.equal(reads, 0);
+  } finally { await client.close(); }
+  const replay = await connectedClient(makeDeps({ tv: { getReplayStatus: async () => ({ available: true, started: true, toolbarVisible: true }) } }));
+  try { assert.equal((await replay.callTool({ name: "get_closed_mtf_summary", arguments: base })).isError, true); }
+  finally { await replay.close(); }
 });
 
 test("get_mtf_overview forwards symbols, timeframes and fields", async () => {

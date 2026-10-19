@@ -51,6 +51,7 @@ import { buildAnalysisAlertPlans, matchExistingAnalysisAlerts } from "./analysis
 import { validateTradePlan } from "./tradePlan.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
+import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
 import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
 import { buildAnalysisPerformance } from "./analysisPerformance.js";
@@ -7810,6 +7811,29 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     },
+  );
+
+  server.registerTool(
+    "get_closed_mtf_summary",
+    {
+      description: "Summarize SMA20/50/200, EMA20, RSI14 and ATR14 from successor-confirmed native OHLC at one cutoff. " +
+        "Never uses scanner values or guesses daily/weekly close times. Reuses matching layout charts; missing timeframes " +
+        "require confirm=true for temporary switching and verified restoration. Loaded history only; no trade signals or journal writes.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        chart_index: z.number().int().nonnegative().optional(),
+        expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
+        timeframes: z.array(z.enum(CLOSED_MTF_TIMEFRAMES)).min(1).max(6).optional(),
+        count: z.number().int().min(2).max(1000).optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ symbol, chart_index, expected_timeframe, timeframes, count, confirm }) => chartOperations.run(async () => {
+      try {
+        return jsonResult(await buildClosedMtfSummary(tv, { symbol, chartIndex: chart_index, expectedTimeframe: expected_timeframe,
+          timeframes, count, confirm }));
+      } catch (err) { return errorResult(err); }
+    }),
   );
 
   server.registerTool(

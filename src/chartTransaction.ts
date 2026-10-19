@@ -28,7 +28,7 @@ const BEHIND_EXCHANGE = /^[A-Z0-9_]+:(.+)$/i;
  * "2*OANDA:EURUSD") does not: each of its tickers has more than an exchange name before it or more formula after it.
  * A requested symbol that names its own exchange is matched exactly.
  */
-const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) => {
+export const symbolSatisfies = (actual: string, requested: string, exchangeOptional: boolean) => {
   if (sameSymbol(actual, requested)) return true;
   if (!exchangeOptional || requested.includes(":")) return false;
   const behind = BEHIND_EXCHANGE.exec(actual)?.[1];

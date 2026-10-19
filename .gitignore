@@ -6,6 +6,6 @@ build/
 *.png
 qiita/
 
-playbook/
-fxdata/
+/playbook
+/fxdata
 bookmap-addon/dist/
