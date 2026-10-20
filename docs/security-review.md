@@ -539,6 +539,12 @@ and only in a collection CLI. The `docs/launchd/*.example` files carried real
 absolute home paths and a username until 2026-10-02; they now hold placeholders,
 and a test keeps them that way. The old paths remain in the git history.
 
+## Moving-Average Settings and Values (#104-3)
+
+`get_moving_average_context` is a read-only, shared-lock chart context tool. Required symbol/timeframe, selected chart index, study IDs/names, Replay inactivity and whitelisted settings are checked before/after acquisition. It supports only the explicitly identified ten-SMA metadata signature; unrelated studies are returned as unmapped without inferring semantics from display names. Exact native bar-open/Plot-ID joins exclude the unconfirmed tail. Nonzero/unknown offsets, external sources, unknown study health and unavailable exact plot values cannot yield substituted values. When loaded OHLC permits, both adjacent SMA values are recomputed for verification; mismatches suppress values/slopes and insufficient history remains partial. The adjacent-bar change discloses elapsed seconds, including closures; it is not a trade signal or a historical point-in-time claim.
+
+Inputs cap history at 3-1,000 loaded rows. Internal snapshots cap references at 64 studies, mapped studies at 16, scanned raw inputs at 256, non-internal inputs at 128, input descriptors at 256 and plot descriptors at 128 per study; metadata strings are bounded to 200 characters. Only the twenty public input IDs `in_0` through `in_19` are accepted. Unknown non-internal IDs stop that study before any input values are serialized, while known Pine-internal IDs are ignored. Pine source/internal inputs and arbitrary property trees are excluded; only these allowlisted scalar settings, whitelisted display fields and finite numeric line values cross CDP. The public response contains no raw OHLC/plot arrays. No account, order, alert, scanner or private research data is accessed, and no chart/history/indicator/journal changes occur. A metadata hash is descriptive provenance, not a source-code audit or proof against repainting/manual UI races. See [the mapping contract](MOVING_AVERAGE_CONTEXT.md).
+
 ## Handoff for Future Phases
 
 - Keep trading and Replay Trading APIs private. Alert exposure remains limited to #26's confirmed creation path; modification, restart, deletion, and webhooks remain unavailable.

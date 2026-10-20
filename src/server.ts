@@ -53,6 +53,7 @@ import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
 import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
+import { buildMovingAverageContext } from "./movingAverageContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
 import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
 import { buildAnalysisPerformance } from "./analysisPerformance.js";
@@ -188,6 +189,7 @@ export interface ServerDeps {
     | "stopReplay"
     | "getExecutionQuotes"
     | "getTradingSessionMetadata"
+    | "getMovingAverageStudies"
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
@@ -10284,6 +10286,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     },
+  );
+
+  server.registerTool(
+    "get_moving_average_context",
+    {
+      description: "Map moving-average settings to native plot values by an explicit study identity and input/plot IDs, not a similar display name. " +
+        "V1 supports the observed ten-line Simple Moving Averages study only; other studies remain unmapped. Reports period, SMA method, price source, " +
+        "visibility, exact successor-confirmed bar times and the difference between adjacent confirmed values, with elapsed seconds. " +
+        "Checks both values against loaded native OHLC when enough history exists. Unknown offsets/sources, study errors, absent exact plot times or " +
+        "numeric mismatches never produce a substituted value. Read-only under the chart lock; no chart changes, history loading, scanner fallback, orders or journal writes.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.enum(CLOSED_MTF_TIMEFRAMES),
+        chart_index: z.number().int().nonnegative().optional(),
+        count: z.number().int().min(3).max(1000).optional().describe("Loaded native and study rows including the unconfirmed tail. Default: 500"),
+      },
+    },
+    async ({symbol,expected_timeframe,chart_index,count})=>chartOperations.run(async()=>{
+      try {return jsonResult(await buildMovingAverageContext(tv,{symbol,expectedTimeframe:expected_timeframe,chartIndex:chart_index,count}));}
+      catch(err) {return errorResult(err);}
+    }),
   );
 
   server.registerTool(

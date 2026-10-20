@@ -1,4 +1,5 @@
 import type { CdpClient } from "./cdp.js";
+import { SMA_TEN_STUDY_ID, type MovingAverageSnapshot } from "./movingAverageContext.js";
 
 export interface StudyRef {
   id: string;
@@ -934,10 +935,64 @@ export class TradingView {
     `);
   }
 
-  /**
-   * Recent plot values of indicators (studies) on a chart. By default,
-   * cosmetic plots (colorers, alert conditions) are filtered out.
-   */
+  /** Bounded ID-keyed plots and public settings for the explicitly supported MA adapter. */
+  getMovingAverageStudies(count: number, chartIndex: number): Promise<MovingAverageSnapshot> {
+    if (!Number.isInteger(count) || count < 3 || count > 1000) throw new Error("moving-average count must be an integer between 3 and 1000");
+    if (chartIndex === undefined) throw new Error("moving-average chartIndex must be specified");
+    assertChartIndex(chartIndex);
+    return this.cdp.evaluate<MovingAverageSnapshot>(`
+      (() => {
+        const chart = window.TradingViewApi.chart(${chartIndex});
+        const refs = chart.getAllStudies();
+        if (refs.length > 64) throw new Error("too many studies for a bounded moving-average snapshot");
+        const supportedId = ${JSON.stringify(SMA_TEN_STUDY_ID)};
+        const hidden = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
+        const allowedInputs = new Set(Array.from({length:20}, (_,i) => "in_" + i));
+        const text = (v) => typeof v === "string" ? v.slice(0, 200) : "";
+        const scalar = (v) => typeof v === "string" ? text(v) : typeof v === "boolean" || typeof v === "number" && Number.isFinite(v) ? v : null;
+        const sources = new Map(chart.chartModel().dataSources().filter(s => typeof s.id === "function").map(s => [s.id(), s]));
+        const studies = [], unmappedStudies = [];
+        for (const ref of refs) {
+          const src = sources.get(ref.id);
+          const mi = src && typeof src.metaInfo === "function" ? src.metaInfo() : null;
+          const metaId = typeof mi?.id === "string" && mi.id.length <= 200 ? mi.id : null;
+          if (metaId !== supportedId) { unmappedStudies.push({id:text(ref.id), name:text(ref.name), metaId}); continue; }
+          if (studies.length >= 16) throw new Error("too many mapped moving-average studies");
+          const study = {id:text(ref.id), name:text(ref.name), metaId, visible:null, hasError:null, inputs:[], plots:[], bars:[]};
+          studies.push(study);
+          try {
+            const api = chart.getStudyById(ref.id);
+            const visible = api.isVisible(), hasError = api.hasError();
+            study.visible = typeof visible === "boolean" ? visible : null;
+            study.hasError = typeof hasError === "boolean" ? hasError : null;
+            const inputInfo = api.getInputsInfo();
+            const rawInputs = api.getInputValues();
+            if (rawInputs.length > 256) throw new Error("oversized moving-average inputs");
+            const inputs = rawInputs.filter(v => !hidden.has(v.id));
+            if (inputs.length > 128 || inputInfo.length > 256 || (mi.plots || []).length > 128) throw new Error("oversized moving-average metadata");
+            if (inputs.some(v => !allowedInputs.has(v.id))) throw new Error("unknown moving-average input signature");
+            const info = new Map(inputInfo.map(v => [v.id, v]));
+            study.inputs = inputs.map(v => ({id:text(v.id), name:text(info.get(v.id)?.name), type:text(info.get(v.id)?.type), value:scalar(v.value)}));
+            const styles = src.properties().childs().styles?.childs();
+            study.plots = (mi.plots || []).map(p => {
+              const style = styles?.[p.id]?.state?.();
+              const offset = typeof src.offset === "function" ? src.offset(p.id) : null;
+              return {id:text(p.id), title:text(mi.styles?.[p.id]?.title || p.id), type:text(p.type),
+                visible:typeof style?.visible === "boolean" ? style.visible : null,
+                display:Number.isInteger(style?.display) && style.display >= 0 && style.display <= 4294967295 ? style.display : null,
+                offset:Number.isSafeInteger(offset) ? offset : null};
+            });
+            const columns = study.plots.map((p, i) => ({...p, col:i+1})).filter(p => p.type === "line");
+            study.bars = (src.data()._items || []).slice(-${count}).map(it => ({time:it.value[0], timeIso:new Date(it.value[0]*1000).toISOString(),
+              values:Object.fromEntries(columns.map(p => [p.id, typeof it.value[p.col] === "number" && Number.isFinite(it.value[p.col]) ? it.value[p.col] : null]))}));
+          } catch { study.error = "moving-average metadata or plot data unavailable"; }
+        }
+        return {source:"tradingview_moving_average_studies", chartIndex:${chartIndex}, symbol:chart.symbol(), resolution:chart.resolution(), studies, unmappedStudies};
+      })()
+    `);
+  }
+
+  /** Recent study plot values, excluding cosmetic plots unless requested. */
   getIndicatorValues(
     options: {
       studyId?: string;

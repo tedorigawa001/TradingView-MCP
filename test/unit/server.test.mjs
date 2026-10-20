@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../build/server.js";
+import { SMA_TEN_STUDY_ID } from "../../build/movingAverageContext.js";
 import { EconomicCalendar } from "../../build/calendar.js";
 import {
   ANALYSIS_OVERLAY_INPUTS,
@@ -1239,7 +1240,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred nineteen expected tools", async () => {
+test("exposes exactly the one hundred twenty expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1301,6 +1302,7 @@ test("exposes exactly the one hundred nineteen expected tools", async () => {
       "get_indicator_values",
       "get_key_levels",
       "get_market_snapshot",
+      "get_moving_average_context",
       "get_mtf_overview",
       "get_oanda_flow_collection_readiness",
       "get_ohlcv",
@@ -1692,6 +1694,61 @@ function ohlcvLevelsFixture() {
       high: [3, 7, 8, 10].includes(i) ? 100 : i === 12 ? 101 : 99.9, low: 99.7, volume: null };
   }) };
 }
+
+function movingAverageFixture() {
+  const ohlcv=ohlcvLevelsFixture();
+  const snapshot={source:"tradingview_moving_average_studies",chartIndex:0,symbol:ohlcv.symbol,resolution:ohlcv.resolution,unmappedStudies:[],
+    studies:[{id:"sma1",name:"Simple Moving Averages",metaId:SMA_TEN_STUDY_ID,visible:true,hasError:false,
+      inputs:Array.from({length:10},(_,i)=>[{id:`in_${2*i}`,name:`SMA #${i+1}`,type:"integer",value:3},
+        {id:`in_${2*i+1}`,name:`SMA Source #${i+1}`,type:"source",value:"close"}]).flat(),
+      plots:Array.from({length:20},(_,i)=>({id:`plot_${i}`,title:i%2?`plot_${i}`:`SMA #${i/2+1}`,type:i%2?"colorer":"line",visible:true,display:15,offset:0})),
+      bars:ohlcv.bars.map(b=>({time:b.time,timeIso:b.timeIso,values:Object.fromEntries(Array.from({length:10},(_,i)=>[`plot_${2*i}`,99.8]))}))}]};
+  const context={activeChartIndex:0,chartsCount:1,charts:[{index:0,symbol:ohlcv.symbol,resolution:"60",studies:[{id:"sma1",name:"Simple Moving Averages"}]}]};
+  return {ohlcv,snapshot,context};
+}
+
+test("get_moving_average_context joins settings to confirmed plot values under the shared lock",async()=>{
+  const f=movingAverageFixture();let held=false,released=0;
+  const client=await connectedClient(makeDeps({chartOperationLock:{acquire:async()=>{held=true;return async()=>{held=false;released++;};}},tv:{
+    getChartContext:async()=>{assert.equal(held,true);return f.context;},getOhlcv:async()=>f.ohlcv,
+    getMovingAverageStudies:async(count,index)=>{assert.equal(held,true);assert.equal(index,0);assert.equal(count,17);return structuredClone(f.snapshot);},
+    setSymbol:async()=>assert.fail("no symbol changes"),setResolution:async()=>assert.fail("no timeframe changes"),
+    getIndicatorValues:async()=>assert.fail("no title-keyed fallback"),
+  },scanner:{getQuotes:async()=>assert.fail("no scanner")}}));
+  try {
+    const response=await client.callTool({name:"get_moving_average_context",arguments:{symbol:"EURUSD",expected_timeframe:"60",count:17}});
+    assert.notEqual(response.isError,true);const r=JSON.parse(response.content[0].text);
+    assert.equal(r.moving_averages.length,10);assert.equal(r.moving_averages[0].settings.period,3);
+    assert.equal(r.moving_averages[0].settings.source,"close");assert.equal(r.moving_averages[0].value,99.8);
+    assert.equal(r.moving_averages[0].slope.direction,"flat");assert.equal(r.history.closed_bars_used,16);
+    assert.equal(r.reference.bar_open_at,f.ohlcv.bars[15].timeIso);assert.equal(r.candidateEligible,false);
+    assert.equal(r.chart_changes,false);assert.equal(JSON.stringify(r).includes('"bars"'),false);
+    assert.equal(held,false);assert.equal(released,1);
+  } finally {await client.close();}
+});
+
+test("get_moving_average_context refuses schema errors, Replay, binding and settings drift",async()=>{
+  const f=movingAverageFixture(), base={symbol:"EURUSD",expected_timeframe:"60"};
+  const client=await connectedClient(makeDeps({tv:{getChartContext:async()=>f.context,getMovingAverageStudies:async()=>f.snapshot,getOhlcv:async()=>f.ohlcv}}));
+  try {for(const patch of [{count:2},{count:1001},{chart_index:-1},{expected_timeframe:"1M"},{symbol:"FX:EURUSD"}])
+    assert.equal((await client.callTool({name:"get_moving_average_context",arguments:{...base,...patch}})).isError,true);
+  } finally {await client.close();}
+  for(const mode of ["replay","drift","missing","offset"]) {
+    let calls=0;
+    const c=await connectedClient(makeDeps({tv:{getChartContext:async()=>f.context,getOhlcv:async()=>f.ohlcv,
+      getReplayStatus:async()=>({available:true,started:mode==="replay",toolbarVisible:false}),
+      getMovingAverageStudies:async()=>{const s=structuredClone(f.snapshot);calls++;
+        if(mode==="drift" && calls===2)s.studies[0].inputs[0].value=7;
+        if(mode==="missing")s.studies[0].bars=[];
+        if(mode==="offset")s.studies[0].plots[0].offset=1;
+        return s;},
+    }}));
+    try {const r=await c.callTool({name:"get_moving_average_context",arguments:base});
+      if(["replay","drift"].includes(mode)) assert.equal(r.isError,true);
+      else {assert.notEqual(r.isError,true);const p=JSON.parse(r.content[0].text);assert.equal(p.status,"partial");assert.equal(p.moving_averages[0].value,null);}
+    } finally {await c.close();}
+  }
+});
 
 test("get_ohlcv_key_levels reads bound native OHLC under the shared lock without indicators, scanner or chart changes", async () => {
   let held = false, releases = 0;

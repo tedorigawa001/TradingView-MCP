@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import vm from "node:vm";
 import { TradingView } from "../../build/tradingview.js";
+import { summarizeMovingAverages, SMA_TEN_STUDY_ID } from "../../build/movingAverageContext.js";
 
 /** Fake CdpClient that records expressions instead of talking to a page. */
 function fakeCdp(result = {}) {
@@ -15,6 +16,59 @@ function fakeCdp(result = {}) {
     },
   };
 }
+
+test("moving-average snapshot reads only bounded public metadata and plot-ID keyed values", async () => {
+  const cdp=fakeCdp(), tv=new TradingView(cdp);
+  assert.throws(()=>tv.getMovingAverageStudies(1001,0),/count/);
+  assert.throws(()=>tv.getMovingAverageStudies(20,-1),/chartIndex/);
+  assert.throws(()=>tv.getMovingAverageStudies(20,undefined),/chartIndex/);
+  await tv.getMovingAverageStudies(3,1);
+  const script=cdp.calls[0], inputs=[{id:"in_0",value:20},{id:"text",value:"PRIVATE SOURCE"},{id:"pineId",value:"PRIVATE ID"}];
+  const source={id:()=>"s1",metaInfo:()=>({id:"Script$PUB;kWRFasqqymAq56dUJNmDbMqN55wBFWPa@tv-scripting",plots:[{id:"plot_0",type:"line"}],styles:{plot_0:{title:"SMA #1"}}}),
+    properties:()=>({childs:()=>({styles:{childs:()=>({plot_0:{state:()=>({visible:true,display:15,private:"PRIVATE STYLE"})}})}})}),offset:()=>0,
+    data:()=>({_items:[{value:[1577836800,100]},{value:[1577840400,NaN]}]})};
+  const chart={symbol:()=>"OANDA:EURUSD",resolution:()=>"60",getAllStudies:()=>[{id:"s1",name:"Simple Moving Averages"}],chartModel:()=>({dataSources:()=>[source]}),
+    getStudyById:()=>({getInputValues:()=>inputs,getInputsInfo:()=>[{id:"in_0",name:"SMA #1",type:"integer"}],isVisible:()=>true,hasError:()=>false})};
+  const run=()=>JSON.parse(JSON.stringify(vm.runInNewContext(script,{window:{TradingViewApi:{chart:i=>{assert.equal(i,1);return chart;}}}})));
+  const result=run();
+  assert.equal(result.chartIndex,1); assert.equal(result.symbol,"OANDA:EURUSD");
+  assert.deepEqual(result.studies[0].inputs,[{id:"in_0",name:"SMA #1",type:"integer",value:20}]);
+  assert.deepEqual(result.studies[0].bars[0].values,{plot_0:100});
+  assert.equal(result.studies[0].bars[1].values.plot_0,null);
+  assert.equal(JSON.stringify(result).includes("PRIVATE"),false);
+  inputs.push({id:"future_internal_source",value:"PRIVATE NEW INTERNAL VALUE"});
+  const unknownInput=run();
+  assert.equal(JSON.stringify(unknownInput).includes("PRIVATE"),false,"unknown input values must not cross CDP");
+  assert.match(unknownInput.studies[0].error,/unavailable/);
+  inputs.pop();
+  const saved=source.metaInfo; source.metaInfo=()=>({...saved(),id:"different@tv-scripting"});
+  assert.equal(run().studies.length,0); assert.equal(run().unmappedStudies.length,1);
+  chart.getAllStudies=()=>Array.from({length:65},(_,i)=>({id:`s${i}`,name:"x"}));
+  assert.throws(run,/too many studies/);
+});
+
+test("all twenty interleaved SMA/colorer columns flow through snapshot extraction into ten correct summaries", async()=>{
+  const native=Array.from({length:13},(_,i)=>({time:1577836800+i*3600,timeIso:new Date((1577836800+i*3600)*1000).toISOString(),
+    open:100+i,high:101+i,low:99+i,close:100+i,volume:null}));
+  const inputs=Array.from({length:10},(_,i)=>[{id:`in_${2*i}`,name:`SMA #${i+1}`,type:"integer",value:i+1},
+    {id:`in_${2*i+1}`,name:`SMA Source #${i+1}`,type:"source",value:"close"}]).flat().reverse();
+  const plots=Array.from({length:20},(_,i)=>({id:`plot_${i}`,type:i%2?"colorer":"line"}));
+  const meta={id:SMA_TEN_STUDY_ID,plots,styles:Object.fromEntries(plots.map((p,i)=>[p.id,{title:i%2?p.id:`SMA #${i/2+1}`}]))};
+  const source={id:()=>"ten",metaInfo:()=>meta,offset:()=>0,properties:()=>({childs:()=>({styles:{childs:()=>Object.fromEntries(plots.map(p=>[p.id,{state:()=>({visible:true,display:15})}]))}})}),
+    data:()=>({_items:native.map((b,i)=>({value:[b.time,...plots.map((p,j)=>j%2?999999:i<j/2?null:100+i-j/4)]}))})};
+  const chart={symbol:()=>"OANDA:EURUSD",resolution:()=>"60",getAllStudies:()=>[{id:"ten",name:"Simple Moving Averages"}],chartModel:()=>({dataSources:()=>[source]}),
+    getStudyById:()=>({getInputValues:()=>inputs,getInputsInfo:()=>inputs,isVisible:()=>true,hasError:()=>false})};
+  const tv=new TradingView({evaluate:async expression=>JSON.parse(JSON.stringify(vm.runInNewContext(expression,{window:{TradingViewApi:{chart:()=>chart}}})))});
+  const snapshot=await tv.getMovingAverageStudies(13,0);
+  const r=summarizeMovingAverages({symbol:chart.symbol(),resolution:"60",count:13,bars:native},snapshot,chart.symbol(),"60",new Date("2020-01-03T00:00:00Z"));
+  assert.equal(r.status,"complete");assert.equal(r.moving_averages.length,10);
+  for(const [i,row] of r.moving_averages.entries()) {
+    assert.equal(row.settings.period,i+1);assert.equal(row.plot_id,`plot_${2*i}`);
+    assert.equal(row.value,111-i/2);assert.equal(row.previous_value,110-i/2);
+    assert.equal(row.verification.status,"matched_native_ohlcv_sma");assert.equal(row.slope.price_change,1);
+  }
+  assert.equal(JSON.stringify(snapshot).includes("999999"),false,"colorers must never be emitted as value columns");
+});
 
 test("setSymbol embeds the symbol as a JSON string literal (no code injection)", async () => {
   const cdp = fakeCdp({ symbol: "X", resolution: "1D" });
