@@ -187,6 +187,7 @@ export interface ServerDeps {
     | "stepReplay"
     | "stopReplay"
     | "getExecutionQuotes"
+    | "getTradingSessionMetadata"
     | "getOhlcv"
     | "getIndicatorValues"
     | "getIndicatorInputs"
@@ -10291,6 +10292,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description: "Extract descriptive swing levels directly from successor-confirmed native OHLC, without indicators or scanner fallback. " +
         "Fixed strict 3-left/3-right pivots; earliest seed prices stay fixed when merging within 5 bps. Reports post-confirmation " +
         "touch episodes, confirmed same-side rejections, last-touch times, provenance and filter denominators. " +
+        "Uses provider-bound session/timezone/holiday/correction metadata to retain declared closures and exclude missing or unclassified intervals; never assumes generic holidays. " +
         "Read-only on the bound chart; no timeframe changes, history loading, drawings, trading signals or journal writes.",
       inputSchema: {
         symbol: SYMBOL_SCHEMA,

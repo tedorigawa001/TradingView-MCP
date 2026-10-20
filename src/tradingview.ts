@@ -60,6 +60,20 @@ export interface OhlcvResult {
   bars: OhlcvBar[];
 }
 
+export interface TradingSessionMetadata {
+  source: "tradingview_symbol_info";
+  chartIndex: number;
+  symbol: string;
+  resolution: string;
+  fullName: string | null;
+  timezone: string | null;
+  session: string | null;
+  sessionHolidays: string | null;
+  corrections: string | null;
+  subsessionId: string | null;
+  subsessions: Array<{ id: string | null; session: string | null }>;
+}
+
 export interface IndicatorPlot {
   id: string;
   title: string;
@@ -835,6 +849,29 @@ export class TradingView {
           });
         }
         return result;
+      })()
+    `);
+  }
+
+  /** Read only the provider's calendar fields for the selected native series, never account/quote state. */
+  getTradingSessionMetadata(chartIndex: number): Promise<TradingSessionMetadata> {
+    assertChartIndex(chartIndex);
+    return this.cdp.evaluate<TradingSessionMetadata>(`
+      (() => {
+        const chart = window.TradingViewApi.chart(${chartIndex});
+        const info = chart.chartModel().mainSeries().symbolInfo?.() || {};
+        const text = (value, max = 4096) => {
+          if (value === undefined || value === null) return null;
+          if (typeof value !== "string" || value.length > max) throw new Error("invalid or oversized trading session metadata");
+          return value;
+        };
+        if (info.subsessions != null && (!Array.isArray(info.subsessions) || info.subsessions.length > 16)) {
+          throw new Error("invalid or oversized trading subsession metadata");
+        }
+        return { source: "tradingview_symbol_info", chartIndex: ${chartIndex}, symbol: chart.symbol(), resolution: chart.resolution(),
+          fullName: text(info.full_name ?? info.pro_name), timezone: text(info.timezone), session: text(info.session),
+          sessionHolidays: text(info.session_holidays, 65536), corrections: text(info.corrections, 65536),
+          subsessionId: text(info.subsession_id), subsessions: (info.subsessions || []).map((s) => ({ id: text(s.id), session: text(s.session) })) };
       })()
     `);
   }

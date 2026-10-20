@@ -12,6 +12,9 @@ function series(n = 20, resolution = "60") {
   }) };
 }
 const extract = (input, options) => extractOhlcvKeyLevels(input, symbol, input.resolution, cutoff, options);
+const sessionMetadata = (resolution = "240", extra = {}) => ({ chartIndex: 0, symbol, resolution,
+  source: "tradingview_symbol_info", fullName: symbol, timezone: "America/New_York",
+  session: "1700-1659:2345|1700-1655:6", sessionHolidays: null, corrections: null, subsessionId: null, subsessions: [], ...extra });
 function shift(input, index, seconds) {
   for (const bar of input.bars.slice(index)) { bar.time += seconds; bar.timeIso = new Date(bar.time * 1000).toISOString(); }
 }
@@ -25,7 +28,7 @@ function visits() {
 
 test("OHLC levels freeze strict 3/3 pivots and wait for the last right bar's native successor", () => {
   assert.equal(Object.isFrozen(OHLCV_KEY_LEVEL_RULE), true);
-  assert.deepEqual(OHLCV_KEY_LEVEL_RULE, { version: "ohlcv_swing_levels_v1.1", left_bars: 3, right_bars: 3, merge_tolerance_bps: 5, touch_half_width_bps: 5 });
+  assert.deepEqual(OHLCV_KEY_LEVEL_RULE, { version: "ohlcv_swing_levels_v1.2", left_bars: 3, right_bars: 3, merge_tolerance_bps: 5, touch_half_width_bps: 5 });
   const input = series(8);
   input.bars[3].high = 100; input.bars[3].low = 99.6;
   const before = extractOhlcvKeyLevels(input, symbol, "60", new Date(input.bars[7].time * 1000 - 1));
@@ -173,6 +176,22 @@ test("native gaps refuse pivot windows including the confirmation boundary", () 
   }
 });
 
+test("bound provider sessions preserve a strict 4H swing across the declared weekend closure", () => {
+  const input = series(16, "240");
+  const start = Date.parse("2026-10-08T21:00:00.000Z") / 1000;
+  for (const [i, bar] of input.bars.entries()) {
+    bar.time = start + (i * 4 + (i >= 6 ? 48 : 0)) * 3600;
+    bar.timeIso = new Date(bar.time * 1000).toISOString();
+  }
+  input.bars[5].high = 100;
+  const result = extract(input, { sessionMetadata: sessionMetadata() });
+  assert.equal(result.counts.source_pivots, 1);
+  assert.equal(result.levels[0].known_at, input.bars[9].timeIso);
+  assert.equal(result.history.pivot_windows_excluded_by_gaps, 0);
+  assert.equal(result.session_calendar.counts.scheduled_closures, 1);
+  assert.equal(result.session_calendar.counts.missing_expected_bar_intervals, 0);
+});
+
 test("visits never imply a rejection across gaps and touching after a gap starts a new episode", () => {
   const input = visits(); shift(input, 8, 3600 * 48);
   const result = extract(input), row = result.levels.find((row) => row.price === 100);
@@ -192,30 +211,35 @@ test("daily and weekly pivots use successor confirmation; DST shifts do not brea
   }
 });
 
-test("calendar-native pivots survive ordinary session gaps but report them instead of claiming contiguous coverage", () => {
+test("calendar-native pivots cross provider-declared weekends and holiday weeks, never unexplained gaps", () => {
   for (const tf of ["1D", "1W"]) {
     const input = series(12, tf); input.bars[3].high = 100;
     input.bars[7].high = input.bars[8].high = 100;
-    if (tf === "1D") {
-      const monday = Date.parse("2026-10-05T21:00:00.000Z") / 1000;
-      for (const [i, bar] of input.bars.entries()) {
-        bar.time = monday + (i + Math.floor(i / 5) * 2) * 86400;
-        bar.timeIso = new Date(bar.time * 1000).toISOString();
-      }
-    } else shift(input, 5, 604800 * 2);
-    const result = extract(input);
-    assert.equal(result.counts.source_pivots, 1, "a calendar pivot is defined over observed native bars, not calendar days");
+    const sunday = Date.parse("2026-10-04T21:00:00.000Z") / 1000;
+    for (const [i, bar] of input.bars.entries()) {
+      bar.time = sunday + (tf === "1D" ? i + Math.floor(i / 5) * 2 : (i + (i >= 5 ? 2 : 0)) * 7) * 86400;
+      if (tf === "1W" && i >= 4) bar.time += 3600;
+      bar.timeIso = new Date(bar.time * 1000).toISOString();
+    }
+    const holidays = "20261109,20261110,20261111,20261112,20261113,20261116,20261117,20261118,20261119,20261120";
+    const meta = sessionMetadata(tf, { session: "1700-1700", sessionHolidays: tf === "1W" ? holidays : null });
+    const result = extract(input, { sessionMetadata: meta });
+    assert.equal(result.counts.source_pivots, 1);
     assert.equal(result.levels[0].price, 100);
     assert.equal(result.levels[0].known_at, input.bars[7].timeIso);
     assert.equal(result.levels[0].touch_episodes, 1);
     assert.equal(result.levels[0].confirmed_rejections, 1);
     assert.equal(result.history.pivot_windows_excluded_by_gaps, 0);
     assert.equal(result.history.pivot_windows_spanning_gaps, 5);
-    assert.equal(result.status, "partial");
-    assert.deepEqual(result.quality_issues, ["calendar_pivot_windows_span_timestamp_gaps"]);
-    const confirmationGap = series(8, tf); confirmationGap.bars[3].high = 100;
-    shift(confirmationGap, 7, tf === "1D" ? 2 * 86400 : 2 * 604800);
-    const atBoundary = extract(confirmationGap);
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.quality_issues, []);
+    assert.equal(extract(input).counts.source_pivots, 0, "missing provider evidence never authorizes a closure");
+    if (tf === "1W") assert.equal(extract(input, { sessionMetadata: { ...meta, sessionHolidays: null } }).counts.source_pivots, 0);
+    const confirmationGap = { ...input, bars: structuredClone(input.bars.slice(0, 8)) };
+    confirmationGap.bars[7].high = 99.9;
+    shift(confirmationGap, 7, tf === "1D" ? 86400 : 604800);
+    const boundaryHolidays = tf === "1D" ? "20261014" : `${holidays},20261207,20261208,20261209,20261210,20261211`;
+    const atBoundary = extract(confirmationGap, { sessionMetadata: { ...meta, sessionHolidays: boundaryHolidays } });
     assert.equal(atBoundary.counts.source_pivots, 1);
     assert.equal(atBoundary.history.pivot_windows_spanning_gaps, 1);
     assert.equal(atBoundary.levels[0].known_at, confirmationGap.bars[7].timeIso);
@@ -278,12 +302,17 @@ test("malformed, mismatched, unordered, oversized and stale-cadence OHLC is refu
   assert.throws(() => extract(overflow), /non-finite/);
 });
 
-function api({ replay = false, unavailable = false, drift, throwRead = false, responseSymbol = symbol } = {}) {
+function api({ replay = false, unavailable = false, drift, throwRead = false, responseSymbol = symbol, sessionDrift = false, noMetadata = false } = {}) {
   const calls = []; let reads = 0;
   const chart = { index: 1, symbol, resolution: "60", studies: [] };
   return { calls, chart,
     async getChartContext() { calls.push("context"); return { activeChartIndex: 1, chartsCount: 1, charts: [{ ...chart }] }; },
     async getReplayStatus() { calls.push("replay"); return { available: !unavailable, started: replay || drift === "replay" && reads > 0, toolbarVisible: false }; },
+    async getTradingSessionMetadata() {
+      calls.push("session");
+      if (noMetadata) throw new Error("metadata unavailable");
+      return sessionMetadata("60", { chartIndex: 1, timezone: "Etc/UTC", session: sessionDrift && reads > 0 ? "0900-1600" : "24x7" });
+    },
     async getOhlcv(count, index) {
       calls.push({ count, index }); reads++;
       if (throwRead) throw new Error("read failed");
@@ -306,13 +335,30 @@ test("read-only acquisition binds the selected full listing, fixes cutoff and ne
 });
 
 test("Replay, chart drift and wrong OHLC feed all refuse output", async () => {
-  for (const mode of [{ replay: true }, { unavailable: true }, { drift: "replay" }, { drift: "symbol" }, { drift: "resolution" }, { responseSymbol: "OTHER:EURUSD" }, { throwRead: true }]) {
+  for (const mode of [{ replay: true }, { unavailable: true }, { drift: "replay" }, { drift: "symbol" }, { drift: "resolution" }, { responseSymbol: "OTHER:EURUSD" }, { throwRead: true }, { sessionDrift: true }]) {
     await assert.rejects(buildOhlcvKeyLevels(api(mode), options, () => cutoff));
   }
   for (const patch of [{ symbol: "OTHER:EURUSD" }, { expectedTimeframe: "240" }, { chartIndex: 0 }]) {
     const tv = api(); await assert.rejects(buildOhlcvKeyLevels(tv, { ...options, ...patch }, () => cutoff));
     assert.equal(tv.calls.some((call) => typeof call === "object"), false);
   }
+});
+
+test("session provenance is checked before OHLC; unavailable metadata cannot whitelist a closure", async () => {
+  for (const patch of [{ symbol: "OTHER:EURUSD" }, { fullName: "OTHER:EURUSD" }, { resolution: "240" }, { chartIndex: 0 }]) {
+    const tv = api();
+    tv.getTradingSessionMetadata = async () => sessionMetadata("60", { chartIndex: 1, ...patch });
+    await assert.rejects(buildOhlcvKeyLevels(tv, options, () => cutoff), /metadata does not match/);
+    assert.equal(tv.calls.some((call) => typeof call === "object"), false);
+  }
+  const tv = api({ noMetadata: true });
+  const input = visits(); shift(input, 8, 3600 * 48);
+  tv.getOhlcv = async () => input;
+  const result = await buildOhlcvKeyLevels(tv, options, () => cutoff);
+  assert.equal(result.session_calendar.status, "unavailable");
+  assert.equal(result.session_calendar.counts.scheduled_closures, 0);
+  assert.ok(result.session_calendar.counts.unclassified_intervals > 0);
+  assert.equal(result.status, "partial");
 });
 
 test("direct acquisition validates options before any chart or replay access", async () => {

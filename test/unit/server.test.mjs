@@ -96,6 +96,14 @@ function makeDeps(overrides = {}) {
       }),
       stopReplay: async () => ({ changed: true, before: { started: true }, after: { started: false } }),
       getExecutionQuotes: async () => [],
+      getTradingSessionMetadata: async (chartIndex = 0) => {
+        const context = overrides.tv?.getChartContext ? await overrides.tv.getChartContext() : {
+          charts: [{ index: 0, symbol: "EURUSD", resolution: "1D" }],
+        };
+        const chart = context.charts.find((candidate) => candidate.index === chartIndex);
+        return { source: "tradingview_symbol_info", chartIndex, symbol: chart.symbol, fullName: chart.symbol, resolution: chart.resolution,
+          timezone: "Etc/UTC", session: "24x7", sessionHolidays: null, corrections: null, subsessionId: null, subsessions: [] };
+      },
       getOhlcv: async (count, chartIndex) => ({
         symbol: "EURUSD",
         resolution: "1D",
@@ -1777,25 +1785,72 @@ test("get_ohlcv_key_levels propagates empty-history partial status instead of in
   } finally { await client.close(); }
 });
 
-test("get_ohlcv_key_levels returns daily swing levels across weekends with explicit partial calendar coverage", async () => {
+test("get_ohlcv_key_levels uses the bound provider calendar for daily weekends without declaring missing data", async () => {
   const input = ohlcvLevelsFixture(); input.symbol = "EURUSD"; input.resolution = "1D";
-  const monday = Date.parse("2026-09-07T21:00:00.000Z") / 1000;
+  const monday = Date.parse("2026-09-06T21:00:00.000Z") / 1000;
   for (const [i, bar] of input.bars.entries()) {
     bar.time = monday + (i + Math.floor(i / 5) * 2) * 86400;
     bar.timeIso = new Date(bar.time * 1000).toISOString();
   }
-  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => input } }));
+  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => input,
+    getTradingSessionMetadata: async () => ({ source: "tradingview_symbol_info", chartIndex: 0, symbol: "EURUSD", fullName: "EURUSD", resolution: "1D",
+      timezone: "America/New_York", session: "1700-1700", sessionHolidays: null, corrections: null, subsessionId: null, subsessions: [] }),
+  } }));
   try {
     const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "1D" } });
     assert.notEqual(response.isError, true);
     const result = JSON.parse(response.content[0].text);
-    assert.equal(result.status, "partial"); assert.equal(result.rule.version, "ohlcv_swing_levels_v1.1");
+    assert.equal(result.status, "complete"); assert.equal(result.rule.version, "ohlcv_swing_levels_v1.2");
     assert.equal(result.counts.source_pivots, 2); assert.equal(result.counts.returned_levels, 2);
     assert.equal(result.history.pivot_windows_excluded_by_gaps, 0);
     assert.ok(result.history.pivot_windows_spanning_gaps > 0);
-    assert.deepEqual(result.quality_issues, ["calendar_pivot_windows_span_timestamp_gaps"]);
+    assert.deepEqual(result.quality_issues, []);
+    assert.ok(result.session_calendar.counts.scheduled_closures > 0);
     assert.equal(result.levels.find((row) => row.price === 100).known_at, input.bars[7].timeIso);
     assert.equal(result.chart_changes, false);
+  } finally { await client.close(); }
+});
+
+test("get_ohlcv_key_levels permits a declared provider holiday but excludes the same unexplained absence", async () => {
+  const input = ohlcvLevelsFixture(); input.symbol = "EURUSD";
+  input.bars = input.bars.slice(0, 12); input.count = 12;
+  const from = Date.parse("2025-04-17T09:00:00.000Z") / 1000;
+  for (const [i, bar] of input.bars.entries()) {
+    bar.time = i <= 6 ? from + i * 3600 : Date.parse("2025-04-21T09:00:00.000Z") / 1000 + (i - 7) * 3600;
+    bar.timeIso = new Date(bar.time * 1000).toISOString();
+    bar.high = i === 3 ? 100 : 99.9;
+  }
+  for (const declared of [true, false]) {
+    const client = await connectedClient(makeDeps({ tv: {
+      getChartContext: async () => ({ activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0, symbol: "EURUSD", resolution: "60", studies: [] }] }),
+      getOhlcv: async () => input,
+      getTradingSessionMetadata: async () => ({ source: "tradingview_symbol_info", chartIndex: 0, symbol: "EURUSD", fullName: "EURUSD", resolution: "60",
+        timezone: "Etc/UTC", session: "0900-1600", sessionHolidays: declared ? "20250418" : null, corrections: null, subsessionId: null, subsessions: [] }),
+    } }));
+    try {
+      const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "60" } });
+      assert.notEqual(response.isError, true);
+      const result = JSON.parse(response.content[0].text);
+      assert.equal(result.counts.source_pivots, declared ? 1 : 0);
+      assert.equal(result.status, declared ? "complete" : "partial");
+      assert.equal(result.session_calendar.counts.scheduled_closures, declared ? 1 : 0);
+      assert.equal(result.session_calendar.counts.missing_expected_bar_intervals, declared ? 0 : 1);
+      if (!declared) assert.equal(result.session_calendar.intervals[0].expected_missing_bars, 7);
+    } finally { await client.close(); }
+  }
+});
+
+test("get_ohlcv_key_levels discards data if the provider session changes during acquisition", async () => {
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getOhlcv: async () => { reads++; return { symbol: "EURUSD", resolution: "1D", count: 0, bars: [] }; },
+    getTradingSessionMetadata: async () => ({ source: "tradingview_symbol_info", chartIndex: 0, symbol: "EURUSD", fullName: "EURUSD", resolution: "1D",
+      timezone: "Etc/UTC", session: reads === 0 ? "24x7" : "0900-1600", sessionHolidays: null, corrections: null, subsessionId: null, subsessions: [] }),
+  } }));
+  try {
+    const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "1D" } });
+    assert.equal(response.isError, true); assert.equal(reads, 1);
+    assert.equal(JSON.stringify(response).includes('"levels"'), false);
   } finally { await client.close(); }
 });
 

@@ -1,14 +1,16 @@
-import type { OhlcvResult, TradingView } from "./tradingview.js";
+import type { OhlcvResult, TradingSessionMetadata, TradingView } from "./tradingview.js";
 import { normalizeResolution } from "./analysisOverlay.js";
 import { assertChartState, symbolSatisfies } from "./chartTransaction.js";
 import { CLOSED_MTF_TIMEFRAMES, selectClosedNativeBars } from "./closedMtfSummary.js";
+import { assertTradingSessionBinding, classifyTradingSessionIntervals } from "./tradingSessionCalendar.js";
 
 export const OHLCV_KEY_LEVEL_RULE = Object.freeze({
-  version: "ohlcv_swing_levels_v1.1", left_bars: 3, right_bars: 3,
+  version: "ohlcv_swing_levels_v1.2", left_bars: 3, right_bars: 3,
   merge_tolerance_bps: 5, touch_half_width_bps: 5,
 });
 
 type Filters = { rangePercent?: number; limit?: number };
+type ExtractionOptions = Filters & { sessionMetadata?: TradingSessionMetadata | null };
 type Origin = { kind: "swing_high" | "swing_low"; price: number; bar_index: number;
   bar_open_at: string; confirmed_at: string };
 type Level = { seed: Origin; origins: Origin[] };
@@ -21,23 +23,21 @@ function filters(options: Filters) {
   return { rangePercent, limit };
 }
 
-export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timeframe: string, asOf: Date, options: Filters = {}) {
+export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timeframe: string, asOf: Date, options: ExtractionOptions = {}) {
   const { rangePercent, limit } = filters(options);
   const { eligible, closed, end, firstForming, cadence } = selectClosedNativeBars(result, symbol, timeframe, asOf);
   const rule = OHLCV_KEY_LEVEL_RULE;
-  const calendarNative = ["1D", "1W"].includes(normalizeResolution(timeframe));
   const gapLimit = cadence.expected_interval_seconds + Math.max(cadence.tolerance_seconds, cadence.expected_interval_seconds / 2);
   const gapBefore = eligible.map((bar, index) => index > 0 && bar.time - eligible[index - 1].time > gapLimit);
+  const calendar = classifyTradingSessionIntervals(options.sessionMetadata, symbol, timeframe, eligible, gapLimit);
   const origins: Origin[] = [];
   let excludedPivotWindows = 0, spanningPivotWindows = 0;
   for (let i = rule.left_bars; i + rule.right_bars < closed.length; i++) {
     const confirmationIndex = i + rule.right_bars + 1;
     if (gapBefore.slice(i - rule.left_bars + 1, confirmationIndex + 1).some(Boolean)) {
       spanningPivotWindows++;
-      // Calendar pivots count observed sessions; ordinary weekends must not erase every 3/3 window.
-      // This does not prove calendar completeness: expose all such windows and keep visit resets below.
-      if (!calendarNative) { excludedPivotWindows++; continue; }
     }
+    if (calendar.unsafeBefore.slice(i - rule.left_bars + 1, confirmationIndex + 1).some(Boolean)) { excludedPivotWindows++; continue; }
     const neighbours = closed.slice(i - rule.left_bars, i + rule.right_bars + 1).filter((_, index) => index !== rule.left_bars);
     for (const kind of ["swing_high", "swing_low"] as const) {
       const price = kind === "swing_high" ? closed[i].high : closed[i].low;
@@ -71,9 +71,9 @@ export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timef
     const start = level.seed.bar_index + rule.right_bars + 1;
     for (let index = start; index < closed.length; index++) {
       const bar = closed[index];
-      if (gapBefore[index]) { inVisit = false; approach = 0; }
+      if (calendar.resetBefore[index]) { inVisit = false; approach = 0; }
       if (bar.high >= lower && bar.low <= upper) {
-        if (!inVisit) { touches++; approach = gapBefore[index] ? 0 : side(closed[index - 1].close); }
+        if (!inVisit) { touches++; approach = calendar.resetBefore[index] ? 0 : side(closed[index - 1].close); }
         inVisit = true;
         lastTouch = bar.timeIso; lastTouchConfirmed = eligible[index + 1].timeIso;
       } else if (inVisit) {
@@ -104,7 +104,8 @@ export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timef
   if (closed.length === 0) issues.push("no_successor_confirmed_bars");
   if (firstForming >= 0 && firstForming < eligible.length - 1) issues.push("forming_bar_before_end_of_history");
   if (excludedPivotWindows > 0) issues.push("pivot_windows_crossing_native_gaps_excluded");
-  if (calendarNative && spanningPivotWindows > 0) issues.push("calendar_pivot_windows_span_timestamp_gaps");
+  if (calendar.evidence.counts.missing_expected_bar_intervals > 0) issues.push("expected_trading_bars_missing_from_native_history");
+  if (calendar.evidence.counts.unclassified_intervals > 0) issues.push("unclassified_session_intervals");
   return {
     schema_version: "1.0", symbol: result.symbol, timeframe: normalizeResolution(timeframe), as_of: asOf.toISOString(),
     source: "tradingview_native_ohlcv", data_use: "descriptive_context_only_not_a_trade_signal", candidateEligible: false,
@@ -114,9 +115,8 @@ export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timef
       merge: "chronological_pivots_to_nearest_existing_seed_within_tolerance;_ties_earliest_seed;_seed_price_never_moves",
       touch: "closed_bar_range_intersects_seed_zone;_consecutive_touching_bars_are_one_episode;_only_after_known_at",
       rejection: "first_non_touching_closed_bar_exits_on_the_same_side_as_the_close_before_the_episode;_unknown_approach_is_not_counted",
-      pivot_gap_policy: calendarNative ? "observed_native_calendar_bars_with_spanning_gap_counts;_session_coverage_not_proven"
-        : "exclude_pivot_windows_spanning_gaps",
-      gap: "reset_all_visits_above_gap_limit;_intraday_pivot_windows_are_excluded;_calendar_pivot_windows_are_reported;_no_imputation", gap_limit_seconds: gapLimit },
+      pivot_gap_policy: "allow_only_bound_provider_scheduled_closures;_exclude_missing_or_unclassified_intervals",
+      gap: "reset_visits_at_wall_gaps_and_missing_or_unclassified_intervals_on_every_timeframe;_no_imputation", gap_limit_seconds: gapLimit },
     reference: { price: latest?.close ?? null, basis: "latest_successor_confirmed_close", bar_open_at: latest?.timeIso ?? null,
       confirmed_at: latest === null ? null : eligible[end].timeIso },
     history: { loaded_bars: result.bars.length, closed_bars_used: closed.length,
@@ -124,7 +124,7 @@ export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timef
       unconfirmed_tail_bars_excluded: eligible.length - closed.length, forming_bars_excluded: eligible.filter((bar) => bar.forming === true).length,
       native_gap_intervals: gapBefore.filter(Boolean).length, pivot_windows_excluded_by_gaps: excludedPivotWindows,
       pivot_windows_spanning_gaps: spanningPivotWindows },
-    native_cadence: cadence, filters: { range_percent: rangePercent, limit },
+    native_cadence: cadence, session_calendar: calendar.evidence, filters: { range_percent: rangePercent, limit },
     counts: { source_pivots: origins.length, level_candidates: levels.length, levels_in_range: inRange.length,
       excluded_by_range: rows.length - inRange.length, excluded_by_limit: Math.max(0, inRange.length - limit), returned_levels: Math.min(inRange.length, limit) },
     levels: inRange.slice(0, limit), quality_issues: issues,
@@ -132,13 +132,14 @@ export function extractOhlcvKeyLevels(result: OhlcvResult, symbol: string, timef
       "Fixed descriptive rules, not calibrated support/resistance strength, trade signals, stop orders, or evidence of an edge. Nearest-first ordering is not importance ranking.",
       "No indicator, scanner, volume, resampling or forward fill is used. The latest bar without a native successor is excluded even during closures.",
       "Times name bar opens and successor confirmation, not intrabar touch times or exchange publication. A touch is not a confirmed rejection or an executable fill.",
-      "Gap handling is based on observed timestamps, not an exchange calendar. Calendar pivots count observed native sessions across gaps and report partial coverage; intraday pivot windows spanning gaps are excluded. Visits reset at gaps on every timeframe. Missing-session coverage is not proven; sparse cadence can be refused.",
+      "Provider session hours, timezone and supplied holiday/correction dates determine expected bars, not a generic FX/exchange calendar. Missing expected bars can also mean an unreported holiday or no trades, not proven vendor data loss. Unsupported or absent metadata never licenses a closure.",
+      "Calendar timestamp convention must match native observations. Session history syntax, ambiguous DST boundaries and excessive schedule size are refused conservatively. Visits reset across wall gaps even for declared closures; no rejection is inferred across a closure.",
       "The loaded window determines earliest seeds and counts. Merged later origins do not move a seed; only events after its confirmation are counted. No historical vintage or real-time freshness guarantee.",
     ],
   };
 }
 
-type LevelsApi = Pick<TradingView, "getChartContext" | "getReplayStatus" | "getOhlcv">;
+type LevelsApi = Pick<TradingView, "getChartContext" | "getReplayStatus" | "getOhlcv" | "getTradingSessionMetadata">;
 type LevelsOptions = Filters & { symbol: string; expectedTimeframe: string; chartIndex?: number; count?: number };
 
 async function noReplay(tv: LevelsApi) {
@@ -161,10 +162,17 @@ export async function buildOhlcvKeyLevels(tv: LevelsApi, options: LevelsOptions,
   const selected = context.charts.find((chart) => chart.index === chartIndex);
   if (!selected || !symbolSatisfies(selected.symbol, options.symbol, true)) throw new Error("OHLC key level chart symbol does not match the request");
   const original = await assertChartState(tv, chartIndex, { symbol: selected.symbol, resolution: timeframe });
+  let sessionMetadata: TradingSessionMetadata | null = null;
+  try { sessionMetadata = await tv.getTradingSessionMetadata(chartIndex); } catch { /* No metadata is not evidence of a closure. */ }
+  if (sessionMetadata) assertTradingSessionBinding(sessionMetadata, original.symbol, timeframe, chartIndex);
   const result = await tv.getOhlcv(count, chartIndex);
   const observedAt = now().toISOString();
   await assertChartState(tv, chartIndex, { symbol: original.symbol, resolution: original.resolution });
   await noReplay(tv);
-  return { ...extractOhlcvKeyLevels(result, original.symbol, timeframe, asOf, options), chart_index: chartIndex, observed_at: observedAt,
+  if (sessionMetadata) {
+    const after = await tv.getTradingSessionMetadata(chartIndex);
+    if (JSON.stringify(after) !== JSON.stringify(sessionMetadata)) throw new Error("trading session metadata changed during OHLC acquisition");
+  }
+  return { ...extractOhlcvKeyLevels(result, original.symbol, timeframe, asOf, { ...options, sessionMetadata }), chart_index: chartIndex, observed_at: observedAt,
     requested_bars: count, chart_changes: false };
 }

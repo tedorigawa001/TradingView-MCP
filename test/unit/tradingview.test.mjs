@@ -1139,6 +1139,29 @@ test("getExecutionQuotes reads bounded live quote and session fields from every 
   assert.ok(expr.includes("info.session"));
 });
 
+test("getTradingSessionMetadata executes a bounded calendar-only read bound to an explicit chart", async () => {
+  const cdp = fakeCdp();
+  await new TradingView(cdp).getTradingSessionMetadata(1);
+  const info = { full_name: "PEPPERSTONE:MXNJPY", timezone: "America/New_York", session: "1700-1659:2345|1700-1655:6",
+    session_holidays: "20261225", corrections: "1700-1400:20261224", subsession_id: "regular",
+    subsessions: [{ id: "regular", session: "1700-1659:2345|1700-1655:6", ignored: "unrelated" }], private_account: "DO_NOT_READ" };
+  const context = { window: { TradingViewApi: { chart: (index) => {
+    assert.equal(index, 1);
+    return { symbol: () => "PEPPERSTONE:MXNJPY", resolution: () => "240", chartModel: () => ({ mainSeries: () => ({ symbolInfo: () => info }) }) };
+  } } } };
+  const value = JSON.parse(JSON.stringify(vm.runInNewContext(cdp.calls[0], context)));
+  assert.equal(value.chartIndex, 1); assert.equal(value.symbol, info.full_name); assert.equal(value.fullName, info.full_name);
+  assert.equal(value.sessionHolidays, "20261225"); assert.equal(value.corrections, "1700-1400:20261224");
+  assert.deepEqual(value.subsessions, [{ id: "regular", session: info.session }]);
+  assert.equal(JSON.stringify(value).includes("DO_NOT_READ"), false);
+  assert.deepEqual(Object.keys(value).sort(), ["source", "chartIndex", "symbol", "resolution", "fullName", "timezone", "session", "sessionHolidays", "corrections", "subsessionId", "subsessions"].sort());
+  info.session = "x".repeat(4097);
+  assert.throws(() => vm.runInNewContext(cdp.calls[0], context), /oversized/);
+  info.session = "24x7"; info.subsessions = Array.from({ length: 17 }, () => ({ id: "x" }));
+  assert.throws(() => vm.runInNewContext(cdp.calls[0], context), /oversized/);
+  assert.throws(() => new TradingView(cdp).getTradingSessionMetadata(-1), /chartIndex/);
+});
+
 test("indicator values and graphics expose the is_price_study flag", async () => {
   const cdp = fakeCdp([]);
   const tv = new TradingView(cdp);
