@@ -31,8 +31,8 @@ function nativeCadence(bars: OhlcvResult["bars"], timeframe: string) {
     minimum_interval_seconds: minimum, expected_interval_seconds: expected, tolerance_seconds: tolerance };
 }
 
-/** Native bars only: a successor, not a duration guess or the forming flag, proves completion. */
-export function summarizeClosedTimeframe(result: OhlcvResult, symbol: string, timeframe: string, asOf: Date) {
+/** Shared native-bar boundary for descriptive tools; never expose its raw bars in an MCP response. */
+export function selectClosedNativeBars(result: OhlcvResult, symbol: string, timeframe: string, asOf: Date) {
   if (!Number.isFinite(asOf.getTime())) throw new Error("closed MTF summary needs a valid cutoff");
   if (result.symbol.toUpperCase() !== symbol.toUpperCase() || normalizeResolution(result.resolution) !== normalizeResolution(timeframe)) {
     throw new Error("closed MTF OHLC symbol or timeframe does not match the request");
@@ -55,6 +55,13 @@ export function summarizeClosedTimeframe(result: OhlcvResult, symbol: string, ti
   // A forming observation ends the usable prefix even if malformed upstream data follows it.
   const end = firstForming < 0 ? Math.max(0, eligible.length - 1) : firstForming;
   const closed = eligible.slice(0, end);
+  return { eligible, closed, end, firstForming, cadence };
+}
+
+/** Native bars only: a successor, not a duration guess or the forming flag, proves completion. */
+export function summarizeClosedTimeframe(result: OhlcvResult, symbol: string, timeframe: string, asOf: Date) {
+  const { eligible, closed, end, firstForming, cadence } = selectClosedNativeBars(result, symbol, timeframe, asOf);
+  const bars = result.bars;
   const latest = closed.at(-1) ?? null;
   const closes = closed.map((bar) => bar.close);
   const changes = closes.slice(1).map((close, index) => close - closes[index]);

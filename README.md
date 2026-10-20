@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (118 Total)
+## Tools (119 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -185,6 +185,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_quotes` | Quotes and technicals such as RSI and aggregate ratings |
 | `get_mtf_overview` | Batch scanner snapshots for multiple symbols and timeframes without chart interference; these may include forming-bar values. Use `get_closed_mtf_summary` when confirmed native bars are required |
 | `get_closed_mtf_summary` | SMA20/50/200, EMA20, RSI14 and ATR14 recomputed from successor-confirmed native OHLC at one common cutoff. Resolves an unqualified ticker only against the selected pane, then binds to its full listing. Reuses matching panes; other timeframes require `confirm=true` for temporary changes and restoration. Rejects data-ready timeout notes and mismatched native cadence. No scanner substitution; insufficient history returns null/partial |
+| `get_ohlcv_key_levels` | Read-only OHLC-derived levels on a bound chart, independent of indicators. Strict 3-left/3-right swings merge within a fixed 5-bps distance of an immutable earliest seed. Reports post-confirmation touch episodes, same-side rejections, crossing counts, source pivots, last-touch confirmation times and pre-filter denominators. Daily/weekly pivots count observed native bars and disclose gap-spanning windows as partial coverage; intraday gapped pivot windows are excluded, and visits reset at gaps on every timeframe. No chart changes, history loading, strength ranking or trade signals |
 | `scan_market` | Market screening, for example Japanese stocks with RSI below 30 sorted by volume |
 | `get_economic_events` | Economic calendar filtered by country and importance |
 | `get_watchlist` | Your TradingView watchlist |

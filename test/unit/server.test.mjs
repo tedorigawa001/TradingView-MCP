@@ -1231,7 +1231,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred eighteen expected tools", async () => {
+test("exposes exactly the one hundred nineteen expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1296,6 +1296,7 @@ test("exposes exactly the one hundred eighteen expected tools", async () => {
       "get_mtf_overview",
       "get_oanda_flow_collection_readiness",
       "get_ohlcv",
+      "get_ohlcv_key_levels",
       "get_pine_source",
       "get_policy_rate_context",
       "get_positioning_context",
@@ -1674,6 +1675,128 @@ test("get_closed_mtf_summary MCP rejects unsupported/duplicate frames, oversized
   const replay = await connectedClient(makeDeps({ tv: { getReplayStatus: async () => ({ available: true, started: true, toolbarVisible: true }) } }));
   try { assert.equal((await replay.callTool({ name: "get_closed_mtf_summary", arguments: base })).isError, true); }
   finally { await replay.close(); }
+});
+
+function ohlcvLevelsFixture() {
+  return { symbol: "OANDA:EURUSD", resolution: "60", count: 17, bars: Array.from({ length: 17 }, (_, i) => {
+    const time = Date.parse("2020-01-01T00:00:00.000Z") / 1000 + i * 3600;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open: 99.8, close: 99.8,
+      high: [3, 7, 8, 10].includes(i) ? 100 : i === 12 ? 101 : 99.9, low: 99.7, volume: null };
+  }) };
+}
+
+test("get_ohlcv_key_levels reads bound native OHLC under the shared lock without indicators, scanner or chart changes", async () => {
+  let held = false, releases = 0;
+  const reads = [], input = ohlcvLevelsFixture();
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { assert.equal(held, false); held = true; return async () => { held = false; releases++; }; } },
+    tv: {
+      getChartContext: async () => { assert.equal(held, true); return { activeChartIndex: 1, chartsCount: 1,
+        charts: [{ index: 1, symbol: "OANDA:EURUSD", resolution: "60", studies: [] }] }; },
+      getOhlcv: async (count, index) => { assert.equal(held, true); reads.push({ count, index }); return input; },
+      getKeyLevels: async () => { throw new Error("indicator levels must not be used"); },
+      getIndicatorValues: async () => { throw new Error("indicators must not be used"); },
+      setResolution: async () => { throw new Error("timeframe must not change"); },
+      setSymbol: async () => { throw new Error("symbol must not change"); },
+    }, scanner: { getQuotes: async () => { throw new Error("scanner must not be used"); } },
+  }));
+  try {
+    const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: {
+      symbol: "EURUSD", expected_timeframe: "60", chart_index: 1, count: 17, range_percent: 2, limit: 1,
+    } });
+    assert.notEqual(response.isError, true);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.status, "complete"); assert.equal(result.symbol, "OANDA:EURUSD");
+    assert.equal(result.source, "tradingview_native_ohlcv"); assert.equal(result.chart_changes, false);
+    assert.equal(result.candidateEligible, false); assert.equal(result.history.closed_bars_used, 16);
+    assert.equal(result.counts.source_pivots, 2); assert.equal(result.counts.level_candidates, 2);
+    assert.equal(result.counts.returned_levels, 1); assert.equal(result.counts.excluded_by_limit, 1);
+    assert.equal(result.levels[0].price, 100); assert.equal(result.levels[0].touch_episodes, 3);
+    assert.equal(result.levels[0].confirmed_rejections, 3);
+    assert.equal(result.levels[0].last_touch_bar_open_at, input.bars[12].timeIso);
+    assert.equal(result.levels[0].last_touch_confirmed_at, input.bars[13].timeIso);
+    assert.equal(result.levels[0].known_at, input.bars[7].timeIso);
+    assert.equal(JSON.stringify(result).includes('"bars"'), false);
+    assert.deepEqual(reads, [{ count: 17, index: 1 }]); assert.equal(held, false); assert.equal(releases, 1);
+  } finally { await client.close(); }
+});
+
+test("get_ohlcv_key_levels validates MCP schema and chart binding before reading", async () => {
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => { reads++; throw new Error("unexpected read"); } } }));
+  const base = { symbol: "EURUSD", expected_timeframe: "1D" };
+  try {
+    for (const patch of [{ count: 7 }, { count: 1001 }, { count: 8.5 }, { range_percent: 0 }, { range_percent: 51 },
+      { limit: 101 }, { chart_index: -1 }, { expected_timeframe: "1M" }, { expected_timeframe: "60" }, { symbol: "OANDA:USDJPY" }]) {
+      assert.equal((await client.callTool({ name: "get_ohlcv_key_levels", arguments: { ...base, ...patch } })).isError, true);
+    }
+    assert.equal(reads, 0);
+  } finally { await client.close(); }
+});
+
+test("get_ohlcv_key_levels discards OHLC on Replay or binding drift, wrong feed or stale cadence", async () => {
+  for (const mode of ["replay_before", "replay_after", "unavailable", "drift", "wrong_feed", "stale_cadence"]) {
+    let reads = 0, released = false;
+    const client = await connectedClient(makeDeps({
+      chartOperationLock: { acquire: async () => async () => { released = true; } },
+      tv: {
+        getReplayStatus: async () => ({ available: mode !== "unavailable", toolbarVisible: false,
+          started: mode === "replay_before" || mode === "replay_after" && reads > 0 }),
+        getChartContext: async () => ({ activeChartIndex: 0, chartsCount: 1, charts: [{ index: 0,
+          symbol: mode === "drift" && reads > 0 ? "OTHER:EURUSD" : "OANDA:EURUSD", resolution: "60", studies: [] }] }),
+        getOhlcv: async () => {
+          reads++; const input = ohlcvLevelsFixture();
+          if (mode === "wrong_feed") input.symbol = "OTHER:EURUSD";
+          if (mode === "stale_cadence") for (const [i, bar] of input.bars.entries()) {
+            bar.time = input.bars[0].time + i * 900; bar.timeIso = new Date(bar.time * 1000).toISOString();
+          }
+          return input;
+        },
+      },
+    }));
+    try {
+      const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "60" } });
+      assert.equal(response.isError, true, mode); assert.equal(released, true);
+      assert.equal(JSON.stringify(response).includes('"levels"'), false);
+      assert.equal(reads, ["replay_before", "unavailable"].includes(mode) ? 0 : 1);
+    } finally { await client.close(); }
+  }
+});
+
+test("get_ohlcv_key_levels propagates empty-history partial status instead of inventing levels", async () => {
+  const client = await connectedClient(makeDeps({ tv: {
+    getOhlcv: async () => ({ symbol: "EURUSD", resolution: "1D", count: 0, bars: [] }),
+  } }));
+  try {
+    const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "1D" } });
+    assert.notEqual(response.isError, true);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.status, "partial"); assert.equal(result.reference.price, null); assert.deepEqual(result.levels, []);
+    assert.ok(result.quality_issues.includes("no_successor_confirmed_bars"));
+    assert.equal(result.counts.source_pivots, 0);
+  } finally { await client.close(); }
+});
+
+test("get_ohlcv_key_levels returns daily swing levels across weekends with explicit partial calendar coverage", async () => {
+  const input = ohlcvLevelsFixture(); input.symbol = "EURUSD"; input.resolution = "1D";
+  const monday = Date.parse("2026-09-07T21:00:00.000Z") / 1000;
+  for (const [i, bar] of input.bars.entries()) {
+    bar.time = monday + (i + Math.floor(i / 5) * 2) * 86400;
+    bar.timeIso = new Date(bar.time * 1000).toISOString();
+  }
+  const client = await connectedClient(makeDeps({ tv: { getOhlcv: async () => input } }));
+  try {
+    const response = await client.callTool({ name: "get_ohlcv_key_levels", arguments: { symbol: "EURUSD", expected_timeframe: "1D" } });
+    assert.notEqual(response.isError, true);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.status, "partial"); assert.equal(result.rule.version, "ohlcv_swing_levels_v1.1");
+    assert.equal(result.counts.source_pivots, 2); assert.equal(result.counts.returned_levels, 2);
+    assert.equal(result.history.pivot_windows_excluded_by_gaps, 0);
+    assert.ok(result.history.pivot_windows_spanning_gaps > 0);
+    assert.deepEqual(result.quality_issues, ["calendar_pivot_windows_span_timestamp_gaps"]);
+    assert.equal(result.levels.find((row) => row.price === 100).known_at, input.bars[7].timeIso);
+    assert.equal(result.chart_changes, false);
+  } finally { await client.close(); }
 });
 
 test("get_mtf_overview forwards symbols, timeframes and fields", async () => {

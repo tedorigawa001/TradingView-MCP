@@ -52,6 +52,7 @@ import { validateTradePlan } from "./tradePlan.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
+import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
 import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
 import { buildAnalysisPerformance } from "./analysisPerformance.js";
@@ -10282,6 +10283,30 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     },
+  );
+
+  server.registerTool(
+    "get_ohlcv_key_levels",
+    {
+      description: "Extract descriptive swing levels directly from successor-confirmed native OHLC, without indicators or scanner fallback. " +
+        "Fixed strict 3-left/3-right pivots; earliest seed prices stay fixed when merging within 5 bps. Reports post-confirmation " +
+        "touch episodes, confirmed same-side rejections, last-touch times, provenance and filter denominators. " +
+        "Read-only on the bound chart; no timeframe changes, history loading, drawings, trading signals or journal writes.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        expected_timeframe: z.enum(CLOSED_MTF_TIMEFRAMES),
+        chart_index: z.number().int().nonnegative().optional(),
+        count: z.number().int().min(8).max(1000).optional().describe("Loaded native bars including the unconfirmed tail. Default: 500"),
+        range_percent: z.number().positive().max(50).optional().describe("Seed levels within this percent of the last confirmed close. Default: 3"),
+        limit: z.number().int().min(1).max(100).optional().describe("Nearest levels to return; pre-filter counts remain visible. Default: 30"),
+      },
+    },
+    async ({ symbol, expected_timeframe, chart_index, count, range_percent, limit }) => chartOperations.run(async () => {
+      try {
+        return jsonResult(await buildOhlcvKeyLevels(tv, { symbol, expectedTimeframe: expected_timeframe,
+          chartIndex: chart_index, count, rangePercent: range_percent, limit }));
+      } catch (err) { return errorResult(err); }
+    }),
   );
 
   server.registerTool(

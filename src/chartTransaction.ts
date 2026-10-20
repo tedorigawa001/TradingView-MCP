@@ -1,6 +1,7 @@
 import type { ChartInfo, TradingView } from "./tradingview.js";
 
 type ChartStateApi = Pick<TradingView, "getChartContext" | "setSymbol" | "setResolution">;
+type ChartReadApi = Pick<TradingView, "getChartContext">;
 type ChartTarget = { symbol?: string; resolution?: string };
 /**
  * `exchangeOptional` lets a requested symbol without an exchange prefix ("EURUSD") stand for a listing of that ticker
@@ -37,7 +38,7 @@ export const symbolSatisfies = (actual: string, requested: string, exchangeOptio
 const sameResolution = (left: string, right: string) =>
   normalizeResolution(left) === normalizeResolution(right);
 
-export async function readChartState(api: ChartStateApi, chartIndex: number): Promise<ChartInfo> {
+export async function readChartState(api: ChartReadApi, chartIndex: number): Promise<ChartInfo> {
   if (!Number.isInteger(chartIndex) || chartIndex < 0) throw new Error("chartIndex must be a non-negative integer");
   const chart = (await api.getChartContext()).charts.find((candidate) => candidate.index === chartIndex);
   if (!chart) throw new Error(`chart index ${chartIndex} is not available`);
@@ -45,7 +46,7 @@ export async function readChartState(api: ChartStateApi, chartIndex: number): Pr
 }
 
 export async function assertChartState(
-  api: ChartStateApi,
+  api: ChartReadApi,
   chartIndex: number,
   expected: { symbol: string; resolution: string },
 ): Promise<ChartInfo> {
