@@ -10303,10 +10303,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         count: z.number().int().min(3).max(1000).optional().describe("Loaded native and study rows including the unconfirmed tail. Default: 500"),
       },
     },
-    async ({symbol,expected_timeframe,chart_index,count})=>chartOperations.run(async()=>{
-      try {return jsonResult(await buildMovingAverageContext(tv,{symbol,expectedTimeframe:expected_timeframe,chartIndex:chart_index,count}));}
-      catch(err) {return errorResult(err);}
-    }),
+    async ({ symbol, expected_timeframe, chart_index, count }) =>
+      chartOperations.run(async () => {
+        try {
+          return jsonResult(await buildMovingAverageContext(tv, {
+            symbol,
+            expectedTimeframe: expected_timeframe,
+            chartIndex: chart_index,
+            count
+          }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }),
   );
 
   server.registerTool(
