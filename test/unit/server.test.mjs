@@ -1240,7 +1240,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred twenty expected tools", async () => {
+test("exposes exactly the one hundred twenty-one expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1260,6 +1260,7 @@ test("exposes exactly the one hundred twenty expected tools", async () => {
       "compare_strategy_experiments",
       "compute_backtest_overfitting",
       "compute_correlation_regimes",
+      "compute_cost_adjusted_risk_reward",
       "compute_deflated_sharpe",
       "compute_feature_outcome_relationships",
       "compute_lead_lag_relationships",
@@ -2323,6 +2324,61 @@ test("compute_round_trip_cost exposes explicit execution assumptions", async () 
   const parsed = JSON.parse(res.content[0].text);
   assert.ok(Math.abs(parsed.spread_pips - 2) < 1e-12);
   assert.equal(parsed.slippage_pips_round_trip, 1);
+});
+
+function costAdjustedRiskRewardInput() {
+  return {
+    symbol: "OANDA:XAUUSD", direction: "long", price_basis: "mid", price_unit: "USD per troy ounce",
+    entry_price: 100, stop_price: 95, target_price: 110, bid: 99.9, ask: 100.1,
+    entry_slippage_price: 0.1, stop_slippage_price: 0.2, target_slippage_price: 0.05, round_trip_fee_price: 0.04,
+  };
+}
+
+test("compute_cost_adjusted_risk_reward is pure MCP arithmetic without chart, lock, feed or journal reads", async () => {
+  const deps = makeDeps();
+  let externalReads = 0;
+  const forbidden = new Proxy({}, { get() { externalReads++; throw new Error("external access forbidden"); } });
+  for (const key of ["cdp", "tv", "scanner", "calendar", "cot", "realYield", "journal", "researchJournal", "chartOperationLock"]) {
+    deps[key] = forbidden;
+  }
+  const client = await connectedClient(deps);
+  try {
+    for (const price_basis of ["mid", "executable"]) {
+      const response = await client.callTool({ name: "compute_cost_adjusted_risk_reward", arguments: { ...costAdjustedRiskRewardInput(), price_basis } });
+      assert.notEqual(response.isError, true);
+      const r = JSON.parse(response.content[0].text);
+      assert.equal(r.status, "computed");
+      assert.equal(r.candidateEligible, false);
+      assert.equal(r.price_unit, "USD per troy ounce");
+      assert.equal(r.quote.freshness_verified, false);
+      assert.ok(Math.abs(r.net.loss_at_stop_price - (price_basis === "mid" ? 5.54 : 5.34)) < 1e-10);
+      assert.ok(Math.abs(r.net.profit_at_target_price - (price_basis === "mid" ? 9.61 : 9.81)) < 1e-10);
+      assert.equal(r.quote.used_for_spread_adjustment, price_basis !== "executable");
+    }
+    assert.equal(externalReads, 0);
+  } finally { await client.close(); }
+});
+
+test("compute_cost_adjusted_risk_reward rejects omitted cost assumptions and invalid geometry through MCP", async () => {
+  const client = await connectedClient(makeDeps());
+  try {
+    const base = costAdjustedRiskRewardInput();
+    for (const field of ["price_basis", "price_unit", "entry_slippage_price", "stop_slippage_price", "target_slippage_price", "round_trip_fee_price"]) {
+      const input = { ...base };
+      delete input[field];
+      assert.equal((await client.callTool({ name: "compute_cost_adjusted_risk_reward", arguments: input })).isError, true, field);
+    }
+    for (const patch of [{ price_basis: "close" }, { price_unit: " " }, { price_unit: "x\ny" }, { ask: 99 }, { direction: "short" },
+      { stop_price: 100 }, { target_price: 95 }, { entry_slippage_price: -1 }, { ask: null }]) {
+      assert.equal((await client.callTool({ name: "compute_cost_adjusted_risk_reward", arguments: { ...base, ...patch } })).isError, true);
+    }
+    const negative = await client.callTool({ name: "compute_cost_adjusted_risk_reward", arguments: {
+      ...base, bid: 99.5, ask: 100.5, target_price: 101, entry_slippage_price: 0, stop_slippage_price: 0,
+      target_slippage_price: 0, round_trip_fee_price: 0.25,
+    } });
+    assert.notEqual(negative.isError, true);
+    assert.equal(JSON.parse(negative.content[0].text).net.profit_at_target_price, -0.25);
+  } finally { await client.close(); }
 });
 
 test("compute_position_size exposes a risk-capped quantity through MCP", async () => {

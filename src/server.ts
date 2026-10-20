@@ -44,6 +44,7 @@ import type { CmeDailyBulletinClient } from "./cmeDailyBulletin.js";
 import type { TreasuryRealYieldClient } from "./realYield.js";
 import { compareIndicatorObservations } from "./indicatorAudit.js";
 import { computeRoundTripCost } from "./costModel.js";
+import { computeCostAdjustedRiskReward } from "./costAdjustedRiskReward.js";
 import { computePositionSize } from "./positionSize.js";
 import { auditPineSource } from "./pineAudit.js";
 import { validateResearchProtocol } from "./researchProtocol.js";
@@ -9908,6 +9909,45 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           "Returns are natural-log close-to-close returns; no costs, carry, or directional policy are applied.",
         ],
       });
+    },
+  );
+
+  server.registerTool(
+    "compute_cost_adjusted_risk_reward",
+    {
+      description:
+        "Compute conditional gross and cost-adjusted reward/risk from caller-supplied entry, stop, target and bid/ask. " +
+        "Declare one common bid/ask/mid basis for all levels, or executable basis when entry and exits already use their respective execution sides. " +
+        "Applies the supplied constant spread once per round trip, never again for executable basis. " +
+        "Entry/stop/target adverse slippage and a total round-trip fee are required, all in the declared native price unit; explicit zero is allowed. " +
+        "Reports modeled buy-at-ask/sell-at-bid scenarios, separate stop/target costs and signed net profit/ratio. " +
+        "Pure arithmetic only: no quote acquisition, freshness verification, pip inference, quantity, money conversion, chart, account, order or journal access. " +
+        "Computed is not execution readiness, guaranteed fills, broker trigger semantics or evidence of an edge.",
+      inputSchema: {
+        symbol: SYMBOL_SCHEMA,
+        direction: z.enum(["long", "short"]),
+        price_basis: z.enum(["bid", "ask", "mid", "executable"])
+          .describe("Basis of all levels. Executable: entry already uses entry-side quote, exits use opposite-side quote, before fees/slippage."),
+        price_unit: z.string().min(1).max(80).regex(/^[^\x00-\x1f\x7f]+$/)
+          .refine((value) => value.trim().length > 0)
+          .describe("Caller-declared common price unit, e.g. JPY per MXN or USD per troy ounce. Not independently verified."),
+        entry_price: z.number().finite().positive(),
+        stop_price: z.number().finite().positive(),
+        target_price: z.number().finite().positive(),
+        bid: z.number().finite().positive().describe("Caller-supplied quote; used for spread only, not as proof of freshness."),
+        ask: z.number().finite().positive(),
+        entry_slippage_price: z.number().finite().min(0).describe("Adverse entry price movement, in price_unit; zero must be explicit."),
+        stop_slippage_price: z.number().finite().min(0).describe("Adverse exit movement in the stop scenario, in price_unit."),
+        target_slippage_price: z.number().finite().min(0).describe("Adverse exit movement in the target scenario, in price_unit; not a limit-order fill guarantee."),
+        round_trip_fee_price: z.number().finite().min(0).describe("Total fee for entry plus one exit, already converted to price_unit; charged once per scenario, not per side."),
+      },
+    },
+    async (input) => {
+      try {
+        return jsonResult(computeCostAdjustedRiskReward(input));
+      } catch (err) {
+        return errorResult(err);
+      }
     },
   );
 

@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (120 Total)
+## Tools (121 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -227,6 +227,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `run_volume_profile_reaction_study` | Runs the frozen 60- or 240-minute VAH/VAL reaction study with same-prior-regime controls; it does not claim order-flow evidence |
 | `run_volume_profile_poc_reversion_study` | Runs the separately frozen 60-minute POC-reversion study and keeps its population separate from VAH/VAL reactions |
 | `compute_round_trip_cost` | Computes round-trip spread, slippage, and commission under explicit assumptions |
+| `compute_cost_adjusted_risk_reward` | Pure caller-supplied entry/stop/target scenario arithmetic with an explicit bid/ask/mid or already-executable price basis. Applies spread once, separate adverse entry/stop/target slippage, and one total round-trip fee in the declared price unit. Reports gross/net reward-to-risk and signed target profit; no quote acquisition, freshness claim, quantity, account access or order placement. [Scenario contract](docs/COST_ADJUSTED_RISK_REWARD.md) |
 | `compute_position_size` | Floors position size from loss limit, Entry/Stop, costs, quantity constraints, and fresh FX conversion evidence |
 | `evaluate_due_analyses` | Previews due nonterminal journal analyses, then after confirmation temporarily switches the selected chart, evaluates, records, and restores it |
 | `get_analysis_performance` | Aggregates the live journal into outcomes, gross/net R, MFE/MAE, and time-to-hit with explicit populations and exclusions |
