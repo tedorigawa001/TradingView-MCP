@@ -1240,7 +1240,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred twenty-one expected tools", async () => {
+test("exposes exactly the one hundred twenty-two expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1287,6 +1287,7 @@ test("exposes exactly the one hundred twenty-one expected tools", async () => {
       "get_carry_core_primary_readiness",
       "get_chart_context",
       "get_chart_screenshot",
+      "get_closed_chart_snapshot",
       "get_closed_mtf_summary",
       "get_cme_gold_open_interest",
       "get_cot_crowding_unwind_context",
@@ -1585,6 +1586,104 @@ test("a tool error carrying Authorization headers reaches neither the client nor
     for (const call of logged.mock.calls) assert.ok(!call.arguments.join(" ").includes(secret), "stderr must not carry it either");
   }
   assert.ok(logged.mock.calls.length > 0, "the redacted detail goes to stderr");
+});
+
+test("get_closed_chart_snapshot holds one shared lock through preview and rejects invalid bounds", async () => {
+  let held = false, releases = 0, reads = 0;
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { held = true; return async () => { held = false; releases++; }; } },
+    tv: {
+      getChartContext: async () => { assert.equal(held, true); return { layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "1D", studies: [] }] }; },
+      getOhlcv: async () => { reads++; throw new Error("preview must not read"); },
+      setResolution: async () => { throw new Error("preview must not switch"); },
+    },
+  }));
+  try {
+    const args = { targets: [{ chart_index: 0, symbol: "OANDA:EURUSD", expected_timeframe: "1D" }] };
+    const response = await client.callTool({ name: "get_closed_chart_snapshot", arguments: args });
+    assert.notEqual(response.isError, true);
+    assert.equal(JSON.parse(response.content[0].text).status, "confirmation_required");
+    assert.equal(reads, 0); assert.equal(held, false); assert.equal(releases, 1);
+    assert.equal((await client.callTool({ name: "get_closed_chart_snapshot", arguments: { ...args, recent_count: 101 } })).isError, true);
+  } finally { await client.close(); }
+});
+
+test("get_closed_chart_snapshot MCP keeps native reads, restoration and quotes under one lock", async () => {
+  let held = false, releases = 0, resolution = "1D", quotes = 0;
+  const changes = [];
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { assert.equal(held, false); held = true;
+      return async () => { held = false; releases++; }; } },
+    tv: {
+      getChartContext: async () => { assert.equal(held, true); return { layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+        charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution, studies: [{ id: "keep", name: "MA" }] }] }; },
+      setResolution: async (tf) => { assert.equal(held, true); changes.push(tf); resolution = tf; return {}; },
+      getOhlcv: async (count) => {
+        assert.equal(held, true);
+        const step = resolution === "1D" ? 86400 : Number(resolution) * 60;
+        return { symbol: "OANDA:EURUSD", resolution, count, bars: Array.from({ length: count }, (_, i) => {
+          const time = Date.parse("2020-01-01T00:00:00Z") / 1000 + i * step;
+          return { time, timeIso: new Date(time * 1000).toISOString(), open: 100 + i, high: 101 + i,
+            low: 99 + i, close: 100 + i, volume: null };
+        }) };
+      },
+      getExecutionQuotes: async () => { assert.equal(held, true); assert.equal(resolution, "1D"); quotes++; return []; },
+    },
+    scanner: { getQuotes: async () => { assert.equal(held, true); throw new Error("no live quotes in unit test"); } },
+  }));
+  try {
+    const response = await client.callTool({ name: "get_closed_chart_snapshot", arguments: {
+      targets: [{ chart_index: 0, symbol: "OANDA:EURUSD", expected_timeframe: "1D" }],
+      timeframes: ["15", "60"], count: 201, recent_count: 2, confirm: true,
+    } });
+    assert.notEqual(response.isError, true);
+    const r = JSON.parse(response.content[0].text);
+    assert.equal(r.status, "partial"); assert.equal(r.restoration.verified, true);
+    assert.equal(r.panes[0].series.length, 2); assert.equal(r.panes[0].series[0].recent_closed_bars.length, 2);
+    assert.equal(quotes, 1); assert.equal(held, false); assert.equal(releases, 1);
+    assert.deepEqual(changes, ["15", "60", "1D"]);
+  } finally { await client.close(); }
+});
+
+test("get_closed_chart_snapshot reads quotes once per symbol when two panes show the same symbol", async () => {
+  const context = { layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
+    { index: 0, symbol: "OANDA:XAUUSD", resolution: "1D", studies: [] },
+    { index: 1, symbol: "OANDA:XAUUSD", resolution: "240", studies: [] }] };
+  const changes = [], quoted = [];
+  const client = await connectedClient(makeDeps({
+    tv: {
+      getChartContext: async () => structuredClone(context),
+      setResolution: async (tf, index) => { changes.push([index, tf]); context.charts[index].resolution = tf;
+        context.activeChartIndex = index; return {}; },
+      getOhlcv: async (count, index) => {
+        const { symbol, resolution } = context.charts[index];
+        const step = resolution === "1D" ? 86400 : Number(resolution) * 60;
+        return { symbol, resolution, count, bars: Array.from({ length: count }, (_, i) => {
+          const time = Date.parse("2020-01-01T00:00:00Z") / 1000 + i * step;
+          return { time, timeIso: new Date(time * 1000).toISOString(), open: 100, high: 101, low: 99, close: 100, volume: null };
+        }) };
+      },
+      getExecutionQuotes: async () => [],
+    },
+    scanner: { getQuotes: async (symbols) => { quoted.push(symbols);
+      return { totalCount: symbols.length, returned: symbols.length, rows: symbols.map((symbol) => ({ symbol, values: {} })) }; } },
+  }));
+  try {
+    const response = await client.callTool({ name: "get_closed_chart_snapshot", arguments: {
+      targets: context.charts.map((c) => ({ chart_index: c.index, symbol: c.symbol, expected_timeframe: c.resolution })),
+      timeframes: ["60"], count: 201, recent_count: 2, confirm: true,
+    } });
+    assert.notEqual(response.isError, true);
+    const r = JSON.parse(response.content[0].text);
+    assert.equal(r.restoration.verified, true);
+    assert.equal(r.panes.length, 2);
+    // The duplicate refusal used to make every such snapshot partial with no quotes.
+    assert.equal(r.quality_issues.includes("execution_snapshot_failed"), false);
+    assert.deepEqual(r.execution.quotes.map((q) => q.symbol), ["OANDA:XAUUSD"]);
+    assert.ok(quoted.length > 0 && quoted.every((symbols) => symbols.length === 1 && symbols[0] === "OANDA:XAUUSD"));
+    assert.deepEqual(changes, [[0, "60"], [0, "1D"], [1, "60"], [1, "240"], [0, "15"], [0, "1D"]]);
+  } finally { await client.close(); }
 });
 
 test("get_closed_mtf_summary previews missing native timeframes without reading OHLC or scanner values", async () => {

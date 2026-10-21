@@ -53,6 +53,7 @@ import { validateTradePlan } from "./tradePlan.js";
 import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
+import { buildClosedChartSnapshot } from "./closedChartSnapshot.js";
 import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
 import { buildMovingAverageContext } from "./movingAverageContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
@@ -7837,6 +7838,33 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       try {
         return jsonResult(await buildClosedMtfSummary(tv, { symbol, chartIndex: chart_index, expectedTimeframe: expected_timeframe,
           timeframes, count, confirm }));
+      } catch (err) { return errorResult(err); }
+    }),
+  );
+
+  server.registerTool(
+    "get_closed_chart_snapshot",
+    {
+      description: "Capture original and requested successor-confirmed native bars and indicators for up to four displayed panes at one cutoff, " +
+        "plus separately timestamped execution quotes. Exact exchange-qualified bindings are required. Temporary timeframe changes need confirm=true. " +
+        "Holds the shared lock through whole-layout Study ID/timeframe/selection restoration checks. Manual drift, Replay or restoration failures block evidence. " +
+        "No symbol/study changes, history loading, orders, scenario rules, delivery or journal writes. The selected pane must be among targets when switching.",
+      inputSchema: {
+        targets: z.array(z.object({ chart_index: z.number().int().nonnegative(), symbol: SYMBOL_SCHEMA,
+          expected_timeframe: z.enum(CLOSED_MTF_TIMEFRAMES) })).min(1).max(4),
+        timeframes: z.array(z.enum(CLOSED_MTF_TIMEFRAMES)).min(1).max(6).optional(),
+        count: z.number().int().min(2).max(1000).optional(),
+        recent_count: z.number().int().min(1).max(100).optional(),
+        confirm: z.boolean().optional(),
+      },
+    },
+    async ({ targets, timeframes, count, recent_count, confirm }) => chartOperations.run(async () => {
+      try {
+        // Two panes may show one symbol at different timeframes; the execution snapshot refuses duplicate symbols.
+        return jsonResult(await buildClosedChartSnapshot(tv, () => buildExecutionSnapshot({ scanner, tv }, {
+          symbols: [...new Set(targets.map((t) => t.symbol))], waitForUpdateMs: 1200, sampleIntervalMs: 300, maxQuoteAgeMs: 5000,
+        }), { targets: targets.map((t) => ({ chartIndex: t.chart_index, symbol: t.symbol, expectedTimeframe: t.expected_timeframe })),
+          timeframes, count, recentCount: recent_count, confirm }));
       } catch (err) { return errorResult(err); }
     }),
   );
