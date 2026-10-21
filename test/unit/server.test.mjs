@@ -1240,7 +1240,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred twenty-two expected tools", async () => {
+test("exposes exactly the one hundred twenty-three expected tools", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1278,6 +1278,7 @@ test("exposes exactly the one hundred twenty-two expected tools", async () => {
       "evaluate_analysis_overlay_outcome",
       "evaluate_cross_asset_shock_outcomes",
       "evaluate_due_analyses",
+      "evaluate_fixed_scenario",
       "get_aligned_history",
       "get_analysis_calibration",
       "get_analysis_journal",
@@ -2423,6 +2424,64 @@ test("compute_round_trip_cost exposes explicit execution assumptions", async () 
   const parsed = JSON.parse(res.content[0].text);
   assert.ok(Math.abs(parsed.spread_pips - 2) < 1e-12);
   assert.equal(parsed.slippage_pips_round_trip, 1);
+});
+
+function fixedScenarioInput() {
+  return {
+    definition: { id: "synthetic-gold", version: "1", known_at: "2026-10-20T00:00:00.000Z",
+      symbol: "OANDA:XAUUSD", source: "tradingview_native_ohlcv", price_basis: "unknown",
+      main_scenario: "Synthetic recovery check, not a live signal", opposing_scenario: null,
+      activation: { band: { lower: 4118, upper: 4123 }, direction: "above",
+        any_of: [{ timeframe: "15", consecutive_closes: 2 }, { timeframe: "60", consecutive_closes: 1 }] },
+      invalidation: null, valid_until: null },
+    expected_conditions_sha256: null,
+    previous: { analysis_id: "synthetic-previous", as_of: "2026-10-21T00:00:00.000Z",
+      conditions_sha256: null, activation_confirmed_at: null },
+    evidence: { snapshot_id: "synthetic-snapshot", as_of: "2026-10-21T01:00:00.000Z", symbol: "OANDA:XAUUSD",
+      source: "tradingview_native_ohlcv", price_basis: "unknown", restoration_verified: true,
+      series: [{ timeframe: "60", observed_at: "2026-10-21T01:00:01.000Z", bars: [{
+        bar_open_at: "2026-10-21T00:00:00.000Z", confirmed_at: "2026-10-21T01:00:00.000Z",
+        open: 4120, high: 4130, low: 4119, close: 4129,
+      }] }] },
+  };
+}
+
+test("evaluate_fixed_scenario is stateless MCP arithmetic without chart, lock, quotes or journal access", async () => {
+  const deps = makeDeps(); let accesses = 0;
+  const forbidden = new Proxy({}, { get() { accesses++; throw new Error("external access forbidden"); } });
+  for (const key of ["cdp", "tv", "scanner", "calendar", "cot", "realYield", "journal", "researchJournal", "chartOperationLock"]) deps[key] = forbidden;
+  const client = await connectedClient(deps);
+  try {
+    const input = fixedScenarioInput();
+    let response = await client.callTool({ name: "evaluate_fixed_scenario", arguments: input });
+    assert.notEqual(response.isError, true); const first = JSON.parse(response.content[0].text);
+    assert.equal(first.classification, "triggered"); assert.equal(first.activation.first_match.timeframe, "60");
+    assert.equal(first.invalidation.status, "unspecified"); assert.equal(first.candidateEligible, false);
+    assert.equal(first.definition_pin_verified, false);
+    input.expected_conditions_sha256 = first.conditions_sha256;
+    response = await client.callTool({ name: "evaluate_fixed_scenario", arguments: input });
+    assert.equal(JSON.parse(response.content[0].text).definition_pin_verified, true);
+    input.definition.activation.band.upper = 4130;
+    response = await client.callTool({ name: "evaluate_fixed_scenario", arguments: input });
+    const changed = JSON.parse(response.content[0].text);
+    assert.equal(changed.classification, "not_evaluable"); assert.ok(changed.issues.includes("conditions_hash_mismatch"));
+    assert.equal(accesses, 0);
+  } finally { await client.close(); }
+});
+
+test("evaluate_fixed_scenario MCP refuses unknown keys and malformed rules without inferred defaults", async () => {
+  const client = await connectedClient(makeDeps());
+  try {
+    for (const change of [x => delete x.definition.invalidation, x => x.definition.notify = true,
+      x => x.definition.activation.any_of[0].timeframe = "1D", x => x.definition.activation.band.lower = 5000,
+      x => x.evidence.series.push(x.evidence.series[0]), x => delete x.expected_conditions_sha256]) {
+      const x = fixedScenarioInput(); change(x);
+      assert.equal((await client.callTool({ name: "evaluate_fixed_scenario", arguments: x })).isError, true);
+    }
+    const x = fixedScenarioInput(); x.definition.activation = null;
+    const r = await client.callTool({ name: "evaluate_fixed_scenario", arguments: x });
+    assert.notEqual(r.isError, true); assert.equal(JSON.parse(r.content[0].text).classification, "not_evaluable");
+  } finally { await client.close(); }
 });
 
 function costAdjustedRiskRewardInput() {

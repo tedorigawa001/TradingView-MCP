@@ -148,7 +148,7 @@ With TradingView running in debug mode, ask your AI agent:
 
 The agent can combine tools such as `get_chart_context` (what is displayed), `get_chart_screenshot` (visual evidence), and `get_ohlcv` (numeric evidence).
 
-## Tools (122 Total)
+## Tools (123 Total)
 
 The AI selects the appropriate tools automatically; you do not need to memorize them.
 
@@ -186,6 +186,7 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_mtf_overview` | Batch scanner snapshots for multiple symbols and timeframes without chart interference; these may include forming-bar values. Use `get_closed_mtf_summary` when confirmed native bars are required |
 | `get_closed_mtf_summary` | SMA20/50/200, EMA20, RSI14 and ATR14 recomputed from successor-confirmed native OHLC at one common cutoff. Resolves an unqualified ticker only against the selected pane, then binds to its full listing. Reuses matching panes; other timeframes require `confirm=true` for temporary changes and restoration. Rejects data-ready timeout notes and mismatched native cadence. No scanner substitution; insufficient history returns null/partial |
 | `get_closed_chart_snapshot` | Batch original/requested native timeframes for up to four displayed, exchange-qualified panes at one OHLC cutoff. Includes bounded confirmed OHLC, indicators, separately timed execution quotes and whole-layout restoration evidence. Shared lock covers all panes and quotes; temporary changes require `confirm=true`. Refuses observed manual drift, Replay and failed restoration. No scenario evaluation or persistence. [Contract](docs/CLOSED_CHART_SNAPSHOT.md) |
+| `evaluate_fixed_scenario` | Stateless comparison of explicit, version/hash-pinned close-band conditions and supplied confirmed native bars. Keeps boundaries, streaks, timeframe OR, gaps, original scenario text and exact evidence separate. No inferred rules, chart access, persistence, notification decisions or automation changes. [Contract](docs/FIXED_SCENARIO.md) |
 | `get_ohlcv_key_levels` | Read-only OHLC-derived levels: strict 3-left/3-right swings, fixed 5-bps seed merging, post-confirmation contacts/rejections and source timestamps. Uses the bound provider's session/timezone/holiday/correction metadata to distinguish declared closures from missing expected bars; unknown gaps stay conservative. Visits reset at long gaps, including declared closures. Returns filter denominators and calendar provenance; no chart changes, history loading, strength ranking or trade signals. [Calendar contract](docs/TRADING_SESSION_CALENDAR.md) |
 | `get_moving_average_context` | Map the explicitly identified ten-line Simple Moving Averages study's input IDs to plot IDs: period, SMA method, source price, visibility, confirmed value and adjacent-bar slope with elapsed seconds. Uses exact native timestamps and verifies both SMA values against loaded OHLC when possible; insufficient verification stays partial. Other studies are listed as unmapped, not guessed from names. No chart changes, history loading or scanner fallback. [Mapping contract](docs/MOVING_AVERAGE_CONTEXT.md) |
 | `scan_market` | Market screening, for example Japanese stocks with RSI below 30 sorted by volume |

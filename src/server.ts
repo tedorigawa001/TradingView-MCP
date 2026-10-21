@@ -54,6 +54,7 @@ import { buildMarketSnapshot } from "./marketSnapshot.js";
 import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
 import { buildClosedChartSnapshot } from "./closedChartSnapshot.js";
+import { evaluateFixedScenario, fixedScenarioInputSchema } from "./fixedScenario.js";
 import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
 import { buildMovingAverageContext } from "./movingAverageContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
@@ -7867,6 +7868,23 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           timeframes, count, recentCount: recent_count, confirm }));
       } catch (err) { return errorResult(err); }
     }),
+  );
+
+  server.registerTool(
+    "evaluate_fixed_scenario",
+    {
+      description: "Compare caller-supplied fixed close-band conditions with bounded native confirmed bars. " +
+        "Explicit timeframe branches are OR; strict band crossings, boundary equality, streaks, gaps and incomplete evidence remain distinct. " +
+        "Returns definition version/hash, original scenario text, comparison window and exact supporting bars. " +
+        "Unspecified rules are never invented; both activation/invalidation matches have no implicit lifecycle precedence. " +
+        "Stateless arithmetic only: no chart, lock, quotes, automation, notification decisions, orders, persistence or journal access. " +
+        "A match is not a new state transition, trading signal or proof of historical availability.",
+      inputSchema: fixedScenarioInputSchema,
+    },
+    async (input) => {
+      try { return jsonResult(evaluateFixedScenario(input)); }
+      catch (err) { return errorResult(err); }
+    },
   );
 
   server.registerTool(
