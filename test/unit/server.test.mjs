@@ -1665,6 +1665,7 @@ async function nativeMcpFixture(t, hooks = {}) {
       assert.ok((await lstat(join(directory, ".writer.lock"))).isFile(), "store lock must precede chart lock");
       if (hooks.lockUnavailable) throw new Error("synthetic shared chart lock unavailable");
       if (hooks.expireAtChartLock) tick = 600001;
+      if (hooks.expireWallAtChartLock) offset = 600001;
       assert.equal(state.held, false); state.held = true; state.acquires++;
       return async () => { assert.deepEqual(context, hooks.drift || hooks.restoreFailure ? context : initial); state.held = false; };
     } },
@@ -1706,6 +1707,7 @@ test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate s
     assert.ok(tool.inputSchema.required.includes("confirm")); assert.match(tool.description, /human approval/);
   }
   assert.equal(tools.find((tool) => tool.name === "prune_native_bar_history").annotations.destructiveHint, true);
+  assert.equal(tools.find((tool) => tool.name === "record_native_bar_snapshot").annotations.destructiveHint, true);
   assert.equal(tools.find((tool) => tool.name === "recover_native_bar_clock_ahead").annotations.destructiveHint, true);
 });
 
@@ -1771,7 +1773,7 @@ nativeFsTest("105-3 MCP records fresh synthetic bars only after both locks and f
   assert.deepEqual(await readFile(path), bytes); assert.equal(f.state.chartCalls, reads);
 });
 
-for (const hooks of [{ replay: true }, { restoreFailure: true }, { drift: true }, { empty: true }, { lockUnavailable: true }, { expireAtChartLock: true }]) {
+for (const hooks of [{ replay: true }, { restoreFailure: true }, { drift: true }, { empty: true }, { lockUnavailable: true }, { expireAtChartLock: true }, { expireWallAtChartLock: true }]) {
   nativeFsTest(`105-3 MCP aborts synthetic capture without bars: ${Object.keys(hooks)[0]}`, async (t) => {
     const f = await nativeMcpFixture(t, hooks), p = await f.prepare();
     await f.reject("record_native_bar_snapshot", nativeWriteArgs(p));

@@ -99,8 +99,10 @@ export function projectNativeBarHistory(captures: AcceptedNativeCapture[], input
         const hash = evidenceHash(values), previous = row.versions.at(-1);
         if (!previous || previous.value_hash !== hash) {
           const changed = previous ? fields.filter((k) => previous.values[k] !== bar[k]) : [];
-          row.versions.push({ occurrence: row.versions.length + 1, value_hash: hash, values,
-            changed_fields: changed, change_kind: !previous ? "initial" : changed.every((k) => k === "volume") ? "volume_only" : "price_or_mixed",
+          row.versions.push({ occurrence: truncated ? null : row.versions.length + 1,
+            retained_occurrence: row.versions.length + 1, value_hash: hash, values,
+            changed_fields: changed, change_kind: !previous ? truncated ? "retained_origin_unknown" : "initial"
+              : changed.every((k) => k === "volume") ? "volume_only" : "price_or_mixed",
             version_first_seen_at: series.observed_at, last_observed_at: series.observed_at,
             confirmed_by_next_bar_at: bar.confirmed_by_next_bar_at, recorded_at: batch.recorded_at,
             recording_id: batch.recording_id, payload_hash: batch.payload_hash });

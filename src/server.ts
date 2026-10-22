@@ -7889,8 +7889,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     description: "Only after separate explicit human approval, consume this process's live recording plan and capture fresh native bars. " +
       "Store lock precedes shared chart lock; complete layout/Study ID/timeframe/selection restoration precedes immutable persistence. " +
       "No caller OHLC, imports, backdating, quotes, orders, journals, notification decisions or automation changes. " +
-      "A first attempt may initialize metadata even if capture fails. On uncertain outcome query the original recording id; never blindly recapture.",
-    inputSchema: nativePlanInput, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      "A first attempt may initialize metadata even if capture fails. Temporary 15/60 pane changes are fully restored. " +
+      "On uncertain outcome query the original recording id; never blindly recapture. Production maintenance remains disabled pending anchored filesystem operations.",
+    inputSchema: nativePlanInput, annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   }, async ({ plan_id, plan_hash, confirm }) => {
     try {
       return jsonResult(await nativeBarHistory.record(plan_id, plan_hash, confirm, (targets, assertPlanActive) => chartOperations.run(async () => {
@@ -7929,14 +7930,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     ["prepare_native_bar_clock_recovery", "recover_native_bar_clock_ahead", "clock_recovery"],
   ] as const) {
     server.registerTool(prepareName, {
-      description: kind === "prune" ? "Read-only exact expired batch preview (older than 90 elapsed days); separate deletion approval required. No automatic cleanup or chart access."
-        : "Read-only exact >1-minute clock-ahead batch preview; separate approval required for byte-preserving quarantine, never restamping or deleting. No chart access.",
+      description: (kind === "prune" ? "Read-only exact expired batch preview (older than 90 elapsed days); separate deletion approval required. No automatic cleanup or chart access."
+        : "Read-only exact >1-minute clock-ahead batch preview; separate approval required for byte-preserving quarantine, never restamping or deleting. No chart access.")
+        + " Production execution is disabled pending anchored filesystem operations; preview reports the blocker.",
       inputSchema: z.strictObject({}), annotations: { readOnlyHint: true },
     }, async () => {
       try { return jsonResult(await nativeBarHistory.prepareMaintenance(kind), true); } catch (e) { return errorResult(e); }
     });
     server.registerTool(executeName, {
-      description: "Only after separate human approval, consume this process's exact live maintenance plan. Revalidate under writer lock, publish durable intent, " +
+      description: "Production execution currently refuses without filesystem changes: anchored filesystem operations are not yet available. " +
+        "Synthetic-only implementation: only after separate human approval, consume this process's exact live maintenance plan. Revalidate under writer lock, publish durable intent, " +
         (kind === "prune" ? "delete only listed owned expired receipt/payload pairs. " : "quarantine only listed owned clock-ahead pairs without overwriting or restamping. ") +
         "Interrupted maintenance blocks history until a separately previewed and approved recovery. Never changes charts, scenario/notification rules or Dot; recording consent does not authorize maintenance.",
       inputSchema: nativePlanInput, annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },

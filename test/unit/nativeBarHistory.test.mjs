@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, realpath, chmod, symlink, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { NativeBarHistory } from "../../build/nativeBarHistory.js";
 import { canonical, evidenceHash, nativeBarCaptureSchema, nativeBarTimestamp } from "../../build/nativeBarEvidence.js";
 
@@ -205,7 +207,7 @@ test("105-3 retention is elapsed receipt age, never old bar-open age; no automat
   const p = await f.store.prepareMaintenance("prune"); assert.equal(p.pairs.length, 1);
   assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
   f.setTime("2027-01-21T00:00:00.000Z"); const b = await record(f, 8.55);
-  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /stale/);
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /stale|expired/);
   const fresh = await f.store.prepareMaintenance("prune"); await f.store.maintain(fresh.plan_id, fresh.plan_hash, true, "prune");
   const h = await f.store.history(query); assert.equal(h.history_truncated, true);
   assert.equal(h.bars[0].first_seen_at, b.receipt.recorded_at);
@@ -351,7 +353,7 @@ test("105-3 invalid UTF-8 cannot alias a canonical replacement character", async
 });
 
 test("105-3 maintenance refuses metadata growth before making existing history unreadable", async (t) => {
-  const f = await fixture(t, { maintenanceMetadataLimitBytes: 1024 });
+  const f = await fixture(t, { maintenanceMetadataLimitBytes: 1500 });
   let now = Date.parse(f.time());
   for (let i = 0; i < 3; i++) {
     const latest = await record(f);
@@ -364,4 +366,166 @@ test("105-3 maintenance refuses metadata growth before making existing history u
       assert.equal((await f.store.history(query)).bars.length, 1);
     }
   }
+});
+
+test("105-3 review: dead process locks recover but live and unknown owners do not", async (t) => {
+  const f = await fixture(t); await record(f);
+  const child = await promisify(execFile)(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]);
+  const lock = join(f.directory, ".writer.lock");
+  await writeFile(lock, canonical({ pid: Number(child.stdout), token: "00000000-0000-4000-8000-000000000001" }), { mode: 0o600 });
+  assert.equal((await record(f)).status, "committed");
+  await writeFile(lock, canonical({ pid: process.pid, token: "00000000-0000-4000-8000-000000000002" }), { mode: 0o600 });
+  await assert.rejects(record(f), /lock_busy/);
+  await writeFile(lock, "unknown owner");
+  await assert.rejects(record(f), /lock_busy/);
+});
+
+test("105-3 review: receipt side files never become committed evidence or pending records", async (t) => {
+  const f = await fixture(t), a = await record(f), paths = filePaths(f, a.receipt);
+  const dir = join(f.directory, "receipts", a.receipt.day);
+  for (const name of [".DS_Store", ".interrupted.stage", "owner-note.json"]) {
+    await writeFile(join(dir, name), "not a receipt", { mode: 0o644 });
+  }
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
+  assert.equal((await f.store.history(query)).bars.length, 1);
+  await writeFile(paths.receipt, "broken committed receipt");
+  await assert.rejects(f.store.history(query), /JSON/);
+});
+
+test("105-3 review: pruning never fabricates an initial version or original occurrence number", async (t) => {
+  const f = await fixture(t), a = await record(f);
+  f.setTime("2027-01-21T00:00:00.000Z"); const b = await record(f, 8.55);
+  const p = await f.store.prepareMaintenance("prune");
+  await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  const h = await f.store.history(query), v = h.bars[0].versions[0];
+  assert.equal(v.change_kind, "retained_origin_unknown");
+  assert.equal(v.occurrence, null);
+  assert.equal(v.retained_occurrence, 1);
+  assert.equal(h.retention_coverage.pruned_through_recorded_at, a.receipt.recorded_at);
+  assert.equal(h.retention_coverage.earliest_retained_recorded_at, b.receipt.recorded_at);
+  assert.equal(h.retention_coverage.continuous_market_coverage, false);
+});
+
+test("105-3 review: wall-clock expiry cannot be bypassed with an unchanged monotonic clock", async (t) => {
+  const f = await fixture(t), p = await f.store.prepareRecording(targets);
+  f.setTime(p.expires_at);
+  await assert.rejects(f.store.record(p.plan_id, p.plan_hash, true, async () => { throw new Error("must not capture"); }), /plan_expired/);
+  assert.deepEqual(await readdir(f.base), []);
+});
+
+test("105-3 review: UTC midnight does not orphan an otherwise valid capture", async (t) => {
+  const f = await fixture(t, { afterPublish: async (s) => { if (s === "payload") f.setTime("2026-10-23T00:00:00.001Z"); } });
+  f.setTime("2026-10-22T23:59:59.999Z");
+  const a = await record(f);
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
+  assert.equal((await f.store.history(query)).bars.length, 1);
+});
+
+test("105-3 review: an empty interrupted initialization can be previewed without writes", async (t) => {
+  const f = await fixture(t); await mkdir(f.directory, { mode: 0o700 });
+  const p = await f.store.prepareRecording(targets);
+  assert.equal(p.store_status, "initialization_incomplete");
+  assert.deepEqual(await readdir(f.directory), []);
+  assert.equal((await record(f)).status, "committed");
+});
+
+test("105-3 review: recording preview discloses temporary pane changes", async (t) => {
+  const f = await fixture(t), p = await f.store.prepareRecording(targets);
+  assert.deepEqual(p.chart_changes.targets.map((v) => v.temporary_timeframes), [["15", "60"], ["15", "60"]]);
+  assert.equal(p.chart_changes.restore_selected_pane, true);
+});
+
+test("105-3 review: maintenance ids are not pending recording ids", async (t) => {
+  const f = await fixture(t); await record(f); f.setTime("2027-02-01T00:00:00.000Z");
+  const p = await f.store.prepareMaintenance("prune"), m = await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  assert.equal((await f.store.status(m.maintenance_id)).status, "not_found");
+});
+
+nodeTest("105-3 review: explicit and inherited macOS ACLs fail closed without changing them", { skip: process.platform !== "darwin" }, async (t) => {
+  const f = await fixture(t); await record(f);
+  await promisify(execFile)("/bin/chmod", ["+a", "everyone allow write", f.directory]);
+  await assert.rejects(f.store.prepareRecording(targets), /acl/);
+  await promisify(execFile)("/bin/chmod", ["-N", f.directory]);
+  await promisify(execFile)("/bin/chmod", ["+a", "everyone allow write,directory_inherit,file_inherit", f.base]);
+  const inherited = join(f.base, "inherited"); await mkdir(inherited, { mode: 0o700 });
+  const store = new NativeBarHistory({ ...f.options, directory: inherited });
+  await assert.rejects(store.prepareRecording(targets), /acl/);
+});
+
+test("105-3 review: forged resume intents cannot prune fresh evidence", async (t) => {
+  const f = await fixture(t), a = await record(f), paths = filePaths(f, a.receipt);
+  const id = "00000000-0000-4000-8000-000000000099", before = await readFile(paths.payload);
+  await mkdir(join(f.directory, "maintenance"), { mode: 0o700 });
+  await writeFile(join(f.directory, "maintenance", `${id}.json`), canonical({ schema: "native-bar-maintenance-v1", id,
+    kind: "prune", created_at: f.time(), generation: evidenceHash("forged synthetic generation"),
+    pairs: [{ recording_id: a.receipt.recording_id, sequence: a.receipt.sequence, day: a.receipt.day,
+      payload_hash: a.receipt.payload_hash, receipt_hash: evidenceHash(a.receipt), bytes: before.length + 1024,
+      recorded_at: "2020-01-01T00:00:00.000Z", last_observed_at: "2020-01-01T00:00:00.000Z" }] }), { mode: 0o600 });
+  const p = await f.store.prepareMaintenance("prune");
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /maintenance_(evidence|eligibility)/);
+  assert.deepEqual(await readFile(paths.payload), before);
+  assert.ok((await lstat(paths.receipt)).isFile());
+});
+
+test("105-3 review: startup overrides are restricted to explicit private storage namespaces", async () => {
+  const store = new NativeBarHistory({ directory: "/Users/Shared/native-bar-data" });
+  await assert.rejects(store.prepareRecording(targets), /root_not_allowlisted/);
+});
+
+test("105-3 review: production maintenance fails closed before IO even with an otherwise valid plan", async (t) => {
+  const f = await fixture(t), a = await record(f), path = filePaths(f, a.receipt).payload, before = await readFile(path);
+  f.setTime("2027-02-01T00:00:00.000Z");
+  const p = await f.store.prepareMaintenance("prune");
+  assert.equal(p.execution_available, true); // this fixture alone opts into the synthetic implementation
+  delete f.options.testOnly;
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /anchored_filesystem_operations_required/);
+  assert.deepEqual(await readFile(path), before);
+  assert.equal((await readdir(f.directory)).includes("maintenance"), false);
+});
+
+test("105-3 review: concurrent side-file churn does not invalidate committed receipt inventory", async (t) => {
+  const f = await fixture(t), a = await record(f), original = f.store.inventory.bind(f.store);
+  let scans = 0;
+  f.store.inventory = async () => {
+    const result = await original();
+    if (++scans === 1) await writeFile(join(f.directory, "receipts", a.receipt.day, ".another-process.stage"), "synthetic staging", { mode: 0o600 });
+    return result;
+  };
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
+  assert.ok(scans >= 2);
+});
+
+test("105-3 review: dead takeover marker is recoverable but a live marker is preserved", async (t) => {
+  const f = await fixture(t); await record(f);
+  const child = await promisify(execFile)(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]);
+  const path = join(f.directory, ".writer.takeover");
+  await writeFile(path, canonical({ pid: Number(child.stdout), token: "00000000-0000-4000-8000-000000000008" }), { mode: 0o600 });
+  assert.equal((await record(f)).status, "committed");
+  const live = canonical({ pid: process.pid, token: "00000000-0000-4000-8000-000000000009" });
+  await writeFile(path, live, { mode: 0o600 });
+  await assert.rejects(record(f), /lock_busy/);
+  assert.equal(await readFile(path, "utf8"), live);
+});
+
+test("105-3 review: multiple real processes serialize dead-lock takeover and collection", async (t) => {
+  const f = await fixture(t); await mkdir(f.directory, { mode: 0o700 });
+  const child = await promisify(execFile)(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]);
+  const owner = { pid: Number(child.stdout), token: "00000000-0000-4000-8000-000000000071" };
+  for (const name of [".writer.lock", ".writer.takeover", `.writer-claim-${owner.token}.json`]) {
+    await writeFile(join(f.directory, name), canonical(owner), { mode: 0o600 });
+  }
+  const code = `import {open,unlink} from 'node:fs/promises';
+    import {join} from 'node:path';
+    const {takeNativeWriterLock}=await import(process.argv[1]);
+    for(let i=0;i<8;i++){
+      const lock=await takeNativeWriterLock(process.argv[2],async()=>{},10000);
+      const sentinel=join(process.argv[2],'synthetic-exclusive-section');
+      try{const fd=await open(sentinel,'wx',0o600);await fd.close();
+        await new Promise(r=>setTimeout(r,3));await unlink(sentinel);
+      }finally{if(!lock.release())throw Error('release failed');}
+    }`;
+  const url = new URL("../../build/nativeBarAccess.js", import.meta.url).href;
+  await Promise.all(Array.from({ length: 4 }, () => promisify(execFile)(process.execPath,
+    ["--input-type=module", "-e", code, url, f.directory], { timeout: 30000 })));
+  assert.equal((await readdir(f.directory)).includes("synthetic-exclusive-section"), false);
 });
