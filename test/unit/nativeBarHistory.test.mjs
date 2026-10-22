@@ -419,6 +419,9 @@ test("105-3 review: UTC midnight does not orphan an otherwise valid capture", as
   const a = await record(f);
   assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
   assert.equal((await f.store.history(query)).bars.length, 1);
+  assert.equal(a.receipt.day, "2026-10-22"); assert.equal(a.receipt.partition_at, "2026-10-22T23:59:59.999Z");
+  assert.equal(a.receipt.recorded_at, "2026-10-23T00:00:00.001Z");
+  assert.equal((await f.store.history({ ...query, as_of: "2026-10-23T00:00:00.000Z" })).bars.length, 0);
 });
 
 test("105-3 review: an empty interrupted initialization can be previewed without writes", async (t) => {
@@ -528,4 +531,169 @@ test("105-3 review: multiple real processes serialize dead-lock takeover and col
   await Promise.all(Array.from({ length: 4 }, () => promisify(execFile)(process.execPath,
     ["--input-type=module", "-e", code, url, f.directory], { timeout: 30000 })));
   assert.equal((await readdir(f.directory)).includes("synthetic-exclusive-section"), false);
+});
+
+const incarnationTest = ["darwin", "linux"].includes(process.platform) ? nodeTest : nodeTest.skip;
+incarnationTest("105-3 re-review: a reused PID or another boot session never keeps a dead writer's entries alive", async (t) => {
+  const f = await fixture(t); await record(f);
+  // The parent process is alive, but it is not the process that wrote these entries.
+  const reused = { boot: null, pid: process.ppid, start: "000000000000", token: "00000000-0000-4000-8000-000000000081" };
+  await writeFile(join(f.directory, `.writer-claim-${reused.token}.json`), canonical(reused), { mode: 0o600 });
+  await writeFile(join(f.directory, `.writer-ticket-${reused.token}.json`), canonical({ ...reused, ticket: 1 }), { mode: 0o600 });
+  const otherBoot = { boot: "ffffffffffff", pid: process.ppid, start: null, token: "00000000-0000-4000-8000-000000000082" };
+  await writeFile(join(f.directory, ".writer.lock"), canonical(otherBoot), { mode: 0o600 });
+  const r = await record(f, 8.55);
+  assert.equal(r.status, "committed");
+  const status = await f.store.status(r.receipt.recording_id);
+  assert.ok(status.side_files.writer_coordination >= 3); // dead entries are preserved and counted, never deleted
+  assert.ok((await readdir(f.directory)).includes(`.writer-claim-${reused.token}.json`));
+  // An earlier-build entry naming a live PID cannot be proven dead, so it still blocks.
+  const legacy = join(f.directory, ".writer-claim-00000000-0000-4000-8000-000000000083.json");
+  await writeFile(legacy, canonical({ pid: process.ppid, token: "00000000-0000-4000-8000-000000000083" }), { mode: 0o600 });
+  await assert.rejects(record(f), /active writer queue/);
+  await rm(legacy); assert.equal((await record(f, 8.56)).status, "committed");
+});
+
+test("105-3 re-review: a live lock outside the queue is waited on for the whole lock wait", async (t) => {
+  const f = await fixture(t); await record(f);
+  await writeFile(join(f.directory, ".writer.lock"), canonical({ pid: process.pid, token: "00000000-0000-4000-8000-000000000084" }), { mode: 0o600 });
+  const store = new NativeBarHistory({ ...f.options, lockWaitMs: 600 }), p = await store.prepareRecording(targets);
+  const started = performance.now();
+  await assert.rejects(store.record(p.plan_id, p.plan_hash, true, async () => { throw new Error("must not capture"); }), /live or unknown owner/);
+  assert.ok(performance.now() - started >= 550);
+});
+
+test("105-3 re-review: a failed lock release is reported without hiding a committed recording", async (t) => {
+  const f = await fixture(t), p = await f.store.prepareRecording(targets);
+  const r = await f.store.record(p.plan_id, p.plan_hash, true, async () => {
+    await rm(join(f.directory, ".writer.lock")); return capture(f.time());
+  });
+  assert.equal(r.status, "committed"); assert.match(r.writer_lock_release, /failed/);
+  assert.equal((await f.store.status(p.recording_id)).status, "committed");
+});
+
+nodeTest("105-3 re-review: batched ACL inspection accepts deny-only entries and refuses a grant on any evidence file", { skip: process.platform !== "darwin" }, async (t) => {
+  const f = await fixture(t), a = await record(f); f.setTime("2026-10-22T01:00:00.000Z");
+  const b = await record(f, 8.55); f.setTime("2026-10-22T02:00:00.000Z"); await record(f, 8.56);
+  const exec = promisify(execFile);
+  await exec("/bin/chmod", ["+a", "everyone deny write", filePaths(f, a.receipt).receipt]);
+  assert.equal((await f.store.history(query)).bars[0].versions.length, 3);
+  await exec("/bin/chmod", ["+a", "everyone allow read", filePaths(f, b.receipt).payload]);
+  await assert.rejects(f.store.history(query), /unsafe_acl/);
+});
+
+test("105-3 re-review: an approved clock recovery can finish after the corrected clock passes its stamps", async (t) => {
+  let fail = true;
+  const f = await fixture(t, { afterPublish: async (stage) => { if (fail && stage === "quarantine_linked") throw new Error("synthetic link interruption"); } });
+  const a = await record(f); f.setTime("2026-10-21T22:00:00.000Z");
+  let p = await f.store.prepareMaintenance("clock_recovery");
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery"), /link interruption/);
+  f.setTime("2026-10-22T03:00:00.000Z"); fail = false;
+  p = await f.store.prepareMaintenance("clock_recovery"); assert.ok(p.resume_id);
+  await f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery");
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "quarantined");
+  assert.equal((await f.store.history(query)).bars.length, 0);
+});
+
+test("105-3 re-review: a prune approved under a clock running ahead resumes after the correction", async (t) => {
+  let fail = true;
+  const f = await fixture(t, { afterPublish: async (stage) => { if (fail && stage === "maintenance_receipt") throw new Error("synthetic interruption"); } });
+  const a = await record(f); f.setTime("2027-03-01T00:00:00.000Z");
+  let p = await f.store.prepareMaintenance("prune");
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /synthetic interruption/);
+  f.setTime("2027-02-01T00:00:00.000Z"); fail = false;
+  p = await f.store.prepareMaintenance("prune"); assert.ok(p.resume_id);
+  await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "pruned");
+});
+
+test("105-3 re-review: a forged clock-recovery intent with an old approval time is not bound to the store", async (t) => {
+  const f = await fixture(t), a = await record(f), paths = filePaths(f, a.receipt);
+  const id = "00000000-0000-4000-8000-000000000098", before = await readFile(paths.payload);
+  await mkdir(join(f.directory, "maintenance"), { mode: 0o700 });
+  await writeFile(join(f.directory, "maintenance", `${id}.json`), canonical({ schema: "native-bar-maintenance-v1", id,
+    kind: "clock_recovery", created_at: "2020-01-01T00:00:00.000Z", generation: evidenceHash("forged synthetic generation"),
+    pairs: [{ recording_id: a.receipt.recording_id, sequence: a.receipt.sequence, day: a.receipt.day,
+      payload_hash: a.receipt.payload_hash, receipt_hash: evidenceHash(a.receipt), bytes: before.length + 1024,
+      recorded_at: a.receipt.recorded_at, last_observed_at: f.time() }] }), { mode: 0o600 });
+  const p = await f.store.prepareMaintenance("clock_recovery");
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery"), /not bound to this store state/);
+  assert.deepEqual(await readFile(paths.payload), before);
+});
+
+test("105-3 re-review: plan expiry during payload publication cannot strand the payload", async (t) => {
+  let expires = null;
+  const f = await fixture(t, { afterPublish: async (s) => { if (s === "payload" && expires) f.setTime(expires); } });
+  const p = await f.store.prepareRecording(targets); expires = p.expires_at;
+  assert.equal((await f.store.record(p.plan_id, p.plan_hash, true, async () => capture(f.time()))).status, "committed");
+  assert.equal((await f.store.status(p.recording_id)).status, "committed");
+});
+
+test("105-3 re-review: retention coverage keeps the known prune boundary beside legacy intents", async (t) => {
+  const f = await fixture(t), a = await record(f); f.setTime("2026-10-23T00:00:00.000Z");
+  const b = await record(f, 8.55), legacy = filePaths(f, a.receipt);
+  const id = "00000000-0000-4000-8000-000000000097", bytes = (await readFile(legacy.payload)).length + (await readFile(legacy.receipt)).length;
+  const intent = { schema: "native-bar-maintenance-v1", id, kind: "prune", created_at: f.time(), generation: evidenceHash("legacy synthetic"),
+    pairs: [{ recording_id: a.receipt.recording_id, sequence: a.receipt.sequence, day: a.receipt.day,
+      payload_hash: a.receipt.payload_hash, receipt_hash: evidenceHash(a.receipt), bytes }] };
+  await mkdir(join(f.directory, "maintenance"), { mode: 0o700 });
+  await writeFile(join(f.directory, "maintenance", `${id}.json`), canonical(intent), { mode: 0o600 });
+  await writeFile(join(f.directory, "maintenance", `${id}.done.json`), canonical({ id, intent_hash: evidenceHash(intent) }), { mode: 0o600 });
+  await rm(legacy.payload); await rm(legacy.receipt);
+  f.setTime("2027-02-01T00:00:00.000Z");
+  const p = await f.store.prepareMaintenance("prune"); await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  await record(f, 8.56);
+  const h = await f.store.history(query);
+  assert.equal(h.retention_coverage.pruned_through_recorded_at, b.receipt.recorded_at);
+  assert.equal(h.retention_coverage.legacy_pruned_times_unknown, true);
+  assert.equal(h.bars[0].versions[0].change_kind, "retained_origin_unknown");
+});
+
+test("105-3 re-review: bars opening after the prune boundary keep initial versions and occurrence numbers", async (t) => {
+  const f = await fixture(t); await record(f);
+  f.setTime("2027-01-21T00:00:00.000Z"); await record(f, 8.55);
+  const p = await f.store.prepareMaintenance("prune"); await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  f.setTime("2027-01-21T02:00:00.000Z");
+  const later = capture(f.time());
+  for (const s of later.series) s.bars = [{ ...s.bars[0], bar_open_at: "2027-01-21T00:00:00.000Z", confirmed_by_next_bar_at: "2027-01-21T01:00:00.000Z" }];
+  const plan = await f.store.prepareRecording(targets);
+  await f.store.record(plan.plan_id, plan.plan_hash, true, async () => later);
+  const h = await f.store.history(query), fresh = h.bars.find((b) => b.bar_open_at === "2027-01-21T00:00:00.000Z");
+  const old = h.bars.find((b) => b.bar_open_at === "2026-10-20T00:00:00.000Z");
+  assert.equal(h.history_truncated, true);
+  assert.equal(fresh.versions[0].change_kind, "initial"); assert.equal(fresh.versions[0].occurrence, 1);
+  assert.equal(fresh.first_seen_scope, "local_observations_only");
+  assert.equal(old.versions[0].change_kind, "retained_origin_unknown"); assert.equal(old.first_seen_scope, "earliest_retained");
+});
+
+test("105-3 re-review: disabled maintenance issues no plan, refuses before consuming one and names the clock wait", async (t) => {
+  const f = await fixture(t, { syntheticMaintenance: false }), a = await record(f);
+  f.setTime("2027-02-01T00:00:00.000Z");
+  const p = await f.store.prepareMaintenance("prune");
+  assert.equal(p.plan_id, null); assert.equal(p.plan_hash, null); assert.equal(p.execution_available, false);
+  assert.equal(p.pairs.length, 1); assert.match(p.execution_blocker, /no plan issued/);
+  await assert.rejects(f.store.maintain("00000000-0000-4000-8000-000000000001", "f".repeat(64), true, "prune"), /anchored_filesystem_operations_required/);
+  assert.equal((await f.store.status(a.receipt.recording_id)).status, "committed");
+  f.setTime("2026-10-21T00:00:00.000Z");
+  const r = await f.store.prepareRecording(targets);
+  await assert.rejects(f.store.record(r.plan_id, r.plan_hash, true, async () => { throw new Error("must not capture"); }), /clock recovery execution is disabled/);
+  const synthetic = await fixture(t); await record(synthetic); synthetic.setTime("2027-02-01T00:00:00.000Z");
+  const m = await synthetic.store.prepareMaintenance("prune");
+  assert.equal("recording_id" in m, false); assert.equal("chart_changes" in m, false); assert.equal("bindings_verified" in m, false);
+  assert.equal(m.warnings.some((w) => /initialize metadata/.test(w)), false);
+});
+
+test("105-3 re-review: side-file-only roots report initialization_incomplete; evidence without policy is a named refusal", async (t) => {
+  const f = await fixture(t); await mkdir(f.directory, { mode: 0o700 });
+  await writeFile(join(f.directory, ".DS_Store"), "finder", { mode: 0o644 });
+  assert.equal((await f.store.history(query)).store_status, "initialization_incomplete");
+  assert.equal((await f.store.prepareRecording(targets)).store_status, "initialization_incomplete");
+  assert.equal((await record(f)).status, "committed");
+  await rm(join(f.directory, "policy.json"));
+  await assert.rejects(f.store.history(query), /policy_missing_or_partial_initialization/);
+});
+
+test("105-3 re-review: production roots outside the home default are refused, including external volumes", async () => {
+  const store = new NativeBarHistory({ directory: "/Volumes/SyntheticVolume/.tradingview-mcp/native-bar-history/v1" });
+  await assert.rejects(store.prepareRecording(targets), /root_not_allowlisted/);
 });

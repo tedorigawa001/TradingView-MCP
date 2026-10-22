@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readdir, realpath, statfs, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { posixModeEnforced, publishImmutableFile, readRegularFile, syncDirectoryEntry } from "./fsDurability.js";
-import { assertNativeBarAcl, takeNativeWriterLock } from "./nativeBarAccess.js";
+import { assertNativeBarAcl, primeNativeBarAcls, takeNativeWriterLock } from "./nativeBarAccess.js";
 import { canonical, evidenceHash, nativeBarCaptureSchema, nativeBarHash, nativeBarId, nativeBarTargetsSchema,
   nativeBarTimestamp, NATIVE_BAR_SYMBOLS, projectNativeBarHistory } from "./nativeBarEvidence.js";
 import type { AcceptedNativeCapture, NativeBarCapture, NativeBarTargets } from "./nativeBarEvidence.js";
@@ -28,14 +28,16 @@ const maintenanceSchema = z.strictObject({ schema: z.literal("native-bar-mainten
 type Maintenance = z.infer<typeof maintenanceSchema>;
 type State = { missing: boolean; pairs: Pair[]; maintenance: Maintenance[]; incomplete: Maintenance[];
   initializationIncomplete?: boolean; bytes: number; queryBytes: number; maintenanceBytes: number; generation: string; files: string[] };
-type Plan = { plan_id: string; plan_hash: string; recording_id: string; kind: "record" | "prune" | "clock_recovery";
+type Plan = { plan_id: string; plan_hash: string; recording_id?: string; kind: "record" | "prune" | "clock_recovery";
   expires_at: string; deadline: number; targets?: NativeBarTargets; generation: string; pairs: Maintenance["pairs"];
   resume_id?: string; policy_hash: string };
 export type NativeHistoryOptions = {
   directory?: string; now?: () => Date; monotonic?: () => number; lockWaitMs?: number;
   /** Constructor-only seam. Never exposed through MCP requests or environment configuration. */
   testOnly?: { allowTemporaryRoot: true; quotaBytes?: number; queryBytesLimit?: number; maintenanceMetadataLimitBytes?: number;
-    afterPublish?: (stage: string) => Promise<void> };
+    afterPublish?: (stage: string) => Promise<void>;
+    /** false exercises the production maintenance refusal on a synthetic root. */
+    syntheticMaintenance?: false };
 };
 
 /** No constructor IO, background collection, durable grants or imports. */
@@ -68,6 +70,8 @@ export class NativeBarHistory {
     this.policyHash = evidenceHash(this.policy);
   }
   private clock() { return nativeBarTimestamp.parse(this.now().toISOString()); }
+  /** Only synthetic fixtures execute maintenance; production waits for anchored filesystem operations. */
+  private get maintenanceExecutable() { return !!this.options.testOnly && this.options.testOnly.syntheticMaintenance !== false; }
   private async safePath(path: string, file = false) {
     if (!isAbsolute(this.directory) || resolve(this.directory) !== this.directory) throw new Error("unsafe_root: canonical absolute directory required");
     if (!posixModeEnforced()) throw new Error("private_access_unverified: Windows ACL verification unavailable");
@@ -77,23 +81,27 @@ export class NativeBarHistory {
     if (root === sep || root === homedir()) throw new Error("unsafe_root");
     if (!this.options.testOnly && ([tmpdir(), await realpath(tmpdir()), "/tmp", "/private/tmp", "/var/tmp"].some((p) => root === p || root.startsWith(`${p}/`))
       || /\/(\.codex|\.agents|\.ssh|\.aws|\.gnupg|\.kube|\.azure|\.password-store|\.git|automations|research[-_]?journal|Keychains)(\/|$)/i.test(root))) throw new Error("protected_or_temporary_root");
-    if (!this.options.testOnly && root !== join(homedir(), ".tradingview-mcp", "native-bar-history", "v1")
-      && !/^\/Volumes\/[^/]+\/\.tradingview-mcp\/native-bar-history\/v1$/.test(root)) throw new Error("root_not_allowlisted");
+    // External volumes stay refused until their mount is verified local with ownership honored: macOS mounts them
+    // ownership-ignored by default, where every owner and mode check above would pass for any local user.
+    if (!this.options.testOnly && root !== join(homedir(), ".tradingview-mcp", "native-bar-history", "v1")) throw new Error("root_not_allowlisted");
     const components: string[] = [];
     for (let p = path; ; p = dirname(p)) { components.unshift(p); if (dirname(p) === p) break; }
-    for (const p of components) {
-      let st;
-      try { st = await lstat(p); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; }
-      if (st.isSymbolicLink() || (p === path && file ? !st.isFile() : !st.isDirectory())) throw new Error("unsafe_path: link or nonregular entry");
-      const owned = st.uid === process.getuid!();
-      const inside = p === root || p.startsWith(`${root}/`);
-      if ((inside && (!owned || (posixModeEnforced() && (st.mode & 0o077) !== 0)))
-        || (!inside && !this.options.testOnly && ((st.mode & 0o022) !== 0 || (!owned && st.uid !== 0)))) throw new Error("unsafe_owner_or_permissions");
-      await assertNativeBarAcl(p);
-      if (!file || p !== path) {
-        try { await lstat(join(p, ".git")); throw new Error("git_checkout_root_refused"); }
-        catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
-      }
+    for (const p of components) await this.checkComponent(p, file && p === path);
+  }
+  /** One existing path component: no link, expected type, owner/mode rules inside and outside the store, ACL, no Git. */
+  private async checkComponent(p: string, finalFile: boolean) {
+    const root = this.directory;
+    let st;
+    try { st = await lstat(p); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return; throw e; }
+    if (st.isSymbolicLink() || (finalFile ? !st.isFile() : !st.isDirectory())) throw new Error("unsafe_path: link or nonregular entry");
+    const owned = st.uid === process.getuid!();
+    const inside = p === root || p.startsWith(`${root}/`);
+    if ((inside && (!owned || (posixModeEnforced() && (st.mode & 0o077) !== 0)))
+      || (!inside && !this.options.testOnly && ((st.mode & 0o022) !== 0 || (!owned && st.uid !== 0)))) throw new Error("unsafe_owner_or_permissions");
+    await assertNativeBarAcl(p);
+    if (!finalFile) {
+      try { await lstat(join(p, ".git")); throw new Error("git_checkout_root_refused"); }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
     }
   }
   private async read(path: string, max = 1024 ** 2) {
@@ -139,7 +147,11 @@ export class NativeBarHistory {
     const files: string[] = []; let bytes = 0, entries = 0;
     const walk = async (path: string) => {
       await this.safePath(path);
-      for (const entry of await readdir(path, { withFileTypes: true })) {
+      const list = await readdir(path, { withFileTypes: true });
+      if (entries + list.length > 30000) throw new Error("store_entry_limit");
+      // One bounded ACL listing per directory, before the per-file checks below, instead of one process per file.
+      await primeNativeBarAcls(path, list.filter((e) => !e.isDirectory() && this.logicalFiles([join(path, e.name)]).length).map((e) => e.name));
+      for (const entry of list) {
         if (++entries > 30000) throw new Error("store_entry_limit");
         const p = join(path, entry.name);
         if (entry.isDirectory()) await walk(p);
@@ -148,7 +160,8 @@ export class NativeBarHistory {
           const st = await lstat(p).catch((e) => { if (e.code === "ENOENT" && !logical) return null; throw e; });
           if (!st) continue;
           if (!st.isFile()) throw new Error("unsafe_path: link or nonregular entry");
-          if (logical) await this.safePath(p, true);
+          // walk() just verified the whole directory chain; reads still verify every component again.
+          if (logical) await this.checkComponent(p, true);
           bytes += st.size; files.push(p);
         }
         if (bytes > this.quota) throw new Error("store_over_quota");
@@ -167,9 +180,10 @@ export class NativeBarHistory {
     let policy;
     try { policy = await this.read(join(this.directory, "policy.json")); }
     catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT" || files.some((p) => dirname(p) !== this.directory
-        || !/^\.policy-.*\.stage$/.test(relative(this.directory, p)))) throw e;
-      // Only empty/recognizable pre-policy initialization is recoverable by a new recording approval.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      if (this.logicalFiles(files).length) throw new Error("policy_missing_or_partial_initialization: evidence exists without policy");
+      // No evidence yet: only side files such as publication staging or Finder metadata, which are never adopted.
+      // A new recording approval may finish the initialization.
       return { missing: false, initializationIncomplete: true, pairs: [], maintenance: [], incomplete: [], bytes,
         queryBytes: 0, maintenanceBytes: 0, generation: evidenceHash({ receipts: [], maintenance: [] }), files };
     }
@@ -214,21 +228,26 @@ export class NativeBarHistory {
     return { status: latest && latest > now ? "clock_ahead" : "ok", latest_recorded_at: latest,
       ahead_ms: latest ? Math.max(0, Date.parse(latest) - Date.parse(now)) : 0 };
   }
+  private storeStatus(state: State, present: string) {
+    return state.missing ? "missing" : state.initializationIncomplete ? "initialization_incomplete" : present;
+  }
   private issue(kind: Plan["kind"], state: State, extra: Partial<Plan> = {}) {
-    const tick = this.monotonic();
+    const tick = this.monotonic(), record = kind === "record";
     for (const [id, p] of this.plans) if (p.deadline <= tick) this.plans.delete(id);
     if (this.plans.size >= 128) throw new Error("plan_registry_full");
-    const body = { plan_id: randomUUID(), recording_id: randomUUID(), kind, expires_at: new Date(Date.parse(this.clock()) + 600000).toISOString(),
+    const body = { plan_id: randomUUID(), ...(record ? { recording_id: randomUUID() } : {}), kind,
+      expires_at: new Date(Date.parse(this.clock()) + 600000).toISOString(),
       generation: state.generation, pairs: [] as Maintenance["pairs"], policy_hash: this.policyHash, ...extra };
     const plan = { ...body, plan_hash: evidenceHash(body), deadline: tick + 600000 };
     this.plans.set(plan.plan_id, plan);
     const { deadline, ...publicPlan } = plan;
-    return structuredClone({ ...publicPlan, directory: this.directory, policy: this.policy,
-      store_status: state.missing ? "missing" : state.initializationIncomplete ? "initialization_incomplete" : "existing",
-      chart_changes: kind === "record" ? { targets: plan.targets!.map((t) => ({ ...t, temporary_timeframes: ["15", "60"],
-        restore_timeframe: t.expected_timeframe })), restore_selected_pane: true, restore_full_layout_and_studies: true } : null,
-      bindings_verified: false, warnings: ["confirm is not human authentication; host must obtain explicit per-invocation approval",
-        "first confirmed write may initialize metadata even if capture later fails", "no automatic collection, deletion or notification"] });
+    return structuredClone({ ...publicPlan, directory: this.directory, policy: this.policy, store_status: this.storeStatus(state, "existing"),
+      ...(record ? { chart_changes: { targets: plan.targets!.map((t) => ({ ...t, temporary_timeframes: ["15", "60"],
+        restore_timeframe: t.expected_timeframe })), restore_selected_pane: true, restore_full_layout_and_studies: true },
+        bindings_verified: false } : {}),
+      warnings: ["confirm is not human authentication; host must obtain explicit per-invocation approval",
+        ...(record ? ["first confirmed write may initialize metadata even if capture later fails"] : []),
+        "no automatic collection, deletion or notification"] });
   }
   async prepareRecording(targets: NativeBarTargets) {
     return this.issue("record", await this.load(), { targets: nativeBarTargetsSchema.parse(targets) });
@@ -252,8 +271,15 @@ export class NativeBarHistory {
     }
     await this.safePath(this.directory);
     const lock = await takeNativeWriterLock(this.directory, (p) => this.safePath(p, true), this.options.lockWaitMs ?? 1000);
-    try { return await work(); }
-    finally { if (!lock.release()) throw new Error("store_lock_release_failed"); }
+    let result: T;
+    try { result = await work(); }
+    catch (e) {
+      if (!lock.release()) throw new Error(`${(e as Error).message}; also store_lock_release_failed`, { cause: e });
+      throw e;
+    }
+    // The work already finished (a recording is committed): report the lock problem without hiding that outcome.
+    if (!lock.release()) return { ...result, writer_lock_release: "failed: other writers stay blocked until this MCP server exits" };
+    return result;
   }
   /** The collector rechecks the supplied guard after any chart-queue/lock wait, before native access. */
   async record(id: string, hash: string, confirm: boolean,
@@ -264,7 +290,9 @@ export class NativeBarHistory {
       const state = await this.load();
       if (state.generation !== plan.generation) throw new Error("store_changed: fresh preview required");
       assertPlanActive();
-      if (this.clockQuality(state).status === "clock_ahead") throw new Error("clock_ahead: prepare_native_bar_clock_recovery or wait for clock; no charts touched");
+      if (this.clockQuality(state).status === "clock_ahead") {
+        throw new Error(`clock_ahead: recording resumes once the clock passes the latest recorded_at${this.maintenanceExecutable ? "" : " (clock recovery execution is disabled)"}; no charts touched`);
+      }
       if (state.pairs.length >= 4096) throw new Error("committed_capture_limit: explicit maintenance decision required");
       const space = await statfs(this.directory);
       if (state.bytes + RESERVE + 2 * 1024 ** 2 > this.quota || Number(space.bavail) * Number(space.bsize) < RESERVE + 2 * 1024 ** 2) throw new Error("insufficient_capacity: no automatic deletion");
@@ -281,13 +309,15 @@ export class NativeBarHistory {
       if (state.queryBytes + payloadBytes + 16384 > this.queryBytesLimit) {
         throw new Error("history_query_capacity: explicit maintenance decision required; no payload published");
       }
-      const day = ended.slice(0, 10), paths = this.paths({ day, recording_id: plan.recording_id });
+      const day = ended.slice(0, 10), paths = this.paths({ day, recording_id: plan.recording_id! });
+      // Payload and receipt are one approved act: the last expiry check precedes the payload, so expiry during its
+      // publication cannot strand an uncommitted payload.
+      assertPlanActive();
       await this.publish(paths.payload, payload);
       await this.options.testOnly?.afterPublish?.("payload");
       const recordedAt = this.clock();
-      assertPlanActive();
       if (recordedAt < ended) throw new Error("clock_rollback: payload pending, not committed");
-      const receipt: Receipt = { schema: "native-bar-receipt-v1", recording_id: plan.recording_id, day,
+      const receipt: Receipt = { schema: "native-bar-receipt-v1", recording_id: plan.recording_id!, day,
         sequence: state.maintenance.reduce((max, m) => m.pairs.reduce((n, p) => Math.max(n, p.sequence), max),
           state.pairs.reduce((n, p) => Math.max(n, p.receipt.sequence), 0)) + 1,
         plan_hash: hash, policy_hash: this.policyHash, payload_hash: evidenceHash(payload), recorded_at: recordedAt, partition_at: ended };
@@ -303,36 +333,53 @@ export class NativeBarHistory {
     const state = await this.load(true);
     const removal = state.maintenance.find((m) => m.pairs.some((p) => p.recording_id === recordingId));
     const pair = state.pairs.find((p) => p.receipt.recording_id === recordingId);
+    const logical = this.logicalFiles(state.files).length;
+    const coordination = state.files.filter((p) => dirname(p) === this.directory
+      && /^\.writer(?:\.lock|\.takeover|-(?:claim|ticket|retired)-.+)$/.test(basename(p))).length;
+    const quarantined = state.files.filter((p) => p.startsWith(join(this.directory, "quarantine") + sep)).length;
     return { status: removal ? state.incomplete.includes(removal) ? "maintenance_incomplete" : removal.kind === "prune" ? "pruned" : "quarantined"
       : pair ? "committed" : state.files.some((p) => this.artifact(p, "captures") && p.endsWith(`/${recordingId}.json`)) ? "pending" : "not_found",
-      receipt: pair?.receipt ?? null, clock: this.clockQuality(state),
-      store_status: state.missing ? "missing" : state.initializationIncomplete ? "initialization_incomplete" : "initialized",
+      receipt: pair?.receipt ?? null, clock: this.clockQuality(state), store_status: this.storeStatus(state, "initialized"),
+      side_files: { writer_coordination: coordination, clock_quarantine: quarantined, other: state.files.length - logical - coordination - quarantined,
+        handling: "preserved and counted against limits; includes live writers' files; no automatic cleanup" },
       storage_visibility_at_as_of: "not_proven" };
   }
   async history(input: Parameters<typeof projectNativeBarHistory>[1]) {
     const state = await this.load();
     const captures: AcceptedNativeCapture[] = state.pairs.map((p) => ({ ...p.receipt, capture: p.payload }));
-    const result = { ...projectNativeBarHistory(captures, input, state.maintenance.some((m) => m.kind === "prune")),
-      retention_coverage: { pruned_through_recorded_at: state.maintenance.filter((m) => m.kind === "prune")
-        .flatMap((m) => m.pairs.map((p) => p.recorded_at ?? null)).sort().at(-1) ?? null,
-        legacy_pruned_times_unknown: state.maintenance.some((m) => m.kind === "prune" && m.pairs.some((p) => !p.recorded_at)),
+    const prunes = state.maintenance.filter((m) => m.kind === "prune");
+    const prunedTimes = prunes.flatMap((m) => m.pairs.map((p) => p.recorded_at ?? null));
+    const legacyUnknown = prunedTimes.includes(null);
+    const prunedThrough = prunedTimes.filter((s): s is string => s !== null).sort().at(-1) ?? null;
+    const result = { ...projectNativeBarHistory(captures, input, prunes.length > 0, legacyUnknown ? null : prunedThrough),
+      retention_coverage: { pruned_through_recorded_at: prunedThrough, legacy_pruned_times_unknown: legacyUnknown,
         earliest_retained_recorded_at: state.pairs[0]?.receipt.recorded_at ?? null,
         continuous_market_coverage: false },
       clock: this.clockQuality(state), coverage_generation: state.generation,
       quarantined_captures: state.maintenance.filter((m) => m.kind === "clock_recovery").reduce((n, m) => n + m.pairs.length, 0),
-      store_status: state.missing ? "missing" : "existing" };
+      store_status: this.storeStatus(state, "existing") };
     if (Buffer.byteLength(canonical(result)) > 8 * 1024 ** 2) throw new Error("history_response_limit: narrow the query");
     return result;
   }
   private ref(pair: Pair) { return { recording_id: pair.receipt.recording_id, sequence: pair.receipt.sequence, day: pair.receipt.day,
     payload_hash: pair.receipt.payload_hash, receipt_hash: pair.receipt_hash, bytes: pair.bytes,
     recorded_at: pair.receipt.recorded_at, last_observed_at: pair.payload.series.map((s) => s.observed_at).sort().at(-1)! }; }
-  private async validateMaintenance(intent: Maintenance, resume: boolean) {
+  private async validateMaintenance(intent: Maintenance, resume: boolean, state: State) {
     if (intent.pairs.length > 1024 || new Set(intent.pairs.map((p) => p.recording_id)).size !== intent.pairs.length
       || new Set(intent.pairs.map((p) => p.sequence)).size !== intent.pairs.length) throw new Error("maintenance_evidence_invalid_scope");
+    if (resume) {
+      // The intent must name the exact store state it was approved against: the receipts still present plus its own,
+      // and the maintenance recorded before it. A planted or stale intent fails here before any timestamp is trusted.
+      const receipts = [...state.pairs.map((p) => ({ sequence: p.receipt.sequence, hash: p.receipt_hash })),
+        ...intent.pairs.map((r) => ({ sequence: r.sequence, hash: r.receipt_hash }))].sort((a, b) => a.sequence - b.sequence);
+      if (evidenceHash({ receipts: receipts.map((r) => r.hash), maintenance: state.maintenance.filter((m) => m.id !== intent.id) })
+        !== intent.generation) throw new Error("maintenance_evidence_changed: intent is not bound to this store state");
+    }
     const clock = Date.parse(this.clock()), approved = Date.parse(intent.created_at);
-    if (approved > clock) throw new Error("maintenance_eligibility_changed: future intent");
-    const cutoff = intent.kind === "prune" ? Math.min(clock, approved) - 90 * DAY : Math.max(clock, approved) + 60000;
+    // Prune uses the earlier of approval and now, so a future-stamped intent or a clock moved back never widens it.
+    // Clock recovery judges "ahead" against the approval itself: an approved, interrupted quarantine stays finishable
+    // after the corrected clock passes the ahead stamps, and a future approval time only narrows it.
+    const cutoff = intent.kind === "prune" ? Math.min(clock, approved) - 90 * DAY : approved + 60000;
     // Validate the entire batch before removing any file, including on a freshly approved resume.
     for (const ref of intent.pairs) {
       const paths = this.paths(ref);
@@ -371,9 +418,13 @@ export class NativeBarHistory {
       return kind === "prune" ? timestamp < cutoff : timestamp > cutoff;
     });
     const pairs = pending[0]?.pairs ?? (kind === "prune" ? eligible.slice(0, 1024) : eligible.slice(-1024)).map((p) => this.ref(p));
-    return { ...this.issue(kind, state, { pairs, ...(pending[0] ? { resume_id: pending[0].id } : {}) }),
-      execution_available: !!this.options.testOnly,
-      execution_blocker: this.options.testOnly ? null : "anchored_filesystem_operations_required: production maintenance is disabled",
+    const scope = { pairs, ...(pending[0] ? { resume_id: pending[0].id } : {}) };
+    // Without an executable backend there is nothing to approve: list the exact scope, but issue no plan.
+    const plan = this.maintenanceExecutable ? this.issue(kind, state, scope)
+      : { plan_id: null, plan_hash: null, kind, ...scope, directory: this.directory, store_status: this.storeStatus(state, "existing") };
+    return { ...plan,
+      execution_available: this.maintenanceExecutable,
+      execution_blocker: this.maintenanceExecutable ? null : "anchored_filesystem_operations_required: production maintenance is disabled; no plan issued",
       bytes_affected: pairs.reduce((n, p) => n + p.bytes, 0), captures_remaining: state.pairs.length - (pending.length ? 0 : pairs.length),
       additional_eligible_batches: Math.max(0, eligible.length - pairs.length),
       affected_observations: state.pairs.filter((p) => pairs.some((r) => r.recording_id === p.receipt.recording_id)).map((p) => ({
@@ -385,8 +436,8 @@ export class NativeBarHistory {
       clock: this.clockQuality(state) };
   }
   async maintain(id: string, hash: string, confirm: boolean, kind: "prune" | "clock_recovery") {
+    if (!this.maintenanceExecutable) throw new Error("anchored_filesystem_operations_required: production maintenance is disabled; no files changed");
     const plan = this.consume(id, hash, confirm, kind);
-    if (!this.options.testOnly) throw new Error("anchored_filesystem_operations_required: production maintenance is disabled; no files changed");
     const initial = await this.load(true);
     if (initial.missing || plan.pairs.length === 0) return { status: "nothing_to_do", affected: 0 };
     return this.locked(async () => {
@@ -397,7 +448,7 @@ export class NativeBarHistory {
         : { schema: "native-bar-maintenance-v1", id: randomUUID(), kind, created_at: this.clock(), pairs: plan.pairs, generation: state.generation };
       if (!intent) throw new Error("maintenance_intent_missing");
       if (intent.kind !== kind || canonical(intent.pairs) !== canonical(plan.pairs)) throw new Error("maintenance_evidence_changed");
-      await this.validateMaintenance(intent, !!plan.resume_id);
+      await this.validateMaintenance(intent, !!plan.resume_id, state);
       if (!plan.resume_id) {
         const cutoff = Date.parse(this.clock()) + (kind === "prune" ? -90 * DAY : 60000);
         for (const ref of plan.pairs) {

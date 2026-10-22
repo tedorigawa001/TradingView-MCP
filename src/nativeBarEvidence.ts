@@ -73,10 +73,14 @@ export type AcceptedNativeCapture = {
   recording_id: string; sequence: number; recorded_at: string; payload_hash: string; capture: NativeBarCapture;
 };
 
-/** Derive occurrences only from accepted observations; absent windows never imply deletion. */
+/**
+ * Derive occurrences only from accepted observations; absent windows never imply deletion. After a prune, an identity's
+ * origin is unknown unless its bar opens at/after `prunedThrough` (the latest pruned receipt time, null when unknown):
+ * every stored bar opens before its successor, observation and receipt, so such a bar was in no pruned capture.
+ */
 export function projectNativeBarHistory(captures: AcceptedNativeCapture[], input: {
   symbol: typeof NATIVE_BAR_SYMBOLS[number]; timeframe: "15" | "60"; as_of?: string; limit?: number;
-}, truncated: boolean) {
+}, truncated: boolean, prunedThrough: string | null = null) {
   z.strictObject({ symbol: z.enum(NATIVE_BAR_SYMBOLS), timeframe: z.enum(["15", "60"]),
     as_of: nativeBarTimestamp.optional(), limit: z.number().int().min(1).max(100).optional() }).parse(input);
   const asOf = input.as_of ? nativeBarTimestamp.parse(input.as_of) : null;
@@ -87,11 +91,12 @@ export function projectNativeBarHistory(captures: AcceptedNativeCapture[], input
       if (series.symbol !== input.symbol || series.timeframe !== input.timeframe || (asOf && series.observed_at > asOf)) continue;
       for (const bar of series.bars) {
         const key = canonical([series.source, series.symbol, series.timeframe, bar.bar_open_at, series.price_basis, series.series_context_id]);
+        const originUnknown = truncated && (prunedThrough === null || bar.bar_open_at < prunedThrough);
         let row = identities.get(key);
         if (!row) {
           row = { symbol: series.symbol, timeframe: series.timeframe, source: series.source, price_basis: series.price_basis,
             series_context_id: series.series_context_id, context: series.context, bar_open_at: bar.bar_open_at,
-            first_seen_at: series.observed_at, first_seen_scope: truncated ? "earliest_retained" : "local_observations_only", versions: [] };
+            first_seen_at: series.observed_at, first_seen_scope: originUnknown ? "earliest_retained" : "local_observations_only", versions: [] };
           identities.set(key, row);
         }
         const fields = ["open", "high", "low", "close", "volume"] as const;
@@ -99,9 +104,9 @@ export function projectNativeBarHistory(captures: AcceptedNativeCapture[], input
         const hash = evidenceHash(values), previous = row.versions.at(-1);
         if (!previous || previous.value_hash !== hash) {
           const changed = previous ? fields.filter((k) => previous.values[k] !== bar[k]) : [];
-          row.versions.push({ occurrence: truncated ? null : row.versions.length + 1,
+          row.versions.push({ occurrence: originUnknown ? null : row.versions.length + 1,
             retained_occurrence: row.versions.length + 1, value_hash: hash, values,
-            changed_fields: changed, change_kind: !previous ? truncated ? "retained_origin_unknown" : "initial"
+            changed_fields: changed, change_kind: !previous ? originUnknown ? "retained_origin_unknown" : "initial"
               : changed.every((k) => k === "volume") ? "volume_only" : "price_or_mixed",
             version_first_seen_at: series.observed_at, last_observed_at: series.observed_at,
             confirmed_by_next_bar_at: bar.confirmed_by_next_bar_at, recorded_at: batch.recorded_at,

@@ -7932,7 +7932,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     server.registerTool(prepareName, {
       description: (kind === "prune" ? "Read-only exact expired batch preview (older than 90 elapsed days); separate deletion approval required. No automatic cleanup or chart access."
         : "Read-only exact >1-minute clock-ahead batch preview; separate approval required for byte-preserving quarantine, never restamping or deleting. No chart access.")
-        + " Production execution is disabled pending anchored filesystem operations; preview reports the blocker.",
+        + " Production execution is disabled pending anchored filesystem operations; the preview lists the exact scope and blocker but issues no plan.",
       inputSchema: z.strictObject({}), annotations: { readOnlyHint: true },
     }, async () => {
       try { return jsonResult(await nativeBarHistory.prepareMaintenance(kind), true); } catch (e) { return errorResult(e); }

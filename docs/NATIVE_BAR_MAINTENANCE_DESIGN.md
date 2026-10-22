@@ -11,7 +11,7 @@ Separate abandoned-file quarantine from irreversible purge. Neither a filename, 
 | Decision | Approved design contract (integration not yet enabled) |
 |---|---|
 | Initial platform | macOS, qualified local APFS storage, with all required descriptor/ACL/exclusive-rename capabilities verified. Other platforms/filesystems refuse execution until their adapters pass the same tests. |
-| Destination | Existing approved native-bar root only; preserve the exact default/external-volume path allowlist. No alternate temporary root, trash service or fallback directory. External path approval alone does not qualify its filesystem. |
+| Destination | Existing approved native-bar root only; preserve the exact default path allowlist. External volumes stay refused until a local, ownership-honoring mount is verified. No alternate temporary root, trash service or fallback directory. External path approval alone does not qualify its filesystem. |
 | Committed retention | Prune eligibility remains strictly older than 90 elapsed days using observation/logical receipt age. No change to current eligibility or clock-ahead threshold. |
 | Abandoned quarantine | Exact fresh approval, inactive producer/cooperative writer exclusion and validated object identity. Age is displayed, not a substitute for these checks. |
 | Abandoned purge | Separate exact approval. Earliest candidate eligibility is strictly more than 90 elapsed days after a trustworthy quarantine timestamp, not an untrusted original mtime. User approved this design policy on 2026-10-23; it is not yet implemented or applied to any real file. Age alone never authorizes deletion. |
@@ -22,7 +22,7 @@ The separate quarantine period prevents a partially written file with no trustwo
 
 ## Existing Implementation And Integration
 
-`nativeBarHistory.ts` currently rejects production `maintain` before filesystem IO. Its pathname-based synthetic implementation must not become the production fallback. `nativeBarAccess.ts` publishes whole choosing/ticket/lock files and serializes cooperating writers, including dead-owner takeover. `fsDurability.ts` single-file staging names are `.<stem>-<tag>-<pid>-<random>.stage`; recognizing that shape does not establish provenance or inactivity.
+`nativeBarHistory.ts` currently rejects production `maintain` before filesystem IO. Its pathname-based synthetic implementation must not become the production fallback. `nativeBarAccess.ts` publishes whole choosing/ticket/lock files and serializes cooperating writers, including dead-owner takeover. Owner files carry boot-session and process-start digests, so a reused PID no longer keeps a dead owner alive; earlier-build owner files keep PID-only liveness. `fsDurability.ts` single-file staging names are `.<stem>-<tag>-<pid>-<random>.stage`; recognizing that shape does not establish provenance or inactivity.
 
 Introduce these narrowly scoped components after design agreement:
 
