@@ -1,0 +1,167 @@
+# 105-3 Native Bar First-Seen And Observed Revisions
+
+Status: design approved by the user, 2026-10-22, with the amendments below (series context fields, clock-ahead recovery, plan/process binding, external-volume roots). Implementation and synthetic temporary-directory tests may begin. Not approved for recording, maintenance, deletion or automation integration: each needs its own approval.
+
+This document proposes persistence for prospectively acquired native bars. It does not implement a store, register MCP tools, create data directories, record observations, delete evidence, resume Dot, or change scenario/notification conditions. Design approval, implementation approval and actual recording consent are separate decisions.
+
+## Proposed Decisions Requiring Approval
+
+| Topic | Proposed initial policy | Boundary |
+|---|---|---|
+| Location | `~/.tradingview-mcp/native-bar-history/v1/` | Dedicated local store, outside the repository, Codex automations and research journals. Do not create it during design or read-only previews. |
+| Scope | `PEPPERSTONE:MXNJPY` and `OANDA:XAUUSD`, native `15`/`60`, at most 40 confirmed bars per series per capture | Existing displayed panes only. Original 240-minute/daily panes, more symbols/timeframes and wider windows require a new scope approval. |
+| Retention | 90 elapsed days, based on capture/storage time, not bar-open time | This is an eligibility threshold for explicit maintenance, not an automatic or guaranteed maximum lifetime. Without deletion approval, expired batches remain. |
+| Capacity | 1 GiB for the entire dedicated store; 1 MiB per capture payload; explicit limits on batch/query sizes | Stop recording before exceeding limits. Do not delete, compress away versions, move to another path or lower evidence quality automatically. |
+| Recording consent | A single-use, short-lived preview plan plus `confirm=true` for each capture-and-record invocation | No standing permission, background collector or implicit recording in an existing read tool. |
+| Deletion consent | Separate preview and explicit confirmation of exact expired batches | Recording consent never authorizes deletion, repair, export or changing retention. |
+
+The current request authorizes drafting this proposal, not these future writes. Proposed numbers are storage/resource policy, not changes to trading thresholds, confirmation counts or notification rules. They must be approved before implementation treats them as operational defaults.
+
+## Existing Code And Reuse Boundaries
+
+- `cotFirstSeenHistory.ts` and `realYieldHistory.ts` resolve their own files below `~/.tradingview-mcp`. Their files and schemas must remain untouched.
+- `firstSeenStore.ts` provides append-only sequence/clock validation, owner-only JSONL and process/file locking. Its series model is calendar-date based and its serialized reads can create directories/lock files. It is not directly the new bar-store schema or a no-write preview implementation.
+- `fsDurability.ts` provides checked regular-file reads, exclusive creation, durable immutable publication and platform-specific permission handling. Reuse these primitives where their actual guarantees fit; they do not provide encryption, complete macOS ACL inspection or a new transaction/retention protocol automatically.
+- `get_closed_chart_snapshot` remains a non-persisting reader. `evaluate_fixed_scenario` remains stateless. Neither gains silent first-seen writes, new condition defaults or a persistence requirement.
+
+## Storage Layout And Privacy
+
+Proposed layout:
+
+```text
+~/.tradingview-mcp/native-bar-history/v1/
+  policy.json
+  captures/YYYY-MM-DD/<recording-id>.json
+  receipts/YYYY-MM-DD/<recording-id>.json
+  maintenance/<maintenance-id>.json
+```
+
+Partitions use the recorder's UTC storage date; UI summaries use JST. `policy.json` describes the approved storage configuration and schema, not a durable grant to record. A future startup-only `TRADINGVIEW_MCP_NATIVE_BAR_HISTORY_DIR` may select another approved absolute root. MCP requests must not supply arbitrary file paths; changing the resolved root invalidates outstanding plans and requires new approval.
+
+Validate the existing root and path components without creating them during preview. Refuse symlinks/reparse points, non-regular files, foreign ownership, unsafe writable ancestors and unexpected destinations. Reject a root within a Git checkout, automation log, research journal, temporary directory or protected credential directory. Do not resolve a link and silently accept its destination. Create only new owned subdirectories after confirmation; use 0700 directories and 0600 files where POSIX permissions are enforceable. Never chmod or repair existing unrelated paths to make validation pass. Other platforms need an equivalent verified private-access contract or must refuse writes.
+
+Local filesystem permissions are not encryption. OS backups, cloud sync and administrator access are outside this store's guarantees; an alternate location must be reviewed for those concerns. No network upload, Gmail delivery, account data, Pine source, strategy names, screenshots, cookies or credentials are stored. Persist bounded OHLCV and necessary provenance, not the complete chart context, Study names/IDs, quotes or the entire snapshot response. Restoration can be recorded as an attestation/hash without archiving private study metadata.
+
+An alternate root on an external volume inherits its ancestors' permissions. For example, a `/Volumes/<name>` root that is group-writable (often `0775`, group `staff` on macOS) is an unsafe writable ancestor and is refused, as split exports refuse it since 0.1.44; volumes mounted with ownership ignored are not detected. Use the internal-disk default (the 90-day estimate is about 70-175 MB), or have the owner tighten the volume root (`chmod g-w,o-w`) before approving that root. The store never changes those permissions itself.
+
+## Observation Identity And Clocks
+
+Separate these concepts:
+
+| Field | Meaning |
+|---|---|
+| `bar_open_at` | Native bar's opening timestamp. Not availability. |
+| `confirmed_by_next_bar_at` | Actual successor's opening timestamp supplied by native evidence. Not exchange publication time. |
+| `capture_as_of` | Cutoff used for native-bar selection. Acquisition is not simultaneous across series. |
+| `observed_at` | Server-generated time immediately after reading that series. A historical bar loaded today is first observed today. |
+| `recorded_at` | Server-generated logical receipt time, after payload fsync/readback and before publishing its receipt. Not the exact moment a client or another process could query it. |
+| `acknowledged_at` | Response-only timestamp after receipt publication/sync/readback. It is not retroactively written into immutable evidence. |
+| `first_seen_at` | Earliest retained, accepted local observation of a bar identity, qualified by retention coverage. |
+| `version_first_seen_at` | First local observation of this occurrence of a changed value. An `A→B→A` return starts a new occurrence. |
+
+Canonical UTC timestamps are stored. Clock rollback, future-stamped evidence or conflicting observation order must not be fixed by replacing times with bar-open, successor time or a guessed timestamp. Refuse the new capture as historical evidence and expose the clock/ordering issue. Use monotonic elapsed time for timeouts and sequence/generation numbers for ordering. Separate processes recording into one root must share one writer lock.
+
+Identity is at least `(source, exact exchange-qualified symbol, native timeframe, bar_open_at, price_basis, series_context_id)`. Native chart type, session/adjustment metadata and capture contract belong to the context when actually available. Never infer missing context from a symbol. Unknown price basis remains unknown; a known context or basis change starts another identity, not a price correction. If source context cannot be verified across capture sessions, start a new context epoch and report continuity as unverified rather than joining it silently.
+
+`series_context_id` is the SHA-256 of a canonical, key-sorted record of fields actually read from TradingView at capture time, never inferred from the symbol:
+
+| Field | Source | Missing value |
+|---|---|---|
+| `symbol`, `full_name`, `exchange`, `type`, `currency` | the pane's symbol info | refuse capture (identity unknown) |
+| `timezone`, `session`, `subsession_id` | the session metadata that 104-2 already binds (`tradingview_symbol_info`) | refuse capture |
+| `pricescale`, `minmov`, `minmove2`, `fractional` | the pane's symbol info | refuse capture (a tick-size change is a context change, not a price revision) |
+| `chart_style` | the pane's chart style | refuse unless standard candles, bars or hollow candles; Heikin Ashi, Renko, line break, Kagi, point-and-figure, range and other synthetic styles are never recorded |
+| `adjustment` (dividends, back-adjusted continuous futures, extended hours) | the pane's settings, when the instrument type has them | record `not_applicable` only for instrument types that cannot have them (FX, CFD/commodity spot); otherwise refuse when unreadable |
+| `capture_contract` | this design's version and the bar-selection rule (successor-confirmed native bars) | always present |
+
+Holiday and correction metadata are not part of the context: they change as the provider publishes them and would otherwise split every series at each update. They are recorded per capture as provenance instead. Two captures share a context only when every field is equal; a single difference starts a new context epoch, reported as such, and values across epochs are never compared as revisions. A capture whose mandatory fields cannot be read is refused, not recorded under an unverified epoch, so that "continuity unverified" never becomes the normal case and observed revisions remain detectable. For the initial MXNJPY and XAUUSD panes, the symbol, session and tick fields were read live on 2026-10-22 (104-2's session metadata and the execution snapshot's instrument fields: `forex`/JPY/`Pepperstone`/pricescale 100000 and `commodity`/USD/`OANDA`/pricescale 1000, both `minmov` 1, `minmove2` 10, not fractional). No current tool reads the chart style or adjustment settings, so the implementation must add and test that read before recording is enabled; a symbol that does not expose every mandatory field is out of scope until reviewed.
+
+The first version may therefore have less continuous history than a provider's full history. This is intentional. A value change under an unchanged verified context is an **observed revision**, not proof that the exchange or provider issued a correction. Changed volume is also a changed OHLCV payload; expose which fields changed and do not call volume-only changes a price breakout.
+
+## Version Semantics And Data Minimization
+
+Each accepted capture stores one bounded payload of complete observed bars and a receipt binding its content hash, policy hash, source contexts and recording id. Repeated overlapping windows may repeat OHLCV inside capture files. This deliberate initial tradeoff makes each capture self-contained and avoids retention dependencies on deduplicated payloads elsewhere. It is not a new revision each time an unchanged value is reread.
+
+Derive value versions from successive accepted observations of each identity:
+
+- First observation: initial locally observed version; no claim about earlier market versions.
+- Same OHLCV again: another observation of the same value occurrence, with its own receipt; preserve the first observation and extend the last-observed evidence. Do not invent intervening continuity.
+- Changed OHLCV: append another observed occurrence, retaining old and new values, hashes, observation times and changed fields. Never overwrite the earlier capture.
+- `A→B→A`: three occurrences. Content hash A may recur, but its earlier first-seen time must not make the later return appear known before it was seen.
+- Bar absent from a later bounded window: not a provider deletion or revision. It may simply have rolled out of the window. No deletion observation is fabricated.
+- Same recording id retried: return the same committed receipt, not a fresh observation timestamp or a second capture.
+
+The approved default 4-series × 40-bar capture contains at most 160 bars. A rough assumption of 200-500 bytes per bar at hourly capture gives approximately 70-175 MB over 90 days, before receipts/metadata. This is a capacity estimate, not a measured size or permission to run hourly. More frequent calls, richer context and temporary publication files count toward the 1 GiB limit. Initial implementation must measure actual sizes and reserve room for receipts/maintenance before accepting a write.
+
+## Explicit Recording Workflow
+
+Proposed interfaces, not currently registered:
+
+1. `prepare_native_bar_recording`: read-only preview of the resolved destination, existing policy, exact symbol/timeframe allowlist, caller-declared expected target bindings, proposed bounded window, privacy exclusions, byte/quota limits and retention/deletion policy. The bindings are explicitly unverified until execution; preview does not contact CDP or acquire a chart/store lock. Missing store is reported as missing; no mkdir, policy write, log append or lock-file creation. A plan id/hash, single-use recording id and expiry (proposed 10 minutes) bind that request. Preview does not switch timeframes or acquire OHLC for storage.
+2. `record_native_bar_snapshot`: requires the live plan id/hash and explicit `confirm=true`, then freshly acquires the approved displayed native series itself. It does not accept caller-supplied OHLC, `first_seen_at` or an old snapshot as authoritative prospective evidence. Closed/changed panes are refused; symbols are never reopened or changed. Only already-approved temporary timeframe changes are used, with the 105-1 shared chart lock, Replay/binding guards and full restoration verification.
+3. `get_native_bar_recording_status`: read-only lookup of an existing receipt by the server-issued id. A missing, pending or expired id must not silently start another capture.
+4. `get_native_bar_history` / `get_native_bar_history_as_of`: bounded read-only queries of committed evidence. No network, chart changes, history loading, persistence on read or scheduling.
+
+`confirm=true` and plan hashes are technical safeguards, not proof that a human approved. The calling host must enforce the user's explicit write approval; an approval-reference string or an agent-generated boolean is not authentication. This chat's design request, the 105-1 timeframe permission, previous analysis-log permission and Gmail approval do not authorize this store. Preview/approval must show that a first confirmed write may create the dedicated directory and `policy.json` even if later capture fails. Such a failure must distinguish initialized metadata from successfully recorded bars.
+
+Plans live only in the MCP process, expire and are consumed on a confirmed attempt; restart, policy/root change or scope drift invalidates them. Durable `policy.json` is configuration only and does not reactivate consent after restart. A timeout with unknown outcome is resolved through receipt status using the original recording id; no blind recapture/retry with a new id. A retry may acknowledge an existing matching receipt, but resuming an incomplete write needs a fresh recovery preview/approval. A policy hash covers path, scope, limits, retention, exclusions and schema, not trading conditions.
+
+A plan is therefore bound to the MCP server process that issued it. Hosts that start a separate server per conversation or thread (Codex does, and one host may run several) cannot preview in one process and record in another: the record call fails closed with `plan_not_found`, and the user previews again in the same session. This is intended; plans are never shared through the store, a file or an environment variable, because that would turn a preview into a durable grant.
+
+Initial consent is per invocation. Any future bounded-session or scheduled recording grant requires separate user approval of its scope, expiry and revocation; it is not part of this design's default and is not implemented by editing Dot's prompt or job settings.
+
+## Transactions, Concurrency And Failure
+
+After approval, take the store writer lock before taking the chart-operation lock. All future combined writers must use that order; never add a chart-lock→store-lock path. On store-lock contention, do not operate charts. After acquisition and restoration, release the chart lock before disk publication, while retaining the store writer lock. This serializes captures for one root without holding a chart lock through disk IO. Use bounded waits and never reclaim a live owner's lock blindly.
+
+For the first version, all approved series must be acquired and restored successfully before any bar payload is published. Empty/missing series or acquisition errors abort the entire capture rather than silently shrinking its approved scope. A shorter but valid loaded window can be recorded with its actual count and explicit history shortage, not filled to 40. Insufficient SMA/RSI history alone is irrelevant: these indicator values are not persisted. OHLCV values must be finite and internally valid; an unavailable volume remains null/unknown, never zero. A volume availability change is distinguishable from a numeric volume correction.
+
+Publish a new immutable capture payload, fsync and read/hash it back, then publish a receipt referencing it with its logical `recorded_at`. Only a valid durable receipt plus matching payload is committed history. Response acknowledgement follows receipt sync/readback. Existing different content under the same id is a conflict, not an overwrite. Readers ignore unreceipted payloads and reject malformed receipts/hash mismatches; a receipt naming corrupt/missing evidence is an error, not a zero-row result. An already-read payload selected by an immutable receipt remains the reader's evidence even if maintenance proceeds afterward; a missing file during selection requires a generation reread or a clear retry, not partial success.
+
+Reuse immutable publication/file-safety primitives, not a claim that multiple filenames become atomically visible together. Partial publication leaves an incomplete capture, distinguishable via status. No startup auto-repair, deletion of unfamiliar files, backup fallback or migration from old journals. Replay, manual drift, unverified restoration or invalid native evidence prevents bar persistence. Reports keep collection, restoration and persistence outcomes separate. Quote readiness never establishes bar availability or changes recording scope.
+
+## Historical Queries And Their Limits
+
+An as-of observation query chooses the last accepted occurrence actually observed at/before T, from captures whose logical `recorded_at` is also at/before T. Later revisions never replace earlier values in that query. Return original clocks, the selected receipt/hash, context and retention coverage. The result is the **last locally observed value**, not proof of the market's value at every instant between observations.
+
+This establishes a conservative local observation/recording basis, not exact historical client/query visibility: receipt timestamps precede final receipt publication, and acknowledgement is only returned after sync. Expose `storage_visibility_at_as_of: not_proven`; never label the logical receipt time an exchange release, first worldwide availability, authenticated clock or guaranteed query-readiness timestamp. If a future use requires proven client-side availability, it needs separate externally acknowledged first-receipt evidence, not a reinterpretation of this store.
+
+No imports from old tmp reports, review-log rows, caller JSON, current historical chart values or earlier bar opens may be backdated into prospective first-seen history. A separately approved offline import, if ever added, must be isolated as imported/unverified and excluded from these prospective as-of results. No carried-forward bars, invented missing sessions or post-hoc scenario wins. Version comparison and historical selection must not change 105-2's rules or notification decisions.
+
+## Retention And Explicit Maintenance
+
+Use the maximum relevant observation/logical receipt timestamp of a committed batch to determine its age. A newly captured old bar is retained as a new observation, not expired because its bar-open date is old. The proposed 90 days means 90 × 24 elapsed hours, not calendar-date labels or 90 sessions.
+
+`prepare_native_bar_history_prune` should list exact owned expired payload/receipt pairs, ids/hashes, bytes to remove, remaining coverage and retention effects. `prune_native_bar_history` needs a separate fresh plan/hash and `confirm=true`, revalidation under the store writer lock and a durable maintenance intent before removal. It may delete only planned expired files of this store. Failures remain explicit and recoverable by a separately approved action; no general filesystem cleanup. No timer, launch agent, cron job or Dot change is created for pruning.
+
+Maintenance advances a retention coverage floor and makes pruned recording ids return `pruned`, not permission to recreate their earlier observations. A pending or unknown expired id cannot cause recapture. Minimum policy/coverage metadata may remain until the store is explicitly removed; it must not retain pruned OHLCV or pretend to preserve deleted proof. Maintenance details themselves follow the same retention eligibility rule. Deleting the entire store is a different approval.
+
+After pruning, report `history_truncated` and distinguish earliest retained first-seen evidence from an original global first-seen time. A version's earlier observation or predecessor may no longer be provable; expose unavailable/truncated rather than manufacture a chain or a synthetic boundary version. Do not fill in a cutoff value using a later capture simply to make coverage appear complete. Readers and pruning must be tested together, including interruption between deleting receipts and payloads; the maintenance intent/coverage generation must make partial removal visible.
+
+Without approved maintenance, expiry alone does not delete anything; the 90-day proposal is not a maximum-lifetime promise. At quota, recording stops and asks for a user decision. Retention changes need a new policy preview/approval and invalidate outstanding plans; shortening retention is not itself deletion consent. Neither long retention nor more stored samples is evidence of trading skill or improved forecasts.
+
+### Clock-ahead recovery
+
+Refusing out-of-order clocks means a capture stamped while the system clock ran ahead blocks every later capture until the clock reaches its stamp, as happened to the first-seen logs before `tradingview-mcp-repair-first-seen` (BACKLOG 103-11). The first version includes the same recovery from the start, under the same explicit-maintenance rules:
+
+- Status and history queries report `clock_ahead` with the stamped time and its distance from the current clock, and the refusal of a new capture names the recovery.
+- `prepare_native_bar_clock_recovery` lists, read-only and without locks, the committed captures whose `recorded_at` or `observed_at` is more than one minute ahead of the current clock (always the latest ones), their ids, hashes, bytes and the bars whose first-seen or version history they establish.
+- `recover_native_bar_clock_ahead` needs that fresh plan/hash and `confirm=true`. Under the store writer lock it moves exactly those receipt/payload pairs, byte for byte, to an owner-only `quarantine/<maintenance-id>/` area with a durable maintenance intent, so committed history ends before them. Their observations are not re-stamped, re-dated or merged; quarantined evidence is excluded from as-of and first-seen queries and is only removed by a separately approved deletion.
+- After recovery the next capture is accepted. Bars first seen only in quarantined captures become first seen again at their next real observation, never at the quarantined time.
+
+## Acceptance Tests Before Recording Is Enabled
+
+- Preview/read/status on a missing root creates no directory, file, lock or policy; read-only existing queries never append observations.
+- Missing/expired/replayed plan, wrong hash, changed root/scope or unapproved initialization refuses a new capture/write. Restart never restores consent.
+- Symlinked ancestor/destination, FIFO, foreign owner, unsafe permissions/ACL limitations, Git/temp/protected root, insufficient space and quota overrun fail closed without path fallback.
+- Correct successor proof stays distinct from actual read/receipt times; backdated caller input and imported old snapshots cannot become prospective evidence.
+- Initial A, repeated A, B, return A, volume-only change and context/basis changes have distinct, reproducible semantics. Reusing an id never advances first-seen/last-observed time.
+- As-of before first observation has no evidence; at/after observations selects the right retained occurrence, never a later revision. Incomplete/retained coverage is explicit.
+- Clock rollback, concurrent writers, malformed JSON, altered hash, receipt without payload, lost acknowledgement, fsync/publication failure and partial initialization never claim successful recording falsely.
+- Replay/manual drift/restore failure persists no bars. Source contexts remain exact; unsupported context continuity is not guessed.
+- Retention uses local observation/storage age; pruning is exact-plan-only, interruption-safe, never changes non-owned files and never rewrites first-seen evidence after deletion.
+- Existing 105-1/105-2 tools retain their non-persisting contracts; automation configuration bytes, Dot PAUSED, condition hash and notification behavior remain unchanged.
+
+## Next Decision
+
+Review the proposed root, 90-day explicit-maintenance policy, 1 GiB cap, per-invocation recording approval, the concrete series context fields and the clock-ahead recovery. Only after those choices are approved should implementation and synthetic temporary-directory tests begin. Real recording, maintenance and any automation integration remain separately gated.
