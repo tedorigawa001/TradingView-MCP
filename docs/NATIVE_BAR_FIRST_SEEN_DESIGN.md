@@ -1,8 +1,32 @@
 # 105-3 Native Bar First-Seen And Observed Revisions
 
-Status: design approved by the user, 2026-10-22, with the amendments below (series context fields, clock-ahead recovery, plan/process binding, external-volume roots). Implementation and synthetic temporary-directory tests may begin. Not approved for recording, maintenance, deletion or automation integration: each needs its own approval.
+Status: design, core implementation, gated MCP registration and synthetic temporary-directory tests approved by the user, 2026-10-22, with the amendments below (series context fields, clock-ahead recovery, plan/process binding, external-volume roots). Production recording, maintenance, deletion and automation integration are not approved: each needs its own approval.
 
-This document proposes persistence for prospectively acquired native bars. It does not implement a store, register MCP tools, create data directories, record observations, delete evidence, resume Dot, or change scenario/notification conditions. Design approval, implementation approval and actual recording consent are separate decisions.
+This document specifies persistence for prospectively acquired native bars. The core library and the nine gated MCP tools are implemented under the approvals above. Registration approval is not permission to execute persistence on real data. The separately approved non-persisting live comparison below reads real charts without creating a production directory or recording observations. Production persistence/maintenance, Dot integration and scenario/notification changes are not authorized by these development approvals.
+
+## Implementation Boundary (2026-10-22)
+
+- `nativeBarEvidence.ts`: strict bounded schemas, canonical context/value hashes and retained first-seen/occurrence projection. A repeated value extends an observation; A/B/A starts three occurrences. As-of requires both observation and logical receipt timestamps.
+- `nativeBarHistory.ts`: constructor without IO, read-only previews/status/history, process-local expiring single-use plans, private immutable payload/receipt publication, writer serialization, separately planned exact pruning and clock-ahead quarantine. A separate instance belongs to each server by default; grants are not shared through disk or environment.
+- `nativeBarCapture.ts`: fresh native reads through the existing 105-1 layout/Replay/restoration guards, context reads around each native OHLC read and a final restored-pane context check. Indicators, original-timeframe bars, Study IDs and quotes are not persisted.
+- `TradingView.getNativeBarSeriesContext`: read-only adapter for actual symbol info, style properties and explicit provider spot/CFD classification. Numeric styles 0/1/9 are accepted only after validation. Missing metadata, unknown applicability or synthetic styles refuse recording. VM tests cover supported/refused cases; the non-persisting live comparison also verified the two current standard-candle panes and their required metadata. No production storage call was made.
+- `server.ts` registers the nine tools below (132 tools total) only after the user's separate registration approval. Strict MCP schemas reject arbitrary paths, caller OHLC/timestamps, wider recording scope and missing/false confirmation. The recording handler takes the store writer lock before the shared chart lock and releases chart access after restoration, before publication. It rechecks the process-local monotonic expiry after the chart queue/lock wait, before any native read; waiting never extends consent. Read/preview/status/maintenance handlers never acquire a chart lock. Existing result/error formatting and credential redaction are reused; only the new native-history tools opt into compact JSON, so indentation does not inflate bounded history responses. `index.ts`, 105-1/105-2 contracts, automation settings and notification logic are unchanged. No production execution or running-server restart follows from registration.
+
+Initial resource limits are explicit in policy hashes: at most 4,096 committed captures, 256 MiB of capture evidence per scan, 16 MiB of maintenance intent metadata, 1,024 pairs per maintenance plan, 100 returned occurrences per identity and 8 MiB per response. These bounds fail closed or explicitly disclose omitted older occurrences; they never delete automatically. Maintenance previews disclose additional eligible batches beyond the exact selected batch. An exhausted capture count requires an explicit maintenance decision before another capture, not an unreadable extra committed batch. Publication also checks the projected readable evidence budget (including a 16 KiB receipt reserve) and projected maintenance intent bytes before writing either. Reaching a reader limit must not make the store unreadable by committing one extra batch or intent.
+
+Quarantine uses an exclusive hard link, directory sync, readback and source unlink on the same filesystem. It preserves bytes without replacing an existing destination. An interruption with both links present remains blocked until a fresh, matching recovery approval. Clock-ahead stamps of at most one minute still block new recordings until the clock catches up, but do not qualify for the more-than-one-minute quarantine operation. Neither rule restamps evidence.
+
+Synthetic tests use constructor-only temporary-root/failure/clock seams; neither MCP requests nor environment variables expose those bypasses. Only dedicated temporary fixtures are written or removed. Windows storage is deliberately refused until equivalent private-access verification is implemented; its explicit-refusal test runs on Windows, while POSIX filesystem tests skip there. Normal directory permissions are not a claim of complete ACL or same-user race protection.
+
+## Non-Persisting Live Comparison And Review (2026-10-22)
+
+At 19:48:03-19:48:05 JST, the final build captured the displayed PEPPERSTONE:MXNJPY and OANDA:XAUUSD native 15/60-minute series, 40 confirmed bars per series, in forward and reverse pane order. A shared chart-operation lock covered the comparison; original 240-minute/daily timeframes, all Study IDs, symbols and selected pane were reread and matched after both orders. Replay remained inactive. The adapter's required context fields were readable, including standard candle style and actual FX/CFD instrument classification.
+
+An independent in-memory loop over the same raw native reads matched OHLCV, actual successor-open proof, bounded selection and history shortage. Independent canonical hashing matched context IDs. In-memory hypothetical receipts exercised the projection and both observation/logical-receipt as-of gates. These were explicitly hypothetical receipts, not accepted or durable first-seen evidence. No live-derived observations or projection were written to a report, store or journal, and no record/prune/recovery store API was invoked. Only aggregate pass/count/restoration results were printed. The production root remained absent; a final normal-MCP context/Replay reread also matched the initial state.
+
+Self-review added five synthetic regression tests: refuse projected capture/maintenance growth before exceeding the reader's byte limits; pair unchanged values with the latest receipt's successor proof while preserving earlier as-of evidence; reject invalid UTF-8 bytes that would decode to the same replacement character; and reject extended-year timestamps incompatible with four-digit receipt partitions/lexical ordering. Canonical reads now compare UTF-8 bytes, not lossy decoded strings. UTC timestamps are nonnegative, canonical four-digit-year instants. No trading/scenario/notification rules or default retention/capacity values changed.
+
+Final validation: 1,869 Node tests passed, zero failed, two skipped (one existing privileged-owner test and the Windows-only refusal test on POSIX); Bookmap's five Java classes and two Node tests passed. The production storage write/maintenance path remains deliberately untested with real data and needs its own approval. Dot remained PAUSED, and both the complete automation-file hash and condition-prefix hash were unchanged. This is a self-review, not a claim of an independent reviewer or of production persistence success.
 
 ## Proposed Decisions Requiring Approval
 
@@ -15,7 +39,7 @@ This document proposes persistence for prospectively acquired native bars. It do
 | Recording consent | A single-use, short-lived preview plan plus `confirm=true` for each capture-and-record invocation | No standing permission, background collector or implicit recording in an existing read tool. |
 | Deletion consent | Separate preview and explicit confirmation of exact expired batches | Recording consent never authorizes deletion, repair, export or changing retention. |
 
-The current request authorizes drafting this proposal, not these future writes. Proposed numbers are storage/resource policy, not changes to trading thresholds, confirmation counts or notification rules. They must be approved before implementation treats them as operational defaults.
+The user approved these choices for implementation and synthetic testing. They are storage/resource policy, not changes to trading thresholds, confirmation counts or notification rules. Actual production recording and maintenance remain separately gated.
 
 ## Existing Code And Reuse Boundaries
 
@@ -95,7 +119,7 @@ The approved default 4-series × 40-bar capture contains at most 160 bars. A rou
 
 ## Explicit Recording Workflow
 
-Proposed interfaces, not currently registered:
+Registered gated interfaces (production execution still requires separate approval):
 
 1. `prepare_native_bar_recording`: read-only preview of the resolved destination, existing policy, exact symbol/timeframe allowlist, caller-declared expected target bindings, proposed bounded window, privacy exclusions, byte/quota limits and retention/deletion policy. The bindings are explicitly unverified until execution; preview does not contact CDP or acquire a chart/store lock. Missing store is reported as missing; no mkdir, policy write, log append or lock-file creation. A plan id/hash, single-use recording id and expiry (proposed 10 minutes) bind that request. Preview does not switch timeframes or acquire OHLC for storage.
 2. `record_native_bar_snapshot`: requires the live plan id/hash and explicit `confirm=true`, then freshly acquires the approved displayed native series itself. It does not accept caller-supplied OHLC, `first_seen_at` or an old snapshot as authoritative prospective evidence. Closed/changed panes are refused; symbols are never reopened or changed. Only already-approved temporary timeframe changes are used, with the 105-1 shared chart lock, Replay/binding guards and full restoration verification.
@@ -164,4 +188,4 @@ Refusing out-of-order clocks means a capture stamped while the system clock ran 
 
 ## Next Decision
 
-Review the proposed root, 90-day explicit-maintenance policy, 1 GiB cap, per-invocation recording approval, the concrete series context fields and the clock-ahead recovery. Only after those choices are approved should implementation and synthetic temporary-directory tests begin. Real recording, maintenance and any automation integration remain separately gated.
+Review the implementation and synthetic MCP results before committing or deploying. Registration itself does not record or delete anything. Real read-only adapter comparison, any production recording, exact maintenance and automation integration are distinct approvals; none follows automatically from this implementation or registration approval.

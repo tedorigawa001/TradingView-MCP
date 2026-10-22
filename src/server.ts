@@ -55,6 +55,9 @@ import { buildTradeDecisionContext } from "./tradeDecisionContext.js";
 import { buildClosedMtfSummary, CLOSED_MTF_TIMEFRAMES } from "./closedMtfSummary.js";
 import { buildClosedChartSnapshot } from "./closedChartSnapshot.js";
 import { evaluateFixedScenario, fixedScenarioInputSchema } from "./fixedScenario.js";
+import { NativeBarHistory } from "./nativeBarHistory.js";
+import { captureNativeBarEvidence } from "./nativeBarCapture.js";
+import { nativeBarTargetsSchema, nativeBarId, nativeBarHash, nativeBarTimestamp, NATIVE_BAR_SYMBOLS } from "./nativeBarEvidence.js";
 import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
 import { buildMovingAverageContext } from "./movingAverageContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
@@ -215,7 +218,8 @@ export interface ServerDeps {
     | "getKeyLevels"
     | "setSymbol"
     | "setResolution"
-  >;
+  > & Partial<Pick<TradingView, "getNativeBarSeriesContext">>;
+  nativeBarHistory?: NativeBarHistory;
   scanner: Pick<Scanner, "getQuotes" | "scanMarket" | "getMtfOverview">;
   calendar: Pick<EconomicCalendar, "getEvents">;
   cot: Pick<CotClient, "getLatest" | "getHistory">;
@@ -360,8 +364,8 @@ type ToolResult = {
   structuredContent?: Record<string, unknown>;
 };
 
-function jsonResult(value: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+function jsonResult(value: unknown, compact = false): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, compact ? undefined : 2) }] };
 }
 
 function structuredJsonResult(value: Record<string, unknown>): ToolResult {
@@ -435,7 +439,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -7869,6 +7873,77 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       } catch (err) { return errorResult(err); }
     }),
   );
+
+  const nativePlanInput = z.strictObject({ plan_id: nativeBarId, plan_hash: nativeBarHash, confirm: z.literal(true) });
+  const nativeQueryInput = { symbol: z.enum(NATIVE_BAR_SYMBOLS), timeframe: z.enum(["15", "60"]),
+    limit: z.number().int().min(1).max(100).optional() };
+  server.registerTool("prepare_native_bar_recording", {
+    description: "Preview a process-local, single-use 10-minute recording plan. No chart access, lock or file/directory creation. " +
+      "Only displayed PEPPERSTONE:MXNJPY/OANDA:XAUUSD, native 15/60, at most 40 confirmed bars each. " +
+      "Explicit per-invocation human approval is separate from confirm/hash; policy is not consent. No automatic collection or deletion.",
+    inputSchema: z.strictObject({ targets: nativeBarTargetsSchema }), annotations: { readOnlyHint: true },
+  }, async ({ targets }) => {
+    try { return jsonResult(await nativeBarHistory.prepareRecording(targets), true); } catch (e) { return errorResult(e); }
+  });
+  server.registerTool("record_native_bar_snapshot", {
+    description: "Only after separate explicit human approval, consume this process's live recording plan and capture fresh native bars. " +
+      "Store lock precedes shared chart lock; complete layout/Study ID/timeframe/selection restoration precedes immutable persistence. " +
+      "No caller OHLC, imports, backdating, quotes, orders, journals, notification decisions or automation changes. " +
+      "A first attempt may initialize metadata even if capture fails. On uncertain outcome query the original recording id; never blindly recapture.",
+    inputSchema: nativePlanInput, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ plan_id, plan_hash, confirm }) => {
+    try {
+      return jsonResult(await nativeBarHistory.record(plan_id, plan_hash, confirm, (targets, assertPlanActive) => chartOperations.run(async () => {
+        // Chart-queue/lock waits must not extend a plan's monotonic lifetime.
+        assertPlanActive();
+        if (!tv.getNativeBarSeriesContext) throw new Error("native context adapter unavailable");
+        return captureNativeBarEvidence({ getChartContext: () => tv.getChartContext(), getReplayStatus: () => tv.getReplayStatus(),
+          setResolution: (tf, index) => tv.setResolution(tf, index), getOhlcv: (n, index) => tv.getOhlcv(n, index),
+          getNativeBarSeriesContext: (index) => tv.getNativeBarSeriesContext!(index) }, targets);
+      })), true);
+    } catch (e) { return errorResult(e); }
+  });
+  server.registerTool("get_native_bar_recording_status", {
+    description: "Read-only original recording-id lookup: committed, pending, pruned, quarantined, maintenance_incomplete or not_found. " +
+      "Never recaptures, initializes storage, acquires a chart lock or changes timestamps.",
+    inputSchema: z.strictObject({ recording_id: nativeBarId }), annotations: { readOnlyHint: true },
+  }, async ({ recording_id }) => {
+    try { return jsonResult(await nativeBarHistory.status(recording_id), true); } catch (e) { return errorResult(e); }
+  });
+  server.registerTool("get_native_bar_history", {
+    description: "Read bounded committed local native-bar first-seen and observed revision occurrences. No CDP, locks, writes or carry-forward market truth. " +
+      "Context epochs remain separate; retention and omitted older occurrences are explicit. Not a scenario or notification decision.",
+    inputSchema: z.strictObject(nativeQueryInput), annotations: { readOnlyHint: true },
+  }, async (input) => {
+    try { return jsonResult(await nativeBarHistory.history(input), true); } catch (e) { return errorResult(e); }
+  });
+  server.registerTool("get_native_bar_history_as_of", {
+    description: "Read last locally observed occurrences with both observed_at AND logical recorded_at at/before as_of. " +
+      "Exact historical query visibility is not proven. No later revision backfill, chart access, writes or inferred availability.",
+    inputSchema: z.strictObject({ ...nativeQueryInput, as_of: nativeBarTimestamp }), annotations: { readOnlyHint: true },
+  }, async (input) => {
+    try { return jsonResult(await nativeBarHistory.history(input), true); } catch (e) { return errorResult(e); }
+  });
+  for (const [prepareName, executeName, kind] of [
+    ["prepare_native_bar_history_prune", "prune_native_bar_history", "prune"],
+    ["prepare_native_bar_clock_recovery", "recover_native_bar_clock_ahead", "clock_recovery"],
+  ] as const) {
+    server.registerTool(prepareName, {
+      description: kind === "prune" ? "Read-only exact expired batch preview (older than 90 elapsed days); separate deletion approval required. No automatic cleanup or chart access."
+        : "Read-only exact >1-minute clock-ahead batch preview; separate approval required for byte-preserving quarantine, never restamping or deleting. No chart access.",
+      inputSchema: z.strictObject({}), annotations: { readOnlyHint: true },
+    }, async () => {
+      try { return jsonResult(await nativeBarHistory.prepareMaintenance(kind), true); } catch (e) { return errorResult(e); }
+    });
+    server.registerTool(executeName, {
+      description: "Only after separate human approval, consume this process's exact live maintenance plan. Revalidate under writer lock, publish durable intent, " +
+        (kind === "prune" ? "delete only listed owned expired receipt/payload pairs. " : "quarantine only listed owned clock-ahead pairs without overwriting or restamping. ") +
+        "Interrupted maintenance blocks history until a separately previewed and approved recovery. Never changes charts, scenario/notification rules or Dot; recording consent does not authorize maintenance.",
+      inputSchema: nativePlanInput, annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    }, async ({ plan_id, plan_hash, confirm }) => {
+      try { return jsonResult(await nativeBarHistory.maintain(plan_id, plan_hash, confirm, kind), true); } catch (e) { return errorResult(e); }
+    });
+  }
 
   server.registerTool(
     "evaluate_fixed_scenario",

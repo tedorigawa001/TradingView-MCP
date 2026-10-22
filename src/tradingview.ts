@@ -1,4 +1,6 @@
 import type { CdpClient } from "./cdp.js";
+import { nativeSeriesContextSchema } from "./nativeBarEvidence.js";
+import type { NativeBarSeriesContext } from "./nativeBarEvidence.js";
 import { SMA_TEN_STUDY_ID, type MovingAverageSnapshot } from "./movingAverageContext.js";
 
 export interface StudyRef {
@@ -875,6 +877,43 @@ export class TradingView {
           subsessionId: text(info.subsession_id), subsessions: (info.subsessions || []).map((s) => ({ id: text(s.id), session: text(s.session) })) };
       })()
     `);
+  }
+
+  /** Read-only native identity. Unknown styles/settings fail closed, never assume standard candles. */
+  async getNativeBarSeriesContext(chartIndex: number): Promise<{
+    symbol: string; resolution: string; context: NativeBarSeriesContext;
+    provenance: { session_holidays: string | null; corrections: string | null };
+  }> {
+    assertChartIndex(chartIndex);
+    const result = await this.cdp.evaluate<any>(`
+      (() => {
+        const chart = window.TradingViewApi.chart(${chartIndex});
+        const series = chart.chartModel().mainSeries();
+        const info = series.symbolInfo?.();
+        if (!info) throw new Error("native symbol info unavailable");
+        const properties = series.properties?.().childs?.();
+        const style = properties?.style?.value?.();
+        const chartStyle = ({0: "bars", 1: "candles", 9: "hollow_candles"})[style];
+        if (!chartStyle) throw new Error("native chart style unsupported or unreadable");
+        const spot = Array.isArray(info.typespecs) && info.typespecs.some(s => s === "spot" || s === "cfd");
+        // Non-FX instruments need explicit provider spot/CFD classification, never a symbol-name guess.
+        if (!(info.type === "forex" || (spot && (info.type === "cfd" || info.type === "commodity")))) {
+          throw new Error("native adjustment applicability unverified; recording refused");
+        }
+        const bounded = v => {
+          if (v === undefined || v === null) return null;
+          if (typeof v !== "string" || v.length > 65536) throw new Error("invalid native provenance");
+          return v;
+        };
+        return { symbol: chart.symbol(), resolution: chart.resolution(), context: {
+          symbol: chart.symbol(), full_name: info.full_name, exchange: info.exchange, type: info.type,
+          currency: info.currency_code, timezone: info.timezone, session: info.session, subsession_id: info.subsession_id,
+          pricescale: info.pricescale, minmov: info.minmov, minmove2: info.minmove2, fractional: info.fractional,
+          chart_style: chartStyle, adjustment: "not_applicable", capture_contract: "native-bar-v1:successor-confirmed"
+        }, provenance: { session_holidays: bounded(info.session_holidays), corrections: bounded(info.corrections) } };
+      })()
+    `);
+    return { ...result, context: nativeSeriesContextSchema.parse(result.context) };
   }
 
   /**

@@ -1,5 +1,5 @@
 import test from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../build/server.js";
+import { NativeBarHistory } from "../../build/nativeBarHistory.js";
 import { SMA_TEN_STUDY_ID } from "../../build/movingAverageContext.js";
 import { EconomicCalendar } from "../../build/calendar.js";
 import {
@@ -589,6 +590,7 @@ function makeDeps(overrides = {}) {
       ...overrides.cmeGoldOpenInterest,
     },
     futuresOpenInterestHistory: overrides.futuresOpenInterestHistory,
+    nativeBarHistory: overrides.nativeBarHistory,
   };
 }
 
@@ -1307,6 +1309,9 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "get_market_snapshot",
       "get_moving_average_context",
       "get_mtf_overview",
+      "get_native_bar_history",
+      "get_native_bar_history_as_of",
+      "get_native_bar_recording_status",
       "get_oanda_flow_collection_readiness",
       "get_ohlcv",
       "get_ohlcv_key_levels",
@@ -1331,11 +1336,17 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "preflight_bookmap_flow_price_join",
       "preflight_cross_asset_shock",
       "preflight_research_oos",
+      "prepare_native_bar_clock_recovery",
+      "prepare_native_bar_history_prune",
+      "prepare_native_bar_recording",
+      "prune_native_bar_history",
       "reconcile_gold_open_interest",
+      "record_native_bar_snapshot",
       "record_research_period_usage",
       "record_research_period_usage_batch",
       "record_research_trials",
       "record_strategy_experiment",
+      "recover_native_bar_clock_ahead",
       "register_event_study_hypothesis",
       "register_strategy_hypothesis",
       "remove_owned_study",
@@ -1587,6 +1598,232 @@ test("a tool error carrying Authorization headers reaches neither the client nor
     for (const call of logged.mock.calls) assert.ok(!call.arguments.join(" ").includes(secret), "stderr must not carry it either");
   }
   assert.ok(logged.mock.calls.length > 0, "the redacted detail goes to stderr");
+});
+
+const nativeTargets = [
+  { chart_index: 0, symbol: "PEPPERSTONE:MXNJPY", expected_timeframe: "240" },
+  { chart_index: 1, symbol: "OANDA:XAUUSD", expected_timeframe: "1D" },
+];
+const nativeQuery = { symbol: "PEPPERSTONE:MXNJPY", timeframe: "15" };
+const nativeWriteArgs = (p) => ({ plan_id: p.plan_id, plan_hash: p.plan_hash, confirm: true });
+
+async function nativeMcpFixture(t, hooks = {}) {
+  const base = await mkdtemp(join(await realpath(tmpdir()), "native-mcp-synthetic-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // A regressed dependency injection must hit a refused temporary root, never the real store.
+  const previousRoot = process.env.TRADINGVIEW_MCP_NATIVE_BAR_HISTORY_DIR;
+  process.env.TRADINGVIEW_MCP_NATIVE_BAR_HISTORY_DIR = join(base, "unapproved-fallback");
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.TRADINGVIEW_MCP_NATIVE_BAR_HISTORY_DIR;
+    else process.env.TRADINGVIEW_MCP_NATIVE_BAR_HISTORY_DIR = previousRoot;
+  });
+  const directory = join(base, "store");
+  const initial = { layoutName: "synthetic", activeChartIndex: 0, chartsCount: 2,
+    charts: nativeTargets.map((p) => ({ index: p.chart_index, symbol: p.symbol, resolution: p.expected_timeframe,
+      studies: [{ id: `private-${p.chart_index}`, name: "synthetic private study" }] })) };
+  const context = structuredClone(initial), state = { held: false, acquires: 0, reads: 0, chartCalls: 0, publications: 0 };
+  let offset = 0, tick = 0;
+  const options = { directory, now: () => new Date(Date.now() + offset), monotonic: () => tick, lockWaitMs: 0,
+    testOnly: { allowTemporaryRoot: true, afterPublish: async (stage) => {
+      state.publications++; assert.equal(state.held, false); assert.deepEqual(context, initial);
+      if (hooks.publishFailure === stage) throw new Error("synthetic publication acknowledgement failure");
+    } } };
+  const store = new NativeBarHistory(options);
+  const check = () => { state.chartCalls++; assert.equal(state.held, true); };
+  const tv = {
+    getChartContext: async () => { check(); return structuredClone(context); },
+    getReplayStatus: async () => { check(); return { available: true, started: hooks.replay === true, toolbarVisible: false }; },
+    setResolution: async (tf, index) => {
+      check();
+      if (hooks.restoreFailure && tf === initial.charts[index].resolution) throw new Error("synthetic restore failure");
+      context.charts[index].resolution = tf; context.activeChartIndex = index; return {};
+    },
+    getOhlcv: async (count, index) => {
+      check(); state.reads++;
+      const pane = context.charts[index], step = pane.resolution === "1D" ? 86400 : Number(pane.resolution) * 60;
+      const end = Math.floor(Date.now() / 3600000) * 3600;
+      const bars = Array.from({ length: count }, (_, i) => {
+        const time = end - (count - 1 - i) * step;
+        return { time, timeIso: new Date(time * 1000).toISOString(), open: 100, high: 102, low: 99,
+          close: 101, volume: null, forming: i === count - 1 };
+      });
+      if (hooks.drift && pane.resolution === "15") context.charts[1].symbol = "OANDA:USDJPY";
+      return { symbol: pane.symbol, resolution: pane.resolution, count, bars: hooks.empty && pane.resolution === "60" ? [] : bars };
+    },
+    getNativeBarSeriesContext: async (index) => {
+      check(); const p = context.charts[index];
+      return { symbol: p.symbol, resolution: p.resolution,
+        context: { symbol: p.symbol, full_name: p.symbol, exchange: "synthetic", type: "forex", currency: "JPY",
+          timezone: "Etc/UTC", session: "24x7", subsession_id: "regular", pricescale: 1000, minmov: 1, minmove2: 10,
+          fractional: false, chart_style: "candles", adjustment: "not_applicable", capture_contract: "native-bar-v1:successor-confirmed" },
+        provenance: { session_holidays: null, corrections: null } };
+    },
+  };
+  const forbidden = () => { throw new Error("unrelated live/notification/journal dependency must not be called"); };
+  const deps = makeDeps({ nativeBarHistory: store,
+    chartOperationLock: { acquire: async () => {
+      assert.ok((await lstat(join(directory, ".writer.lock"))).isFile(), "store lock must precede chart lock");
+      if (hooks.lockUnavailable) throw new Error("synthetic shared chart lock unavailable");
+      if (hooks.expireAtChartLock) tick = 600001;
+      assert.equal(state.held, false); state.held = true; state.acquires++;
+      return async () => { assert.deepEqual(context, hooks.drift || hooks.restoreFailure ? context : initial); state.held = false; };
+    } },
+    tv: { ...tv, getExecutionQuotes: forbidden, setSymbol: forbidden, loadMoreHistory: forbidden,
+      startReplay: forbidden, stopReplay: forbidden, stepReplay: forbidden, getIndicatorValues: forbidden, createPriceAlert: forbidden },
+    scanner: { getQuotes: forbidden, getMtfOverview: forbidden, scanMarket: forbidden },
+    journal: { recordAnalysis: forbidden, recordOutcome: forbidden, recordAlertSet: forbidden, recordAttempt: forbidden },
+    researchJournal: { registerHypothesis: forbidden, recordExperiment: forbidden },
+  });
+  const client = await connectedClient(deps); t.after(() => client.close());
+  const call = async (name, args = {}) => {
+    const r = await client.callTool({ name, arguments: args });
+    assert.notEqual(r.isError, true, r.content[0].text);
+    assert.ok(!r.content[0].text.includes("\n"), "native responses must not inflate bounded JSON with indentation");
+    return JSON.parse(r.content[0].text);
+  };
+  const reject = async (name, args, pattern) => {
+    const r = await client.callTool({ name, arguments: args });
+    assert.equal(r.isError, true); if (pattern) assert.match(r.content[0].text, pattern);
+  };
+  const prepare = () => call("prepare_native_bar_recording", { targets: nativeTargets });
+  return { base, directory, options, store, deps, client, call, reject, prepare, state, initial, context,
+    offset: (n) => { offset = n; }, tick: (n) => { tick = n; } };
+}
+
+test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
+  const client = await connectedClient(makeDeps()); t.after(() => client.close());
+  const tools = (await client.listTools()).tools;
+  assert.equal(tools.length, 132);
+  for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
+    "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
+    assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
+  }
+  for (const name of ["record_native_bar_snapshot", "prune_native_bar_history", "recover_native_bar_clock_ahead"]) {
+    const tool = tools.find((tool) => tool.name === name);
+    assert.equal(tool.annotations.readOnlyHint, false); assert.equal(tool.annotations.idempotentHint, false);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["confirm", "plan_hash", "plan_id"]);
+    assert.ok(tool.inputSchema.required.includes("confirm")); assert.match(tool.description, /human approval/);
+  }
+  assert.equal(tools.find((tool) => tool.name === "prune_native_bar_history").annotations.destructiveHint, true);
+  assert.equal(tools.find((tool) => tool.name === "recover_native_bar_clock_ahead").annotations.destructiveHint, true);
+});
+
+const nativeFsTest = process.platform === "win32" ? test.skip : test;
+nativeFsTest("105-3 MCP missing-store previews, history, status and empty maintenance never initialize or touch charts", async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  assert.equal(p.bindings_verified, false); assert.equal(p.store_status, "missing");
+  assert.equal((await f.call("get_native_bar_history", nativeQuery)).bars.length, 0);
+  assert.equal((await f.call("get_native_bar_history_as_of", { ...nativeQuery, as_of: "2020-01-01T00:00:00.000Z" })).bars.length, 0);
+  assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, "not_found");
+  for (const [preview, execute] of [["prepare_native_bar_history_prune", "prune_native_bar_history"],
+    ["prepare_native_bar_clock_recovery", "recover_native_bar_clock_ahead"]]) {
+    const m = await f.call(preview); assert.equal(m.pairs.length, 0);
+    assert.equal((await f.call(execute, nativeWriteArgs(m))).status, "nothing_to_do");
+  }
+  assert.equal(f.state.chartCalls, 0); assert.equal(f.state.acquires, 0); assert.deepEqual(await readdir(f.base), []);
+});
+
+nativeFsTest("105-3 MCP schemas reject raw OHLC, paths, scope drift, missing approval and unknown fields before writes", async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  for (const args of [{ plan_id: p.plan_id, plan_hash: p.plan_hash }, { ...nativeWriteArgs(p), confirm: false },
+    { ...nativeWriteArgs(p), bars: [] }, { ...nativeWriteArgs(p), first_seen_at: "2020-01-01T00:00:00.000Z" },
+    { ...nativeWriteArgs(p), directory: "/tmp/forbidden" }]) await f.reject("record_native_bar_snapshot", args);
+  await f.reject("prepare_native_bar_recording", { targets: nativeTargets, count: 100 });
+  await f.reject("prepare_native_bar_recording", { targets: [nativeTargets[0], nativeTargets[0]] });
+  await f.reject("prepare_native_bar_recording", { targets: [{ ...nativeTargets[0], symbol: "OANDA:MXNJPY" }, nativeTargets[1]] });
+  await f.reject("get_native_bar_history", { ...nativeQuery, timeframe: "240" });
+  await f.reject("get_native_bar_history", { ...nativeQuery, limit: 101 });
+  await f.reject("get_native_bar_history_as_of", { ...nativeQuery, as_of: "2026-10-22T00:00:00+09:00" });
+  await f.reject("prepare_native_bar_history_prune", { confirm: true });
+  await f.reject("recover_native_bar_clock_ahead", { ...nativeWriteArgs(p), pairs: [] });
+  assert.equal(f.state.chartCalls, 0); assert.deepEqual(await readdir(f.base), []);
+});
+
+nativeFsTest("105-3 MCP plans expire, consume wrong-hash attempts and do not transfer between server instances", async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  const other = await connectedClient({ ...f.deps, nativeBarHistory: new NativeBarHistory(f.options) }); t.after(() => other.close());
+  const r = await other.callTool({ name: "record_native_bar_snapshot", arguments: nativeWriteArgs(p) });
+  assert.equal(r.isError, true); assert.match(r.content[0].text, /plan_not_found/);
+  await f.reject("record_native_bar_snapshot", { ...nativeWriteArgs(p), plan_hash: "f".repeat(64) }, /binding_mismatch/);
+  await f.reject("record_native_bar_snapshot", nativeWriteArgs(p), /plan_not_found/);
+  const expired = await f.prepare(); f.tick(600001);
+  await f.reject("record_native_bar_snapshot", nativeWriteArgs(expired), /expired/);
+  assert.equal(f.state.chartCalls, 0); assert.deepEqual(await readdir(f.base), []);
+});
+
+nativeFsTest("105-3 MCP records fresh synthetic bars only after both locks and full restoration, then reads without chart activity", async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  const result = await f.call("record_native_bar_snapshot", nativeWriteArgs(p));
+  assert.equal(result.status, "committed"); assert.equal(result.restoration_verified, true);
+  assert.equal(result.receipt.recording_id, p.recording_id); assert.equal(f.state.acquires, 1); assert.equal(f.state.held, false);
+  assert.equal(f.state.publications, 2); assert.deepEqual(f.context, f.initial);
+  const reads = f.state.chartCalls, path = join(f.directory, "captures", result.receipt.day, `${p.recording_id}.json`);
+  const bytes = await readFile(path);
+  assert.ok(!bytes.toString().includes("private-")); assert.ok(!bytes.toString().includes("execution"));
+  const h = await f.call("get_native_bar_history", nativeQuery);
+  assert.equal(h.bars.length, 40); assert.equal(h.storage_visibility_at_as_of, "not_proven");
+  assert.equal(h.bars[0].versions.length, 1);
+  const historical = await f.call("get_native_bar_history_as_of", { ...nativeQuery, as_of: result.receipt.recorded_at });
+  assert.deepEqual(historical.bars, h.bars);
+  assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, "committed");
+  await f.reject("record_native_bar_snapshot", nativeWriteArgs(p), /plan_not_found/);
+  assert.deepEqual(await readFile(path), bytes); assert.equal(f.state.chartCalls, reads);
+});
+
+for (const hooks of [{ replay: true }, { restoreFailure: true }, { drift: true }, { empty: true }, { lockUnavailable: true }, { expireAtChartLock: true }]) {
+  nativeFsTest(`105-3 MCP aborts synthetic capture without bars: ${Object.keys(hooks)[0]}`, async (t) => {
+    const f = await nativeMcpFixture(t, hooks), p = await f.prepare();
+    await f.reject("record_native_bar_snapshot", nativeWriteArgs(p));
+    assert.equal(f.state.held, false); assert.equal(f.state.publications, 0);
+    assert.deepEqual(await readdir(f.directory), ["policy.json"]);
+    assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, "not_found");
+    if (hooks.drift) assert.equal(f.context.charts[1].symbol, "OANDA:USDJPY");
+    if (hooks.replay) assert.equal(f.state.reads, 0);
+  });
+}
+
+for (const [stage, expected] of [["payload", "pending"], ["receipt", "committed"]]) {
+  nativeFsTest(`105-3 MCP lost acknowledgement after ${stage} uses original status without recapture`, async (t) => {
+    const f = await nativeMcpFixture(t, { publishFailure: stage }), p = await f.prepare();
+    await f.reject("record_native_bar_snapshot", nativeWriteArgs(p), /acknowledgement failure/);
+    const calls = f.state.chartCalls;
+    assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, expected);
+    assert.equal((await f.call("get_native_bar_history", nativeQuery)).bars.length, expected === "committed" ? 40 : 0);
+    await f.reject("record_native_bar_snapshot", nativeWriteArgs(p), /plan_not_found/);
+    assert.equal(f.state.chartCalls, calls); assert.equal(f.state.acquires, 1);
+  });
+}
+
+nativeFsTest("105-3 MCP busy store lock refuses before shared chart lock acquisition", async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  await f.call("record_native_bar_snapshot", nativeWriteArgs(p));
+  const next = await f.prepare(), calls = f.state.chartCalls, acquires = f.state.acquires;
+  const path = join(f.directory, ".writer.lock"); await writeFile(path, "synthetic-live-owner", { mode: 0o600 });
+  await f.reject("record_native_bar_snapshot", nativeWriteArgs(next), /store_lock_busy/);
+  assert.equal(f.state.chartCalls, calls); assert.equal(f.state.acquires, acquires);
+  assert.equal(await readFile(path, "utf8"), "synthetic-live-owner");
+});
+
+for (const [preview, execute, offset, expected] of [
+  ["prepare_native_bar_history_prune", "prune_native_bar_history", 91 * 86400000, "pruned"],
+  ["prepare_native_bar_clock_recovery", "recover_native_bar_clock_ahead", -86400000, "quarantined"],
+]) nativeFsTest(`105-3 MCP ${execute} needs its own exact plan and never acquires chart lock`, async (t) => {
+  const f = await nativeMcpFixture(t), p = await f.prepare();
+  const r = await f.call("record_native_bar_snapshot", nativeWriteArgs(p)), calls = f.state.chartCalls;
+  const path = join(f.directory, "captures", r.receipt.day, `${p.recording_id}.json`), bytes = await readFile(path);
+  f.offset(offset);
+  const recordingPlan = await f.prepare();
+  await f.reject(execute, nativeWriteArgs(recordingPlan), /binding_mismatch/);
+  const maintenance = await f.call(preview); assert.equal(maintenance.pairs.length, 1);
+  await f.reject(execute, { ...nativeWriteArgs(maintenance), confirm: false });
+  assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, "committed");
+  const result = await f.call(execute, nativeWriteArgs(maintenance)); assert.equal(result.status, "complete");
+  assert.equal((await f.call("get_native_bar_recording_status", { recording_id: p.recording_id })).status, expected);
+  assert.equal((await f.call("get_native_bar_history", nativeQuery)).bars.length, 0);
+  await f.reject(execute, nativeWriteArgs(maintenance), /plan_not_found/);
+  assert.equal(f.state.chartCalls, calls); assert.equal(f.state.acquires, 1);
+  if (expected === "quarantined") assert.deepEqual(await readFile(join(f.directory, "quarantine", result.maintenance_id, `${p.recording_id}.payload.json`)), bytes);
 });
 
 test("get_closed_chart_snapshot holds one shared lock through preview and rejects invalid bounds", async () => {
