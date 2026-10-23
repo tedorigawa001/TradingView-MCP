@@ -6,7 +6,10 @@ export const NATIVE_BAR_TRANSACTION_LIMITS = Object.freeze({ artifact_bytes: 102
   targets: 1024, root_sessions: 8, live_targets: 32, descriptors: 512 });
 const L = NATIVE_BAR_TRANSACTION_LIMITS;
 const nativeBarId = evidenceId.refine((s) => s === s.toLowerCase(), "lower-case identifier required");
-const uint = z.string().regex(/^(0|[1-9][0-9]{0,29})$/);
+const UINT = /^(0|[1-9][0-9]{0,29})$/;
+const uint = z.string().regex(UINT);
+// A refinement still runs after its pattern failed, so it must not assume a valid decimal string.
+const uintWhere = (check: (n: bigint) => boolean) => uint.refine((v) => !UINT.test(v) || check(BigInt(v)));
 const integer = z.string().regex(/^(0|-?[1-9][0-9]{0,29})$/);
 const pathSchema = z.string().min(1).max(512).refine((s) => !s.includes("\\") && !s.includes("\0")
   && s.split("/").every((p) => p !== "" && p !== "." && p !== ".."), "canonical relative path required");
@@ -18,7 +21,7 @@ const originSchema = z.discriminatedUnion("kind", [
 export const nativeBarTransactionClockSchema = z.strictObject({ utc_at: nativeBarTimestamp,
   elapsed: z.strictObject({ boot_id: nativeBarId, source_id: z.string().min(1).max(128), reading_ns: uint, qualified: z.boolean() }).nullable() });
 export const nativeBarTransactionProofSchema = z.strictObject({ device: uint, inode: uint, uid: uint, gid: uint,
-  mode: z.literal("33152"), nlink: z.literal("1"), acl: z.enum(["none", "deny_only"]), size: uint.refine((v) => BigInt(v) <= BigInt(L.artifact_bytes)),
+  mode: z.literal("33152"), nlink: z.literal("1"), acl: z.enum(["none", "deny_only"]), size: uintWhere((n) => n <= BigInt(L.artifact_bytes)),
   sha256: nativeBarHash, birthtime_ns: integer, mtime_ns: integer, ctime_ns: integer });
 const parentSchema = z.strictObject({ path: pathSchema, device: uint, inode: uint, uid: uint,
   mode: z.literal("16832"), acl: z.enum(["none", "deny_only"]) });
@@ -94,7 +97,7 @@ const capacitySchema = z.strictObject({ schema: z.literal("native-bar-transactio
   existing: z.strictObject({ inventory_bytes: uint, metadata_bytes: uint, entries: uint, available_bytes: uint.nullable() }),
   publications: z.array(z.strictObject({ role: z.enum(["intent", "manifest", "event", "attempt", "completion", "marker",
     "publication_temporary", "coordination", "directory"]), bytes: uint, count: uint })).max(L.entries),
-  recovery_reserve: z.strictObject({ bytes: uint.refine((v) => BigInt(v) > 0n), entries: uint.refine((v) => BigInt(v) > 0n) }),
+  recovery_reserve: z.strictObject({ bytes: uintWhere((n) => n > 0n), entries: uintWhere((n) => n > 0n) }),
   reads: z.array(z.strictObject({ bytes: uint, count: uint })).max(L.entries), response_bytes: uint,
   handles: z.strictObject({ existing_roots: handleCount, additional_roots: handleCount, existing_descriptors: handleCount,
     additional_descriptors: handleCount, peak_targets_per_session: handleCount }) });
@@ -152,16 +155,21 @@ function movedProof(before: Proof, after: Proof, start: Clock, end: Clock) {
 }
 const ageSchema = z.strictObject({ quarantined_at: nativeBarTimestamp, completed: nativeBarTransactionClockSchema,
   observed: nativeBarTransactionClockSchema, native_times_ns: z.array(integer).min(1).max(L.targets * 3 + 3) });
-/** Structural clock assessment only; a qualified flag in supplied JSON is not OS attestation. */
-export function assessNativeBarQuarantineAge(input: unknown) {
-  const v = ageSchema.parse(input), reasons: string[] = [], hold = 90n * 86400n * 1000000000n;
-  const anchor = [BigInt(Date.parse(v.quarantined_at)) * 1000000n, utcNs(v.completed), ...v.native_times_ns.map(BigInt)]
-    .reduce((a, b) => a > b ? a : b);
-  if (v.quarantined_at > v.completed.utc_at || v.observed.utc_at < v.completed.utc_at) reasons.push("clock_inconsistent");
-  if (utcNs(v.observed) - anchor <= hold) reasons.push("wall_or_native_age_not_over_90_days");
-  const a = v.completed.elapsed, b = v.observed.elapsed;
+type AgeAnchor = { quarantined_at: string; completed: Clock; anchor: bigint };
+const ageAnchor = (quarantinedAt: string, completed: Clock, nativeTimes: string[]): AgeAnchor => ({ quarantined_at: quarantinedAt, completed,
+  anchor: [BigInt(Date.parse(quarantinedAt)) * 1000000n, utcNs(completed), ...nativeTimes.map(BigInt)].reduce((a, b) => a > b ? a : b) });
+function ageReasons(q: AgeAnchor, observed: Clock) {
+  const reasons: string[] = [], hold = 90n * 86400n * 1000000000n;
+  if (q.quarantined_at > q.completed.utc_at || observed.utc_at < q.completed.utc_at) reasons.push("clock_inconsistent");
+  if (utcNs(observed) - q.anchor <= hold) reasons.push("wall_or_native_age_not_over_90_days");
+  const a = q.completed.elapsed, b = observed.elapsed;
   if (!a?.qualified || !b?.qualified || a.boot_id !== b.boot_id || a.source_id !== b.source_id) reasons.push("elapsed_clock_unverified");
   else if (BigInt(b.reading_ns) - BigInt(a.reading_ns) <= hold) reasons.push("elapsed_age_not_over_90_days");
+  return reasons;
+}
+/** Structural clock assessment only; a qualified flag in supplied JSON is not OS attestation. */
+export function assessNativeBarQuarantineAge(input: unknown) {
+  const v = ageSchema.parse(input), reasons = ageReasons(ageAnchor(v.quarantined_at, v.completed, v.native_times_ns), v.observed);
   return { eligible: reasons.length === 0, reasons, verification_scope: "supplied_clock_evidence_only" as const, execution_available: false as const };
 }
 const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -248,8 +256,18 @@ export function replayNativeBarTransaction(input: unknown) {
     }
   }
   for (const q of bundle.quarantines) bindObject(q.marker_proof.device, q.marker_proof.inode, `marker:${q.quarantine_id}`);
+  // One anchor per marker set: the latest of its quarantine time, completion and every marker/target native time.
+  const anchors = new Map(bundle.quarantines.map((q) => [q.quarantine_id, ageAnchor(q.quarantined_at, q.completed,
+    [q.marker_proof.birthtime_ns, q.marker_proof.mtime_ns, q.marker_proof.ctime_ns, ...q.targets.flatMap((t) => [t.proof.birthtime_ns, t.proof.mtime_ns, t.proof.ctime_ns])])]));
+  const agedAt = (q: z.infer<typeof nativeBarQuarantineEvidenceSchema>, clock: Clock) => {
+    if (ageReasons(anchors.get(q.quarantine_id)!, clock).length) throw new Error("transaction_purge_age_unverified");
+  };
+  // Staging is the first purge step and cannot be undone within purge, so age gates it as it gates unlink: a young
+  // or post-reboot set must stay in place rather than be stranded in holding.
+  if (purge) for (const q of bundle.quarantines) agedAt(q, intent.created);
   const hash = evidenceHash(intent), attempts = new Map(bundle.attempts.map((a) => [a.attempt_id, a]));
   if (attempts.size !== bundle.attempts.length) throw new Error("transaction_duplicate_attempt");
+  const attemptHashes = new Map(bundle.attempts.map((a) => [a.attempt_id, evidenceHash(a)]));
   const targetIds = new Set(targets.map((t) => t.target_id));
   for (const a of attempts.values()) {
     if (a.maintenance_id !== intent.maintenance_id || a.intent_hash !== hash || a.binding_hash !== evidenceHash(intent.binding)
@@ -258,17 +276,19 @@ export function replayNativeBarTransaction(input: unknown) {
       || a.actions.some((s) => !targetIds.has(s.target_id) || !(purge ? ["stage", "unlink", "verify", "reconcile_absence"] : ["stage", "quarantine", "verify"]).includes(s.action))
       || a.observations.length !== targets.length || new Set(a.observations.map((o) => o.target_id)).size !== targets.length
       || a.observations.some((o) => !targetIds.has(o.target_id))) throw new Error("transaction_attempt_binding");
+    if (purge && a.actions.some((s) => s.action === "stage" || s.action === "unlink")) for (const q of bundle.quarantines) agedAt(q, a.issued);
   }
   type State = { target_id: string; state: string; proof: Proof; pending_clock?: Clock; pending_hash?: string;
     pending_attempt?: string; terminal_hash?: string; terminal_attempt?: string;
     blocked_attempt?: string; blocked?: "conflict" | "durability_unknown" };
   const states = new Map<string, State>(targets.map((t) => [t.target_id, { target_id: t.target_id, state: "source", proof: t.proof }]));
   let previous: string | null = null, previousClock = intent.created, active: string | null = null;
-  const used = new Set<string>();
+  const used = new Set<string>(), blocked = new Set<string>();
+  let conflictRecorded = false;
   const observations = new Map<string, Map<string, z.infer<typeof observationSchema>>>();
   for (const [index, e] of bundle.events.entries()) {
     const a = attempts.get(e.attempt_id), state = states.get(e.target_id);
-    if (!a || !state || e.maintenance_id !== intent.maintenance_id || e.intent_hash !== hash || e.attempt_hash !== evidenceHash(a)
+    if (!a || !state || e.maintenance_id !== intent.maintenance_id || e.intent_hash !== hash || e.attempt_hash !== attemptHashes.get(a.attempt_id)
       || e.sequence !== index + 1 || e.previous_event_hash !== previous) throw new Error("transaction_event_binding");
     if (active !== a.attempt_id) {
       if (used.has(a.attempt_id) || a.resume_after_event_hash !== previous) throw new Error("transaction_attempt_prefix");
@@ -298,23 +318,26 @@ export function replayNativeBarTransaction(input: unknown) {
     const action = e.type === "move_pending" || e.type === "held_verified" ? "stage" : e.type === "unlink_pending" || e.type === "unlinked" ? "unlink"
       : e.type === "recovered_verified" || e.type === "terminal_absence_verified" ? "verify" : e.type === "reconciled_absence" ? "reconcile_absence" : "quarantine";
     if (e.type !== "failure" && !a.actions.some((s) => s.target_id === e.target_id && s.action === action)) throw new Error("transaction_action_not_approved");
-    if ([...states.values()].some((s) => s.blocked)
-      && !["recovered_verified", "reconciled_absence", "terminal_absence_verified", "failure"].includes(e.type)) throw new Error("transaction_blocked");
+    if (blocked.size && !["recovered_verified", "reconciled_absence", "terminal_absence_verified", "failure"].includes(e.type)) throw new Error("transaction_blocked");
+    // A conflict needs a separately reviewed resolution; ordinary recovery clears only durability_unknown.
+    if (state.blocked === "conflict" && e.type !== "failure") throw new Error("transaction_conflict_requires_resolution");
     if (["held_verified", "quarantined_verified", "unlinked"].includes(e.type)
       && state.pending_attempt !== a.attempt_id) throw new Error("transaction_pending_attempt");
     if (e.type === "move_pending" || e.type === "quarantine_move_pending") {
       const expected = e.type === "move_pending" ? "source" : "holding";
       if (state.state !== expected || !same(state.proof, e.proof)) throw new Error("transaction_illegal_transition");
+      if (purge && e.type === "move_pending") agedAt(quarantineForTarget.get(e.target_id)!, e.clock);
       state.state = e.type; state.pending_clock = e.clock; state.pending_hash = evidenceHash(e); state.pending_attempt = a.attempt_id;
     } else if (e.type === "failure") {
       state.blocked = state.blocked === "conflict" ? "conflict" : e.outcome; state.blocked_attempt = a.attempt_id;
+      blocked.add(state.target_id); if (e.outcome === "conflict") conflictRecorded = true;
     } else if (e.type === "terminal_absence_verified") {
       const o = observations.get(a.attempt_id)!.get(e.target_id)!;
       if (!purge || !["purged", "absent_unconfirmed"].includes(state.state) || !a.resume_after_event_hash
         || a.attempt_id === state.terminal_attempt || a.attempt_id === state.blocked_attempt
         || e.from_terminal_event_hash !== state.terminal_hash || o.source || o.holding || o.quarantine) throw new Error("transaction_terminal_absence_binding");
       // Recheck current absence without rewriting the original terminal event or its certainty.
-      delete state.blocked; delete state.blocked_attempt;
+      delete state.blocked; delete state.blocked_attempt; blocked.delete(state.target_id);
     } else if (e.type === "recovered_verified" || e.type === "reconciled_absence") {
       if (!a.resume_after_event_hash || a.attempt_id === state.pending_attempt || a.attempt_id === state.blocked_attempt
         || e.from_pending_event_hash !== (state.pending_hash ?? null)) throw new Error("transaction_recovery_binding");
@@ -330,13 +353,11 @@ export function replayNativeBarTransaction(input: unknown) {
         state.proof = e.proof; state.state = e.location === "quarantine" ? "quarantined" : e.location;
       }
       delete state.blocked; delete state.blocked_attempt; delete state.pending_clock; delete state.pending_hash; delete state.pending_attempt;
+      blocked.delete(state.target_id);
     } else if (e.type === "unlink_pending") {
       if (!purge || state.state !== "holding" || !same(state.proof, e.proof)
         || e.reference_hash !== intent.baseline.reference_hash || [...states.values()].some((s) => !["holding", "unlink_pending", "purged", "absent_unconfirmed"].includes(s.state))) throw new Error("transaction_illegal_unlink");
-      const q = quarantineForTarget.get(e.target_id)!;
-      if (!assessNativeBarQuarantineAge({ quarantined_at: q.quarantined_at, completed: q.completed, observed: e.clock,
-        native_times_ns: [q.marker_proof.birthtime_ns, q.marker_proof.mtime_ns, q.marker_proof.ctime_ns,
-          ...q.targets.flatMap((t) => [t.proof.birthtime_ns, t.proof.mtime_ns, t.proof.ctime_ns])] }).eligible) throw new Error("transaction_purge_age_unverified");
+      agedAt(quarantineForTarget.get(e.target_id)!, e.clock);
       state.state = "unlink_pending"; state.pending_clock = e.clock; state.pending_hash = evidenceHash(e); state.pending_attempt = a.attempt_id;
     } else if (e.type === "unlinked") {
       if (!purge || state.state !== "unlink_pending" || !same(state.proof, e.proof)) throw new Error("transaction_illegal_transition");
@@ -357,7 +378,7 @@ export function replayNativeBarTransaction(input: unknown) {
   if (bundle.completion) {
     const c = bundle.completion, marker = c.marker;
     if (!previous || c.maintenance_id !== intent.maintenance_id || c.intent_hash !== hash || c.last_event_hash !== previous
-      || !same(c.attempt_hashes, [...used].map((id) => evidenceHash(attempts.get(id)!)))
+      || !same(c.attempt_hashes, [...used].map((id) => attemptHashes.get(id)!))
       || c.outcome !== ([...states.values()].some((s) => s.state === "absent_unconfirmed") ? "resolved_with_uncertainty" : "complete")
       || c.targets.length !== targets.length || new Set(c.targets.map((t) => t.target_id)).size !== targets.length
       || c.targets.some((t) => states.get(t.target_id)?.state !== t.state || !same(purge ? null : states.get(t.target_id)?.proof, t.proof))
@@ -378,7 +399,7 @@ export function replayNativeBarTransaction(input: unknown) {
     original_acknowledgement: "not_proven" as const, maintenance_id: intent.maintenance_id, intent_hash: evidenceHash(intent),
     targets: [...states.values()].map((s) => ({ target_id: s.target_id, state: s.blocked ?? s.state, phase: s.state,
       proof: ["purged", "absent_unconfirmed"].includes(s.state) ? null : s.proof })),
-    spent_markers: purge && status === "complete" ? bundle.quarantines.map((q) => q.quarantine_id) : [] as string[] };
+    spent_markers: purge && status === "complete" && !conflictRecorded ? bundle.quarantines.map((q) => q.quarantine_id) : [] as string[] };
   if (Buffer.byteLength(canonical(result)) > L.response_bytes) throw new Error("transaction_response_limit");
   return result;
 }

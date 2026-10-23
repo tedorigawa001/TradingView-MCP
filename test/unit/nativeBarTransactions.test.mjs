@@ -506,3 +506,43 @@ test("capacity rejects nonempty logical inventory with zero counted entries", ()
   b.existing.inventory_bytes = b.existing.metadata_bytes = "0";
   assert.equal(calculateNativeBarTransactionCapacity(b).fits, true);
 });
+
+test("purge staging is age-gated like unlink, so a young set is never moved into holding", () => {
+  const f = purgeFixture(); f.intent.created = tick(86400);
+  Object.assign(f.attempts[0], { issued: tick(86400 + 1), expires_at: time(86400 + 601) }); rebind(f);
+  assert.throws(() => replayNativeBarTransaction(f), /purge_age_unverified/);
+});
+test("after a reboot a staged purge set can be re-verified in holding, but unlink stays refused", () => {
+  const f = heldPurge(), held = f.events.at(-1).proof, after = later + 100;
+  const verify = resume(f, after, [{ target_id: id(2), source: null, holding: held, quarantine: null }], ["verify"]);
+  Object.assign(verify.issued.elapsed, { boot_id: id(91), reading_ns: "1000000000" });
+  const e = event(f, "recovered_verified", after + 1, { location: "holding", proof: held, from_pending_event_hash: null });
+  Object.assign(e.clock.elapsed, { boot_id: id(91), reading_ns: "2000000000" });
+  assert.equal(replayNativeBarTransaction(f).targets[0].state, "holding");
+  const unlink = structuredClone(f); unlink.attempts.at(-1).actions = [{ target_id: id(2), action: "unlink" }]; rebind(unlink);
+  assert.throws(() => replayNativeBarTransaction(unlink), /purge_age_unverified/);
+});
+test("a recorded conflict is never cleared by ordinary recovery and never spends a marker", () => {
+  const f = fixture(), p = f.manifests[0].targets[0].proof; f.attempts.push(attempt(f));
+  event(f, "move_pending", 2, { proof: p });
+  event(f, "failure", 3, { outcome: "conflict", reason: "namespace_changed" });
+  const held = { ...p, ctime_ns: ns(time(3)) };
+  resume(f, 5, [{ target_id: id(2), source: null, holding: held, quarantine: null }], ["verify"]);
+  event(f, "recovered_verified", 6, { location: "holding", proof: held, from_pending_event_hash: evidenceHash(f.events[0]) });
+  assert.throws(() => replayNativeBarTransaction(f), /conflict_requires_resolution/);
+  const g = terminalPurge(), unlinked = g.events.at(-1);
+  event(g, "failure", later + 6, { outcome: "conflict", reason: "object_changed" });
+  resume(g, later + 8, [{ target_id: id(2), source: null, holding: null, quarantine: null }], ["verify"]);
+  event(g, "terminal_absence_verified", later + 9, { from_terminal_event_hash: evidenceHash(unlinked) });
+  assert.throws(() => replayNativeBarTransaction(g), /conflict_requires_resolution/);
+  g.events.pop(); g.attempts.pop();
+  const r = replayNativeBarTransaction(g); assert.equal(r.status, "conflict"); assert.deepEqual(r.spent_markers, []);
+});
+test("non-numeric strings in refined numeric fields refuse as validation errors, not runtime exceptions", () => {
+  for (const value of ["abc", "1.5", "1n"]) {
+    const f = fixture(); f.manifests[0].targets[0].proof.size = value;
+    assert.throws(() => replayNativeBarTransaction(f), (e) => !(e instanceof SyntaxError));
+    const b = budget(); b.recovery_reserve.bytes = value;
+    assert.throws(() => calculateNativeBarTransactionCapacity(b), (e) => !(e instanceof SyntaxError));
+  }
+});
