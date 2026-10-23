@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 
 type NativeBackend = {
-  info(): { protocol: number; mode: string; read_protocol?: number };
+  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number };
+  openCoordination(root: string, ttlMs: number): unknown;
+  coordinationCall(handle: unknown, action: string, name: string | undefined, body: string | undefined): unknown;
   openRoot(root: string, ttlMs: number): unknown;
   closeRoot(handle: unknown): void;
   inspect(handle: unknown, area: string, day: string, name: string): unknown;
@@ -84,6 +86,47 @@ export function openSyntheticNativeBarReader(root: string, ttlMs = 600000) {
         verify: (hook?: SyntheticReadHook) => ({ matches: native.verifyInventory(handle, snapshot, hook), execution_available: false as const }),
         close: () => native.closeInventory(handle, snapshot),
       };
+    },
+  };
+}
+
+/** Fixture-only descriptor coordination adapter, never a data mutation/host approval capability. */
+export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000) {
+  const native = backend();
+  if (!native || native.info().coordination_protocol !== 3) throw new Error("native_bar_coordination_unavailable: no filesystem fallback");
+  const handle = native.openCoordination(root, ttlMs);
+  const call = (action: string, name?: string, body?: string) => native.coordinationCall(handle, action, name, body);
+  let closeResult: { coordination_released: boolean; execution_available: false } | undefined;
+  return {
+    check: () => { call("check"); },
+    preview: () => call("preview") as SyntheticNativeInventory,
+    verifyBaseline: () => { call("baseline"); },
+    verifyLocked: () => { call("locked"); },
+    delta: () => call("delta") as { entries: { path: string; present: boolean; proof: SyntheticReadProof & { sha256: string } }[];
+      retired_count: string; retired_paths: string[]; unresolved_temporaries: string; temporary_paths: string[]; uncertain: boolean },
+    async names() { return call("names") as string[]; },
+    async read(name: string) {
+      for (let attempt = 0; ; ++attempt) {
+        try { const value = call("read", name) as string | null; return value === null ? null : Buffer.from(value); }
+        catch (e) {
+          // Old immutable publication briefly has two links; ordinary release may retire a name mid-read.
+          // Never accept that observation. Retry a bounded fresh native read, without resetting the lease.
+          if (attempt >= 9 || !(e instanceof Error) || !/^(?:open_failed:2|namespace_changed(?::2)?|target_changed|artifact_read_changed|writer_read_changed|hard_link_refused)$/.test(e.message)) throw e;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    },
+    async publish(name: string, body: string): Promise<"created" | "exists"> {
+      return call("publish", name, body) ? "created" : "exists";
+    },
+    removeOwn: (name: string, body: string) => call("release", name, body) as boolean,
+    async retireDead(name: ".writer.lock" | ".writer.takeover") { return call("retire", name) as boolean; },
+    close() {
+      if (closeResult) return closeResult;
+      let released = false;
+      try { released = call("cleanup") as boolean; }
+      finally { call("close"); closeResult = { coordination_released: released, execution_available: false }; }
+      return closeResult;
     },
   };
 }

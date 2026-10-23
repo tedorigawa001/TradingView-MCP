@@ -85,6 +85,15 @@ export async function primeNativeBarAcls(directory: string, names: string[]): Pr
 }
 
 type Owner = { pid: number; token: string; boot?: string | null; start?: string | null };
+/** Internal coordination adapter. Native adapters never implement pathname fallbacks. */
+export type NativeWriterIo = {
+  check(): void;
+  names(): Promise<string[]>;
+  read(name: string): Promise<Buffer | null>;
+  publish(name: string, body: string): Promise<"created" | "exists">;
+  removeOwn(name: string, body: string, absentOk?: boolean): boolean;
+  retireDead(name: ".writer.lock" | ".writer.takeover"): Promise<boolean>;
+};
 type Incarnation = { boot: string | null; start: string | null };
 let ownIncarnation: Promise<Incarnation> | null = null;
 // Identities are compared only for equality, so a short digest keeps every owner file within the 128-byte lock limit.
@@ -202,26 +211,23 @@ function rethrowAfter(error: unknown, cleanup: () => void): never {
 }
 
 /** Lamport bakery ordering serializes stale-file takeovers as well as ordinary acquisitions. */
-async function enterWriterQueue(directory: string, validate: (path: string) => Promise<void>, waitMs: number) {
+async function enterWriterQueue(io: NativeWriterIo, waitMs: number) {
   const id = randomUUID(), owner = await ownerBody(id), body = canonical(owner);
-  const claim = join(directory, `.writer-claim-${id}.json`), ticketPath = join(directory, `.writer-ticket-${id}.json`);
+  const claim = `.writer-claim-${id}.json`, ticketPath = `.writer-ticket-${id}.json`;
   let ticketBody: string | null = null;
   const leave = () => {
-    const ticketReleased = ticketBody === null || releaseOwnOrAbsent(ticketPath, ticketBody);
-    const claimReleased = releaseOwnOrAbsent(claim, body);
+    const ticketReleased = ticketBody === null || io.removeOwn(ticketPath, ticketBody, true);
+    const claimReleased = io.removeOwn(claim, body, true);
     if (!ticketReleased || !claimReleased) throw new Error("writer_queue_release_failed");
   };
   const scan = async () => {
-    const names = await readdir(directory);
+    io.check(); const names = await io.names();
     if (names.length > 30000) throw new Error("store_entry_limit");
     const claims: { id: string; owner: Owner }[] = [];
     for (const name of names) {
       const match = /^\.writer-claim-([0-9a-f-]{36})\.json$/.exec(name);
       if (!match || match[1] === id || !nativeBarId.safeParse(match[1]).success) continue;
-      const path = join(directory, name);
-      let bytes: Buffer;
-      try { await validate(path); bytes = await readRegularFile(path, "native writer claim", 256); }
-      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; }
+      const bytes = await io.read(name); if (!bytes) continue;
       const other = parseOwner(bytes.toString("utf8"));
       if (!other || other.token !== match[1]) throw new Error("writer_claim_corrupt");
       claims.push({ id: match[1], owner: other });
@@ -231,29 +237,29 @@ async function enterWriterQueue(directory: string, validate: (path: string) => P
     const contenders: { id: string; ticket: number | null }[] = [];
     for (const [i, c] of claims.entries()) {
       if (dead[i]) continue;
-      const numbered = join(directory, `.writer-ticket-${c.id}.json`);
+      const numbered = `.writer-ticket-${c.id}.json`;
       let ticket: number | null = null;
-      try {
-        await validate(numbered);
-        const b = await readRegularFile(numbered, "native writer ticket", 256), n = parseOwner(b.toString("utf8"), ["ticket"]);
+      const b = await io.read(numbered);
+      if (b) {
+        const n = parseOwner(b.toString("utf8"), ["ticket"]);
         if (!n) throw new Error("writer_ticket_corrupt");
         const { ticket: value, ...rest } = n;
         if (canonical(rest) !== canonical(c.owner) || !Number.isSafeInteger(value) || (value as number) < 1) throw new Error("writer_ticket_corrupt");
         ticket = value as number;
-      } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+      }
       contenders.push({ id: c.id, ticket });
     }
-    return contenders;
+    io.check(); return contenders;
   };
-  await validate(claim);
-  if (await publishImmutableFile(claim, body, "native writer claim") !== "created") throw new Error("writer_claim_conflict");
+  io.check();
+  if (await io.publish(claim, body) !== "created") throw new Error("writer_claim_conflict");
   try {
     const others = await scan(), ticket = Math.max(0, ...others.map((c) => c.ticket ?? 0)) + 1;
     // Release reads at most 128 bytes, so a larger body could never be removed by its owner.
     if (!Number.isSafeInteger(ticket) || Buffer.byteLength(canonical({ ...owner, ticket })) > 128) throw new Error("writer_ticket_exhausted");
     ticketBody = canonical({ ...owner, ticket });
-    await validate(ticketPath);
-    if (await publishImmutableFile(ticketPath, ticketBody, "native writer ticket") !== "created") throw new Error("writer_ticket_conflict");
+    io.check();
+    if (await io.publish(ticketPath, ticketBody) !== "created") throw new Error("writer_ticket_conflict");
     const started = performance.now();
     for (;;) {
       const blockers = (await scan()).some((c) => c.ticket === null || c.ticket < ticket || (c.ticket === ticket && c.id < id));
@@ -281,21 +287,25 @@ async function retireDead(path: string) {
 }
 
 /** Atomic whole-file publication; age never authorizes takeover, including the takeover marker. */
-async function takeWriterFile(directory: string, validate: (path: string) => Promise<void>, waitMs: number) {
-  const path = join(directory, ".writer.lock"), marker = join(directory, ".writer.takeover");
+async function takeWriterFile(io: NativeWriterIo, waitMs: number) {
+  const path = ".writer.lock", marker = ".writer.takeover";
+  const owner = async (name: string) => {
+    io.check(); const bytes = await io.read(name);
+    const parsed = bytes && parseOwner(bytes.toString("utf8"));
+    return bytes ? { dead: parsed ? (await ownersDead([parsed]))[0] : false } : null;
+  };
   const token = canonical(await ownerBody(randomUUID())), started = performance.now();
   // Waiting on a live owner is bounded by waitMs; only repeated takeovers are bounded by count.
   for (let takeovers = 0; takeovers < 16;) {
-    await validate(path); await validate(marker);
-    const gate = await lockOwner(marker);
-    if (gate?.dead) { await retireDead(marker); takeovers++; continue; }
-    if (!gate && await publishImmutableFile(path, token, "native bar writer") === "created") {
-      if (!(await lockOwner(marker))) return { release: () => releaseLockFileSync(path, (s) => s === token) };
-      if (!releaseLockFileSync(path, (s) => s === token)) throw new Error("store_lock_release_failed");
-    } else if (!gate && (await lockOwner(path))?.dead) {
-      if (await publishImmutableFile(marker, token, "native bar writer takeover") === "created") {
-        const releaseMarker = () => { if (!releaseLockFileSync(marker, (s) => s === token)) throw new Error("store_takeover_release_failed"); };
-        try { await retireDead(path); } catch (e) { rethrowAfter(e, releaseMarker); }
+    io.check(); const gate = await owner(marker);
+    if (gate?.dead) { await io.retireDead(marker); takeovers++; continue; }
+    if (!gate && await io.publish(path, token) === "created") {
+      if (!(await owner(marker))) return { release: () => io.removeOwn(path, token) };
+      if (!io.removeOwn(path, token)) throw new Error("store_lock_release_failed");
+    } else if (!gate && (await owner(path))?.dead) {
+      if (await io.publish(marker, token) === "created") {
+        const releaseMarker = () => { if (!io.removeOwn(marker, token)) throw new Error("store_takeover_release_failed"); };
+        try { await io.retireDead(path); } catch (e) { rethrowAfter(e, releaseMarker); }
         releaseMarker(); takeovers++;
         continue;
       }
@@ -309,9 +319,33 @@ async function takeWriterFile(directory: string, validate: (path: string) => Pro
 /** `release` reports success; it never throws, so a failed release cannot hide what the locked work already did. */
 export async function takeNativeWriterLock(directory: string, validate: (path: string) => Promise<void>, waitMs: number) {
   if (!posixModeEnforced()) throw new Error("private_access_unverified: writer coordination requires verified POSIX access");
-  const started = performance.now(), leave = await enterWriterQueue(directory, validate, waitMs);
+  return takeNativeWriterLockWithIo({
+    check() {}, names: () => readdir(directory),
+    async read(name) {
+      const path = join(directory, name);
+      try {
+        await validate(path);
+        if (name === ".writer.lock" || name === ".writer.takeover") return (await lockOwner(path))?.bytes ?? null;
+        return await readRegularFile(path, "native writer coordination", 256);
+      }
+      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+    },
+    async publish(name, body) { const path = join(directory, name); await validate(path);
+      return await publishImmutableFile(path, body, "native writer coordination") === "created" ? "created" : "exists"; },
+    removeOwn: (name, body, absentOk) => absentOk ? releaseOwnOrAbsent(join(directory, name), body)
+      : releaseLockFileSync(join(directory, name), (s) => s === body),
+    retireDead: (name) => retireDead(join(directory, name)),
+  }, waitMs);
+}
+
+/** Same bakery/takeover algorithm, with no implicit filesystem or liveness adapter substitution. */
+export async function takeNativeWriterLockWithIo(io: NativeWriterIo, waitMs: number) {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 600000) throw new Error("invalid_writer_wait");
+  io.check(); const started = performance.now(), leave = await enterWriterQueue(io, waitMs);
   try {
-    const lock = await takeWriterFile(directory, validate, Math.max(0, waitMs - (performance.now() - started)));
+    const lock = await takeWriterFile(io, Math.max(0, waitMs - (performance.now() - started)));
+    try { io.check(); }
+    catch (e) { rethrowAfter(e, () => { if (!lock.release()) throw new Error("store_lock_release_failed"); }); }
     return { release: () => {
       let released = false;
       try { released = lock.release(); } catch { /* reported as false */ }

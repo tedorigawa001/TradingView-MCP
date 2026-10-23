@@ -22,6 +22,7 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 
 #if !defined(__APPLE__) || !defined(NATIVE_BAR_SYNTHETIC_ONLY)
@@ -89,6 +90,7 @@ struct Session {
   std::weak_ptr<ReadSnapshot> snapshot;
   uint64_t read_bytes = 0;
   bool read_only = false;
+  bool coordination_only = false;
   Steady::time_point deadline;
   Wall::time_point wall_deadline;
   pid_t pid = getpid();
@@ -102,10 +104,13 @@ struct Session {
   void check_deadline() {
     require(!closed, "session_closed");
     require(pid == getpid(), "session_process_mismatch");
-    if (Steady::now() >= deadline || Wall::now() >= wall_deadline) { release(); throw std::runtime_error("session_expired"); }
+    if (Steady::now() >= deadline || Wall::now() >= wall_deadline) {
+      if (!coordination_only) release();
+      throw std::runtime_error("session_expired");
+    }
   }
-  void guard() {
-    check_deadline();
+  void namespace_guard() {
+    require(!closed && pid == getpid(), "session_closed_or_wrong_process");
     for (size_t i = 0; i < chain.size(); ++i) {
       private_access(chain[i].fd.value, true, chain[i].strict);
       if (i) {
@@ -114,8 +119,8 @@ struct Session {
         require(S_ISDIR(entry.st_mode) && same_id(entry, stat_fd(chain[i].fd.value)), "namespace_changed");
       }
     }
-    check_deadline();
   }
+  void guard() { check_deadline(); namespace_guard(); check_deadline(); }
 };
 void napi_ok_or_throw(napi_status s) { require(s == napi_ok, "native_argument_error"); }
 std::string string_arg(napi_env env, napi_value value) {
@@ -349,8 +354,7 @@ napi_value purge_target(napi_env env, napi_callback_info info) {
     } catch (...) { if (t->state != "durability_unknown") t->state = "conflict"; throw; }
   });
 }
-napi_value open_root_impl(napi_env env, napi_callback_info info, bool read_only) {
-  return boundary(env, [&] {
+std::shared_ptr<Session> create_root(napi_env env, napi_callback_info info, bool read_only) {
     size_t argc = 2; napi_value args[2]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 2, "argument_count");
     auto path = string_arg(env, args[0]);
     double ttl; napi_ok_or_throw(napi_get_value_double(env, args[1], &ttl)); require(ttl >= 1 && ttl <= 600000 && ttl == static_cast<int>(ttl), "invalid_deadline");
@@ -379,8 +383,10 @@ napi_value open_root_impl(napi_env env, napi_callback_info info, bool read_only)
     private_access(marker.value, false, true); char bytes[32]{};
     require(read(marker.value, bytes, sizeof(bytes)) == 21 && std::string(bytes, 21) == "synthetic-fixture-v1\n", "synthetic_marker_required");
     qualify_volume(session->root()); session->guard();
-    return wrap(env, session, SESSION_TAG);
-  });
+    return session;
+}
+napi_value open_root_impl(napi_env env, napi_callback_info info, bool read_only) {
+  return boundary(env, [&] { return wrap(env, create_root(env, info, read_only), SESSION_TAG); });
 }
 napi_value open_root(napi_env env, napi_callback_info info) { return open_root_impl(env, info, false); }
 napi_value open_read_root(napi_env env, napi_callback_info info) { return open_root_impl(env, info, true); }
@@ -388,11 +394,13 @@ napi_value close_root(napi_env env, napi_callback_info info) {
   return boundary(env, [&] { size_t argc = 1; napi_value args[1]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 1, "argument_count"); session_arg(env, args[0])->close(); return undefined(env); });
 }
 #include "native_bar_read.inc"
+#include "native_bar_writer.inc"
 napi_value backend_info(napi_env env, napi_callback_info) {
   return boundary(env, [&] {
     auto out = object(env); napi_value version, fds, sessions;
     napi_ok_or_throw(napi_create_int32(env, 1, &version)); prop(env, out, "protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 2, &version)); prop(env, out, "read_protocol", version);
+    napi_ok_or_throw(napi_create_int32(env, 3, &version)); prop(env, out, "coordination_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -406,6 +414,8 @@ NAPI_MODULE_INIT() {
     {"info", nullptr, backend_info, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRoot", nullptr, open_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"openCoordination", nullptr, open_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"coordinationCall", nullptr, coordination_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inventory", nullptr, read_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readEvidence", nullptr, read_evidence, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"verifyInventory", nullptr, verify_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
