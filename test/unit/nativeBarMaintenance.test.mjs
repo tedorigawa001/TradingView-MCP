@@ -116,6 +116,11 @@ function plans() {
   return { registry: new NativeBarCleanupPlans({ now: () => new Date(time), monotonic: () => tick }),
     time: (v) => { time = v; }, tick: (v) => { tick = v; } };
 }
+// Validation needs a re-inventory taken after approval: the same evidence a little later, with renewed liveness checks.
+function after(f, s, ms = 1000) {
+  const time = new Date(Date.parse(s.as_of) + ms).toISOString(); f.time(time);
+  return { ...s, as_of: time, liveness: s.liveness.map((v) => ({ ...v, checked_at: v.checked_at === s.as_of ? time : v.checked_at })) };
+}
 test("approval plan binds exact candidate IDs and yields only a single-use validation result, never an execution grant", () => {
   const s = snapshot(); register(s, file(stagePath, "truncated"));
   const item = classifyNativeBarCleanup(s).items.find((e) => e.path === stagePath);
@@ -126,7 +131,9 @@ test("approval plan binds exact candidate IDs and yields only a single-use valid
   assert.match(p.targets[0].destination, /^quarantine\/abandoned\//);
   assert.equal(p.expires_at, "2026-10-23T00:10:00.000Z");
   const request = { plan_id: p.plan_id, plan_hash: p.plan_hash, action: "quarantine", confirm: true };
-  const v = f.registry.consumeForSyntheticValidation(request, s);
+  assert.throws(() => f.registry.consumeForSyntheticValidation(request, s), /not_after_approval/);
+  const again = f.registry.prepare(s, { action: "quarantine", candidate_ids: [item.candidate_id] });
+  const v = f.registry.consumeForSyntheticValidation({ ...request, plan_id: again.plan_id, plan_hash: again.plan_hash }, after(f, s));
   assert.equal(v.status, "validated_only"); assert.equal(v.execution_available, false); assert.equal(v.no_operation_performed, true);
   assert.throws(() => f.registry.consumeForSyntheticValidation(request, s), /plan_not_found/);
 });
@@ -279,7 +286,7 @@ test("plan cannot cross registry instances, override scope or be widened by muta
   assert.throws(() => f.registry.consumeForSyntheticValidation(request(p, { source_path: "arbitrary" }), s));
   p.targets[0].source_path = "arbitrary"; p.targets[0].proof.inode = "0"; p.binding.inode = "0";
   p.plan_hash = originalHash;
-  const result = f.registry.consumeForSyntheticValidation(request(p), s);
+  const result = f.registry.consumeForSyntheticValidation(request(p), after(f, s));
   assert.equal(result.targets[0].source_path, stagePath); assert.notEqual(result.targets[0].proof.inode, "0");
   assert.equal(result.no_operation_performed, true);
 });
@@ -291,21 +298,21 @@ for (const [label, change] of [
   ["new root", (s) => { s.root.inode = "8"; }],
 ]) test(`snapshot change invalidates whole unstarted plan: ${label}`, () => {
   const s = registered(), f = plans(), p = prepare(f, s); change(s);
-  assert.throws(() => f.registry.consumeForSyntheticValidation(request(p), s), /snapshot_changed|cleanup_blocked/);
+  assert.throws(() => f.registry.consumeForSyntheticValidation(request(p), after(f, s)), /snapshot_changed|cleanup_blocked/);
 });
 test("legacy review is explicit and never gains destinations or quarantine authority", () => {
   const s = snapshot(); s.entries.push(file(stagePath, "partial")); const f = plans();
   assert.throws(() => prepare(f, s), /candidate_not_eligible/);
   const p = prepare(f, s, "legacy_review");
   assert.equal(p.targets[0].effect, "review_only"); assert.equal(p.targets[0].destination, null); assert.equal(p.targets[0].holding_path, null);
-  assert.equal(f.registry.consumeForSyntheticValidation(request(p), s).no_operation_performed, true);
+  assert.equal(f.registry.consumeForSyntheticValidation(request(p), after(f, s)).no_operation_performed, true);
 });
 test("purge preview is separate and explicitly irreversible but remains non-executable", () => {
   const s = snapshot(); quarantined(s, 91 * 86400000); const f = plans();
   const p = prepare(f, s, "purge", `quarantine/abandoned/${op}/${stageId}`);
   assert.equal(p.targets[0].effect, "irreversible_unlink"); assert.equal(p.targets[0].destination, null);
   assert.equal(p.capacity_reservation, "unverified_no_execution");
-  assert.equal(f.registry.consumeForSyntheticValidation(request(p), s).no_operation_performed, true);
+  assert.equal(f.registry.consumeForSyntheticValidation(request(p), after(f, s)).no_operation_performed, true);
 });
 test("incomplete/missing/unsafe roots, future snapshots and unknown selection refuse", () => {
   const f = plans();
@@ -352,14 +359,15 @@ test("batch, entry and serialized response ceilings fail without implicit chunki
   const tooMany = snapshot(); tooMany.entries = Array(30001).fill(tooMany.entries[0]);
   assert.throws(() => classifyNativeBarCleanup(tooMany));
   const response = snapshot();
-  for (let i = 0; i < 9000; i++) response.entries.push(file(`unknown-${String(i).padStart(5, "0")}-${"x".repeat(480)}`, ""));
+  for (let i = 0; i < 13000; i++) response.entries.push(file(`unknown-${String(i).padStart(5, "0")}-${"x".repeat(480)}`, ""));
   assert.throws(() => classifyNativeBarCleanup(response), /response_limit/);
 });
 test("deadlines are rechecked after validation work, not restarted at the end", () => {
-  let call = 0;
-  const registry = new NativeBarCleanupPlans({ now: () => new Date(at), monotonic: () => ++call >= 4 ? 600000 : 0 });
+  let call = 0, wall = at;
+  const registry = new NativeBarCleanupPlans({ now: () => new Date(wall), monotonic: () => ++call >= 4 ? 600000 : 0 });
   const s = registered(), item = targetItem(s), p = registry.prepare(s, { action: "quarantine", candidate_ids: [item.candidate_id] });
-  assert.throws(() => registry.consumeForSyntheticValidation(request(p), s), /plan_expired/);
+  const later = after({ time: (v) => { wall = v; } }, s);
+  assert.throws(() => registry.consumeForSyntheticValidation(request(p), later), /plan_expired/);
 });
 test("a changed native timestamp, missing marker, hard link or current producer prevents purge candidacy", () => {
   for (const change of [
@@ -387,7 +395,7 @@ test("new as-of needs a renewed producer check and never turns old liveness into
   s.as_of = "2026-10-23T00:01:00.000Z"; f.time(s.as_of);
   assert.throws(() => f.registry.consumeForSyntheticValidation(request(p), s), /snapshot_changed|candidate_changed/);
   s.liveness[0].checked_at = s.as_of;
-  const next = prepare(f, s); assert.equal(f.registry.consumeForSyntheticValidation(request(next), s).status, "validated_only");
+  const next = prepare(f, s); assert.equal(f.registry.consumeForSyntheticValidation(request(next), after(f, s)).status, "validated_only");
 });
 test("an incomplete known maintenance transaction blocks unrelated cleanup plans", () => {
   const s = registered(); s.entries.push(file(`maintenance/${id}.json`, { schema: "native-bar-maintenance-v1", id,
@@ -414,19 +422,18 @@ test("an abandoned quarantine without its completion marker blocks unrelated cle
   s.entries.push(file(`quarantine/abandoned/${id}/${stageId}`, "interrupted quarantine"));
   assert.throws(() => prepare(plans(), s), /quarantine_recovery_required/);
 });
-for (const phase of ["prepare", "consume"]) test(`snapshot freshness is rechecked after ${phase} work`, () => {
-  const s = registered(), base = Date.parse(at), late = base + 599999;
+test("snapshot freshness is rechecked after prepare work", () => {
+  const s = registered(), late = Date.parse(at) + 599999;
   let calls = 0;
-  const registry = new NativeBarCleanupPlans({ now: () => new Date(phase === "prepare"
-    ? ++calls === 1 ? late : late + 2
-    : ++calls <= 2 ? base + 1000 : calls === 3 ? late : late + 2), monotonic: () => 0 });
-  const selection = { action: "quarantine", candidate_ids: [targetItem(s).candidate_id] };
-  if (phase === "prepare") assert.throws(() => registry.prepare(s, selection), /stale_snapshot/);
-  else {
-    const p = registry.prepare(s, selection);
-    // The plan remains within its lifetime while the older evidence expires during validation.
-    assert.throws(() => registry.consumeForSyntheticValidation(request(p), s), /stale_snapshot/);
-  }
+  const registry = new NativeBarCleanupPlans({ now: () => new Date(++calls === 1 ? late : late + 2), monotonic: () => 0 });
+  assert.throws(() => registry.prepare(s, { action: "quarantine", candidate_ids: [targetItem(s).candidate_id] }), /stale_snapshot/);
+});
+test("validation refuses the evidence the preview was built from, so evidence never outlives a valid plan", () => {
+  const s = registered(), base = Date.parse(at);
+  let calls = 0;
+  const registry = new NativeBarCleanupPlans({ now: () => new Date(++calls <= 2 ? base + 1000 : base + 599999), monotonic: () => 0 });
+  const p = registry.prepare(s, { action: "quarantine", candidate_ids: [targetItem(s).candidate_id] });
+  assert.throws(() => registry.consumeForSyntheticValidation(request(p), s), /not_after_approval/);
 });
 test("large liveness inventories preserve exact owner matching and current-owner exclusions", (t) => {
   const s = snapshot(), count = 256;
@@ -440,4 +447,106 @@ test("large liveness inventories preserve exact owner matching and current-owner
   const start = performance.now(), result = classifyNativeBarCleanup(s);
   t.diagnostic(`256 owners / 1280 liveness proofs: ${(performance.now() - start).toFixed(1)} ms`);
   assert.equal(result.items.filter((i) => i.eligible_for === "quarantine").length, count - 1);
+});
+
+const maintenanceId = "00000000-0000-4000-8000-000000000006";
+test("a stage named for a committed or maintained recording is referenced, never legacy review", () => {
+  const s = snapshot(); committed(s); s.entries.push(file(stagePath, "partial receipt"));
+  assert.deepEqual(classifyNativeBarCleanup(s).blockers, []);
+  assert.equal(targetItem(s).classification, "referenced");
+  const m = snapshot(), intent = { schema: "native-bar-maintenance-v1", id: maintenanceId, kind: "prune", created_at: at,
+    generation: evidenceHash("generation"), pairs: [{ recording_id: id, sequence: 1, day: "2026-10-23", payload_hash: evidenceHash("p"),
+      receipt_hash: evidenceHash("r"), bytes: 1 }] };
+  m.entries.push(file(`maintenance/${maintenanceId}.json`, intent),
+    file(`maintenance/${maintenanceId}.done.json`, { id: maintenanceId, intent_hash: evidenceHash(intent) }), file(stagePath, "partial"));
+  assert.deepEqual(classifyNativeBarCleanup(m).blockers, []);
+  assert.equal(targetItem(m).classification, "referenced");
+});
+
+test("unregistered files are not offered for legacy review while any writer may still be publishing", () => {
+  const pending = "captures/2026-10-23/00000000-0000-4000-8000-000000000005.json";
+  const base = () => { const s = snapshot(); s.entries.push(file(pending, capture())); return s; };
+  assert.equal(targetItem(base(), pending).eligible_for, "legacy_review");
+  for (const change of [
+    (s) => s.entries.push(file(".writer.lock", owner)),
+    (s) => s.entries.push(file(`.writer-claim-${op}.json`, owner)),
+    (s) => s.current_owner_tokens.push(op),
+  ]) {
+    const s = base(); change(s); const item = targetItem(s, pending);
+    assert.equal(item.eligible_for, null); assert.match(item.reasons.join(), /writer_activity_present/);
+  }
+  const dead = base(); dead.entries.push(file(`.writer-claim-${op}.json`, owner));
+  dead.liveness.push({ owner_hash: evidenceHash(owner), state: "dead", reason: "esrch", checked_at: at });
+  assert.equal(targetItem(dead, pending).eligible_for, "legacy_review");
+});
+
+test("a stage whose name does not carry a recording ID is preserved without legacy review", () => {
+  const s = snapshot(), path = "captures/2026-10-23/.files-aabbccdd-123-112233445566.stage";
+  s.entries.push(file(path, "partial"));
+  const item = targetItem(s, path);
+  assert.equal(item.classification, "legacy_unverified"); assert.equal(item.eligible_for, null);
+  assert.match(item.reasons.join(), /stage_recording_unbound/);
+});
+
+test("a case variant of a store name blocks planning, as it can be the same object on a case-insensitive volume", () => {
+  for (const path of [`Receipts/2026-10-23/${id}.json`, "receipts/2026-10-23/ABCDEF00-0000-4000-8000-000000000001.json", "Policy.json",
+    `quarantine/Abandoned/${op}/timestamp.json`]) {
+    const s = snapshot(); s.entries.push(file(path, "x"));
+    assert.ok(classifyNativeBarCleanup(s).blockers.some((b) => b.startsWith("case_variant_store_name:")), path);
+  }
+  const finder = snapshot(); finder.entries.push(file("receipts/2026-10-23/.DS_Store", "finder"));
+  assert.deepEqual(classifyNativeBarCleanup(finder).blockers, []);
+});
+
+test("a ticket that disagrees with its claim is queue corruption, never a dead-coordination candidate", () => {
+  const s = snapshot();
+  s.entries.push(file(`.writer-claim-${op}.json`, { ...owner, pid: 100 }), file(`.writer-ticket-${op}.json`, { ...owner, pid: 200, ticket: 1 }));
+  s.liveness.push({ owner_hash: evidenceHash({ ...owner, pid: 200 }), state: "dead", reason: "esrch", checked_at: at });
+  const report = classifyNativeBarCleanup(s);
+  assert.ok(report.blockers.includes(`integrity_failure:.writer-ticket-${op}.json`));
+  assert.ok(report.items.every((i) => i.eligible_for === null));
+});
+
+test("a retired copy of the holder named by the current lock is not dead coordination", () => {
+  const s = snapshot(), retired = `.writer-retired-${id}.lock`;
+  s.entries.push(file(retired, owner));
+  s.liveness.push({ owner_hash: evidenceHash(owner), state: "dead", reason: "esrch", checked_at: at });
+  assert.equal(targetItem(s, retired).eligible_for, "quarantine");
+  s.entries.push(file(".writer.lock", owner));
+  assert.equal(targetItem(s, retired).eligible_for, null);
+});
+
+test("non-candidates are listed compactly so a large store stays reportable", () => {
+  const s = snapshot();
+  for (let i = 0; i < 15000; i++) s.entries.push(file(`captures/2026-10-23/note-${String(i).padStart(5, "0")}`, ""));
+  const report = classifyNativeBarCleanup(s);
+  assert.equal(report.summary.unknown, 15000);
+  assert.ok(report.items.every((i) => i.candidate_id && !("proof" in i) && !("parents" in i)));
+});
+
+test("a purge plan must cover every target of a marker it touches", () => {
+  const s = snapshot(), old = new Date(Date.parse(at) - 91 * 86400000).toISOString();
+  const ids = [stageId, "00000000-0000-4000-8000-000000000004"], sources = [stagePath, stagePath.replace("aabbccdd", "bbccddee")];
+  const targets = ids.map((target, i) => {
+    const t = file(`quarantine/abandoned/${op}/${target}`, `partial-${i}`);
+    Object.assign(t.proof, { mtime_ns: ns(old), ctime_ns: ns(old), birthtime_ns: ns(old) }); return t;
+  });
+  const marker = file(`quarantine/abandoned/${op}/timestamp.json`, { schema: "native-bar-abandoned-quarantine-v1", operation_id: op,
+    root: { device: "1", inode: "2" }, policy_hash: policyHash, quarantined_at: old,
+    targets: targets.map((t, i) => ({ target_id: ids[i], source_path: sources[i], recording_id: id, proof: t.proof })) });
+  Object.assign(marker.proof, { mtime_ns: ns(old), ctime_ns: ns(old), birthtime_ns: ns(old) });
+  s.entries.push(...targets, marker);
+  const report = classifyNativeBarCleanup(s), candidates = targets.map((t) => report.items.find((i) => i.path === t.path).candidate_id);
+  assert.deepEqual(report.blockers, []);
+  const f = plans();
+  assert.throws(() => f.registry.prepare(s, { action: "purge", candidate_ids: [candidates[0]] }), /complete_marker_set/);
+  assert.equal(f.registry.prepare(s, { action: "purge", candidate_ids: candidates }).targets.length, 2);
+});
+
+test("generation ignores entry order even for names locale collation ranks equal; names equal under NFC refuse", () => {
+  const s = snapshot(); s.entries.push(file("note\u0001", "x"), file("note\u0002", "y"), file("B-note", "z"), file("a-note", "w"));
+  const reversed = { ...s, entries: [...s.entries].reverse() };
+  assert.equal(classifyNativeBarCleanup(s).generation, classifyNativeBarCleanup(reversed).generation);
+  const dup = snapshot(); dup.entries.push(file("é-note", "x"), file("é-note", "y"));
+  assert.throws(() => classifyNativeBarCleanup(dup), /duplicate_normalized_path/);
 });

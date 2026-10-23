@@ -44,6 +44,8 @@ type CleanupClass = "unknown" | "unsafe" | "hard_link_alias" | "committed" | "re
 type Action = "quarantine" | "purge" | "legacy_review";
 type Item = { candidate_id: string; path: string; classification: CleanupClass; eligible_for: Action | null; reasons: string[];
   proof: Entry["proof"]; parents: Entry["parents"] };
+type ReportItem = Item | Omit<Item, "proof" | "parents">;
+const isCandidate = (i: ReportItem): i is Item => "proof" in i;
 const LIMITS = Object.freeze({ entries: 30000, file_bytes: 1024 ** 2, scan_bytes: 256 * 1024 ** 2,
   metadata_bytes: 16 * 1024 ** 2, response_bytes: 8 * 1024 ** 2, quota_bytes: 1024 ** 3, batch: 1024 } as const);
 
@@ -51,10 +53,13 @@ const rawHash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest
 function bounded(input: NativeBarCleanupSnapshot) {
   const snapshot = snapshotSchema.parse(input);
   let inventory = 0n, metadata = 0n, scan = 0;
-  const paths = new Set<string>();
+  const paths = new Set<string>(), normalized = new Set<string>();
   if (new Set(snapshot.liveness.map((v) => v.owner_hash)).size !== snapshot.liveness.length) throw new Error("cleanup_duplicate_liveness");
   for (const e of snapshot.entries) {
     if (paths.has(e.path)) throw new Error("cleanup_duplicate_path"); paths.add(e.path);
+    // APFS is normalization-insensitive: two such names cannot both exist, so the snapshot is inconsistent.
+    const nfc = e.path.normalize("NFC");
+    if (normalized.has(nfc)) throw new Error("cleanup_duplicate_normalized_path"); normalized.add(nfc);
     if (e.kind !== "directory") inventory += BigInt(e.proof.size);
     if (metadataPath(e.path)) metadata += BigInt(e.proof.size);
     if (e.bytes) {
@@ -68,24 +73,53 @@ function bounded(input: NativeBarCleanupSnapshot) {
   return { snapshot, inventory, metadata };
 }
 const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+// Compiled once: classification runs every pattern over up to 30,000 entries.
+const RE = {
+  captures: new RegExp(`^captures/([0-9]{4}-[0-9]{2}-[0-9]{2})/(${uuid})\\.json$`),
+  receipts: new RegExp(`^receipts/([0-9]{4}-[0-9]{2}-[0-9]{2})/(${uuid})\\.json$`),
+  maintenance: new RegExp(`^maintenance/(${uuid})(\\.done)?\\.json$`),
+  events: new RegExp(`^maintenance/${uuid}\\.events/`),
+  unsupported: new RegExp(`^(maintenance-hold/${uuid}/|maintenance/${uuid}\\.events/)`),
+  coordination: new RegExp(`^\\.writer-(claim|ticket|retired)-(${uuid})\\.(json|lock)$`),
+  reservation: new RegExp(`^operations/(${uuid})\\.reservation\\.json$`),
+  created: new RegExp(`^operations/(${uuid})\\.created/(${uuid})\\.json$`),
+  abandoned: new RegExp(`^quarantine/abandoned/(${uuid})(/|$)`),
+  timestamp: new RegExp(`^quarantine/abandoned/(${uuid})/timestamp\\.json$`),
+  stage: /^(captures|receipts)\/[0-9]{4}-[0-9]{2}-[0-9]{2}\/\.[A-Za-z0-9._-]{1,64}-[0-9a-f]{8}-[1-9][0-9]*-[0-9a-f]{12}\.stage$/,
+  // fsDurability names a stage `.<destination stem>-<tag>-<pid>-<random>.stage`; this store's stems are recording IDs.
+  stageRecording: new RegExp(`/\\.(${uuid})-[0-9a-f]{8}-[1-9][0-9]*-[0-9a-f]{12}\\.stage$`),
+};
+const NAMESPACES = ["policy.json", "captures", "receipts", "maintenance", "maintenance-hold", "operations", "quarantine",
+  ".writer.lock", ".writer.takeover"];
 function artifact(path: string, area: "captures" | "receipts") {
-  const m = new RegExp(`^${area}/([0-9]{4}-[0-9]{2}-[0-9]{2})/(${uuid})\\.json$`).exec(path);
+  const m = RE[area].exec(path);
   if (!m || !nativeBarTimestamp.safeParse(`${m[1]}T00:00:00.000Z`).success || !nativeBarId.safeParse(m[2]).success) return null;
   return { day: m[1], recording_id: m[2] };
 }
-function maintenancePath(path: string) { return new RegExp(`^maintenance/(${uuid})(\\.done)?\\.json$`).exec(path); }
+function maintenancePath(path: string) { return RE.maintenance.exec(path); }
 function metadataPath(path: string) {
   return path === "policy.json" || !!artifact(path, "receipts") || !!maintenancePath(path)
     || path.startsWith("operations/") || /^\.writer[-.]/.test(path) || /^quarantine\/abandoned\/[^/]+\/timestamp\.json$/.test(path)
-    || new RegExp(`^maintenance/${uuid}\\.events/`).test(path);
+    || RE.events.test(path);
 }
 function isStage(path: string) {
-  return /^(captures|receipts)\/[0-9]{4}-[0-9]{2}-[0-9]{2}\/\.[A-Za-z0-9._-]{1,64}-[0-9a-f]{8}-[1-9][0-9]*-[0-9a-f]{12}\.stage$/.test(path)
-    && nativeBarTimestamp.safeParse(`${path.split("/")[1]}T00:00:00.000Z`).success;
+  return RE.stage.test(path) && nativeBarTimestamp.safeParse(`${path.split("/")[1]}T00:00:00.000Z`).success;
 }
+function stageRecording(path: string) { return RE.stageRecording.exec(path)?.[1] ?? null; }
 function coordinationPath(path: string) {
-  const match = new RegExp(`^\\.writer-(claim|ticket|retired)-(${uuid})\\.(json|lock)$`).exec(path);
+  const match = RE.coordination.exec(path);
   return match && ((match[1] === "retired") === (match[3] === "lock")) ? match : null;
+}
+function recognized(path: string) {
+  return metadataPath(path) || !!artifact(path, "captures") || isStage(path) || !!coordinationPath(path)
+    || path.startsWith("quarantine/abandoned/") || path.startsWith("maintenance-hold/") || NAMESPACES.includes(path);
+}
+/** APFS compares names case-insensitively, so a case variant of a store name may be the same object the store uses. */
+function caseVariant(path: string) {
+  const lower = path.toLowerCase();
+  if (lower === path) return false;
+  const [first] = path.split("/"), [lowerFirst] = lower.split("/");
+  return (first !== lowerFirst && NAMESPACES.includes(lowerFirst)) || (recognized(lower) && !recognized(path));
 }
 function coordinationOwner(e: Entry, root: NonNullable<Snapshot["root"]>, match: RegExpExecArray) {
   if (BigInt(e.proof.size) > 256n) throw new Error("invalid_coordination");
@@ -97,8 +131,8 @@ function coordinationOwner(e: Entry, root: NonNullable<Snapshot["root"]>, match:
   if (match[1] !== "retired" && owner.token !== match[2]) throw new Error("coordination_token");
   return owner;
 }
-function ownerDeathCheck(snapshot: Snapshot) {
-  const current = new Set(snapshot.current_owner_tokens), liveness = new Map(snapshot.liveness.map((v) => [v.owner_hash, v]));
+function ownerDeathCheck(snapshot: Snapshot, lockTokens: string[] = []) {
+  const current = new Set([...snapshot.current_owner_tokens, ...lockTokens]), liveness = new Map(snapshot.liveness.map((v) => [v.owner_hash, v]));
   return (owner: Owner) => {
     if (current.has(owner.token)) return false;
     const v = liveness.get(evidenceHash(owner));
@@ -135,7 +169,7 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
   }));
   const blockers: string[] = snapshot.coverage_complete ? [] : ["incomplete_inventory"];
   const byPath = new Map(snapshot.entries.map((e) => [e.path, e]));
-  const isDead = ownerDeathCheck(snapshot);
+  let isDead = ownerDeathCheck(snapshot);
   const itemByPath = new Map(items.map((i) => [i.path, i]));
   const mark = (path: string, classification: CleanupClass, reason: string, eligible_for: Action | null = null) => {
     const item = itemByPath.get(path); if (item) Object.assign(item, { classification, eligible_for, reasons: [reason] });
@@ -144,21 +178,27 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
   const root = snapshot.root;
   const parentProofs = new Map<string, string>();
   const objectPaths = new Map<string, string>();
-  const abandonedOperations = new Set<string>();
+  // Paths below each abandoned-quarantine operation directory, indexed once instead of rescanned per marker.
+  const abandonedOperations = new Map<string, string[]>();
   for (const e of snapshot.entries) {
-    const abandoned = new RegExp(`^quarantine/abandoned/(${uuid})(?:/|$)`).exec(e.path);
-    if (abandoned) abandonedOperations.add(abandoned[1]);
+    const abandoned = RE.abandoned.exec(e.path);
+    if (abandoned) {
+      const below = abandonedOperations.get(abandoned[1]) ?? [];
+      if (abandoned[2] === "/") below.push(e.path);
+      abandonedOperations.set(abandoned[1], below);
+    }
     if (e.kind === "file") {
       const key = `${e.proof.device}:${e.proof.inode}`;
       if (objectPaths.has(key)) blockers.push(`duplicate_object_identity:${e.path}`);
       objectPaths.set(key, e.path);
     }
-    if (new RegExp(`^(maintenance-hold/${uuid}/|maintenance/${uuid}\\.events/)`).test(e.path)) {
+    if (RE.unsupported.test(e.path)) {
       blockers.push(`unsupported_transaction_state:${e.path}`);
       mark(e.path, "protected_metadata", "explicit_recovery_not_implemented");
     }
+    if (caseVariant(e.path)) blockers.push(`case_variant_store_name:${e.path}`);
   }
-  for (const operation of abandonedOperations) if (!byPath.has(`quarantine/abandoned/${operation}/timestamp.json`)) {
+  for (const operation of abandonedOperations.keys()) if (!byPath.has(`quarantine/abandoned/${operation}/timestamp.json`)) {
     blockers.push(`quarantine_recovery_required:${operation}`);
   }
   for (const e of snapshot.entries) for (const p of e.parents) {
@@ -213,7 +253,7 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
     const reservations = new Map<string, { value: z.infer<typeof nativeBarProducerReservationSchema>; hash: string }>();
     const reservationByPath = new Map<string, z.infer<typeof nativeBarProducerReservationSchema>>();
     for (const e of snapshot.entries) {
-      const match = new RegExp(`^operations/(${uuid})\\.reservation\\.json$`).exec(e.path);
+      const match = RE.reservation.exec(e.path);
       if (!match) continue;
       mark(e.path, "protected_metadata", "producer_provenance_is_not_cleanup");
       try {
@@ -227,7 +267,7 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
       } catch { fail(e.path); }
     }
     for (const e of snapshot.entries) {
-      const match = new RegExp(`^operations/(${uuid})\\.created/(${uuid})\\.json$`).exec(e.path);
+      const match = RE.created.exec(e.path);
       if (!match) continue;
       mark(e.path, "protected_metadata", "producer_provenance_is_not_cleanup");
       try {
@@ -238,8 +278,32 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
         registered.set(c.path, { reservation: r.value, created: c });
       } catch { fail(e.path); }
     }
+    // The holder named by a current lock or takeover marker is current, whatever liveness the caller supplied.
+    const lockTokens: string[] = [];
+    for (const path of [".writer.lock", ".writer.takeover"]) {
+      const lock = byPath.get(path);
+      if (lock) try { lockTokens.push(ownerSchema.parse(json(lock, root)).token); } catch { /* still protected below */ }
+    }
+    isDead = ownerDeathCheck(snapshot, lockTokens);
+    // A claim and its ticket are written by one owner; a mismatched pair is the queue corruption writers refuse.
+    const claims = new Map<string, Owner | null>(), tickets = new Map<string, { path: string; owner: Owner | null }>();
+    let writerActive = lockTokens.length > 0 || byPath.has(".writer.lock") || byPath.has(".writer.takeover") || snapshot.current_owner_tokens.length > 0;
+    for (const e of snapshot.entries) {
+      const coordination = coordinationPath(e.path);
+      if (!coordination) continue;
+      let owner: Owner | null = null;
+      try { owner = coordinationOwner(e, root, coordination); } catch { /* unverified owner */ }
+      if (!owner || !isDead(owner)) writerActive = true;
+      if (coordination[1] === "claim") claims.set(coordination[2], owner);
+      if (coordination[1] === "ticket") tickets.set(coordination[2], { path: e.path, owner });
+    }
+    for (const [token, ticket] of tickets) {
+      const claim = claims.get(token);
+      if (claims.has(token) && (!claim || !ticket.owner || canonical(claim) !== canonical(ticket.owner))) fail(ticket.path);
+    }
     const liveReferences = new Set([...reservations.values()].filter((r) => !isDead(r.value.owner))
       .map((r) => r.value.artifact.recording_id));
+    if (liveReferences.size) writerActive = true;
     for (const e of snapshot.entries) {
       if (e.kind === "directory" || committedPaths.has(e.path) || artifact(e.path, "receipts")) continue;
       if (e.path.startsWith("quarantine/")) {
@@ -258,14 +322,17 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
       const capture = artifact(e.path, "captures");
       if (coordination) {
         try {
+          if (itemByPath.get(e.path)?.classification === "integrity_failure") continue;
           const owner = coordinationOwner(e, root, coordination);
           const dead = isDead(owner);
           mark(e.path, dead ? "dead_coordination" : "live_or_unknown_producer", dead ? "producer_death_verified" : "producer_live_unknown_or_current", dead ? "quarantine" : null);
         } catch { mark(e.path, "live_or_unknown_producer", "coordination_owner_unverified"); }
       } else if (capture || isStage(e.path)) {
         const registration = registered.get(e.path), reservation = reservationByPath.get(e.path);
-        const refId = reservation?.artifact.recording_id ?? capture?.recording_id;
-        if (refId && (references.has(refId) || liveReferences.has(refId))) {
+        // A stage name carries its destination recording ID, so a stage is checked against the same references.
+        const stageId = isStage(e.path) ? stageRecording(e.path) : null;
+        const refIds = [reservation?.artifact.recording_id, capture?.recording_id, stageId].filter((v): v is string => !!v);
+        if (refIds.some((v) => references.has(v) || liveReferences.has(v))) {
           if (reservation && !isDead(reservation.owner)) mark(e.path, "live_or_unknown_producer", "producer_live_unknown_or_current");
           else mark(e.path, "referenced", "receipt_maintenance_or_live_producer_reference");
           continue;
@@ -278,6 +345,9 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
           }
           if (!registration) {
             if (reservation) mark(e.path, "live_or_unknown_producer", isDead(reservation.owner) ? "created_entry_missing" : "producer_live_unknown_or_current");
+            // Legacy review needs a known recording and no writer that could still be publishing an unregistered file.
+            else if (!refIds.length) mark(e.path, "legacy_unverified", "stage_recording_unbound");
+            else if (writerActive) mark(e.path, "legacy_unverified", "writer_activity_present");
             else mark(e.path, "legacy_unverified", "no_registered_producer_provenance", "legacy_review");
             continue;
           }
@@ -292,7 +362,7 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
       }
     }
     for (const e of snapshot.entries) {
-      const match = new RegExp(`^quarantine/abandoned/(${uuid})/timestamp\\.json$`).exec(e.path);
+      const match = RE.timestamp.exec(e.path);
       if (!match) continue;
       mark(e.path, "protected_metadata", "quarantine_timestamp_is_not_cleanup");
       try {
@@ -303,7 +373,7 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
           || new Set(q.targets.map((t) => t.source_path)).size !== q.targets.length) throw new Error("quarantine_binding");
         const prefix = `quarantine/abandoned/${q.operation_id}/`;
         const leaves = new Set([e.path, ...q.targets.map((t) => `${prefix}${t.target_id}`)]);
-        if (snapshot.entries.some((v) => v.path.startsWith(prefix) && !leaves.has(v.path))) throw new Error("quarantine_unexpected_entry");
+        if ((abandonedOperations.get(q.operation_id) ?? []).some((v) => !leaves.has(v))) throw new Error("quarantine_unexpected_entry");
         // Check the whole completed set before classifying any target as purge-eligible.
         for (const t of q.targets) {
           const path = `quarantine/abandoned/${q.operation_id}/${t.target_id}`, target = byPath.get(path);
@@ -333,12 +403,18 @@ export function classifyNativeBarCleanup(input: NativeBarCleanupSnapshot) {
       } catch { fail(e.path); }
     }
   }
-  const generation = evidenceHash({ root, entries: [...snapshot.entries].sort((a, b) => a.path.localeCompare(b.path)).map((e) => ({ ...e,
+  // Code-unit order: locale collation can rank distinct names equal and make the hash depend on input order.
+  const byCodeUnit = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+  const generation = evidenceHash({ root, entries: [...snapshot.entries].sort((a, b) => byCodeUnit(a.path, b.path)).map((e) => ({ ...e,
     bytes: e.bytes ? rawHash(e.bytes) : null })), current_owner_tokens: [...snapshot.current_owner_tokens].sort(),
-    liveness: snapshot.liveness.map(({ checked_at, ...v }) => v).sort((a, b) => a.owner_hash.localeCompare(b.owner_hash)), coverage_complete: snapshot.coverage_complete });
+    liveness: snapshot.liveness.map(({ checked_at, ...v }) => v).sort((a, b) => byCodeUnit(a.owner_hash, b.owner_hash)), coverage_complete: snapshot.coverage_complete });
+  const summary: Record<string, number> = {};
+  for (const i of items) summary[i.classification] = (summary[i.classification] ?? 0) + 1;
+  // Only candidates carry the proofs a plan binds; the rest stay compact so a full store remains reportable.
+  const listed = items.map(({ proof, parents, ...rest }): ReportItem => rest.eligible_for ? { ...rest, proof, parents } : rest);
   const result = { schema: "native-bar-cleanup-classification-v1" as const, as_of: snapshot.as_of,
     verification_scope: "supplied_snapshot_only" as const, execution_available: false as const,
-    execution_blocker: "cleanup_execution_not_implemented" as const, binding: root, generation, items, blockers,
+    execution_blocker: "cleanup_execution_not_implemented" as const, binding: root, generation, items: listed, summary, blockers,
     inventory_bytes: String(inventory), metadata_bytes: String(metadata), limits: LIMITS };
   if (Buffer.byteLength(canonical(result)) > LIMITS.response_bytes) throw new Error("cleanup_response_limit");
   return result;
@@ -396,7 +472,7 @@ export class NativeBarCleanupPlans {
     for (const [id, p] of this.plans) if (start.wall - p.issued >= PLAN_TTL_MS || start.tick - p.tick >= PLAN_TTL_MS) this.plans.delete(id);
     if (this.plans.size >= 128) throw new Error("cleanup_plan_capacity");
     const report = this.classify(input, start.wall), operationId = randomUUID();
-    const byId = new Map(report.items.map((i) => [i.candidate_id, i]));
+    const byId = new Map(report.items.filter(isCandidate).map((i) => [i.candidate_id, i]));
     const targets: PlanTarget[] = [...selected.candidate_ids].sort().map((id) => {
       const item = byId.get(id);
       if (!item || item.eligible_for !== selected.action) throw new Error("cleanup_candidate_not_eligible");
@@ -406,6 +482,16 @@ export class NativeBarCleanupPlans {
         destination: selected.action === "quarantine" ? `quarantine/abandoned/${operationId}/${targetId}` : null,
         holding_path: selected.action === "legacy_review" ? null : `maintenance-hold/${operationId}/${targetId}` };
     });
+    if (selected.action === "purge") {
+      // A marker stays consistent only while its whole target set is present, so purge never splits one.
+      const chosen = new Set(targets.map((t) => t.source_path));
+      for (const operation of new Set(targets.map((t) => RE.abandoned.exec(t.source_path)?.[1]))) {
+        const prefix = `quarantine/abandoned/${operation}/`;
+        if (!operation || report.items.some((i) => i.path.startsWith(prefix) && i.path !== `${prefix}timestamp.json` && !chosen.has(i.path))) {
+          throw new Error("cleanup_purge_requires_complete_marker_set");
+        }
+      }
+    }
     const body: PlanBody = { schema: "native-bar-cleanup-plan-v1", plan_id: randomUUID(), issuer_id: this.issuer, operation_id: operationId,
       action: selected.action, issued_at: new Date(start.wall).toISOString(), expires_at: new Date(start.wall + PLAN_TTL_MS).toISOString(),
       snapshot_as_of: report.as_of, generation: report.generation, binding: report.binding, targets,
@@ -435,9 +521,12 @@ export class NativeBarCleanupPlans {
     checkExpiry(current);
     if (selected.plan_hash !== plan.plan_hash || selected.action !== plan.action) throw new Error("cleanup_plan_binding_mismatch");
     const report = this.classify(input, current.wall);
-    if (report.as_of < plan.snapshot_as_of || report.generation !== plan.generation) throw new Error("cleanup_snapshot_changed");
+    // Validation needs a re-inventory taken after approval, never the evidence the preview was built from.
+    if (report.as_of <= plan.issued_at) throw new Error("cleanup_snapshot_not_after_approval");
+    if (report.generation !== plan.generation) throw new Error("cleanup_snapshot_changed");
+    const byId = new Map(report.items.filter(isCandidate).map((i) => [i.candidate_id, i]));
     for (const target of plan.targets) {
-      const item = report.items.find((i) => i.candidate_id === target.candidate_id);
+      const item = byId.get(target.candidate_id);
       if (!item || item.eligible_for !== plan.action || item.classification !== target.classification) throw new Error("cleanup_candidate_changed");
     }
     const end = this.clock();
