@@ -278,7 +278,7 @@ export class NativeBarHistory {
       throw e;
     }
     // The work already finished (a recording is committed): report the lock problem without hiding that outcome.
-    if (!lock.release()) return { ...result, writer_lock_release: "failed: other writers stay blocked until this MCP server exits" };
+    if (!lock.release()) return { ...result, writer_lock_release: "failed: removal of this server's writer files is unconfirmed; any that remain block other writers until this MCP server exits" };
     return result;
   }
   /** The collector rechecks the supplied guard after any chart-queue/lock wait, before native access. */
@@ -361,6 +361,9 @@ export class NativeBarHistory {
     if (Buffer.byteLength(canonical(result)) > 8 * 1024 ** 2) throw new Error("history_response_limit: narrow the query");
     return result;
   }
+  private latestStamp(pair: Pair) {
+    return Math.max(Date.parse(pair.receipt.recorded_at), ...pair.payload.series.map((s) => Date.parse(s.observed_at)));
+  }
   private ref(pair: Pair) { return { recording_id: pair.receipt.recording_id, sequence: pair.receipt.sequence, day: pair.receipt.day,
     payload_hash: pair.receipt.payload_hash, receipt_hash: pair.receipt_hash, bytes: pair.bytes,
     recorded_at: pair.receipt.recorded_at, last_observed_at: pair.payload.series.map((s) => s.observed_at).sort().at(-1)! }; }
@@ -380,6 +383,16 @@ export class NativeBarHistory {
     // Clock recovery judges "ahead" against the approval itself: an approved, interrupted quarantine stays finishable
     // after the corrected clock passes the ahead stamps, and a future approval time only narrows it.
     const cutoff = intent.kind === "prune" ? Math.min(clock, approved) - 90 * DAY : approved + 60000;
+    if (intent.kind === "clock_recovery") {
+      // A same-user process can compute the generation, so check the approval time against the captures left out: a
+      // genuine recovery listed every capture then ahead (the latest 1,024 when more), so each retained capture after its
+      // first listed one, or every retained capture when fewer were listed, was within a minute of that approval.
+      const first = Math.min(...intent.pairs.map((p) => p.sequence)), listed = new Set(intent.pairs.map((p) => p.recording_id));
+      if (state.pairs.some((p) => !listed.has(p.receipt.recording_id) && (intent.pairs.length < 1024 || p.receipt.sequence > first)
+        && this.latestStamp(p) > cutoff)) {
+        throw new Error("maintenance_evidence_changed: recovery approval time is inconsistent with the retained captures");
+      }
+    }
     // Validate the entire batch before removing any file, including on a freshly approved resume.
     for (const ref of intent.pairs) {
       const paths = this.paths(ref);
@@ -413,16 +426,18 @@ export class NativeBarHistory {
     const state = await this.load(true), pending = state.incomplete;
     if (pending.length > 1 || (pending.length && pending[0].kind !== kind)) throw new Error("different_maintenance_incomplete");
     const cutoff = Date.parse(this.clock()) + (kind === "prune" ? -90 * DAY : 60000);
-    const eligible = state.pairs.filter((p) => {
-      const timestamp = Math.max(Date.parse(p.receipt.recorded_at), ...p.payload.series.map((s) => Date.parse(s.observed_at)));
-      return kind === "prune" ? timestamp < cutoff : timestamp > cutoff;
-    });
+    const eligible = state.pairs.filter((p) => kind === "prune" ? this.latestStamp(p) < cutoff : this.latestStamp(p) > cutoff);
     const pairs = pending[0]?.pairs ?? (kind === "prune" ? eligible.slice(0, 1024) : eligible.slice(-1024)).map((p) => this.ref(p));
     const scope = { pairs, ...(pending[0] ? { resume_id: pending[0].id } : {}) };
+    // An intent planted over every capture cannot be told from a genuine interrupted recovery; say when only its
+    // approval time supports the listed scope, so the human reviewing the resume can tell.
+    const aheadNow = pairs.some((r) => [r.recorded_at, r.last_observed_at].some((t) => t && Date.parse(t) > cutoff));
+    const basis = pending[0] && kind === "clock_recovery" ? { resume_basis: aheadNow ? "listed_captures_still_ahead"
+      : "approval_time_only: no listed capture is ahead of the current clock; confirm the clock was ahead when this recovery was approved" } : {};
     // Without an executable backend there is nothing to approve: list the exact scope, but issue no plan.
     const plan = this.maintenanceExecutable ? this.issue(kind, state, scope)
       : { plan_id: null, plan_hash: null, kind, ...scope, directory: this.directory, store_status: this.storeStatus(state, "existing") };
-    return { ...plan,
+    return { ...plan, ...basis,
       execution_available: this.maintenanceExecutable,
       execution_blocker: this.maintenanceExecutable ? null : "anchored_filesystem_operations_required: production maintenance is disabled; no plan issued",
       bytes_affected: pairs.reduce((n, p) => n + p.bytes, 0), captures_remaining: state.pairs.length - (pending.length ? 0 : pairs.length),
@@ -454,7 +469,7 @@ export class NativeBarHistory {
         for (const ref of plan.pairs) {
           const pair = state.pairs.find((p) => p.receipt.recording_id === ref.recording_id);
           if (!pair || canonical(this.ref(pair)) !== canonical(ref)) throw new Error("maintenance_evidence_changed");
-          const stamp = Math.max(Date.parse(pair.receipt.recorded_at), ...pair.payload.series.map((s) => Date.parse(s.observed_at)));
+          const stamp = this.latestStamp(pair);
           if (kind === "prune" ? stamp >= cutoff : stamp <= cutoff) throw new Error("maintenance_eligibility_changed");
         }
         if (state.maintenanceBytes + Buffer.byteLength(canonical(intent)) > this.maintenanceMetadataLimitBytes) {

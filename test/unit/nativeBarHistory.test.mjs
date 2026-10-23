@@ -697,3 +697,63 @@ test("105-3 re-review: production roots outside the home default are refused, in
   const store = new NativeBarHistory({ directory: "/Volumes/SyntheticVolume/.tradingview-mcp/native-bar-history/v1" });
   await assert.rejects(store.prepareRecording(targets), /root_not_allowlisted/);
 });
+
+test("105-3 final check: a planted recovery intent with a correct generation cannot quarantine other good captures", async (t) => {
+  const f = await fixture(t), a = await record(f); f.setTime("2026-10-22T01:00:00.000Z"); const b = await record(f, 8.55);
+  const id = "00000000-0000-4000-8000-000000000096", r = b.receipt;
+  await mkdir(join(f.directory, "maintenance"), { mode: 0o700 });
+  await writeFile(join(f.directory, "maintenance", `${id}.json`), canonical({ schema: "native-bar-maintenance-v1", id, kind: "clock_recovery",
+    created_at: "2020-01-01T00:00:00.000Z", generation: evidenceHash({ receipts: [a, b].map((x) => evidenceHash(x.receipt)), maintenance: [] }),
+    pairs: [{ recording_id: r.recording_id, sequence: r.sequence, day: r.day, payload_hash: r.payload_hash, receipt_hash: evidenceHash(r),
+      bytes: 1, recorded_at: r.recorded_at, last_observed_at: r.recorded_at }] }), { mode: 0o600 });
+  const p = await f.store.prepareMaintenance("clock_recovery");
+  assert.equal(p.resume_id, id); assert.match(p.resume_basis, /approval_time_only/);
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery"), /approval time is inconsistent/);
+  assert.ok((await lstat(filePaths(f, r).payload)).isFile()); assert.ok((await lstat(filePaths(f, r).receipt)).isFile());
+});
+
+test("105-3 final check: a multi-pair recovery interrupted midway resumes beside earlier completed maintenance", async (t) => {
+  let calls = 0, failAt = 0;
+  const f = await fixture(t, { afterPublish: async (stage) => {
+    if (stage.startsWith("maintenance_") && ++calls === failAt) throw new Error("synthetic interruption");
+  } });
+  const z = await record(f); f.setTime("2026-10-21T00:00:00.000Z");
+  let p = await f.store.prepareMaintenance("clock_recovery"); await f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery");
+  const later = [];
+  for (const [i, time] of ["2026-10-22T01:00:00.000Z", "2026-10-22T01:01:00.000Z", "2026-10-22T01:02:00.000Z"].entries()) {
+    f.setTime(time); later.push(await record(f, 8.6 + i / 100));
+  }
+  f.setTime("2026-10-21T00:00:00.000Z"); calls = 0; failAt = 3; // after the first pair and the second receipt
+  p = await f.store.prepareMaintenance("clock_recovery"); assert.equal(p.pairs.length, 3);
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery"), /synthetic interruption/);
+  f.setTime("2026-10-22T03:00:00.000Z"); failAt = 0;
+  p = await f.store.prepareMaintenance("clock_recovery"); assert.ok(p.resume_id); assert.match(p.resume_basis, /approval_time_only/);
+  await f.store.maintain(p.plan_id, p.plan_hash, true, "clock_recovery");
+  for (const r of [z, ...later]) assert.equal((await f.store.status(r.receipt.recording_id)).status, "quarantined");
+  assert.equal((await f.store.history(query)).bars.length, 0);
+});
+
+test("105-3 final check: a bar opening exactly at the prune boundary keeps its initial version", async (t) => {
+  const f = await fixture(t), a = await record(f);
+  f.setTime("2027-01-21T00:00:00.000Z"); await record(f, 8.55);
+  const p = await f.store.prepareMaintenance("prune"); await f.store.maintain(p.plan_id, p.plan_hash, true, "prune");
+  const edge = capture(f.time());
+  for (const s of edge.series) s.bars = [{ ...s.bars[0], bar_open_at: a.receipt.recorded_at, confirmed_by_next_bar_at: "2026-10-22T01:00:00.000Z" }];
+  const plan = await f.store.prepareRecording(targets);
+  await f.store.record(plan.plan_id, plan.plan_hash, true, async () => edge);
+  const h = await f.store.history(query), bar = h.bars.find((b) => b.bar_open_at === a.receipt.recorded_at);
+  assert.equal(h.retention_coverage.pruned_through_recorded_at, a.receipt.recorded_at);
+  assert.equal(bar.versions[0].change_kind, "initial"); assert.equal(bar.versions[0].occurrence, 1);
+});
+
+test("105-3 final check: a disabled-maintenance preview of a pending intent lists the resume without a plan", async (t) => {
+  let fail = true;
+  const f = await fixture(t, { afterPublish: async (stage) => { if (fail && stage === "maintenance_receipt") throw new Error("synthetic interruption"); } });
+  await record(f); f.setTime("2027-02-01T00:00:00.000Z");
+  const p = await f.store.prepareMaintenance("prune");
+  await assert.rejects(f.store.maintain(p.plan_id, p.plan_hash, true, "prune"), /synthetic interruption/);
+  f.options.testOnly.syntheticMaintenance = false; fail = false;
+  const preview = await f.store.prepareMaintenance("prune");
+  assert.deepEqual(await readdir(join(f.directory, "maintenance")), [`${preview.resume_id}.json`]);
+  assert.equal(preview.plan_id, null); assert.equal(preview.plan_hash, null); assert.equal(preview.pairs.length, 1);
+});

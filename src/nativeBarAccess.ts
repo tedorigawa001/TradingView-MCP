@@ -129,9 +129,15 @@ async function startTimes(pids: number[]): Promise<Map<number, string> | null> {
 }
 
 function incarnation() {
-  ownIncarnation ??= (async () => ({ boot: await bootSession(), start: (await startTimes([]))?.get(process.pid) ?? null }))();
-  return ownIncarnation;
+  const current = ownIncarnation ??= (async () => ({ boot: await bootSession(), start: (await startTimes([]))?.get(process.pid) ?? null }))();
+  // An unreadable identity is read again next time rather than written into every later owner file of this process.
+  void current.then((v) => { if ((v.boot === null || v.start === null) && ownIncarnation === current) ownIncarnation = null; });
+  return current;
 }
+const processGone = (pid: number) => {
+  try { process.kill(pid, 0); return false; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH"; }
+};
 
 /** Owner files are `{pid,token}` (earlier builds) or `{boot,pid,start,token}`, each optionally with the named extra keys. */
 function parseOwner(text: string, extra: string[] = []): (Owner & Record<string, unknown>) | null {
@@ -154,12 +160,14 @@ async function ownersDead(owners: Owner[]): Promise<boolean[]> {
   const me = await incarnation();
   const verdicts = owners.map((o): boolean | null => {
     if (deadOwners.has(canonical(o)) || (o.boot && me.boot && o.boot !== me.boot)) return true;
-    try { process.kill(o.pid, 0); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ESRCH") return true; }
+    if (processGone(o.pid)) return true;
     return o.start ? null : false;
   });
   const starts = verdicts.includes(null) ? await startTimes(owners.filter((_, i) => verdicts[i] === null).map((o) => o.pid)) : null;
   return owners.map((o, i) => {
-    const dead = verdicts[i] ?? (starts !== null && starts.get(o.pid) !== o.start);
+    // A PID missing from a possibly truncated listing is gone only if the system says so now.
+    const seen = starts?.get(o.pid);
+    const dead = verdicts[i] ?? (starts !== null && (seen === undefined ? processGone(o.pid) : seen !== o.start));
     if (dead) {
       if (deadOwners.size >= 4096) deadOwners.clear();
       deadOwners.add(canonical(o));
