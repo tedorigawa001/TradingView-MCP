@@ -162,7 +162,14 @@ for (const level of ["file", "parent", "root"]) test(`actual ACL allow at ${leve
   const add = spawnSync("/bin/chmod", ["+a", "everyone allow read,write", chosen]); assert.equal(add.status, 0, add.stderr?.toString());
   t.after(() => spawnSync("/bin/chmod", ["-N", chosen]));
   if (level === "root") assert.throws(() => openSyntheticNativeBarReader(f.root), /unsafe_acl/);
-  else { const reader = openSyntheticNativeBarReader(f.root); t.after(() => reader.close()); assert.throws(() => reader.inventory(), /unsafe_acl/); }
+  else if (level === "parent") { const reader = openSyntheticNativeBarReader(f.root); t.after(() => reader.close()); assert.throws(() => reader.inventory(), /unsafe_acl/); }
+  else {
+    // A grant on one file preserves that file as unreadable instead of aborting every inventory.
+    const reader = openSyntheticNativeBarReader(f.root); t.after(() => reader.close()); const snapshot = reader.inventory();
+    const index = snapshot.report.entries.findIndex((e) => e.path.endsWith(".json")), entry = snapshot.report.entries[index];
+    assert.equal(entry.proof.acl, "unsafe"); assert.equal(entry.reason, "preserved_unsafe_acl"); assert.equal(entry.readable_evidence, false);
+    assert.throws(() => snapshot.readEvidence(index), /evidence_not_readable/); snapshot.close();
+  }
   assert.equal(fs.readFileSync(path, "utf8"), "invented-only\n");
 });
 test("deny-only ACL survives native proof collection and an inherited grant is refused", (t) => {
@@ -256,4 +263,26 @@ test("read traversal obeys the shared descriptor limit and recovers references a
     assert.equal(limited, true); assert.throws(() => reader.inventory(), /native_fd_limit/); assert.ok(native.info().live_fds <= 512);
   } finally { for (const writer of writers) writer.close(); reader.close(); }
   assert.equal(native.info().live_fds, before.live_fds); assert.equal(native.info().live_sessions, before.live_sessions);
+});
+
+test("a store-sized inventory fits the response bound", (t) => {
+  const f = fixture(t);
+  for (const area of ["captures", "receipts"]) for (let d = 0; d < 3; d++) {
+    const dir = join(f.root, area, `2026-10-2${d}`); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (let i = 0; i < 800; i++) fs.writeFileSync(join(dir, `01234567-89ab-4cde-8fab-${String(d * 1000 + i).padStart(12, "0")}.json`), "x", { mode: 0o600 });
+  }
+  const reader = openSyntheticNativeBarReader(f.root); t.after(() => reader.close()); const snapshot = reader.inventory();
+  assert.equal(snapshot.report.entries.length, 4808); assert.ok(snapshot.report.entries.every((e) => e.kind === "directory" || e.readable_evidence));
+  snapshot.close();
+});
+test("folded variants of evidence names are unqualified, and non-RFC identifiers are not evidence", (t) => {
+  const f = fixture(t), path = capture(f), upper = path.replace(id, id.toUpperCase()); fs.renameSync(path, upper);
+  fs.writeFileSync(join(f.root, "captures", "2026-10-23", "00000000-0000-0000-0000-000000000001.json"), "x", { mode: 0o600 });
+  const reader = openSyntheticNativeBarReader(f.root); t.after(() => reader.close()); const snapshot = reader.inventory();
+  const variant = snapshot.report.entries.find((e) => e.path.endsWith(`${id.toUpperCase()}.json`));
+  assert.equal(variant.namespace_qualified, false); assert.equal(variant.readable_evidence, false);
+  assert.equal(snapshot.report.namespace_qualified, false);
+  const other = snapshot.report.entries.find((e) => e.path.endsWith("000000000001.json"));
+  assert.equal(other.reason, "preserved_unknown"); assert.equal(other.readable_evidence, false);
+  snapshot.close();
 });

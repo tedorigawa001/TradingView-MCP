@@ -66,12 +66,13 @@ void exact_name(int parent, const std::string& name) {
   const auto listed = names(parent, 30000);
   require(std::find(listed.begin(), listed.end(), name) != listed.end(), "exact_name_changed");
 }
-const std::string READ_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+// The TypeScript readers accept zod uuid() identifiers (RFC version 1-8 and variant 8-b, or nil/max), lower-case only here.
+const std::string READ_UUID = "(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+  "|0{8}-0{4}-0{4}-0{4}-0{12}|f{8}-f{4}-f{4}-f{4}-f{12})";
 bool matches(const std::string& value, const std::string& pattern) { return std::regex_match(value, std::regex(pattern)); }
-void evidence_role(ReadEntry& e) {
-  const auto& p = e.path;
+bool evidence_name(const std::string& p) {
   const auto u = READ_UUID;
-  e.evidence = matches(p, "(?:captures|receipts)/[0-9]{4}-[0-9]{2}-[0-9]{2}/" + u + "\\.json")
+  return matches(p, "(?:captures|receipts)/[0-9]{4}-[0-9]{2}-[0-9]{2}/" + u + "\\.json")
     || matches(p, "(?:captures|receipts)/[0-9]{4}-[0-9]{2}-[0-9]{2}/\\." + u + "-[0-9a-f]{8}-[1-9][0-9]*-[0-9a-f]{12}\\.stage")
     || p == "policy.json" || p == "retention.json" || p == ".writer.lock" || p == ".writer.takeover"
     || matches(p, "\\.writer-(?:(?:claim|ticket)-" + u + "\\.json|retired-" + u + "\\.lock)")
@@ -82,6 +83,14 @@ void evidence_role(ReadEntry& e) {
     || matches(p, "operations/" + u + "\\.created/" + u + "\\.json")
     || matches(p, "maintenance-hold/" + u + "/" + u)
     || matches(p, "quarantine/abandoned/" + u + "/(?:timestamp\\.json|" + u + ")");
+}
+void evidence_role(ReadEntry& e) {
+  const auto& p = e.path;
+  const auto u = READ_UUID;
+  e.evidence = evidence_name(p);
+  // On a case-insensitive volume a folded variant of an evidence name can be the very object a reader opens by its
+  // canonical name, so it must not pass as an unrelated side file.
+  if (!e.evidence && evidence_name(name_key(p))) e.namespace_valid = false;
   e.metadata_file = e.evidence && p.compare(0, 9, "captures/") != 0
     && p.compare(0, 17, "maintenance-hold/") != 0
     && !(p.compare(0, 21, "quarantine/abandoned/") == 0 && p.find("timestamp.json") == std::string::npos);
@@ -165,7 +174,10 @@ void scan(Session& s, int fd, const std::string& path, ReadSnapshot& out, unsign
       if (e.kind != "file") e.reason = "preserved_nonregular";
       else if (e.metadata.st_uid != getuid() || (e.metadata.st_mode & 0077)) e.reason = "preserved_unsafe_access";
       else {
-        auto file = leaf(fd, name); binding(fd, name, file.value, false);
+        // Bind the name without the ACL check, so a grant on one file preserves that file instead of aborting the inventory.
+        auto file = leaf(fd, name); struct stat named{};
+        syscall_ok(fstatat(fd, name.c_str(), &named, AT_SYMLINK_NOFOLLOW), "namespace_changed");
+        require(same_id(named, stat_fd(file.value)) && S_ISREG(named.st_mode), "namespace_changed");
         require(equal_metadata(e.metadata, stat_fd(file.value)), "inventory_changed");
         try { e.acl = private_access(file.value, false, true); }
         catch (const std::runtime_error& error) { if (std::string(error.what()) != "unsafe_acl") throw; e.acl = "unsafe"; e.reason = "preserved_unsafe_acl"; }
@@ -186,8 +198,13 @@ void scan(Session& s, int fd, const std::string& path, ReadSnapshot& out, unsign
 ReadSnapshot collect(Session& s, const ReadLimits& limits) {
   s.guard(); read_volume(s.root()); ReadSnapshot out; out.limits = limits;
   out.root_acl = private_access(s.root(), true, true); out.root = stat_fd(s.root()); scan(s, s.root(), "", out);
+  // Per entry: 512 bytes bound every fixed key, punctuation and maximal decimal/label value; the path is charged its
+  // worst JSON form (6 for a control byte, 2 for a quote or backslash, 3 for a non-ASCII byte escaped as UTF-16).
   uint64_t response_bound = 4096;
-  for (const auto& e : out.entries) response_bound += 1536 + e.path.size() * 6;
+  for (const auto& e : out.entries) {
+    response_bound += 512;
+    for (unsigned char c : e.path) response_bound += c < 0x20 ? 6 : c == 0x22 || c == 0x5c ? 2 : c >= 0x80 ? 3 : 1;
+  }
   require(response_bound <= limits.response_bytes, "inventory_response_limit");
   s.guard(); require(equal_metadata(out.root, stat_fd(s.root())), "inventory_changed"); return out;
 }

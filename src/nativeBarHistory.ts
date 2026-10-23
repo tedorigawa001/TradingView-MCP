@@ -124,8 +124,9 @@ export class NativeBarHistory {
     if (area === "maintenance") return /^[0-9a-f-]{36}(?:\.done)?\.json$/.test(r)
       && nativeBarId.safeParse(r.split(".")[0]).success;
     const parts = r.split(sep);
+    // Lower-case only, like the native reader: an upper-case name on a case-insensitive volume is a variant, not evidence.
     return parts.length === 2 && /^\d{4}-\d{2}-\d{2}$/.test(parts[0]) && parts[1].endsWith(".json")
-      && nativeBarId.safeParse(parts[1].slice(0, -5)).success;
+      && parts[1] === parts[1].toLowerCase() && nativeBarId.safeParse(parts[1].slice(0, -5)).success;
   }
   private logicalFiles(files: string[]) {
     return files.filter((p) => p === join(this.directory, "policy.json")
@@ -196,6 +197,8 @@ export class NativeBarHistory {
         || receipt.day !== (receipt.partition_at ?? receipt.recorded_at).slice(0, 10)
         || (receipt.partition_at && receipt.partition_at > receipt.recorded_at)) throw new Error("receipt_binding_corrupt");
       if (maintenance.some((m) => m.pairs.some((r) => r.recording_id === receipt.recording_id))) continue;
+      // The exact canonical name must exist: a case-insensitive lookup could otherwise read a renamed variant.
+      if (!files.includes(this.paths(receipt).payload)) throw new Error("payload_missing_or_name_changed");
       const payload = nativeBarCaptureSchema.parse(await this.read(this.paths(receipt).payload));
       if (evidenceHash(payload) !== receipt.payload_hash || payload.series.some((s) => s.observed_at > receipt.recorded_at)) throw new Error("payload_hash_or_clock_corrupt");
       const pairBytes = (await lstat(p)).size + (await lstat(this.paths(receipt).payload)).size;

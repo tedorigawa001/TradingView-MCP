@@ -1,6 +1,6 @@
 import nodeTest from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, realpath, chmod, symlink, lstat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, realpath, chmod, symlink, lstat, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -124,7 +124,7 @@ test("105-3 corrupted/missing receipt evidence is an error, never empty history"
   const original = await readFile(paths.payload);
   await writeFile(paths.payload, "{}"); await assert.rejects(f.store.history(query));
   await writeFile(paths.payload, original); await rm(paths.payload);
-  await assert.rejects(f.store.history(query), /ENOENT/);
+  await assert.rejects(f.store.history(query), /payload_missing_or_name_changed/);
   await writeFile(paths.receipt, "malformed"); await assert.rejects(f.store.history(query), /JSON/);
 });
 
@@ -756,4 +756,10 @@ test("105-3 final check: a disabled-maintenance preview of a pending intent list
   const preview = await f.store.prepareMaintenance("prune");
   assert.deepEqual(await readdir(join(f.directory, "maintenance")), [`${preview.resume_id}.json`]);
   assert.equal(preview.plan_id, null); assert.equal(preview.plan_hash, null); assert.equal(preview.pairs.length, 1);
+});
+
+test("105-3 native review: a payload renamed to a case variant is never read through a case-insensitive lookup", async (t) => {
+  const f = await fixture(t), a = await record(f), paths = filePaths(f, a.receipt);
+  await rename(paths.payload, paths.payload.replace(a.receipt.recording_id, a.receipt.recording_id.toUpperCase()));
+  await assert.rejects(f.store.history(query), /payload_missing_or_name_changed/);
 });
