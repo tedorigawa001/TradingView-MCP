@@ -1,6 +1,6 @@
 # Native Bar Safe Maintenance And Abandoned File Cleanup
 
-Status: design and strictly-more-than-90-day abandoned-quarantine purge-candidate policy approved by the user, 2026-10-23 JST. Phase 1 implements native primitives and synthetic tests only; it does not register, deploy or enable them for production, or authorize real-data operations. The production maintenance refusal remains in force. No live market data is read, recorded, moved or deleted by this work.
+Status: design and strictly-more-than-90-day abandoned-quarantine purge-candidate policy approved by the user, 2026-10-23 JST. Phase 1 implements native primitives; phase 2 adds supplied-snapshot classification and memory-only approval previews. Both use synthetic tests only; neither registers, deploys or enables production execution, or authorizes real-data operations. The production maintenance refusal remains in force. No live market data is read, recorded, moved or deleted by this work.
 
 ## Decisions And Boundaries
 
@@ -14,7 +14,7 @@ Separate abandoned-file quarantine from irreversible purge. Neither a filename, 
 | Destination | Existing approved native-bar root only; preserve the exact default path allowlist. External volumes stay refused until a local, ownership-honoring mount is verified. No alternate temporary root, trash service or fallback directory. External path approval alone does not qualify its filesystem. |
 | Committed retention | Prune eligibility remains strictly older than 90 elapsed days using observation/logical receipt age. No change to current eligibility or clock-ahead threshold. |
 | Abandoned quarantine | Exact fresh approval, inactive producer/cooperative writer exclusion and validated object identity. Age is displayed, not a substitute for these checks. |
-| Abandoned purge | Separate exact approval. Earliest candidate eligibility is strictly more than 90 elapsed days after a trustworthy quarantine timestamp, not an untrusted original mtime. User approved this design policy on 2026-10-23; it is not yet implemented or applied to any real file. Age alone never authorizes deletion. |
+| Abandoned purge | Separate exact approval. Earliest candidate eligibility is strictly more than 90 elapsed days after a trustworthy quarantine timestamp, not an untrusted original mtime. Phase 2 structurally tests this rule on supplied synthetic snapshots only; timestamp authentication and execution remain unimplemented. It has not been applied to a real file. Age alone never authorizes deletion. |
 | Approval | Same-process, single-use plan/hash, explicit human approval through the host, and `confirm=true`. Both ten-minute wall-clock and monotonic expiry remain enforced. |
 | Scope | Native-bar storage only. No recursive/general deletion, journal maintenance, chart changes, notifications, strategy changes, Dot integration or real-data testing. |
 
@@ -195,3 +195,9 @@ The user approved the design and strictly-more-than-90-day abandoned-quarantine 
 Implemented: pinned root/parent sessions, descriptor ACL/owner/mode/volume qualification, bounded byte proofs, exclusive holding moves, post-move verification, held-only unlink, incomplete outcomes, dual-clock expiry and bounded descriptor lifecycle. These are synchronous in-process primitives, not transaction/consent/recovery integration. The production-maintenance guard remains unchanged.
 
 Not implemented in this phase: cleanup classification, producer reservations, versioned durable intents/events, replay/recovery, quarantine clock/90-day eligibility, staging/coordination cleanup, writer-lock integration, new MCP tools or production packaging. The broader acceptance matrix above remains a release gate. Neither approval nor passing primitive tests permits real-data operations, deployment or Dot restart. Dot remains PAUSED; the automation file and trading/notification-condition prefix remain byte-for-byte unchanged.
+
+## Phase 2 Implementation Boundary
+
+[Classification and approval-preview contract](NATIVE_BAR_CLEANUP_PLANNING.md). `nativeBarMaintenance.ts` is disconnected from native I/O and the server. It validates bounded supplied evidence, protects committed/referenced/live/unknown files, separates unregistered legacy review, structurally tests strictly-more-than-90-day abandoned-quarantine eligibility, and binds explicit candidate IDs to single-use dual-clock memory previews. Successful consumption is **validation only**, not an execution grant. Legacy plans are review-only, without a move destination. Corrupt canonical metadata, incomplete inventory/maintenance, changed roots/parents/objects and new references block planning/validation.
+
+Three provisional provenance schemas are in-memory contracts, not persisted artifacts. Existing recording does not publish reservations. Remaining work includes descriptor inventory/birthtime support, trusted liveness/clock/provenance collection, writer exclusion, durable versioned transaction/recovery integration and headroom reservation, prior-build compatibility, native mutation integration and release review. The full matrix and separate approval gates remain. No new MCP registration, real-data operation, deployment, Dot restart or trading/notification change follows from these tests.

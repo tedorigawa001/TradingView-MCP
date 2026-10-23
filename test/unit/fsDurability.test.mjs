@@ -157,7 +157,17 @@ test("no store reads a stat mode without asking whether the host has one", async
   const files = (await readdir(directory)).filter((name) => name.endsWith(".ts") && name !== "fsDurability.ts");
   const offenders = [];
   for (const name of files) {
-    for (const line of (await readFile(new URL(name, directory), "utf8")).split("\n")) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    if (name === "nativeBarMaintenance.ts") {
+      // Not a stat reader: this pure classifier checks supplied POSIX proofs, independent of the test host.
+      // Keep this exception narrow: introducing an I/O adapter requires revisiting this boundary.
+      const dependencies = [...source.matchAll(/^import .*? from "([^"]+)";/gm)].map((m) => m[1]).sort();
+      assert.deepEqual(dependencies, ["./nativeBarArtifacts.js", "./nativeBarEvidence.js", "node:crypto", "zod"]);
+      assert.doesNotMatch(source, /\b(?:import|require|eval)\s*\(|\b(?:readFile|writeFile|rename|unlink|stat|lstat)\s*\(/);
+      assert.ok(source.includes('verification_scope: "supplied_snapshot_only"'));
+      continue;
+    }
+    for (const line of source.split("\n")) {
       if (line.includes("& 0o077") && !line.includes("posixModeEnforced")) offenders.push(`${name}: ${line.trim()}`);
     }
   }
