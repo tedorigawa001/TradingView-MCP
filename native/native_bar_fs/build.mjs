@@ -20,7 +20,7 @@ if (sanitize) {
 }
 const result = spawnSync("/usr/bin/xcrun", ["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
   "-fvisibility=hidden", "-fstack-protector-strong", "-DNAPI_VERSION=8", "-DNATIVE_BAR_SYNTHETIC_ONLY=1",
-  "-bundle", "-undefined", "dynamic_lookup", ...sanitizerFlags, "-I", headers,
+  "-bundle", "-undefined", "dynamic_lookup", "-framework", "CoreFoundation", ...sanitizerFlags, "-I", headers,
   join(root, "native/native_bar_fs/native_bar_fs.cc"), "-o", join(output, "native_bar_fs.node")], { stdio: "inherit" });
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);

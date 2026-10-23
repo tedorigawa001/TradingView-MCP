@@ -4,6 +4,8 @@ Status: design and strictly-more-than-90-day abandoned-quarantine purge-candidat
 
 Next-phase [execution and durable recovery integration design](NATIVE_BAR_EXECUTION_RECOVERY_DESIGN.md) (2026-10-23 JST, based on `075ac5e`): design and conservative purge hold without elapsed proof approved. Slice A implements strict supplied-record schemas, pure state replay and logical capacity calculation with in-memory synthetic tests. It does not connect trusted native evidence, the descriptor-backed existing writer protocol, self-delta generation, persistence, transaction-aware history readers or compatibility migration. All current guards and separate approval gates remain unchanged.
 
+Slice B is now separately approved for native read/qualification and synthetic tests only. Its [read protocol 2](../native/native_bar_fs/README.md#read-protocol-2-slice-b) adds descriptor-derived birthtime/ACL/volume facts, bounded inventory/evidence reads and final metadata verification. It is disconnected from the classifier/server/history/mutation paths, creates nothing while reading, and establishes no elapsed-time proof, execution grant or production compatibility profile. Slices C-F and real-data/MCP/enablement approvals remain separate.
+
 ## Decisions And Boundaries
 
 Use a small in-process Node-API native backend for descriptor-relative filesystem operations. Keep scenario evaluation, consent plans, retention classification and history projection in TypeScript. Keep the existing native-bar writer serialization; do not replace it with a second, unrelated lock protocol. Maintenance never takes a chart lock or accesses TradingView/CDP.

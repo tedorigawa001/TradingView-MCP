@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <sys/stdio.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <dirent.h>
 #include <uuid/uuid.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -18,6 +20,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <map>
+#include <set>
 
 #if !defined(__APPLE__) || !defined(NATIVE_BAR_SYNTHETIC_ONLY)
 #error This foundation build is macOS synthetic-only; production builds are not enabled.
@@ -48,7 +53,7 @@ struct Fd {
 };
 struct stat stat_fd(int fd) { struct stat st{}; syscall_ok(fstat(fd, &st), "fstat_failed"); return st; }
 bool same_id(const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; }
-void private_access(int fd, bool directory, bool strict) {
+std::string private_access(int fd, bool directory, bool strict) {
   auto st = stat_fd(fd);
   require(directory ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode), "nonregular_object");
   require(st.st_uid == getuid() || (!strict && st.st_uid == 0), "foreign_owner");
@@ -62,13 +67,13 @@ void private_access(int fd, bool directory, bool strict) {
     struct stat checked{}; syscall_ok(fstatx_np(fd, &checked, sec), "acl_unverified");
     int present = 1; syscall_ok(filesec_query_property(sec, FILESEC_ACL, &present), "acl_unverified");
     require(!present && same_id(st, checked), "acl_unverified");
-    return;
+    return "none";
   }
   struct Acl { acl_t value; ~Acl() { acl_free(value); } } guard{acl};
   syscall_ok(acl_valid(acl), "acl_invalid");
   for (int index = 0; index < 256; ++index) {
     acl_entry_t entry;
-    if (acl_get_entry(acl, index, &entry) < 0) { require(errno == EINVAL, "acl_iteration_failed"); return; }
+    if (acl_get_entry(acl, index, &entry) < 0) { require(errno == EINVAL, "acl_iteration_failed"); return index ? "deny_only" : "none"; }
     acl_tag_t tag;
     syscall_ok(acl_get_tag_type(entry, &tag), "acl_tag_unverified");
     require(tag == ACL_EXTENDED_DENY, "unsafe_acl");
@@ -77,9 +82,13 @@ void private_access(int fd, bool directory, bool strict) {
 }
 struct Anchor { Fd fd; std::string name; bool strict; };
 struct Target;
+struct ReadSnapshot;
 struct Session {
   std::vector<Anchor> chain;
   std::vector<std::weak_ptr<Target>> targets;
+  std::weak_ptr<ReadSnapshot> snapshot;
+  uint64_t read_bytes = 0;
+  bool read_only = false;
   Steady::time_point deadline;
   Wall::time_point wall_deadline;
   pid_t pid = getpid();
@@ -147,6 +156,7 @@ struct Proof { struct stat metadata; std::string sha256; };
 bool equal_metadata(const struct stat& a, const struct stat& b, bool renamed = false) {
   return same_id(a, b) && a.st_mode == b.st_mode && a.st_uid == b.st_uid && a.st_gid == b.st_gid
     && a.st_nlink == b.st_nlink && a.st_size == b.st_size && a.st_flags == b.st_flags
+    && a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec && a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec
     && a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
     && (renamed || (a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec));
 }
@@ -205,11 +215,12 @@ struct Target {
     binding(slot_fd.value, destination, file_fd.value, false);
   }
 };
+void release_snapshot(Session& session) noexcept;
 Session::~Session() { release(); }
 void Session::release() noexcept {
   if (closed) return;
   for (auto& weak : targets) if (auto target = weak.lock()) target->close();
-  targets.clear(); chain.clear(); closed = true; --session_count;
+  targets.clear(); release_snapshot(*this); chain.clear(); closed = true; --session_count;
 }
 void Session::close() { require(!busy, "session_busy"); release(); }
 struct Busy {
@@ -261,6 +272,7 @@ napi_value inspect_target(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 4; napi_value args[4]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 4, "argument_count");
     auto s = session_arg(env, args[0]); Busy busy(*s); s->guard();
+    require(!s->read_only, "read_only_session");
     auto t = std::make_shared<Target>(); t->session = s;
     t->area = string_arg(env, args[1]); t->day = string_arg(env, args[2]); t->name = string_arg(env, args[3]);
     require(t->area == "captures" || t->area == "receipts", "invalid_area");
@@ -283,6 +295,7 @@ napi_value stage_target(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 2; napi_value args[2]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 2, "argument_count");
     auto t = target_arg(env, args[0]); auto s = t->session.lock(); require(s != nullptr, "session_closed"); Busy busy(*s);
+    require(!s->read_only, "read_only_session");
     require(t->state == "previewed", "target_not_previewed");
     try {
       s->guard(); t->source_binding(*s); compare(t->expected, proof(t->file_fd.value)); t->state = "preparing";
@@ -319,6 +332,7 @@ napi_value purge_target(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 2; napi_value args[2]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 2, "argument_count");
     auto t = target_arg(env, args[0]); auto s = t->session.lock(); require(s != nullptr, "session_closed"); Busy busy(*s);
+    require(!s->read_only, "read_only_session");
     require(t->state == "held_verified", "target_not_held");
     try {
       s->guard();
@@ -335,7 +349,7 @@ napi_value purge_target(napi_env env, napi_callback_info info) {
     } catch (...) { if (t->state != "durability_unknown") t->state = "conflict"; throw; }
   });
 }
-napi_value open_root(napi_env env, napi_callback_info info) {
+napi_value open_root_impl(napi_env env, napi_callback_info info, bool read_only) {
   return boundary(env, [&] {
     size_t argc = 2; napi_value args[2]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 2, "argument_count");
     auto path = string_arg(env, args[0]);
@@ -347,6 +361,7 @@ napi_value open_root(napi_env env, napi_callback_info info) {
     const auto suffix = path.substr(prefix.size(), 6);
     require(suffix.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") == std::string::npos, "synthetic_root_required");
     auto session = std::make_shared<Session>();
+    session->read_only = read_only;
     session->deadline = Steady::now() + std::chrono::milliseconds(static_cast<int>(ttl));
     session->wall_deadline = Wall::now() + std::chrono::milliseconds(static_cast<int>(ttl));
     session->chain.push_back({Fd(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)), "", false});
@@ -367,13 +382,17 @@ napi_value open_root(napi_env env, napi_callback_info info) {
     return wrap(env, session, SESSION_TAG);
   });
 }
+napi_value open_root(napi_env env, napi_callback_info info) { return open_root_impl(env, info, false); }
+napi_value open_read_root(napi_env env, napi_callback_info info) { return open_root_impl(env, info, true); }
 napi_value close_root(napi_env env, napi_callback_info info) {
   return boundary(env, [&] { size_t argc = 1; napi_value args[1]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 1, "argument_count"); session_arg(env, args[0])->close(); return undefined(env); });
 }
+#include "native_bar_read.inc"
 napi_value backend_info(napi_env env, napi_callback_info) {
   return boundary(env, [&] {
     auto out = object(env); napi_value version, fds, sessions;
     napi_ok_or_throw(napi_create_int32(env, 1, &version)); prop(env, out, "protocol", version);
+    napi_ok_or_throw(napi_create_int32(env, 2, &version)); prop(env, out, "read_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -386,6 +405,11 @@ NAPI_MODULE_INIT() {
   napi_property_descriptor methods[] = {
     {"info", nullptr, backend_info, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRoot", nullptr, open_root, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inventory", nullptr, read_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readEvidence", nullptr, read_evidence, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"verifyInventory", nullptr, verify_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"closeInventory", nullptr, close_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"closeRoot", nullptr, close_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspect", nullptr, inspect_target, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"status", nullptr, status_target, nullptr, nullptr, nullptr, napi_default, nullptr},

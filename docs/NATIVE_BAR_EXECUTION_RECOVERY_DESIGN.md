@@ -1,6 +1,6 @@
 # Native Bar Execution And Durable Recovery Integration
 
-Status: **design and conservative clock hold approved; slice A implemented in memory only**, 2026-10-23 JST, based on `075ac5e`. The user authorized strict record formats, state replay and capacity accounting with synthetic tests. Native collection/execution, format migration, real recording/movement/deletion, MCP registration, deployment and production enablement are not authorized. Dot stays PAUSED. Trading/scenario/notification conditions are unchanged.
+Status: **design and conservative clock hold approved; slice A implemented in memory, slice B native reads implemented for synthetic fixtures only**, 2026-10-23 JST, based on `075ac5e`. The user separately authorized strict records/replay/capacity and then native read/qualification with synthetic tests. Native execution, format migration, real recording/movement/deletion, MCP registration, deployment and production enablement are not authorized. Dot stays PAUSED. Trading/scenario/notification conditions are unchanged.
 
 This refines the [approved maintenance design](NATIVE_BAR_MAINTENANCE_DESIGN.md) and preserves the [phase 2 classification contract](NATIVE_BAR_CLEANUP_PLANNING.md). Existing production maintenance refusal and synthetic-only native root gates remain in force. No real store is initialized by this design work.
 
@@ -157,7 +157,7 @@ Any future real-store profile initialization or v1-to-new-profile transition is 
 | Slice | Deliverable after separate implementation approval | Acceptance evidence |
 |---|---|---|
 | A (implemented in memory) | Pure versioned intent/event/attempt schemas, replay reducer and capacity calculator | 117 synthetic tests: ordinary transition matrix, role/ID confusion, duplicates/gaps, absent-after-unlink uncertainty, fresh terminal-absence verification, 1 MiB/16 MiB/30,000-entry boundaries; no module I/O. Native/runtime integration is not implied. |
-| B | Synthetic native protocol extension and trusted read-only inventory/status | Birthtime, bounded reads, exact-case/normalization behavior, ACL/parent/root swaps, unsupported capability/volume, FD limits; missing/read-only root creates nothing. |
+| B (synthetic read facts implemented) | Separate read protocol 2, descriptor inventory, evidence reads and final view verification | Birthtime, bounded reads, observed names/normalization, ACL/parent/root swaps, shared FD limits, missing/owner-read-only roots create nothing. Actual unsupported-volume/remount/error injection and durable transaction-status composition remain later qualification/integration work. |
 | C | Descriptor-backed existing writer algorithm and execution-only registry | Multiple processes, live/suspended/unknown/PID reuse, exact self-deltas versus other writers, queue expiry and no deadline reset; old/native paths cannot fall back. |
 | D | Immutable metadata publication and quarantine-only coordinator | Kill/fail before/after every create/write/sync/publish/move/event/marker/response; conflict objects and external-victim fixture unchanged; fresh recovery approval after restart. |
 | E | New-profile recording provenance and transaction-aware readers | No real data; fake restored captures, pending publication, midnight/clock rollback, A/B/A/volume/context history unchanged, legal spent markers, missing terminal events fail closed, prior build rejects fixture profile. |
@@ -165,7 +165,7 @@ Any future real-store profile initialization or v1-to-new-profile transition is 
 
 Test real native operations only in dedicated synthetic roots and sibling victim fixtures. Inject clocks/process evidence/syscall failures without weakening production guards. Full regression plus native sanitizers/static analysis and packaging checks remain required at relevant slices; mocked TypeScript tests do not establish native path or power-loss safety. Power interruption, filesystem/OS qualification and independent review remain release gates, not accomplishments of this document.
 
-MCP registration, production binary packaging/deployment, profile migration/initialization, enabling execution, each real-data operation and any Dot connection are separate later decisions. No implementation slice implicitly grants another. Slice A alone is now authorized and implemented; slices B-F remain future work requiring their own approval.
+MCP registration, production binary packaging/deployment, profile migration/initialization, enabling execution, each real-data operation and any Dot connection are separate later decisions. No implementation slice implicitly grants another. Slices A and B are separately authorized and implemented within the boundaries below; slices C-F remain future work requiring their own approval.
 
 ## Approved Decisions
 
@@ -203,3 +203,13 @@ bdo npm test
 ```
 
 They cover the ordinary transition matrix, whole-set purge staging, restart/reconciliation, approval/hash/role/ACL/clock substitutions, record limits and exact capacity boundaries. They do not prove filesystem race safety, power-loss durability, authenticated time, real recovery or safe production deletion. No native build or production deployment is needed for slice A.
+
+## Slice B Read Boundary
+
+The [native read protocol contract](../native/native_bar_fs/README.md#read-protocol-2-slice-b) defines `openSyntheticNativeBarReader` and the synthetic-only `native_bar_read.inc` implementation. It supplies actual descriptor-derived raw facts and bounded content, not execution eligibility or human authority. It is not imported by the server/history/classifier/replay path. Existing native protocol 1 mutation primitives remain separate and unreachable from a read lease; the production allowlist/refusal is unchanged.
+
+Invented files in dedicated synthetic roots test qualification and read races. No real store is opened, initialized, recorded, moved or deleted. Inventory/verify creates no lock, policy, probe or journal; failed/unknown entries remain preserved. Final metadata verification must follow a set of content reads; matching scans are bounded checks, not an atomic snapshot or continuous watch. Unknown ordinary files participate in drift detection. Raw evidence is not JSON-decoded or adopted as first-seen/transaction history.
+
+Closing or expiring a native inventory releases vector capacity as well as entries before JS garbage collection. A read checks the original lease again after response construction, so hashing, copying or synchronous JS work during serialization cannot return an already-expired successful read. These are lifetime/refusal checks, not an elapsed-time qualification or execution grant.
+
+Still absent: phase 2 snapshot adaptation, raw canonical/duplicate-key JSON validation, complete producer/profile/reference interpretation, process liveness/exclusion and self-delta generations, authenticated host approval, persistent publication, transaction-aware status/recovery composition, and any mutation registry. Native elapsed-time qualification explicitly remains false, so slice B cannot manufacture 90-day deletion evidence. Actual unsupported-volume/capability-failure tests and release qualification remain open gates, not accomplishments of a successful local APFS run.

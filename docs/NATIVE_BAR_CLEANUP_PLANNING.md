@@ -4,6 +4,8 @@ Status: phase 2, supplied-snapshot classification and process-local planning onl
 
 The [execution/recovery connection design](NATIVE_BAR_EXECUTION_RECOVERY_DESIGN.md) and conservative clock hold are approved. Its slice A adds isolated strict record schemas, pure replay and logical capacity accounting with in-memory synthetic tests only. It does not turn `consumeForSyntheticValidation` into a grant, change this API's hashes or enable a backend. Trusted native collection, execution and compatibility integration remain later approval gates.
 
+The separately approved slice B now supplies [synthetic-only native raw reads and qualification](../native/native_bar_fs/README.md#read-protocol-2-slice-b). It does not construct this classifier's snapshot, change its generations, authenticate the supplied process/clock/eligibility claims or connect its plans to execution. Raw native facts, canonical metadata interpretation and execution authority remain distinct boundaries.
+
 ## Implemented Boundary
 
 `src/nativeBarMaintenance.ts` exports `classifyNativeBarCleanup`, `NativeBarCleanupPlans` and three provisional provenance schemas. It imports only crypto, Zod and pure evidence schemas. It does not open/read/write a file, load the native addon, probe a process, take a writer/chart lock, access TradingView, send notifications or alter history. Existing receipt/maintenance schemas moved unchanged to `nativeBarArtifacts.ts` for consistent interpretation by the history reader and classifier. Existing recording/publication and production-maintenance refusal are unchanged.
