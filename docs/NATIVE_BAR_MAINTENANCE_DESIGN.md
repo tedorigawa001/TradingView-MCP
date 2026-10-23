@@ -2,6 +2,8 @@
 
 Status: design and strictly-more-than-90-day abandoned-quarantine purge-candidate policy approved by the user, 2026-10-23 JST. Phase 1 implements native primitives; phase 2 adds supplied-snapshot classification and memory-only approval previews. Both use synthetic tests only; neither registers, deploys or enables production execution, or authorizes real-data operations. The production maintenance refusal remains in force. No live market data is read, recorded, moved or deleted by this work.
 
+Next-phase [execution and durable recovery integration design](NATIVE_BAR_EXECUTION_RECOVERY_DESIGN.md) (2026-10-23 JST, based on `075ac5e`): design and conservative purge hold without elapsed proof approved. Slice A implements strict supplied-record schemas, pure state replay and logical capacity calculation with in-memory synthetic tests. It does not connect trusted native evidence, the descriptor-backed existing writer protocol, self-delta generation, persistence, transaction-aware history readers or compatibility migration. All current guards and separate approval gates remain unchanged.
+
 ## Decisions And Boundaries
 
 Use a small in-process Node-API native backend for descriptor-relative filesystem operations. Keep scenario evaluation, consent plans, retention classification and history projection in TypeScript. Keep the existing native-bar writer serialization; do not replace it with a second, unrelated lock protocol. Maintenance never takes a chart lock or accesses TradingView/CDP.

@@ -1,0 +1,205 @@
+# Native Bar Execution And Durable Recovery Integration
+
+Status: **design and conservative clock hold approved; slice A implemented in memory only**, 2026-10-23 JST, based on `075ac5e`. The user authorized strict record formats, state replay and capacity accounting with synthetic tests. Native collection/execution, format migration, real recording/movement/deletion, MCP registration, deployment and production enablement are not authorized. Dot stays PAUSED. Trading/scenario/notification conditions are unchanged.
+
+This refines the [approved maintenance design](NATIVE_BAR_MAINTENANCE_DESIGN.md) and preserves the [phase 2 classification contract](NATIVE_BAR_CLEANUP_PLANNING.md). Existing production maintenance refusal and synthetic-only native root gates remain in force. No real store is initialized by this design work.
+
+## Recommended Scope
+
+First connect **abandoned quarantine and its separately approved purge**, in synthetic fixtures only. Keep committed prune and clock-ahead recovery on their existing production-refused path until their own transaction-aware history adapter passes the same gates. Do not route either through abandoned cleanup. Legacy review remains review-only, without a movement destination; arbitrary side files, hard links and malformed/unknown ownership remain preserved.
+
+Recovery means observing surviving evidence and proposing an exact new action. It does not restore a previous grant, repair an intent automatically, recreate a receipt or infer a successful unlink from absence. Read/status, preparation, execution, recovery and recording retain separate authorities.
+
+| Existing component | Current limitation | Proposed connection |
+|---|---|---|
+| `nativeBarMaintenance.ts` | Supplied snapshots; `consumeForSyntheticValidation` returns no execution grant | Retain this API as validation-only. Add an internal trusted evidence view and a separate execution registry; never accept a caller snapshot as execution authority. Preserve the `075ac5e` reference, case/normalization, current-owner, fresh-after-issuance and whole-marker-set checks. |
+| `nativeBarFs.ts` / native protocol 1 | Synthetic-only; capture/receipt UUID leaves; native-generated holding names; 32 live targets/session; no birthtime/inventory/publication/restart journal | New versioned synthetic protocol with complete descriptor evidence, plan-bound slots, metadata publication and read-only recovery. Do not flip protocol 1 into production mode or reuse its cached `status()` as restart evidence. |
+| `nativeBarAccess.ts` | Correct cooperative ordering, but pathname-based coordination/publication/takeover | Share the existing owner/incarnation and bakery/takeover algorithm through a descriptor-backed store adapter. Do not add a second independent lock protocol. |
+| `nativeBarHistory.ts` | v1 readers and policy; pathname synthetic maintenance; production refusal | Read-only profile/transaction awareness before connecting any executor. No change to existing refusal, record-pair publication semantics, first-seen projection or accepted observations in the first connection slice. |
+
+Proposed boundaries: `nativeBarMaintenanceIo.ts` collects trusted evidence, `nativeBarTransactions.ts` contains strict schemas and a pure replay reducer, and `nativeBarMaintenanceExecution.ts` coordinates grants/locks/steps. These names are design placeholders, not new MCP tools. Neither the reducer nor the classifier may perform I/O; neither the native backend nor the reducer decides trading conditions or human authorization.
+
+## Trusted Evidence And Native Sessions
+
+1. Open only the exact approved root, walking and pinning each component. Preview is read-only: no directory, lock, capability probe, policy or journal creation. Missing root returns no executable plan. Qualification must include actual owner/mode/ACL, supported local APFS/ownership behavior, case/normalization semantics, protocol and required capabilities. Unsupported/unknown qualification refuses without a pathname fallback.
+2. Enumerate a bounded descriptor-relative inventory, including unknown names and all operation metadata. Read only bounded regular evidence through descriptors, with before/after identity/metadata checks. Expose lossless decimal birthtime as well as device/inode/link/size/mtime/ctime, raw hash, actual parent identities and ACL outcomes. Do not fill missing fields from filenames, `stat` guesses or earlier reports.
+3. Collect process-incarnation liveness through the existing evidence rules; bind the results to the collection interval and root. Live, suspended, `EPERM`, partial listings, ambiguous PID reuse and malformed owners stay live/unknown. Current lock/takeover holders and this attempt's own coordination are never cleanup targets. Case variants and normalized duplicates fail as in phase 2; native lookup must not silently alias them.
+4. Detect inventory/reference drift with a second bounded descriptor metadata/generation check. A preview that cannot establish a complete stable evidence view returns reasons, not an executable plan. An execution attempt must collect again **after** issuance and after lock acquisition. A cached preview is insufficient.
+5. Proposed layout names are generated and retained in memory before approval, not created. New native operations take opaque, issuer-bound target/transaction handles with fixed role enums and these exact names. They do not accept arbitrary path strings, inodes, destinations, timestamps, hooks or raw payloads from a request. Protocol 1's independent slot allocation cannot implement the plan-bound destination contract unchanged.
+
+Keep native limits of eight root sessions, 32 live targets per session and 512 descriptors unless separately reviewed. The memory-plan ceiling of 128 is not a promise that 128 descriptor-backed execution previews fit: additional previews refuse or remain non-executable when root-session capacity is exhausted. Close unused/expired leases without deleting anything. A session deadline is never restarted when issuing a newer plan; an older lease cannot support a plan beyond its own deadline.
+
+Up to 1,024 exact selected targets is a planning cap, not an FD allocation request. Preflight every target under the writer exclusion, retain bounded proofs, and reopen/revalidate small groups within the 32-target budget. Never keep 1,024 target FDs open. Grouping is not atomic execution: partial movement after a later conflict remains visible. A batch cannot silently expand, split a quarantine marker set or advance to another batch.
+
+The execution view must fail closed on malformed/unknown transaction entries anywhere under holding, manifest, attempts or event namespaces, including non-UUID names. Today's classifier preserves some malformed holding/event names as unknown; that is not an execution qualification. Keep ordinary Finder/owner side files outside these private transaction namespaces preserved and reportable, not corrupt receipts. Supporting the stricter execution view requires versioned reader tests, not a blanket deletion allowlist or silent reinterpretation of the current API.
+
+## Approval And Locking
+
+The proposed executor accepts only an execution plan ID/hash and technical `confirm=true`, plus the host's separately obtained per-invocation approval. It never calls the phase 2 validation result an executable grant. Disk intents, hashes, a supplied snapshot, an earlier human approval, an environment variable and a tool description do not authenticate current human consent. If the host cannot establish that approval, execution stays unavailable.
+
+The current repository has no new authenticated approval bridge for this connection. Specify a trusted, non-request-constructible host invocation capability before enabling an executor; an injected boolean or serialized `approval_reference` is not that capability. Synthetic fixtures may mint a fixture-only capability, accepted only by the synthetic native root gate. Persisted approval references remain audit information, not reusable authority.
+
+An internal grant is process-local, single-use and bound to root/ancestor/session identity, policy/profile, backend capabilities, operation kind, exact targets and roles, proposed slots, evidence generation, uncertainty, and both ten-minute deadlines. The preview discloses coordination/metadata writes, content moves versus irreversible unlinks, bytes, retention effects and possible partial outcomes. Approval for quarantine never permits purge, recording, metadata cleanup, legacy movement or committed maintenance.
+
+Consume once, before waiting. Acquire the **existing** writer queue and lock using the pinned root adapter, then recheck both clocks, namespace, profile, scope and references before any transaction/data mutation. Maintenance never takes a chart lock or reads charts/quotes. Recording retains its existing store-before-chart order when its adapter is separately integrated. A busy or unknown owner causes bounded refusal, not forced cleanup. Keep native work inside the owning MCP process and finish/join it before releasing writer ownership.
+
+### Generation Without Hiding Changes
+
+Taking the lock creates claim/ticket/lock files, so comparing phase 2's raw generation unchanged would always reject execution. Do not solve this by ignoring all `.writer*`, `operations/` or `maintenance/` paths.
+
+The trusted execution view carries two linked generations: a complete inventory generation and a reference/data baseline. It also carries an exact **coordination delta manifest** minted by the current adapter: generated names, owner tokens, creation identities and hashes for files this attempt created/released. The comparison removes only those proven self-created deltas; every selected target, pre-existing coordination entry, other writer, unknown file and external metadata change remains bound. Parent/root identity, ownership, mode and ACL changes are never normalized away. This new derivation needs its own schema/version and tests; do not silently alter phase 2's hash definition.
+
+If dead-lock takeover retires a pre-existing file, the baseline has changed: release the acquired lock, preserve the retired bytes and demand a fresh preview. Queue churn by another writer can likewise stale a plan. Report coordination effects already performed; do not say "no files changed" merely because no data target moved. After intent publication, only the exact operation's declared immutable journal publications are additional permitted self-deltas. Validate ownership of each delta, not just its pathname prefix.
+
+## Durable Format And Capacity
+
+Use a new strict transaction format, not extra permissive fields in v1 intents. Proposed layout, still under the approved root:
+
+```text
+operations/<record-operation-id>.reservation.json
+operations/<record-operation-id>.created/<stage-id>.json
+maintenance/<maintenance-id>.json
+maintenance/<maintenance-id>.manifest/<chunk-id>.json
+maintenance/<maintenance-id>.events/<sequence>.json
+maintenance/<maintenance-id>.attempts/<attempt-id>.json
+maintenance/<maintenance-id>.done.json
+maintenance-hold/<maintenance-id>/<target-id>
+quarantine/abandoned/<quarantine-id>/<target-id>
+quarantine/abandoned/<quarantine-id>/timestamp.json
+```
+
+Recording ID, producer operation ID, maintenance ID, target ID and recovery attempt ID are distinct roles with separately named fields. No status lookup guesses a role from a UUID alone. Slice A validates structured records only; these formats are not yet an on-disk writer/native protocol. Phase 2's provisional v1 provenance schemas and protocol 1 do not supply the durable execution contract today.
+
+Proposed schema discriminators are `native-bar-maintenance-intent-v2`, `native-bar-maintenance-event-v2`, `native-bar-maintenance-attempt-v2` and `native-bar-maintenance-completion-v2`. Intent kinds are closed to `quarantine_abandoned` and `purge_abandoned` in this scope. All event names/roles are discriminated unions; arbitrary state strings, unknown versions/fields, duplicate IDs/steps and dangling manifest references refuse. UTC values use the existing canonical four-digit-year contract; native counters/times remain lossless decimal strings with an explicit clock-source ID/boot binding.
+
+| Record | Required binding |
+|---|---|
+| Intent header and bounded manifests | Format/profile/kind, operation ID, exact approved target/role set, source/holding/final names, preflight proofs and parents, reference baseline, root/policy/backend, per-invocation approval-plan hash, original clock observations, finite step/publication set and capacity budget. Header binds every immutable manifest chunk hash/count; all must exist and validate before the first data move. |
+| Event | Strict sequence and previous-event hash, intent/attempt hash, target role, permitted transition, before/after evidence, actual known locations, clock brackets and sync outcome. No raw OHLC, credentials, account data or serialized reusable grant. |
+| Attempt | Fresh approval-plan binding, original intent/completed-prefix hashes, newly observed locations/proofs, exact remaining actions, current root/profile/reference baseline and current clock evidence. Never overwrite the original intent or claim its approval survives restart. |
+| Quarantine timestamp plus completion | Exact surviving target set, final post-move proofs and marker hash/proof, publication clock brackets and completion-event chain. A marker alone is not authenticated time or a completed transaction. |
+| Final completion | Exact terminal target outcomes, full legal event/attempt-chain references, surviving/absent locations, marker/coverage effects and final sync/readback result. It contains no OHLC and grants no future action. |
+
+Publish immutable canonical metadata through native exclusive creation in verified private directories, bounded writes, sync and non-replacing publication/readback. Never use Node pathname `unlink/link/rename` or shared `fsDurability.ts` as a mutation fallback. Temporary metadata-publication slots are generated, declared and counted; interrupted/truncated entries are preserved for diagnosis, never mistaken for complete events. A partial manifest/header grants no operation; missing metadata never proves that a prior data operation did not happen.
+
+Sync acknowledgement describes the verified durability operations actually requested and observed, not an unconditional power-loss guarantee. The native durability profile and power-interruption tests must be qualified before advertising stronger guarantees. A failed or unverifiable durability step cannot become `complete` merely because the final path currently exists.
+
+A completion record can describe verified preceding steps, not its own later publication acknowledgement. Choose its logical completion clock after final target/marker verification and before publishing that record; report the subsequent sync/readback acknowledgement separately in the response. Status after response loss reports the validated surviving terminal evidence and `original_acknowledgement: not_proven`, not a fabricated original receipt time. Holding-age evidence binds that logical clock together with marker/target native clocks and the qualified elapsed source; it is not exact historical client/query visibility.
+
+Keep 1 GiB inventory, 1 MiB per artifact, 256 MiB evidence-read budget, 16 MiB maintenance metadata, 8 MiB response and 30,000 entries. Budget the **peak**, including coordination, manifest chunks, publication temporaries, all remaining events, completion/marker and bounded recovery headroom before touching data. Large manifests must be split into explicitly hash-bound chunks below 1 MiB, not truncated. Account for native rereads/hash verification within the invocation budget, not an unbounded full scan before each target. If mandatory reads plus the exact batch do not fit, refuse before staging. Do not raise limits or silently shrink the approved batch.
+
+Reserve actual filesystem headroom through the qualified native session as well as logical quota. No disk-space estimate guarantees writes will succeed; every write/sync failure stops further data steps and reports uncertainty. A fixed 4 MiB reserve is not proof an arbitrary journal fits. Repeated recovery attempts consume bounded capacity; exhaustion preserves evidence and stops rather than deleting old metadata or automatically reclaiming space. Metadata retirement/whole-store deletion needs a separate future design/approval.
+
+## Execution State Machine
+
+All target evidence/reference checks for the exact batch precede its first data move. Revalidate the currently addressed target and namespace again at every step. The durable reducer accepts only legal monotone transitions and exact role/identity bindings; a hash chain detects inconsistency, not authenticated authorship against a same-UID adversary.
+
+| Step | Durable evidence before data mutation | Success evidence and failure behavior |
+|---|---|---|
+| Prepare layout/intent | Valid current grant, writer ownership, full baseline and capacity; immutable manifests/header synced and read back | Partial publication is `preparation_incomplete`; no automatic cleanup, target action or fabricated intent. |
+| Source to holding | Synced `move_pending` binding exact source/slot/proof | Exclusive descriptor rename, reopen/hash/compare, file and both directories synced, `held_verified` event. A moved replacement becomes `conflict` and is preserved; no blind restore. |
+| Holding to abandoned quarantine | Synced `quarantine_move_pending`, quarantine-only role | Exact exclusive final move, final proofs/readback/sync, target event. Partial sets block recording/other maintenance and need fresh recovery approval. |
+| Finish quarantine | All exact targets verified at final slots, all move events durable | Publish new marker and terminal completion, sync/read back. Its verified completion time starts holding; never use an old intent date to backdate it. |
+| Quarantine to purge holding | Fresh **purge** approval, complete marker target sets, verified completion/clock/age/references, synced move evidence | Exact whole set staged/reverified; still no unlink from the original source path. Interrupted staging is a known purge transaction, not a new abandoned candidate. |
+| Irreversible unlink | Synced `unlink_pending` for that held object, fresh target/reference checks, both deadlines and original purge scope | Native held-only unlink, surviving-descriptor/link checks, directory sync and absence readback, then synced `unlinked`. No secure-erasure/reclaimed-block promise. |
+| Finish purge | Every selected target has a verified legal terminal event | Publish completion and a spent-marker projection; do not delete the original timestamp marker or producer metadata as an unapproved extra action. |
+
+The runtime registry/session, not the on-disk intent, controls which native calls are possible. The backend distinguishes read/root leases from an expiring mutation grant. Do not grant a fresh native TTL after a queue wait or after reopening a target. On timeout/cancellation, stop new moves/unlinks; do not extend the grant to finish. Best-effort readback/sync may report what already happened, but any metadata append that lacks remaining authorization can be absent. Record/report `incomplete` or `durability_unknown`; later recovery handles the gap. Release only this attempt's exact owned coordination entries and close handles in `finally`; never clean up abandoned data in a finalizer.
+
+### Marker Consumption And Readers
+
+`075ac5e` correctly refuses a partial purge of one marker set. Simply deleting that full set would still make today's raw classifier call its surviving marker corrupt. Therefore **transaction-aware reading must land before unlink is connected**.
+
+New readers validate the original marker, immutable intent, exact target set and legal completed purge chain before projecting that marker as `spent`. Its targets may then be absent, but it remains counted retained metadata, not a new cleanup candidate. Pending/forged/missing `unlinked` events, altered marker contents or a different set never produce a spent projection. Do not hide raw entries before computing inventory/generation, or let a caller supply `spent=true`. Without this reader, purge execution stays unavailable.
+
+Abandoned cleanup never changes accepted observations, retained first-seen, occurrence numbering or the committed retention floor. Recording IDs can report `abandoned_quarantined` / `abandoned_purged` only from validated completion evidence, never `committed`. Transaction status lists per-target known locations, attempted versus confirmed steps, writer-release outcome, reason for blocking and remaining approval needs. It is freshly read-only; native protocol 1's cached status is not enough. If a complete committed-history view cannot be proved, return unavailable rather than a partial success.
+
+## Restart And Recovery
+
+Constructors/startup create nothing and never resume automatically. Explicit status/inspection after restart is read-only and acquires no writing lock. It may report `changing` if two bounded evidence checks disagree. No on-disk plan nonce, PID or old host approval revives authority. A recovery preview creates no journal or lock; execution needs a new same-process plan/hash, new human approval, writer exclusion and all current gates again.
+
+| Surviving evidence | Read-only result | Freshly approved recovery may do |
+|---|---|---|
+| Original only, no trusted terminal step | `not_started_or_unconfirmed` | Revalidate eligibility and stage only the exact remaining approved target; do not invent earlier progress. |
+| Holding only, exact original identity/content, legal pending move | `held_incomplete` | Reopen the known slot under a new native session and validate the entire transaction; quarantine-only remains move-only, purge requires purge-specific approval and current age proof. |
+| Final quarantine only, missing post-move event/marker | `quarantine_incomplete` | Confirm current location/sync under new approval, append a new attempt/evidence, complete the exact set and establish a **new** verified completion clock. Do not claim the old move/UTC time was observed. |
+| Marker and target set valid, lost response after durable completion | `complete` with original ID and verified outcome | Return status only; do not rerun data steps to recover an acknowledgement. |
+| Both source and holding/final present; different identity/hash; unknown links; corrupt/gapped event chain | `conflict` | Preserve all locations; no force-delete, overwrite, repair or automatic rollback. Needs a separately reviewed resolution. |
+| Absent after `unlink_pending`, no durable verified `unlinked` | `durability_unknown`, current absence distinct from proven historical success | No further unlink for that target. Fresh explicit reconciliation may acknowledge current synced absence with the original uncertainty retained; never fabricate `unlinked` or certain original `complete`. |
+| New receipt/live reference, changed root/profile, missing original proof, unverifiable clock/eligibility | `blocked` | No movement/deletion. A different approved scope is a new operation, not a widened resume. |
+
+Every recovery is bound to the original immutable intent/manifest, validated event prefix and surviving actual objects **plus a newly approved exact remaining-action set**. Reconstruct the allowed baseline from known transitions; a self-consistent forged old intent/generation alone cannot make a new record eligible. Read every relevant source, holding, quarantine and reference namespace, not whichever path happens to exist. Unknown original state remains unknown.
+
+The general classifier's incomplete-transaction blocker remains. A narrow recovery reducer may explain the selected transaction's own pending slots, but cannot suppress other blockers or route failed recovery into permissive abandoned cleanup. Missing completion metadata may leave a safe manual dead end; do not add a general repair/delete escape hatch. Legacy v1 incomplete prune/clock recovery and hard-link aliases remain separately gated; never rewrite them into a v2 consent record or silently migrate them.
+
+## Quarantine Time Assurance
+
+The strictly-more-than-90-elapsed-day rule is unchanged. Phase 2 tests structural age but currently does not prove marker/target birthtime consistency with operation publication, reboot-spanning elapsed time or authentic historical UTC. Native mtime/ctime/birthtime can veto eligibility; they cannot independently authenticate a backdated JSON timestamp. A digest chain is not an external time authority.
+
+The conservative first executor policy, **approved as design**, is to persist operation UTC brackets, boot identity and a qualified boot-relative monotonic clock source/reading in the completion evidence. Require marker creation inside its recorded publication bracket, target birthtime no later than its verified creation/quarantine step, and post-move ctime inside its observed move bracket (with explicitly documented native precision). Clock rollback/contradiction blocks completion/purge; do not patch timestamps. Verify actual marker/target identities/content and the completion chain again at purge. Slice A checks supplied clock claims only; collection, persistence and source qualification are not implemented.
+
+For a new purge, require both local wall/native evidence **and** verified elapsed-clock evidence to exceed 90 days strictly. A process-relative `performance.now()` value cannot serve as a cross-process clock proof. The native clock source must pass cross-process/suspend/restart semantics tests before it is qualified; this document does not assert a particular OS clock already meets them. After an OS reboot or unavailable source, elapsed age is unverified and purge remains blocked. Same-boot server restart may recover only when that absolute boot-relative source and original evidence are still verifiable. Read-only diagnostics and quarantine recovery remain possible without granting a new unlink.
+
+This safety choice can leave valid old quarantine undeletable after reboot. It is an explicit availability tradeoff, not a silent new threshold or a claim of tamper-proof storage. Cross-boot attestation, an external time service or a new holding-period attestation needs a separate approved design; no network call, clock reset, backdating or fallback is implied. Same-UID/admin tampering remains outside the isolation guarantee described in the parent design.
+
+## Recording Provenance And Format Compatibility
+
+Ordinary interrupted-stage cleanup cannot be enabled safely by the classifier alone: new writers must publish durable producer reservation and separate created-object identity **before** writing stage contents. Bind exact generated path, recording ID, root/profile/owner and descriptor birthtime. Create-to-register crashes stay unverified; no legacy adoption. This is a separate recording-adapter implementation slice, with fake captures only. Preserve the approved payload/receipt pair boundary, UTC partition handling, restoration-before-publication and no recapture/backdated first-seen semantics. Do not change shared publication behavior for other stores.
+
+Reserve distinct artifact-attempt IDs for payload stage, final payload and receipt publication, linked to the same recording ID. Declare final capture intent before exclusive stage creation, then bind actual stage creation and the verified immutable publication transition separately. A final path is not a newly born object: retain its original birthtime and lineage rather than inventing a later creation clock. Partial hard-link publication is an alias conflict, not an abandoned ordinary file. The one-path provisional reservation schema cannot silently be stretched to authorize every artifact of a recording; exact versioned provenance/transition schemas and crash tests belong to slice E.
+
+Old readers can ignore unknown operation directories, so a sidecar feature flag is not a compatibility fence. New transaction state must never coexist with an old writer that can silently treat the store as a normal v1 store. Proposed first integration uses **fresh synthetic fixture profiles only**, with an explicit versioned policy contract that old `NativeBarHistory` rejects by policy hash before capture. Preserve the exact production path allowlist and do not modify an existing `policy.json`, create a `/v2` production root or enable a flag to pass this gate.
+
+Any future real-store profile initialization or v1-to-new-profile transition is a separately approved, offline migration/compatibility project. It must stop/drain all old MCP processes, invalidate their plans/sessions, prove prior-build rejection (including waiters that validated before the transition), handle interrupted initialization without a permissive missing-policy window, and preserve immutable old evidence/coverage. This design does not yet specify or authorize that migration. Until then existing real v1 stores and production recording/maintenance remain unqualified for this integration.
+
+## Implementation And Acceptance Gates
+
+| Slice | Deliverable after separate implementation approval | Acceptance evidence |
+|---|---|---|
+| A (implemented in memory) | Pure versioned intent/event/attempt schemas, replay reducer and capacity calculator | 117 synthetic tests: ordinary transition matrix, role/ID confusion, duplicates/gaps, absent-after-unlink uncertainty, fresh terminal-absence verification, 1 MiB/16 MiB/30,000-entry boundaries; no module I/O. Native/runtime integration is not implied. |
+| B | Synthetic native protocol extension and trusted read-only inventory/status | Birthtime, bounded reads, exact-case/normalization behavior, ACL/parent/root swaps, unsupported capability/volume, FD limits; missing/read-only root creates nothing. |
+| C | Descriptor-backed existing writer algorithm and execution-only registry | Multiple processes, live/suspended/unknown/PID reuse, exact self-deltas versus other writers, queue expiry and no deadline reset; old/native paths cannot fall back. |
+| D | Immutable metadata publication and quarantine-only coordinator | Kill/fail before/after every create/write/sync/publish/move/event/marker/response; conflict objects and external-victim fixture unchanged; fresh recovery approval after restart. |
+| E | New-profile recording provenance and transaction-aware readers | No real data; fake restored captures, pending publication, midnight/clock rollback, A/B/A/volume/context history unchanged, legal spent markers, missing terminal events fail closed, prior build rejects fixture profile. |
+| F | Separately approved synthetic purge coordinator | Whole marker sets, exact 90-day boundary, fresh forged old metadata, clock/reboot refusal, held substitutions, pending unlink/ack loss, no marker/provenance deletion or secure-erasure claim. |
+
+Test real native operations only in dedicated synthetic roots and sibling victim fixtures. Inject clocks/process evidence/syscall failures without weakening production guards. Full regression plus native sanitizers/static analysis and packaging checks remain required at relevant slices; mocked TypeScript tests do not establish native path or power-loss safety. Power interruption, filesystem/OS qualification and independent review remain release gates, not accomplishments of this document.
+
+MCP registration, production binary packaging/deployment, profile migration/initialization, enabling execution, each real-data operation and any Dot connection are separate later decisions. No implementation slice implicitly grants another. Slice A alone is now authorized and implemented; slices B-F remain future work requiring their own approval.
+
+## Approved Decisions
+
+- Start with abandoned cleanup in new-profile synthetic fixtures; keep legacy movement, committed maintenance and real v1 migration out of the first executor.
+- Preserve unverified outcomes and original metadata rather than repairing intent files or deleting spent markers.
+- Require qualified elapsed-clock evidence for purge, accepting that OS reboot can leave it blocked; cross-boot attestation is not part of this initial design.
+- Slice A implementation was separately approved. No native/data operation above is authorized by that approval.
+
+## Slice A Implementation Contract
+
+`src/nativeBarTransactions.ts` imports only Zod and the existing pure evidence helper. It opens no file, creates no journal, acquires no lock, loads no native backend and performs no chart, mail, automation or history operation. No server/history/classifier/native-loader integration imports it. Every result says `execution_available: false`. The v2 names below are an isolated synthetic record model, not a stable production disk/protocol contract or compatibility migration.
+
+Exported strict schemas cover clocks, regular single-link private file proofs, manifests, intents, attempts, discriminated events, completions and `native-bar-quarantine-evidence-v2`. Root, file and parent ACL claims allow only `none` or `deny_only`; unknown/write-grant values refuse. Device/inode/owner/size/native-time fields remain canonical decimal strings, not lossy numbers. Unknown versions/fields, including raw OHLC or account fields, refuse. Actual OS qualification and authentication of these claims are not implied.
+
+`replayNativeBarTransaction(bundle)` validates exact manifest/quarantine hashes and whole target sets, source roles and recording IDs, parent/root/owner/device bindings, cross-role inode aliases, event order/hash chains and attempt scopes. It accepts only the two cleanup kinds, not committed prune/clock recovery. Publication/slot names, coordination deltas, provenance eligibility and exact derived capacity/publication plans still need their trusted native/registry adapters before a write protocol is defined. The current reducer does not claim to validate those absent adapters or to consume an execution capability. No path or schema is passed to an executor.
+
+Normal transitions are `source -> move_pending -> holding -> quarantine_move_pending -> quarantined` or `source -> move_pending -> holding -> unlink_pending -> purged`. Verified post-step events must belong to the same attempt as their pending event. First unlink requires the entire exact marker set already held or legally terminal. Repeated/out-of-order transitions, unknown actions, changed content/identity/birthtime/mtime, ctime outside its move bracket, old approvals, changed references, expired wall/elapsed deadlines and time rollback refuse. All events and the logical completion clock must fit the attempt's original ten-minute deadlines. Native times use nanoseconds; a supplied UTC millisecond brackets through that millisecond's last nanosecond, not a general clock-drift allowance.
+
+Any failed target blocks new data transitions for the whole transaction. Conflict severity cannot be downgraded by another failure event. Fresh recovery binds a new attempt to the validated event prefix and observations of every target, then verifies the selected surviving location. Pending rename recovery never forges the missing original verified event. An unchanged held object after `unlink_pending` may be reverified before a new pending unlink under fresh approval. An absent object can only become `absent_unconfirmed`; missing `unlinked` never becomes historical success. Remaining exact targets may finish, but the combined terminal outcome is `resolved_with_uncertainty`, with no spent-marker projection. Only an exact certain completed purge yields `spent_markers`; original marker records are never deleted. `original_acknowledgement` always remains `not_proven`.
+
+If terminal evidence survived but completion did not, a new exact attempt may record `terminal_absence_verified` under its `verify` action and new deadlines. It requires current absence in all supplied locations and binds `from_terminal_event_hash` to the original `unlinked` or `reconciled_absence` event. It does not perform or claim another unlink, revive the old approval, replace the original terminal event, or promote `absent_unconfirmed` to `purged`. This permits a new completion after the old attempt expired while retaining the original certainty/uncertainty. An object still present, missing/wrong terminal event, old attempt, changed references or missing verification scope refuses.
+
+The quarantine evidence object is a **supplied read-model**, not an authenticated certificate. Future readers must derive it from verified native objects plus the original immutable completion chain, never accept it directly from an execution request. The model requires marker birthtime after the supplied final-quarantine time and target native ctimes, and completion no earlier than the marker proof. `assessNativeBarQuarantineAge` requires both wall/native age and qualified same-boot/source elapsed age to exceed 90 days strictly. Native times can delay eligibility, never replace elapsed proof. Reboot, absent/unqualified source, short elapsed time or contradictory clocks hold purge; no fallback or timestamp repair exists. A JSON `qualified: true` is not OS attestation.
+
+`calculateNativeBarTransactionCapacity` takes a strict `native-bar-transaction-capacity-v2` logical budget: existing inventory/metadata bytes and entries, available-byte estimate (nullable), explicit publication roles with byte/count upper bounds, positive recovery byte/entry reserve, all planned read bytes/counts, response bytes and peak handle counts. Roles include coordination, publication temporaries and directories; directories count as entries with zero **logical** content bytes. It computes exact BigInt totals, including all publications and recovery reserve at once, with no future-deletion credit, reclamation, silent batching or limit increase. It returns reasons and exact decimal totals, `verification_scope: supplied_budget_only` and `capacity_reservation: not_reserved`. Unknown/insufficient available space, metadata bytes above inventory bytes, or nonzero inventory bytes with zero counted entries refuse. Disk allocation/block overhead and an actual filesystem reservation must be qualified by the future native session; a supplied estimate does not prove physical writes will fit. The future planner must derive this budget from its entire finite step/publication set, not accept a caller's low estimates as authority.
+
+Limits: 1 MiB per canonical record, 16 MiB aggregate replay metadata, 30,000 replay records, 1,024 targets, 1 GiB peak logical inventory, 256 MiB planned reads, 8 MiB response, 8 root sessions, 32 live targets/session and 512 descriptors. Replay measures its actual supplied records and response; capacity tests cover exact ceilings and one-unit overruns. Native raw-byte canonical parsing, physical inventory accounting, publication capacity binding, global writer exclusion, fresh reference collection, host approval authentication and durable readback remain later integration gates. The structured-input reducer cannot detect duplicate keys already discarded by an upstream JSON parser; a future raw reader must reject noncanonical/duplicate-key metadata before constructing a bundle.
+
+Synthetic tests use invented in-memory objects/clocks only; source-boundary checks read repository code, not a real data store:
+
+```sh
+bdo npm run build
+bdo node --test test/unit/nativeBarTransactions.test.mjs
+bdo npm test
+```
+
+They cover the ordinary transition matrix, whole-set purge staging, restart/reconciliation, approval/hash/role/ACL/clock substitutions, record limits and exact capacity boundaries. They do not prove filesystem race safety, power-loss durability, authenticated time, real recovery or safe production deletion. No native build or production deployment is needed for slice A.

@@ -2,6 +2,8 @@
 
 Status: phase 2, supplied-snapshot classification and process-local planning only, 2026-10-23 JST. No filesystem adapter, mutation executor, new MCP registration or production enablement. The [approved maintenance design](NATIVE_BAR_MAINTENANCE_DESIGN.md) remains the execution contract; this module does not satisfy its production release gates.
 
+The [execution/recovery connection design](NATIVE_BAR_EXECUTION_RECOVERY_DESIGN.md) and conservative clock hold are approved. Its slice A adds isolated strict record schemas, pure replay and logical capacity accounting with in-memory synthetic tests only. It does not turn `consumeForSyntheticValidation` into a grant, change this API's hashes or enable a backend. Trusted native collection, execution and compatibility integration remain later approval gates.
+
 ## Implemented Boundary
 
 `src/nativeBarMaintenance.ts` exports `classifyNativeBarCleanup`, `NativeBarCleanupPlans` and three provisional provenance schemas. It imports only crypto, Zod and pure evidence schemas. It does not open/read/write a file, load the native addon, probe a process, take a writer/chart lock, access TradingView, send notifications or alter history. Existing receipt/maintenance schemas moved unchanged to `nativeBarArtifacts.ts` for consistent interpretation by the history reader and classifier. Existing recording/publication and production-maintenance refusal are unchanged.
