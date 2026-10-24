@@ -52,7 +52,8 @@ test("the old pathname adapter retains its independent lock permission check", a
   const dir = mkdtempSync(join(tmpdir(), "writer-legacy-private-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const body = canonical({ pid: process.pid, token: "01234567-89ab-4cde-8fab-0123456789ab" });
   writeFileSync(join(dir, ".writer.lock"), body, { mode: 0o644 });
-  await assert.rejects(takeNativeWriterLock(dir, async () => {}, 20), /unsafe_writer_lock/);
+  // Windows refuses earlier: the store cannot verify POSIX private access there.
+  await assert.rejects(takeNativeWriterLock(dir, async () => {}, 20), process.platform === "win32" ? /private_access_unverified/ : /unsafe_writer_lock/);
   assert.deepEqual(readdirSync(dir), [".writer.lock"]); assert.equal(readFileSync(join(dir, ".writer.lock"), "utf8"), body);
 });
 test("unsupported platforms refuse coordination without a loader or pathname fallback", () => {
