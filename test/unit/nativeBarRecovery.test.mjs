@@ -210,7 +210,7 @@ test("a new attempt reconciles a surviving held object without completing the ol
   const result = validateNativeBarRecoveryBundle(b);
   assert.equal(result.targets[0].state, "holding"); assert.equal(result.recovery_execution_available, false);
   b.events.at(-1).type = "held_verified"; delete b.events.at(-1).location; delete b.events.at(-1).from_pending_event_hash;
-  assert.throws(() => validateNativeBarRecoveryBundle(b), /pending_attempt|action_not_approved/);
+  assert.throws(() => validateNativeBarRecoveryBundle(b), /pending_attempt|action_not_approved|verification_required/);
 });
 test("completion after metadata-only recovery binds a new marker and preserves the older prefix marker", () => {
   const b = finishInitial(); mark(b, 8); const old = canonical(b.markers[0]);
@@ -471,4 +471,23 @@ for (const [label, mutate, reason] of [
   const q = inputFor(fixture(2)); mutate(q); const r = planNativeBarRecovery(q);
   assert.equal(r.status, "blocked"); assert.deepEqual(r.remaining, []); assert.equal(r.attempt_plan, null);
   assert.ok(r.blocking_reasons.some((s) => s.includes(reason)), JSON.stringify(r.blocking_reasons));
+});
+
+test("a recovery attempt must open each planned verification before any other step", () => {
+  const build = (verify) => {
+    const b = fixture(); addAttempt(b); const t = b.original.manifest.targets[0], held = { ...t.proof, ctime_ns: ns(5) };
+    event(b, "move_pending", 4, { proof: t.proof }); event(b, "held_verified", 5, { proof: held });
+    addAttempt(b, 2, 700, [{ target_id: id(100), source: null, holding: held, quarantine: null }],
+      [{ target_id: id(100), action: "verify" }, { target_id: id(100), action: "quarantine" }]);
+    if (verify) event(b, "recovered_verified", 703, { location: "holding", proof: held, from_pending_event_hash: null });
+    event(b, "quarantine_move_pending", 704, { proof: held }); event(b, "quarantined_verified", 705, { proof: { ...held, ctime_ns: ns(705) } });
+    return b;
+  };
+  assert.throws(() => validateNativeBarRecoveryBundle(build(false)), /recovery_verification_required/);
+  const result = validateNativeBarRecoveryBundle(build(true));
+  assert.equal(result.targets[0].state, "quarantined"); assert.equal(result.elapsed_clock_qualified, false);
+});
+test("the decoder refuses deeply nested input cleanly before any recursive comparison", () => {
+  const deep = Buffer.from(`{"attempts":${"[".repeat(20000)}${"]".repeat(20000)}}`);
+  assert.throws(() => decodeNativeBarRecoveryBundle(deep), /recovery_input_depth/);
 });

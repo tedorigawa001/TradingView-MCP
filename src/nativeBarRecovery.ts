@@ -206,16 +206,21 @@ function validateAttempts(b: Bundle) {
       || own.some((e) => e.clock.utc_at < p.observed_at)) throw new Error("recovery_attempt_binding");
     const replay = replayPrefix(b, prefix);
     if (a.observations.length !== o.manifest.targets.length || new Set(a.observations.map((v) => v.target_id)).size !== a.observations.length) throw new Error("recovery_observation_binding");
+    const planned = new Map<string, string[]>();
     const actions = o.manifest.targets.flatMap((t) => {
       const state = replay.targets.find((v) => v.target_id === t.target_id)!, observation = a.observations.find((v) => v.target_id === t.target_id);
       if (!observation) throw new Error("recovery_observation_binding");
-      const { place } = observe(state, observation, prefix, p.opened_at);
-      return permittedActions(t.target_id, remainingSteps(place, env.ordinal !== 1 && prefix.length > 0));
+      const { place } = observe(state, observation, prefix, p.opened_at), steps = remainingSteps(place, env.ordinal !== 1 && prefix.length > 0);
+      planned.set(t.target_id, steps); return permittedActions(t.target_id, steps);
     });
     if (!same(a.actions, actions)) throw new Error("recovery_remaining_action_scope");
     for (const t of o.manifest.targets) {
       const events = own.filter((e) => e.target_id === t.target_id), types = events.map((e) => e.type);
       if (events.length > (env.ordinal === 1 ? 4 : 5) || new Set(types).size !== types.length) throw new Error("recovery_event_capacity");
+      // A planned fresh verification must be the first step of this attempt for that target, not an optional extra.
+      const first = planned.get(t.target_id)![0];
+      if (events.length && first.startsWith("recovered_")
+        && !(events[0].type === "recovered_verified" && events[0].location === first.slice("recovered_".length))) throw new Error("recovery_verification_required");
     }
   }
   const planIds = [...originalIdentifiers(o), ...b.attempts.map((e) => e.plan.plan_id)];
@@ -273,13 +278,14 @@ export function validateNativeBarRecoveryBundle(input: unknown) {
   boundBundleArrays(input);
   const bundle = nativeBarRecoveryBundleSchema.parse(input);
   if (!bundle.original) return { schema: "native-bar-recovery-replay-v5" as const, status: "preparation_incomplete", verification_scope: "supplied_records_only" as const,
-    execution_available: false as const, recovery_execution_available: false as const, original_acknowledgement: "not_proven" as const, targets: [] };
+    execution_available: false as const, recovery_execution_available: false as const, original_acknowledgement: "not_proven" as const, targets: [],
+    elapsed_clock_qualified: false as const };
   validateOriginal(bundle.original);
   validateAttempts(bundle);
   const replay = replayPrefix(bundle);
   validateMarkers(bundle); validateCompletion(bundle, replay);
   return { ...replay, schema: "native-bar-recovery-replay-v5" as const, status: bundle.completion ? "complete" : replay.status,
-    recovery_execution_available: false as const };
+    recovery_execution_available: false as const, elapsed_clock_qualified: false as const };
 }
 
 function boundBundleArrays(input: unknown) {
@@ -291,11 +297,21 @@ function boundBundleArrays(input: unknown) {
   if (Array.isArray(layout.publications)) for (const v of layout.publications) cap(object(v).temporaries, 3);
 }
 
+/** Iterative, so arbitrarily deep input refuses cleanly before any recursive comparison. */
+function boundDepth(value: unknown, max = 64) {
+  const stack: [unknown, number][] = [[value, 0]];
+  while (stack.length) {
+    const [v, depth] = stack.pop()!;
+    if (v === null || typeof v !== "object") continue;
+    if (depth >= max) throw new Error("recovery_input_depth");
+    for (const child of Object.values(v)) stack.push([child, depth + 1]);
+  }
+}
 /** Canonical bytes supplied by a caller, never a file path or an authenticated native read. */
 export function decodeNativeBarRecoveryBundle(input: Uint8Array): Bundle {
   if (!(input instanceof Uint8Array) || input.byteLength > L.response_bytes) throw new Error("recovery_input_limit");
   const raw = new TextDecoder("utf-8", { fatal: true }).decode(input), value: unknown = JSON.parse(raw);
-  boundBundleArrays(value);
+  boundDepth(value); boundBundleArrays(value);
   if (!Buffer.from(input).equals(Buffer.from(canonical(value)))) throw new Error("recovery_noncanonical_record");
   validateNativeBarRecoveryBundle(value); return nativeBarRecoveryBundleSchema.parse(value);
 }
@@ -377,7 +393,7 @@ export function planNativeBarRecovery(input: unknown) {
   let capacity: ReturnType<typeof calculateNativeBarRecoveryCapacity> | null = null;
   let attempt_plan: z.infer<typeof auditSchema> | null = null;
   const common = { verification_scope: "supplied_records_only" as const, execution_available: false as const, recovery_execution_available: false as const,
-    approval_authenticated: false as const, original_acknowledgement: "not_proven" as const,
+    approval_authenticated: false as const, original_acknowledgement: "not_proven" as const, elapsed_clock_qualified: false as const,
     execution_blockers: ["native_recovery_not_connected", "controller_admission_not_authenticated", "fresh_approval_not_authenticated"], recorded_status: replay.status };
   const result = (status: "blocked" | "planned_only" | "complete_read_only") => ({ ...common, status,
     maintenance_id: o?.intent.maintenance_id ?? null, blocking_reasons: [...new Set(reasons)],
