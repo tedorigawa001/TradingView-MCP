@@ -4,6 +4,22 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 復旧R-Dの独立レビュー対応 (2026-10-25 JST、検証・再レビュー完了)**: 通信/終了処理とnative証跡/元期限を2名が独立して読み取り専用レビューし、中優先度3件を指摘。遅れて起動した元workerが親の元単調10分期限後もstepできる経路、blockingな継承socket待機中に期限を再検査できない経路、期限後closeが1msで強制終了される経路を、いずれも合成で修正前に失敗させた。元試行だけ親の元windowを各engine check/native gate前後で確認し、復旧2/3には適用しない。固定fd4の接続済みAF_UNIX/SOCK_STREAMをnativeで検査し、flagsを保持してO_NONBLOCK化・再確認する。native不在時のblocking fallback、外部path/FD入力はない。closeだけ30秒上限の解放専用猶予を設け、実行期限・元承認・復旧回数は延長しない。
+
+修正後の再レビューは2名とも追加の修正必須指摘なし。元期限/境界内の期限超過/復旧の独立window、無応答read/write、期限後の実native解放の6件を追加し、R-D個別29件と単体境界7件が成功。Clang静的解析は指摘0件。実時間30秒の無応答cleanup強制終了、不正fd4のnative拒否網羅、ASan、電源断/再マウント、本番資格までは確認していない。
+
+最終の固定候補で通常native全879件が成功し、元190点/復旧156点の実SIGKILL走査を完了。別のUBSan実行は全走査だけを除く既存503件とR-D個別29件、計532件が成功し、finallyで通常backendへ復元した。両実行とも失敗/cancel/skip各0。全単体は2,270成功・既存skip2、Bookmap Java5クラス/Node2件成功。検証対象17ソース/テストのhash固定と関連21ファイルの空白検査を確認。Dot PAUSED・設定全体/判定通知条件hash不変、本番保存先未作成。実装とレビュー対応の関連21ファイルだけをコミット対象とし、実データ操作・MCP登録・本番有効化・Dot再開・判定/通知条件変更・push/配布は行わない。
+
+**105-3 復旧R-Dの実worker接続 (2026-10-25 JST、合成検証済み・未コミット)**: `418bc71`を基準に、[R-Dの実装境界](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md#r-d-implemented-boundary)を追加。独立したscope/試行消費/公開証跡は存続controllerに残し、固定workerへprivate fork IPCと継承duplexによる同期gateを接続。パス・ディスクJSON・環境変数・コピーした承認から権限を作らず、明示的なprepare/単発承認/begin/1 native step/closeだけを提供し、自動再起動・自動復旧はしない。元試行1は封印済みの元10分期限へCの両時計を狭めるだけで延長せず、一度の開始もcontrollerに保持。元試行/復旧2・3で同じ有限native engineを使う。架空input/layout/reserve/元envelopeの初期配置は既存の専用fixture harnessであり、本番initializerにはしない。
+
+worker終了時は、稼働中に親がnative own-deltaと実読取を照合した3つのclaim/ticket/lockだけを、別の新しい単発計画/承認・既存のincarnation付き生存判定・正確なdescriptor証跡で削除せず退避する。退避した正確な名前/内容/完全proofだけをcontrollerに残し、参照の元hashとの比較ではその実証跡だけを区別する。全項目は現在inventory世代/容量計上へ残し、`.writer*`の一括除外・未知の退避証跡の採用・親喪失時の権限再構築はしない。全公開結果の実行権限/host認証/経過時計資格はfalse、元ackは`not_proven`。v2/v4形式と判定/通知/保持条件は不変。最終flush前後にはv5専用の合成中断点だけを追加し、旧v4の中断scheduleは変えない。実データ操作・MCP登録・本番有効化・Dot再開・コミット/push/配布は行わない。
+
+最小通信経路、claim/ticket退避、元試行接続、反復closeのRED→GREENを確認。自己点検から、同時worker上限/親子のnative資源会計、承認した完全proofへの退避直前束縛、通信の深さ制限も追加。未修正では同内容別inodeを退避できる再現と第2workerの起動が成功する再現が失敗し、修正後は拒否する。最初の全gate走査は元190/190と復旧51/156までの260成功・失敗0・cancel1で意図的に中断し、補強後にやり直すため成功完了扱いにはしない。負のname-patternが子テストへ一致して全走査まで開始した点も区別し、以降の個別確認にはskip-patternを使う。全gate走査と既存回帰の最終結果は別途記録する。独立レビュー、ASan、電源断/再マウント、本番資格は未実施。
+
+補強後の固定候補で個別native23件と単体境界7件が成功。標準の全単体テストは時間検査を変えず`--test-concurrency=2`で2,270成功・失敗0・既存skip2、Bookmap Java5クラス・Node2件成功。ネイティブ変更のClang静的解析は指摘0件。通常の全native実行は元190点/復旧156点の実SIGKILL走査を含め終了コード0。別のUBSan実行はこの全走査だけをskip-patternで除き、既存503件とR-D個別23件の計526件成功・失敗/cancel/skip各0、finallyで通常backendへ復元した。全走査までUBSan済みとはしない。今回の資源brokerは同時R-D workerを1つに制限し、親に既存native leaseがあれば新forkを拒否。callback前後/応答時に親子のnative root/FDを合算し、既存8 roots/512 native FDs/追加48 FDの余裕を保つ。OS/Nodeの全descriptorを数える主張ではない。
+
+検証対象16ソース/テストのhash固定、関連20ファイルの空白検査、HEAD `418bc71`・未ステージを確認。Dot PAUSED・設定全体/判定通知条件hash不変、本番保存先未作成。変更は未コミットで、実データの記録/移動/削除・MCP登録・本番有効化・配布は行っていない。次は独立レビュー。永続的な本番受入証跡(E)、経過時間を証明する削除資格とpurge(F)、本番initializerは未接続のまま。
+
 **105-3 復旧R-Cの合成専用ネイティブ固定ステップ (2026-10-24 JST)**: `c973ca1`を基準に、[R-Cの実装境界](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md#r-c-implemented-boundary)を追加。存続中controllerの封印済み架空入力に対する専用owner capabilityと、同じCセッションの元10分期限・writer排他に束縛し、単発のnative承認/試行番号を待機前に消費する。現物記録/参照世代/全対象/親とroot/完全ACL・flags/元reserveを照合し、native側で残操作と公開先を再導出。`step()`はパス・phase・本文を受け取らず、新しいpending→残移動→実証跡とsync→verified→試行別marker→completionだけを有限実行する。v4とは内部の不変公開/sync helperだけを共有し、旧executorへのfallbackはない。旧pending/marker/中断temporary/予約容量/衝突を削除・再利用せず保持する。管理側喪失・期限切れ・変化・失敗時は追加操作を止め、正確に所有する調整ファイルだけを解放し、未確認の解放は成功としない。
 
 ユーザーの明示承認により、未来の公開後時刻を自身の不変本文へ書く循環を解消。v5 marker本文は公開前の`verified_at`だけとし、実測した公開前後の時刻は後続`completion.marker.publication`へ保存する。古い未完了markerは自身のprefix/試行・native実体/内容/時刻と存続controller証跡で照合し、旧開発fixtureは移行/補修しない。ファイル枠数・最大2対象/復旧2回・保持条件・判定/通知条件は変更しない。合成試験で、移動後のflags変更の見落としと、JS側の停止検査が例外解放の外にあってwriterが残る経路を再現して修正。衝突試験は、上書き前に親変更を先に検出して拒否する実際の順序に期待値を合わせ、検査は緩和しない。

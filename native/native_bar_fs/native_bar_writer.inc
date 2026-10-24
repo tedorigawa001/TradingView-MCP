@@ -8,7 +8,7 @@ struct Coordination {
   std::map<std::string, size_t> baseline_root;
   std::map<std::string, CoordinationRecord> own, observed;
   std::vector<std::string> temporaries, retired;
-  bool uncertain = false, foreign_churn = false;
+  bool uncertain = false, foreign_churn = false, original_window_bound = false;
   unsigned publications = 0;
   void close() {
     session->release(); baseline.release(); baseline_root.clear(); own.clear(); observed.clear();
@@ -142,7 +142,7 @@ bool coordination_publish(Coordination& c, const std::string& name, const std::s
   binding(c.session->root(), name, fd.value, false); sync_dir(c.session->root()); coordination_guard(c); return true;
 }
 void coordination_retire(Coordination& c, const std::string& name) {
-  require(name == ".writer.lock" || name == ".writer.takeover", "invalid_retirement_role");
+  require(name == ".writer.lock" || name == ".writer.takeover" || (c.session->recovery_read && coordination_name(name)), "invalid_retirement_role");
   coordination_guard(c); auto observed = c.observed.find(name);
   require(observed != c.observed.end() && c.retired.size() < 16, "retirement_observation_required");
   auto current = coordination_read(c, name); require(current.has_value(), "coordination_changed");
@@ -269,7 +269,7 @@ napi_value coordination_call(napi_env env, napi_callback_info info) {
         : original != c->baseline_root.end() ? &c->baseline.entries[original->second].metadata : nullptr;
       if (record ? !expected || !equal_metadata(*expected, record->proof.metadata) : expected != nullptr) c->foreign_churn = true;
       if (!record) { napi_value out; napi_ok_or_throw(napi_get_null(env, &out)); return out; }
-      if (name == ".writer.lock" || name == ".writer.takeover") c->observed.insert_or_assign(name, *record);
+      if (name == ".writer.lock" || name == ".writer.takeover" || c->session->recovery_read) c->observed.insert_or_assign(name, *record);
       return text(env, record->body);
     }
     if (action == "publish") return boolean_value(env, coordination_publish(*c, name, string_arg(env, args[3])));

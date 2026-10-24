@@ -3,6 +3,7 @@
 #include <sys/attr.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/stdio.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -438,6 +439,9 @@ NAPI_MODULE_INIT() {
     {"openCoordination", nullptr, open_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRecoveryCoordination", nullptr, open_recovery_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"recoveryWindow", nullptr, recovery_window, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"bindRecoveryOriginalWindow", nullptr, bind_recovery_original_window, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"retireRecoveryCoordination", nullptr, retire_recovery_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"qualifyRecoveryChannel", nullptr, qualify_recovery_channel, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"prepareRecovery", nullptr, prepare_recovery, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"recoveryCall", nullptr, recovery_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"coordinationCall", nullptr, coordination_call, nullptr, nullptr, nullptr, napi_default, nullptr},

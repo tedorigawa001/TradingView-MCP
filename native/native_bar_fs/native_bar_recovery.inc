@@ -175,16 +175,62 @@ napi_value recovery_window(napi_env env, napi_callback_info info) {
     auto c = rcoord(env, args[0]); Busy busy(*c->session); coordination_guard(*c);
     return rvalue(env, {{"opened_at", rwall(c->session->wall_deadline - std::chrono::minutes(10))}, {"expires_at", rwall(c->session->wall_deadline)}}); });
 }
+napi_value qualify_recovery_channel(napi_env env, napi_callback_info info) {
+  return boundary(env, [&] {
+    size_t count = 0; napi_ok_or_throw(napi_get_cb_info(env, info, &count, nullptr, nullptr, nullptr)); require(count == 0, "argument_count");
+    constexpr int fd = 4; require(S_ISSOCK(stat_fd(fd).st_mode), "recovery_inherited_socket_required");
+    int type = 0; socklen_t length = sizeof(type);
+    syscall_ok(getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length), "recovery_channel_type");
+    require(type == SOCK_STREAM, "recovery_inherited_socket_required");
+    sockaddr_storage peer{}; length = sizeof(peer);
+    syscall_ok(getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &length), "recovery_channel_peer");
+    require(peer.ss_family == AF_UNIX, "recovery_inherited_socket_required");
+    const int flags = fcntl(fd, F_GETFL); syscall_ok(flags, "recovery_channel_flags");
+    syscall_ok(fcntl(fd, F_SETFL, flags | O_NONBLOCK), "recovery_channel_nonblocking");
+    const int checked = fcntl(fd, F_GETFL); syscall_ok(checked, "recovery_channel_flags");
+    require(checked & O_NONBLOCK, "recovery_channel_nonblocking"); return undefined(env);
+  });
+}
+napi_value retire_recovery_coordination(napi_env env, napi_callback_info info) {
+  return boundary(env, [&] { size_t count = 3; napi_value args[3]; napi_ok_or_throw(napi_get_cb_info(env, info, &count, args, nullptr, nullptr)); require(count == 3, "argument_count");
+    auto c = rcoord(env, args[0]); Busy busy(*c->session); coordination_guard(*c);
+    const auto name = string_arg(env, args[1]); require(coordination_name(name), "recovery_retirement_scope");
+    const auto expected = rparse(env, rbuffer(env, args[2], 65536)); const auto current = coordination_read(*c, name);
+    require(current.has_value(), "recovery_retirement_changed"); Quarantine q; q.coordination = c;
+    require(rsame(rproof(env, q, name), expected), "recovery_retirement_proof_changed");
+    auto fd = leaf(c->session->root(), name); binding(c->session->root(), name, fd.value, false); compare(current->proof, qproof(q, fd.value));
+    c->observed.insert_or_assign(name, *current); coordination_retire(*c, name); return text(env, c->retired.back()); });
+}
+Wall::time_point rtime(const std::string& value) {
+  require(matches(value, "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z"), "recovery_original_window");
+  tm utc{}; require(strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &utc), "recovery_original_window");
+  const auto seconds = timegm(&utc);
+  require(seconds >= 0 && seconds < std::chrono::duration_cast<std::chrono::seconds>(Wall::duration::max()).count(), "recovery_original_window");
+  const auto time = Wall::time_point(std::chrono::seconds(seconds) + std::chrono::milliseconds(std::stoi(value.substr(20, 3))));
+  require(rwall(time) == value, "recovery_original_window"); return time;
+}
+napi_value bind_recovery_original_window(napi_env env, napi_callback_info info) {
+  return boundary(env, [&] { size_t count = 3; napi_value args[3]; napi_ok_or_throw(napi_get_cb_info(env, info, &count, args, nullptr, nullptr)); require(count == 3, "argument_count");
+    auto c = rcoord(env, args[0]); Busy busy(*c->session); coordination_baseline(*c);
+    const auto opened = rtime(string_arg(env, args[1])), expires = rtime(string_arg(env, args[2])); const auto now = Wall::now();
+    require(!c->original_window_bound && !c->publications && c->own.empty() && expires - opened == std::chrono::minutes(10)
+      && now >= opened && now < expires && expires <= c->session->wall_deadline, "recovery_original_window");
+    c->session->wall_deadline = expires; c->session->deadline = std::min(c->session->deadline,
+      Steady::now() + std::chrono::duration_cast<Steady::duration>(expires - Wall::now())); c->original_window_bound = true; return undefined(env); });
+}
 napi_value prepare_recovery(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
-    size_t argc = 4; napi_value args[4]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 4, "argument_count");
+    size_t argc = 5; napi_value args[5]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 4 || argc == 5, "argument_count");
     auto c = rcoord(env, args[0]); Busy busy(*c->session); coordination_baseline(*c);
     auto r = std::make_shared<Recovery5>(); r->q = std::make_shared<Quarantine>(); auto& q = *r->q; q.coordination = c; q.root = c->baseline.root;
     r->original = rparse(env, rbuffer(env, args[1], 65536)); r->bundle = rparse(env, rbuffer(env, args[2], 8 * 1024 * 1024), 8 * 1024 * 1024);
     r->audit = rparse(env, rbuffer(env, args[3], 65536)); const auto& o = r->original; const auto& p = o.at("plan"); const auto& layout = p.at("layout");
     require(rsame(r->bundle.at("original"), o) && r->bundle.at("completion").kind == RJson::Nil, "recovery_original_or_completed");
     require(o.at("schema").str() == "native-bar-quarantine-intent-v5" && layout.at("target_count").integer() >= 1 && layout.at("target_count").integer() <= 2, "recovery_profile");
-    r->ordinal = r->audit.at("ordinal").integer(); require(r->ordinal == 2 || r->ordinal == 3, "recovery_ordinal");
+    r->ordinal = r->audit.at("ordinal").integer(); require(r->ordinal == 2 || r->ordinal == 3
+      || (r->ordinal == 1 && c->original_window_bound && r->bundle.at("attempts").a.empty() && r->bundle.at("events").a.empty()
+        && r->bundle.at("markers").a.empty() && r->audit.at("opened_at").str() == p.at("opened_at").str()
+        && r->audit.at("expires_at").str() == p.at("expires_at").str()), "recovery_ordinal");
     q.id = layout.at("maintenance_id").str(); q.chunk = layout.at("chunk_id").str(); q.attempt = layout.at("attempt_ids").a.at(r->ordinal - 1).str();
     require(matches(q.id, READ_UUID) && matches(q.chunk, READ_UUID) && matches(q.attempt, READ_UUID), "recovery_identifiers");
     q.reserve = layout.at("reserve_path").str(); require(q.reserve == ".quarantine-reserve-" + layout.at("reserve_id").str() + ".tmp", "recovery_layout");
@@ -199,6 +245,10 @@ napi_value prepare_recovery(napi_env env, napi_callback_info info) {
     for (int i = 1; i <= 14 * layout.at("target_count").integer(); ++i) publications.push_back("maintenance/" + q.id + ".events/" + std::to_string(i) + ".json");
     for (const auto& id : layout.at("attempt_ids").a) publications.push_back("quarantine/abandoned/" + q.id + "/" + id.str() + ".timestamp.json");
     publications.push_back("maintenance/" + q.id + ".done.json"); require(publications.size() == layout.at("publications").a.size(), "recovery_layout");
+    std::map<std::string, RJson> retired;
+    if (argc == 5) { const auto list = rparse(env, rbuffer(env, args[4], 65536)); require(list.kind == RJson::Array && list.a.size() <= 16, "recovery_retirement_scope");
+      for (const auto& entry : list.a) require(matches(entry.at("path").str(), "\\.writer-retired-" + READ_UUID + "\\.lock")
+        && retired.emplace(entry.at("path").str(), entry.at("proof")).second, "recovery_retirement_scope"); }
     std::map<std::string, int> temporaries;
     for (size_t i = 0; i < publications.size(); ++i) {
       const auto& slot = layout.at("publications").a[i]; require(slot.at("path").str() == publications[i] && slot.at("temporaries").a.size() == 3, "recovery_layout");
@@ -207,7 +257,7 @@ napi_value prepare_recovery(napi_env env, napi_callback_info info) {
     }
     for (const auto& e : c->baseline.entries) {
       require(e.kind == "directory" || (e.kind == "file" && e.readable), "recovery_unqualified_entry"); q.expected.emplace(e.path, e);
-      require(e.path.compare(0, 7, ".writer") != 0 && e.path.compare(0, 8, "receipts") != 0 && e.path.compare(0, 10, "operations") != 0, "recovery_reference_or_coordination");
+      require((e.path.compare(0, 7, ".writer") != 0 || retired.count(e.path)) && e.path.compare(0, 8, "receipts") != 0 && e.path.compare(0, 10, "operations") != 0, "recovery_reference_or_coordination");
       if (e.kind == "directory") { auto fd = directory(qdir(q, qparent(e.path)), qname(e.path)); auto acl = coordination_acl(fd.value, true);
         q.dirs.emplace(e.path, QuarantineDir{std::move(fd), e.metadata, acl}); }
     }
@@ -234,12 +284,14 @@ napi_value prepare_recovery(napi_env env, napi_callback_info info) {
     for (const auto& e : c->baseline.entries) {
       RJson file, dir, hash;
       if (e.kind == "file") { file = rproof(env, q, e.path); hash = file.at("sha256");
+        if (retired.count(e.path)) require(rsame(file, retired.at(e.path)) && e.metadata.st_size <= 256, "recovery_retirement_changed");
         if (records.count(e.path)) require(hash.str() == rhash(records.at(e.path)) && file.at("size").str() == std::to_string(rcanonical(records.at(e.path)).size()), "recovery_record_changed");
       } else dir = rdir(env, e.metadata, e.acl, e.acl_hash);
       inventory.push_back({{"path", e.path}, {"kind", e.kind}, {"size", std::to_string(e.metadata.st_size)}, {"sha256", hash},
         {"allocated_bytes", std::to_string(recovery_allocated(e.metadata))}, {"proof", file}, {"directory_proof", dir}});
     }
     for (const auto& record : records) require(q.expected.count(record.first), "recovery_record_missing");
+    for (const auto& record : retired) require(q.expected.count(record.first), "recovery_retirement_missing");
     std::set<std::string> private_allowed(dirs.begin(), dirs.end());
     for (const auto& record : records) private_allowed.insert(record.first);
     for (const auto& t : o.at("manifest").at("targets").a) { private_allowed.insert("maintenance-hold/" + q.id + "/" + t.at("target_id").str()); private_allowed.insert("quarantine/abandoned/" + q.id + "/" + t.at("target_id").str()); }
@@ -340,7 +392,7 @@ void rmove(napi_env env, Recovery5& r, size_t index, bool final, napi_value hook
 RJson rattempt(Recovery5& r) {
   const auto& o = r.original; const auto& a = r.audit;
   RJson attempt{{"schema", "native-bar-maintenance-attempt-v2"}, {"attempt_id", r.q->attempt}, {"maintenance_id", r.q->id},
-    {"intent_hash", rhash(o.at("intent"))}, {"binding_hash", rhash(o.at("intent").at("binding"))}, {"approval_plan_hash", a.at("plan_hash")},
+    {"intent_hash", rhash(o.at("intent"))}, {"binding_hash", rhash(o.at("intent").at("binding"))}, {"approval_plan_hash", r.ordinal == 1 ? o.at("plan").at("plan_hash") : a.at("plan_hash")},
     {"issued", rclock(a.at("opened_at").str())}, {"expires_at", a.at("expires_at")}, {"resume_after_event_hash", a.at("prefix_hash")},
     {"reference_hash", a.at("reference_hash")}, {"actions", a.at("actions")}, {"observations", a.at("observations")}};
   return {{"schema", "native-bar-recovery-attempt-v5"}, {"ordinal", r.ordinal},

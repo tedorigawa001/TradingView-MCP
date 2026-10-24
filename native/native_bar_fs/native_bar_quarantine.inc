@@ -219,7 +219,11 @@ Proof qpublish_record(Quarantine& q, size_t index, const std::string& bytes, nap
   qverify(q); qsync(q, fd.value, env, callback, path); qsync(q, qdir(q, parent), env, callback, parent, true);
   qsync(q, q.coordination->session->root(), env, callback, "", true); qverify(q);
   // Directory fsync alone may stay in the drive cache; one full flush after the completion covers the final changes.
-  if (index + 1 == q.publications.size()) syscall_ok(fcntl(q.coordination->session->root(), F_FULLFSYNC), "quarantine_final_flush_failed");
+  if (index + 1 == q.publications.size()) {
+    if (q.coordination->session->recovery_read) { read_hook(env, callback, "before_final_fullsync", path); qverify(q); }
+    syscall_ok(fcntl(q.coordination->session->root(), F_FULLFSYNC), "quarantine_final_flush_failed");
+    if (q.coordination->session->recovery_read) { read_hook(env, callback, "after_final_fullsync", path); qverify(q); }
+  }
   q.published.emplace(path, p); ++q.next;
   return p;
 }

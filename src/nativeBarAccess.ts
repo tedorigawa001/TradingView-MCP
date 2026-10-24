@@ -190,6 +190,12 @@ export async function coordinationOwnerDead(bytes: Buffer): Promise<boolean> {
   const owner = parseOwner(bytes.toString("utf8"));
   return owner ? (await ownersDead([owner]))[0] : false;
 }
+/** The same liveness rule for a witnessed bakery ticket; no age-based or unknown-owner retirement. */
+export async function coordinationFileOwnerDead(name: string, bytes: Buffer): Promise<boolean> {
+  const ticket = /^\.writer-ticket-[0-9a-f-]{36}\.json$/.test(name);
+  const owner = parseOwner(bytes.toString("utf8"), ticket ? ["ticket"] : []);
+  return owner ? (await ownersDead([owner]))[0] : false;
+}
 
 async function ownerBody(token: string) {
   const me = await incarnation();

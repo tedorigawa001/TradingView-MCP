@@ -13,7 +13,7 @@ function run(argv, env = process.env) {
 try {
   run(["node_modules/typescript/bin/tsc"]);
   run(["native/native_bar_fs/build.mjs", ...args]);
-  run(["--test", "--test-concurrency=1", "test/native/nativeBarFs.test.mjs", "test/native/nativeBarRead.test.mjs", "test/native/nativeBarWriter.test.mjs", "test/native/nativeBarQuarantine.test.mjs", "test/native/nativeBarRecoveryRead.test.mjs", "test/native/nativeBarRecoveryExecution.test.mjs"], {
+  run(["--test", "--test-concurrency=1", "test/native/nativeBarFs.test.mjs", "test/native/nativeBarRead.test.mjs", "test/native/nativeBarWriter.test.mjs", "test/native/nativeBarQuarantine.test.mjs", "test/native/nativeBarRecoveryRead.test.mjs", "test/native/nativeBarRecoveryExecution.test.mjs", "test/native/nativeBarRecoveryProcess.test.mjs"], {
     ...process.env, UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1",
   });
 } catch (error) {

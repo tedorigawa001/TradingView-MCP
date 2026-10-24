@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { canonical } from "./nativeBarEvidence.js";
+import { canonical, evidenceHash } from "./nativeBarEvidence.js";
 import { planNativeBarRecovery, nativeBarRecoveryBundleSchema, validateNativeBarRecoveryBundle } from "./nativeBarRecovery.js";
-import { syntheticNativeBarRecoveryExecutionOwner } from "./nativeBarRecoveryController.js";
+import { syntheticNativeBarRecoveryExecutionOwner, type SyntheticRecoveryExecutionOwner } from "./nativeBarRecoveryController.js";
 import { openSyntheticNativeBarRecoveryIo, type SyntheticReadHook, type SyntheticRecoveryProof } from "./nativeBarFs.js";
 import { takeNativeWriterLockWithIo } from "./nativeBarAccess.js";
 
 /** R-C local fixture stepping only. No RPC registration, pathname mutation or automatic retry. */
 export function createSyntheticNativeBarRecoveryExecution(ownerCapability: object) {
-  const owner = syntheticNativeBarRecoveryExecutionOwner(ownerCapability);
-  const mono = performance.now(), io = openSyntheticNativeBarRecoveryIo(owner.root);
+  return createSyntheticNativeBarRecoveryWorkerEngine(syntheticNativeBarRecoveryExecutionOwner(ownerCapability));
+}
+/** Trusted inherited-channel worker bootstrap only, like the raw addon. Not a public consent/JSON admission API. */
+export function createSyntheticNativeBarRecoveryWorkerEngine(owner: SyntheticRecoveryExecutionOwner, initial = false) {
+  const original = initial ? owner.original : undefined;
+  const mono = performance.now(), io = openSyntheticNativeBarRecoveryIo(owner.root, original?.plan);
   let window: ReturnType<typeof io.window>;
   try { window = io.window(); } catch (error) { io.close(); throw error; }
   let closed = false, busy = false, consumed = false, begun = false, lastWall = Date.now();
@@ -18,7 +22,8 @@ export function createSyntheticNativeBarRecoveryExecution(ownerCapability: objec
   let closeResult: { coordination_released: boolean; execution_available: false } | undefined;
   const approvals = new WeakMap<object, unknown>();
   const check = (native = true) => {
-    owner.alive(); if (closed) throw new Error("recovery_execution_closed"); if (native) io.coordination.check();
+    owner.alive(); if (initial) owner.originalWindow();
+    if (closed) throw new Error("recovery_execution_closed"); if (native) io.coordination.check();
     const now = Date.now(); if (now < lastWall || now >= Date.parse(window.expires_at) || performance.now() >= mono + 600000) throw new Error("recovery_execution_expired_or_clock_rollback");
     lastWall = now;
   };
@@ -42,7 +47,12 @@ export function createSyntheticNativeBarRecoveryExecution(ownerCapability: objec
           request: { plan_id: randomUUID(), ordinal, opened_at: window.opened_at, issued_at: issued, expires_at: window.expires_at,
             checked_at: new Date().toISOString(), checked_elapsed_ns: String(Math.floor((performance.now() - mono) * 1e6)) } });
         if (r.status !== "planned_only" || !r.attempt_plan) throw new Error(`recovery_native_prepare_blocked:${r.blocking_reasons.join(",")}`);
-        const native = io.prepare(Buffer.from(canonical(owner.original)), Buffer.from(canonical(snapshot.bundle)), Buffer.from(canonical(r.attempt_plan)));
+        if (initial) {
+          if (snapshot.bundle.attempts.length || snapshot.bundle.events.length || ledger.consumed_ordinals.join() !== "1") throw new Error("recovery_original_not_fresh");
+          const { plan_hash: _hash, ...fields } = { ...r.attempt_plan, ordinal: 1 }; void _hash;
+          r.attempt_plan = { ...fields, plan_hash: evidenceHash(fields) };
+        }
+        const native = io.prepare(Buffer.from(canonical(owner.original)), Buffer.from(canonical(snapshot.bundle)), Buffer.from(canonical(r.attempt_plan)), Buffer.from(canonical(owner.retired())));
         check(); plan = structuredClone(r.attempt_plan);
         return { ...r, native, eligibility: "independently_admitted_invented_fixture_only" as const,
           host_approval_available: false, automatic_recovery: false, effects: ["writer_coordination", "fixed_native_recovery_steps", "immutable_metadata_publication", "no_reserve_reallocation", "no_data_unlink"] };
@@ -55,9 +65,9 @@ export function createSyntheticNativeBarRecoveryExecution(ownerCapability: objec
       bind(id, hash); if (!approvals.has(approval)) throw new Error("recovery_fixture_approval_required");
       const native = approvals.get(approval); approvals.delete(approval); consumed = true; busy = true; activeHook = options.hook;
       try {
-        owner.consume(plan!.ordinal); io.consume(native); check();
+        if (initial) owner.consumeInitial(); else owner.consume(plan!.ordinal); io.consume(native); check();
         lock = await takeNativeWriterLockWithIo(io.coordination, options.waitMs ?? 1000); check(); io.begin(); begun = true;
-        return { execution_available: false, recovery_execution_available: false, synthetic_fixture_begun: true };
+        return { execution_available: false, recovery_execution_available: false, synthetic_fixture_begun: true, coordination: io.coordination.delta() };
       } catch (error) { busy = false; const cleanup = close(); throw Object.assign(error instanceof Error ? error : new Error("recovery_begin_failed"), cleanup); }
       finally { busy = false; }
     },

@@ -45,7 +45,7 @@ function collect(root: string, options: ReadOptions = {}) {
         if (entry.kind === "directory") continue;
         if (entry.kind !== "file" || !entry.readable_evidence) throw new Error("recovery_unqualified_entry");
         const metadata = entry.path === "policy.json" || entry.path.startsWith("maintenance/") || entry.path.endsWith(".timestamp.json")
-          || entry.path.startsWith(".publication-");
+          || entry.path.startsWith(".publication-") || entry.path.startsWith(".writer");
         if (metadata && BigInt(entry.proof.size) > 65536n) throw new Error("recovery_record_limit");
         const value = snapshot.readEvidence(index, options.hook); readBytes = BigInt(value.lease_read_bytes);
         files.set(entry.path, { proof: fileProof(value.proof), allocated_bytes: value.proof.allocated_bytes });
@@ -76,9 +76,9 @@ function entries(c: Collection) {
     size: e.proof.size, sha256: c.files.get(e.path)?.proof.sha256 ?? null, allocated_bytes: e.proof.allocated_bytes,
     proof: c.files.get(e.path)?.proof ?? null, directory_proof: e.kind === "directory" ? directory(e.proof) : null }));
 }
-function referenceHash(c: Collection, p: Pick<Plan, "layout" | "targets">) {
+function referenceHash(c: Collection, p: Pick<Plan, "layout" | "targets">, coordination: Iterable<string> = []) {
   const self = new Set([...p.layout.directories, p.layout.reserve_path, ...p.layout.publications.flatMap((v) => [v.path, ...v.temporaries.map((t) => t.path)]),
-    ...p.targets.flatMap((t) => [t.source_path, `maintenance-hold/${p.layout.maintenance_id}/${t.target_id}`, `quarantine/abandoned/${p.layout.maintenance_id}/${t.target_id}`])]);
+    ...p.targets.flatMap((t) => [t.source_path, `maintenance-hold/${p.layout.maintenance_id}/${t.target_id}`, `quarantine/abandoned/${p.layout.maintenance_id}/${t.target_id}`]), ...coordination]);
   return evidenceHash(c.report.entries.filter((e) => !self.has(e.path)).map((e) => e.kind === "directory"
     ? { path: e.path, kind: e.kind, proof: stable(e.proof) }
     : { path: e.path, kind: e.kind, proof: c.files.get(e.path)!.proof, allocated_bytes: e.proof.allocated_bytes }));
@@ -98,22 +98,31 @@ function parseRecord(bytes: Buffer | undefined): unknown {
 type Admission = { root: string; plan: Plan; fixture_id: string; inputs_digest: string; mono: number; sealed: boolean; invalid: boolean;
   last_wall: number;
   initial_paths: Set<string>; pending?: Original; original?: Original; consumed: number[];
-  acknowledged: Map<string, { path: string; hash: string; proof: FileProof }> };
+  acknowledged: Map<string, { path: string; hash: string; proof: FileProof }>;
+  workers: Map<number, Map<string, { path: string; body: string; proof: FileProof }>>;
+  retired: Map<string, { path: string; body: string; proof: FileProof }>; initialInvoked: boolean };
 type Connection = { a: Admission; owner: object; alive: () => void; closed: boolean };
 const connections = new WeakMap<object, Connection>();
-type ExecutionOwner = { root: string; original: Original; alive: () => void;
+export type SyntheticRecoveryExecutionOwner = { root: string; original: Original; alive: () => void;
+  originalWindow: () => void;
   read: () => ReturnType<typeof inspectSyntheticNativeBarRecovery>;
   ledger: () => { original_envelope_hash: string; scope_digest: string; consumed_ordinals: number[]; known_publications: { path: string; hash: string; proof: FileProof }[] };
-  consume: (ordinal: number) => void; witnessed: (path: string, record: unknown, proof: SyntheticRecoveryProof & { sha256: string }) => void };
-const executionOwners = new WeakMap<object, ExecutionOwner>();
+  consume: (ordinal: number) => void; witnessed: (path: string, record: unknown, proof: SyntheticRecoveryProof & { sha256: string }) => void;
+  retired: () => { path: string; proof: FileProof }[];
+  registerWorker: (pid: number) => void; observeWorker: (pid: number, nativeEntries: { path: string; present: boolean; proof: Record<string, string> }[]) => void;
+  consumeInitial: () => void;
+  workerCoordination: (pid: number) => { path: string; body: string; proof: FileProof }[];
+  acceptRetirement: (pid: number, source: string, destination: string) => void };
+const executionOwners = new WeakMap<object, SyntheticRecoveryExecutionOwner>();
 /** Trusted R-C bootstrap bridge, not a root/JSON/reader-ticket promotion or a host approval. */
-export function syntheticNativeBarRecoveryExecutionOwner(capability: object): ExecutionOwner {
+export function syntheticNativeBarRecoveryExecutionOwner(capability: object): SyntheticRecoveryExecutionOwner {
   const owner = executionOwners.get(capability); if (!owner) throw new Error("recovery_execution_owner_required"); owner.alive(); return owner;
 }
-function checkScope(a: Admission, c: Collection) {
-  if (c.report.entries.some((e) => e.path.startsWith(".writer"))) throw new Error("recovery_coordination_prerequisite");
+function checkScope(a: Admission, c: Collection, live = new Map<string, { proof: FileProof }>()) {
+  if (c.report.entries.some((e) => e.path.startsWith(".writer") && !a.retired.has(e.path) && !live.has(e.path))) throw new Error("recovery_coordination_prerequisite");
+  for (const [path, entry] of [...a.retired, ...live]) if (!same(c.files.get(path)?.proof, entry.proof)) throw new Error("recovery_coordination_witness_changed");
   if (!same(nativeBinding(c, a.plan.targets, a.plan.layout), a.plan.native_binding)) { a.invalid = true; throw new Error("recovery_native_binding_changed"); }
-  if (referenceHash(c, a.plan) !== a.plan.baseline.reference_hash) { a.invalid = true; throw new Error("recovery_references_changed"); }
+  if (referenceHash(c, a.plan, [...a.retired.keys(), ...live.keys()]) !== a.plan.baseline.reference_hash) { a.invalid = true; throw new Error("recovery_references_changed"); }
   for (const expected of (a.original ?? a.pending)?.scope.layout_directories ?? []) {
     const e = c.report.entries.find((e) => e.path === expected.path);
     if (!e || e.kind !== "directory" || !same(directory(e.proof), expected.proof)) {
@@ -163,7 +172,7 @@ function physicalBytes(c: Collection) {
 function evaluate(a: Admission, c: Collection, bundle: Bundle) {
   const layout = a.plan.layout;
   const list = entries(c);
-  const generation = { inventory_hash: evidenceHash(list), original_reference_hash: referenceHash(c, a.plan),
+  const generation = { inventory_hash: evidenceHash(list), original_reference_hash: referenceHash(c, a.plan, [...a.retired.keys(), ...[...a.workers.values()].flatMap((v) => [...v.keys()])]),
     native_binding_hash: evidenceHash(nativeBinding(c, a.plan.targets, layout)) };
   const view = nativeBarRecoveryViewSchema.parse({ schema: "native-bar-recovery-view-v5", observed_at: c.observed_at,
     inventory_complete: true, references_complete: true, allocation_complete: true, inventory_hash: evidenceHash(list),
@@ -261,7 +270,7 @@ export function createSyntheticNativeBarRecoveryController() {
       const handle = Object.freeze({}); readCheck(c);
       if (closed || process.pid !== pid) throw new Error("recovery_controller_unavailable"); seenRoots.add(identity);
       admissions.set(handle, { root, plan, fixture_id: randomUUID(), inputs_digest: evidenceHash(inputs.map((i) => ({ source_path: i.source_path, sha256: rawHash(i.bytes) }))),
-        mono: c.mono, sealed: false, invalid: false, last_wall: Date.now(), initial_paths: new Set(c.report.entries.map((e) => e.path)), consumed: [], acknowledged: new Map() });
+        mono: c.mono, sealed: false, invalid: false, last_wall: Date.now(), initial_paths: new Set(c.report.entries.map((e) => e.path)), consumed: [], acknowledged: new Map(), workers: new Map(), retired: new Map(), initialInvoked: false });
       return { ...noExecution, admission: handle, plan: structuredClone(plan), capacity };
     },
     prepareOriginal(handle: object, options: ReadOptions = {}) {
@@ -314,6 +323,46 @@ export function createSyntheticNativeBarRecoveryController() {
       const capability = Object.freeze({}), ticket = Object.freeze({});
       connections.set(ticket, { a, owner, alive: () => alive(a), closed: false });
       executionOwners.set(capability, Object.freeze({ root: a.root, get original() { alive(a); return structuredClone(a.original!); }, alive: () => alive(a),
+        originalWindow: () => originalWindow(a),
+        retired: () => { alive(a); return structuredClone([...a.retired.values()].map(({ path, proof }) => ({ path, proof }))); },
+        registerWorker: (pid) => { alive(a); if (!Number.isSafeInteger(pid) || pid < 1 || a.workers.has(pid)) throw new Error("recovery_worker_registration"); a.workers.set(pid, new Map()); },
+        consumeInitial: () => {
+          originalWindow(a); if (a.initialInvoked || a.consumed.length !== 1 || a.consumed[0] !== 1) throw new Error("recovery_original_invocation_consumed");
+          a.initialInvoked = true;
+        },
+        observeWorker: (pid, nativeEntries) => {
+          alive(a); const known = a.workers.get(pid); if (!known || known.size) throw new Error("recovery_worker_registration");
+          if (!Array.isArray(nativeEntries) || nativeEntries.length !== 3) throw new Error("recovery_worker_native_coordination_required");
+          const c = collect(a.root), own = new Map<string, { path: string; body: string; proof: FileProof }>();
+          for (const e of c.report.entries.filter((e) => e.path.startsWith(".writer") && !a.retired.has(e.path))) {
+            const body = c.records.get(e.path)?.toString("utf8"); if (!body || body.length > 128) throw new Error("recovery_worker_coordination_unknown");
+            const value = parseRecord(Buffer.from(body)) as { pid: number; token: string; ticket?: number };
+            const actual = c.files.get(e.path)!.proof, native = nativeEntries.find((n) => n.path === e.path);
+            if (!native?.present || Object.entries(native.proof).some(([key, value]) => actual[key as keyof FileProof] !== value)) throw new Error("recovery_worker_native_coordination_changed");
+            if (value.pid !== pid || !nativeBarId.safeParse(value.token).success
+              || e.path !== ".writer.lock" && e.path !== `.writer-claim-${value.token}.json` && e.path !== `.writer-ticket-${value.token}.json`)
+              throw new Error("recovery_worker_coordination_unknown");
+            own.set(e.path, { path: e.path, body, proof: c.files.get(e.path)!.proof });
+          }
+          if (own.size !== 3 || !own.has(".writer.lock")) throw new Error("recovery_worker_coordination_incomplete");
+          checkScope(a, c, own); const b = readBundle(a, c); validateNativeBarRecoveryBundle(b);
+          a.workers.set(pid, own); alive(a);
+        },
+        workerCoordination: (pid) => {
+          alive(a); const own = a.workers.get(pid); if (!own?.size) throw new Error("recovery_worker_coordination_unwitnessed");
+          const c = collect(a.root); checkScope(a, c, own); validateNativeBarRecoveryBundle(readBundle(a, c)); alive(a);
+          return structuredClone([...own.values()]);
+        },
+        acceptRetirement: (pid, source, destination) => {
+          alive(a); const own = a.workers.get(pid), before = own?.get(source);
+          if (!before || !/^\.writer-retired-[0-9a-f-]{36}\.lock$/.test(destination) || a.retired.has(destination) || a.retired.size >= 16) throw new Error("recovery_retirement_scope");
+          const c = collect(a.root), after = c.files.get(destination)?.proof;
+          if (!after || c.files.has(source) || c.records.get(destination)?.toString("utf8") !== before.body) throw new Error("recovery_retirement_changed");
+          const { ctime_ns: oldTime, ...oldProof } = before.proof, { ctime_ns: newTime, ...newProof } = after;
+          if (!same(oldProof, newProof) || BigInt(newTime) < BigInt(oldTime)) throw new Error("recovery_retirement_changed");
+          const remaining = new Map(own); remaining.delete(source); remaining.set(destination, { path: destination, body: before.body, proof: after });
+          checkScope(a, c, remaining); a.retired.set(destination, remaining.get(destination)!); remaining.delete(destination); a.workers.set(pid, remaining); alive(a);
+        },
         read: () => inspectSyntheticNativeBarRecovery(ticket),
         ledger: () => { alive(a); return structuredClone({ original_envelope_hash: evidenceHash(a.original), scope_digest: a.original!.scope_digest,
           consumed_ordinals: a.consumed, known_publications: [...a.acknowledged.values()] }); },

@@ -1,10 +1,13 @@
 import { createRequire } from "node:module";
 
 type NativeBackend = {
-  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number; recovery_read_protocol?: number; recovery_protocol?: number };
+  qualifyRecoveryChannel(): void;
+  info(): { protocol: number; mode: string; live_fds: number; live_sessions: number; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number; recovery_read_protocol?: number; recovery_protocol?: number };
+  retireRecoveryCoordination(handle: unknown, name: string, proof: Buffer): string;
   openRecoveryCoordination(root: string, ttlMs: number): unknown;
   recoveryWindow(handle: unknown): { opened_at: string; expires_at: string };
-  prepareRecovery(handle: unknown, original: Buffer, bundle: Buffer, audit: Buffer): unknown;
+  bindRecoveryOriginalWindow(handle: unknown, openedAt: string, expiresAt: string): void;
+  prepareRecovery(handle: unknown, original: Buffer, bundle: Buffer, audit: Buffer, retired?: Buffer): unknown;
   recoveryCall(handle: unknown, action: string, approval: unknown, hook?: SyntheticReadHook): unknown;
   prepareQuarantine(coordination: unknown, indices: number[]): unknown;
   quarantineCall(handle: unknown, action: string, index: number | undefined, bytes: Buffer | undefined, hook: SyntheticReadHook | undefined): unknown;
@@ -47,6 +50,14 @@ function backend(): NativeBackend | null {
 /** Optional, disconnected from the MCP server. Never compiles or downloads a backend. */
 export function nativeBarFsAvailability() {
   return { available: backend() !== null, mode: "synthetic_only" as const, production_enabled: false as const };
+}
+
+/** Qualify only the fixed inherited local socket; never accepts a file descriptor or pathname. */
+export function qualifySyntheticNativeBarRecoveryChannel() {
+  const native = backend();
+  if (!native || native.info().recovery_protocol !== 5 || typeof native.qualifyRecoveryChannel !== "function")
+    throw new Error("native_bar_recovery_channel_unavailable: no blocking fallback");
+  native.qualifyRecoveryChannel();
 }
 
 export function openSyntheticNativeBarFs(root: string, ttlMs = 600000) {
@@ -182,22 +193,40 @@ function openSyntheticCoordinationProfile(root: string, ttlMs: number,
 }
 
 /** Internal R-C fixture bridge. No paths, phases or metadata bytes can be supplied to a step. */
-export function openSyntheticNativeBarRecoveryIo(root: string) {
+export function openSyntheticNativeBarRecoveryIo(root: string, originalWindow?: { opened_at: string; expires_at: string }) {
   const coordination = openSyntheticCoordinationProfile(root, 600000, {}, true), binding = coordinationBindings.get(coordination)!;
+  try { if (originalWindow) binding.native.bindRecoveryOriginalWindow(binding.handle, originalWindow.opened_at, originalWindow.expires_at); }
+  catch (error) { coordination.close(); throw error; }
   let handle: unknown;
   const call = (action: string, approval?: unknown, hook?: SyntheticReadHook) => {
     if (!handle) throw new Error("recovery_plan_required"); return binding.native.recoveryCall(handle, action, approval, hook);
   };
   return { coordination, window: () => binding.native.recoveryWindow(binding.handle),
-    prepare(original: Buffer, bundle: Buffer, audit: Buffer) {
+    prepare(original: Buffer, bundle: Buffer, audit: Buffer, retired = Buffer.from("[]")) {
       if (handle) throw new Error("recovery_plan_already_issued");
-      handle = binding.native.prepareRecovery(binding.handle, original, bundle, audit); return call("report");
+      handle = binding.native.prepareRecovery(binding.handle, original, bundle, audit, retired); return call("report");
     },
     approve: () => call("approve"), consume: (approval: unknown) => { call("consume", approval); },
     begin: () => { call("begin"); }, step: (hook?: SyntheticReadHook) => call("step", undefined, hook),
     verify: () => { call("verify"); }, report: () => call("report"),
     close() { let result; try { if (handle) call("close"); } finally { result = coordination.close(); } return result; },
   };
+}
+
+/** Exact descriptor retirement only; the trusted coordinator must separately prove the witnessed worker dead. */
+export function openSyntheticNativeBarRecoveryRetirementIo(root: string) {
+  const coordination = openSyntheticCoordinationProfile(root, 600000, {}, true), binding = coordinationBindings.get(coordination)!;
+  return { coordination,
+    async retire(name: string, body: string, proof: Buffer) {
+      if (!Buffer.isBuffer(proof)) throw new Error("recovery_retirement_proof_required");
+      const actual = await coordination.read(name); if (!actual?.equals(Buffer.from(body))) throw new Error("recovery_retirement_body_changed");
+      return binding.native.retireRecoveryCoordination(binding.handle, name, proof);
+    }, close: () => coordination.close() };
+}
+/** Resource broker facts only; loading the optional synthetic addon never opens a root. */
+export function syntheticNativeBarRecoveryResources() {
+  const native = backend(); if (!native) throw new Error("native_bar_recovery_unavailable");
+  const info = native.info(); return { roots: info.live_sessions, descriptors: info.live_fds };
 }
 
 export type SyntheticQuarantinePlan = { maintenance_id: string; chunk_id: string; attempt_id: string; reserve_path: string;
