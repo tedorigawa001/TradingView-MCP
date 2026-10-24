@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { canonical } from "../../build/nativeBarEvidence.js";
 import { openSyntheticNativeBarCoordination } from "../../build/nativeBarFs.js";
-import { takeNativeWriterLockWithIo } from "../../build/nativeBarAccess.js";
+import { coordinationOwnerDead, takeNativeWriterLockWithIo } from "../../build/nativeBarAccess.js";
 import { createSyntheticNativeBarExecutionRegistry } from "../../build/nativeBarMaintenanceExecution.js";
 
 const native = createRequire(import.meta.url)("../../build/native-bar-fs/native_bar_fs.node");
@@ -213,7 +213,10 @@ function worker(f, tag, ms = 40, legacy = false) {
   return spawn(process.execPath, ["--input-type=module", "-e", `
     import {openSyntheticNativeBarCoordination} from ${JSON.stringify(fsUrl)};
     import {takeNativeWriterLockWithIo,takeNativeWriterLock} from ${JSON.stringify(accessUrl)};
-    const io=${legacy ? "null" : `openSyntheticNativeBarCoordination(${JSON.stringify(f.root)})`};
+    // Opening refuses while peers change the namespace (two inventory passes must match); callers retry briefly.
+    const open=async()=>{for(let i=0;;i++){try{return openSyntheticNativeBarCoordination(${JSON.stringify(f.root)})}
+      catch(e){if(i>=50||!/^(?:inventory_changed|open_failed:2)/.test(e.message))throw e;await new Promise(r=>setTimeout(r,10))}}};
+    const io=${legacy ? "null" : "await open()"};
     try { const lock=io?await takeNativeWriterLockWithIo(io,5000):await takeNativeWriterLock(${JSON.stringify(f.root)},async()=>{},5000);
       try { process.stdout.write(${JSON.stringify(tag + ":start\n")}); await new Promise(r=>setTimeout(r,${ms})); process.stdout.write(${JSON.stringify(tag + ":end\n")}); }
       finally { if(!lock.release()) throw Error('release_failed'); }
@@ -238,4 +241,24 @@ test("a suspended owner stays blocking, and process death leaves evidence for re
   assert.ok(fs.readdirSync(f.root).includes(".writer.lock")); const next = registry(f); t.after(() => next.r.close());
   await assert.rejects(next.run(), /fresh_preview_required/);
   assert.ok(fs.readdirSync(f.root).some((n) => n.startsWith(".writer-retired-")));
+});
+
+test("the exported adapter retires only on a liveness verdict reached in the same call", async (t) => {
+  const f = fixture(t), plain = openSyntheticNativeBarCoordination(f.root); t.after(() => plain.close());
+  put(f, ".writer.lock", owner());
+  assert.equal((await plain.read(".writer.lock")).toString(), owner());
+  await assert.rejects(plain.retireDead(".writer.lock"), /retirement_requires_liveness_judge/);
+  const judged = openSyntheticNativeBarCoordination(f.root, 600000, { ownerDead: coordinationOwnerDead }); t.after(() => judged.close());
+  await assert.rejects(judged.retireDead(".writer.lock"), /retirement_owner_not_proven_dead/);
+  assert.equal(fs.readFileSync(join(f.root, ".writer.lock"), "utf8"), owner());
+  assert.ok(!fs.readdirSync(f.root).some((n) => n.startsWith(".writer-retired-")));
+});
+test("an owned queue entry removed by someone else is accepted only with absentOk and leaves release unconfirmed", async (t) => {
+  const f = fixture(t), claim = `.writer-claim-${id}.json`;
+  for (const absentOk of [false, true]) {
+    const io = openSyntheticNativeBarCoordination(f.root);
+    assert.equal(await io.publish(claim, owner()), "created"); fs.unlinkSync(join(f.root, claim));
+    assert.equal(io.removeOwn(claim, owner(), absentOk), absentOk);
+    assert.equal(io.close().coordination_released, false);
+  }
 });

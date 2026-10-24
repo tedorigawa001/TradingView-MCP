@@ -91,7 +91,8 @@ export function openSyntheticNativeBarReader(root: string, ttlMs = 600000) {
 }
 
 /** Fixture-only descriptor coordination adapter, never a data mutation/host approval capability. */
-export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000) {
+export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
+  options: { ownerDead?: (body: Buffer) => Promise<boolean> } = {}) {
   const native = backend();
   if (!native || native.info().coordination_protocol !== 3) throw new Error("native_bar_coordination_unavailable: no filesystem fallback");
   const handle = native.openCoordination(root, ttlMs);
@@ -105,22 +106,19 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000)
     delta: () => call("delta") as { entries: { path: string; present: boolean; proof: SyntheticReadProof & { sha256: string } }[];
       retired_count: string; retired_paths: string[]; unresolved_temporaries: string; temporary_paths: string[]; uncertain: boolean },
     async names() { return call("names") as string[]; },
-    async read(name: string) {
-      for (let attempt = 0; ; ++attempt) {
-        try { const value = call("read", name) as string | null; return value === null ? null : Buffer.from(value); }
-        catch (e) {
-          // Old immutable publication briefly has two links; ordinary release may retire a name mid-read.
-          // Never accept that observation. Retry a bounded fresh native read, without resetting the lease.
-          if (attempt >= 9 || !(e instanceof Error) || !/^(?:open_failed:2|namespace_changed(?::2)?|target_changed|artifact_read_changed|writer_read_changed|hard_link_refused)$/.test(e.message)) throw e;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-      }
-    },
+    read,
     async publish(name: string, body: string): Promise<"created" | "exists"> {
       return call("publish", name, body) ? "created" : "exists";
     },
-    removeOwn: (name: string, body: string) => call("release", name, body) as boolean,
-    async retireDead(name: ".writer.lock" | ".writer.takeover") { return call("retire", name) as boolean; },
+    removeOwn: (name: string, body: string, absentOk?: boolean) => call(absentOk ? "release_or_absent" : "release", name, body) as boolean,
+    async retireDead(name: ".writer.lock" | ".writer.takeover") {
+      // The native primitive is not a liveness oracle: retire only on a verdict reached in this call about the exact
+      // body just read, which the native side then compares with the object it moves.
+      if (!options.ownerDead) throw new Error("retirement_requires_liveness_judge");
+      const body = await read(name);
+      if (!body || !(await options.ownerDead(body))) throw new Error("retirement_owner_not_proven_dead");
+      return call("retire", name) as boolean;
+    },
     close() {
       if (closeResult) return closeResult;
       let released = false;
@@ -129,4 +127,15 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000)
       return closeResult;
     },
   };
+  async function read(name: string) {
+    for (let attempt = 0; ; ++attempt) {
+      try { const value = call("read", name) as string | null; return value === null ? null : Buffer.from(value); }
+      catch (e) {
+        // Old immutable publication briefly has two links; ordinary release may retire a name mid-read.
+        // Never accept that observation. Retry a bounded fresh native read, without resetting the lease.
+        if (attempt >= 9 || !(e instanceof Error) || !/^(?:open_failed:2|namespace_changed(?::2)?|target_changed|artifact_read_changed|writer_read_changed|hard_link_refused)$/.test(e.message)) throw e;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+  }
 }

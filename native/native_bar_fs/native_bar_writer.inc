@@ -77,11 +77,17 @@ std::optional<CoordinationRecord> coordination_read(Coordination& c, const std::
   binding(c.session->root(), name, fd.value, false); coordination_guard(c, cleanup);
   return CoordinationRecord{body, before, true, private_access(fd.value, false, true)};
 }
-bool coordination_release(Coordination& c, const std::string& name, const std::string& body) {
+bool coordination_release(Coordination& c, const std::string& name, const std::string& body, bool absent_ok = false) {
   coordination_guard(c, true); auto own = c.own.find(name);
   auto current = coordination_read(c, name, true);
   if (!current) {
-    if (own != c.own.end() && own->second.present) { c.uncertain = true; return false; }
+    if (own != c.own.end() && own->second.present) {
+      // Someone else removed an owned queue entry. Like the pathname adapter, absent_ok accepts that for the shared
+      // algorithm, but the session stays uncertain so its final release is never reported as confirmed.
+      c.uncertain = true;
+      if (!absent_ok) return false;
+      own->second.present = false; return true;
+    }
     return true;
   }
   require(own != c.own.end() && own->second.present && body == own->second.body, "coordination_not_owned");
@@ -126,7 +132,9 @@ bool coordination_publish(Coordination& c, const std::string& name, const std::s
     sync_dir(c.session->root()); c.temporaries.pop_back(); c.uncertain = false; return false;
   }
   syscall_ok(renamed, "coordination_publish_failed");
-  // Track ownership before a later sync/deadline failure so finally can release this exact publication.
+  // Remember the published name before verifying it: a failed post-rename proof leaves it tracked, never orphaned.
+  // Its pre-rename proof cannot match the renamed object, so cleanup reports it unreleased rather than unlinking it.
+  c.own.insert_or_assign(name, CoordinationRecord{body, written, true, "unverified"});
   auto published = coordination_proof(c, fd.value); compare(written, published, true);
   c.own.insert_or_assign(name, CoordinationRecord{body, published, true, private_access(fd.value, false, true)});
   c.temporaries.pop_back(); c.uncertain = false;
@@ -203,7 +211,9 @@ napi_value coordination_call(napi_env env, napi_callback_info info) {
       }
       return boolean_value(env, released);
     }
-    if (action == "release") return boolean_value(env, coordination_release(*c, string_arg(env, args[2]), string_arg(env, args[3])));
+    if (action == "release" || action == "release_or_absent") {
+      return boolean_value(env, coordination_release(*c, string_arg(env, args[2]), string_arg(env, args[3]), action == "release_or_absent"));
+    }
     if (action == "delta") {
       coordination_guard(*c, true);
       auto out = object(env); napi_value entries; napi_ok_or_throw(napi_create_array_with_length(env, c->own.size(), &entries)); size_t i = 0;

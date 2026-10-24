@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { evidenceHash } from "./nativeBarEvidence.js";
 import { openSyntheticNativeBarCoordination } from "./nativeBarFs.js";
-import { takeNativeWriterLockWithIo } from "./nativeBarAccess.js";
+import { coordinationOwnerDead, takeNativeWriterLockWithIo } from "./nativeBarAccess.js";
 
 type Kind = "quarantine_abandoned" | "purge_abandoned";
 type FixtureApproval = Readonly<{ fixture_only: true }>;
@@ -9,7 +9,7 @@ type FixtureApproval = Readonly<{ fixture_only: true }>;
 /** Isolated slice C registry. Never returns a native data-mutation or host-approval capability. */
 export function createSyntheticNativeBarExecutionRegistry(root: string, ttlMs = 600000) {
   const openedWall = Date.now(), openedMono = performance.now();
-  const io = openSyntheticNativeBarCoordination(root, ttlMs);
+  const io = openSyntheticNativeBarCoordination(root, ttlMs, { ownerDead: coordinationOwnerDead });
   let baseline: ReturnType<typeof io.preview>, generation: string;
   try {
     baseline = structuredClone(io.preview());

@@ -185,6 +185,12 @@ async function ownersDead(owners: Owner[]): Promise<boolean[]> {
   });
 }
 
+/** The writer algorithm verdict for one coordination file body: dead only when proven gone, never for unknown contents. */
+export async function coordinationOwnerDead(bytes: Buffer): Promise<boolean> {
+  const owner = parseOwner(bytes.toString("utf8"));
+  return owner ? (await ownersDead([owner]))[0] : false;
+}
+
 async function ownerBody(token: string) {
   const me = await incarnation();
   return { boot: me.boot, pid: process.pid, start: me.start, token };
