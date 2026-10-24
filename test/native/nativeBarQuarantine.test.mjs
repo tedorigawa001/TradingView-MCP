@@ -280,3 +280,16 @@ test("an unqualified profile and an overlarge fixture inventory create no layout
     assert.equal(fs.existsSync(join(f.root, ".writer.lock")), false);
   }
 });
+for (const area of ["quarantine/abandoned", "maintenance-hold"]) test(`an unplanned object in this transaction's ${area} directory refuses inspection`, async (t) => {
+  const { f, r, p, a } = await prepared(t); await r.execute(p.plan_id, p.plan_hash, a);
+  assert.equal(inspectSyntheticNativeBarQuarantine(f.root, p.maintenance_id).status, "complete");
+  fs.writeFileSync(join(f.root, area, p.maintenance_id, "21234567-89ab-4cde-8fab-0123456789ab"), "planted", { mode: 0o600 });
+  assert.throws(() => inspectSyntheticNativeBarQuarantine(f.root, p.maintenance_id), /unplanned_transaction_entry/);
+});
+test("a reserve left by a run interrupted before its layout blocks the next plan", async (t) => {
+  const { f, r, p, a } = await prepared(t);
+  await assert.rejects(r.execute(p.plan_id, p.plan_hash, a, { hook(phase) { if (phase === "after_reserve") throw new Error("synthetic_stop"); } }), /synthetic_stop/);
+  assert.ok(fs.readdirSync(f.root).some((n) => n.startsWith(".quarantine-reserve-"))); assert.equal(fs.existsSync(join(f.root, "maintenance")), false);
+  const next = createSyntheticNativeBarQuarantineRegistry(f.root); t.after(() => next.close());
+  assert.throws(() => next.prepare([2]), /existing_transactions_blocked/);
+});

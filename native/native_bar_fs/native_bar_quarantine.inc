@@ -126,6 +126,9 @@ napi_value prepare_quarantine(napi_env env, napi_callback_info info) {
     auto q = std::make_shared<Quarantine>(); q->coordination = c; q->root = c->baseline.root;
     for (const auto& e : c->baseline.entries) {
       require(e.path != "maintenance" && e.path != "maintenance-hold" && e.path != "quarantine" && e.path != "operations", "quarantine_existing_transactions_blocked");
+      // A reserve left by a run interrupted before its layout is an unfinished transaction too. Its allocated blocks are
+      // invisible to size-based inventory limits, so another plan must not allocate one more.
+      require(e.path.compare(0, 20, ".quarantine-reserve-") != 0, "quarantine_existing_transactions_blocked");
       q->expected.emplace(e.path, e);
       if (e.kind == "directory") {
         auto fd = directory(qdir(*q, qparent(e.path)), qname(e.path));
@@ -214,6 +217,8 @@ Proof qpublish(Quarantine& q, size_t index, const std::string& bytes, napi_env e
   read_hook(env, callback, "after_readback", path);
   qverify(q); qsync(q, fd.value, env, callback, path); qsync(q, qdir(q, parent), env, callback, parent, true);
   qsync(q, q.coordination->session->root(), env, callback, "", true); qverify(q);
+  // Directory fsync alone may stay in the drive cache; one full flush after the completion covers the final changes.
+  if (index + 1 == q.publications.size()) syscall_ok(fcntl(q.coordination->session->root(), F_FULLFSYNC), "quarantine_final_flush_failed");
   q.published.emplace(path, p); ++q.next;
   if (index >= 3 && index < 3 + q.targets.size() * 4 && (index - 3) % 4 % 2 == 1) ++q.targets[(index - 3) / 4].phase;
   return p;

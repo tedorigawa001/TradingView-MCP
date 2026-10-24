@@ -213,6 +213,13 @@ export function inspectSyntheticNativeBarQuarantine(root: string, maintenanceId:
       for (const event of events) if (canonical(records.get(`${prefix}.events/${event.sequence}.json`)) !== canonical(event)) throw new Error("quarantine_event_path_binding");
       const allowed = new Set(["policy.json", ...envelope.plan.publications]);
       if ([...records.keys()].some((p) => !allowed.has(p))) throw new Error("quarantine_unknown_transaction_metadata");
+      // Every entry in this transaction's namespaces must be planned, so a later purge trusting this result never meets an
+      // object the transaction did not quarantine.
+      const holdingDir = `maintenance-hold/${maintenanceId}`, quarantineDir = `quarantine/abandoned/${maintenanceId}`;
+      const planned = new Set([...envelope.plan.publications, `${prefix}.manifest`, `${prefix}.events`, `${prefix}.attempts`, holdingDir, quarantineDir,
+        ...envelope.plan.targets.flatMap((t) => [`${holdingDir}/${t.target_id}`, `${quarantineDir}/${t.target_id}`])]);
+      const owned = (p: string) => p.startsWith(`${prefix}.`) || [holdingDir, quarantineDir].some((d) => p === d || p.startsWith(`${d}/`));
+      if (snapshot.report.entries.some((e) => owned(e.path) && !planned.has(e.path))) throw new Error("quarantine_unplanned_transaction_entry");
       const completion = records.has(prefix + ".done.json") ? nativeBarTransactionCompletionSchema.parse(records.get(prefix + ".done.json")) : null;
       const replay = replayNativeBarTransaction({ schema: "native-bar-transaction-bundle-v2", intent, manifests, quarantines: [], attempts, events, completion });
       const current_locations = manifests.flatMap((m) => m.targets).map((target) => {
