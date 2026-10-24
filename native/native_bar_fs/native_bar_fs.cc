@@ -395,12 +395,14 @@ napi_value close_root(napi_env env, napi_callback_info info) {
 }
 #include "native_bar_read.inc"
 #include "native_bar_writer.inc"
+#include "native_bar_quarantine.inc"
 napi_value backend_info(napi_env env, napi_callback_info) {
   return boundary(env, [&] {
     auto out = object(env); napi_value version, fds, sessions;
     napi_ok_or_throw(napi_create_int32(env, 1, &version)); prop(env, out, "protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 2, &version)); prop(env, out, "read_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 3, &version)); prop(env, out, "coordination_protocol", version);
+    napi_ok_or_throw(napi_create_int32(env, 4, &version)); prop(env, out, "quarantine_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -416,6 +418,8 @@ NAPI_MODULE_INIT() {
     {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openCoordination", nullptr, open_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"coordinationCall", nullptr, coordination_call, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"prepareQuarantine", nullptr, prepare_quarantine, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"quarantineCall", nullptr, quarantine_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inventory", nullptr, read_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readEvidence", nullptr, read_evidence, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"verifyInventory", nullptr, verify_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},

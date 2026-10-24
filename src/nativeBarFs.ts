@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 
 type NativeBackend = {
-  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number };
+  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number };
+  prepareQuarantine(coordination: unknown, indices: number[]): unknown;
+  quarantineCall(handle: unknown, action: string, index: number | undefined, bytes: Buffer | undefined, hook: SyntheticReadHook | undefined): unknown;
   openCoordination(root: string, ttlMs: number): unknown;
   coordinationCall(handle: unknown, action: string, name: string | undefined, body: string | undefined): unknown;
   openRoot(root: string, ttlMs: number): unknown;
@@ -17,6 +19,7 @@ type NativeBackend = {
   verifyInventory(handle: unknown, inventory: unknown, hook: SyntheticReadHook | undefined): boolean;
   closeInventory(handle: unknown, inventory: unknown): void;
 };
+const coordinationBindings = new WeakMap<object, { native: NativeBackend; handle: unknown }>();
 
 export type SyntheticTargetStatus = {
   state: "previewed" | "preparing" | "staging" | "held_verified" | "conflict" | "durability_unknown" | "purged";
@@ -98,7 +101,7 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
   const handle = native.openCoordination(root, ttlMs);
   const call = (action: string, name?: string, body?: string) => native.coordinationCall(handle, action, name, body);
   let closeResult: { coordination_released: boolean; execution_available: false } | undefined;
-  return {
+  const io = {
     check: () => { call("check"); },
     preview: () => call("preview") as SyntheticNativeInventory,
     verifyBaseline: () => { call("baseline"); },
@@ -127,6 +130,8 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
       return closeResult;
     },
   };
+  coordinationBindings.set(io, { native, handle });
+  return io;
   async function read(name: string) {
     for (let attempt = 0; ; ++attempt) {
       try { const value = call("read", name) as string | null; return value === null ? null : Buffer.from(value); }
@@ -138,4 +143,35 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
       }
     }
   }
+}
+
+export type SyntheticQuarantinePlan = { maintenance_id: string; chunk_id: string; attempt_id: string; reserve_path: string;
+  budget_bytes: string; execution_available: false; halted: boolean; published_count: string;
+  targets: { target_id: string; source_path: string; holding_path: string; quarantine_path: string;
+    proof: SyntheticReadProof & { sha256: string }; phase: string }[]; publications: string[]; temporary_paths: string[] };
+
+/** Internal fixture protocol. All destinations come from the native plan, never request paths. */
+export function openSyntheticNativeBarQuarantineIo(root: string, ttlMs: number,
+  options: { ownerDead: (body: Buffer) => Promise<boolean> }) {
+  const native = backend();
+  if (!native || native.info().quarantine_protocol !== 4) throw new Error("native_bar_quarantine_unavailable: no filesystem fallback");
+  const coordination = openSyntheticNativeBarCoordination(root, ttlMs, options);
+  const binding = coordinationBindings.get(coordination)!;
+  let handle: unknown;
+  const call = (action: string, index?: number, bytes?: Buffer, hook?: SyntheticReadHook) => {
+    if (!handle) throw new Error("quarantine_plan_required");
+    return native.quarantineCall(handle, action, index, bytes, hook);
+  };
+  return { coordination,
+    prepare(indices: number[]) {
+      if (handle) throw new Error("quarantine_plan_already_issued");
+      handle = native.prepareQuarantine(binding.handle, indices); return call("report") as SyntheticQuarantinePlan;
+    },
+    begin: (hook?: SyntheticReadHook) => { call("begin", undefined, undefined, hook); },
+    verify: () => { call("verify"); },
+    publish: (index: number, bytes: Buffer, hook?: SyntheticReadHook) => call("publish", index, bytes, hook) as SyntheticReadProof & { sha256: string },
+    move: (index: number, final: boolean, hook?: SyntheticReadHook) => call(final ? "quarantine" : "stage", index, undefined, hook) as SyntheticReadProof & { sha256: string },
+    report: () => call("report") as SyntheticQuarantinePlan,
+    close() { let result; try { if (handle) call("close"); } finally { result = coordination.close(); } return result; },
+  };
 }

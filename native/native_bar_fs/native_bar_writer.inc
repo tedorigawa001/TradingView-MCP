@@ -15,8 +15,8 @@ struct Coordination {
     decltype(anchors)().swap(anchors); decltype(temporaries)().swap(temporaries); decltype(retired)().swap(retired);
   }
 };
-std::string coordination_acl(int fd, bool strict) {
-  private_access(fd, true, strict);
+std::string coordination_acl(int fd, bool strict, bool directory_fd = true) {
+  private_access(fd, directory_fd, strict);
   auto acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
   if (!acl) { require(errno == ENOENT, "acl_unverified"); return "none"; }
   struct Acl { acl_t value; ~Acl() { acl_free(value); } } guard{acl};
