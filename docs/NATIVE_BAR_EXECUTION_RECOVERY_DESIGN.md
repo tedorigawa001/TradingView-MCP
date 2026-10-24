@@ -4,6 +4,8 @@ Status: **slices A-C implemented; slice D synthetic immutable publication/quaran
 
 This refines the [approved maintenance design](NATIVE_BAR_MAINTENANCE_DESIGN.md) and preserves the [phase 2 classification contract](NATIVE_BAR_CLEANUP_PLANNING.md). Existing production maintenance refusal and synthetic-only native root gates remain in force. No real store is initialized by this design work.
 
+The remaining D connection is detailed in the [quarantine recovery design](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md). The user approved its fresh v5 fixture profile, two-target/two-recovery limit and stopping on controller loss. R-A alone now implements pure record contracts, remaining-action planning and capacity accounting with synthetic in-memory tests. Independent controller/native admission, per-invocation consent and recovery execution remain disconnected. V4, slice A, real stores and existing execution refusal are unchanged.
+
 ## Recommended Scope
 
 First connect **abandoned quarantine and its separately approved purge**, in synthetic fixtures only. Keep committed prune and clock-ahead recovery on their existing production-refused path until their own transaction-aware history adapter passes the same gates. Do not route either through abandoned cleanup. Legacy review remains review-only, without a movement destination; arbitrary side files, hard links and malformed/unknown ownership remain preserved.
