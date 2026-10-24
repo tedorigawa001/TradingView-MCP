@@ -109,7 +109,8 @@ bool coordination_release(Coordination& c, const std::string& name, const std::s
 bool coordination_publish(Coordination& c, const std::string& name, const std::string& body) {
   require(coordination_name(name) && body.size() <= 128 && !body.empty(), "invalid_coordination_publication");
   coordination_guard(c); require(c.publications < 64 && !c.uncertain, "coordination_publication_limit");
-  auto listed = names(c.session->root(), 30000); require(listed.size() < 30000 - 2, "inventory_entry_limit");
+  const size_t ceiling = c.session->recovery_read ? 512 : 30000;
+  auto listed = names(c.session->root(), ceiling); require(listed.size() < ceiling - 2, "inventory_entry_limit");
   for (const auto& entry : listed) if (name_key(entry) == name_key(name)) {
     require(entry == name, "ambiguous_namespace_name"); return false;
   }
@@ -156,7 +157,8 @@ void coordination_retire(Coordination& c, const std::string& name) {
 }
 void coordination_baseline(Coordination& c) {
   coordination_guard(c); require(!c.uncertain && !c.foreign_churn && c.retired.empty(), "fresh_preview_required_after_coordination_change");
-  auto current = collect(*c.session, ReadLimits{}); same_inventory(current, collect(*c.session, ReadLimits{}));
+  ReadLimits limits; if (c.session->recovery_read) limits.entries = 512;
+  auto current = collect(*c.session, limits); same_inventory(current, collect(*c.session, limits));
   require(current.namespace_valid && c.baseline.namespace_valid, "unqualified_namespace");
   if (c.publications) {
     // APFS counts regular children in directory nlink. Bind its delta to the exact live owned publications.
@@ -181,22 +183,32 @@ void coordination_baseline(Coordination& c) {
   }
   current.entries = std::move(baseline); current.root = c.baseline.root; same_inventory(c.baseline, current); coordination_guard(c);
 }
-napi_value open_coordination(napi_env env, napi_callback_info info) {
+napi_value open_coordination_impl(napi_env env, napi_callback_info info, bool recovery) {
   return boundary(env, [&] {
     auto c = std::make_shared<Coordination>(); c->session = create_root(env, info, true); c->session->coordination_only = true;
+    c->session->recovery_read = recovery;
+    if (recovery) {
+      auto policy = leaf(c->session->root(), "policy.json"); binding(c->session->root(), "policy.json", policy.value, false);
+      const auto before = coordination_proof(*c, policy.value);
+      require(coordination_bytes(*c->session, policy.value) == "{\"schema\":\"native-bar-synthetic-quarantine-recovery-profile-v5\"}", "recovery_synthetic_profile_required");
+      compare(before, coordination_proof(*c, policy.value)); binding(c->session->root(), "policy.json", policy.value, false);
+    }
     for (const auto& anchor : c->session->chain) c->anchors.push_back({stat_fd(anchor.fd.value), coordination_acl(anchor.fd.value, anchor.strict)});
     coordination_guard(*c);
-    c->baseline = collect(*c->session, ReadLimits{}); same_inventory(c->baseline, collect(*c->session, ReadLimits{}));
+    ReadLimits limits; if (recovery) limits.entries = 512;
+    c->baseline = collect(*c->session, limits); same_inventory(c->baseline, collect(*c->session, limits));
     for (size_t i = 0; i < c->baseline.entries.size(); ++i) if (c->baseline.entries[i].path.find('/') == std::string::npos)
       c->baseline_root.emplace(c->baseline.entries[i].path, i);
     require(c->baseline.namespace_valid, "unqualified_namespace");
     require(c->baseline.inventory_bytes <= 1024ULL * 1024 * 1024 - 16384 && c->baseline.metadata_bytes <= 16ULL * 1024 * 1024 - 16384
-      && c->baseline.entries.size() <= 30000 - 128, "coordination_headroom_required");
+      && c->baseline.entries.size() <= (recovery ? 512 - 32 : 30000 - 128), "coordination_headroom_required");
     struct statfs fs{}; syscall_ok(fstatfs(c->session->root(), &fs), "filesystem_unverified");
     require(!(fs.f_flags & MNT_RDONLY) && static_cast<__int128>(fs.f_bavail) * fs.f_bsize >= 4 * 1024 * 1024, "coordination_headroom_required");
     return wrap(env, c, COORD_TAG);
   });
 }
+napi_value open_coordination(napi_env env, napi_callback_info info) { return open_coordination_impl(env, info, false); }
+napi_value open_recovery_coordination(napi_env env, napi_callback_info info) { return open_coordination_impl(env, info, true); }
 napi_value coordination_call(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 4; napi_value args[4]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 4, "argument_count");
@@ -241,7 +253,7 @@ napi_value coordination_call(napi_env env, napi_callback_info info) {
       compare(own->second.proof, current->proof); return boolean_value(env, true);
     }
     if (action == "names") {
-      auto listed = names(c->session->root(), 30000); napi_value out; napi_ok_or_throw(napi_create_array_with_length(env, listed.size(), &out));
+      auto listed = names(c->session->root(), c->session->recovery_read ? 512 : 30000); napi_value out; napi_ok_or_throw(napi_create_array_with_length(env, listed.size(), &out));
       std::set<std::string> expected;
       for (const auto& entry : c->baseline_root) expected.insert(entry.first);
       for (const auto& [name, record] : c->own) if (record.present) expected.insert(name);

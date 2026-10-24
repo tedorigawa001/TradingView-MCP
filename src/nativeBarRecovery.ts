@@ -78,12 +78,13 @@ export const nativeBarRecoveryAttemptSchema = z.strictObject({ schema: z.literal
 export const nativeBarRecoveryMarkerSchema = z.strictObject({ schema: z.literal("native-bar-recovery-timestamp-v5"), maintenance_id: uuid,
   attempt_id: uuid, intent_hash: nativeBarHash, last_event_hash: nativeBarHash,
   targets: z.array(z.strictObject({ target_id: uuid, proof: nativeBarTransactionProofSchema })).min(1).max(2),
-  publication: z.strictObject({ before: clockSchema, after: clockSchema }) });
+  verified_at: nativeBarTimestamp });
 const markerEvidenceSchema = z.strictObject({ record: nativeBarRecoveryMarkerSchema, proof: nativeProofSchema });
 export const nativeBarRecoveryCompletionSchema = z.strictObject({ schema: z.literal("native-bar-recovery-completion-v5"), maintenance_id: uuid,
   intent_hash: nativeBarHash, last_event_hash: nativeBarHash, published_attempt_hashes: z.array(nativeBarHash).min(1).max(3),
   used_attempt_hashes: z.array(nativeBarHash).min(1).max(3), final_attempt_id: uuid, clock: clockSchema,
-  marker: z.strictObject({ path: relative, hash: nativeBarHash, proof: nativeProofSchema }),
+  marker: z.strictObject({ path: relative, hash: nativeBarHash, proof: nativeProofSchema,
+    publication: z.strictObject({ before: clockSchema, after: clockSchema }) }),
   targets: z.array(z.strictObject({ target_id: uuid, proof: nativeBarTransactionProofSchema })).min(1).max(2) });
 export const nativeBarRecoveryBundleSchema = z.strictObject({ schema: z.literal("native-bar-recovery-bundle-v5"),
   original: nativeBarRecoveryOriginalSchema.nullable(), attempts: z.array(nativeBarRecoveryAttemptSchema).max(3),
@@ -260,13 +261,14 @@ function validateMarkers(b: Bundle) {
       || replay.targets.some((t) => t.state !== "quarantined") || !same(m.targets, terminalTargets(replay))
       || m.targets.some((t) => { const last = [...own].reverse().find((e) => e.target_id === t.target_id);
         return !last || !(last.type === "quarantined_verified" || last.type === "recovered_verified" && last.location === "quarantine"); })
-      || m.publication.before.utc_at < b.events[index].clock.utc_at || m.publication.before.utc_at < envelope.plan.observed_at
-      || m.publication.after.utc_at < m.publication.before.utc_at || m.publication.after.utc_at >= a.expires_at
-      || b.attempts.some((e) => e.ordinal > envelope.ordinal && e.plan.opened_at < m.publication.after.utc_at)
+      || m.verified_at < b.events[index].clock.utc_at || m.verified_at < envelope.plan.observed_at || m.verified_at >= a.expires_at
+      || b.attempts.some((e) => e.ordinal > envelope.ordinal && e.plan.opened_at < m.verified_at)
       || proof.device !== o.intent.binding.root.device || proof.uid !== o.intent.binding.root.uid
       || proof.sha256 !== evidenceHash(m) || proof.size !== String(Buffer.byteLength(canonical(m)))
-      || [proof.birthtime_ns, proof.mtime_ns, proof.ctime_ns].some((v) => BigInt(v) < BigInt(Date.parse(m.publication.before.utc_at)) * 1000000n)) throw new Error("recovery_marker_binding");
-    proofClock(proof, m.publication.after.utc_at);
+      || [proof.birthtime_ns, proof.mtime_ns, proof.ctime_ns].some((v) => BigInt(v) < BigInt(Date.parse(m.verified_at)) * 1000000n
+        || BigInt(v) >= BigInt(Date.parse(a.expires_at)) * 1000000n
+        || b.attempts.some((e) => e.ordinal > envelope.ordinal && BigInt(v) > BigInt(Date.parse(e.plan.opened_at)) * 1000000n + 999999n))) throw new Error("recovery_marker_binding");
+    proofClock(proof, a.expires_at);
     const identity = `${proof.device}:${proof.inode}`;
     if (objects.has(identity)) throw new Error("recovery_marker_alias"); objects.add(identity);
   }
@@ -283,7 +285,11 @@ function validateCompletion(b: Bundle, replay: Replay) {
     || !same(c.used_attempt_hashes, used.map((id) => evidenceHash(b.attempts.find((a) => a.attempt.attempt_id === id)!.attempt)))
     || c.marker.path !== `quarantine/abandoned/${o.intent.maintenance_id}/${c.final_attempt_id}.timestamp.json`
     || c.marker.hash !== evidenceHash(m.record) || !same(c.marker.proof, m.proof) || replay.targets.some((t) => t.state !== "quarantined")
-    || !same(c.targets, terminalTargets(replay)) || c.clock.utc_at < m.record.publication.after.utc_at
+    || !same(c.targets, terminalTargets(replay)) || c.marker.publication.before.utc_at < m.record.verified_at
+    || c.marker.publication.after.utc_at < c.marker.publication.before.utc_at
+    || c.clock.utc_at < c.marker.publication.after.utc_at
+    || [m.proof.birthtime_ns, m.proof.mtime_ns, m.proof.ctime_ns].some((v) => BigInt(v) < BigInt(Date.parse(c.marker.publication.before.utc_at)) * 1000000n
+      || BigInt(v) > BigInt(Date.parse(c.marker.publication.after.utc_at)) * 1000000n + 999999n)
     || c.clock.utc_at >= final.attempt.expires_at) throw new Error("recovery_completion_binding");
   proofClock(c.marker.proof, c.clock.utc_at);
 }
@@ -499,7 +505,7 @@ export function planNativeBarRecovery(input: unknown) {
   if (Date.parse(request.expires_at) - Date.parse(request.opened_at) !== 600000 || request.issued_at < request.opened_at
     || v.observed_at <= request.issued_at || request.checked_at >= request.expires_at || request.checked_at < request.opened_at
     || BigInt(request.checked_elapsed_ns) >= 600000000000n || request.opened_at < (b.events.at(-1)?.clock.utc_at ?? o.intent.created.utc_at)
-    || b.markers.some((m) => m.record.publication.after.utc_at > request.opened_at)
+    || b.markers.some((m) => m.record.verified_at > request.opened_at)
     || b.attempts.some((a) => a.plan.observed_at > request.opened_at)) reasons.push("lease_expired_or_clock_binding");
   if ([...originalIdentifiers(o), ...b.attempts.map((a) => a.plan.plan_id)].includes(request.plan_id)) reasons.push("plan_identifier_reused");
   capacity = calculateNativeBarRecoveryCapacity({ ...v.accounting, schema: "native-bar-recovery-capacity-v5", phase: "recovery",

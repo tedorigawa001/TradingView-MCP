@@ -80,7 +80,7 @@ function mark(b, seconds) {
   const a = b.attempts.at(-1).attempt;
   const targets = b.original.manifest.targets.map((t) => ({ target_id: t.target_id, proof: [...b.events].reverse().find((e) => e.target_id === t.target_id).proof }));
   const record = { schema: "native-bar-recovery-timestamp-v5", maintenance_id: id(1), attempt_id: a.attempt_id,
-    intent_hash: hash(b.original.intent), last_event_hash: hash(b.events.at(-1)), targets, publication: { before: clock(seconds), after: clock(seconds + 1) } };
+    intent_hash: hash(b.original.intent), last_event_hash: hash(b.events.at(-1)), targets, verified_at: time(seconds) };
   const p = { ...proof(String(2000 + b.attempts.at(-1).ordinal), seconds), birthtime_ns: ns(seconds), mtime_ns: ns(seconds),
     size: String(Buffer.byteLength(canonical(record))), sha256: hash(record), flags: "0", acl_hash: hash("no ACL") };
   const evidence = { record, proof: p }; b.markers.push(evidence); return evidence;
@@ -91,7 +91,7 @@ function complete(b, seconds) {
     last_event_hash: hash(b.events.at(-1)), published_attempt_hashes: b.attempts.map(hash),
     used_attempt_hashes: used.map((id) => hash(b.attempts.find((a) => a.attempt.attempt_id === id).attempt)),
     final_attempt_id: m.record.attempt_id, clock: clock(seconds), marker: { path: `quarantine/abandoned/${id(1)}/${m.record.attempt_id}.timestamp.json`,
-      hash: hash(m.record), proof: m.proof }, targets: m.record.targets }; return b;
+      hash: hash(m.record), proof: m.proof, publication: { before: { utc_at: m.record.verified_at, elapsed: null }, after: clock(seconds) } }, targets: m.record.targets }; return b;
 }
 function inputFor(b, overrides) {
   const o = b.original, layout = o.plan.layout, replay = validateNativeBarRecoveryBundle(b);
@@ -224,7 +224,7 @@ test("completion after metadata-only recovery binds a new marker and preserves t
   event(b, "recovered_verified", 703, { location: "quarantine", proof: q, from_pending_event_hash: null });
   mark(b, 704); complete(b, 706);
   assert.equal(validateNativeBarRecoveryBundle(b).status, "complete"); assert.equal(canonical(b.markers[0]), old);
-  b.completion.marker = { path: `quarantine/abandoned/${id(1)}/${id(10)}.timestamp.json`, hash: hash(b.markers[0].record), proof: b.markers[0].proof };
+  b.completion.marker = { ...b.completion.marker, path: `quarantine/abandoned/${id(1)}/${id(10)}.timestamp.json`, hash: hash(b.markers[0].record), proof: b.markers[0].proof };
   assert.throws(() => validateNativeBarRecoveryBundle(b), /completion_binding/);
 });
 test("remaining work for a pending held object is validation-only and controller loss blocks the whole plan", () => {
@@ -388,6 +388,12 @@ test("review: completed records do not skip current reserve evidence or qualify 
     assert.ok(r.blocking_reasons.includes("original_allocation_unverified")); assert.deepEqual(r.remaining, []);
   }
 });
+test("R-C marker publication observations live in the later completion, never in their own immutable bytes", () => {
+  const b = finishInitial(), m = mark(b, 8); delete m.record.publication; m.record.verified_at = time(8);
+  m.proof.sha256 = hash(m.record); m.proof.size = String(Buffer.byteLength(canonical(m.record)));
+  complete(b, 10); b.completion.marker.publication = { before: clock(8), after: clock(9) };
+  assert.equal(validateNativeBarRecoveryBundle(b).status, "complete");
+});
 test("recovery accepts the same reserve with at least its original observed allocation and charges the actual occupancy", () => {
   const q = inputFor(fixture()); q.view.reserve.allocated_bytes = String(BigInt(q.view.reserve.allocated_bytes) + 4096n);
   q.view.entries.find((e) => e.path === q.bundle.original.plan.layout.reserve_path).allocated_bytes = q.view.reserve.allocated_bytes;
@@ -424,8 +430,8 @@ for (const [name, mutate] of [
   ["gapped events", (b) => { b.events.splice(1, 1); }],
   ["extra event", (b) => { b.events.push(structuredClone(b.events.at(-1))); }],
   ["altered old marker", (b) => { b.markers[0].record.targets[0].proof.sha256 = hash("other"); }],
-  ["marker preceding verification", (b) => { b.markers[0].record.publication.before = clock(6); }],
-  ["future marker ctime", (b) => { b.markers[0].proof.ctime_ns = ns(10); }],
+  ["marker preceding verification", (b) => { b.markers[0].record.verified_at = time(6); }],
+  ["future marker ctime", (b) => { b.markers[0].proof.ctime_ns = ns(11); }],
   ["wrong marker role", (b) => { b.completion.marker.path = `quarantine/abandoned/${id(1)}/timestamp.json`; }],
   ["completion expiry", (b) => { b.completion.clock = clock(601); }],
   ["wrong consumed attempt list", (b) => { b.completion.used_attempt_hashes = [hash("wrong")]; }],

@@ -370,20 +370,20 @@ test("a surviving v5 completion binds its native attempt-specific marker and rem
   seedEvent(x, state, "move_pending", target.proof); fs.renameSync(join(x.root, target.source_path), join(x.root, held));
   const heldProof = baseProof(nativeProof(x.root, held)); seedEvent(x, state, "held_verified", heldProof); seedEvent(x, state, "quarantine_move_pending", heldProof);
   fs.renameSync(join(x.root, held), join(x.root, final)); const finalProof = baseProof(nativeProof(x.root, final)); seedEvent(x, state, "quarantined_verified", finalProof);
-  // A fixed fixture bracket is checked against actual native times. This is not a writer or publication-ack test.
-  const before = Date.now(), after = before + 500, targets = [{ target_id: target.target_id, proof: finalProof }];
+  const before = Date.now(), targets = [{ target_id: target.target_id, proof: finalProof }];
   const marker = { schema: "native-bar-recovery-timestamp-v5", maintenance_id: o.intent.maintenance_id, attempt_id: state.attempt.attempt_id,
     intent_hash: hash(o.intent), last_event_hash: hash(state.events.at(-1)), targets,
-    publication: { before: { utc_at: new Date(before).toISOString(), elapsed: null }, after: { utc_at: new Date(after).toISOString(), elapsed: null } } };
+    verified_at: new Date(before).toISOString() };
   const path = `quarantine/abandoned/${o.intent.maintenance_id}/${state.attempt.attempt_id}.timestamp.json`;
   fs.writeFileSync(join(x.root, path), canonical(marker), { mode: 0o600 });
-  const { allocated_bytes, ...proof } = nativeProof(x.root, path); void allocated_bytes;
+  const { allocated_bytes, ...proof } = nativeProof(x.root, path); void allocated_bytes; const after = Date.now();
   assert.ok(BigInt(proof.ctime_ns) <= BigInt(after) * 1000000n + 999999n);
   await new Promise((r) => setTimeout(r, Math.max(0, after - Date.now() + 1)));
   const attempt = JSON.parse(fs.readFileSync(join(x.root, `maintenance/${o.intent.maintenance_id}.attempts/${state.attempt.attempt_id}.json`), "utf8"));
   const completion = { schema: "native-bar-recovery-completion-v5", maintenance_id: o.intent.maintenance_id, intent_hash: hash(o.intent),
     last_event_hash: hash(state.events.at(-1)), published_attempt_hashes: [hash(attempt)], used_attempt_hashes: [hash(state.attempt)],
-    final_attempt_id: state.attempt.attempt_id, clock: { utc_at: new Date().toISOString(), elapsed: null }, marker: { path, hash: hash(marker), proof }, targets };
+    final_attempt_id: state.attempt.attempt_id, clock: { utc_at: new Date().toISOString(), elapsed: null }, marker: { path, hash: hash(marker), proof,
+      publication: { before: { utc_at: new Date(before).toISOString(), elapsed: null }, after: { utc_at: new Date(after).toISOString(), elapsed: null } } }, targets };
   fs.writeFileSync(join(x.root, `maintenance/${o.intent.maintenance_id}.done.json`), canonical(completion), { mode: 0o600 });
   const r = x.mod.inspectSyntheticNativeBarRecovery(x.ticket);
   assert.equal(r.result.status, "complete_read_only"); assert.equal(r.result.recorded_status, "complete");

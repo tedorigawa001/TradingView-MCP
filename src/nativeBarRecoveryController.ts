@@ -101,6 +101,15 @@ type Admission = { root: string; plan: Plan; fixture_id: string; inputs_digest: 
   acknowledged: Map<string, { path: string; hash: string; proof: FileProof }> };
 type Connection = { a: Admission; owner: object; alive: () => void; closed: boolean };
 const connections = new WeakMap<object, Connection>();
+type ExecutionOwner = { root: string; original: Original; alive: () => void;
+  read: () => ReturnType<typeof inspectSyntheticNativeBarRecovery>;
+  ledger: () => { original_envelope_hash: string; scope_digest: string; consumed_ordinals: number[]; known_publications: { path: string; hash: string; proof: FileProof }[] };
+  consume: (ordinal: number) => void; witnessed: (path: string, record: unknown, proof: SyntheticRecoveryProof & { sha256: string }) => void };
+const executionOwners = new WeakMap<object, ExecutionOwner>();
+/** Trusted R-C bootstrap bridge, not a root/JSON/reader-ticket promotion or a host approval. */
+export function syntheticNativeBarRecoveryExecutionOwner(capability: object): ExecutionOwner {
+  const owner = executionOwners.get(capability); if (!owner) throw new Error("recovery_execution_owner_required"); owner.alive(); return owner;
+}
 function checkScope(a: Admission, c: Collection) {
   if (c.report.entries.some((e) => e.path.startsWith(".writer"))) throw new Error("recovery_coordination_prerequisite");
   if (!same(nativeBinding(c, a.plan.targets, a.plan.layout), a.plan.native_binding)) { a.invalid = true; throw new Error("recovery_native_binding_changed"); }
@@ -299,6 +308,21 @@ export function createSyntheticNativeBarRecoveryController() {
     connect(handle: object) {
       const a = admission(handle); alive(a); if (!a.sealed) throw new Error("recovery_original_not_sealed");
       const ticket = Object.freeze({}); connections.set(ticket, { a, owner, alive: () => alive(a), closed: false }); return ticket;
+    },
+    connectExecutionForSyntheticTest(handle: object) {
+      const a = admission(handle); alive(a); if (!a.sealed) throw new Error("recovery_original_not_sealed");
+      const capability = Object.freeze({}), ticket = Object.freeze({});
+      connections.set(ticket, { a, owner, alive: () => alive(a), closed: false });
+      executionOwners.set(capability, Object.freeze({ root: a.root, get original() { alive(a); return structuredClone(a.original!); }, alive: () => alive(a),
+        read: () => inspectSyntheticNativeBarRecovery(ticket),
+        ledger: () => { alive(a); return structuredClone({ original_envelope_hash: evidenceHash(a.original), scope_digest: a.original!.scope_digest,
+          consumed_ordinals: a.consumed, known_publications: [...a.acknowledged.values()] }); },
+        consume: (ordinal) => { alive(a); if (ordinal < 2 || ordinal > 3 || ordinal !== Math.max(...a.consumed) + 1) throw new Error("recovery_ordinal_unavailable"); a.consumed.push(ordinal); },
+        witnessed: (path, record, proof) => {
+          alive(a); if (!a.plan.layout.publications.some((p) => p.path === path) || proof.sha256 !== evidenceHash(record)
+            || proof.size !== String(Buffer.byteLength(canonical(record)))) throw new Error("recovery_publication_not_admitted");
+          a.acknowledged.set(path, { path, hash: proof.sha256, proof: structuredClone(fileProof(proof)) });
+        } })); return capability;
     },
     disconnect(ticket: object) {
       const link = connections.get(ticket); if (!link || link.owner !== owner) throw new Error("recovery_wrong_connection");

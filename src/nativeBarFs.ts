@@ -1,7 +1,11 @@
 import { createRequire } from "node:module";
 
 type NativeBackend = {
-  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number; recovery_read_protocol?: number };
+  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number; recovery_read_protocol?: number; recovery_protocol?: number };
+  openRecoveryCoordination(root: string, ttlMs: number): unknown;
+  recoveryWindow(handle: unknown): { opened_at: string; expires_at: string };
+  prepareRecovery(handle: unknown, original: Buffer, bundle: Buffer, audit: Buffer): unknown;
+  recoveryCall(handle: unknown, action: string, approval: unknown, hook?: SyntheticReadHook): unknown;
   prepareQuarantine(coordination: unknown, indices: number[]): unknown;
   quarantineCall(handle: unknown, action: string, index: number | undefined, bytes: Buffer | undefined, hook: SyntheticReadHook | undefined): unknown;
   openCoordination(root: string, ttlMs: number): unknown;
@@ -123,9 +127,14 @@ export function openSyntheticNativeBarRecoveryReader(root: string, ttlMs = 60000
 /** Fixture-only descriptor coordination adapter, never a data mutation/host approval capability. */
 export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
   options: { ownerDead?: (body: Buffer) => Promise<boolean> } = {}) {
+  return openSyntheticCoordinationProfile(root, ttlMs, options, false);
+}
+function openSyntheticCoordinationProfile(root: string, ttlMs: number,
+  options: { ownerDead?: (body: Buffer) => Promise<boolean> }, recovery: boolean) {
   const native = backend();
   if (!native || native.info().coordination_protocol !== 3) throw new Error("native_bar_coordination_unavailable: no filesystem fallback");
-  const handle = native.openCoordination(root, ttlMs);
+  if (recovery && native.info().recovery_protocol !== 5) throw new Error("native_bar_recovery_unavailable: no filesystem fallback");
+  const handle = recovery ? native.openRecoveryCoordination(root, ttlMs) : native.openCoordination(root, ttlMs);
   const call = (action: string, name?: string, body?: string) => native.coordinationCall(handle, action, name, body);
   let closeResult: { coordination_released: boolean; execution_available: false } | undefined;
   const io = {
@@ -170,6 +179,25 @@ export function openSyntheticNativeBarCoordination(root: string, ttlMs = 600000,
       }
     }
   }
+}
+
+/** Internal R-C fixture bridge. No paths, phases or metadata bytes can be supplied to a step. */
+export function openSyntheticNativeBarRecoveryIo(root: string) {
+  const coordination = openSyntheticCoordinationProfile(root, 600000, {}, true), binding = coordinationBindings.get(coordination)!;
+  let handle: unknown;
+  const call = (action: string, approval?: unknown, hook?: SyntheticReadHook) => {
+    if (!handle) throw new Error("recovery_plan_required"); return binding.native.recoveryCall(handle, action, approval, hook);
+  };
+  return { coordination, window: () => binding.native.recoveryWindow(binding.handle),
+    prepare(original: Buffer, bundle: Buffer, audit: Buffer) {
+      if (handle) throw new Error("recovery_plan_already_issued");
+      handle = binding.native.prepareRecovery(binding.handle, original, bundle, audit); return call("report");
+    },
+    approve: () => call("approve"), consume: (approval: unknown) => { call("consume", approval); },
+    begin: () => { call("begin"); }, step: (hook?: SyntheticReadHook) => call("step", undefined, hook),
+    verify: () => { call("verify"); }, report: () => call("report"),
+    close() { let result; try { if (handle) call("close"); } finally { result = coordination.close(); } return result; },
+  };
 }
 
 export type SyntheticQuarantinePlan = { maintenance_id: string; chunk_id: string; attempt_id: string; reserve_path: string;

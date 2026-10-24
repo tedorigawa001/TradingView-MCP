@@ -4,7 +4,7 @@ Status: **slices A-C implemented; slice D synthetic immutable publication/quaran
 
 This refines the [approved maintenance design](NATIVE_BAR_MAINTENANCE_DESIGN.md) and preserves the [phase 2 classification contract](NATIVE_BAR_CLEANUP_PLANNING.md). Existing production maintenance refusal and synthetic-only native root gates remain in force. No real store is initialized by this design work.
 
-The remaining D connection is detailed in the [quarantine recovery design](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md). The approved v5/two-target/two-recovery/controller-loss-stop contract has R-A pure records/planning/accounting and R-B local fixture-controller/read-only native-view implementations. C-session-bound mutation admission, fresh per-invocation consent, cross-process execution bootstrap and recovery execution remain disconnected. V4, slice A, real stores and existing execution refusal are unchanged.
+The remaining D connection is detailed in the [quarantine recovery design](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md). The approved v5/two-target/two-recovery/controller-loss-stop contract has R-A pure records/planning/accounting, R-B local fixture-controller/read-only native-view and R-C local C-session-bound fixed-step recovery implementations. R-C requires fresh per-invocation fixture consent; it is not host approval. Cross-process execution bootstrap, actual v5 worker-death recovery and the initial v5 writer remain disconnected pending R-D. V4, slice A, real stores and existing production execution refusal are unchanged.
 
 ## Recommended Scope
 

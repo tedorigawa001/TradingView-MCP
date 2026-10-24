@@ -53,7 +53,8 @@ void qlocked(Quarantine& q) {
   auto current = coordination_read(c, ".writer.lock"); require(current.has_value(), "writer_not_owned"); compare(own->second.proof, current->proof);
 }
 void qverify(Quarantine& q) {
-  qlocked(q); qbind_dirs(q); auto actual = collect(*q.coordination->session, ReadLimits{});
+  qlocked(q); qbind_dirs(q); ReadLimits limits; if (q.coordination->session->recovery_read) limits.entries = 512;
+  auto actual = collect(*q.coordination->session, limits);
   require(actual.namespace_valid && equal_metadata(q.root, actual.root), "quarantine_inventory_changed");
   size_t count = 0;
   for (const auto& e : actual.entries) {
@@ -62,7 +63,8 @@ void qverify(Quarantine& q) {
       require(equal_metadata(own->second.proof.metadata, e.metadata), "coordination_changed"); continue;
     }
     const auto it = q.expected.find(e.path);
-    require(it != q.expected.end() && equal_metadata(it->second.metadata, e.metadata) && it->second.acl == e.acl, "quarantine_inventory_changed"); ++count;
+    require(it != q.expected.end() && equal_metadata(it->second.metadata, e.metadata) && it->second.acl == e.acl
+      && (!q.coordination->session->recovery_read || (it->second.acl_hash == e.acl_hash && it->second.metadata.st_blocks == e.metadata.st_blocks)), "quarantine_inventory_changed"); ++count;
   }
   require(count == q.expected.size(), "quarantine_inventory_changed"); qlocked(q);
 }
@@ -76,7 +78,9 @@ void qrefresh(Quarantine& q, const std::string& path) {
 }
 void qremember(Quarantine& q, const std::string& path, int fd, bool dir) {
   ReadEntry e; e.path = path; e.kind = dir ? "directory" : "file"; e.metadata = stat_fd(fd);
-  e.acl = private_access(fd, dir, true); evidence_role(e); q.expected.insert_or_assign(path, e); qrefresh(q, qparent(path));
+  e.acl = private_access(fd, dir, true); evidence_role(e, q.coordination->session->recovery_read);
+  if (q.coordination->session->recovery_read) e.acl_hash = recovery_acl_hash(fd, dir);
+  q.expected.insert_or_assign(path, e); qrefresh(q, qparent(path));
 }
 void qsync(Quarantine& q, int fd, napi_env env, napi_value callback, const std::string& path, bool directory_fd = false) {
   read_hook(env, callback, "before_sync", path); qlocked(q); qbind_dirs(q);
@@ -186,11 +190,8 @@ void qbegin(Quarantine& q, napi_env env, napi_value callback) {
     std::string("maintenance-hold"), "maintenance-hold/" + q.id, std::string("quarantine"), std::string("quarantine/abandoned"), "quarantine/abandoned/" + q.id}) qmkdir(q, path, env, callback);
   q.begun = true; qverify(q);
 }
-Proof qpublish(Quarantine& q, size_t index, const std::string& bytes, napi_env env, napi_value callback) {
+Proof qpublish_record(Quarantine& q, size_t index, const std::string& bytes, napi_env env, napi_value callback) {
   require(q.begun && index == q.next && index < q.publications.size() && !bytes.empty() && bytes.size() <= 65536, "quarantine_publication_scope");
-  if (index >= 3 && index < 3 + q.targets.size() * 4) {
-    const auto local = index - 3; require(q.targets[local / 4].phase == static_cast<int>(local % 4), "quarantine_publication_order");
-  } else if (index >= 3) for (const auto& t : q.targets) require(t.phase == 4, "quarantine_incomplete_targets");
   const auto path = q.publications[index], parent = qparent(path), temp = q.temporaries[index];
   // Root temporaries are deliberately outside transaction namespaces and remain preserved on interruption.
   read_hook(env, callback, "before_create_metadata", path); qverify(q);
@@ -220,6 +221,14 @@ Proof qpublish(Quarantine& q, size_t index, const std::string& bytes, napi_env e
   // Directory fsync alone may stay in the drive cache; one full flush after the completion covers the final changes.
   if (index + 1 == q.publications.size()) syscall_ok(fcntl(q.coordination->session->root(), F_FULLFSYNC), "quarantine_final_flush_failed");
   q.published.emplace(path, p); ++q.next;
+  return p;
+}
+Proof qpublish(Quarantine& q, size_t index, const std::string& bytes, napi_env env, napi_value callback) {
+  require(q.begun && index == q.next && index < q.publications.size() && !bytes.empty() && bytes.size() <= 65536, "quarantine_publication_scope");
+  if (index >= 3 && index < 3 + q.targets.size() * 4) {
+    const auto local = index - 3; require(q.targets[local / 4].phase == static_cast<int>(local % 4), "quarantine_publication_order");
+  } else if (index >= 3) for (const auto& t : q.targets) require(t.phase == 4, "quarantine_incomplete_targets");
+  auto p = qpublish_record(q, index, bytes, env, callback);
   if (index >= 3 && index < 3 + q.targets.size() * 4 && (index - 3) % 4 % 2 == 1) ++q.targets[(index - 3) / 4].phase;
   return p;
 }

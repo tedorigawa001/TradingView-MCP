@@ -24,6 +24,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <ctime>
 
 #if !defined(__APPLE__) || !defined(NATIVE_BAR_SYNTHETIC_ONLY)
 #error This foundation build is macOS synthetic-only; production builds are not enabled.
@@ -397,6 +398,7 @@ napi_value close_root(napi_env env, napi_callback_info info) {
 #include "native_bar_read.inc"
 #include "native_bar_writer.inc"
 #include "native_bar_quarantine.inc"
+#include "native_bar_recovery.inc"
 napi_value open_recovery_read_root(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     auto s = create_root(env, info, true); s->recovery_read = true;
@@ -417,6 +419,7 @@ napi_value backend_info(napi_env env, napi_callback_info) {
     napi_ok_or_throw(napi_create_int32(env, 3, &version)); prop(env, out, "coordination_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 4, &version)); prop(env, out, "quarantine_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 5, &version)); prop(env, out, "recovery_read_protocol", version);
+    prop(env, out, "recovery_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -426,12 +429,17 @@ napi_value backend_info(napi_env env, napi_callback_info) {
 } // namespace
 
 NAPI_MODULE_INIT() {
+  try { rparser_init(env); } catch (...) { return nullptr; }
   napi_property_descriptor methods[] = {
     {"info", nullptr, backend_info, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRoot", nullptr, open_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRecoveryReadRoot", nullptr, open_recovery_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openCoordination", nullptr, open_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"openRecoveryCoordination", nullptr, open_recovery_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"recoveryWindow", nullptr, recovery_window, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"prepareRecovery", nullptr, prepare_recovery, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"recoveryCall", nullptr, recovery_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"coordinationCall", nullptr, coordination_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"prepareQuarantine", nullptr, prepare_quarantine, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"quarantineCall", nullptr, quarantine_call, nullptr, nullptr, nullptr, napi_default, nullptr},
