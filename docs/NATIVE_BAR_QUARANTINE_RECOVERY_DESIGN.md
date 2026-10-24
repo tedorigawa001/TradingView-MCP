@@ -1,6 +1,6 @@
 # Native Bar Quarantine Recovery Execution
 
-Status: **v5 / two-target / two-recovery / controller-loss-stop design approved; R-A pure contracts implemented**, 2026-10-24 JST, following `15d9f36`. The user authorized R-A record formats, remaining-action planning, capacity accounting and synthetic tests only. R-B/R-C/R-D implementation, fixture execution, real recording/movement/deletion, MCP registration, deployment and production enablement are not authorized. Dot stays PAUSED; trading/scenario/notification conditions are unchanged.
+Status: **R-A pure contracts and R-B local fixture controller/read-only native view implemented**, 2026-10-24 JST, following `49c68b6`. The user separately authorized R-B implementation and synthetic tests. R-C/R-D execution integration, real recording/movement/deletion, MCP registration, deployment and production enablement are not authorized. Dot stays PAUSED; trading/scenario/notification conditions are unchanged.
 
 The [parent execution design](NATIVE_BAR_EXECUTION_RECOVERY_DESIGN.md) remains the governing safety contract. The first connection below is deliberately narrower: move-only recovery of independently admitted invented fixtures, with finite retries. It does not complete slice E provenance/history integration or slice F purge.
 
@@ -19,7 +19,7 @@ The existing v4 inspector remains read-only. `complete` means verified surviving
 
 ## First Connection Scope
 
-Call the first connection **D-R0**. The pure R-A contracts below are implemented; native admission, execution and controller capabilities remain proposed and disconnected. None is a registered tool.
+Call the first connection **D-R0**. R-A and the read-only R-B boundary below are implemented. Native mutation admission/step execution and cross-process execution integration remain disconnected. None is a registered tool.
 
 - Use a **fresh, already provisioned marked temporary fixture**, with exact proposed policy `{"schema":"native-bar-synthetic-quarantine-recovery-profile-v5"}` and typed native protocol 5 admission. Do not create it through a constructor or recovery preview.
 - Support one original quarantine transaction, **one or two invented capture targets**, the original attempt and at most **two freshly approved recovery attempts**. The complete target set stays fixed. Refuse larger sets; never trim, split or automatically continue a batch.
@@ -27,7 +27,7 @@ Call the first connection **D-R0**. The pure R-A contracts below are implemented
 - No purge/unlink, source restoration, overwritten metadata, re-recording, receipt repair, legacy adoption, metadata cleanup or reservation release. Root temporaries, old markers, incomplete layouts and reserves remain preserved.
 - Keep every public plan/result at `execution_available:false` and `recovery_execution_available:false`. A future local fixture execution result may separately report exact synthetic effects; it is not production authority.
 
-The user approved these narrower engineering limits. They do not change a trading rule, notification threshold or the strictly-more-than-90-day deletion condition. Only R-A implementation is authorized so far.
+The user approved these narrower engineering limits and R-A/R-B implementation. They do not change a trading rule, notification threshold or the strictly-more-than-90-day deletion condition. R-C and R-D need separate implementation approval.
 
 ## Independent Admission And Fresh Consent
 
@@ -147,7 +147,7 @@ Never replace a valid completion to improve its clock or certainty. Persist UTC 
 
 ## Implementation Order And Acceptance
 
-Each step needs separate implementation approval. R-A alone has that approval and is implemented within the boundary below; R-B onward remains unimplemented.
+Each step needs separate implementation approval. R-A and R-B have that approval and are implemented within the boundaries below; R-C onward remains unimplemented.
 
 | Step | Deliverable | Required synthetic acceptance |
 |---|---|---|
@@ -200,3 +200,43 @@ The 2026-10-24 self-review found one supplied-record chronology gap: a completed
 Six added in-memory review cases cover that chronology, valid late preparation, the unchanged v2 nanosecond bound, native identity changes despite identical acknowledged bytes, and a consumed ordinal that has no published attempt envelope. No native code, existing schema, MCP registration, production refusal, Dot setting or trading/notification condition changed. The review is local self-review, not an independent review or a native/production qualification.
 
 Final verification: 131 R-A tests passed; together with the unchanged v2 record model, 252 passed. The first standard run failed three existing wall-clock duration assertions under high machine load (forward-period backoff, Pine lexical audit, redaction); it is not counted as a pass. Without changing their code or thresholds, all 34 tests in those three files passed serially, and the identical complete unit suite passed with `--test-concurrency=2`: 2,248 passes, two existing skips, no failures. Bookmap's five Java classes and two Node tests passed separately. Build, whitespace, frozen-source hashes, Dot PAUSED and unchanged settings/condition hashes were verified before committing the six scoped files. Load-sensitive existing duration tests remain a test-environment caveat; no production or native-recovery qualification is claimed.
+
+## R-B Implemented Boundary
+
+`nativeBarRecoveryController.ts` is trusted **local fixture bootstrap**, not an MCP API or a production authority. It imports only crypto/schema/pure record helpers and the optional read-only native wrapper. No runtime method creates a directory, allocates space, publishes a journal, takes a writer lock, moves/unlinks data, retires coordination or falls back to legacy execution. V1/v2/v4 formats and high-level paths are unchanged. The stricter development-only v5 fields described below are required rather than inferred or migrated.
+
+| Interface | Scope |
+|---|---|
+| `createSyntheticNativeBarRecoveryController().admit(root, inputs)` | Open a fresh marked v5 temporary fixture; independently supplied, copied Buffer commitments must match actual selected capture hashes/lengths. One or two targets only, valid canonical capture partitions, no existing preparation/transaction/receipt/producer state. Unselected captures remain protected reference facts. Return a detached initial plan and a process-local opaque admission object. |
+| `prepareOriginal(admission)` | Read already prepared exact layout/reserve; check original target/root/parent/ancestor/ACL/flags/reference bindings and actual allocated blocks. Construct the acyclic original envelope in memory, once, within the original wall/monotonic window. Does not prepare files or allocate that reserve. |
+| `sealOriginal(admission)` | Read canonical actual original/manifest/optional initial attempt, require exact privately prepared scope and no data event yet; recheck all targets, native reserve proof/allocation, layout and budgets through R-A. Retain independent envelope/manifest and observed publication witnesses before any future executor may be integrated. |
+| `connect` / `disconnect` / `close` | Unserializable, issuer-bound reader tickets refer to the surviving controller ledger. Reader reconnection does not reset scope, witnesses or consumed ordinals. Closure, forged/cross-issuer objects and JSON copies refuse. Module-lifetime native-root identity tombstones also prohibit readmission. |
+| `consumeAttempt(admission, ordinal)` | Trusted bootstrap bookkeeping only: consume the next ordinal 2/3, without a file write, approval or execution grant. It cannot authorize R-C; that future executor must first require new issuer-bound consent and its own native admission. Failed/unpublished ordinals stay consumed. |
+| `rememberPublication(admission, path, record)` | Trusted bootstrap explicitly witnesses an expected declared record against fresh actual canonical bytes and native proof; it is not automatic reconstruction of historical acknowledgement from disk. Previously witnessed bytes/identity must still match. Reader tickets cannot call this owner-side operation. |
+| `inspectSyntheticNativeBarRecovery(ticket)` | Fresh indexed descriptor reads and final inventory verification; reconstruct/validate v5 records and actual source/holding/final positions, current reserve, full access/ancestor bindings and exact references; return native facts plus R-A's whole-scope descriptive result. No mutation handle is returned. |
+
+Reference hashing excludes only the exact predeclared transaction/layout/temporary/reserve/selected-target slots; it never ignores namespace prefixes, writer files or unknown files. Directory identities/access/ACLs/birth/flags are separately bound while their expected entry-churn times are not mistaken for reference data. Other regular artifacts are hashed; new references, unknown private entries and any writer coordination refuse. R-B neither judges an old lock dead nor retires it. A detected immutable binding/reference change invalidates that admission rather than silently refreshing its original scope.
+
+The separate native `recovery_read_protocol:5` accepts only the exact fresh v5 policy in an already marked synthetic root. It keeps legacy read protocol 2 grammar/results separate, adds attempt-specific timestamp/root temporary recognition, reports complete descriptor ACL digests, immutable ancestor evidence and `st_blocks * 512` allocation, and returns fresh read/free-space/descriptor accounting at final verification. The 512-entry ceiling cannot be raised; existing artifact/metadata/read/response/FD/root limits remain. Logical inventory and actual physical occupancy (including root/directory blocks and the retained reserve) are distinct. No allocation credit or elapsed-age qualification is inferred. Unknown/unreadable objects remain preserved; they cannot produce a qualified high-level recovery view.
+
+Both native and JS response-finalization recheck the original read lease, and the controller retains observed wall time across reader leases. Controller closure during collection or final response construction refuses. `controller_scope_verified` describes the live local fixture ledger/observations only. All results still have `execution_available:false`, `recovery_execution_available:false`, `approval_authenticated:false`, `elapsed_clock_qualified:false` and `original_acknowledgement:not_proven`. A surviving completion is read-only evidence, not original response receipt, actual writer sync acknowledgement or power-loss durability.
+
+Tests provision **invented fixtures only** outside runtime APIs. `test/native/recoveryReserveFixture.cc` is a separately compiled, marked-temporary-root-only setup tool for a size-zero preallocated reserve; it is never linked/exported by the addon, packaged, or called by runtime code. Test harnesses manually seed invented records and move invented payloads to exercise read decisions; these are not an R-C writer. Fixed fixture marker brackets validate native metadata without claiming real publication-ack handling. Normal opens/previews/inspection never perform those setup effects.
+
+This R-B controller outlives reader facades/leases within its process. Actual worker-process death, authenticated controller-to-worker bootstrap/IPC and C-session-bound mutation admission are **R-C/R-D gates**, not proven by reconnecting reader objects. Whole-controller/OS loss destroys its opaque objects; disk JSON cannot restore them, and an existing prepared/journaled root cannot be readmitted as fresh. This is not durable production admission, host consent, real producer provenance, remount/clone/compression qualification or cross-process elapsed time. Slice E and all production gates remain required. No MCP/Dot/history integration, deployment or commit is included in this implementation task.
+
+Verification on the fixed 2026-10-24 sources: 37 added native cases plus 422 existing cases passed in normal and UBSan runs; the runner restored the normal backend afterwards. The standard full unit suite, run with concurrency 2 without changing timing thresholds, passed 2,252 cases with two existing skips, including four added boundary cases. Bookmap passed five Java test classes and two Node tests. This is implementation/synthetic verification, not an independent review, ASan/power-loss qualification or an actual R-C/R-D process-recovery test.
+
+## R-B Commit Review
+
+The review starts from `8072066`, retaining its R-A F1/F2/F5 fixes. It integrates the F3/F4 work left to this controller boundary, two bounded-read findings, and the completed-view allocation check:
+
+- The sealed scope now includes `layout_directories`, the exact ordered nine prepared paths with native immutable identity/access/ACL evidence. Fresh entries carry separate `directory_proof` facts. Every prepared directory and source parent must still match, including empty directories and before original sealing. Directory entry-churn size/ctime is not confused with identity, group, birth, flags or complete ACL. A detected substitution invalidates the admission permanently; restoring its old path does not revive it.
+- V5 views and attempt plans now retain `current_reference_hash`, the canonical hash of `{inventory_hash, original_reference_hash:reference_hash, native_binding_hash}`. The complete current inventory includes owned records/temporaries and directory facts. The protected-reference hash and unchanged v2 attempt `reference_hash` remain the original audit value; neither is silently replaced by the new generation. Both generation consistency and original protected-reference equality are required. Historical supplied generations remain descriptive, not authenticated native publication acknowledgements.
+- Native JSON records receive an iterative depth bound before recursive canonical comparison, matching the pure decoder's safety posture. Deep input refuses without repair or stack overflow.
+- Native response accounting charges each pinned ancestor in addition to fixed header and per-entry allowances. A deep synthetic temporary anchor cannot return more evidence than a caller's reduced response limit permits.
+- A surviving completion does not bypass the current allocation check. Lost, substituted, unqualified or under-allocated reserve evidence blocks the fresh view while retaining `recorded_status:complete`; it neither erases the historical completion nor invents a new execution opportunity.
+
+The v5 schema additions do not upgrade existing stores or adopt old fixtures. Missing directory/generation evidence refuses. No existing v2/v4 schema, writer, trading condition or notification rule changes.
+
+The normal full native run passed 472 cases. After the final pure completed-view allocation check, the fixed final sources passed 193 R-A/R-B/boundary cases, 94 native read/UBSan cases and the full standard unit suite (concurrency 2): 2,260 passes, two existing skips, no failures. Bookmap passed five Java test classes and two Node cases. The final pure change does not modify the 422 legacy native cases' runtime paths. Clang static analysis reported no diagnostics; source hashes, whitespace and restoration of the normal backend were checked. This is local self-review and synthetic verification, not independent review, ASan, power-loss/remount qualification or an R-C/R-D recovery-execution claim. Dot remains PAUSED; full settings and trading/notification-condition hashes are unchanged. Only the 14 scoped files are included in the commit; no push or deployment is included.

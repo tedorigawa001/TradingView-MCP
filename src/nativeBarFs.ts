@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 
 type NativeBackend = {
-  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number };
+  info(): { protocol: number; mode: string; read_protocol?: number; coordination_protocol?: number; quarantine_protocol?: number; recovery_read_protocol?: number };
   prepareQuarantine(coordination: unknown, indices: number[]): unknown;
   quarantineCall(handle: unknown, action: string, index: number | undefined, bytes: Buffer | undefined, hook: SyntheticReadHook | undefined): unknown;
   openCoordination(root: string, ttlMs: number): unknown;
@@ -13,6 +13,7 @@ type NativeBackend = {
   stage(target: unknown, hook: SyntheticHook | undefined): SyntheticTargetStatus;
   purge(target: unknown, hook: SyntheticHook | undefined): SyntheticTargetStatus;
   openReadRoot(root: string, ttlMs: number): unknown;
+  openRecoveryReadRoot(root: string, ttlMs: number): unknown;
   inventory(handle: unknown, hook: SyntheticReadHook | undefined, limits: SyntheticReadLimits | undefined): { report: SyntheticNativeInventory };
   readEvidence(handle: unknown, inventory: unknown, index: number, hook: SyntheticReadHook | undefined): {
     bytes: Buffer; proof: SyntheticReadProof & { sha256: string }; execution_available: false; lease_read_bytes: string };
@@ -87,6 +88,32 @@ export function openSyntheticNativeBarReader(root: string, ttlMs = 600000) {
       return { report: snapshot.report, collection_started_at: started_at, collection_completed_at: new Date().toISOString(),
         readEvidence: (index: number, hook?: SyntheticReadHook) => native.readEvidence(handle, snapshot, index, hook),
         verify: (hook?: SyntheticReadHook) => ({ matches: native.verifyInventory(handle, snapshot, hook), execution_available: false as const }),
+        close: () => native.closeInventory(handle, snapshot),
+      };
+    },
+  };
+}
+
+export type SyntheticRecoveryProof = SyntheticReadProof & { acl_hash: string; allocated_bytes: string };
+export type SyntheticRecoveryInventory = Omit<SyntheticNativeInventory, "schema" | "root" | "entries"> & {
+  schema: "native-bar-native-recovery-inventory-v5"; root: SyntheticRecoveryProof; ancestors: SyntheticRecoveryProof[];
+  available_bytes: string; lease_read_bytes: string; live_fds: string; live_sessions: string;
+  entries: (Omit<SyntheticNativeInventory["entries"][number], "proof"> & { proof: SyntheticRecoveryProof })[];
+};
+/** V5 fixture-only read profile. No coordination, allocation or mutation handles are exposed. */
+export function openSyntheticNativeBarRecoveryReader(root: string, ttlMs = 600000) {
+  const native = backend();
+  if (!native || native.info().recovery_read_protocol !== 5) throw new Error("native_bar_recovery_read_unavailable: no filesystem fallback");
+  const handle = native.openRecoveryReadRoot(root, ttlMs);
+  return {
+    close: () => native.closeRoot(handle),
+    inventory(options?: { hook?: SyntheticReadHook; limits?: SyntheticReadLimits }) {
+      const snapshot = native.inventory(handle, options?.hook, options?.limits);
+      return { report: snapshot.report as unknown as SyntheticRecoveryInventory,
+        readEvidence: (index: number, hook?: SyntheticReadHook) => native.readEvidence(handle, snapshot, index, hook) as {
+          bytes: Buffer; proof: SyntheticRecoveryProof & { sha256: string }; execution_available: false; lease_read_bytes: string },
+        verify: (hook?: SyntheticReadHook) => ({ matches: true as const,
+          report: native.verifyInventory(handle, snapshot, hook) as unknown as SyntheticRecoveryInventory, execution_available: false as const }),
         close: () => native.closeInventory(handle, snapshot),
       };
     },

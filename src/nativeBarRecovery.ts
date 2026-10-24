@@ -61,6 +61,7 @@ export const nativeBarRecoveryInitialPlanSchema = z.strictObject({ schema: z.lit
   targets: nativeBarTransactionManifestSchema.shape.targets.max(2), layout: nativeBarRecoveryLayoutSchema, plan_hash: nativeBarHash });
 const scopeSchema = z.strictObject({ schema: z.literal("native-bar-recovery-scope-v5"), fixture_id: uuid,
   initial_plan_hash: nativeBarHash, native_binding_hash: nativeBarHash, manifest_hash: nativeBarHash, inputs_digest: nativeBarHash,
+  layout_directories: z.array(z.strictObject({ path: relative, proof: directorySchema })).length(9),
   allocation: z.strictObject({ path: relative, proof: nativeProofSchema, allocated_bytes: uint, acknowledged: clockSchema }) });
 export const nativeBarRecoveryOriginalSchema = z.strictObject({ schema: z.literal("native-bar-quarantine-intent-v5"),
   plan: nativeBarRecoveryInitialPlanSchema, scope: scopeSchema, scope_digest: nativeBarHash,
@@ -70,7 +71,7 @@ const auditSchema = z.strictObject({ schema: z.literal("native-bar-recovery-atte
   scope_digest: nativeBarHash, original_envelope_hash: nativeBarHash, intent_hash: nativeBarHash,
   prefix_hash: nativeBarHash.nullable(), prefix_count: z.number().int().nonnegative().max(28), opened_at: nativeBarTimestamp,
   issued_at: nativeBarTimestamp, observed_at: nativeBarTimestamp, expires_at: nativeBarTimestamp,
-  inventory_hash: nativeBarHash, reference_hash: nativeBarHash, native_binding_hash: nativeBarHash,
+  inventory_hash: nativeBarHash, reference_hash: nativeBarHash, current_reference_hash: nativeBarHash, native_binding_hash: nativeBarHash,
   observations: nativeBarTransactionAttemptSchema.shape.observations.max(2), actions: nativeBarTransactionAttemptSchema.shape.actions.max(6), plan_hash: nativeBarHash });
 export const nativeBarRecoveryAttemptSchema = z.strictObject({ schema: z.literal("native-bar-recovery-attempt-v5"), ordinal,
   previous_envelope_hash: nativeBarHash.nullable(), attempt: nativeBarTransactionAttemptSchema, plan: auditSchema });
@@ -93,6 +94,9 @@ type NativeProof = z.infer<typeof nativeProofSchema>;
 type Observation = z.infer<typeof nativeBarTransactionAttemptSchema>["observations"][number];
 type Replay = ReturnType<typeof replayNativeBarTransaction>;
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+function referenceGeneration(v: { inventory_hash: string; reference_hash: string; native_binding_hash: string }) {
+  return evidenceHash({ inventory_hash: v.inventory_hash, original_reference_hash: v.reference_hash, native_binding_hash: v.native_binding_hash });
+}
 function hashFields(v: object, field = "plan_hash") { const fields = { ...v } as Record<string, unknown>; delete fields[field]; return evidenceHash(fields); }
 function window(opened: string, expires: string) { if (Date.parse(expires) - Date.parse(opened) !== 600000) throw new Error("recovery_window_binding"); }
 function recordSize(v: unknown) { if (Buffer.byteLength(canonical(v), "utf8") > L.record_bytes) throw new Error("recovery_record_limit"); }
@@ -108,7 +112,8 @@ function originalIdentifiers(o: Original) {
     ...m.targets.flatMap((t) => [t.target_id, t.origin.kind === "capture" ? t.origin.recording_id : "invalid"])];
 }
 function nativeDirectories(o: Original) {
-  return [o.plan.native_binding.root, ...o.plan.native_binding.targets.flatMap((t) => t.parents.map((p) => p.proof))];
+  return [o.plan.native_binding.root, ...o.plan.native_binding.targets.flatMap((t) => t.parents.map((p) => p.proof)),
+    ...o.scope.layout_directories.map((p) => p.proof)];
 }
 function validateOriginal(o: Original) {
   const { plan: p, intent: i, manifest: m, scope: s } = o; validateLayout(p.layout); window(p.opened_at, p.expires_at);
@@ -124,7 +129,7 @@ function validateOriginal(o: Original) {
     throw new Error("recovery_native_binding");
   const ids = originalIdentifiers(o);
   if (new Set(ids).size !== ids.length || ids.some((v) => !uuid.safeParse(v).success)) throw new Error("recovery_role_identifiers");
-  const directories = new Map<string, unknown>([[".", root]]);
+  const directories = new Map<string, z.infer<typeof directorySchema>>([[".", root]]);
   for (const { path, proof } of [{ path: ".", proof: root }, ...p.native_binding.targets.flatMap((t) => t.parents)]) {
     if (proof.device !== root.device || proof.uid !== root.uid || BigInt(proof.birthtime_ns) > BigInt(Date.parse(p.opened_at)) * 1000000n + 999999n
       || directories.has(path) && !same(directories.get(path), proof)) throw new Error("recovery_native_binding");
@@ -139,6 +144,15 @@ function validateOriginal(o: Original) {
     nativeBarTimestamp.parse(t.source_path.split("/")[1] + "T00:00:00.000Z");
   }
   const allocation = s.allocation, b = BigInt((4 * (9 + 14 * m.targets.length) + 32) * 65536 + 1048576);
+  if (!same(s.layout_directories.map((d) => d.path), p.layout.directories)) throw new Error("recovery_layout_directory_binding");
+  const directoryIds = new Set([...directories.values()].map((d) => `${d.device}:${d.inode}`));
+  for (const { proof } of s.layout_directories) {
+    const key = `${proof.device}:${proof.inode}`;
+    if (proof.device !== root.device || proof.uid !== root.uid || directoryIds.has(key)
+      || BigInt(proof.birthtime_ns) > BigInt(Date.parse(allocation.acknowledged.utc_at)) * 1000000n + 999999n)
+      throw new Error("recovery_layout_directory_binding");
+    directoryIds.add(key);
+  }
   if (o.scope_digest !== evidenceHash(s) || s.initial_plan_hash !== p.plan_hash || s.manifest_hash !== evidenceHash(m)
     || s.native_binding_hash !== evidenceHash(p.native_binding) || allocation.path !== p.layout.reserve_path
     || BigInt(allocation.allocated_bytes) < b || allocation.proof.size !== "0" || allocation.proof.device !== root.device
@@ -200,7 +214,8 @@ function validateAttempts(b: Bundle) {
       || a.issued.elapsed !== null || a.issued.utc_at !== p.opened_at || a.expires_at !== p.expires_at
       || env.ordinal === 1 && (p.opened_at !== o.plan.opened_at || p.expires_at !== o.plan.expires_at)
       || a.approval_plan_hash !== (env.ordinal === 1 ? o.plan.plan_hash : p.plan_hash)
-      || p.reference_hash !== o.intent.baseline.reference_hash || !same(p.observations, a.observations) || !same(p.actions, a.actions)
+      || p.reference_hash !== o.intent.baseline.reference_hash || p.current_reference_hash !== referenceGeneration(p)
+      || !same(p.observations, a.observations) || !same(p.actions, a.actions)
       || p.issued_at < p.opened_at || p.observed_at <= p.issued_at || p.observed_at >= p.expires_at
       || prefix.some((e) => e.clock.utc_at > p.opened_at) || prior && prior.plan.observed_at > p.opened_at
       || own.some((e) => e.clock.utc_at < p.observed_at)) throw new Error("recovery_attempt_binding");
@@ -353,13 +368,13 @@ export function calculateNativeBarRecoveryCapacity(input: unknown) {
 }
 
 const entrySchema = z.strictObject({ path: relative, kind: z.enum(["file", "directory", "other"]), size: uint,
-  sha256: nativeBarHash.nullable(), allocated_bytes: uint.nullable(), proof: nativeProofSchema.nullable() });
+  sha256: nativeBarHash.nullable(), allocated_bytes: uint.nullable(), proof: nativeProofSchema.nullable(), directory_proof: directorySchema.nullable() });
 const locationSchema = z.strictObject({ target_id: uuid, source: nativeProofSchema.nullable(), holding: nativeProofSchema.nullable(), quarantine: nativeProofSchema.nullable() });
 const accountingSchema = capacitySchema.omit({ schema: true, target_count: true, phase: true, occupied_entries: true,
   remaining_publications: true, remaining_temporaries: true, reserve_allocated_bytes: true });
 export const nativeBarRecoveryViewSchema = z.strictObject({ schema: z.literal("native-bar-recovery-view-v5"), observed_at: nativeBarTimestamp,
   inventory_complete: z.boolean(), references_complete: z.boolean(), allocation_complete: z.boolean(), inventory_hash: nativeBarHash,
-  reference_hash: nativeBarHash, native_binding: nativeBindingSchema, entries: z.array(entrySchema).max(512), locations: z.array(locationSchema).max(2),
+  reference_hash: nativeBarHash, current_reference_hash: nativeBarHash, native_binding: nativeBindingSchema, entries: z.array(entrySchema).max(512), locations: z.array(locationSchema).max(2),
   reserve: z.strictObject({ proof: nativeProofSchema, allocated_bytes: uint }).nullable(), accounting: accountingSchema });
 const controllerSchema = z.strictObject({ original_envelope_hash: nativeBarHash, scope_digest: nativeBarHash,
   consumed_ordinals: z.array(ordinal).min(1).max(3), known_publications: z.array(z.strictObject({ path: relative, hash: nativeBarHash,
@@ -403,6 +418,7 @@ export function planNativeBarRecovery(input: unknown) {
   const records = publishedRecords(b), layout = o.plan.layout, entries = new Map(v.entries.map((e) => [e.path, e]));
   if (!v.inventory_complete) reasons.push("inventory_incomplete");
   if (!v.references_complete || v.reference_hash !== o.intent.baseline.reference_hash) reasons.push("references_unverified_or_changed");
+  if (v.current_reference_hash !== referenceGeneration({ ...v, native_binding_hash: evidenceHash(v.native_binding) })) reasons.push("current_reference_generation_changed");
   if (!same(v.native_binding, o.plan.native_binding)) reasons.push("native_binding_changed");
   if (v.inventory_hash !== evidenceHash(v.entries) || entries.size !== v.entries.length
     || new Set(v.entries.map((e) => e.path.normalize("NFC").toLowerCase())).size !== entries.size) reasons.push("inventory_binding");
@@ -423,7 +439,7 @@ export function planNativeBarRecovery(input: unknown) {
       || !b.completion && temporaries.get(e.path)! > maxConsumed)) reasons.push("temporary_binding");
     if (e.path.startsWith("receipts/") && o.manifest.targets.some((t) => e.path.split("/").at(-1) === t.source_path.split("/").at(-1))) reasons.push("receipt_reference");
     if (e.kind === "file") {
-      if (!e.proof || e.proof.sha256 !== e.sha256 || e.proof.size !== e.size || e.proof.uid !== o.intent.binding.root.uid
+      if (e.directory_proof || !e.proof || e.proof.sha256 !== e.sha256 || e.proof.size !== e.size || e.proof.uid !== o.intent.binding.root.uid
         || e.proof.device !== o.intent.binding.root.device) reasons.push("entry_proof_binding");
       else {
         const key = `${e.proof.device}:${e.proof.inode}`;
@@ -431,9 +447,12 @@ export function planNativeBarRecovery(input: unknown) {
         try { proofClock(e.proof, v.observed_at); } catch { reasons.push("observation_clock"); }
       }
     }
+    if (e.kind === "directory" && (!e.directory_proof || e.proof || e.sha256
+      || e.directory_proof.device !== o.intent.binding.root.device || e.directory_proof.uid !== o.intent.binding.root.uid
+      || BigInt(e.directory_proof.birthtime_ns) > BigInt(Date.parse(v.observed_at)) * 1000000n + 999999n)) reasons.push("directory_missing_or_changed");
   }
-  for (const path of [...layout.directories, ...o.manifest.targets.flatMap((t) => t.parents.map((p) => p.path))])
-    if (entries.get(path)?.kind !== "directory") reasons.push("directory_missing_or_changed");
+  for (const { path, proof } of [...o.scope.layout_directories, ...o.plan.native_binding.targets.flatMap((t) => t.parents)])
+    if (entries.get(path)?.kind !== "directory" || !same(entries.get(path)?.directory_proof, proof)) reasons.push("directory_missing_or_changed");
   for (const [path, record] of records) {
     const e = entries.get(path);
     if (!e || e.kind !== "file" || e.sha256 !== evidenceHash(record) || e.size !== String(Buffer.byteLength(canonical(record)))) reasons.push("published_record_missing_or_changed");
@@ -463,6 +482,10 @@ export function planNativeBarRecovery(input: unknown) {
     + v.entries.filter((e) => temporaries.has(e.path)).reduce((n, e) => n + BigInt(e.size), 0n);
   if (BigInt(v.accounting.occupied_inventory_bytes) < logical || BigInt(v.accounting.occupied_allocated_bytes) < allocated
     || BigInt(v.accounting.occupied_metadata_bytes) < metadata) reasons.push("accounting_underreported");
+  if (!v.allocation_complete || v.entries.some((e) => e.allocated_bytes === null) || !v.reserve
+    || !same(v.reserve.proof, o.scope.allocation.proof) || BigInt(v.reserve.allocated_bytes) < BigInt(o.scope.allocation.allocated_bytes)
+    || !same(entries.get(layout.reserve_path)?.proof, v.reserve?.proof)
+    || entries.get(layout.reserve_path)?.allocated_bytes !== v.reserve?.allocated_bytes) reasons.push("original_allocation_unverified");
   if (b.completion) return result(reasons.length ? "blocked" : "complete_read_only");
   if (!controller) reasons.push("controller_unavailable");
   else {
@@ -473,10 +496,6 @@ export function planNativeBarRecovery(input: unknown) {
     if (maxConsumed >= 3) reasons.push("recovery_exhausted");
     if (request.ordinal !== maxConsumed + 1 || request.ordinal < 2) reasons.push("recovery_ordinal_unavailable");
   }
-  if (!v.allocation_complete || v.entries.some((e) => e.allocated_bytes === null) || !v.reserve
-    || !same(v.reserve.proof, o.scope.allocation.proof) || BigInt(v.reserve.allocated_bytes) < BigInt(o.scope.allocation.allocated_bytes)
-    || !same(entries.get(layout.reserve_path)?.proof, v.reserve?.proof)
-    || entries.get(layout.reserve_path)?.allocated_bytes !== v.reserve?.allocated_bytes) reasons.push("original_allocation_unverified");
   if (Date.parse(request.expires_at) - Date.parse(request.opened_at) !== 600000 || request.issued_at < request.opened_at
     || v.observed_at <= request.issued_at || request.checked_at >= request.expires_at || request.checked_at < request.opened_at
     || BigInt(request.checked_elapsed_ns) >= 600000000000n || request.opened_at < (b.events.at(-1)?.clock.utc_at ?? o.intent.created.utc_at)
@@ -494,7 +513,8 @@ export function planNativeBarRecovery(input: unknown) {
       ordinal: request.ordinal, scope_digest: o.scope_digest, original_envelope_hash: evidenceHash(o), intent_hash: evidenceHash(o.intent),
       prefix_hash: b.events.length ? evidenceHash(b.events.at(-1)) : null, prefix_count: b.events.length,
       opened_at: request.opened_at, issued_at: request.issued_at, observed_at: v.observed_at, expires_at: request.expires_at,
-      inventory_hash: v.inventory_hash, reference_hash: v.reference_hash, native_binding_hash: evidenceHash(v.native_binding), observations,
+      inventory_hash: v.inventory_hash, reference_hash: v.reference_hash, current_reference_hash: v.current_reference_hash,
+      native_binding_hash: evidenceHash(v.native_binding), observations,
       actions: remaining.flatMap((t) => permittedActions(t.target_id, t.operations)) };
     attempt_plan = auditSchema.parse({ ...contents, plan_hash: evidenceHash(contents) }); recordSize(attempt_plan);
   }

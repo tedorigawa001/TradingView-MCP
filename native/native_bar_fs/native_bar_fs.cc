@@ -90,6 +90,7 @@ struct Session {
   std::weak_ptr<ReadSnapshot> snapshot;
   uint64_t read_bytes = 0;
   bool read_only = false;
+  bool recovery_read = false;
   bool coordination_only = false;
   Steady::time_point deadline;
   Wall::time_point wall_deadline;
@@ -396,6 +397,18 @@ napi_value close_root(napi_env env, napi_callback_info info) {
 #include "native_bar_read.inc"
 #include "native_bar_writer.inc"
 #include "native_bar_quarantine.inc"
+napi_value open_recovery_read_root(napi_env env, napi_callback_info info) {
+  return boundary(env, [&] {
+    auto s = create_root(env, info, true); s->recovery_read = true;
+    auto file = leaf(s->root(), "policy.json"); binding(s->root(), "policy.json", file.value, false);
+    const std::string expected = "{\"schema\":\"native-bar-synthetic-quarantine-recovery-profile-v5\"}";
+    const auto before = stat_fd(file.value); require(before.st_size == static_cast<off_t>(expected.size()), "recovery_synthetic_profile_required");
+    std::string bytes(expected.size(), '\0');
+    require(pread(file.value, bytes.data(), bytes.size(), 0) == static_cast<ssize_t>(bytes.size()) && bytes == expected, "recovery_synthetic_profile_required");
+    require(equal_metadata(before, stat_fd(file.value)), "recovery_policy_changed"); s->read_bytes += bytes.size();
+    binding(s->root(), "policy.json", file.value, false); s->guard(); return wrap(env, s, SESSION_TAG);
+  });
+}
 napi_value backend_info(napi_env env, napi_callback_info) {
   return boundary(env, [&] {
     auto out = object(env); napi_value version, fds, sessions;
@@ -403,6 +416,7 @@ napi_value backend_info(napi_env env, napi_callback_info) {
     napi_ok_or_throw(napi_create_int32(env, 2, &version)); prop(env, out, "read_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 3, &version)); prop(env, out, "coordination_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 4, &version)); prop(env, out, "quarantine_protocol", version);
+    napi_ok_or_throw(napi_create_int32(env, 5, &version)); prop(env, out, "recovery_read_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -416,6 +430,7 @@ NAPI_MODULE_INIT() {
     {"info", nullptr, backend_info, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRoot", nullptr, open_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"openRecoveryReadRoot", nullptr, open_recovery_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openCoordination", nullptr, open_coordination, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"coordinationCall", nullptr, coordination_call, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"prepareQuarantine", nullptr, prepare_quarantine, nullptr, nullptr, nullptr, napi_default, nullptr},

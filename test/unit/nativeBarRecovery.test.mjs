@@ -33,6 +33,7 @@ function fixture(n = 1) {
   const manifest = { schema: "native-bar-maintenance-manifest-v2", maintenance_id: id(1), chunk_id: id(2), targets };
   const scope = { schema: "native-bar-recovery-scope-v5", fixture_id: id(5), initial_plan_hash: plan.plan_hash,
     native_binding_hash: hash(native_binding), manifest_hash: hash(manifest), inputs_digest: hash("independently invented fixture"),
+    layout_directories: layout.directories.map((path, i) => ({ path, proof: directory(String(30 + i)) })),
     allocation: { path: layout.reserve_path, proof: { ...proof("999", 2), birthtime_ns: ns(2), mtime_ns: ns(2), size: "0", flags: "0", acl_hash: hash("no ACL") },
       allocated_bytes: n === 1 ? "9175040" : "12845056", acknowledged: clock(2) } };
   const intent = { schema: "native-bar-maintenance-intent-v2", maintenance_id: id(1), kind: "quarantine_abandoned", binding,
@@ -49,6 +50,8 @@ function addAttempt(b, ord = 1, opened = 1, observations, actions) {
     scope_digest: o.scope_digest, original_envelope_hash: hash(o), intent_hash: hash(o.intent), prefix_hash: prefix, prefix_count: b.events.length,
     opened_at: time(opened), issued_at: time(opened + 1), observed_at: time(opened + 2), expires_at: time(opened + 600),
     inventory_hash: hash(`inventory at ${opened}`), reference_hash: o.intent.baseline.reference_hash, native_binding_hash: hash(o.plan.native_binding),
+    current_reference_hash: hash({ inventory_hash: hash(`inventory at ${opened}`), original_reference_hash: o.intent.baseline.reference_hash,
+      native_binding_hash: hash(o.plan.native_binding) }),
     observations, actions, plan_hash: "" });
   const attempt = { schema: "native-bar-maintenance-attempt-v2", attempt_id: o.plan.layout.attempt_ids[ord - 1], maintenance_id: id(1),
     intent_hash: hash(o.intent), binding_hash: hash(o.intent.binding), approval_plan_hash: ord === 1 ? o.plan.plan_hash : plan.plan_hash,
@@ -101,7 +104,8 @@ function inputFor(b, overrides) {
   const entries = new Map();
   let inode = 5000;
   const add = (path, kind, size = "0", sha256 = null, allocated_bytes = "0", native = null) => entries.set(path, { path, kind, size, sha256, allocated_bytes,
-    proof: native ?? (kind === "file" ? { ...proof(String(inode++)), size, sha256, flags: "0", acl_hash: hash("no ACL") } : null) });
+    proof: native ?? (kind === "file" ? { ...proof(String(inode++)), size, sha256, flags: "0", acl_hash: hash("no ACL") } : null),
+    directory_proof: kind === "directory" ? structuredClone([...o.scope.layout_directories, ...o.plan.native_binding.targets.flatMap((t) => t.parents)].find((d) => d.path === path).proof) : null });
   for (const path of [...layout.directories, ...o.manifest.targets.flatMap((t) => t.parents.map((p) => p.path))]) add(path, "directory");
   const records = [["policy.json", { schema: "native-bar-synthetic-quarantine-recovery-profile-v5" }],
     [`maintenance/${id(1)}.manifest/${id(2)}.json`, o.manifest], [`maintenance/${id(1)}.json`, o],
@@ -121,6 +125,7 @@ function inputFor(b, overrides) {
   return { schema: "native-bar-recovery-query-v5", bundle: b,
     view: { schema: "native-bar-recovery-view-v5", observed_at: time(703), inventory_complete: true, references_complete: true, allocation_complete: true,
       inventory_hash: hash(list), reference_hash: o.intent.baseline.reference_hash, native_binding: structuredClone(o.plan.native_binding), entries: list, locations: full,
+      current_reference_hash: hash({ inventory_hash: hash(list), original_reference_hash: o.intent.baseline.reference_hash, native_binding_hash: hash(o.plan.native_binding) }),
       reserve: { proof: structuredClone(o.scope.allocation.proof), allocated_bytes: o.scope.allocation.allocated_bytes },
       accounting: { occupied_inventory_bytes: String(list.reduce((n, e) => n + BigInt(e.size), 0n)),
         occupied_metadata_bytes: String(records.reduce((n, [, r]) => n + Buffer.byteLength(canonical(r)), 0)),
@@ -333,9 +338,56 @@ test("the last recovery ordinal includes unused published attempts and cannot gr
 });
 function refreshInventory(input) {
   const v = input.view; v.inventory_hash = hash(v.entries);
+  v.current_reference_hash = hash({ inventory_hash: v.inventory_hash, original_reference_hash: v.reference_hash, native_binding_hash: hash(v.native_binding) });
   v.accounting.occupied_inventory_bytes = String(v.entries.reduce((n, e) => n + BigInt(e.size), 0n));
   v.accounting.occupied_allocated_bytes = String(v.entries.reduce((n, e) => n + BigInt(e.allocated_bytes ?? "0"), 0n));
 }
+test("review: recovery plans bind a fresh reference generation without replacing the original v2 audit hash", () => {
+  const q = inputFor(fixture()), r = planNativeBarRecovery(q);
+  assert.equal(r.status, "planned_only");
+  assert.equal(r.attempt_plan.reference_hash, q.bundle.original.intent.baseline.reference_hash);
+  assert.match(r.attempt_plan.current_reference_hash, /^[a-f0-9]{64}$/);
+  assert.equal(r.attempt_plan.current_reference_hash, hash({ inventory_hash: q.view.inventory_hash,
+    original_reference_hash: q.view.reference_hash, native_binding_hash: hash(q.view.native_binding) }));
+  assert.notEqual(r.attempt_plan.current_reference_hash, r.attempt_plan.reference_hash);
+});
+test("review: tampered current reference generations refuse even when their enclosing plan is rehashed", () => {
+  const b = fixture(); addAttempt(b); b.attempts[0].plan.current_reference_hash = hash("another generation"); rehash(b.attempts[0].plan);
+  assert.throws(() => validateNativeBarRecoveryBundle(b), /attempt_binding/);
+  const q = inputFor(fixture()); q.view.current_reference_hash = hash("another generation");
+  const r = planNativeBarRecovery(q); assert.equal(r.status, "blocked"); assert.ok(r.blocking_reasons.includes("current_reference_generation_changed"));
+});
+test("review: owned publication deltas refresh only the current generation, not the original audit hash", () => {
+  const q = inputFor(fixture()), before = planNativeBarRecovery(q).attempt_plan;
+  const path = q.bundle.original.plan.layout.publications[0].temporaries[0].path, p = { ...proof("8200"), size: "1", flags: "0", acl_hash: hash("no ACL") };
+  q.view.entries.push({ path, kind: "file", size: p.size, sha256: p.sha256, allocated_bytes: "4096", proof: p, directory_proof: null });
+  refreshInventory(q); q.view.accounting.occupied_metadata_bytes = String(BigInt(q.view.accounting.occupied_metadata_bytes) + 1n);
+  const r = planNativeBarRecovery(q); assert.equal(r.status, "planned_only");
+  assert.equal(r.attempt_plan.reference_hash, before.reference_hash); assert.notEqual(r.attempt_plan.current_reference_hash, before.current_reference_hash);
+});
+test("review: transaction directories retain exact identity and access facts in fresh views", () => {
+  for (const field of ["inode", "gid", "birthtime_ns", "flags", "acl_hash"]) {
+    const q = inputFor(fixture()), e = q.view.entries.find((e) => e.path === q.bundle.original.plan.layout.directories[2]);
+    e.directory_proof[field] = field === "acl_hash" ? hash("another ACL") : String(BigInt(e.directory_proof[field]) + 1n); refreshInventory(q);
+    const r = planNativeBarRecovery(q); assert.equal(r.status, "blocked", field); assert.ok(r.blocking_reasons.includes("directory_missing_or_changed"), field);
+  }
+});
+test("review: original layout evidence cannot omit, reorder, alias or postdate its prepared directory set", () => {
+  for (const mutate of [(s) => s.layout_directories.pop(), (s) => s.layout_directories.reverse(),
+    (s) => { s.layout_directories[0].proof = directory("2"); }, (s) => { s.layout_directories[0].proof.birthtime_ns = ns(3); }]) {
+    const b = fixture(); mutate(b.original.scope); b.original.scope_digest = hash(b.original.scope);
+    assert.throws(() => validateNativeBarRecoveryBundle(b));
+  }
+});
+test("review: completed records do not skip current reserve evidence or qualify a substituted allocation", () => {
+  for (const change of [(q) => { q.view.allocation_complete = false; }, (q) => { q.view.reserve = null; },
+    (q) => { q.view.reserve.proof.inode = "9200"; }, (q) => { q.view.reserve.allocated_bytes = "0"; },
+    (q) => { q.view.entries = q.view.entries.filter((e) => e.path !== q.bundle.original.plan.layout.reserve_path); refreshInventory(q); }]) {
+    const b = finishInitial(); mark(b, 20); complete(b, 22); const q = inputFor(b); change(q);
+    const r = planNativeBarRecovery(q); assert.equal(r.recorded_status, "complete"); assert.equal(r.status, "blocked");
+    assert.ok(r.blocking_reasons.includes("original_allocation_unverified")); assert.deepEqual(r.remaining, []);
+  }
+});
 test("recovery accepts the same reserve with at least its original observed allocation and charges the actual occupancy", () => {
   const q = inputFor(fixture()); q.view.reserve.allocated_bytes = String(BigInt(q.view.reserve.allocated_bytes) + 4096n);
   q.view.entries.find((e) => e.path === q.bundle.original.plan.layout.reserve_path).allocated_bytes = q.view.reserve.allocated_bytes;
@@ -344,7 +396,7 @@ test("recovery accepts the same reserve with at least its original observed allo
 test("retained temporary bytes must be charged as metadata without adoption or cleanup", () => {
   const q = inputFor(fixture()), path = q.bundle.original.plan.layout.publications[0].temporaries[0].path;
   const p = { ...proof("8100"), size: "123", flags: "0", acl_hash: hash("no ACL") };
-  q.view.entries.push({ path, kind: "file", size: p.size, sha256: p.sha256, allocated_bytes: "4096", proof: p }); refreshInventory(q);
+  q.view.entries.push({ path, kind: "file", size: p.size, sha256: p.sha256, allocated_bytes: "4096", proof: p, directory_proof: null }); refreshInventory(q);
   const blocked = planNativeBarRecovery(q);
   assert.equal(blocked.status, "blocked"); assert.ok(blocked.blocking_reasons.includes("accounting_underreported"));
   q.view.accounting.occupied_metadata_bytes = String(BigInt(q.view.accounting.occupied_metadata_bytes) + 123n);
@@ -392,7 +444,7 @@ for (const [name, pathFor] of [
   ["future ordinal temporary", (q) => q.bundle.original.plan.layout.publications[0].temporaries[2].path],
 ]) test(`remaining planning refuses ${name} without removing it`, () => {
   const q = inputFor(fixture()), p = { ...proof("8100"), flags: "0", acl_hash: hash("no ACL") };
-  q.view.entries.push({ path: pathFor(q), kind: "file", size: p.size, sha256: p.sha256, allocated_bytes: "4096", proof: p });
+  q.view.entries.push({ path: pathFor(q), kind: "file", size: p.size, sha256: p.sha256, allocated_bytes: "4096", proof: p, directory_proof: null });
   refreshInventory(q); const before = canonical(q), r = planNativeBarRecovery(q);
   assert.equal(r.status, "blocked"); assert.equal(canonical(q), before); assert.equal(r.attempt_plan, null); assert.deepEqual(r.remaining, []);
 });

@@ -7,6 +7,7 @@ struct ReadLimits {
 };
 struct ReadEntry {
   std::string path, kind, acl = "unverified", reason;
+  std::string acl_hash;
   struct stat metadata{};
   bool evidence = false, metadata_file = false, readable = false, namespace_valid = true;
 };
@@ -16,10 +17,41 @@ struct ReadSnapshot {
   std::vector<ReadEntry> entries;
   struct stat root{};
   std::string root_acl;
+  std::vector<std::pair<struct stat, std::string>> anchors;
+  bool recovery = false;
   uint64_t inventory_bytes = 0, metadata_bytes = 0;
   bool closed = false, namespace_valid = true;
-  void release() noexcept { std::vector<ReadEntry>().swap(entries); closed = true; }
+  void release() noexcept { std::vector<ReadEntry>().swap(entries); decltype(anchors)().swap(anchors); closed = true; }
 };
+std::string recovery_acl_hash(int fd, bool directory_fd, bool strict = true) {
+  private_access(fd, directory_fd, strict);
+  auto acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); std::string bytes = "none";
+  if (!acl) require(errno == ENOENT, "acl_unverified");
+  else {
+    struct Acl { acl_t p; ~Acl() { acl_free(p); } } guard{acl};
+    ssize_t length = 0; auto raw = acl_to_text(acl, &length);
+    struct Text { char* p; ~Text() { if (p) acl_free(p); } } text_guard{raw};
+    require(raw && length >= 0 && length <= 65536, "acl_unverified"); bytes.assign(raw, static_cast<size_t>(length));
+  }
+  unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(bytes.data(), static_cast<CC_LONG>(bytes.size()), digest);
+  const char* hex = "0123456789abcdef"; std::string hash;
+  for (auto b : digest) { hash += hex[b >> 4]; hash += hex[b & 15]; } return hash;
+}
+bool recovery_anchor_equal(const struct stat& a, const struct stat& b) {
+  auto expected = a; expected.st_size = b.st_size; expected.st_nlink = b.st_nlink;
+  expected.st_mtimespec = b.st_mtimespec; expected.st_ctimespec = b.st_ctimespec;
+  return equal_metadata(expected, b);
+}
+void recovery_anchors(Session& s, const ReadSnapshot& snap) {
+  if (!s.recovery_read) return;
+  require(snap.anchors.size() == s.chain.size(), "recovery_ancestor_changed");
+  for (size_t i = 0; i < s.chain.size(); ++i) require(recovery_anchor_equal(snap.anchors[i].first, stat_fd(s.chain[i].fd.value))
+    && snap.anchors[i].second == recovery_acl_hash(s.chain[i].fd.value, true, s.chain[i].strict), "recovery_ancestor_changed");
+}
+uint64_t recovery_allocated(const struct stat& st) {
+  require(st.st_blocks >= 0 && static_cast<uint64_t>(st.st_blocks) <= UINT64_MAX / 512, "allocated_space_unverified");
+  return static_cast<uint64_t>(st.st_blocks) * 512;
+}
 void release_snapshot(Session& s) noexcept { if (auto value = s.snapshot.lock()) value->release(); s.snapshot.reset(); }
 std::string nanoseconds(timespec time) {
   __int128 n = static_cast<__int128>(time.tv_sec) * 1000000000 + time.tv_nsec;
@@ -84,10 +116,12 @@ bool evidence_name(const std::string& p) {
     || matches(p, "maintenance-hold/" + u + "/" + u)
     || matches(p, "quarantine/abandoned/" + u + "/(?:timestamp\\.json|" + u + ")");
 }
-void evidence_role(ReadEntry& e) {
+void evidence_role(ReadEntry& e, bool recovery = false) {
   const auto& p = e.path;
   const auto u = READ_UUID;
   e.evidence = evidence_name(p);
+  if (recovery && matches(p, "quarantine/abandoned/" + u + "/" + u + "\\.timestamp\\.json")) e.evidence = true;
+  if (recovery && (matches(p, "\\.(?:publication|quarantine-reserve)-" + u + "\\.tmp") || (p.find('/') == std::string::npos && e.kind == "file"))) e.evidence = true;
   // On a case-insensitive volume a folded variant of an evidence name can be the very object a reader opens by its
   // canonical name, so it must not pass as an unrelated side file.
   if (!e.evidence && evidence_name(name_key(p))) e.namespace_valid = false;
@@ -120,8 +154,9 @@ void read_hook(napi_env env, napi_value callback, const char* phase, const std::
   napi_ok_or_throw(napi_call_function(env, undefined(env), callback, 2, args, &result));
   napi_ok_or_throw(napi_typeof(env, result, &type)); require(type == napi_undefined, "test_hook_must_be_synchronous_void");
 }
-ReadLimits read_limits(napi_env env, napi_value value) {
-  ReadLimits result; napi_valuetype type; napi_ok_or_throw(napi_typeof(env, value, &type));
+ReadLimits read_limits(napi_env env, napi_value value, bool recovery = false) {
+  ReadLimits result; if (recovery) result.entries = 512;
+  napi_valuetype type; napi_ok_or_throw(napi_typeof(env, value, &type));
   if (type == napi_undefined) return result;
   require(type == napi_object, "invalid_read_limits"); napi_value keys;
   napi_ok_or_throw(napi_get_property_names(env, value, &keys)); uint32_t length;
@@ -161,13 +196,14 @@ void scan(Session& s, int fd, const std::string& path, ReadSnapshot& out, unsign
     require(e.metadata.st_dev == stat_fd(s.root()).st_dev, "cross_device_refused");
     e.kind = S_ISDIR(e.metadata.st_mode) ? "directory" : S_ISREG(e.metadata.st_mode) ? "file"
       : S_ISLNK(e.metadata.st_mode) ? "symlink" : "nonregular";
-    evidence_role(e);
+    evidence_role(e, s.recovery_read);
     require(e.metadata.st_size >= 0, "inventory_size_unverified"); out.inventory_bytes += static_cast<uint64_t>(e.metadata.st_size);
     require(out.inventory_bytes <= out.limits.inventory_bytes, "inventory_byte_limit");
     if (e.kind == "directory") {
       auto child = directory(fd, name); binding(fd, name, child.value, true);
       require(equal_metadata(e.metadata, stat_fd(child.value)), "inventory_changed");
       e.acl = private_access(child.value, true, true); out.entries.push_back(e);
+      if (s.recovery_read) out.entries.back().acl_hash = recovery_acl_hash(child.value, true);
       scan(s, child.value, e.path, out, depth + 1); binding(fd, name, child.value, true);
       require(equal_metadata(e.metadata, stat_fd(child.value)), "inventory_changed");
     } else {
@@ -182,6 +218,7 @@ void scan(Session& s, int fd, const std::string& path, ReadSnapshot& out, unsign
         try { e.acl = private_access(file.value, false, true); }
         catch (const std::runtime_error& error) { if (std::string(error.what()) != "unsafe_acl") throw; e.acl = "unsafe"; e.reason = "preserved_unsafe_acl"; }
         require(equal_metadata(e.metadata, stat_fd(file.value)), "inventory_changed");
+        if (s.recovery_read && e.reason.empty()) e.acl_hash = recovery_acl_hash(file.value, false);
       }
       if (e.reason.empty() && e.metadata.st_nlink != 1) e.reason = "preserved_hardlink";
       if (e.reason.empty() && e.metadata.st_size > 1024 * 1024) e.reason = "preserved_oversize";
@@ -197,23 +234,29 @@ void scan(Session& s, int fd, const std::string& path, ReadSnapshot& out, unsign
 }
 ReadSnapshot collect(Session& s, const ReadLimits& limits) {
   s.guard(); read_volume(s.root()); ReadSnapshot out; out.limits = limits;
+  out.recovery = s.recovery_read;
+  if (s.recovery_read) for (const auto& anchor : s.chain) out.anchors.emplace_back(stat_fd(anchor.fd.value), recovery_acl_hash(anchor.fd.value, true, anchor.strict));
   out.root_acl = private_access(s.root(), true, true); out.root = stat_fd(s.root()); scan(s, s.root(), "", out);
-  // Per entry: 512 bytes bound every fixed key, punctuation and maximal decimal/label value; the path is charged its
+  // Per entry: 512 bytes (768 in recovery mode) bound the fixed fields; each recovery anchor is charged separately. The path uses its
   // worst JSON form (6 for a control byte, 2 for a quote or backslash, 3 for a non-ASCII byte escaped as UTF-16).
-  uint64_t response_bound = 4096;
+  uint64_t response_bound = s.recovery_read ? 16384 + 768ULL * out.anchors.size() : 4096;
   for (const auto& e : out.entries) {
-    response_bound += 512;
+    response_bound += s.recovery_read ? 768 : 512;
     for (unsigned char c : e.path) response_bound += c < 0x20 ? 6 : c == 0x22 || c == 0x5c ? 2 : c >= 0x80 ? 3 : 1;
   }
   require(response_bound <= limits.response_bytes, "inventory_response_limit");
-  s.guard(); require(equal_metadata(out.root, stat_fd(s.root())), "inventory_changed"); return out;
+  s.guard(); recovery_anchors(s, out); require(equal_metadata(out.root, stat_fd(s.root())), "inventory_changed"); return out;
 }
 void same_inventory(const ReadSnapshot& a, const ReadSnapshot& b) {
   require(equal_metadata(a.root, b.root) && a.root_acl == b.root_acl && a.entries.size() == b.entries.size(), "inventory_changed");
   for (size_t i = 0; i < a.entries.size(); ++i) {
     const auto& x = a.entries[i]; const auto& y = b.entries[i];
-    require(x.path == y.path && x.acl == y.acl && x.reason == y.reason && equal_metadata(x.metadata, y.metadata), "inventory_changed");
+    require(x.path == y.path && x.acl == y.acl && x.acl_hash == y.acl_hash && x.reason == y.reason && equal_metadata(x.metadata, y.metadata)
+      && (!a.recovery || x.metadata.st_blocks == y.metadata.st_blocks), "inventory_changed");
   }
+  require(a.anchors.size() == b.anchors.size(), "recovery_ancestor_changed");
+  for (size_t i = 0; i < a.anchors.size(); ++i) require(recovery_anchor_equal(a.anchors[i].first, b.anchors[i].first)
+    && a.anchors[i].second == b.anchors[i].second, "recovery_ancestor_changed");
 }
 napi_value metadata_value(napi_env env, const struct stat& st, const std::string& acl) {
   auto out = object(env);
@@ -224,13 +267,32 @@ napi_value metadata_value(napi_env env, const struct stat& st, const std::string
   return out;
 }
 napi_value boolean_value(napi_env env, bool value) { napi_value out; napi_ok_or_throw(napi_get_boolean(env, value, &out)); return out; }
+napi_value recovery_metadata(napi_env env, const struct stat& st, const std::string& acl, const std::string& hash) {
+  auto p = metadata_value(env, st, acl); prop(env, p, "acl_hash", text(env, hash));
+  prop(env, p, "allocated_bytes", text(env, std::to_string(recovery_allocated(st)))); return p;
+}
 napi_value inventory_report(napi_env env, Session& s, const ReadSnapshot& snapshot) {
-  auto out = object(env); prop(env, out, "schema", text(env, "native-bar-native-inventory-v2"));
+  auto out = object(env); prop(env, out, "schema", text(env, s.recovery_read ? "native-bar-native-recovery-inventory-v5" : "native-bar-native-inventory-v2"));
   prop(env, out, "execution_available", boolean_value(env, false)); prop(env, out, "inventory_complete", boolean_value(env, true));
   prop(env, out, "verification_scope", text(env, "synthetic_native_read_only"));
   prop(env, out, "namespace_qualified", boolean_value(env, snapshot.namespace_valid));
   prop(env, out, "elapsed_clock_qualified", boolean_value(env, false));
   prop(env, out, "root", metadata_value(env, snapshot.root, snapshot.root_acl));
+  if (s.recovery_read) {
+    prop(env, out, "root", recovery_metadata(env, snapshot.root, snapshot.root_acl, snapshot.anchors.back().second));
+    napi_value anchors; napi_ok_or_throw(napi_create_array_with_length(env, snapshot.anchors.size() - 1, &anchors));
+    for (size_t i = 0; i + 1 < snapshot.anchors.size(); ++i) {
+      auto p = recovery_metadata(env, snapshot.anchors[i].first, private_access(s.chain[i].fd.value, true, s.chain[i].strict), snapshot.anchors[i].second);
+      napi_ok_or_throw(napi_set_element(env, anchors, i, p));
+    }
+    prop(env, out, "ancestors", anchors);
+    struct statfs fs{}; syscall_ok(fstatfs(s.root(), &fs), "available_space_unverified");
+    require(fs.f_bsize > 0 && fs.f_bavail <= UINT64_MAX / static_cast<uint64_t>(fs.f_bsize), "available_space_unverified");
+    prop(env, out, "available_bytes", text(env, std::to_string(static_cast<uint64_t>(fs.f_bavail) * fs.f_bsize)));
+    prop(env, out, "lease_read_bytes", text(env, std::to_string(s.read_bytes)));
+    prop(env, out, "live_fds", text(env, std::to_string(fd_count.load())));
+    prop(env, out, "live_sessions", text(env, std::to_string(session_count.load())));
+  }
   prop(env, out, "inventory_bytes", text(env, std::to_string(snapshot.inventory_bytes)));
   prop(env, out, "metadata_bytes", text(env, std::to_string(snapshot.metadata_bytes)));
   auto volume = object(env); auto facts = read_volume(s.root());
@@ -242,7 +304,7 @@ napi_value inventory_report(napi_env env, Session& s, const ReadSnapshot& snapsh
   for (size_t i = 0; i < snapshot.entries.size(); ++i) {
     const auto& e = snapshot.entries[i]; auto item = object(env);
     prop(env, item, "path", text(env, e.path)); prop(env, item, "kind", text(env, e.kind));
-    prop(env, item, "proof", metadata_value(env, e.metadata, e.acl));
+    prop(env, item, "proof", s.recovery_read ? recovery_metadata(env, e.metadata, e.acl, e.acl_hash) : metadata_value(env, e.metadata, e.acl));
     prop(env, item, "readable_evidence", boolean_value(env, e.readable)); prop(env, item, "namespace_qualified", boolean_value(env, e.namespace_valid));
     prop(env, item, "reason", text(env, e.reason)); napi_ok_or_throw(napi_set_element(env, entries, i, item));
   }
@@ -258,7 +320,8 @@ napi_value read_inventory(napi_env env, napi_callback_info info) {
     size_t argc = 3; napi_value args[3]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 3, "argument_count");
     auto s = session_arg(env, args[0]); Busy busy(*s); s->guard(); require(s->read_only, "read_only_session_required");
     if (auto old = s->snapshot.lock()) require(old->closed, "inventory_already_open");
-    auto limits = read_limits(env, args[2]); auto snapshot = std::make_shared<ReadSnapshot>(collect(*s, limits));
+    auto limits = read_limits(env, args[2], s->recovery_read);
+    auto snapshot = std::make_shared<ReadSnapshot>(collect(*s, limits));
     read_hook(env, args[1], "inventory_between_passes"); same_inventory(*snapshot, collect(*s, limits));
     snapshot->session = s; auto handle = wrap(env, snapshot, SNAPSHOT_TAG);
     prop(env, handle, "report", inventory_report(env, *s, *snapshot)); s->snapshot = snapshot; s->guard(); return handle;
@@ -277,13 +340,16 @@ napi_value verify_inventory(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 3; napi_value args[3]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 3, "argument_count");
     auto s = session_arg(env, args[0]); Busy busy(*s); s->guard(); read_volume(s->root()); auto snap = snapshot_arg(env, args[1], s);
-    read_hook(env, args[2], "verify_before_scan"); same_inventory(*snap, collect(*s, snap->limits)); s->guard(); return boolean_value(env, true);
+    recovery_anchors(*s, *snap);
+    read_hook(env, args[2], "verify_before_scan"); auto current = collect(*s, snap->limits); same_inventory(*snap, current); s->guard();
+    auto out = s->recovery_read ? inventory_report(env, *s, current) : boolean_value(env, true); s->guard(); return out;
   });
 }
 napi_value read_evidence(napi_env env, napi_callback_info info) {
   return boundary(env, [&] {
     size_t argc = 4; napi_value args[4]; napi_ok_or_throw(napi_get_cb_info(env, info, &argc, args, nullptr, nullptr)); require(argc == 4, "argument_count");
     auto s = session_arg(env, args[0]); Busy busy(*s); s->guard(); read_volume(s->root()); auto snap = snapshot_arg(env, args[1], s);
+    recovery_anchors(*s, *snap);
     double index; napi_ok_or_throw(napi_get_value_double(env, args[2], &index));
     require(index >= 0 && index < snap->entries.size() && index == static_cast<size_t>(index), "invalid_inventory_index");
     const auto& e = snap->entries[static_cast<size_t>(index)]; require(e.readable, "evidence_not_readable");
@@ -299,10 +365,12 @@ napi_value read_evidence(napi_env env, napi_callback_info info) {
       auto original = std::find_if(snap->entries.begin(), snap->entries.end(), [&](const ReadEntry& item) { return item.path == path; });
       require(original != snap->entries.end() && equal_metadata(original->metadata, stat_fd(dir.value)), "inventory_changed");
       binding(parent, component, dir.value, true); parents.push_back(std::move(dir)); parent = parents.back().value; start = slash + 1;
+      if (s->recovery_read) require(recovery_acl_hash(parent, true) == original->acl_hash, "recovery_parent_acl_changed");
     }
     const auto name = e.path.substr(start); exact_name(parent, name); auto file = leaf(parent, name); binding(parent, name, file.value, false);
     require(equal_metadata(e.metadata, stat_fd(file.value)), "inventory_changed");
     auto acl = private_access(file.value, false, true); require(acl == e.acl, "inventory_changed");
+    if (s->recovery_read) require(recovery_acl_hash(file.value, false) == e.acl_hash && stat_fd(file.value).st_blocks == e.metadata.st_blocks, "recovery_file_changed");
     s->read_bytes += e.metadata.st_size;
     std::vector<unsigned char> bytes(static_cast<size_t>(e.metadata.st_size)); size_t offset = 0;
     while (offset < bytes.size()) {
@@ -312,19 +380,25 @@ napi_value read_evidence(napi_env env, napi_callback_info info) {
     read_hook(env, args[3], "read_after_bytes", e.path);
     require(equal_metadata(e.metadata, stat_fd(file.value)) && private_access(file.value, false, true) == e.acl, "evidence_read_changed");
     binding(parent, name, file.value, false); exact_name(parent, name);
+    if (s->recovery_read) require(recovery_acl_hash(file.value, false) == e.acl_hash && stat_fd(file.value).st_blocks == e.metadata.st_blocks, "recovery_file_changed");
     // Recheck every pinned parent after a callback or concurrent namespace change.
     int ancestor = s->root(); size_t pos = 0;
     for (const auto& dir : parents) {
       auto slash = e.path.find('/', pos); const auto component = e.path.substr(pos, slash - pos);
       exact_name(ancestor, component); binding(ancestor, component, dir.value, true); ancestor = dir.value; pos = slash + 1;
+      if (s->recovery_read) {
+        auto original = std::find_if(snap->entries.begin(), snap->entries.end(), [&](const ReadEntry& v) { return v.path == e.path.substr(0, slash); });
+        require(original != snap->entries.end() && recovery_acl_hash(ancestor, true) == original->acl_hash, "recovery_parent_acl_changed");
+      }
     }
     s->guard(); read_volume(s->root()); require(equal_metadata(snap->root, stat_fd(s->root())), "inventory_changed");
     unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(bytes.data(), static_cast<CC_LONG>(bytes.size()), digest);
     static const char* hex = "0123456789abcdef"; std::string hash; for (auto b : digest) { hash += hex[b >> 4]; hash += hex[b & 15]; }
     auto out = object(env); napi_value content; void* copied;
     napi_ok_or_throw(napi_create_buffer_copy(env, bytes.size(), bytes.data(), &copied, &content)); prop(env, out, "bytes", content);
-    auto p = metadata_value(env, e.metadata, e.acl); prop(env, p, "sha256", text(env, hash)); prop(env, out, "proof", p);
+    auto p = s->recovery_read ? recovery_metadata(env, e.metadata, e.acl, e.acl_hash) : metadata_value(env, e.metadata, e.acl);
+    prop(env, p, "sha256", text(env, hash)); prop(env, out, "proof", p);
     prop(env, out, "execution_available", boolean_value(env, false)); prop(env, out, "lease_read_bytes", text(env, std::to_string(s->read_bytes)));
-    s->guard(); return out;
+    s->guard(); recovery_anchors(*s, *snap); return out;
   });
 }
