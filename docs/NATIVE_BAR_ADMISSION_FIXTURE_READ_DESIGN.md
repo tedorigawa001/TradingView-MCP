@@ -247,7 +247,7 @@ Budget input separates data/witness/common inventory counters, additional retain
 
 `model_fits:true` describes these supplied numbers, not their truth. The function has no mutable counters to consume or reset and cannot mint a read context. Native counter enforcement, actual ACL/content/marker checks, resource reservation/release, full Unicode names, clock/deadline guards and paired final rehash remain B-2b/B-2c. C0/C1/provider sequencing remains B-3; B-2a has no actual clock or provider.
 
-Verification: 99 memory-only synthetic cases plus three source-boundary cases pass (102 B-2a); the combined E-A/B-1/B-2a run passes 279 cases with zero failures/cancellations/skips. Isolated TypeScript compilation and no-emit typechecking are used, not a shared MCP build. Missing-module/function tracer tests failed before implementation; ordinary side-directory misclassification, mandatory-read undercount and known-ticket close after revocation were each reproduced before correction. Close on a known ticket remains release-only/idempotent even after registry/bootstrap revocation; a foreign/copied ticket still refuses, and all non-close operations remain revoked. This step does not run the general unit/Bookmap/native suites because they create disk fixtures or generated fixture artifacts; it claims no such regression or native qualification. No fixture, key, signature or marker is persisted. Independent review and other Node/runtime profiles are not qualified by this implementation step.
+Initial verification (before the review corrections below, which bring these to 104 and 281): 99 memory-only synthetic cases plus three source-boundary cases pass (102 B-2a); the combined E-A/B-1/B-2a run passes 279 cases with zero failures/cancellations/skips. Isolated TypeScript compilation and no-emit typechecking are used, not a shared MCP build. Missing-module/function tracer tests failed before implementation; ordinary side-directory misclassification, mandatory-read undercount and known-ticket close after revocation were each reproduced before correction. Close on a known ticket remains release-only/idempotent even after registry/bootstrap revocation; a foreign/copied ticket still refuses, and all non-close operations remain revoked. This step does not run the general unit/Bookmap/native suites because they create disk fixtures or generated fixture artifacts; it claims no such regression or native qualification. No fixture, key, signature or marker is persisted. Independent review and other Node/runtime profiles are not qualified by this implementation step.
 
 ## B-2a Review Corrections
 
@@ -290,3 +290,46 @@ The subsequent user-approved pre-commit local review covers the 17 B-2b source, 
 After correction, normal and UBSan isolated runs each pass **49 native synthetic cases + 4 reader boundary cases + 281 existing pure cases = 334**, with zero failures/cancellations/skips on the tested macOS APFS host. TypeScript no-emit checking, Clang static analysis and diff whitespace checks pass. Source-boundary coverage now rejects inherited-property assignment in the new native module. Every native case returns its starting FD/root-lease counts. The old response-setter test now verifies non-invocation, and the observation-time test uses the explicit synthetic read hook rather than depending on prototype callbacks.
 
 No further must-fix issue remains within this local review scope. This is not a separate independent review or completion of B-2c's wider integration/compatibility/error-injection matrix above. The general native recovery/worker/SIGKILL, Bookmap and broad fixture suites were not run; the only new worker is the narrowly owned empty-fixture churn regression. All fixture creation/removal is newly invented and unsigned. No real store, key/signature persistence, MCP registration, production enablement, Dot restart or market/notification/retention condition change is performed. Dot remains PAUSED with unchanged full/condition hashes. Normal shared JS/native build hashes match their review-start values. The 17 B-2b files are the authorized local commit scope; no push or distribution is included.
+
+## B-2a Independent Review And B-2b Read-Budget Corrections
+
+A separate read-only review of `9ecd7a5` (B-2a) found no must-fix issue, three should-fix issues, four low-priority issues and three informational notes. The committer's review of `ec717b6` (B-2b) then found two should-fix read-path issues, one confirmed by measurement. All twelve corrections below were reproduced against the committed builds first.
+
+**B-2b read path.**
+
+1. *Directory listings drained the read budget.* Every exact-name check listed the whole parent directory: the shared OS temp anchor, intermediate directories and the witness root. Each listed name was charged `sizeof(dirent)` (1,048 bytes on this host), and every indexed read repeated these guards about three times.
+   - Measured on `ec717b6`, each 58-byte unsigned witness record cost about 2.1–2.4 MB of the 256 MiB read budget.
+   - Reading and verifying 120 records failed with `admission_read_limit`, so E-A's 512-record ledger could never be read.
+   - Now names are charged at the record length actually returned. Exact names are listed only when a control is first pinned. Later reads rely on the name-to-object binding and the full metadata (mtime/ctime, allocation, ACL) of the unchanged parent, root and snapshot directories, which any rename inside the private fixture changes.
+   - The fixture parent's exact four-name namespace and every in-scope inventory listing remain.
+   - Afterwards each record costs about 104 KB. 120 records are read and verified in 13.1 MB, and 480 in 51.7 MB (about 20% of the budget). A fixture whose combined inventory exceeds 512 entries is still refused by the unchanged entry ceiling, as designed.
+2. *Shared temp entries blocked opening.* The opener and guards listed the shared OS ancestors with the 512-entry cap and the fold-collision rule, so unrelated temp entries could refuse the fixture.
+   - The allowed per-user temp anchor holds 34,336 entries on this host and could never open. `/private/tmp` would fail past 511 entries, or on a case-sensitive volume holding an unrelated fold collision.
+   - Shared ancestors are no longer listed. They keep pinned identity/access bindings and no-follow name-to-object checks, so unrelated temp activity is not fixture mutation, as designed.
+
+**B-2a contracts and their native mirror.**
+
+3. *Name check cap.* `checkSyntheticAdmissionReadNames` held a full 512-entry inventory to one record's 64 KiB and refused it. It now allows `entries × 1 KiB`.
+4. *Read floor.* The floor counted the first marker/policy read only. It now derives the native protocol's mandatory work regardless of supplied counters: each distinct content read three times plus the final rehash, each pass with a 64 KiB guard allowance; four joint inventory passes at 3 KiB per entry; and control rereads at open, in each pass, at verification and around every content pass. Directory/ACL/metadata work beyond these is added as supplied.
+5. *Boundary tests.* All four boundary tests (E-A, B-1, B-2a, reader) now require named imports only. A default or namespace import of `node:process` or `node:crypto` reached `env`, `dlopen`, `createSign` and `randomInt`. E-A/B-1/B-2a now allow `Date` only as the object of `Date.parse`, which catches `(Date).now()`, `new (Date)()` and `Reflect.construct(Date, [])`. B-2a gains B-1's crypto bans and a bypass self-test.
+6. *Legacy private names.* `retention.json`, v5 `.stage` names under captures/receipts and R-D `.publication-<uuid>.tmp` are blocked as unknown private entries, in both B-2a and the native classifier, instead of passing as ordinary side files.
+7. *Implied parent collisions.* Names colliding only through an implied parent folder (`A` and `a/x`) are refused.
+8. *Budget input cap.* A budget request now has its own 256 KiB cap, so any registration that validates alone (up to 64 KiB) also fits a budget request.
+9. *Stale counts.* The stale B-2a counts above are labeled as pre-correction values.
+
+**Clarifications.**
+
+10. The owner-PID check cannot fail within one process; it is defensive only, since tokens cannot cross processes.
+11. A bootstrap pins anchor, pins and authority reference, not `fixture_name`. Separate registries may register differently named fixtures under the same pins, and B-3 must bind the intended fixture itself.
+12. Evidence-shaped names misplaced in the data root (for example `1.json` or `admission-witness/1.json` under `store`) are ordinary side files: preserved and counted, never evidence. Separately, any unsafe file in scope (mode, owner, link count or ACL), including an ordinary side file such as a 0644 `.DS_Store`, makes `access_qualified` false and blocks final verification. This is deliberate conservatism, not an ordinary-side exception.
+
+**Tests and verification.**
+
+New regressions include a 120-record read and verify within budget, a fixture under the per-user temp anchor, legacy names blocking the final view, a 512-entry name check, implied-parent collisions, the derived read floor, a near-64 KiB registration in a budget request, and bypass self-tests in every boundary test. The seven runtime regressions fail on the committed builds. The new native tests close their context in `finally`. Otherwise a failed assertion would hold the leases, the FD/lease check would fail, and the fixture cleanup would be skipped; this was observed once against the old build and the stray fixture removed.
+
+Verification, from a git-archive copy plus this patch, with source/test hashes fixed:
+- Normal and UBSan isolated B-2 runs each pass 342 cases with zero failures/cancellations/skips and zero UBSan runtime errors.
+- The general native suite passes all 880 existing cases, including the complete R-D SIGKILL traces. Its 52 skips are the B-2b-only cases outside isolated mode.
+- The full unit suite passes 2,560 cases, with two existing skips.
+
+New fixtures are invented and unsigned, created and removed by the tests themselves. Two older `/private/tmp` and three per-user temp `native-bar-fs-synthetic-*` directories predate this work and were left untouched. No real store, signing/key persistence, MCP registration, production enablement, push or Dot/market/notification/retention change is included.

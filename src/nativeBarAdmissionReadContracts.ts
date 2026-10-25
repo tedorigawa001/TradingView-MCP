@@ -39,7 +39,7 @@ const noAuthority = Object.freeze({ scope: "synthetic_fixture_only" as const, ve
 const bytes = (v: unknown) => Buffer.byteLength(canonical(v));
 
 // Structured contracts only: never traverse accessors, exotic arrays or unbounded strings before schema work.
-function bounded(value: unknown, limit = L.record_bytes) {
+function bounded(value: unknown, limit: number = L.record_bytes) {
   let size = 0, nodes = 0; const active = new Set<object>();
   function visit(v: unknown, depth: number) {
     if (++nodes > 262144 || depth > 64) throw new Error("b2a_input_depth_or_nodes");
@@ -63,8 +63,8 @@ function bounded(value: unknown, limit = L.record_bytes) {
   }
   visit(value, 0); if (bytes(value) > limit) throw new Error("b2a_input_bytes");
 }
-function parse<T>(schema: z.ZodType<T>, input: unknown): T {
-  bounded(input); const result = schema.safeParse(input);
+function parse<T>(schema: z.ZodType<T>, input: unknown, limit: number = L.record_bytes): T {
+  bounded(input, limit); const result = schema.safeParse(input);
   if (!result.success) throw new Error("b2a_invalid_input"); return result.data;
 }
 function identities(pins: z.infer<typeof pinsSchema>, reference: string) {
@@ -192,7 +192,9 @@ function shape(root: z.infer<typeof roleSchema>, p: string): Shape {
   if (is(`maintenance/${U}\\.(?:manifest|attempts|events)`)) return out("directory", null, true);
   if (is(`\\.writer\\.(?:lock|takeover)|\\.writer-(?:claim|ticket)-${U}\\.json|\\.writer-retired-${U}\\.lock`)) return out("coordination", L.record_bytes);
   if (is(`\\.quarantine-reserve-${U}\\.tmp`)) return out("reserve", null);
-  if (/^(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:\/|$)|^\.(?:ea-|producer-|writer|quarantine-reserve-)/.test(p)) return out("unknown_private", null);
+  // Legacy v1/v5/R-D private names (retention, v5 stages, R-D publication temporaries) never belong in a v6 store.
+  if (/^(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:\/|$)|^\.(?:ea-|producer-|writer|quarantine-reserve-|publication-)|^retention\.json$|^(?:captures|receipts)\/.*\.stage$/.test(p))
+    return out("unknown_private", null);
   return out("ordinary_side", null);
 }
 export function classifySyntheticAdmissionReadEntry(input: unknown) {
@@ -215,11 +217,19 @@ export function classifySyntheticAdmissionReadEntry(input: unknown) {
     raw_read_candidate: blocker === null && !s.directory && !s.pending && s.limit !== null };
 }
 export function checkSyntheticAdmissionReadNames(input: unknown) {
-  const names = parse(z.array(entrySchema.pick({ root_role: true, path: true })).max(L.entries), input), seen = new Set<string>();
+  // A full inventory of 512 entries with 512-byte paths must fit, so this input is not held to one record's 64 KiB.
+  const names = parse(z.array(entrySchema.pick({ root_role: true, path: true })).max(L.entries), input, L.entries * 1024);
+  const seen = new Set<string>(), exact = new Map<string, string>();
   for (const n of names) {
     if (/[^\x20-\x7e]/.test(n.path)) throw new Error("b2a_native_name_check_required");
     const key = canonical([n.root_role, n.path.toLowerCase()]);
     if (seen.has(key)) throw new Error("b2a_name_collision"); seen.add(key);
+    // Implied parent folders collide too: "A" and "a/x" name one folder in two spellings, even when "a" is not listed.
+    const parts = n.path.split("/");
+    for (let i = 1; i <= parts.length; ++i) {
+      const prefix = parts.slice(0, i).join("/"), folded = canonical([n.root_role, prefix.toLowerCase()]), known = exact.get(folded);
+      if (known !== undefined && known !== prefix) throw new Error("b2a_name_collision"); exact.set(folded, prefix);
+    }
   }
   return { ...noAuthority, supplied_ascii_names_distinct: true as const, native_names_verified: false as const };
 }
@@ -240,13 +250,16 @@ const budgetSchema = z.strictObject({ registration: nativeBarAdmissionReadRegist
   resources: z.strictObject({ live_roots: uint, live_targets: uint, live_fds: uint }) });
 /** Model of supplied counters only. It neither observes nor reserves a native resource. */
 export function calculateSyntheticAdmissionReadBudget(input: unknown) {
-  const q = parse(budgetSchema, input), r = validateSyntheticAdmissionReadRegistration(q.registration), limits = readLimits(q.limits);
+  // The request carries a whole registration (itself capped at 64 KiB) plus counters, so it gets its own larger cap.
+  const q = parse(budgetSchema, input, 256 * 1024), r = validateSyntheticAdmissionReadRegistration(q.registration), limits = readLimits(q.limits);
   const max = (a: bigint, b: bigint) => a > b ? a : b;
   const registrationBytes = BigInt(bytes(r) + 44), policyBytes = BigInt(bytes(NATIVE_BAR_ADMISSION_PROFILE));
   const markers = BigInt(r.bindings.markers.base.size) + BigInt(r.bindings.markers.admission.size);
   const commonEntries = BigInt(r.bindings.ancestors.length + 5);
   const data = q.inventory.data, witness = q.inventory.witness, common = q.inventory.common;
   const work = q.read_work.reduce((sum, w) => sum + BigInt(w.bytes) * BigInt(w.count), 0n);
+  const reads = q.read_work.filter((w) => w.kind === "content");
+  const contentObjects = reads.reduce((n, w) => n + BigInt(w.count), 0n), content = reads.reduce((n, w) => n + BigInt(w.bytes) * BigInt(w.count), 0n);
   const entries = max(BigInt(data.entries), 1n) + BigInt(witness.entries) + max(BigInt(common.entries), commonEntries);
   // Per entry: bounded proofs/classification/Buffer headers plus worst-case escaping of a 512-byte path.
   // Retain baseline, recheck and read-set frames; the bounded ACL serialization scratch is separate.
@@ -256,7 +269,13 @@ export function calculateSyntheticAdmissionReadBudget(input: unknown) {
     inventory_bytes: max(BigInt(data.inventory_bytes), policyBytes) + BigInt(witness.inventory_bytes) + max(BigInt(common.inventory_bytes), markers),
     metadata_bytes: registrationBytes + 3n * inventoryFrame + BigInt(L.record_bytes) + BigInt(q.retained_metadata_bytes) + max(BigInt(data.metadata_bytes), policyBytes)
       + BigInt(witness.metadata_bytes) + max(BigInt(common.metadata_bytes), markers),
-    read_bytes: work + markers + policyBytes,
+    // Mandatory protocol work, whatever the caller supplies. Each distinct content read is read three times (before/after
+    // the bytes and after the response) and rehashed once in final verification, each pass with up to 64 KiB of guard,
+    // control and parent rechecks. Four joint inventory passes (two initial, two around verification) observe every
+    // entry's name, metadata and ACL. Controls are reread at open, in every inventory pass, at final verification and
+    // around every content pass. Other supplied work (directory/ACL/metadata beyond these) is added as given.
+    read_bytes: work - content + 4n * content + 4n * contentObjects * 65536n + 4n * entries * 3072n
+      + (markers + policyBytes) * (6n + 4n * contentObjects),
     response_bytes: max(BigInt(q.response.supplied_bytes), inventoryFrame + registrationBytes + 4n * BigInt(q.response.buffer_bytes)),
   };
   const blockers: string[] = [];

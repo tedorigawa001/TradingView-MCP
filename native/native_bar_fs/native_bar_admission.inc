@@ -109,7 +109,9 @@ void aexpected(const RJson& expected, const RJson& actual) {
 std::vector<std::string> anames(AdmissionRead& c, int fd, uint64_t remaining) {
   DirectoryStream stream(fd); std::vector<std::string> result; std::set<std::string> folded;
   while (true) { c.clock(); errno = 0; auto e = readdir(stream.stream); if (!e) { require(!errno, "admission_readdir"); break; }
-    std::string name(e->d_name); if (name == "." || name == "..") continue; c.charge(sizeof(dirent) + name.size());
+    // Charge the variable record actually returned, not sizeof(dirent): its fixed 1 KiB name buffer is mostly unused.
+    std::string name(e->d_name); if (name == "." || name == "..") continue;
+    c.charge(std::max<uint64_t>(e->d_reclen, offsetof(dirent, d_name) + name.size() + 1));
     require(result.size() < remaining, "admission_entry_limit"); require(folded.insert(name_key(name)).second, "admission_name_collision"); result.push_back(name); }
   std::sort(result.begin(), result.end()); return result;
 }
@@ -121,17 +123,20 @@ std::string atemp() {
   require(n > 0 && n <= sizeof(os) && realpath(os, canonical), "admission_temp_unavailable"); return canonical;
 }
 int aroot(AdmissionRead& c, const std::string& role) { return role == "data" ? c.data.value : c.witness.value; }
+// Shared OS ancestors are never listed: unrelated temp entries cannot exhaust the entry cap, collide or consume the read
+// budget. Name-to-object binding plus pinned identity suffice there; renames inside the private fixture change the full
+// metadata (mtime/ctime) of the parent, root or listed directory that every check below compares.
 void aguard(AdmissionRead& c) {
   c.clock(); require(fd_count.load() + 48 <= 512, "admission_fd_headroom");
   for (size_t i = 0; i < c.chain.size(); ++i) {
     const bool strict = i + 1 == c.chain.size(); auto actual = abinding(c, c.chain[i].fd.value, true, strict);
     if (i + 1 < c.chain.size()) aexpected(c.registration.at("bindings").at("ancestors").a[i].at("proof"), actual);
     else { aexpected(c.registration.at("bindings").at("fixture_parent"), actual); require(equal_metadata(c.parent_stat, stat_fd(c.chain[i].fd.value)) && c.parent_stat.st_blocks == stat_fd(c.chain[i].fd.value).st_blocks, "admission_parent_changed"); }
-    if (i) { aexact(c,c.chain[i-1].fd.value,c.chain[i].name);struct stat entry{}; syscall_ok(fstatat(c.chain[i-1].fd.value, c.chain[i].name.c_str(), &entry, AT_SYMLINK_NOFOLLOW), "admission_anchor_changed");
+    if (i) { struct stat entry{}; syscall_ok(fstatat(c.chain[i-1].fd.value, c.chain[i].name.c_str(), &entry, AT_SYMLINK_NOFOLLOW), "admission_anchor_changed");
       require(S_ISDIR(entry.st_mode) && same_id(entry, stat_fd(c.chain[i].fd.value)), "admission_anchor_changed"); }
   }
   if (c.data.value >= 0) for (const auto& role : {std::string("data"),std::string("witness")}) {
-    int fd = aroot(c,role);const auto name=role == "data" ? "store" : "admission-witness";aexact(c,c.chain.back().fd.value,name);binding(c.chain.back().fd.value,name,fd,true);
+    int fd = aroot(c,role);const auto name=role == "data" ? "store" : "admission-witness";binding(c.chain.back().fd.value,name,fd,true);
     aexpected(c.registration.at("bindings").at(role), abinding(c,fd,true));
     const auto volume=read_volume(fd);const auto& expected_volume=c.registration.at("volume");
     require(volume.case_sensitive==expected_volume.at("case_sensitive").b && volume.read_only==expected_volume.at("read_only_mount").b,"admission_volume_binding");
@@ -139,8 +144,10 @@ void aguard(AdmissionRead& c) {
     require(equal_metadata(expected, stat_fd(fd)) && expected.st_blocks == stat_fd(fd).st_blocks, "admission_root_changed"); }
   c.clock();
 }
+// The exact on-disk name is listed once, when a control is first pinned; later reads compare that pinned or snapshot
+// metadata and the unchanged parent instead of relisting the directory on every check.
 std::pair<std::string,AEntry> aread(AdmissionRead& c, int parent, const std::string& name, const std::string& role, const std::string& path, uint64_t cap, const AEntry* expected = nullptr) {
-  aexact(c,parent,name); auto file = leaf(parent,name); binding(parent,name,file.value,false); const auto before = stat_fd(file.value);
+  if (!expected) aexact(c,parent,name); auto file = leaf(parent,name); binding(parent,name,file.value,false); const auto before = stat_fd(file.value);
   require(before.st_nlink == 1 && before.st_size >= 0 && static_cast<uint64_t>(before.st_size) <= cap, "admission_file_limit");
   const auto acl = aacl(c,file.value,false); if (expected) require(equal_metadata(expected->st,before) && expected->acl_hash == acl
     && expected->st.st_blocks == before.st_blocks, "admission_file_changed");
@@ -148,7 +155,7 @@ std::pair<std::string,AEntry> aread(AdmissionRead& c, int parent, const std::str
   while (offset < bytes.size()) { c.clock(); auto n = pread(file.value,bytes.data()+offset,bytes.size()-offset,offset); if (n < 0 && errno == EINTR) continue;
     require(n > 0, "admission_short_read"); offset += n; }
   require(equal_metadata(before,stat_fd(file.value)) && before.st_blocks == stat_fd(file.value).st_blocks && aacl(c,file.value,false) == acl, "admission_file_changed");
-  binding(parent,name,file.value,false); aexact(c,parent,name); AEntry e; e.role=role; e.path=path; e.kind="file"; e.st=before; e.acl=private_access(file.value,false,true); e.acl_hash=acl;
+  binding(parent,name,file.value,false); if (!expected) aexact(c,parent,name); AEntry e; e.role=role; e.path=path; e.kind="file"; e.st=before; e.acl=private_access(file.value,false,true); e.acl_hash=acl;
   return {bytes,e};
 }
 void acontrols(AdmissionRead& c, bool first) {
@@ -184,7 +191,8 @@ AShape ashape(const std::string& role, const std::string& p) {
   if(is("maintenance/"+u+"\\.(?:manifest|attempts|events)"))return out("directory",0,true);
   if(is("\\.writer\\.(?:lock|takeover)|\\.writer-(?:claim|ticket)-"+u+"\\.json|\\.writer-retired-"+u+"\\.lock"))return out("coordination",65536,false,false,true);
   if(is("\\.quarantine-reserve-"+u+"\\.tmp"))return out("reserve");
-  if(is("(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:/.*)?|\\.(?:ea-|producer-|writer|quarantine-reserve-).*"))return {"unknown_private",false,false,false,false,0};
+  // Legacy v1/v5/R-D private names (retention, v5 stages, R-D publication temporaries) never belong in a v6 store.
+  if(is("(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:/.*)?|\\.(?:ea-|producer-|writer|quarantine-reserve-|publication-).*|retention\\.json|(?:captures|receipts)/.*\\.stage"))return {"unknown_private",false,false,false,false,0};
   return out("ordinary_side");
 }
 AShape aclass(const std::string& role,const std::string& path,bool dir) {
@@ -291,7 +299,7 @@ std::shared_ptr<ASnapshot> asnapshot(napi_env env,napi_value v,const std::shared
 std::pair<std::string,AEntry> aselected(AdmissionRead& c,const ASnapshot& snap,size_t index) {
   const auto& e=snap.entries.at(index);require(e.readable && (e.role=="data"||e.role=="witness"),"admission_not_readable");
   aguard(c);acontrols(c,false); auto parts=aparts(e.path);int parent=aroot(c,e.role);std::vector<Fd> chain;std::string prefix;
-  for(size_t i=0;i+1<parts.size();++i) {if(i)prefix+='/';prefix+=parts[i];aexact(c,parent,parts[i]);auto dir=directory(parent,parts[i]);binding(parent,parts[i],dir.value,true);
+  for(size_t i=0;i+1<parts.size();++i) {if(i)prefix+='/';prefix+=parts[i];auto dir=directory(parent,parts[i]);binding(parent,parts[i],dir.value,true);
     const auto expected=std::find_if(snap.entries.begin(),snap.entries.end(),[&](const auto& item){return item.role==e.role && item.path==prefix;});
     require(expected!=snap.entries.end() && equal_metadata(expected->st,stat_fd(dir.value)) && expected->st.st_blocks==stat_fd(dir.value).st_blocks
       && expected->acl_hash==aacl(c,dir.value,true),"admission_parent_changed");chain.push_back(std::move(dir));parent=chain.back().value; }
@@ -333,7 +341,7 @@ napi_value open_admission_pair(napi_env env,napi_callback_info info) {
     c->chain.push_back({Fd(open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC)),"",false});
     aexpected(c->registration.at("bindings").at("ancestors").a[0].at("proof"),abinding(*c,c->chain.back().fd.value,true,false));
     auto parts=aparts(anchor.substr(1));parts.push_back(c->registration.at("fixture_name").str());
-    for(size_t i=0;i<parts.size();++i) {c->clock();const bool strict=i+1==parts.size();aexact(*c,c->chain.back().fd.value,parts[i]);
+    for(size_t i=0;i<parts.size();++i) {c->clock();const bool strict=i+1==parts.size();
       Fd fd(openat(c->chain.back().fd.value,parts[i].c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC));
       struct stat linked{};syscall_ok(fstatat(c->chain.back().fd.value,parts[i].c_str(),&linked,AT_SYMLINK_NOFOLLOW),"admission_anchor_changed");
       require(S_ISDIR(linked.st_mode) && same_id(linked,stat_fd(fd.value)),"admission_anchor_changed");

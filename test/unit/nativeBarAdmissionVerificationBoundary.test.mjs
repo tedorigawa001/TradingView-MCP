@@ -17,6 +17,11 @@ function imports(file) {
   }
   visit(file); return out;
 }
+// A default or namespace import would reach the whole module (for example crypto.createSign or crypto.randomInt).
+function namedOnly(file) {
+  return file.statements.filter((n) => ts.isImportDeclaration(n)).every((n) => !n.importClause
+    || !n.importClause.name && (!n.importClause.namedBindings || ts.isNamedImports(n.importClause.namedBindings)));
+}
 // Global-object, constructor and clock aliases are refused by name, so string-built property names cannot reach them.
 const forbidden = new Set(["process", "require", "eval", "fetch", "WebSocket", "createPrivateKey", "createPublicKey", "sign", "createSign",
   "generateKeyPair", "generateKeyPairSync", "randomUUID", "randomBytes", "randomInt", "getRandomValues", "webcrypto", "crypto",
@@ -26,9 +31,9 @@ function violations(file) {
   function visit(n) {
     if (ts.isIdentifier(n) && forbidden.has(n.text)) out.push(n.text);
     if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) out.push("dynamic_import");
-    if (ts.isPropertyAccessExpression(n) && n.expression.getText() === "Date" && n.name.text === "now") out.push("Date.now");
-    if (ts.isCallExpression(n) && n.expression.getText() === "Date") out.push("Date()");
-    if (ts.isNewExpression(n) && n.expression.getText() === "Date" && !n.arguments?.length) out.push("new Date()");
+    // Only Date.parse is a pure conversion; any other Date reference (parenthesized, aliased, constructed) may read the clock.
+    if (ts.isIdentifier(n) && n.text === "Date"
+      && !(ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === "parse")) out.push("Date");
     if (ts.isCallExpression(n) && n.expression.getText() === "Math.random") out.push("Math.random");
     ts.forEachChild(n, visit);
   }
@@ -41,13 +46,17 @@ test("B-1 runtime imports only public-key verification/hash APIs and the existin
   assert.deepEqual(crypto.importClause.namedBindings.elements.map((n) => n.propertyName?.text ?? n.name.text).sort(), ["KeyObject", "createHash", "verify"].sort());
 });
 test("B-1 has no signer, native loader, file/network/process access, ambient clock or challenge generator", () => {
-  assert.deepEqual(violations(parse(name)), []);
+  assert.deepEqual(violations(parse(name)), []); assert.ok(namedOnly(parse(name)), "named imports only");
 });
 test("B-1 source checks catch aliased clocks, global lookups, constructors and dynamic imports", () => {
   for (const text of ["Date()", "globalThis.Date.now()", "new globalThis.Date()", "const now = Date.now; now()", "performance.now.call(performance)",
     "globalThis.crypto.getRandomValues(new Uint8Array(1))", "globalThis['proc' + 'ess']", "Function('return this')()",
-    "Reflect.get(globalThis, 'fet' + 'ch')", "new Date()", "export const f = () => import('./x.js')"])
+    "Reflect.get(globalThis, 'fet' + 'ch')", "new Date()", "export const f = () => import('./x.js')",
+    "(Date).now()", "new (Date)()", "Reflect.construct(Date, [])", "const D = Date"])
     assert.ok(violations(snippet(text)).length, text);
+  assert.deepEqual(violations(snippet("Date.parse('2026-10-25T00:00:00.000Z')")), []);
+  for (const text of ['import nc, { verify } from "node:crypto"; nc.createSign("sha256")', 'import * as nc from "node:crypto"; nc.randomInt(1)'])
+    assert.equal(namedOnly(snippet(text)), false, text);
   assert.deepEqual(imports(snippet('export const f = () => import("./nativeBarAdmissionVerification.js");')), ["./nativeBarAdmissionVerification.js"]);
 });
 test("B-1 is used only by the approved memory-only B-2a contracts, not startup or MCP", () => {

@@ -13,16 +13,26 @@ function ast(file) { return ts.createSourceFile(file, readFileSync(new URL(file,
 function imports(file) {
   const out = []; function visit(n) {
     if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier) out.push(n.moduleSpecifier.text);
-    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) out.push("dynamic_import");
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) out.push(ts.isStringLiteralLike(n.arguments[0]) ? n.arguments[0].text : "dynamic_import");
     ts.forEachChild(n, visit);
   } visit(file); return out;
 }
+// A default or namespace import would reach the whole module (for example process.env or process.dlopen).
+function namedOnly(file) {
+  return file.statements.filter((n) => ts.isImportDeclaration(n)).every((n) => !n.importClause
+    || !n.importClause.name && (!n.importClause.namedBindings || ts.isNamedImports(n.importClause.namedBindings)));
+}
+const snippet = (text) => ts.createSourceFile("snippet.ts", text, ts.ScriptTarget.Latest, true);
 test("B-2b has one fixed optional loader and no storage/network/signer/settings imports", () => {
   const file = ast(name);
   assert.deepEqual(imports(file), ["node:module", "node:perf_hooks", "node:process", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js"]);
+  assert.ok(namedOnly(file), "named imports only");
+  for (const text of ['import proc, { platform } from "node:process"; proc.dlopen', 'import * as m from "node:module"'])
+    assert.equal(namedOnly(snippet(text)), false, text);
   const loaders = [];
   function visit(n) {
-    if (ts.isIdentifier(n)) assert.ok(!["process", "require", "eval", "fetch", "WebSocket", "Function", "global", "globalThis", "sign", "createPrivateKey", "generateKeyPairSync", "randomUUID", "randomBytes"].includes(n.text), n.text);
+    if (ts.isIdentifier(n)) assert.ok(!["process", "require", "eval", "fetch", "WebSocket", "Function", "global", "globalThis", "sign", "createSign",
+      "createPrivateKey", "generateKeyPairSync", "randomUUID", "randomBytes", "randomInt", "getRandomValues", "webcrypto", "crypto"].includes(n.text), n.text);
     if (ts.isCallExpression(n) && n.expression.getText() === "createRequire(import.meta.url)") loaders.push(n.arguments[0].text);
     ts.forEachChild(n, visit);
   } visit(file); assert.deepEqual(loaders, ["./native-bar-fs/native_bar_fs.node"]);

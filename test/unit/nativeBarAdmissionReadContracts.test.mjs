@@ -60,11 +60,14 @@ function budget() {
     resources: { live_roots: "0", live_targets: "0", live_fds: "0" } };
 }
 test("B-2a counts data, witness, fixed controls and repeated reads in one supplied budget without qualifying native capacity", () => {
-  const q = budget(), controls = BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.read_bytes);
+  const q = budget(), m = q.registration.bindings.markers;
+  const controls = BigInt(m.base.size) + BigInt(m.admission.size) + BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
   q.inventory.data.entries = "250"; q.inventory.witness.entries = "250";
   q.read_work = [{ kind: "content", bytes: "1000", count: "3" }, { kind: "acl", bytes: "500", count: "2" }];
   const r = api.calculateSyntheticAdmissionReadBudget(q);
-  assert.equal(r.model_fits, true); assert.equal(r.used.entries, "508"); assert.equal(r.used.read_bytes, String(4000n + controls));
+  // Supplied ACL work as given; three content objects four times each with guard passes; four inventory passes; controls.
+  assert.equal(r.model_fits, true); assert.equal(r.used.entries, "508");
+  assert.equal(r.used.read_bytes, String(1000n + 4n * 3000n + 4n * 3n * 65536n + 4n * 508n * 3072n + controls * (6n + 4n * 3n)));
   assert.equal(r.capacity_verified, false); assert.equal(r.native_read_available, false);
   q.inventory.witness.entries = "255";
   assert.deepEqual(api.calculateSyntheticAdmissionReadBudget(q).blockers, ["entries_limit"]);
@@ -207,7 +210,7 @@ for (const key of ["entries", "inventory_bytes", "metadata_bytes", "read_bytes",
     if (key === "entries") q.inventory.data.entries = String(n - 8);
     else if (key === "inventory_bytes") q.inventory.witness.inventory_bytes = String(n - Number(base.used.inventory_bytes));
     else if (key === "metadata_bytes") q.retained_metadata_bytes = String(n - Number(base.used.metadata_bytes));
-    else if (key === "read_bytes") q.read_work = [{ kind: "content", bytes: String(n - Number(base.used.read_bytes)), count: "1" }];
+    else if (key === "read_bytes") q.read_work = [{ kind: "metadata", bytes: String(n - Number(base.used.read_bytes)), count: "1" }];
     else q.response.supplied_bytes = String(n);
     return api.calculateSyntheticAdmissionReadBudget(q);
   }
@@ -294,4 +297,43 @@ test("B-2a derives inventory response and retained-proof floors from entry count
     }
     delete q.limits;
   }
+});
+test("B-2a a full 512-entry name inventory fits the name check, and implied parent folders collide by case", () => {
+  const names = Array.from({ length: 512 }, (_, i) => ({ root_role: "data", path: `quarantine/abandoned/${id(1)}/${id(i + 2)}.timestamp.json` }));
+  assert.equal(api.checkSyntheticAdmissionReadNames(names).supplied_ascii_names_distinct, true);
+  const long = Array.from({ length: 512 }, (_, i) => ({ root_role: "witness", path: `${"d".repeat(400)}/${String(i).padStart(100, "0")}.json` }));
+  assert.equal(api.checkSyntheticAdmissionReadNames(long).supplied_ascii_names_distinct, true);
+  for (const pair of [["A", "a/x"], ["A/x", "a/y"], ["producer/x", "Producer/y"]])
+    assert.throws(() => api.checkSyntheticAdmissionReadNames(pair.map((path) => ({ root_role: "data", path }))), /name_collision/, pair.join(" "));
+  assert.equal(api.checkSyntheticAdmissionReadNames([{ root_role: "data", path: "a/x" }, { root_role: "data", path: "a/y" }, { root_role: "witness", path: "A/z" }])
+    .supplied_ascii_names_distinct, true);
+});
+test("B-2a read floor charges final rehash, per-read rechecks and every inventory pass even with no supplied work", () => {
+  const q = budget(); q.inventory.data.entries = "500";
+  const empty = BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.read_bytes);
+  assert.ok(empty >= 4n * 508n * 3072n, "four joint inventory passes over every entry");
+  q.read_work = [{ kind: "content", bytes: "1048576", count: "1" }];
+  const one = BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.read_bytes);
+  assert.ok(one - empty >= 4n * 1048576n, "three bounded reads plus the final rehash of the same object");
+  q.limits = { read_bytes: Number(empty + 2n * 1048576n) }; assert.ok(api.calculateSyntheticAdmissionReadBudget(q).blockers.includes("read_bytes_limit"));
+});
+test("B-2a legacy v1/v5/R-D private names are blocked, not preserved as ordinary side files", () => {
+  for (const path of [`.publication-${id(10)}.tmp`, "retention.json", `captures/2026-10-25/.${id(10)}-0123abcd-1-0123456789ab.stage`, `receipts/2026-10-25/x.stage`]) {
+    const r = classify("data", path); assert.equal(r.role, "unknown_private", path); assert.equal(r.namespace_status, "blocked", path);
+  }
+  assert.equal(classify("data", "captures/2026-10-25/.DS_Store").namespace_status, "ordinary_side");
+});
+test("B-2a a budget request may carry any registration that validates alone", () => {
+  const q = budget(), r = q.registration, root = structuredClone(r.bindings.ancestors[0].proof);
+  // Sixteen ancestors (the maximum) whose first component is long enough to bring the registration just under 64 KiB.
+  function stretch(length) {
+    r.temp_anchor = "/" + ["a".repeat(length), ...Array.from({ length: 14 }, (_, i) => `t${i}`)].join("/");
+    const paths = ["/", ...r.temp_anchor.slice(1).split("/").map((_, i, a) => "/" + a.slice(0, i + 1).join("/"))];
+    r.bindings.ancestors = paths.map((path, i) => ({ path, proof: { ...structuredClone(root), inode: String(900000 + i) } }));
+    return Buffer.byteLength(canonical(r));
+  }
+  const base = stretch(1); stretch(Math.min(4000, Math.floor((65536 - 256 - base) / 16)));
+  assert.ok(Buffer.byteLength(canonical(r)) > 65536 - 4096 && Buffer.byteLength(canonical(r)) <= 65536);
+  assert.equal(api.validateSyntheticAdmissionReadRegistration(r).schema, "native-bar-admission-read-registration-v1");
+  assert.equal(api.calculateSyntheticAdmissionReadBudget(q).schema, "native-bar-admission-read-budget-v1");
 });

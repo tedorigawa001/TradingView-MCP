@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, statfsSync,
-  rmSync, symlinkSync, linkSync, renameSync } from "node:fs";
+  rmSync, symlinkSync, linkSync, renameSync, realpathSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -23,9 +23,9 @@ const hash = (v) => createHash("sha256").update(v).digest("hex");
 const policy = canonical({ schema: "native-bar-synthetic-admission-profile-v6" });
 const limits = { entries: 512, inventory_bytes: 1073741824, metadata_bytes: 16777216, read_bytes: 268435456, response_bytes: 8388608 };
 const unsigned = Buffer.from('{"invented":"unsigned B-2b bytes, not admission evidence"}');
-function fixture(t, setup = () => {}) {
+function fixture(t, setup = () => {}, anchor = "/private/tmp") {
   // This call exclusively creates the directory we own. Cleanup never accepts an external path.
-  const base = mkdtempSync("/private/tmp/native-bar-fs-synthetic-"); chmodSync(base, 0o700);
+  const base = mkdtempSync(`${anchor}/native-bar-fs-synthetic-`); chmodSync(base, 0o700);
   let bootstrap;
   t.after(() => { try { bootstrap?.close(); } finally { rmSync(base, { recursive: true, force: true }); } });
   const write = (path, bytes = unsigned) => {
@@ -43,9 +43,9 @@ function fixture(t, setup = () => {}) {
   const observed = spawnSync(helper, [base], { encoding: "utf8" });
   assert.equal(observed.status, 0, observed.stderr); const expectation = JSON.parse(observed.stdout);
   const registration = { schema: "native-bar-admission-read-registration-v1", scope: "synthetic_fixture_only", pins,
-    authority_reference: id(6), temp_anchor: "/private/tmp", fixture_name: basename(base), policy_hash: hash(policy), ...expectation };
+    authority_reference: id(6), temp_anchor: anchor, fixture_name: basename(base), policy_hash: hash(policy), ...expectation };
   bootstrap = contracts.createSyntheticAdmissionReadBootstrap({ schema: "native-bar-admission-read-bootstrap-v1", scope: "synthetic_fixture_only",
-    pins, authority_reference: id(6), temp_anchor: "/private/tmp" }, publicKey);
+    pins, authority_reference: id(6), temp_anchor: anchor }, publicKey);
   const registry = createSyntheticAdmissionNativeReadRegistry(bootstrap.token), ticket = registry.registerFixture(registration);
   return { base, write, registration, registry, ticket, bootstrap, begin: (lower, ttl) => registry.beginRead(ticket, lower, ttl),
     raw: (lower = {}, ttl_ms = 600000) => native.beginAdmissionRead(Buffer.from(canonical({ registration, limits: { ...limits, ...lower }, ttl_ms }))) };
@@ -313,4 +313,33 @@ run("B-2b native relative paths obey the same 16-component boundary as B-2a", (t
   const rejected = fixture(t, ({ write }) => write(`store/${Array(16).fill("d").join("/")}/leaf`)), other = rejected.begin();
   try { assert.throws(() => other.openPair().inventory(), /depth_limit/); }
   finally { other.close(); }
+});
+run("B-2b a 120-record witness ledger is read and verified without listing shared directories into the read budget", (t) => {
+  const f = fixture(t, ({ write }) => { for (let i = 2; i <= 120; ++i) write(`admission-witness/${i}.json`); });
+  // Close in finally: a failed assertion must not hold the leases, which would also skip the fixture's own cleanup.
+  const c = f.begin();
+  try {
+    const snap = c.openPair().inventory(), start = BigInt(snap.report.read_bytes);
+    const witness = snap.report.entries.filter((e) => e.root_role === "witness" && e.readable_evidence); assert.equal(witness.length, 120);
+    for (const e of witness) snap.readEvidence("witness", e.index);
+    const verified = snap.verify(); assert.equal(verified.native_snapshot_verified, true);
+    // Each 58-byte record cost about 2.2 MB when every exact-name check relisted the temp anchor and the witness root.
+    assert.ok((BigInt(verified.read_bytes) - start) / 120n < 256n * 1024n, `per-record read work ${(BigInt(verified.read_bytes) - start) / 120n}`);
+  } finally { c.close(); }
+});
+// The canonical per-user temp directory is an allowed anchor; on a busy host it holds far more than 512 unrelated entries.
+const userTemp = eligible ? realpathSync(spawnSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).stdout.trim()) : null;
+run("B-2b the per-user temp anchor opens regardless of how many unrelated entries it holds", (t) => {
+  const f = fixture(t, () => {}, userTemp), c = f.begin();
+  try { assert.equal(c.openPair().inventory().verify().native_snapshot_verified, true); } finally { c.close(); }
+});
+run("B-2b legacy v1/v5/R-D private names block the final view instead of passing as ordinary side files", (t) => {
+  for (const legacy of ["retention.json", `.publication-${id(20)}.tmp`, `captures/2026-10-25/.${id(21)}-0123abcd-1-0123456789ab.stage`]) {
+    const f = fixture(t, ({ write }) => write(`store/${legacy}`)), c = f.begin();
+    try {
+      const snap = c.openPair().inventory(), e = snap.report.entries.find((e) => e.root_role === "data" && e.path === legacy);
+      assert.equal(e.role, "unknown_private", legacy); assert.equal(snap.report.namespace_qualified, false);
+      assert.throws(() => snap.verify(), /unqualified/);
+    } finally { c.close(); }
+  }
 });

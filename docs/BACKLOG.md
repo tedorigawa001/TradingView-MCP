@@ -4,6 +4,25 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B-2a独立レビューとB-2b読取予算の修正 (2026-10-26 JST)**: [記録](NATIVE_BAR_ADMISSION_FIXTURE_READ_DESIGN.md#b-2a-independent-review-and-b-2b-read-budget-corrections)。B-2a(`9ecd7a5`)の別担当レビュー(修正必須なし・中3・低4・参考3)と、B-2b(`ec717b6`)のコミット側確認2件を、修正前のビルドで再現したうえで修正した。
+- B-2b読取: 名前の厳密確認のたびに親ディレクトリ全体(共有の一時ディレクトリ・証跡root)を列挙し、1名前を`sizeof(dirent)`=1,048バイトで数えていた。58バイトの記録1件あたり約2.1〜2.4MBを使い、120件で`admission_read_limit`になっていた。実際の記録長で数え、厳密名の列挙はcontrolの初回だけにし、以降は名前と実体の束縛と親・root・snapshotの完全なmetadata比較に任せる。修正後は記録1件あたり約104KBで、120件は13.1MB、480件は51.7MB(上限の約20%)で読取と最終確認を終える。512件を超える全体inventoryは、既存のエントリ上限で従来どおり拒否する。
+- 共有の一時ディレクトリ: OSの祖先を512件上限・名前衝突判定つきで列挙していたため、ユーザー用一時ディレクトリ(この端末で34,336件)は開けなかった。共有祖先は列挙せず、固定した実体・アクセス束縛とno-followの名前照合だけにする。
+- B-2a/native分類:
+  - 名前検査は512件の一覧を受け付ける(上限は件数×1KiB)。
+  - 親フォルダの大文字小文字違いも衝突として扱う。
+  - 予算の入力上限は256KiBとし、単独で検証を通る登録は必ず収まる。
+  - 読取量の最低値はnativeの必須作業(内容読取3回+最終rehash、各回の確認分、inventory4回、controlの再読取)から導出する。
+  - `retention.json`・v5の`.stage`・R-Dの`.publication-…`を未知の非公開名として止める。
+  - 古いテスト件数は修正前の値と明記した。
+- 境界テスト(E-A/B-1/B-2a/reader): default/namespace importを禁止し、`Date`は`Date.parse`だけを許す(`(Date).now()`・`Reflect.construct(Date,[])`も検出)。B-2aにB-1の暗号系禁止名とすり抜け自己テストを追加。
+- 明記した事項:
+  - PID確認は防御のみ。
+  - bootstrapは`fixture_name`を固定しない(B-3で束縛)。
+  - データ側の証跡形の名前は通常の付随ファイルとして扱う。
+  - 0644の`.DS_Store`など安全でないファイルは最終確認を止める。
+
+追加の実行時テスト7件は修正前に失敗。B-2専用は通常/UBSanとも342件成功(UBSan runtime error 0)、一般nativeは既存880件成功(skip52はB-2b専用の非隔離時)、全単体2,560成功・既存skip2(検証中のhash不変)。新しいnativeテストは失敗時もcontextを閉じ、架空fixtureを残さない(修正前ビルドで一度残った1件はゴミ箱へ移動)。以前からの架空fixture(`/private/tmp`に2件、ユーザー一時ディレクトリに3件)には触れていない。実データ操作・署名/鍵保存・MCP登録・本番有効化・判定/通知/保持条件変更・push/配布は行わない。
+
 **105-3 E-B/B-2bレビュー対応 (2026-10-25 JST)**: [レビュー記録](NATIVE_BAR_ADMISSION_FIXTURE_READ_DESIGN.md#b-2b-review-corrections)。4件を修正前に新規架空fixtureで再現した。(1) 応答の継承setterが返却Bufferを書き換えても元のhash/検証済み表示が残るため、専用応答をown data propertyで構築。(2) `read_bytes`が最後のguard分を含まず、報告値を上限にした同一queryが失敗するため、全照合後に確定。(3) OS祖先の単回観測だけsize/nlink/mtime/ctimeを比較し、別の新規空fixtureの作成/削除で誤停止したため、既存の安定束縛比較へ統一。所有者/権限/flags/birthtime/ACLと対象内の完全比較は維持。(4) native側が相対17要素のleafを許したため、既存の16要素上限に一致させた。native49+境界4+既存純粋281=334件が通常/UBSanで各成功、失敗/skipなし。型検査・Clang静的解析・diff検査成功。今回範囲の修正必須事項は残らないが、別担当の独立レビューとB-2cの広い互換/障害注入検証は未実施。常用JS/native build、Dot PAUSEDと設定全体/条件hashは不変。fixtureの作成/削除は新規の架空・未署名データだけ。関連17ファイルをローカルコミット対象とし、実データ操作・MCP登録/本番有効化・判定/通知/保持条件変更・push/配布は行わない。
 
 **105-3 E-B/B-2b専用native読取・未署名fixture合成検証 (2026-10-25 JST)**: [実装境界と残る検証範囲](NATIVE_BAR_ADMISSION_FIXTURE_READ_DESIGN.md#b-2b-implemented-boundary)。protocol 6専用のcontext/pair/snapshot、登録ticketからだけ開始する未接続adapter、全体の二重inventory、role+joint index指定読取、marker/policy/読取済み集合の最終rehashを実装。開始前から共通期限・2root枠・全FD/byte予算を保持し、失敗後の再開や既存mutation handleへの変換はしない。B-2aへrelease-onlyの内部失効bridgeを追加し、close/取消し/GCで解放する。期待値はreaderと別APIの専用test helperで採取。上限超過の必須証跡が最終資格へ進む点、登録callbackが参照消失したadapterのFDを保持する点、観測終了時刻が応答組立て後の最終照合より早い点を失敗テストで再現・修正した。新規の架空・未署名fixtureだけを作成/片付け、通常/UBSan各329件(専用native44+境界4+既存純粋281)成功、no-emit型検査・Clang静的解析成功。一般native実行/worker/Bookmap試験、網羅的互換/障害注入、独立レビューは未実施でB-2cへ保留。通常MCP build/addonは置換せず、実データ操作・署名/鍵保存・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/push/配布は行わない。
