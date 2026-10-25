@@ -8,6 +8,8 @@ The remaining D connection is detailed in the [quarantine recovery design](NATIV
 
 ## Recommended Scope
 
+Slice E has a separate [durable admission and history integration design](NATIVE_BAR_DURABLE_ADMISSION_DESIGN.md). It separates producer provenance, independent original-admission witnesses and transaction-aware history, with pinned trust/checkpoint verification and no revival of old grants. E-A now implements only pure supplied-evidence contracts, replay/restart diagnostics and capacity accounting; it authenticates nothing and grants no execution. E-B through E-E still require their own implementation approval. Existing v1/v4/v5 profiles, production refusal, elapsed-age hold and all separate approval gates remain unchanged.
+
 First connect **abandoned quarantine and its separately approved purge**, in synthetic fixtures only. Keep committed prune and clock-ahead recovery on their existing production-refused path until their own transaction-aware history adapter passes the same gates. Do not route either through abandoned cleanup. Legacy review remains review-only, without a movement destination; arbitrary side files, hard links and malformed/unknown ownership remain preserved.
 
 Recovery means observing surviving evidence and proposing an exact new action. It does not restore a previous grant, repair an intent automatically, recreate a receipt or infer a successful unlink from absence. Read/status, preparation, execution, recovery and recording retain separate authorities.
