@@ -292,3 +292,10 @@ test("R-D SIGKILL sweep covers every exposed original and pending-recovery publi
     }
   }
 });
+test("R-D a failed step closes its worker at once, releasing the single worker slot", async (t) => {
+  const x = fixture(t); let fired = false;
+  const { p } = await begin(x, { hook(phase) { if (phase === "before_rename" && !fired) { fired = true; throw new Error("synthetic_parent_refusal"); } } });
+  await assert.rejects(finish(p), /synthetic_parent_refusal/);
+  await p.waitForExit();
+  const next = await x.open(); await next.close();
+});

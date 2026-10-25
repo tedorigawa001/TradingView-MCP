@@ -29,7 +29,7 @@ async function createProcess(capability: object, options: { hook?: (phase: strin
     execArgv: [], serialization: "advanced", stdio: ["ignore", "ignore", "pipe", "ipc", "pipe"],
   }); } catch (error) { activeWorker = false; throw error; }
   const pipe = child.stdio[4] as Duplex, approvals = new WeakMap<object, number>();
-  let id = 0, rpcSequence = 0, closed = false, exited = false, buffered = Buffer.alloc(0), stderr = "";
+  let id = 0, rpcSequence = 0, closed = false, exited = false, chunks: Buffer[] = [], queued = 0, stderr = "";
   let pending: { id: number; resolve: (value: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
   const opened = performance.now();
   let resolveExit: () => void;
@@ -47,13 +47,16 @@ async function createProcess(capability: object, options: { hook?: (phase: strin
   pipe.on("error", (error) => { fail(error); child.kill("SIGKILL"); });
   pipe.on("data", (chunk: Buffer) => {
     try {
-      if (buffered.length + chunk.length > RECOVERY_CHANNEL_LIMIT + 4) throw new Error("recovery_ipc_limit");
-      buffered = Buffer.concat([buffered, chunk]);
-      while (buffered.length >= 4) {
-        const length = buffered.readUInt32BE(); if (!length || length > RECOVERY_CHANNEL_LIMIT) throw new Error("recovery_ipc_limit");
-        if (buffered.length < length + 4) return;
-        const m = decodeRecoveryFrame(buffered.subarray(4, 4 + length)) as { nonce: string; id: number; operation: string; args: any[] };
-        buffered = buffered.subarray(4 + length);
+      if (queued + chunk.length > RECOVERY_CHANNEL_LIMIT + 4) throw new Error("recovery_ipc_limit");
+      chunks.push(chunk); queued += chunk.length;
+      while (queued >= 4) {
+        if (chunks[0].length < 4) chunks = [Buffer.concat(chunks, queued)];
+        const length = chunks[0].readUInt32BE(); if (!length || length > RECOVERY_CHANNEL_LIMIT) throw new Error("recovery_ipc_limit");
+        if (queued < length + 4) return;
+        // Concatenate once per complete frame, never once per chunk: a large frame must not cost quadratic copying.
+        const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, queued);
+        const m = decodeRecoveryFrame(all.subarray(4, 4 + length)) as { nonce: string; id: number; operation: string; args: any[] };
+        const rest = all.subarray(4 + length); chunks = rest.length ? [rest] : []; queued = rest.length;
         if (m.nonce !== nonce || m.id !== ++rpcSequence || rpcSequence > 65536 || !Array.isArray(m.args) || !pending) throw new Error("recovery_ipc_request_binding");
         let value: unknown = null, error: string | null = null;
         try {
@@ -117,8 +120,12 @@ async function createProcess(capability: object, options: { hook?: (phase: strin
       catch (error) { await close(); throw error; }
     },
     async step(...args: never[]) {
-      if (args.length) throw new Error("recovery_no_caller_paths_phases_or_payload"); owner.alive();
-      const value = await request("step"), bundle = nativeBarRecoveryBundleSchema.parse(value.bundle); validateNativeBarRecoveryBundle(bundle); owner.alive(); return { ...value, bundle };
+      if (args.length) throw new Error("recovery_no_caller_paths_phases_or_payload");
+      // A failed step ends the ordinal, as prepare and begin do: close at once so the single worker slot is released.
+      try {
+        owner.alive();
+        const value = await request("step"), bundle = nativeBarRecoveryBundleSchema.parse(value.bundle); validateNativeBarRecoveryBundle(bundle); owner.alive(); return { ...value, bundle };
+      } catch (error) { await close(); throw error; }
     }, close,
   };
 }

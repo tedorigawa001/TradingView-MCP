@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 復旧R-Dのコミット後参考指摘対応 (2026-10-25 JST)**: `cf78e9d`の独立レビューは修正必須なし・参考3件。うち2件を修正した([設計書](NATIVE_BAR_QUARANTINE_RECOVERY_DESIGN.md#r-d-post-commit-info-fixes))。上限・schema・承認・試行回数・native stepは変えていない。(1) 親が受信chunkごとに未処理バッファ全体を連結しており、上限内8MiBの1フレームで複製量が二乗に増えていた。レビューの悪性workerでは拒否前に親RSSが515MiB増えた。chunkを溜めて完全な1フレームごとに1回だけ連結し、8MiB+ヘッダ上限は溜める前に検査する。親moduleだけを差し替えた同じ計測を交互に行い、`cf78e9d`の503-508MiBに対し8-9MiB。拒否理由`recovery_ipc_limit`・枠の解放・native session/FD残0は変わらない。(2) 失敗したstepがworkerと唯一のworker枠を呼出し側のcloseまで保持していた。prepare/beginと同じく失敗時に即closeし、再試行・再起動はしない。親が最初のrename gateでstepを拒否した後、呼出し側がcloseする前にworkerが終了し新しいprocessを開けることを確認するnativeテストを追加。`cf78e9d`ではworkerが終了せず、60秒でタイムアウトする。参考3件目のbegin中SIGKILL(親の調整証跡前)は退避走査の対象外という記載済みの制約のまま。修正後の通常native全880件(既存879件+追加1件)が元190点/復旧156点の実SIGKILL走査を含め成功し、失敗/cancel/skip各0、検証中のソースhash不変。全単体は2,270成功・既存skip2。nativeソースは変更していないため新たなsanitizer主張はしない。`cf78e9d`のUBSan再実行はR-D個別29件と元SIGKILL走査190点中160点を含む692件成功・runtime error 0で、全走査は途中で意図的に止めたためUBSan済みとは数えない。実データ操作・MCP登録・本番有効化・Dot再開・判定/通知条件変更・push/配布は行わない。
+
 **105-3 復旧R-Dの独立レビュー対応 (2026-10-25 JST、検証・再レビュー完了)**: 通信/終了処理とnative証跡/元期限を2名が独立して読み取り専用レビューし、中優先度3件を指摘。遅れて起動した元workerが親の元単調10分期限後もstepできる経路、blockingな継承socket待機中に期限を再検査できない経路、期限後closeが1msで強制終了される経路を、いずれも合成で修正前に失敗させた。元試行だけ親の元windowを各engine check/native gate前後で確認し、復旧2/3には適用しない。固定fd4の接続済みAF_UNIX/SOCK_STREAMをnativeで検査し、flagsを保持してO_NONBLOCK化・再確認する。native不在時のblocking fallback、外部path/FD入力はない。closeだけ30秒上限の解放専用猶予を設け、実行期限・元承認・復旧回数は延長しない。
 
 修正後の再レビューは2名とも追加の修正必須指摘なし。元期限/境界内の期限超過/復旧の独立window、無応答read/write、期限後の実native解放の6件を追加し、R-D個別29件と単体境界7件が成功。Clang静的解析は指摘0件。実時間30秒の無応答cleanup強制終了、不正fd4のnative拒否網羅、ASan、電源断/再マウント、本番資格までは確認していない。
