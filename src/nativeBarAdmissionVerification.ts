@@ -35,6 +35,19 @@ const rawHash = (value: Uint8Array) => createHash("sha256").update(value).digest
 const typedPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const typedLength = Object.getOwnPropertyDescriptor(typedPrototype, "byteLength")!.get!;
 const typedBuffer = Object.getOwnPropertyDescriptor(typedPrototype, "buffer")!.get!;
+// The intrinsic ArrayBuffer getter throws for a SharedArrayBuffer from any realm, unlike instanceof.
+const arrayBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex"), P = 2n ** 255n - 19n;
+const littleEndian = (bytes: Uint8Array) => BigInt(`0x${Buffer.from(bytes).reverse().toString("hex")}`);
+// y of the eight small-order points, either x sign: identity, order 2, order 4 and both order-8 pairs.
+const SMALL_ORDER_Y = new Set([0n, 1n, P - 1n, littleEndian(Buffer.from("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "hex")),
+  littleEndian(Buffer.from("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "hex"))]);
+// Some OpenSSL builds accept these keys, and then a constant signature verifies every message.
+function weakPublicKey(spki: Buffer) {
+  if (spki.length !== 44 || !spki.subarray(0, 12).equals(ED25519_SPKI_PREFIX)) return true;
+  const raw = Buffer.from(spki.subarray(12)); raw[31] &= 0x7f; const y = littleEndian(raw);
+  return y >= P || SMALL_ORDER_Y.has(y);
+}
 
 // These limits precede schema/canonical work, including sparse arrays and inherited serialization methods.
 function guard(value: unknown, limit: number, allowBytes = false) {
@@ -67,19 +80,19 @@ function guard(value: unknown, limit: number, allowBytes = false) {
   visit(value, 0);
   if (!allowBytes && byteSize(value) > limit) throw new Error("b1_input_bytes");
 }
+// Bytes are read only through intrinsic getters and copy, so own properties on a view are never consulted.
 function rawInput(input: unknown, limit: number): number {
-  let length: number, buffer: ArrayBuffer;
-  try { length = typedLength.call(input); buffer = typedBuffer.call(input); }
+  let length: number;
+  try { length = typedLength.call(input); arrayBufferLength.call(typedBuffer.call(input)); }
   catch { throw new Error("b1_raw_input_bytes"); }
-  if (!(input instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(input))
-    || length > limit || (typeof SharedArrayBuffer !== "undefined" && buffer instanceof SharedArrayBuffer))
+  if (!(input instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(input)) || length > limit)
     throw new Error("b1_raw_input_bytes");
-  const keys = Reflect.ownKeys(input);
-  if (keys.length !== length || keys.some((key, i) => key !== String(i))) throw new Error("b1_raw_input_properties");
   return length;
 }
 function decode(input: unknown, limit: number) {
-  const raw = Buffer.alloc(rawInput(input, limit)); Uint8Array.prototype.set.call(raw, input as Uint8Array);
+  // The intrinsic copy also refuses a detached view.
+  const raw = Buffer.alloc(rawInput(input, limit));
+  try { Uint8Array.prototype.set.call(raw, input as Uint8Array); } catch { throw new Error("b1_raw_input_bytes"); }
   let depth = 0, nodes = 1, quoted = false, escaped = false, opened = false;
   for (const c of raw) {
     if (quoted) { if (escaped) escaped = false; else if (c === 0x5c) escaped = true; else if (c === 0x22) quoted = false; continue; }
@@ -92,15 +105,21 @@ function decode(input: unknown, limit: number) {
     else if (c === 0x2c) ++nodes;
     if (nodes > 262144) throw new Error("b1_input_depth_or_nodes");
   }
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+  // Coded refusals: a parser message would quote input bytes into diagnostics.
+  let text: string, value: unknown;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(raw); } catch { throw new Error("b1_invalid_utf8"); }
+  try { value = JSON.parse(text); } catch { throw new Error("b1_malformed_json"); }
   guard(value, limit);
   if (!raw.equals(Buffer.from(canonical(value)))) throw new Error("b1_noncanonical_bytes");
   return { value, raw };
 }
-export function decodeNativeBarSignedAdmissionRecord(input: Uint8Array) {
+function decodeRecord(input: Uint8Array) {
   const decoded = decode(input, L.record_bytes), value = nativeBarSignedAdmissionRecordSchema.parse(decoded.value);
   if (decoded.raw.byteLength > NATIVE_BAR_ADMISSION_RECORD_BYTES[value.record.body.type]) throw new Error("b1_record_bytes");
-  return value;
+  return { value, raw: decoded.raw };
+}
+export function decodeNativeBarSignedAdmissionRecord(input: Uint8Array) {
+  return decodeRecord(input).value;
 }
 export function decodeNativeBarSignedReadCheckpoint(input: Uint8Array) {
   return nativeBarSignedReadCheckpointSchema.parse(decode(input, 4096).value);
@@ -131,15 +150,20 @@ function recordIds(records: z.infer<typeof nativeBarAdmissionRecordSchema>[]) {
 export function createSyntheticNativeBarAdmissionVerifier(input: unknown, publicKey: KeyObject) {
   guard(input, L.record_bytes); const pins = Object.freeze(pinsSchema.parse(input));
   if (new Set([pins.fixture_id, pins.store_id, pins.epoch_id, pins.authority_id, pins.key_id]).size !== 5) throw new Error("b1_pin_role_alias");
-  if (!(publicKey instanceof KeyObject) || Reflect.ownKeys(publicKey).some((k) => typeof k === "string"
-    || !Object.hasOwn(Object.getOwnPropertyDescriptor(publicKey, k)!, "value"))
-    || publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519")
-    throw new Error("b1_public_ed25519_key_required");
-  if (rawHash(publicKey.export({ type: "spki", format: "der" })) !== pins.public_key_spki_sha256) throw new Error("b1_public_key_pin_mismatch");
+  let spki: Buffer;
+  // A forged KeyObject throws inside the native accessors; every such failure is the same coded refusal.
+  try {
+    if (!(publicKey instanceof KeyObject) || Reflect.ownKeys(publicKey).some((k) => typeof k === "string"
+      || !Object.hasOwn(Object.getOwnPropertyDescriptor(publicKey, k)!, "value"))
+      || publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") throw new Error("b1_public_ed25519_key_required");
+    spki = publicKey.export({ type: "spki", format: "der" });
+  } catch { throw new Error("b1_public_ed25519_key_required"); }
+  if (weakPublicKey(spki)) throw new Error("b1_public_key_weak");
+  if (rawHash(spki) !== pins.public_key_spki_sha256) throw new Error("b1_public_key_pin_mismatch");
   return Object.freeze({ verifyRecord, verifyCheckpoint, verifyTranscript });
 
   function verifyRecord(input: Uint8Array, suppliedLocation: unknown) {
-    const outer = decodeNativeBarSignedAdmissionRecord(input), record = outer.record, b = record.body;
+    const { value: outer, raw } = decodeRecord(input), record = outer.record, b = record.body;
     guard(suppliedLocation, 1024); const location = locationSchema.parse(suppliedLocation);
     if (outer.fixture_id !== pins.fixture_id || outer.key_id !== pins.key_id || b.store_id !== pins.store_id
       || b.epoch_id !== pins.epoch_id || record.signature.key_id !== pins.key_id) throw new Error("b1_record_pin_mismatch");
@@ -151,7 +175,7 @@ export function createSyntheticNativeBarAdmissionVerifier(input: unknown, public
     if (canonical(outer.placements) !== canonical(expected) || !expected.some((p) => canonical(p) === canonical(location))) throw new Error("b1_record_placement");
     authenticate(outer, "native-bar-eb-signed-record-v1", publicKey);
     return { ...noAuthority, fixture_signature_verified: true as const, supplied_location_matches: true as const,
-      record_hash: outer.record_hash, encoded_sha256: rawHash(Buffer.from(canonical(outer))), record };
+      record_hash: outer.record_hash, encoded_sha256: rawHash(raw), record };
   }
   function verifyCheckpoint(input: Uint8Array, suppliedRequest: unknown) {
     const checkpoint = decodeNativeBarSignedReadCheckpoint(input);

@@ -147,7 +147,10 @@ function prescan(raw: Buffer) {
 export function decodeNativeBarAdmission(input: Uint8Array) {
   if (!(input instanceof Uint8Array) || input.byteLength > L.metadata_bytes) throw new Error("admission_input_bytes");
   const raw = Buffer.from(input); prescan(raw);
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+  // Coded refusals: a parser message would quote input bytes into diagnostics.
+  let text: string, value: unknown;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(raw); } catch { throw new Error("admission_invalid_utf8"); }
+  try { value = JSON.parse(text); } catch { throw new Error("admission_malformed_json"); }
   bounded(value); if (!raw.equals(Buffer.from(canonical(value)))) throw new Error("admission_noncanonical_bytes"); return parse(value);
 }
 export function nativeBarAdmissionBodyDigest(input: unknown) {

@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { canonical, evidenceHash } from "../../build/nativeBarEvidence.js";
+import { KeyObject, createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
+import vm from "node:vm";
 
 const base = process.env.NATIVE_BAR_B1_ISOLATED_TEST === "1" ? "../../build/b1-validation/" : "../../build/";
 const api = await import(new URL(`${base}nativeBarAdmissionVerification.js`, import.meta.url));
+const { canonical, evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const time = (n) => new Date(Date.parse("2026-10-25T00:00:00.000Z") + 1000 * n).toISOString();
 const rawHash = (b) => createHash("sha256").update(b).digest("hex");
@@ -90,16 +91,38 @@ test("B-1 verifies a complete signed in-memory transcript and projects only inte
   assert.equal(r.authority_state_verified, false); assert.equal(r.actual_request_timing_verified, false); assert.equal(r.execution_available, false);
   assert.equal(r.model.tip_hash, f.pins.enrollment_hash); assert.equal(canonical(q), before);
 });
-test("B-1 raw byte views cannot invoke user-added byte-length or serialization accessors", () => {
+test("B-1 raw byte views never consult user-added byte-length or serialization accessors", () => {
   const f = fixture(); let called = false;
   Object.defineProperty(f.bytes, "byteLength", { get() { called = true; return 1; } });
   const v = api.createSyntheticNativeBarAdmissionVerifier(f.pins, publicKey);
-  assert.throws(() => v.verifyRecord(f.bytes, f.location), /b1_raw_input/); assert.equal(called, false);
+  // The intrinsic length and copy read the actual bytes; the decoration is inert.
+  assert.equal(v.verifyRecord(f.bytes, f.location).encoded_sha256, rawHash(Buffer.from(canonical(f.outer)))); assert.equal(called, false);
 });
-test("B-1 uses the RFC 8032 public vector and rejects a modified signature", () => {
-  const signature = Buffer.from("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", "hex");
+// S + L, the group order: the same signature encoded with an out-of-range scalar.
+const L = 2n ** 252n + 27742317777372353535851937790883648493n;
+function scalarPlusOrder(signatureHex) {
+  const s = BigInt(`0x${Buffer.from(signatureHex.slice(64), "hex").reverse().toString("hex")}`) + L;
+  return signatureHex.slice(0, 64) + Buffer.from(s.toString(16).padStart(64, "0"), "hex").reverse().toString("hex");
+}
+test("B-1 uses the RFC 8032 public vector and rejects a modified or non-canonical signature", () => {
+  const hex = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+  const signature = Buffer.from(hex, "hex");
   assert.equal(verify(null, Buffer.alloc(0), publicKey, signature), true);
+  assert.equal(verify(null, Buffer.alloc(0), publicKey, Buffer.from(scalarPlusOrder(hex), "hex")), false);
   signature[0] ^= 1; assert.equal(verify(null, Buffer.alloc(0), publicKey, signature), false);
+});
+test("B-1 refuses small-order and non-canonical public keys whatever the runtime's OpenSSL accepts", () => {
+  const f = fixture(); let constructed = 0;
+  for (const point of ["01" + "00".repeat(31), "01" + "00".repeat(30) + "80", "ec" + "ff".repeat(30) + "7f", "00".repeat(32), "00".repeat(31) + "80",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "ed" + "ff".repeat(30) + "7f", "ee" + "ff".repeat(30) + "7f"]) {
+    const spki = Buffer.from("302a300506032b6570032100" + point, "hex");
+    let key; try { key = createPublicKey({ key: spki, format: "der", type: "spki" }); } catch { continue; }
+    ++constructed;
+    assert.throws(() => api.createSyntheticNativeBarAdmissionVerifier({ ...f.pins, public_key_spki_sha256: rawHash(spki) }, key), /b1_public_key_weak/);
+  }
+  assert.ok(constructed > 0);
 });
 test("B-1 pins accept only an actual public Ed25519 KeyObject with its exact SPKI fingerprint", () => {
   const f = fixture(); let exported = false;
@@ -149,6 +172,7 @@ for (const [name, mutate] of [
   ["long signature", (o) => { o.signature_hex += "00"; }],
   ["uppercase signature", (o) => { o.signature_hex = o.signature_hex.toUpperCase(); }],
   ["out-of-range signature scalar", (o) => { o.signature_hex = o.signature_hex.slice(0, 64) + "ff".repeat(32); }],
+  ["non-canonical scalar S + L", (o) => { o.signature_hex = scalarPlusOrder(o.signature_hex); }],
   ["invalid signature point", (o) => { o.signature_hex = "ff".repeat(32) + o.signature_hex.slice(64); }],
 ]) test(`B-1 refuses ${name} without fallback`, () => {
   const f = fixture(), o = structuredClone(f.outer); mutate(o);
@@ -214,13 +238,35 @@ test("B-1 raw codecs enforce canonical bytes, strict UTF-8 and early byte/depth 
   assert.throws(() => api.decodeNativeBarSignedAdmissionRecord(Buffer.from("[".repeat(10000) + "0" + "]".repeat(10000))), /depth_or_nodes/);
   assert.throws(() => api.decodeNativeBarSignedAdmissionRecord(f.outer), /raw_input_bytes/);
 });
-test("B-1 verifies only the exact byte-view slice and rejects shared-memory or decorated byte views", () => {
+test("B-1 verifies only the exact byte-view slice, rejects shared memory from any realm and ignores decorations", () => {
   const f = fixture(), v = api.createSyntheticNativeBarAdmissionVerifier(f.pins, publicKey), padded = Buffer.concat([Buffer.from("prefix"), f.bytes, Buffer.from("suffix")]);
   const slice = new Uint8Array(padded.buffer, padded.byteOffset + 6, f.bytes.length);
   assert.equal(v.verifyRecord(slice, f.location).encoded_sha256, rawHash(f.bytes));
-  const shared = new Uint8Array(new SharedArrayBuffer(f.bytes.length)); shared.set(f.bytes);
-  assert.throws(() => v.verifyRecord(shared, f.location), /raw_input_bytes/);
-  const decorated = Buffer.from(f.bytes); decorated.extra = "ignored"; assert.throws(() => v.verifyRecord(decorated, f.location), /raw_input_properties/);
+  for (const buffer of [new SharedArrayBuffer(f.bytes.length), vm.runInNewContext(`new SharedArrayBuffer(${f.bytes.length})`),
+    vm.runInNewContext(`new SharedArrayBuffer(${f.bytes.length}, { maxByteLength: ${2 * f.bytes.length} })`)]) {
+    const shared = new Uint8Array(buffer); shared.set(f.bytes); assert.throws(() => v.verifyRecord(shared, f.location), /raw_input_bytes/);
+  }
+  const decorated = Buffer.from(f.bytes); decorated.extra = "ignored"; assert.equal(v.verifyRecord(decorated, f.location).encoded_sha256, rawHash(f.bytes));
+});
+test("B-1 malformed bytes, a detached view and a forged key object refuse with coded errors, never parser text", () => {
+  const f = fixture();
+  assert.throws(() => api.decodeNativeBarSignedAdmissionRecord(Buffer.from("secret-ish text")), (e) => e.message === "b1_malformed_json");
+  assert.throws(() => api.decodeNativeBarSignedReadCheckpoint(Buffer.from([0xff])), (e) => e.message === "b1_invalid_utf8");
+  const detached = new Uint8Array(f.bytes.length); structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  assert.throws(() => api.decodeNativeBarSignedAdmissionRecord(detached), (e) => e.message === "b1_raw_input_bytes");
+  assert.throws(() => api.createSyntheticNativeBarAdmissionVerifier(f.pins, Object.create(KeyObject.prototype)), (e) => e.message === "b1_public_ed25519_key_required");
+});
+test("B-1 whole-transcript accounting adds pins and request metadata beyond the structural guard", () => {
+  const f = fixture(), v = api.createSyntheticNativeBarAdmissionVerifier(f.pins, publicKey), big = Buffer.alloc(65536);
+  const attempt = (last) => {
+    const q = transcript(f); q.records = [...Array.from({ length: 255 }, () => ({ bytes: big, location: f.location })), { bytes: Buffer.alloc(last), location: f.location }];
+    try { v.verifyTranscript(q); return "verified"; } catch (e) { return e.message; }
+  };
+  let low = 0, high = 65536;
+  assert.notEqual(attempt(low), "b1_input_bytes"); assert.equal(attempt(high), "b1_input_bytes");
+  while (high - low > 1) { const mid = (low + high) >> 1; if (attempt(mid) === "b1_input_bytes") high = mid; else low = mid; }
+  // Just inside the structural guard, the charged total (pins, locations, requests) is already over the ceiling.
+  assert.equal(attempt(low), "b1_transcript_input_bytes");
 });
 test("B-1 bounds aggregate transcript bytes and counts repeated aliases without deduplication credit", () => {
   const f = fixture(), q = transcript(f), v = api.createSyntheticNativeBarAdmissionVerifier(f.pins, publicKey), big = Buffer.alloc(65536);

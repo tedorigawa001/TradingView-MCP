@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { canonical, evidenceHash } from "../../build/nativeBarEvidence.js";
 
 const base = process.env.NATIVE_BAR_EA_ISOLATED_TEST === "1" ? "../../build/ea-validation/" : "../../build/";
 const api = await import(new URL(`${base}nativeBarAdmission.js`, import.meta.url));
+const { canonical, evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const time = (n) => new Date(Date.parse("2026-10-25T00:00:00.000Z") + n * 1000).toISOString();
 const ns = (n) => String(BigInt(Date.parse(time(n))) * 1000000n);
@@ -604,4 +604,8 @@ test("E-A raw decoding bounds nesting and value count before JSON parsing", () =
 });
 test("E-A the supplied challenge is a distinct role identifier", () => {
   assert.throws(() => api.replayNativeBarAdmission(producer(fixture(), 5).b), /admission_role_id_reuse/);
+});
+test("E-A malformed raw bytes refuse with coded errors, never parser text quoting the input", () => {
+  assert.throws(() => api.decodeNativeBarAdmission(Buffer.from("secret-ish text")), (e) => e.message === "admission_malformed_json");
+  assert.throws(() => api.decodeNativeBarAdmission(Buffer.from([0xff])), (e) => e.message === "admission_invalid_utf8");
 });
