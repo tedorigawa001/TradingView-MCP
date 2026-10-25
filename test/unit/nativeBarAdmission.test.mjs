@@ -9,7 +9,9 @@ const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const time = (n) => new Date(Date.parse("2026-10-25T00:00:00.000Z") + n * 1000).toISOString();
 const ns = (n) => String(BigInt(Date.parse(time(n))) * 1000000n);
 const directory = (inode) => ({ device: "1", inode, uid: "501", gid: "20", mode: "16832", flags: "0", acl: "none", acl_hash: evidenceHash("ACL"), birthtime_ns: ns(0) });
-function add(b, type, data, at = b.records.length + 1) {
+// The next record time: one second after the latest record.
+const clock = (b) => b.records.length ? (Date.parse(b.records.at(-1).body.at) - Date.parse(time(0))) / 1000 + 1 : 1;
+function add(b, type, data, at = clock(b)) {
   const body = { schema: "native-bar-admission-body-v6", store_id: id(1), epoch_id: id(2), sequence: String(b.records.length + 1),
     previous_hash: b.records.length ? evidenceHash(b.records.at(-1)) : null, at: time(at), type, data };
   const r = { body, signature: { schema: "native-bar-supplied-signature-v1", algorithm: "unqualified-fixture-v1", key_id: id(3),
@@ -32,33 +34,33 @@ const rawHash = (v) => createHash("sha256").update(v).digest("hex");
 const fileProof = (inode, size, sha256, birth, at) => ({ device: "1", inode, uid: "501", gid: "20", mode: "33152", nlink: "1",
   acl: "none", flags: "0", acl_hash: evidenceHash("ACL"), size: String(size), sha256,
   birthtime_ns: ns(birth), mtime_ns: ns(at), ctime_ns: ns(at) });
-function producer(b = fixture(), n = 10, sequence = 1) {
+function producer(b = fixture(), n = 10, sequence = 1, opened = clock(b)) {
   const producer_id = id(n), recording_id = id(n + 1), payload_hash = rawHash("invented payload");
   const artifacts = ["payload_stage", "payload_final", "receipt_stage", "receipt_final"].map((role, i) => ({ role, artifact_id: id(n + 2 + i),
     path: i % 2 === 0 ? `.producer-${id(n + 2 + i)}.tmp` : `${i === 1 ? "captures" : "receipts"}/2026-10-25/${recording_id}.json`,
     from_artifact_id: i % 2 ? id(n + 1 + i) : null }));
-  const opened = b.records.length + 1;
   const reservation = add(b, "producer_reserved", { producer_id, recording_id, owner_incarnation_hash: evidenceHash("invented incarnation"),
     window: { opened_at: time(opened), expires_at: time(opened + 600) }, partition_at: time(opened),
-    payload_hash, payload_bytes: "16", restoration_hash: evidenceHash("restored"), artifacts, reverify_attempt_ids: [id(n + 6), id(n + 7)] });
+    payload_hash, payload_bytes: "16", restoration_hash: evidenceHash("restored"), artifacts, reverify_attempt_ids: [id(n + 6), id(n + 7)] }, opened);
   function publish(stage, final, contentHash, contentBytes) {
-    const birth = b.records.length + 1, inode = String(n * 100 + stage);
+    const birth = clock(b), inode = String(n * 100 + stage);
     const created = add(b, "artifact_created", { producer_id, artifact_id: artifacts[stage].artifact_id, reservation_hash: reservation,
       proof: fileProof(inode, 0, rawHash(""), birth, birth) });
-    const written = b.records.length + 1;
+    const written = clock(b);
     const content = add(b, "content_verified", { producer_id, artifact_id: artifacts[stage].artifact_id, created_hash: created,
       proof: fileProof(inode, contentBytes, contentHash, birth, written) });
-    const before = b.records.length + 1;
+    const before = clock(b);
     const pending = add(b, "publication_pending", { producer_id, from_artifact_id: artifacts[stage].artifact_id,
       artifact_id: artifacts[final].artifact_id, content_hash: content });
-    const after = b.records.length + 1;
+    const after = clock(b);
     return add(b, "publication_observed", { producer_id, artifact_id: artifacts[final].artifact_id, pending_hash: pending,
       proof: { ...fileProof(inode, contentBytes, contentHash, birth, after), mtime_ns: ns(written) }, publication: { before: time(before), after: time(after) } });
   }
   const payloadPublication = publish(0, 1, payload_hash, 16);
-  const receipt = { schema: "native-bar-receipt-v1", recording_id, plan_hash: evidenceHash("original approval audit"),
+  // Each recording consumes its own approval; a plan digest is never reused by another operation.
+  const receipt = { schema: "native-bar-receipt-v1", recording_id, plan_hash: evidenceHash(`recording approval ${n}`),
     policy_hash: b.records[0].body.data.policy_hash, payload_hash, sequence, day: "2026-10-25",
-    recorded_at: time(b.records.length + 1), partition_at: time(opened) };
+    recorded_at: time(clock(b)), partition_at: time(opened) };
   const prepared = add(b, "receipt_prepared", { producer_id, payload_publication_hash: payloadPublication, receipt });
   const receiptPublication = publish(2, 3, evidenceHash(receipt), Buffer.byteLength(canonical(receipt)));
   add(b, "receipt_linked", { producer_id, receipt_preparation_hash: prepared, receipt_publication_hash: receiptPublication,
@@ -86,11 +88,12 @@ function rewrite(b, change, repin = false) {
   if (repin) b.supplied_trust.enrollment_hash = evidenceHash(b.records[0]);
   return checkpointFor(b);
 }
-function maintenance(withOtherProducer = false) {
+function maintenance(withOtherProducer = false, { admitAt, windowLead = 0, originalBorn } = {}) {
   const p = producer(), b = p.b; b.records = b.records.slice(0, 6); checkpointFor(b);
-  const other = withOtherProducer ? producer(b, 100, 2) : null;
+  // A second writer starts only after the orphan producer's original window (2..602) has expired.
+  const other = withOtherProducer ? producer(b, 100, 2, 610) : null;
   if (other) { b.records = b.records.slice(0, -6); checkpointFor(b); }
-  const windowOpened = b.records.length + 1;
+  const admittedAt = admitAt ?? (other ? 1220 : 610), windowOpened = admittedAt - windowLead;
   const maintenance_id = id(30), scope_id = id(31), attempt_ids = [id(32), id(33), id(34)], target_id = id(35);
   const layout = api.createNativeBarAdmissionLayout({ maintenance_id, scope_id, attempt_ids, target_ids: [target_id] });
   const scope = { schema: "native-bar-maintenance-admission-scope-v6", maintenance_id, scope_id, attempt_ids,
@@ -100,19 +103,19 @@ function maintenance(withOtherProducer = false) {
     original_plan_hash: evidenceHash("original approval audit"), window: { opened_at: time(windowOpened), expires_at: time(windowOpened + 600) },
     targets: [{ target_id, producer_id: p.producer_id, artifact_id: p.artifacts[1].artifact_id, source_path: p.artifacts[1].path,
       publication_hash: p.payloadPublication, proof: structuredClone(b.records[5].body.data.proof), receipt_state: "absent", producer_liveness: "dead" }] };
-  const admitted = add(b, "maintenance_admitted", { scope, scope_digest: api.nativeBarAdmissionScopeDigest(scope) });
+  const admitted = add(b, "maintenance_admitted", { scope, scope_digest: api.nativeBarAdmissionScopeDigest(scope) }, admittedAt);
   const manifest = { schema: "native-bar-admission-manifest-v6", maintenance_id, targets: scope.targets };
   const original = { schema: "native-bar-admission-original-v6", maintenance_id, admission_hash: admitted,
     scope_digest: api.nativeBarAdmissionScopeDigest(scope), manifest_digest: evidenceHash(manifest), layout_digest: scope.layout_digest };
-  const at = b.records.length + 1;
+  const at = clock(b), born = originalBorn ?? at;
   const seal = add(b, "original_sealed", { maintenance_id, admission_hash: admitted, original,
-    original_proof: fileProof("5000", Buffer.byteLength(canonical(original)), evidenceHash(original), at, at),
-    manifest_proof: fileProof("5001", Buffer.byteLength(canonical(manifest)), evidenceHash(manifest), at, at) });
-  function consume(ordinal) {
-    const opened = ordinal === 1 ? windowOpened : b.records.length + 1;
+    original_proof: fileProof("5000", Buffer.byteLength(canonical(original)), evidenceHash(original), born, at),
+    manifest_proof: fileProof("5001", Buffer.byteLength(canonical(manifest)), evidenceHash(manifest), born, at) });
+  function consume(ordinal, overrides = {}) {
+    const opened = ordinal === 1 ? windowOpened : clock(b);
     return add(b, "maintenance_attempt_consumed", { maintenance_id, ordinal, attempt_id: attempt_ids[ordinal - 1], original_seal_hash: seal,
       plan_hash: ordinal === 1 ? scope.original_plan_hash : evidenceHash(`fresh approval ${ordinal}`), window: { opened_at: time(opened), expires_at: time(opened + 600) },
-      prefix_hash: evidenceHash(b.records.at(-1)), event_prefix_hash: null, current_reference_hash: evidenceHash(`fresh reference ${ordinal}`) });
+      prefix_hash: evidenceHash(b.records.at(-1)), event_prefix_hash: null, current_reference_hash: evidenceHash(`fresh reference ${ordinal}`), ...overrides });
   }
   consume(1); return { b, scope, admitted, seal, consume, layout, other };
 }
@@ -140,9 +143,10 @@ test("E-A an independently bound maintenance seal survives as evidence but never
   assert.equal(q.decision, "requires_fresh_admission"); assert.equal(q.recovery_execution_available, false);
 });
 function accounting(overrides = {}) {
-  const root = () => ({ entries: "1", inventory_bytes: "128", metadata_bytes: "128", allocated_bytes: "4096", available_bytes: "1073741824" });
+  const root = () => ({ entries: "1", inventory_bytes: "128", metadata_bytes: "128", allocated_bytes: "4096" });
   return { schema: "native-bar-admission-capacity-v6", producer_operations: 1, maintenance_targets: 0,
-    data: root(), witness: root(), authority: root(), read_bytes: "1000", response_bytes: "1000", roots: 3, live_targets: 2, descriptors: 20, ...overrides };
+    data: root(), witness: root(), authority: root(), free_space: { store_volume: "1073741824", authority: "1073741824" },
+    read_bytes: "1000", response_bytes: "1000", roots: 3, live_targets: 2, descriptors: 20, ...overrides };
 }
 test("E-A capacity derives both roots, authority checkpoints and both reverification attempts without reservation credit", () => {
   const input = accounting(), before = canonical(input), r = api.calculateNativeBarAdmissionCapacity(input);
@@ -300,24 +304,27 @@ test("E-A restart rejects stale views and changed current references without mut
 });
 test("E-A a sealed but never invoked original cannot bypass the reference comparison", () => {
   const { b, scope } = maintenance(); b.records.pop(); checkpointFor(b);
-  const r = api.assessNativeBarAdmissionRestart({ bundle: b, maintenance_id: scope.maintenance_id, now: b.as_of,
-    coordination: "clear", current_reference_hash: evidenceHash("changed after original seal") });
-  assert.ok(r.model_blockers.includes("current_references_changed")); assert.equal(r.next_ordinal, 2);
+  const restart = (current_reference_hash) => api.assessNativeBarAdmissionRestart({ bundle: b, maintenance_id: scope.maintenance_id, now: b.as_of,
+    coordination: "clear", current_reference_hash });
+  const changed = restart(evidenceHash("changed after original seal"));
+  assert.ok(changed.model_blockers.includes("current_references_changed")); assert.equal(changed.next_ordinal, null);
+  const unchanged = restart(scope.reference_hash);
+  assert.equal(unchanged.decision, "requires_fresh_admission"); assert.equal(unchanged.next_ordinal, 2);
 });
 
-function coordination(m) {
-  const at = m.b.records.length + 1, owner_token = id(60), entries = ["lock", "claim", "ticket"].map((role, i) => {
+function coordination(m, { attempt = 1, born, incarnation = evidenceHash(`worker incarnation ${attempt}`) } = {}) {
+  const at = clock(m.b), owner_token = id(59 + attempt), entries = ["lock", "claim", "ticket"].map((role, i) => {
     const body_hash = evidenceHash({ role });
     return { role, path: role === "lock" ? ".writer.lock" : `.writer-${role}-${owner_token}.json`, body_hash,
-      proof: fileProof(String(6000 + i), 100, body_hash, at, at) };
+      proof: fileProof(String(6000 + 10 * attempt + i), 100, body_hash, born ?? at, at) };
   });
-  const d = { maintenance_id: m.scope.maintenance_id, attempt_id: m.scope.attempt_ids[0], owner_token,
-    owner_incarnation_hash: evidenceHash("live worker incarnation"), entries };
+  const d = { maintenance_id: m.scope.maintenance_id, attempt_id: m.scope.attempt_ids[attempt - 1], owner_token,
+    owner_incarnation_hash: incarnation, entries };
   const own_delta_hash = evidenceHash({ domain: "native-bar-admission-coordination-v6", coordination: d });
   add(m.b, "coordination_witness", { ...d, own_delta_hash }); return { ...d, own_delta_hash };
 }
 function publication(m, role, inode = "7000") {
-  const slot = m.layout.slots.find((s) => s.role === role), at = m.b.records.length + 1, content_hash = evidenceHash({ role });
+  const slot = m.layout.slots.find((s) => s.role === role), at = clock(m.b), content_hash = evidenceHash({ role });
   return add(m.b, "publication_witness", { maintenance_id: m.scope.maintenance_id, attempt_id: m.scope.attempt_ids[0], role,
     path: slot.path, content_hash, proof: fileProof(inode, 100, content_hash, at, at), publication: { before: time(at), after: time(at) } });
 }
@@ -380,11 +387,27 @@ for (const [field, limit] of [["entries", 512], ["inventory_bytes", 1024 ** 3], 
     assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes(`${field}_capacity`));
   });
 }
-for (const root of ["data", "witness", "authority"]) test(`E-A ${root} free space cannot borrow from another root`, () => {
-  const input = accounting(), r = api.calculateNativeBarAdmissionCapacity(input);
-  input[root].available_bytes = r.future[root].allocated_bytes; assert.equal(api.calculateNativeBarAdmissionCapacity(input).fits, true);
-  input[root].available_bytes = String(BigInt(input[root].available_bytes) - 1n); assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes(`${root}_space_insufficient`));
-  input[root].available_bytes = null; assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes(`${root}_space_unknown`));
+for (const [name, overrides] of [["producer", {}], ["maintenance", { producer_operations: 0, maintenance_targets: 1 }]])
+  test(`E-A ${name} data and witness roots share one store-volume free space under the reserve-plus-twice rule`, () => {
+    const input = accounting(overrides), r = api.calculateNativeBarAdmissionCapacity(input), f = r.future, reserve = BigInt(r.retained_reserve_bytes);
+    const data = BigInt(f.data.allocated_bytes), witness = BigInt(f.witness.allocated_bytes), need = reserve + 2n * (data - reserve + witness);
+    assert.equal(r.required_available_bytes.store_volume, String(need));
+    input.free_space.store_volume = String(need); assert.equal(api.calculateNativeBarAdmissionCapacity(input).fits, true);
+    // One volume is not counted once per root: free space that covers each root alone no longer fits.
+    for (const short of [need - 1n, data > witness ? data : witness, data + witness]) {
+      input.free_space.store_volume = String(short); assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes("store_volume_space_insufficient"));
+    }
+    input.free_space.store_volume = null; assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes("store_volume_space_unknown"));
+  });
+test("E-A authority free space is separate unless the authority declares the store volume", () => {
+  const input = accounting(), r = api.calculateNativeBarAdmissionCapacity(input), authority = 2n * BigInt(r.future.authority.allocated_bytes);
+  assert.equal(r.required_available_bytes.authority, String(authority));
+  input.free_space.authority = String(authority); assert.equal(api.calculateNativeBarAdmissionCapacity(input).fits, true);
+  input.free_space.authority = String(authority - 1n); assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes("authority_space_insufficient"));
+  input.free_space.authority = null; assert.ok(api.calculateNativeBarAdmissionCapacity(input).reasons.includes("authority_space_unknown"));
+  input.free_space.authority = "store_volume"; const shared = api.calculateNativeBarAdmissionCapacity(input);
+  assert.equal(shared.required_available_bytes.authority, "store_volume");
+  assert.equal(BigInt(shared.required_available_bytes.store_volume), BigInt(r.required_available_bytes.store_volume) + authority);
 });
 test("E-A capacity schedules every declared native journal slot and keeps conservative refusals", () => {
   const m = maintenance();
@@ -407,9 +430,28 @@ test("E-A independent slot counts include finals, three metadata temporaries and
   assert.equal(producerBudget.future.data.entries, "68"); assert.equal(producerBudget.future.witness.entries, "64");
   assert.equal(producerBudget.future.authority.entries, "64"); assert.equal(producerBudget.peak.entries, "199");
   const maintenanceBudget = api.calculateNativeBarAdmissionCapacity(accounting({ producer_operations: 0, maintenance_targets: 1 }));
-  // 23 journal finals x 4 slots + 9 coordination objects + 9 directories; 30 witness/checkpoint finals x 4.
-  assert.equal(maintenanceBudget.future.data.entries, "110"); assert.equal(maintenanceBudget.future.witness.entries, "120");
-  assert.equal(maintenanceBudget.future.authority.entries, "120"); assert.equal(maintenanceBudget.peak.entries, "353");
+  // 23 journal finals x 4 slots + 32 R-D headroom slots + 9 coordination objects + 1 retained reserve + 9 directories;
+  // 30 witness/checkpoint finals x 4.
+  assert.equal(maintenanceBudget.future.data.entries, "143"); assert.equal(maintenanceBudget.future.witness.entries, "120");
+  assert.equal(maintenanceBudget.future.authority.entries, "120"); assert.equal(maintenanceBudget.peak.entries, "386");
+  // Two producers may use two partition days: 30 records x 4 + 4 payload/receipt objects + captures, receipts and producer
+  // directories plus, per operation, its captures day, receipts day and producer directory.
+  assert.equal(api.calculateNativeBarAdmissionCapacity(accounting({ producer_operations: 2 })).future.data.entries, "133");
+});
+test("E-A maintenance capacity is at least R-D's bound for the same journal, including its retained reserve", () => {
+  for (const targets of [1, 2]) {
+    const r = api.calculateNativeBarAdmissionCapacity(accounting({ producer_operations: 0, maintenance_targets: targets }));
+    const bound = BigInt((4 * (9 + 14 * targets) + 32) * 65536 + 1048576);
+    assert.equal(r.retained_reserve_bytes, String(bound));
+    assert.ok(BigInt(r.future.data.metadata_bytes) >= bound); assert.ok(BigInt(r.future.data.allocated_bytes) >= 2n * bound);
+    // R-D requires the new reserve plus twice the remaining journal on its volume.
+    assert.ok(BigInt(r.required_available_bytes.store_volume) >= 3n * bound);
+  }
+});
+test("E-A read capacity charges derived mandatory rereads, not a lower supplied aggregate", () => {
+  const input = accounting({ producer_operations: 0, maintenance_targets: 1, read_bytes: "0" }), r = api.calculateNativeBarAdmissionCapacity(input);
+  assert.equal(r.mandatory_read_bytes, String(BigInt(r.peak.metadata_bytes) + 2n * 1048576n)); assert.equal(r.charged_read_bytes, r.mandatory_read_bytes);
+  input.read_bytes = String(256 * 1024 ** 2); assert.equal(api.calculateNativeBarAdmissionCapacity(input).charged_read_bytes, input.read_bytes);
 });
 test("E-A receipt linkage exactly at the original expiry is refused without deadline extension", () => {
   const p = producer(); rewrite(p.b, (b) => { b.records.at(-1).body.at = time(602); });
@@ -454,7 +496,7 @@ test("E-A a second unresolved maintenance cannot overlap even on another orphan 
     receipt_state: "absent", producer_liveness: "dead" }];
   scope.layout_digest = evidenceHash(api.createNativeBarAdmissionLayout({ maintenance_id: scope.maintenance_id, scope_id: scope.scope_id,
     attempt_ids: scope.attempt_ids, target_ids: [id(45)] }));
-  const at = b.records.length + 1; scope.window = { opened_at: time(at), expires_at: time(at + 600) };
+  const at = clock(b); scope.window = { opened_at: time(at), expires_at: time(at + 600) };
   assert.equal(api.replayNativeBarAdmission(b).model_status, "consistent_supplied_model");
   add(b, "maintenance_admitted", { scope, scope_digest: api.nativeBarAdmissionScopeDigest(scope) });
   assert.throws(() => api.replayNativeBarAdmission(b), /admission_unresolved_maintenance/);
@@ -484,4 +526,82 @@ test("E-A UTC midnight preserves the pre-publication partition and the later log
   const before = canonical(b), r = api.replayNativeBarAdmission(b);
   assert.equal(r.model_status, "consistent_supplied_model"); assert.equal(r.producers[0].linked, true);
   assert.equal(r.storage_visibility_at_as_of, "not_proven"); assert.equal(canonical(b), before);
+});
+const restartOf = (b, maintenance_id, current_reference_hash, coordination = "clear") =>
+  api.assessNativeBarAdmissionRestart({ bundle: b, maintenance_id, now: b.as_of, coordination, current_reference_hash });
+for (const [name, overrides, reason] of [
+  ["the original plan and window", (m) => ({ plan_hash: m.scope.original_plan_hash, window: structuredClone(m.scope.window) }), /admission_window_reuse|admission_plan_reuse/],
+  ["the original plan under a new window", (m) => ({ plan_hash: m.scope.original_plan_hash }), /admission_plan_reuse/],
+  ["the original window under a new plan", (m) => ({ window: structuredClone(m.scope.window) }), /admission_window_reuse/],
+  ["a window opened before ordinal one was consumed", (m) => {
+    const opened = Date.parse(m.scope.window.opened_at) + 1000;
+    return { window: { opened_at: new Date(opened).toISOString(), expires_at: new Date(opened + 600000).toISOString() } };
+  }, /admission_window_reuse/],
+]) test(`E-A recovery ordinal two cannot reuse ${name}`, () => {
+  const m = maintenance(); m.consume(2, overrides(m));
+  assert.throws(() => api.replayNativeBarAdmission(m.b), reason);
+});
+test("E-A recovery ordinal three cannot reuse ordinal two's plan or window", () => {
+  for (const key of ["plan_hash", "window"]) {
+    const m = maintenance(); m.consume(2); const previous = m.b.records.at(-1).body.data;
+    m.consume(3, { [key]: structuredClone(previous[key]) });
+    assert.throws(() => api.replayNativeBarAdmission(m.b), key === "window" ? /admission_window_reuse/ : /admission_plan_reuse/);
+  }
+});
+test("E-A producer reverification needs its own plan digest and a window after the original", () => {
+  function reverify(p, window, plan_hash, at) {
+    p.b.records.pop(); checkpointFor(p.b);
+    add(p.b, "producer_reverify_consumed", { producer_id: p.producer_id, ordinal: 1, attempt_id: id(16), plan_hash, window,
+      prefix_hash: evidenceHash(p.b.records.at(-1)), purpose: "verify_existing_pair" }, at);
+  }
+  const original = producer(); reverify(original, structuredClone(original.b.records[1].body.data.window), evidenceHash("new verification"), 20);
+  assert.throws(() => api.replayNativeBarAdmission(original.b), /admission_window_reuse/);
+  const reused = producer(); reverify(reused, { opened_at: time(1000), expires_at: time(1600) }, reused.receipt.plan_hash, 1000);
+  assert.throws(() => api.replayNativeBarAdmission(reused.b), /admission_plan_reuse/);
+});
+test("E-A restart freshness comes from the checkpoint observation, not a relabelled as_of", () => {
+  const { b, scope } = maintenance(); b.as_of = new Date(Date.parse(b.supplied_trust.checkpoint.observed_at) + 30 * 86400000).toISOString();
+  const r = restartOf(b, scope.maintenance_id, evidenceHash("fresh reference 1"));
+  assert.equal(r.decision, "diagnostics_only"); assert.ok(r.model_blockers.includes("fresh_view_required")); assert.equal(r.next_ordinal, null);
+});
+test("E-A a second producer cannot start while another may still write", () => {
+  const a = producer(); a.b.records = a.b.records.slice(0, 6); checkpointFor(a.b); producer(a.b, 100, 2);
+  assert.throws(() => api.replayNativeBarAdmission(a.b), /admission_writer_overlap/);
+  const c = producer(); c.b.records = c.b.records.slice(0, 6); checkpointFor(c.b); producer(c.b, 100, 2, 610);
+  assert.equal(api.replayNativeBarAdmission(c.b).model_status, "consistent_supplied_model");
+});
+test("E-A maintenance cannot be admitted while its target or an unrelated producer may still write", () => {
+  assert.throws(() => api.replayNativeBarAdmission(maintenance(false, { admitAt: 7 }).b), /admission_writer_overlap/);
+  assert.throws(() => api.replayNativeBarAdmission(maintenance(true, { admitAt: 1000 }).b), /admission_writer_overlap/);
+});
+test("E-A a recovery attempt cannot adopt coordination born before its consumption or reuse a worker incarnation", () => {
+  const early = maintenance(), firstWorker = clock(early.b) - 1; early.consume(2); coordination(early, { attempt: 2, born: firstWorker });
+  assert.throws(() => api.replayNativeBarAdmission(early.b), /admission_coordination_binding/);
+  const ancient = maintenance(); coordination(ancient, { born: 0 });
+  assert.throws(() => api.replayNativeBarAdmission(ancient.b), /admission_coordination_binding/);
+  const reused = maintenance(); coordination(reused); reused.consume(2); coordination(reused, { attempt: 2, incarnation: evidenceHash("worker incarnation 1") });
+  assert.throws(() => api.replayNativeBarAdmission(reused.b), /admission_coordination_binding/);
+  const fresh = maintenance(); coordination(fresh); fresh.consume(2); coordination(fresh, { attempt: 2 });
+  assert.equal(api.replayNativeBarAdmission(fresh.b).model_status, "consistent_supplied_model");
+});
+test("E-A the original and manifest objects cannot predate the admission record they hash", () => {
+  assert.equal(api.replayNativeBarAdmission(maintenance(false, { windowLead: 5 }).b).model_status, "consistent_supplied_model");
+  assert.throws(() => api.replayNativeBarAdmission(maintenance(false, { windowLead: 5, originalBorn: 607 }).b), /admission_original_object_binding/);
+});
+test("E-A diagnostics never report a next ordinal, and ledger coordination overrides a supplied clear state", () => {
+  const { b } = maintenance(), unknown = restartOf(b, id(999), evidenceHash("fresh reference 1"));
+  assert.equal(unknown.decision, "diagnostics_only"); assert.equal(unknown.next_ordinal, null);
+  const m = maintenance(); coordination(m); const q = restartOf(m.b, m.scope.maintenance_id, evidenceHash("fresh reference 1"));
+  assert.equal(q.decision, "diagnostics_only"); assert.ok(q.model_blockers.includes("ledger_coordination_unretired")); assert.equal(q.next_ordinal, null);
+  assert.deepEqual(api.replayNativeBarAdmission(m.b).maintenance[0].coordination_witnessed_ordinals, [1]);
+});
+test("E-A raw decoding bounds nesting and value count before JSON parsing", () => {
+  for (const raw of ["[".repeat(100), "[" + "0,".repeat(300000)]) assert.throws(() => api.decodeNativeBarAdmission(Buffer.from(raw)), /admission_input_depth_or_nodes/);
+  // Brackets, commas and escaped quotes inside strings are data, not structure.
+  for (const raw of [JSON.stringify("[".repeat(100)), JSON.stringify('\\"' + "[,".repeat(300000))])
+    assert.throws(() => api.decodeNativeBarAdmission(Buffer.from(raw)), (e) => !/depth_or_nodes/.test(e.message));
+  assert.deepEqual(api.decodeNativeBarAdmission(Buffer.from(canonical(producer().b))).records.length, 12);
+});
+test("E-A the supplied challenge is a distinct role identifier", () => {
+  assert.throws(() => api.replayNativeBarAdmission(producer(fixture(), 5).b), /admission_role_id_reuse/);
 });
