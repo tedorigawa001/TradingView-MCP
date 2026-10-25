@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { KeyObject, createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import vm from "node:vm";
 
-const base = process.env.NATIVE_BAR_B1_ISOLATED_TEST === "1" ? "../../build/b1-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B2B_ISOLATED_TEST === "1" ? "../../build/b2b-validation/" : process.env.NATIVE_BAR_B1_ISOLATED_TEST === "1" ? "../../build/b1-validation/" : "../../build/";
 const api = await import(new URL(`${base}nativeBarAdmissionVerification.js`, import.meta.url));
 const { canonical, evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

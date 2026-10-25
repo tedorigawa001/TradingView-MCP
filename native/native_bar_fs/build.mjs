@@ -5,12 +5,12 @@ import { fileURLToPath } from "node:url";
 
 if (process.platform !== "darwin") throw new Error("native foundation currently supports macOS synthetic tests only");
 const args = process.argv.slice(2);
-if (args.some((arg) => arg !== "--ubsan")) throw new Error("only --ubsan is supported");
+if (args.some((arg) => !["--ubsan", "--admission-validation"].includes(arg))) throw new Error("unsupported native build flag");
 const sanitize = args.includes("--ubsan");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const headers = resolve(dirname(realpathSync(process.execPath)), "../include/node");
 if (!existsSync(join(headers, "node_api.h"))) throw new Error("local Node-API headers unavailable; no automatic download");
-const output = join(root, "build/native-bar-fs");
+const output = join(root, args.includes("--admission-validation") ? "build/b2b-validation/native-bar-fs" : "build/native-bar-fs");
 mkdirSync(output, { recursive: true });
 const sanitizerFlags = [];
 if (sanitize) {

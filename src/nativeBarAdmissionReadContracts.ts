@@ -96,30 +96,37 @@ export function validateSyntheticAdmissionReadRegistration(input: unknown) {
 
 type Bootstrap = { expected: z.infer<typeof bootstrapSchema>; ownerPid: number; closed: boolean; revocations: Set<() => void> };
 const bootstraps = new WeakMap<object, Bootstrap>();
+type NativeClaim = { registration: Registration; check(): void; release(): void };
+const nativeRegistries = new WeakMap<object, (ticket: object, close: () => void) => NativeClaim>();
 const token = () => Object.freeze(Object.create(null) as object);
 export function createSyntheticAdmissionReadBootstrap(input: unknown, publicKey: KeyObject) {
   const expected = parse(bootstrapSchema, input); identities(expected.pins, expected.authority_reference);
   try { createSyntheticNativeBarAdmissionVerifier(expected.pins, publicKey); }
   catch { throw new Error("b2a_public_key_refused"); }
   const state: Bootstrap = { expected, ownerPid: pid, closed: false, revocations: new Set() }, t = token(); bootstraps.set(t, state);
-  return Object.freeze({ token: t, close() { if (state.closed) return; state.closed = true; for (const revoke of state.revocations) revoke(); state.revocations.clear(); } });
+  return Object.freeze({ token: t, close() {
+    state.closed = true; let failed = false;
+    for (const revoke of [...state.revocations]) try { revoke(); } catch { failed = true; }
+    if (failed) throw new Error("b2a_release_unconfirmed");
+  } });
 }
 export function createSyntheticAdmissionReadRegistry(bootstrap: object) {
   const b = bootstraps.get(bootstrap); if (!b || b.closed || b.ownerPid !== pid) throw new Error("b2a_bootstrap_required");
   let closed = false, issued = false;
-  const tickets = new WeakMap<object, { registration: Registration; closed: boolean }>();
+  type Entry = { registration: Registration; closed: boolean; nativeClose?: () => void };
+  const tickets = new WeakMap<object, Entry>(); let registered: Entry | undefined;
   function alive() { if (closed || b!.closed || b!.ownerPid !== pid) throw new Error("b2a_registry_closed"); }
-  const close = () => { closed = true; b.revocations.delete(close); }; b.revocations.add(close);
+  const close = () => { closed = true; registered?.nativeClose?.(); b.revocations.delete(close); }; b.revocations.add(close);
   function entry(t: object) {
     alive(); const e = tickets.get(t); if (!e || e.closed) throw new Error("b2a_fixture_ticket_required"); return e;
   }
-  return Object.freeze({
+  const registry = Object.freeze({
     registerFixture(input: unknown) {
       alive(); if (issued) throw new Error("b2a_registration_already_issued");
       const registration = validateSyntheticAdmissionReadRegistration(input);
       if (registration.temp_anchor !== b.expected.temp_anchor || registration.authority_reference !== b.expected.authority_reference
         || canonical(registration.pins) !== canonical(b.expected.pins)) throw new Error("b2a_bootstrap_binding");
-      const t = token(); tickets.set(t, { registration, closed: false }); issued = true; return t;
+      const t = token(); registered = { registration, closed: false }; tickets.set(t, registered); issued = true; return t;
     },
     describe(t: object) {
       const e = entry(t); return { ...noAuthority, schema: "native-bar-admission-read-registration-result-v1" as const,
@@ -131,9 +138,22 @@ export function createSyntheticAdmissionReadRegistry(bootstrap: object) {
       throw new Error("b2a_native_read_unavailable");
     },
     closeFixture(t: object) {
-      const e = tickets.get(t); if (!e) throw new Error("b2a_fixture_ticket_required"); e.closed = true;
+      const e = tickets.get(t); if (!e) throw new Error("b2a_fixture_ticket_required"); e.closed = true; e.nativeClose?.();
     }, close,
   });
+  nativeRegistries.set(registry, (t, onClose) => {
+    const e = entry(t); if (e.nativeClose) throw new Error("b2a_read_already_active"); e.nativeClose = onClose;
+    return { registration: structuredClone(e.registration), check() { entry(t); },
+      release() { if (e.nativeClose === onClose) e.nativeClose = undefined; } };
+  });
+  return registry;
+}
+
+/** Internal capability bridge. No path lookup, native loading or caller-supplied proof callback. */
+export function claimSyntheticAdmissionNativeRead(registry: object, ticket: object, releaseOnly: () => void): NativeClaim {
+  const claim = nativeRegistries.get(registry); if (!claim) throw new Error("b2a_registry_required");
+  if (typeof releaseOnly !== "function") throw new Error("b2a_release_callback_required");
+  return claim(ticket, releaseOnly);
 }
 
 const relative = z.string().min(1).refine((v) => utf8(v) && Buffer.byteLength(v) <= 512 && !v.includes("\\") && !v.includes("\0")
@@ -210,6 +230,7 @@ const lowerLimitsSchema = z.strictObject({ entries: z.number().int().min(1).max(
   inventory_bytes: z.number().int().min(1).max(ceilings.inventory_bytes).optional(), metadata_bytes: z.number().int().min(1).max(ceilings.metadata_bytes).optional(),
   read_bytes: z.number().int().min(1).max(ceilings.read_bytes).optional(), response_bytes: z.number().int().min(1).max(ceilings.response_bytes).optional() });
 function readLimits(input: unknown) { return input === undefined ? { ...ceilings } : { ...ceilings, ...parse(lowerLimitsSchema, input) }; }
+export const validateSyntheticAdmissionReadLimits = (input?: unknown) => readLimits(input);
 const occupied = z.strictObject({ entries: uint, inventory_bytes: uint, metadata_bytes: uint });
 const count = z.string().regex(/^[1-9][0-9]{0,29}$/);
 const budgetSchema = z.strictObject({ registration: nativeBarAdmissionReadRegistrationSchema, limits: lowerLimitsSchema.optional(),

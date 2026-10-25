@@ -32,6 +32,10 @@ test("B-2a cannot load native code, sign, access storage/network/settings or rea
   } visit(parse(name));
 });
 test("B-2a has no incoming runtime or startup/MCP dependency", () => {
-  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name))
+  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionReader.ts") {
+      assert.deepEqual(imports(parse(file)), ["node:module", "node:perf_hooks", "node:process", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js"]); continue;
+    }
     assert.ok(!imports(parse(file)).some((v) => v.includes("nativeBarAdmissionReadContracts")), file);
+  }
 });

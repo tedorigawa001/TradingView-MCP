@@ -412,6 +412,7 @@ napi_value open_recovery_read_root(napi_env env, napi_callback_info info) {
     binding(s->root(), "policy.json", file.value, false); s->guard(); return wrap(env, s, SESSION_TAG);
   });
 }
+#include "native_bar_admission.inc"
 napi_value backend_info(napi_env env, napi_callback_info) {
   return boundary(env, [&] {
     auto out = object(env); napi_value version, fds, sessions;
@@ -421,6 +422,7 @@ napi_value backend_info(napi_env env, napi_callback_info) {
     napi_ok_or_throw(napi_create_int32(env, 4, &version)); prop(env, out, "quarantine_protocol", version);
     napi_ok_or_throw(napi_create_int32(env, 5, &version)); prop(env, out, "recovery_read_protocol", version);
     prop(env, out, "recovery_protocol", version);
+    napi_ok_or_throw(napi_create_int32(env, 6, &version)); prop(env, out, "admission_read_protocol", version);
     prop(env, out, "mode", text(env, "synthetic_only"));
     napi_ok_or_throw(napi_create_int32(env, fd_count.load(), &fds)); prop(env, out, "live_fds", fds);
     napi_ok_or_throw(napi_create_int32(env, session_count.load(), &sessions)); prop(env, out, "live_sessions", sessions);
@@ -433,6 +435,13 @@ NAPI_MODULE_INIT() {
   try { rparser_init(env); } catch (...) { return nullptr; }
   napi_property_descriptor methods[] = {
     {"info", nullptr, backend_info, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"beginAdmissionRead", nullptr, begin_admission_read, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"openAdmissionReadPair", nullptr, open_admission_pair, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"admissionInventory", nullptr, admission_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readAdmissionEvidence", nullptr, admission_read_evidence, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"verifyAdmissionInventory", nullptr, admission_verify, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"closeAdmissionInventory", nullptr, close_admission_inventory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"closeAdmissionRead", nullptr, close_admission_context, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRoot", nullptr, open_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openReadRoot", nullptr, open_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openRecoveryReadRoot", nullptr, open_recovery_read_root, nullptr, nullptr, nullptr, napi_default, nullptr},
