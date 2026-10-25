@@ -51,11 +51,15 @@ test("E-A source checks catch aliased clocks, global lookups, constructors and d
     assert.ok(violations(snippet(text)).length, text);
   assert.deepEqual(imports(snippet('export const f = () => import("./nativeBarAdmission.js");')), ["./nativeBarAdmission.js"]);
 });
-test("E-A is referenced only by the approved pure B-1 verifier, not production startup or tools", () => {
+test("E-A is referenced only by approved B-1/B-2a memory contracts, not startup or tools", () => {
   for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith(".ts") && name !== "nativeBarAdmission.ts")) {
     const dependencies = imports(ast(name));
     if (name === "nativeBarAdmissionVerification.ts") {
       assert.deepEqual(dependencies, ["node:crypto", "zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js"]);
+      continue;
+    }
+    if (name === "nativeBarAdmissionReadContracts.ts") {
+      assert.deepEqual(dependencies, ["node:crypto", "node:process", "zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionVerification.js"]);
       continue;
     }
     assert.ok(!dependencies.some((v) => v.includes("nativeBarAdmission")), name);

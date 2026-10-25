@@ -50,7 +50,12 @@ test("B-1 source checks catch aliased clocks, global lookups, constructors and d
     assert.ok(violations(snippet(text)).length, text);
   assert.deepEqual(imports(snippet('export const f = () => import("./nativeBarAdmissionVerification.js");')), ["./nativeBarAdmissionVerification.js"]);
 });
-test("B-1 is disconnected from startup, MCP registration and all other runtime modules", () => {
-  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name))
+test("B-1 is used only by the approved memory-only B-2a contracts, not startup or MCP", () => {
+  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionReadContracts.ts") {
+      assert.deepEqual(imports(parse(file)), ["node:crypto", "node:process", "zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionVerification.js"]);
+      continue;
+    }
     assert.ok(!imports(parse(file)).some((s) => s.includes("nativeBarAdmissionVerification")), file);
+  }
 });
