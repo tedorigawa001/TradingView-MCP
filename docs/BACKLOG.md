@@ -4,6 +4,16 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 E-B/B-1レビュー対応 (2026-10-25 JST)**: [レビュー記録](NATIVE_BAR_ADMISSION_READ_DESIGN.md#b-1-review-corrections)。最初のcheckpointより後の時刻を持つ台帳記録が、最後のcheckpoint時刻より前なら通る照合漏れ1件を再現。全記録の`body.at <= C0.observed_at`を必須とし、E-A本体や評価時刻は変えない。合成1件は修正前に期待した拒否が起きず失敗し、修正後は同時刻を許可・1ms後/後続の時刻を拒否する。B-1は合成61件+境界3件=64件、E-A合同170件が成功。固定鍵/domain/ID/配置/容量/入力隔離/台帳再生/権限falseの境界を確認し、追加の修正必須事項なし。別担当による独立レビュー・別Node/provider・native/本番trust資格の確認ではない。公開RFCテスト鍵のメモリ内署名だけを使い、署名や鍵の保存・native読取/試験/ビルド・実データ操作・MCP登録/本番有効化・Dot再開・判定/通知/保持条件の変更は行わない。B-1関連の7ファイルだけをコミット対象とし、push/配布は行わない。
+
+修正後の固定候補で全単体2,440成功・失敗/cancel各0・既存skip2、隔離ビルド/no-emit型検査成功、Bookmap Java5クラス/Node2件成功。修正ソース/試験のhashは全体回帰中に不変。対象外の追跡525ファイルと共有ビルドはレビュー開始時hashと一致し、Dot PAUSED・automation全体/判定通知条件hash不変、本番保存先未作成を確認。実native/電源断/独立レビューの実績には数えない。
+
+**105-3 E-B/B-1の入力形式・署名/checkpoint検証 (2026-10-25 JST、実装・合成検証)**: 承認された[B-1実装境界](NATIVE_BAR_ADMISSION_READ_DESIGN.md#b-1-implemented-boundary)に限定し、`nativeBarAdmissionVerification.ts`を追加。厳密な外側署名/checkpoint codec、固定した公開Ed25519 KeyObjectとSPKI fingerprint、論理record hash/外側bytes hashの分離、配置/ID/digest束縛、前後checkpointと数値順台帳を確認するメモリ内transcript検証を実装。実署名検証が成功してもnative/view/authority最新状態/実問い合わせ時刻/人間承認/実行/確定履歴/elapsed ageは未検証のまま。challenge生成・消費・取得通信はB-3へ保留し、同じ入力の再検証は純粋/idempotentとする。テスト署名は公開RFC鍵によるメモリ内準備だけで、鍵生成・鍵/署名/fixture保存・signer/authority作成はしない。生バイトへの追加属性で長さ検査を迂回できる再現と、公開鍵instanceのexport getterを差し込める再現をそれぞれREDにし、組み込み長取得/追加属性拒否/安全なsliceコピーと鍵instanceの装飾拒否へ修正。E-A本体は不変で、境界テストだけが承認された純粋B-1依存を厳密allowlistする。B-1は合成60件+境界3件=63件、E-A合同169件が成功。ネイティブ読取/実データ操作/MCP登録/本番有効化/Dot再開/判定通知条件変更/コミット/pushは行わない。
+
+最終固定候補で全単体2,439成功・失敗/cancel各0・既存skip2。隔離ビルド/no-emit型検査成功、Bookmap Java5クラス/Node2件成功。ソース/試験hashは全体回帰中に不変で、対象外の追跡525ファイル(E-A本体やnativeソース等)と共有R-Dビルドも開始時hashと一致。Docリンク/新規未追跡ファイルを含む空白検査を確認し、Dot PAUSED・automation全体/判定通知条件hash不変、本番保存先未作成を再確認。既存のバックエンド不在/未対応platform境界試験はデータrootを開く前の拒否を確認するもので、native読取やnative検証の実績には数えない。実測環境はNode24.18.0で、他バージョン/暗号provider/独立レビュー/本番trust資格は未検証。未コミット、未配布。
+
+**105-3 E-B読取専用native・署名/checkpoint検証の設計 (2026-10-25 JST、提案・実装未承認)**: `325ffc7`の修正済みE-A契約と現行v5 native読取を確認し、[専用設計書](NATIVE_BAR_ADMISSION_READ_DESIGN.md)を追加。既存v2/v5のprofile/namespaceを広げず、事前登録済みの架空fixtureのdata/witnessを専用read profileで読む案。E-Aの模擬署名・論理hashを変更せず、記録全体/配置をEd25519の外側署名で束縛し、物理file hashと分離。署名を追加ファイルへ分けず、外側全体も既存role上限内とする。両tree外の固定test公開鍵/authority/epoch/rootを信頼元とし、要求やdisk key/`valid`主張から登録しない。前後2つの異なるchallengeに対する署名付き最新checkpointと全native世代を照合し、drift・欠落・未知の信頼状態・期限/容量超過では無再試行で停止。署名成功を元受入・human承認・実行/履歴・elapsed ageへ昇格させず、保守の場所/完了/退避照合はE-Dへ保留する。全領域の既存上限、共有ボリューム計算、2対象の完全書込計画が551件で収まらない制約を維持。B-1の純粋codec/公開鍵検証、B-2のnative読取、B-3のjoint viewを個別承認とし、次は設計承認後のB-1のみを推奨。今回は文書のみで、鍵/fixture/authority作成・実データ操作・native/MCP実装や登録・本番有効化・Dot再開・判定/通知条件変更・コミット/pushは行わない。
+
 **105-3 E-A独立レビュー対応 (2026-10-25 JST)**: `3b63a16`を別担当が読み取り専用でレビューし、修正必須なし・中優先度4件・低優先度6件、加えてコミット側確認の容量2件を指摘。全12件を修正前のビルドで再現したうえで修正した([設計書](NATIVE_BAR_DURABLE_ADMISSION_DESIGN.md#e-a-independent-review-corrections))。
 - 再生:
   - 承認digestは記録・再検証・保守の元/復旧計画を通じて台帳全体で1回限り。

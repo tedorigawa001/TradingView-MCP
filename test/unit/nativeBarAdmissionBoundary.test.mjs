@@ -34,7 +34,13 @@ test("E-A cannot read ambient clocks/settings, sign, mint handles, or load nativ
   visit(ast("nativeBarAdmission.ts"));
   assert.ok(!calls.some((c) => /^(Date\.now|Math\.random|.*\.(sign|randomUUID|spawn|open|writeFile|unlink))$/.test(c)));
 });
-test("E-A is not imported or exported by production startup, tools, or another runtime module", () => {
-  for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith(".ts") && name !== "nativeBarAdmission.ts"))
-    assert.ok(!imports(ast(name)).some((v) => v.includes("nativeBarAdmission")), name);
+test("E-A is referenced only by the approved pure B-1 verifier, not production startup or tools", () => {
+  for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith(".ts") && name !== "nativeBarAdmission.ts")) {
+    const dependencies = imports(ast(name));
+    if (name === "nativeBarAdmissionVerification.ts") {
+      assert.deepEqual(dependencies, ["node:crypto", "zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js"]);
+      continue;
+    }
+    assert.ok(!dependencies.some((v) => v.includes("nativeBarAdmission")), name);
+  }
 });
