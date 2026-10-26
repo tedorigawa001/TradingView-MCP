@@ -1,6 +1,6 @@
 # B-2 Paired Native Reader And Fixture Registration
 
-Status: **B-2a and B-2b implemented; B-2c integration review pending**, 2026-10-25 JST, based on `9ecd7a5` and the [E-B design](NATIVE_BAR_ADMISSION_READ_DESIGN.md). The user separately approved B-2b's dedicated native reader and new invented unsigned fixture setup/teardown. Native validation builds stay isolated from the normal MCP build. All authority/service, real-data, MCP and production integration remains gated. Dot remains PAUSED; market confirmation, scenario, notification and retention conditions remain unchanged. Earlier implementation sections below retain their historical slice scope.
+Status: **B-2a/B-2b implemented; constrained B-2c acceptance tests run, host qualification pending**, 2026-10-26 JST, based on `cbce6d3` and the [E-B design](NATIVE_BAR_ADMISSION_READ_DESIGN.md). The user approved the B-2c tests within the existing newly invented unsigned-fixture boundary. Native validation builds stay isolated from the normal MCP build. Actual OS clock/mount changes, kernel-failure qualification, authority/service, real-data, MCP and production integration remain gated. Dot remains PAUSED; market confirmation, scenario, notification and retention conditions remain unchanged. Earlier implementation sections below retain their historical slice scope.
 
 ## Scope And Baseline
 
@@ -28,7 +28,7 @@ Reuse descriptor/ACL/hash primitives where their assumptions match. Do not widen
 | Completion | Only current native-scope/read-set facts; no signed/current ledger, accepted history, approval or execution |
 | Tests | Approved for B-2b: newly created, invented unsigned fixtures only; no persisted signatures or keys |
 
-B-2a and B-2b are approved for implementation. B-2c integration review, B-3 and subsequent E slices keep separate gates; B-2b is not production enablement.
+B-2a/B-2b and the constrained B-2c tests below are approved. Wider host-level B-2c qualification, B-3 and subsequent E slices keep separate gates; passing these tests is not production enablement.
 
 ## Registration Contract
 
@@ -362,3 +362,33 @@ Verification, from a git-archive copy plus this patch, with source/test hashes f
 - The full unit suite passes 2,561 cases, with two existing skips.
 
 Fixtures are invented and unsigned, created and removed by the tests. The pre-existing `/private/tmp` (2) and per-user temp (3) fixtures were left untouched. No real store, signing/key persistence, MCP registration, production enablement, push or Dot/market/notification/retention change is included.
+
+## B-2c Constrained Acceptance Tests
+
+On 2026-10-26 JST, the user requested the next acceptance tests. This run starts from `cbce6d3`, keeps the existing constraints and adds 25 cases to the isolated admission runner. Only new invented unsigned fixtures are created/removed. The fixed addon dependency is substituted in this test process's module cache/loader for fault cases, always restored in `finally`; there is no new application loader/provider parameter or native test API. Date substitution affects JavaScript in this test process only, not the OS clock. The ordinary addon and legacy methods are real in the tests except the explicitly substituted boundary below.
+
+| Boundary | New evidence | Qualification |
+|---|---|---|
+| Release failures (3) | Failed close with a live real native pair; repeated failures retain the ticket claim; bootstrap visits other registries after one close fails | Adapter fault injection before native close, not a kernel `close` failure |
+| Missing/old addon (4) | Loader refusal gives a coded error without loader detail; legacy/no-capability, version 5 and wrong-mode reports never begin a context | In-memory loader/export substitution; no binary is renamed or replaced |
+| Initialization deadline (2) | Load latency exhausts the original window without beginning a context; a late returned real native context is released before opening roots | Real elapsed delay with a substituted boundary; native FD/root counters observed |
+| Adapter wall rollback (8) | Before and after open/inventory/read/verify: no result escapes, leases release, a new explicit query remains possible | JavaScript `Date.now` substitution only; native system-clock rollback is not qualified |
+| Native deadline (6) | Before and during inventory/read/final verification, actual elapsed expiry refuses and releases; the old lease is never renewed | Real native calls and elapsed waits; during-operation waits use the existing synchronous synthetic hook |
+| Shared native FD pressure (1) | Six legacy synthetic sessions and retained preview handles take native FD usage above 464; the 48-FD-headroom check refuses admission without changing payload bytes, then a fresh query succeeds after release | Real native managed-FD pressure; no stage/purge/write method is invoked; not OS `EMFILE` qualification |
+| Volume pin mismatch (1) | A contradictory expected read-only-mount flag refuses and releases | Real observed-volume comparison with a false expected pin; no actual remount/cross-device operation |
+
+### Reproduced Failure And Correction
+
+The release-failure tracer failed before correction: after `close()` threw `b2b_release_unconfirmed`, the same live snapshot could still run `verify()` and return a qualified native result. The adapter now marks release as requested **before** calling the backend and rejects all subsequent open/inventory/read/verify work. The resource and active ticket claim remain retained if release fails, so close/revocation can retry. Only successful native release clears that claim; it cannot be reused merely because one close attempt threw. This is a small adapter lifecycle correction, not a native syscall-close fix or new permission.
+
+### Results And Remaining Qualification
+
+The starting 350 cases pass before additions. After the fix, the 25 new cases pass, and normal/UBSan isolated runs each pass **375 cases**, with zero failures/cancellations/skips and no UBSan runtime errors. TypeScript no-emit checking, Clang static analysis and diff whitespace checks pass. Each native test checks return to its initial managed-FD/root counts. Existing limits, signature/authority/admission/execution/history flags and the recording/notification/retention rules remain unchanged. Normal shared JS/native build hashes and the PAUSED Dot configuration match the run-start values.
+
+**B-2c is not fully qualified by this run.** Still unexecuted: genuine OS clock rollback/freeze, real mount/remount/cross-device/ownership transitions, OS descriptor exhaustion, kernel close/EINTR failures and lower-level release-error injection. These need a separately reviewed controlled host/fault setup; JS loader/clock/close substitutions above are not evidence for those native/kernel branches. No host clock, mount, ownership policy, process-wide OS resource limit or previously existing fixture is changed. The broader general native recovery/worker/SIGKILL and full unit suites were not rerun in this step; the 375-case isolated regression is the claim here. B-3/provider/checkpoint orchestration and later persistence/history/handoff slices remain separate gates. No commit, push, MCP registration or production enablement is included.
+
+### Local Commit Reverification
+
+The user subsequently approved committing this constrained B-2c patch separately, on top of `96756f9`. Fresh normal and UBSan runs each pass **375 tests**, with no failures/cancellations/skips or UBSan runtime errors. The current B3-A memory/boundary regression passes **307 tests** after rebuilding its dedicated validation output; an initial attempt used stale B3-A output from before the already committed allowance/sequence corrections, not a B-2c regression. TypeScript no-emit checking, Clang static analysis and diff checks pass. No additional runtime correction is made during this commit step.
+
+The shared top-level JS build and normal native addon hashes, the complete PAUSED Dot configuration hash and the names of pre-existing synthetic fixtures match the start of reverification. Only newly invented unsigned native fixtures are prepared/removed by the admission runner; no real store is present at the configured default path. The five-file local commit contains the release-request guard, its constrained tests and B-2c documentation. It does not qualify the host/kernel gaps above, reopen Dot, alter confirmation/notification/retention conditions, push, deploy or enable any MCP/runtime entry.

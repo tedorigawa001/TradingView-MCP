@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, createPublicKey } from "node:crypto";
-import { createRequire } from "node:module";
+import { createRequire, Module } from "node:module";
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, statfsSync,
   rmSync, symlinkSync, linkSync, renameSync, realpathSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
@@ -62,6 +62,31 @@ const run = (name, fn) => test(name, { skip: !eligible && "macOS APFS and isolat
     assert.equal(native.info().live_sessions, before.live_sessions, "all root leases released");
   }); return fn(t);
 });
+// Replace only this test process's fixed addon dependency; the application accepts no loader/provider argument.
+function withAdmissionBackend(overrides, action) {
+  const require = createRequire(import.meta.url), path = fileURLToPath(new URL("native-bar-fs/native_bar_fs.node", build));
+  const entry = require.cache[require.resolve(path)], original = entry.exports;
+  const names = ["info", "beginAdmissionRead", "openAdmissionReadPair", "admissionInventory", "readAdmissionEvidence",
+    "verifyAdmissionInventory", "closeAdmissionInventory", "closeAdmissionRead"];
+  entry.exports = Object.fromEntries(names.map((name) => [name, overrides[name] ?? native[name]]));
+  try { return action(); } finally { entry.exports = original; }
+}
+function withAddonLoad(load, action) {
+  const original = Module._load, reader = fileURLToPath(new URL("nativeBarAdmissionReader.js", build));
+  Module._load = function(request, parent, isMain) {
+    if (request === "./native-bar-fs/native_bar_fs.node" && parent?.filename === reader) return load();
+    return original.call(this, request, parent, isMain);
+  };
+  try { return action(); } finally { Module._load = original; }
+}
+function prepareAdmissionOperation(f, phase) {
+  const c = f.begin();let pair, snap;
+  if (phase !== "open") pair = c.openPair();
+  if (!["open", "inventory"].includes(phase)) snap = pair.inventory();
+  const entry = snap?.report.entries.find((e) => e.root_role === "witness");
+  return { c, invoke: () => phase === "open" ? c.openPair() : phase === "inventory" ? pair.inventory()
+    : phase === "read" ? snap.readEvidence("witness", entry.index) : snap.verify() };
+}
 run("B-2b unsigned paired inventory/read/reverify has no admission authority and preserves fixture bytes", (t) => {
   const f = fixture(t), before = readFileSync(join(f.base, "admission-witness/1.json"));
   const c = f.begin(); assert.equal(native.info().live_sessions, 2); assert.equal(native.info().live_fds, 0);
@@ -421,4 +446,138 @@ run("B-2b the B-2a read floor covers the native reader's actual work", (t) => {
       assert.ok(BigInt(model.used.read_bytes) >= actual, `${anchor} ${records} read=${read}: model ${model.used.read_bytes} < native ${actual}`);
     } finally { c.close(); }
   }
+});
+run("B-2c an unconfirmed context close blocks further verification until release", (t) => {
+  const f = fixture(t);let failures = 1, verificationCalls = 0;
+  withAdmissionBackend({
+    closeAdmissionRead(handle) { if (failures-- > 0) throw new Error("invented_release_failure");native.closeAdmissionRead(handle); },
+    verifyAdmissionInventory(...args) { verificationCalls++;return native.verifyAdmissionInventory(...args); },
+  }, () => {
+    const c = f.begin(), snap = c.openPair().inventory();
+    try {
+      assert.throws(() => c.close(), /b2b_release_unconfirmed/);
+      assert.throws(() => f.begin(), /b2a_read_already_active/);
+      assert.throws(() => snap.verify(), /b2b_context_closed|b2b_release_unconfirmed/);
+      assert.equal(verificationCalls, 0);
+    } finally { c.close(); }
+    const next = f.begin();next.close();
+  });
+});
+run("B-2c close retries retain the active claim until native release succeeds", (t) => {
+  const f = fixture(t);let failures = 2, closes = 0;
+  withAdmissionBackend({ closeAdmissionRead(handle) { closes++;if (failures-- > 0) throw new Error("invented_release_failure");native.closeAdmissionRead(handle); } }, () => {
+    const c = f.begin();c.openPair().inventory();
+    try { for (let i = 0; i < 2; i++) {
+      assert.throws(() => c.close(), /b2b_release_unconfirmed/);assert.throws(() => f.begin(), /already_active/);
+    } c.close();assert.equal(closes, 3);assert.equal(native.info().live_sessions, 0);
+      const next = f.begin();next.close();
+    } finally { failures = 0;c.close(); }
+  });
+});
+run("B-2c bootstrap revokes every registry even when one native release fails", (t) => {
+  const f = fixture(t), other = createSyntheticAdmissionNativeReadRegistry(f.bootstrap.token), ticket = other.registerFixture(f.registration);
+  let failedHandle, failed = false;
+  withAdmissionBackend({ closeAdmissionRead(handle) {
+    if (handle === failedHandle && !failed) { failed = true;throw new Error("invented_release_failure"); }
+    native.closeAdmissionRead(handle);
+  }, beginAdmissionRead(wire) { const c = native.beginAdmissionRead(wire);failedHandle ??= c;return c; } }, () => {
+    const a = f.begin(), b = other.beginRead(ticket), sa = a.openPair().inventory(), sb = b.openPair().inventory();
+    try { assert.throws(() => f.bootstrap.close(), /b2a_release_unconfirmed/);
+      assert.equal(native.info().live_sessions, 2);assert.throws(() => sa.verify(), /closed/);assert.throws(() => sb.verify(), /closed/);
+      f.bootstrap.close();assert.equal(native.info().live_sessions, 0);
+    } finally { a.close();b.close(); }
+  });
+});
+run("B-2c missing addon refuses only at beginRead and exposes no loader error detail", (t) => {
+  const f = fixture(t);let loads = 0;
+  withAddonLoad(() => { loads++;throw Object.assign(new Error("invented_private_loader_detail"), { code: "MODULE_NOT_FOUND" }); }, () => {
+    const r = createSyntheticAdmissionNativeReadRegistry(f.bootstrap.token), ticket = r.registerFixture(f.registration);
+    try { assert.equal(loads, 0);assert.throws(() => r.beginRead(ticket), { message: "b2b_native_unavailable" });assert.equal(loads, 1); }
+    finally { r.close(); }
+  });
+  const c = f.begin();c.close();
+});
+for (const [label, info] of [["legacy", { mode: "synthetic_only", protocol: 1, read_protocol: 2, recovery_read_protocol: 5 }],
+  ["old version", { mode: "synthetic_only", admission_read_protocol: 5 }], ["wrong mode", { mode: "production", admission_read_protocol: 6 }]])
+  run(`B-2c ${label} addon refuses before native context creation`, (t) => {
+    const f = fixture(t);let begins = 0;
+    withAdmissionBackend({ info: () => info, beginAdmissionRead() { begins++;throw new Error("must_not_begin"); } }, () => {
+      assert.throws(() => f.begin(), { message: "b2b_native_protocol" });assert.equal(begins, 0);
+    }); const c = f.begin();c.close();
+  });
+run("B-2c addon-load latency consumes the original deadline before any context opens", (t) => {
+  const f = fixture(t);let begins = 0;
+  withAddonLoad(() => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+    return { info: () => ({ mode: "synthetic_only", admission_read_protocol: 6 }), beginAdmissionRead() { begins++; } };
+  }, () => { assert.throws(() => f.begin(undefined, 10), /b2b_deadline_or_rollback/);assert.equal(begins, 0); });
+  const c = f.begin();c.close();
+});
+run("B-2c a context returned after its original deadline is released before opening roots", (t) => {
+  const f = fixture(t);let closes = 0;
+  withAdmissionBackend({ beginAdmissionRead(wire) {
+    const c = native.beginAdmissionRead(wire);assert.equal(native.info().live_fds, 0);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 320);return c;
+  }, closeAdmissionRead(c) { closes++;native.closeAdmissionRead(c); } }, () => {
+    assert.throws(() => f.begin(undefined, 300), /b2b_deadline_or_rollback/);assert.equal(closes, 1);
+    assert.equal(native.info().live_sessions, 0);
+  });const c = f.begin();c.close();
+});
+run("B-2c a mismatched pinned read-only mount property refuses without changing the mount", (t) => {
+  const f = fixture(t), registration = structuredClone(f.registration);
+  registration.volume.read_only_mount = !registration.volume.read_only_mount;
+  const c = native.beginAdmissionRead(Buffer.from(canonical({ registration, limits, ttl_ms: 600000 })));
+  try { assert.throws(() => native.openAdmissionReadPair(c), /admission_volume_binding/); }
+  finally { native.closeAdmissionRead(c); }
+});
+const admissionPhaseMethods = { open: "openAdmissionReadPair", inventory: "admissionInventory", read: "readAdmissionEvidence", verify: "verifyAdmissionInventory" };
+for (const phase of Object.keys(admissionPhaseMethods)) for (const when of ["before", "after"])
+  run(`B-2c adapter wall rollback ${when} ${phase} withholds the result and releases`, (t) => {
+    const f = fixture(t), method = admissionPhaseMethods[phase], originalNow = Date.now;let calls = 0;
+    withAdmissionBackend({ [method](...args) {
+      calls++;const result = native[method](...args);if (when === "after") Date.now = () => originalNow() - 1000;return result;
+    } }, () => {
+      const operation = prepareAdmissionOperation(f, phase);
+      try { if (when === "before") Date.now = () => originalNow() - 1000;
+        assert.throws(operation.invoke, /b2b_deadline_or_rollback/);assert.equal(calls, when === "before" ? 0 : 1);
+        assert.equal(native.info().live_sessions, 0);
+      } finally { Date.now = originalNow;operation.c.close(); }
+    });const fresh = f.begin();fresh.close();
+  });
+for (const phase of ["inventory", "read", "verify"]) run(`B-2c native deadline before ${phase} cannot be renewed`, async (t) => {
+  const f = fixture(t), c = f.raw({}, 300);let pair, s;
+  try { pair = native.openAdmissionReadPair(c);if (phase !== "inventory") s = native.admissionInventory(pair, undefined);
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    const entry = s?.report.entries.find((e) => e.root_role === "witness");
+    assert.throws(() => phase === "inventory" ? native.admissionInventory(pair, undefined)
+      : phase === "read" ? native.readAdmissionEvidence(pair, s.snapshot, "witness", entry.index, undefined)
+      : native.verifyAdmissionInventory(pair, s.snapshot, undefined), /admission_deadline_or_rollback/);
+    assert.equal(native.info().live_sessions, 0);
+  } finally { native.closeAdmissionRead(c); }
+});
+for (const phase of ["inventory", "read", "verify"]) run(`B-2c native deadline during ${phase} withholds the response`, (t) => {
+  const f = fixture(t), c = f.raw({}, 300);let hookReached = false;
+  const slow = () => { hookReached = true;Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 320); };
+  try { const pair = native.openAdmissionReadPair(c);let s;
+    if (phase !== "inventory") s = native.admissionInventory(pair, undefined);
+    const entry = s?.report.entries.find((e) => e.root_role === "witness");
+    assert.throws(() => phase === "inventory" ? native.admissionInventory(pair, slow)
+      : phase === "read" ? native.readAdmissionEvidence(pair, s.snapshot, "witness", entry.index, slow)
+      : native.verifyAdmissionInventory(pair, s.snapshot, slow), /admission_deadline_or_rollback/);
+    assert.equal(hookReached, true);assert.equal(native.info().live_sessions, 0);
+  } finally { native.closeAdmissionRead(c); }
+});
+run("B-2c legacy descriptor pressure shares the admission headroom and unwinds without data changes", (t) => {
+  const day = "2026-10-26", name = `${id(50)}.json`, f = fixture(t, ({ write }) => write(`store/captures/${day}/${name}`));
+  const before = readFileSync(join(f.base, `store/captures/${day}/${name}`)), roots = [], targets = [], previousTemp = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = "/private/tmp";
+    for (let i = 0; i < 6; i++) roots.push(native.openRoot(join(f.base, "store"), 600000));
+    for (const root of roots) for (let i = 0; i < 32 && native.info().live_fds <= 464; i++) targets.push(native.inspect(root, "captures", day, name));
+    const pressure = native.info();assert.ok(pressure.live_fds > 464 && pressure.live_fds <= 512);
+    assert.throws(() => f.begin(), /admission_fd_headroom/);assert.equal(native.info().live_fds, pressure.live_fds);
+    assert.equal(native.info().live_sessions, roots.length);assert.deepEqual(readFileSync(join(f.base, `store/captures/${day}/${name}`)), before);
+  } finally { for (const root of roots) native.closeRoot(root);targets.length = 0;
+    if (previousTemp === undefined) delete process.env.TMPDIR;else process.env.TMPDIR = previousTemp;
+  }
+  const c = f.begin();c.openPair().inventory().verify();c.close();
 });

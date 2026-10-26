@@ -17,9 +17,10 @@ type Backend = {
   closeAdmissionInventory(pair: Handle, snapshot: Handle): void;
   closeAdmissionRead(context: Handle): void;
 };
-type Resource = { backend?: Backend; context?: Handle; released: boolean; releaseClaim?: () => void };
+type Resource = { backend?: Backend; context?: Handle; released: boolean; releaseRequested: boolean; releaseClaim?: () => void };
 function releaseResource(resource: Resource) {
   if (resource.released) return;
+  resource.releaseRequested = true;
   if (resource.context) {
     try { resource.backend!.closeAdmissionRead(resource.context); } catch { throw new Error("b2b_release_unconfirmed"); }
   }
@@ -41,7 +42,7 @@ export function createSyntheticAdmissionNativeReadRegistry(bootstrap: object) {
     const limits = validateSyntheticAdmissionReadLimits(lowerLimits);
     if (!Number.isInteger(ttlMs) || ttlMs < 1 || ttlMs > 600000) throw new Error("b2b_deadline");
     const wall = Date.now(), steady = performance.now(); let lastWall = wall;
-    const resource: Resource = { released: false };
+    const resource: Resource = { released: false, releaseRequested: false };
     let backend: Backend | undefined, context: Handle | undefined;
     let claim: ReturnType<typeof claimSyntheticAdmissionNativeRead> | undefined;
     function close() {
@@ -50,7 +51,7 @@ export function createSyntheticAdmissionNativeReadRegistry(bootstrap: object) {
     claim = claimSyntheticAdmissionNativeRead(registry, ticket, weakRelease(close, resource));
     resource.releaseClaim = claim.release; abandonedClaims.register(close, resource, close);
     function check() {
-      if (resource.released) throw new Error("b2b_context_closed"); claim!.check();
+      if (resource.released || resource.releaseRequested) throw new Error("b2b_context_closed"); claim!.check();
       const now = Date.now();
       if (now < lastWall || now >= wall + ttlMs || performance.now() >= steady + ttlMs) throw new Error("b2b_deadline_or_rollback");
       lastWall = now;
