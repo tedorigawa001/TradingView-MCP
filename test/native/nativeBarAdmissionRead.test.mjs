@@ -431,8 +431,13 @@ run("B-2b final verification rehashes the read set and catches a content change 
 });
 run("B-2b the B-2a read floor covers the native reader's actual work", (t) => {
   // Inventory plus verification with no evidence reads is the case where fixed per-pass overhead dominates.
-  for (const [anchor, records, read] of [["/private/tmp", 1, false], [userTemp, 1, false], ["/private/tmp", 30, true], [userTemp, 1, true]]) {
-    const f = fixture(t, ({ write }) => { for (let i = 2; i <= records; ++i) write(`admission-witness/${i}.json`); }, anchor), c = f.begin();
+  // A directory-heavy tree costs more per entry than a file: its own ACL plus its scan's start/end ACL checks.
+  for (const [anchor, records, read, dirs = 0] of [["/private/tmp", 1, false], [userTemp, 1, false], ["/private/tmp", 30, true], [userTemp, 1, true],
+    ["/private/tmp", 1, false, 400]]) {
+    const f = fixture(t, ({ base, write }) => {
+      for (let i = 2; i <= records; ++i) write(`admission-witness/${i}.json`);
+      for (let i = 0; i < dirs; ++i) mkdirSync(join(base, `store/owner-notes/d${String(i).padStart(3, "0")}`), { recursive: true, mode: 0o700 });
+    }, anchor), c = f.begin();
     try {
       const snap = c.openPair().inventory(), entries = snap.report.entries;
       const witness = entries.filter((e) => e.root_role === "witness" && e.readable_evidence);
@@ -443,7 +448,7 @@ run("B-2b the B-2a read floor covers the native reader's actual work", (t) => {
         inventory: { data: occupied("data"), witness: occupied("witness"), common: occupied("fixture") }, retained_metadata_bytes: "0",
         read_work: read ? [{ kind: "content", bytes: String(unsigned.length), count: String(witness.length) }] : [],
         response: { supplied_bytes: "0", buffer_bytes: "0" }, resources: { live_roots: "0", live_targets: "0", live_fds: "0" } });
-      assert.ok(BigInt(model.used.read_bytes) >= actual, `${anchor} ${records} read=${read}: model ${model.used.read_bytes} < native ${actual}`);
+      assert.ok(BigInt(model.used.read_bytes) >= actual, `${anchor} ${records} read=${read} dirs=${dirs}: model ${model.used.read_bytes} < native ${actual}`);
     } finally { c.close(); }
   }
 });

@@ -392,3 +392,12 @@ The starting 350 cases pass before additions. After the fix, the 25 new cases pa
 The user subsequently approved committing this constrained B-2c patch separately, on top of `96756f9`. Fresh normal and UBSan runs each pass **375 tests**, with no failures/cancellations/skips or UBSan runtime errors. The current B3-A memory/boundary regression passes **307 tests** after rebuilding its dedicated validation output; an initial attempt used stale B3-A output from before the already committed allowance/sequence corrections, not a B-2c regression. TypeScript no-emit checking, Clang static analysis and diff checks pass. No additional runtime correction is made during this commit step.
 
 The shared top-level JS build and normal native addon hashes, the complete PAUSED Dot configuration hash and the names of pre-existing synthetic fixtures match the start of reverification. Only newly invented unsigned native fixtures are prepared/removed by the admission runner; no real store is present at the configured default path. The five-file local commit contains the release-request guard, its constrained tests and B-2c documentation. It does not qualify the host/kernel gaps above, reopen Dot, alter confirmation/notification/retention conditions, push, deploy or enable any MCP/runtime entry.
+
+## B-2a Floor Corrections From The B3-A Review
+
+The B3-A independent review traced two B-2a read-model floors below the native reader's real per-call work, and both are corrected in B-2a. B3-A inherits them; see the [B3 record](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md#b3-a-independent-review-corrections).
+
+- *Per-entry inventory floor.* Inventory work is charged 4,608 bytes per entry per pass, up from 3,072. That covers the 1 KiB stat, up to three empty-ACL reads (a directory's own ACL and its scan's start/end checks) and the directory record. Deny-only ACL text beyond that is supplied as `acl` work. A data root of 400 empty directories previously gave a fitting model of 5,519,796 bytes against 6,893,876 bytes of native work.
+- *Response floor.* A content read may carry the native role cap `cap_bytes` (4/8/16/64 KiB or 1 MiB; default 1 MiB). An object larger than its cap is refused. The response floor reserves four times the largest planned cap, as the native per-read check does, instead of trusting the supplied `buffer_bytes` alone.
+
+The native B-2 cross-check now also covers the directory-heavy fixture.

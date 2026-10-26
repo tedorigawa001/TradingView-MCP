@@ -20,7 +20,9 @@ function namedOnly(file) {
 }
 const bad = new Set(["process", "require", "eval", "fetch", "WebSocket", "globalThis", "global", "Function", "performance", "crypto",
   "createPrivateKey", "createPublicKey", "sign", "createSign", "generateKeyPair", "generateKeyPairSync", "randomUUID", "randomBytes",
-  "randomInt", "randomFill", "randomFillSync", "getRandomValues", "webcrypto", "setTimeout", "setInterval"]);
+  "randomInt", "randomFill", "randomFillSync", "getRandomValues", "webcrypto", "setTimeout", "setInterval",
+  // Ambient time also leaks through Intl formatting, event timestamps, timer signals and setImmediate.
+  "Intl", "Event", "EventTarget", "AbortSignal", "setImmediate"]);
 function violations(file) {
   const out = []; function visit(n) {
     if (ts.isIdentifier(n) && bad.has(n.text)) out.push(n.text);
@@ -49,7 +51,8 @@ test("B-2a source checks catch default imports, aliased clocks, global lookups a
     assert.equal(namedOnly(snippet(text)), false, text);
   for (const text of ["(Date).now()", "new (Date)()", "Reflect.construct(Date, [])", "const D = Date", "Date()", "globalThis.Date.now()",
     "performance.now.call(performance)", "globalThis.crypto.getRandomValues(new Uint8Array(1))", "globalThis['proc' + 'ess']",
-    "Function('return this')()", "Reflect.get(globalThis, 'fet' + 'ch')", "createSign('sha256')", "export const f = () => import('./x.js')"])
+    "Function('return this')()", "Reflect.get(globalThis, 'fet' + 'ch')", "createSign('sha256')", "export const f = () => import('./x.js')",
+    "new Intl.DateTimeFormat().format()", "new Event('x').timeStamp", "AbortSignal.timeout(1)", "setImmediate(f)"])
     assert.ok(violations(snippet(text)).length, text);
   assert.deepEqual(violations(snippet("Date.parse('2026-10-25T00:00:00.000Z')")), []);
 });

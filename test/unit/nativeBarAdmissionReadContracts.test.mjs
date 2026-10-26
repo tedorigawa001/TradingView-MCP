@@ -68,7 +68,7 @@ test("B-2a counts data, witness, fixed controls and repeated reads in one suppli
   // Supplied ACL work as given; three content objects four times each with guard passes; four inventory passes; controls.
   assert.equal(r.model_fits, true); assert.equal(r.used.entries, "508");
   const fixed = 5n * (BigInt(q.registration.bindings.ancestors.length) + 4n) * 12288n;
-  assert.equal(r.used.read_bytes, String(1000n + 4n * 3000n + 4n * 3n * 65536n + 4n * 508n * 3072n + controls * (6n + 4n * 3n) + fixed));
+  assert.equal(r.used.read_bytes, String(1000n + 4n * 3000n + 4n * 3n * 65536n + 4n * 508n * 4608n + controls * (6n + 4n * 3n) + fixed));
   assert.equal(r.capacity_verified, false); assert.equal(r.native_read_available, false);
   q.inventory.witness.entries = "255";
   assert.deepEqual(api.calculateSyntheticAdmissionReadBudget(q).blockers, ["entries_limit"]);
@@ -223,7 +223,7 @@ test("B-2a derives registration/control and Buffer-response floors even from und
   assert.equal(r.used.entries, "9"); assert.ok(BigInt(r.used.metadata_bytes) > BigInt(Buffer.byteLength(canonical(q.registration))));
   assert.ok(BigInt(r.used.read_bytes) > 21n); assert.ok(BigInt(r.used.response_bytes) > 4096n);
   q.response.buffer_bytes = "2097152"; assert.ok(api.calculateSyntheticAdmissionReadBudget(q).blockers.includes("response_bytes_limit"));
-  q.read_work = [{ kind: "content", bytes: "999999999999999999999999999999", count: "999999999999999999999999999999" }];
+  q.read_work = [{ kind: "content", bytes: "1048576", count: "999999999999999999999999999999" }];
   assert.ok(api.calculateSyntheticAdmissionReadBudget(q).blockers.includes("read_bytes_limit"));
 });
 for (const [field, exact, reason] of [["live_roots", "6", "root_lease_limit"], ["live_targets", "32", "live_target_limit"], ["live_fds", "464", "descriptor_headroom_limit"]])
@@ -342,4 +342,13 @@ test("B-2a control bytes block a path anywhere, including names that would other
   for (const path of [`producer/${id(10)}/2.json\n`, `producer/${id(10)}/1.json\r`, "maintenance/x\ny", ".writer\nnote", "notes\n.txt", "owner/\x7f"]) {
     const r = classify("data", path); assert.equal(r.namespace_status, "blocked", JSON.stringify(path)); assert.equal(r.raw_read_candidate, false);
   }
+});
+test("B-2a the response floor reserves four times the largest native role cap of any planned content read", () => {
+  const q = budget(), base = BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.response_bytes);
+  q.read_work = [{ kind: "content", bytes: "58", count: "1", cap_bytes: "16384" }];
+  assert.equal(BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.response_bytes) - base, 4n * 16384n);
+  q.read_work = [{ kind: "content", bytes: "58", count: "1" }]; // no cap: a payload-sized 1 MiB reservation
+  assert.equal(BigInt(api.calculateSyntheticAdmissionReadBudget(q).used.response_bytes) - base, 4n * 1048576n);
+  q.read_work = [{ kind: "content", bytes: "16385", count: "1", cap_bytes: "16384" }];
+  assert.throws(() => api.calculateSyntheticAdmissionReadBudget(q), /b2a_invalid_input/);
 });

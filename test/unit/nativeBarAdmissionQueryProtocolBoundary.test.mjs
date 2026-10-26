@@ -16,7 +16,9 @@ const allowed = new Map([
 function imports(file) {
   const out = []; function visit(n) {
     if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier) out.push(n.moduleSpecifier.text);
-    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) out.push("dynamic_import");
+    // A literal dynamic import is recorded by name, so an incoming import("./nativeBarAdmissionQueryProtocol.js") is caught.
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword)
+      out.push(ts.isStringLiteralLike(n.arguments[0]) ? n.arguments[0].text : "dynamic_import");
     ts.forEachChild(n, visit);
   } visit(file); return out;
 }
@@ -32,7 +34,9 @@ const canonicalNames = (names) => JSON.stringify([...names].sort());
 const banned = new Set(["process", "require", "eval", "fetch", "WebSocket", "globalThis", "global", "Function", "performance", "crypto",
   "createRequire", "createPrivateKey", "createPublicKey", "sign", "createSign", "generateKeyPair", "generateKeyPairSync", "randomUUID",
   "randomBytes", "randomInt", "randomFill", "randomFillSync", "getRandomValues", "webcrypto", "setTimeout", "setInterval",
-  "claimSyntheticAdmissionNativeRead", "createSyntheticAdmissionReadRegistry", "createSyntheticAdmissionReadBootstrap"]);
+  "claimSyntheticAdmissionNativeRead", "createSyntheticAdmissionReadRegistry", "createSyntheticAdmissionReadBootstrap",
+  // Ambient time also leaks through Intl formatting, event timestamps, timer signals and setImmediate.
+  "Intl", "Event", "EventTarget", "AbortSignal", "setImmediate"]);
 function violations(file) {
   const out = []; function visit(n) {
     if (ts.isIdentifier(n) && banned.has(n.text)) out.push(n.text);
@@ -50,9 +54,11 @@ test("B3-A has no ambient clock, random source, signer, provider, storage or nat
 });
 test("B3-A boundary tests catch clock aliases, globals, signers, capability bridges and import widening", () => {
   for (const source of ["const clock = Date; clock.now()", "new Date()", "performance.now()", "Math.random()", "globalThis['crypto']",
-    "sign(null, body, key)", "createPrivateKey(x)", "randomBytes(16)", "claimSyntheticAdmissionNativeRead(r,t,c)", "import('./native.js')"])
+    "sign(null, body, key)", "createPrivateKey(x)", "randomBytes(16)", "claimSyntheticAdmissionNativeRead(r,t,c)", "import('./native.js')",
+    "new Intl.DateTimeFormat().format()", "new Event('x').timeStamp", "AbortSignal.timeout(1)", "setImmediate(f)"])
     assert.ok(violations(snippet(source)).length, source);
   assert.deepEqual(violations(snippet("Date.parse('2026-10-26T00:00:00.000Z')")), []);
+  assert.deepEqual(imports(snippet('export const load = () => import("./nativeBarAdmissionQueryProtocol.js")')), ["./nativeBarAdmissionQueryProtocol.js"]);
   const text = readFileSync(new URL(name, root), "utf8");
   for (const mutation of [text.replace('import { z }', 'import all, { z }'), text.replace('import { z }', 'import * as z'),
     text.replace("calculateSyntheticAdmissionReadBudget }", "calculateSyntheticAdmissionReadBudget, claimSyntheticAdmissionNativeRead }")])

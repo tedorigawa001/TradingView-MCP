@@ -234,13 +234,18 @@ test("B3-A charges additional copies/work and cannot lower its fixed schedule", 
   const q = budget(), before = api.calculateSyntheticAdmissionQueryProtocolBudget(q);
   q.retained_protocol_bytes = "100"; q.decoded_transcript_bytes = "200"; q.verifier_work_bytes = "300"; q.provider_work_bytes = "400";
   const after = api.calculateSyntheticAdmissionQueryProtocolBudget(q);
-  assert.equal(BigInt(after.used.metadata_bytes) - BigInt(before.used.metadata_bytes), 300n);
+  // With no content, the transcript/verifier floors are zero, so those add in full; retained protocol bytes below the
+  // three-report floor are absorbed by it, and only the excess above that floor adds.
+  assert.equal(BigInt(after.used.metadata_bytes) - BigInt(before.used.metadata_bytes), 200n);
   assert.equal(BigInt(after.used.read_bytes) - BigInt(before.used.read_bytes), 700n);
+  const reports = 3n * (16384n + BigInt(before.used.entries) * 5120n); q.retained_protocol_bytes = String(reports + 1000n);
+  assert.equal(BigInt(api.calculateSyntheticAdmissionQueryProtocolBudget(q).used.metadata_bytes) - BigInt(before.used.metadata_bytes), 1200n);
   q.inventory_passes = 1; assert.throws(() => api.calculateSyntheticAdmissionQueryProtocolBudget(q), /invalid_input/);
 });
 test("B3-A uses bounded BigInt arithmetic instead of repeating work for huge counts", () => {
-  const q = budget(); q.read_work = [{ kind: "content", bytes: "999999999999999999999999999999", count: "999999999999999999999999999999" }];
-  const r = api.calculateSyntheticAdmissionQueryProtocolBudget(q); assert.equal(r.model_fits, false); assert.ok(BigInt(r.used.read_bytes) > 10n ** 50n);
+  // Each object is bounded by its native role cap (1 MiB at most); the object count itself may be huge.
+  const q = budget(); q.read_work = [{ kind: "content", bytes: "1048576", count: "999999999999999999999999999999" }];
+  const r = api.calculateSyntheticAdmissionQueryProtocolBudget(q); assert.equal(r.model_fits, false); assert.ok(BigInt(r.used.read_bytes) > 10n ** 35n);
 });
 test("B3-A strict result validation cannot qualify forged reports", () => {
   const s = setup(), r = complete(s);
@@ -292,12 +297,14 @@ test("B3-A exact budget formula charges V1, copied content, bounded protocol sta
   const reg = binding.registration, controls = BigInt(reg.bindings.markers.base.size) + BigInt(reg.bindings.markers.admission.size)
     + BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
   // V1 native passes run inside the native allowance; only outer work (B-1 decoding, framing, scratch) is subtracted from it.
-  const v1Native = 3000n + 3n * 65536n + 2n * BigInt(f.used.entries) * 3072n + controls * 6n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
-  const outer = 3n * 3000n + 10n * 4096n + 65536n;
+  const v1Native = 3000n + 3n * 65536n + 2n * BigInt(f.used.entries) * 4608n + controls * 6n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
+  // Supplied verifier/transcript/protocol counters are "0", so their schedule floors apply: two B-1 verifications plus
+  // per-record overhead, one decoded copy, and the three retained native reports.
+  const frame = 16384n + BigInt(f.used.entries) * 5120n, outer = 3n * 3000n + 10n * 4096n + 65536n + (2n * 3000n + 3n * 4096n);
   assert.equal(BigInt(r.used.read_bytes) - BigInt(f.used.read_bytes), v1Native + outer);
   assert.equal(BigInt(r.native_allowance.read_bytes), 268435456n - outer);
   assert.equal(BigInt(r.used.metadata_bytes) - BigInt(f.used.metadata_bytes),
-    6000n + 10n * 4096n + 65536n + 65536n + 521n * 4096n + BigInt(Buffer.byteLength(canonical(binding))));
+    6000n + 10n * 4096n + 65536n + 65536n + 521n * 4096n + BigInt(Buffer.byteLength(canonical(binding))) + 3n * frame + 3000n);
   assert.ok(api.nativeBarAdmissionQueryModelBudgetResultSchema.safeParse(r).success);
   assert.equal(api.nativeBarAdmissionQueryModelBudgetResultSchema.safeParse({ ...r, model_fits: false }).success, false);
   assert.equal(api.nativeBarAdmissionQueryModelBudgetResultSchema.safeParse({ ...r, schedule: { ...r.schedule, final_rehashes: 1 } }).success, false);
@@ -321,11 +328,46 @@ test("B3-A at an exact-fit limit the native allowance still covers the B-2 floor
   const floor = BigInt(calculateSyntheticAdmissionReadBudget({ ...b2, registration: reg }).used.read_bytes);
   const controls = BigInt(reg.bindings.markers.base.size) + BigInt(reg.bindings.markers.admission.size)
     + BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
-  const v1Native = 40n * 16384n + 40n * 65536n + 2n * BigInt(plan.used.entries) * 3072n + controls * 43n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
+  const v1Native = 40n * 16384n + 40n * 65536n + 2n * BigInt(plan.used.entries) * 4608n + controls * 43n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
   // Before the fix the allowance equalled the four-pass floor alone, about 4 MB short of the native work the plan counts.
   assert.ok(BigInt(plan.native_allowance.read_bytes) >= floor + v1Native, `${plan.native_allowance.read_bytes} < ${floor + v1Native}`);
 });
 test("B3-A checkpoint and prefix sequences start at 1, as in B-1", () => {
   const s = setup(), r = s.model.issue(s.q, { phase: "c0", challenge: id(200), observation: obs() });
   assert.throws(() => s.model.receive(s.q, r, { observation: obs(), checkpoint_claim: claim(s.binding, id(200), { sequence: "0" }) }), /invalid_input/);
+});
+function fullProtocol(s) {
+  for (const [phase, n] of [["c0", 200]]) receive(s, phase, n);
+  s.model.advance(s.q, { phase: "pair_open", observation: obs() }); s.model.advance(s.q, { phase: "inventoried", observation: obs() });
+  s.model.bindRecords(s.q, { observation: obs(), sequence: "1", tip_hash: evidenceHash("invented tip"), record_role_ids: [] });
+  s.model.advance(s.q, { phase: "native_checked_before_c1", observation: obs() });
+  const c1 = receive(s, "c1", 201);
+  s.model.advance(s.q, { phase: "native_checked_after_c1", observation: obs() }); s.model.advance(s.q, { phase: "interpretation_complete", observation: obs() });
+  s.model.finish(s.q, { observation: obs() }); return c1;
+}
+test("B3-A an out-of-order event between finish and release is recorded, so the query cannot end consistent", () => {
+  const control = setup(); fullProtocol(control); control.model.release(control.q, { observation: obs(), outcome: "confirmed" });
+  assert.equal(control.model.describe(control.q).model_order_consistent, true);
+  for (const event of [(s) => s.model.advance(s.q, { phase: "pair_open", observation: obs() }), (s) => s.model.finish(s.q, { observation: obs() }),
+    (s) => s.model.issue(s.q, { phase: "c1", challenge: id(300), observation: obs() })]) {
+    const s = setup(); fullProtocol(s); assert.throws(() => event(s), /release_only/);
+    s.model.release(s.q, { observation: obs(), outcome: "confirmed" }); const d = s.model.describe(s.q);
+    assert.equal(d.state, "released"); assert.equal(d.model_order_consistent, false); assert.equal(d.failure, "b3a_release_only");
+  }
+});
+test("B3-A cleanup keeps release_unconfirmed, ignores rolled-back cleanup time, and reports a closed model", () => {
+  const s = setup(); s.model.cancel(s.q, { observation: obs(5) });
+  s.model.release(s.q, { observation: obs(6), outcome: "unconfirmed" }); s.model.cancel(s.q, { observation: obs(1) });
+  const d = s.model.describe(s.q); assert.equal(d.state, "release_unconfirmed"); assert.equal(d.last_supplied_observation.utc_at, obs(6).utc_at);
+  s.model.close(); assert.throws(() => s.model.cancel(s.q, { observation: obs(7) }), /b3a_model_closed/);
+});
+test("B3-A budget refusals use b3a codes, and verifier/transcript/report retention have schedule floors", () => {
+  assert.throws(() => api.calculateSyntheticAdmissionQueryProtocolBudget({ ...budget(), limits: { read_bytes: 268435457 } }), (e) => e.message === "b3a_limits");
+  const q = budget(); q.inventory.data.entries = "200"; q.read_work = [{ kind: "content", bytes: "16384", count: "100", cap_bytes: "16384" }];
+  const low = api.calculateSyntheticAdmissionQueryProtocolBudget(q);
+  q.verifier_work_bytes = String(2n * 100n * 16384n + 100n * 4096n); q.decoded_transcript_bytes = String(100n * 16384n);
+  q.retained_protocol_bytes = String(3n * (16384n + BigInt(low.used.entries) * 5120n));
+  const explicit = api.calculateSyntheticAdmissionQueryProtocolBudget(q);
+  // Supplying the floors explicitly changes nothing: "0" was already charged at least that much.
+  assert.equal(low.used.read_bytes, explicit.used.read_bytes); assert.equal(low.used.metadata_bytes, explicit.used.metadata_bytes);
 });

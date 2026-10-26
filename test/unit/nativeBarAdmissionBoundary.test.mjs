@@ -27,7 +27,9 @@ function namedOnly(file) {
 }
 // Global-object, constructor and clock aliases are refused by name, so string-built property names cannot reach them.
 const forbidden = new Set(["process", "require", "eval", "fetch", "WebSocket", "WeakMap", "WeakSet", "setTimeout", "setInterval",
-  "globalThis", "global", "Function", "performance", "crypto", "randomUUID", "randomBytes", "getRandomValues"]);
+  "globalThis", "global", "Function", "performance", "crypto", "randomUUID", "randomBytes", "getRandomValues",
+  // Ambient time also leaks through Intl formatting, event timestamps, timer signals and setImmediate.
+  "Intl", "Event", "EventTarget", "AbortSignal", "setImmediate"]);
 function violations(file) {
   const out = [];
   function visit(node) {
@@ -53,7 +55,8 @@ test("E-A source checks catch aliased clocks, global lookups, constructors and d
   for (const text of ["Date()", "globalThis.Date.now()", "new globalThis.Date()", "const now = Date.now; now()", "performance.now.call(performance)",
     "globalThis.crypto.getRandomValues(new Uint8Array(1))", "globalThis['proc' + 'ess']", "Function('return this')()",
     "Reflect.get(globalThis, 'fet' + 'ch')", "new Date()", "export const f = () => import('./x.js')",
-    "(Date).now()", "new (Date)()", "Reflect.construct(Date, [])", "const D = Date"])
+    "(Date).now()", "new (Date)()", "Reflect.construct(Date, [])", "const D = Date",
+    "new Intl.DateTimeFormat().format()", "new Event('x').timeStamp", "AbortSignal.timeout(1)", "setImmediate(f)"])
     assert.ok(violations(snippet(text)).length, text);
   assert.deepEqual(violations(snippet("Date.parse('2026-10-25T00:00:00.000Z')")), []);
   for (const text of ['import proc from "node:process"; proc.env', 'import * as z from "zod"']) assert.equal(namedOnly(snippet(text)), false, text);

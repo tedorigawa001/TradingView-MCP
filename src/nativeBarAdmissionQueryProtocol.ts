@@ -39,7 +39,8 @@ export const nativeBarAdmissionQueryModelResultSchema = z.strictObject({ ...qual
 const bytes = (v: unknown) => Buffer.byteLength(canonical(v));
 function refuse(reason: string): never { throw new Error(`b3a_${reason}`); }
 
-// Bound plain structured input before Zod or hashing; never evaluate an accessor/toJSON.
+// Bound plain structured input before Zod or hashing; own accessors/toJSON are refused. A Proxy can still answer Zod's
+// reads differently, so callers are trusted in-process test code, as for every other admission contract.
 function bounded(value: unknown, limit: number) {
   let size = 0, nodes = 0; const active = new Set<object>();
   function visit(v: unknown, depth: number) {
@@ -94,20 +95,22 @@ export function createSyntheticAdmissionQueryProtocolModel(input: unknown, optio
   function lookup(t: object) { const q = queries.get(t); if (!q) refuse("query_handle_required"); return q; }
   function failure(q: Query, reason: string) {
     q.failure ??= reason; if (q.request) q.request.consumed = true;
-    if (q.state !== "released" && q.state !== "revoked") q.state = "releasing";
+    if (q.state !== "released" && q.state !== "revoked" && q.state !== "release_unconfirmed") q.state = "releasing";
   }
   function observe(q: Query, o: Observation, cleanup = false) {
     const wall = Date.parse(o.utc_at), tick = BigInt(o.monotonic_ns);
     const bad = wall < Date.parse(q.last.utc_at) || tick < BigInt(q.last.monotonic_ns) ? "b3a_clock_rollback"
       : wall - Date.parse(q.start.utc_at) >= 600000 || tick - BigInt(q.start.monotonic_ns) >= 600000000000n ? "b3a_expired" : null;
     if (bad) { if (!cleanup) throw new Error(bad); failure(q, bad); }
-    q.last = o; q.ordinal++;
+    // A rolled-back cleanup observation is counted but never lowers the comparison point for later observations.
+    if (bad !== "b3a_clock_rollback") q.last = o; q.ordinal++;
   }
   function run<T>(t: object, action: (q: Query) => T) {
     const q = lookup(t);
     if (closed || q.state === "revoked") refuse("model_closed");
     if (q.state === "released") refuse("query_terminal");
-    if (q.failure || q.state === "releasing" || q.state === "release_unconfirmed") refuse("release_only");
+    // A non-cleanup event after finish is also out of order: record it, so the query can no longer end consistent.
+    if (q.failure || q.state === "releasing" || q.state === "release_unconfirmed") { failure(q, "b3a_release_only"); refuse("release_only"); }
     try { return action(q); }
     catch (e) {
       const reason = e instanceof Error && /^b3a_[a-z_]+$/.test(e.message) ? e.message : "b3a_invalid_input";
@@ -174,7 +177,7 @@ export function createSyntheticAdmissionQueryProtocolModel(input: unknown, optio
       run(t, (q) => { const a = parse(onlyObservation, raw); expect(q, "interpretation_complete"); observe(q, a.observation); q.state = "releasing"; });
     },
     cancel(t: object, raw: unknown) {
-      const q = lookup(t); if (closed || q.state === "released") refuse("query_terminal");
+      const q = lookup(t); if (closed) refuse("model_closed"); if (q.state === "released") refuse("query_terminal");
       try { const a = parse(onlyObservation, raw); observe(q, a.observation, true); }
       catch { failure(q, "b3a_invalid_input"); throw new Error("b3a_invalid_input"); }
       failure(q, "b3a_cancelled");
@@ -210,7 +213,8 @@ const lowerLimits = z.strictObject({ entries: z.number().int().positive().option
 const budgetSchema = z.strictObject({ binding: registrationSchema, limits: lowerLimits.optional(),
   inventory: z.strictObject({ data: occupied, witness: occupied, common: occupied }), retained_metadata_bytes: uint,
   retained_protocol_bytes: uint, decoded_transcript_bytes: uint, verifier_work_bytes: uint, provider_work_bytes: uint,
-  read_work: z.array(z.strictObject({ kind: z.enum(["content", "directory", "acl", "metadata"]), bytes: uint, count: uint.refine((v) => v !== "0") })).max(L.entries),
+  read_work: z.array(z.strictObject({ kind: z.enum(["content", "directory", "acl", "metadata"]), bytes: uint, count: uint.refine((v) => v !== "0"),
+    cap_bytes: z.enum(["4096", "8192", "16384", "65536", "1048576"]).optional() })).max(L.entries),
   response: z.strictObject({ supplied_bytes: uint, buffer_bytes: uint }), resources: z.strictObject({ live_roots: uint, live_targets: uint, live_fds: uint }) });
 const total = z.string().regex(/^(0|[1-9][0-9]{0,89})$/);
 const totals = z.strictObject({ entries: total, inventory_bytes: total, metadata_bytes: total, read_bytes: total, response_bytes: total });
@@ -224,9 +228,12 @@ export const nativeBarAdmissionQueryModelBudgetResultSchema = z.strictObject({ .
 /** Finite supplied-work floor, not a native reservation, provider authentication or physical capacity check. */
 export function calculateSyntheticAdmissionQueryProtocolBudget(input: unknown) {
   const q = parse(budgetSchema, input, 256 * 1024), b = registration(q.binding), r = b.registration;
-  const limits = validateSyntheticAdmissionReadLimits(q.limits);
-  const floor = calculateSyntheticAdmissionReadBudget({ registration: r, ...(q.limits ? { limits: q.limits } : {}), inventory: q.inventory,
-    retained_metadata_bytes: q.retained_metadata_bytes, read_work: q.read_work, response: q.response, resources: q.resources });
+  let limits: ReturnType<typeof validateSyntheticAdmissionReadLimits>, floor: ReturnType<typeof calculateSyntheticAdmissionReadBudget>;
+  try { limits = validateSyntheticAdmissionReadLimits(q.limits); } catch { refuse("limits"); }
+  try {
+    floor = calculateSyntheticAdmissionReadBudget({ registration: r, ...(q.limits ? { limits: q.limits } : {}), inventory: q.inventory,
+      retained_metadata_bytes: q.retained_metadata_bytes, read_work: q.read_work, response: q.response, resources: q.resources });
+  } catch { refuse("invalid_input"); }
   const selected = q.read_work.filter((w) => w.kind === "content");
   const content = selected.reduce((n, w) => n + BigInt(w.bytes) * BigInt(w.count), 0n), objects = selected.reduce((n, w) => n + BigInt(w.count), 0n);
   const controls = BigInt(r.bindings.markers.base.size) + BigInt(r.bindings.markers.admission.size) + BigInt(bytes({ schema: "native-bar-synthetic-admission-profile-v6" }));
@@ -234,12 +241,17 @@ export function calculateSyntheticAdmissionQueryProtocolBudget(input: unknown) {
   // The extra V1 native passes (content, guards, inventory, controls and fixed overhead) are performed by the native reader
   // itself, inside native_allowance, so they are added to the plan but never subtracted from that allowance. Only outer
   // work is: framing, scratch, B-1 decoding/verification, provider work, retained copies and the request ledger.
-  const v1Native = content + objects * 65536n + 2n * BigInt(floor.used.entries) * 3072n + controls * (3n + objects)
+  const v1Native = content + objects * 65536n + 2n * BigInt(floor.used.entries) * 4608n + controls * (3n + objects)
     + 3n * (BigInt(r.bindings.ancestors.length) + 4n) * 12288n;
+  // Schedule-derived floors for outer work the caller might understate: B-1 verifies every envelope twice (record checks,
+  // then the transcript re-verification) with per-record decoding overhead; the JS side retains the initial, V0 and V1
+  // native reports and one decoded copy of the selected content.
+  const max = (a: bigint, b: bigint) => a > b ? a : b, frame = 16384n + BigInt(floor.used.entries) * 5120n;
   const outer: Record<keyof typeof limits, bigint> = {
     entries: 0n, inventory_bytes: 0n,
-    metadata_bytes: 2n * content + external + scratch + ledger + BigInt(q.retained_protocol_bytes) + BigInt(q.decoded_transcript_bytes),
-    read_bytes: 3n * content + external + scratch + BigInt(q.verifier_work_bytes) + BigInt(q.provider_work_bytes),
+    metadata_bytes: 2n * content + external + scratch + ledger + max(BigInt(q.retained_protocol_bytes), 3n * frame)
+      + max(BigInt(q.decoded_transcript_bytes), content),
+    read_bytes: 3n * content + external + scratch + max(BigInt(q.verifier_work_bytes), 2n * content + objects * 4096n) + BigInt(q.provider_work_bytes),
     response_bytes: 65536n + external,
   };
   const keys = Object.keys(limits) as (keyof typeof limits)[], blockers = floor.blockers.filter((k) => !k.endsWith("_bytes_limit") && k !== "entries_limit");

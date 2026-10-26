@@ -246,7 +246,10 @@ const occupied = z.strictObject({ entries: uint, inventory_bytes: uint, metadata
 const count = z.string().regex(/^[1-9][0-9]{0,29}$/);
 const budgetSchema = z.strictObject({ registration: nativeBarAdmissionReadRegistrationSchema, limits: lowerLimitsSchema.optional(),
   inventory: z.strictObject({ data: occupied, witness: occupied, common: occupied }), retained_metadata_bytes: uint,
-  read_work: z.array(z.strictObject({ kind: z.enum(["content", "directory", "acl", "metadata"]), bytes: uint, count })).max(L.entries),
+  // cap_bytes is the native role cap of a content read (witness 16 KiB, mirror 8 KiB, payload 1 MiB, ...); the native
+  // response check reserves four times that cap per read whatever the actual size, so a missing cap means 1 MiB.
+  read_work: z.array(z.strictObject({ kind: z.enum(["content", "directory", "acl", "metadata"]), bytes: uint, count,
+    cap_bytes: z.enum(["4096", "8192", "16384", "65536", "1048576"]).optional() })).max(L.entries),
   response: z.strictObject({ supplied_bytes: uint, buffer_bytes: uint }),
   resources: z.strictObject({ live_roots: uint, live_targets: uint, live_fds: uint }) });
 /** Model of supplied counters only. It neither observes nor reserves a native resource. */
@@ -261,6 +264,8 @@ export function calculateSyntheticAdmissionReadBudget(input: unknown) {
   const work = q.read_work.reduce((sum, w) => sum + BigInt(w.bytes) * BigInt(w.count), 0n);
   const reads = q.read_work.filter((w) => w.kind === "content");
   const contentObjects = reads.reduce((n, w) => n + BigInt(w.count), 0n), content = reads.reduce((n, w) => n + BigInt(w.bytes) * BigInt(w.count), 0n);
+  if (reads.some((w) => BigInt(w.bytes) > BigInt(w.cap_bytes ?? "1048576"))) throw new Error("b2a_invalid_input");
+  const largestCap = reads.reduce((n, w) => max(n, BigInt(w.cap_bytes ?? "1048576")), 0n);
   const entries = max(BigInt(data.entries), 1n) + BigInt(witness.entries) + max(BigInt(common.entries), commonEntries);
   // Per entry: bounded proofs/classification/Buffer headers plus worst-case escaping of a 512-byte path.
   // Retain baseline, recheck and read-set frames; the bounded ACL serialization scratch is separate.
@@ -273,13 +278,15 @@ export function calculateSyntheticAdmissionReadBudget(input: unknown) {
     // Mandatory protocol work, whatever the caller supplies. Each distinct content read is read three times (before/after
     // the bytes and after the response) and rehashed once in final verification, each pass with up to 64 KiB of guard,
     // control and parent rechecks. Four joint inventory passes (two initial, two around verification) observe every
-    // entry's name, metadata and ACL. Controls are reread at open, in every inventory pass, at final verification and
+    // entry's name, metadata and ACL: 4.5 KiB per entry covers the 1 KiB stat, up to three empty-ACL reads (a directory's
+    // own ACL and its scan's start/end checks) and the directory record; deny-only ACL text beyond that is supplied as acl
+    // work. Controls are reread at open, in every inventory pass, at final verification and
     // around every content pass. Other supplied work (directory/ACL/metadata beyond these) is added as given.
     // Fixed overhead per joint pass and at open: guards before and after, control rereads with their ACL charges and every
     // ancestor/root ACL observation, at 12 KiB per pinned chain element (ancestors plus parent, roots and controls).
-    read_bytes: work - content + 4n * content + 4n * contentObjects * 65536n + 4n * entries * 3072n
+    read_bytes: work - content + 4n * content + 4n * contentObjects * 65536n + 4n * entries * 4608n
       + (markers + policyBytes) * (6n + 4n * contentObjects) + 5n * (BigInt(r.bindings.ancestors.length) + 4n) * 12288n,
-    response_bytes: max(BigInt(q.response.supplied_bytes), inventoryFrame + registrationBytes + 4n * BigInt(q.response.buffer_bytes)),
+    response_bytes: max(BigInt(q.response.supplied_bytes), inventoryFrame + registrationBytes + 4n * max(BigInt(q.response.buffer_bytes), largestCap)),
   };
   const blockers: string[] = [];
   for (const key of Object.keys(ceilings) as (keyof typeof ceilings)[]) if (used[key] > BigInt(limits[key]!)) blockers.push(`${key}_limit`);

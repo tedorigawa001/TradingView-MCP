@@ -150,15 +150,15 @@ The strict budget input includes the fixed registration envelope, the existing B
 
 Let `F` be the unchanged B-2 budget floor, `B` selected content bytes including mirrors, `N` selected object count, `E` combined inventory entries, `K` marker-plus-policy bytes and `A` ancestor count. Mandatory external framing is `H = 10 * 4096` bytes (two request frames plus eight response/copy/decoded frames); scratch is `S = 65536`. A current-query ledger allowance is `D = 65536 + (512 + 9) * 4096 + registration-envelope bytes`, conservatively reserving the maximum model role-ID list and fixed identity/request framing. Additional retained state from earlier queries must still be supplied in `retained_protocol_bytes`.
 
-- Metadata: `F.metadata + 2*B + H + S + D + retained_protocol_bytes + decoded_transcript_bytes`.
-- Read work: `F.read + B + N*65536 + 2*E*3072 + K*(3+N) + 3*(A+4)*12288 + 3*B + H + S + verifier_work_bytes + provider_work_bytes`. This adds V1's content/inventory/control checks and bounded verifier work to the old floor.
+- Metadata: `F.metadata + 2*B + H + S + D + max(retained_protocol_bytes, 3*R) + max(decoded_transcript_bytes, B)`, where `R = 16384 + E*5120` is one retained native report frame (initial, V0 and V1 reports).
+- Read work: `F.read + B + N*65536 + 2*E*4608 + K*(3+N) + 3*(A+4)*12288 + 3*B + H + S + max(verifier_work_bytes, 2*B + N*4096) + provider_work_bytes`. B-1 verifies every envelope twice (record checks, then transcript re-verification), so its work has a schedule floor rather than a caller total. This adds V1's content/inventory/control checks and bounded verifier work to the old floor.
 - Response: `F.response + 65536 + H`; combined entries and inventory bytes retain the old floor.
 
-All arithmetic is bounded-input BigInt, including very large supplied counts without count-sized loops. `used`, `remaining` and `native_allowance` are decimal counters. `native_allowance` subtracts only the outer, non-native cost from the unchanged/lowered limit: framing `H`, scratch `S`, B-1 decoding `3*B`, verifier/provider work, retained copies `2*B`, the ledger `D` and retained protocol/transcript bytes. It never subtracts the extra V1 native passes (`B + N*65536 + 2*E*3072 + K*(3+N) + 3*(A+4)*12288`), because the native reader performs them inside that allowance. Hence `model_fits` implies that the B-2 floor plus the V1 native passes fits the allowance. These are pure plans, not reserved native allowances or enforcement. Eight roots, 512 FDs, 48-FD headroom and the existing shared-target ceiling remain unchanged. Capacity/native-budget flags stay false even when `model_fits` is true.
+All arithmetic is bounded-input BigInt, including very large supplied counts without count-sized loops. `used`, `remaining` and `native_allowance` are decimal counters. `native_allowance` subtracts only the outer, non-native cost from the unchanged/lowered limit: framing `H`, scratch `S`, B-1 decoding `3*B`, verifier/provider work, retained copies `2*B`, the ledger `D` and retained protocol/transcript bytes. It never subtracts the extra V1 native passes (`B + N*65536 + 2*E*4608 + K*(3+N) + 3*(A+4)*12288`), because the native reader performs them inside that allowance. Hence `model_fits` implies that the B-2 floor plus the V1 native passes fits the allowance. These are pure plans, not reserved native allowances or enforcement. Eight roots, 512 FDs, 48-FD headroom and the existing shared-target ceiling remain unchanged. Capacity/native-budget flags stay false even when `model_fits` is true.
 
 ### Synthetic Verification
 
-The new slice has **79 tests** (75 model/budget tests plus four source-boundary tests). With E-A and B-2a pure regressions and the B-1/B-2b source/entry boundaries, **305 tests pass**, zero failures/cancellations/skips. Verification uses isolated `build/b3a-validation/` output; the common build is not regenerated. Type checking (`tsc --noEmit`) and `git diff --check` pass.
+At `bfa9cd0` the new slice had **79 tests** (75 model/budget tests plus four source-boundary tests); with E-A and B-2a pure regressions and the B-1/B-2b source/entry boundaries, **305 tests passed**. The review corrections below change these counts, zero failures/cancellations/skips. Verification uses isolated `build/b3a-validation/` output; the common build is not regenerated. Type checking (`tsc --noEmit`) and `git diff --check` pass.
 
 The premature-release bug was reproduced before its fix: a rejected early release left the query in `query_started` and could resume normal work. It now retains a failure and only accepts cleanup. Other cases cover exact fixture digest, detached/copy/foreign handles, single consumption, delayed C0 during C1, checkpoint/prefix changes, role/challenge replay, cancellation/release uncertainty, equal clocks, independent exclusive deadlines/rollback, strict malformed/oversized input, all five exact budget limits and one over, global resource bounds and exact additional-cost arithmetic. Source checks and their mutation tests refuse import widening, clocks/RNG/signers/capability bridges and every incoming runtime dependency.
 
@@ -175,6 +175,34 @@ The committer's review of `bfa9cd0` found one should-fix budget defect and one p
 2. *Sequence floor.* Checkpoint-claim and prefix sequences accepted `"0"`, while B-1 checkpoints start at 1. They now start at 1.
 
 Both regressions, and the corrected formula test, fail on `bfa9cd0`. The E-A/B-1/B-2/B3-A unit suites pass 372 cases, and the full unit suite passes 2,642 with two existing skips. No native code, runtime entry point or MCP wiring changed. The uncommitted B-2c files are not part of this correction.
+
+### B3-A Independent Review Corrections
+
+A separate read-only review of the model at `96756f9` found no must-fix issue, one should-fix issue and eight low-priority items:
+
+1. *Finish-to-release window (should-fix).* An out-of-order event after `finish` was refused but not recorded, so the query still ended `model_order_consistent: true`. Examples: a duplicate or stale response, a foreign handle, a rewinding `advance`, `issue`, `bindRecords` or a second `finish`. Any non-cleanup event in `releasing`/`release_unconfirmed` now records `b3a_release_only`.
+2. *Per-entry inventory floor (inherited from B-2a).* The floor charged 3,072 bytes per entry per pass. A directory costs at least about 4.1 KiB natively: the stat, its own ACL and its scan's start/end ACL checks. On a data root with 400 empty directories, a fitting plan fell short: model 5,519,796 against native 6,893,876. B-2a and B3-A now charge 4,608 bytes per entry per pass. Deny-only ACL text beyond that is supplied as `acl` work. The native cross-check includes this directory-heavy fixture.
+3. *Response floor (inherited).* The native reader reserves four times the role cap of each read, so 16 KiB covers a witness and 1 MiB a payload. B-2a content reads now carry an optional role `cap_bytes`, defaulting to 1 MiB and refusing larger objects. The response floor uses the largest planned cap.
+4. *Literal dynamic imports.* B3-A's boundary test now records literal dynamic imports by name and self-tests it.
+5. *Ambient clocks.* All four pure boundary tests (E-A, B-1, B-2a, B3-A) now also ban `Intl`, `Event`, `EventTarget`, `AbortSignal` and `setImmediate`. The reviewer showed that `Intl.DateTimeFormat` and `Event.timeStamp` read the clock.
+6. *B-1 verification and retention floors.* B-1 verification and E-A replay work, the JS-side retention of the three native reports and the decoded transcript copy no longer depend on caller totals that accept "0". Their schedule floors are given above.
+7. *Stale counts.* The counts above are labeled as the pre-correction state.
+8. *Error codes.* Raised or invalid budget limits now refuse with `b3a_limits` or `b3a_invalid_input`, not B-2a codes. `cancel` after `close()` reports `b3a_model_closed`.
+
+**Smaller behavior fixes.**
+- Cleanup keeps `release_unconfirmed` rather than moving back to `releasing`.
+- A rolled-back cleanup observation is counted but no longer lowers the comparison point.
+- The input-guard comment states that a Proxy can still answer Zod's reads differently, so callers are trusted in-process test code, as for every admission contract.
+
+**For later slices.** A hand-built object can satisfy the exported result schema. Later slices must accept only the original model/live handles, never a result object in place of a handle.
+
+Verification, from a git-archive copy of `a9188fb` plus this patch, with source/test hashes fixed:
+- The new or corrected regressions fail on the unfixed build: finish-to-release, cleanup state, `b3a` codes and floors, exact-fit allowance, the exact formula, the role-cap response floor, and the directory-heavy native cross-check.
+- The E-A/B-1/B-2/B3-A unit suites pass 376 cases.
+- The isolated B-2 run passes 376 cases in both the normal and the UBSan build, with zero UBSan runtime errors.
+- The full unit suite passes 2,646 cases, with two existing skips.
+
+No native C++ source changed. B-2c has since been committed as `a9188fb` and verified separately: 375 normal and 375 UBSan cases. No fixture was left behind, and the pre-existing ones were untouched. No push, real-data operation, MCP registration or production enablement is included.
 
 ## Current Worktree
 
