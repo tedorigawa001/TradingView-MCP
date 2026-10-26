@@ -118,9 +118,21 @@ std::vector<std::string> anames(AdmissionRead& c, int fd, uint64_t remaining) {
 void aexact(AdmissionRead& c, int parent, const std::string& name) {
   const auto list = anames(c, parent, 512); require(std::find(list.begin(), list.end(), name) != list.end(), "admission_exact_name");
 }
-std::string atemp() {
-  char os[PATH_MAX], canonical[PATH_MAX]; const auto n = confstr(_CS_DARWIN_USER_TEMP_DIR, os, sizeof(os));
-  require(n > 0 && n <= sizeof(os) && realpath(os, canonical), "admission_temp_unavailable"); return canonical;
+// The on-disk spelling of an opened object, read without listing its parent: on a case-insensitive volume a case
+// variant opens the same object, so only this comparison keeps anchor and fixture components exact.
+std::string aname(int fd) {
+  attrlist attrs{}; attrs.bitmapcount = ATTR_BIT_MAP_COUNT; attrs.commonattr = ATTR_CMN_NAME;
+  struct { uint32_t length; attrreference_t ref; char buffer[NAME_MAX * 3 + 1]; } __attribute__((packed)) out{};
+  syscall_ok(fgetattrlist(fd, &attrs, &out, sizeof(out), 0), "admission_name_unavailable");
+  const auto offset = static_cast<size_t>(offsetof(decltype(out), ref)) + out.ref.attr_dataoffset;
+  require(out.ref.attr_length >= 1 && offset + out.ref.attr_length <= sizeof(out), "admission_name_unavailable");
+  const char* name = reinterpret_cast<const char*>(&out) + offset; return std::string(name, strnlen(name, out.ref.attr_length));
+}
+// Regex patterns here are a small fixed set; compiling one per call made deep inventories quadratic in practice.
+bool amatch(const std::string& value, const std::string& pattern) {
+  thread_local std::map<std::string, std::regex> cache;
+  auto found = cache.find(pattern); if (found == cache.end()) found = cache.emplace(pattern, std::regex(pattern)).first;
+  return std::regex_match(value, found->second);
 }
 int aroot(AdmissionRead& c, const std::string& role) { return role == "data" ? c.data.value : c.witness.value; }
 // Shared OS ancestors are never listed: unrelated temp entries cannot exhaust the entry cap, collide or consume the read
@@ -133,7 +145,7 @@ void aguard(AdmissionRead& c) {
     if (i + 1 < c.chain.size()) aexpected(c.registration.at("bindings").at("ancestors").a[i].at("proof"), actual);
     else { aexpected(c.registration.at("bindings").at("fixture_parent"), actual); require(equal_metadata(c.parent_stat, stat_fd(c.chain[i].fd.value)) && c.parent_stat.st_blocks == stat_fd(c.chain[i].fd.value).st_blocks, "admission_parent_changed"); }
     if (i) { struct stat entry{}; syscall_ok(fstatat(c.chain[i-1].fd.value, c.chain[i].name.c_str(), &entry, AT_SYMLINK_NOFOLLOW), "admission_anchor_changed");
-      require(S_ISDIR(entry.st_mode) && same_id(entry, stat_fd(c.chain[i].fd.value)), "admission_anchor_changed"); }
+      require(S_ISDIR(entry.st_mode) && same_id(entry, stat_fd(c.chain[i].fd.value)) && aname(c.chain[i].fd.value) == c.chain[i].name, "admission_anchor_changed"); }
   }
   if (c.data.value >= 0) for (const auto& role : {std::string("data"),std::string("witness")}) {
     int fd = aroot(c,role);const auto name=role == "data" ? "store" : "admission-witness";binding(c.chain.back().fd.value,name,fd,true);
@@ -175,7 +187,7 @@ void acontrols(AdmissionRead& c, bool first) {
 }
 struct AShape { std::string category; bool directory = false, pending = false, qualified = true, metadata = false; uint64_t cap = 0; };
 AShape ashape(const std::string& role, const std::string& p) {
-  auto is = [&](const std::string& pattern) { return matches(p,pattern); }; const std::string u=READ_UUID, seq="[1-9][0-9]{0,29}", day="[0-9]{4}-[0-9]{2}-[0-9]{2}";
+  auto is = [&](const std::string& pattern) { return amatch(p,pattern); }; const std::string u=READ_UUID, seq="[1-9][0-9]{0,29}", day="[0-9]{4}-[0-9]{2}-[0-9]{2}";
   auto out=[](const std::string& kind,uint64_t cap=0,bool dir=false,bool pending=false,bool metadata=false) { return AShape{kind,dir,pending,true,metadata,cap}; };
   if (role=="fixture") { if(p=="store"||p=="admission-witness")return out("directory",0,true);
     if(p==".native-bar-fs-synthetic"||p==".native-bar-admission-synthetic")return out("control",4096,false,false,true); return {"unknown_private",false,false,false,false,0}; }
@@ -192,11 +204,15 @@ AShape ashape(const std::string& role, const std::string& p) {
   if(is("\\.writer\\.(?:lock|takeover)|\\.writer-(?:claim|ticket)-"+u+"\\.json|\\.writer-retired-"+u+"\\.lock"))return out("coordination",65536,false,false,true);
   if(is("\\.quarantine-reserve-"+u+"\\.tmp"))return out("reserve");
   // Legacy v1/v5/R-D private names (retention, v5 stages, R-D publication temporaries) never belong in a v6 store.
-  if(is("(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:/.*)?|\\.(?:ea-|producer-|writer|quarantine-reserve-|publication-).*|retention\\.json|(?:captures|receipts)/.*\\.stage"))return {"unknown_private",false,false,false,false,0};
+  // [\s\S], not ".": ECMAScript "." stops at LF/CR, which let a private name with a line break pass as ordinary.
+  if(is("(?:producer|maintenance|maintenance-hold|operations|quarantine)(?:/[\\s\\S]*)?|\\.(?:ea-|producer-|writer|quarantine-reserve-|publication-)[\\s\\S]*|retention\\.json|(?:captures|receipts)/[\\s\\S]*\\.stage"))return {"unknown_private",false,false,false,false,0};
   return out("ordinary_side");
 }
-AShape aclass(const std::string& role,const std::string& path,bool dir) {
-  auto s=ashape(role,path); auto parts=aparts(path); std::string prefix;
+AShape aclass(const std::string& role,const std::string& path,const std::string& kind) {
+  const bool dir=kind=="directory"; auto s=ashape(role,path); auto parts=aparts(path); std::string prefix;
+  // Control bytes never qualify anywhere, and a recognized name must be a regular file or directory (as in B-2a).
+  if(std::any_of(path.begin(),path.end(),[](unsigned char ch){return ch<0x20||ch==0x7f;}))s.qualified=false;
+  if(s.category!="ordinary_side" && kind!="file" && kind!="directory")s.qualified=false;
   for(size_t i=0;i<parts.size();++i) { if(i)prefix+='/';prefix+=parts[i];const auto a=ashape(role,prefix),folded=ashape(role,name_key(prefix));
     if((name_key(prefix)!=prefix && folded.category!="ordinary_side") || (i+1<parts.size() && a.category!="ordinary_side" && !a.directory))s.qualified=false; }
   if(s.category!="ordinary_side" && dir!=s.directory)s.qualified=false; return s;
@@ -230,7 +246,7 @@ void ascan(AdmissionRead& c,ASnapshot& snap,int fd,const std::string& role,const
     c.charge(1024);syscall_ok(fstatat(fd,name.c_str(),&e.st,AT_SYMLINK_NOFOLLOW),"admission_inventory_changed");
     require(e.st.st_dev==stat_fd(aroot(c,role)).st_dev,"admission_cross_device");
     e.kind=S_ISDIR(e.st.st_mode)?"directory":S_ISREG(e.st.st_mode)?"file":S_ISLNK(e.st.st_mode)?"symlink":"nonregular";
-    const auto s=aclass(role,e.path,e.kind=="directory");e.category=s.category;e.qualified=s.qualified;e.cap=s.cap;
+    const auto s=aclass(role,e.path,e.kind);e.category=s.category;e.qualified=s.qualified;e.cap=s.cap;
     if(e.kind=="directory") { auto child=directory(fd,name);binding(fd,name,child.value,true);require(equal_metadata(e.st,stat_fd(child.value)),"admission_inventory_changed");
       e.acl=private_access(child.value,true,true);e.acl_hash=aacl(c,child.value,true); aappend(c,snap,e,false);
       ascan(c,snap,child.value,role,e.path,depth+1);binding(fd,name,child.value,true);require(equal_metadata(e.st,stat_fd(child.value)) && e.st.st_blocks==stat_fd(child.value).st_blocks,"admission_inventory_changed");
@@ -284,7 +300,12 @@ void astamp(napi_env env,napi_value report,AdmissionRead& c) {
 RJson areport(AdmissionRead& c,const ASnapshot& s,bool verified=false) {
   RJson out=afacts();out.o["schema"]="native-bar-native-admission-inventory-v6";std::vector<RJson> entries;
   for(size_t i=0;i<s.entries.size();++i) {auto e=aentry(s.entries[i]);e.o["index"]=static_cast<int>(i);entries.push_back(e);}
-  out.o["entries"]=entries;out.o["joint_generation"]=rhash(RJson(entries));out.o["inventory_complete"]=true;
+  // The generation digest leaves out the volatile OS-ancestor fields that asame also ignores, so unrelated temp
+  // activity cannot change it.
+  std::vector<RJson> stable=entries;
+  for(size_t i=0;i<s.entries.size();++i) if(s.entries[i].role=="fixture" && s.entries[i].path.compare(0,9,"ancestor-")==0)
+    for(auto k:{"size","nlink","mtime_ns","ctime_ns","allocated_bytes"}) stable[i].o["proof"].o.erase(k);
+  out.o["entries"]=entries;out.o["joint_generation"]=rhash(RJson(stable));out.o["inventory_complete"]=true;
   out.o["namespace_qualified"]=s.qualified;out.o["access_qualified"]=s.safe;out.o["native_snapshot_verified"]=verified;
   out.o["inventory_bytes"]=std::to_string(s.inventory_bytes);out.o["metadata_bytes"]=std::to_string(s.metadata_bytes);out.o["read_bytes"]=std::to_string(c.reads);
   out.o["live_fds"]=std::to_string(fd_count.load());out.o["live_sessions"]=std::to_string(session_count.load());
@@ -337,7 +358,11 @@ napi_value open_admission_pair(napi_env env,napi_callback_info info) {
   return boundary(env,[&] {
     size_t argc=1;napi_value args[1];napi_ok_or_throw(napi_get_cb_info(env,info,&argc,args,nullptr,nullptr));require(argc==1,"argument_count");
     auto c=acontext(env,args[0],ADMISSION_CONTEXT_TAG);ABusy busy(*c);AFailure fail{*c,std::uncaught_exceptions(),env};c->clock();require(c->state=="started","admission_pair_already_opened");
-    const auto anchor=c->registration.at("temp_anchor").str();require(anchor=="/private/tmp" || anchor==atemp(),"admission_temp_anchor_refused");
+    // The per-user anchor is not resolved through the OS temp-dir query, which creates a missing directory, nor through
+    // path canonicalization, which follows a symlink at the user-owned T. It is the canonical /private/var/folders shape,
+    // walked below with no-follow components and required to be the caller's private 0700 directory.
+    const auto anchor=c->registration.at("temp_anchor").str();const bool user_temp=matches(anchor,"/private/var/folders/[A-Za-z0-9_+-]+/[A-Za-z0-9_+-]+/T");
+    require(anchor=="/private/tmp" || user_temp,"admission_temp_anchor_refused");
     c->chain.push_back({Fd(open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC)),"",false});
     aexpected(c->registration.at("bindings").at("ancestors").a[0].at("proof"),abinding(*c,c->chain.back().fd.value,true,false));
     auto parts=aparts(anchor.substr(1));parts.push_back(c->registration.at("fixture_name").str());
@@ -345,6 +370,8 @@ napi_value open_admission_pair(napi_env env,napi_callback_info info) {
       Fd fd(openat(c->chain.back().fd.value,parts[i].c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC));
       struct stat linked{};syscall_ok(fstatat(c->chain.back().fd.value,parts[i].c_str(),&linked,AT_SYMLINK_NOFOLLOW),"admission_anchor_changed");
       require(S_ISDIR(linked.st_mode) && same_id(linked,stat_fd(fd.value)),"admission_anchor_changed");
+      require(aname(fd.value)==parts[i],"admission_exact_name");
+      if(user_temp && i+2==parts.size()) { const auto t=stat_fd(fd.value); require(t.st_uid==getuid() && (t.st_mode&07777)==0700,"admission_temp_anchor_refused"); }
       const auto& expected=strict?c->registration.at("bindings").at("fixture_parent"):c->registration.at("bindings").at("ancestors").a[i+1].at("proof");
       aexpected(expected,abinding(*c,fd.value,true,strict));c->chain.push_back({std::move(fd),parts[i],strict});
     }

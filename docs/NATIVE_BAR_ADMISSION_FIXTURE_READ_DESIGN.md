@@ -333,3 +333,32 @@ Verification, from a git-archive copy plus this patch, with source/test hashes f
 - The full unit suite passes 2,560 cases, with two existing skips.
 
 New fixtures are invented and unsigned, created and removed by the tests themselves. Two older `/private/tmp` and three per-user temp `native-bar-fs-synthetic-*` directories predate this work and were left untouched. No real store, signing/key persistence, MCP registration, production enablement, push or Dot/market/notification/retention change is included.
+
+## B-2b Independent Review Corrections
+
+A separate read-only review of the reader at `9233b85` found no must-fix issue, one should-fix issue, seven low-priority items and one informational note. It confirmed that dropping the exact-name listings left no integrity hole on this APFS host: case-only renames, swaps, xattr changes, content edits with mtime restored, same-size rewrites, inode swaps and ACL/flag changes all change a ctime or inode that the reader compares. The corrections:
+
+1. *Line breaks in private names (should-fix).* The native legacy pattern used ECMAScript `.`, which does not match LF/CR. Names such as `producer/<id>/2.json\n`, `maintenance/x\ny` or `.writer\nnote` were therefore classified as ordinary side files and still verified. B-2a, which defers non-ASCII names to native, blocks them. The pattern now uses `[\s\S]`, and in both classifiers a path containing any control byte never qualifies.
+2. *Read floor below native.* B-2a's floor omitted fixed per-pass overhead. For inventory plus verification without reads it was below the native reader's actual work: 162,228 against 233,956 bytes. The floor now adds 12 KiB per pinned chain element at open and in each of four passes. A native test cross-checks the model against actual native read work under both anchors, with and without reads.
+3. *Case-insensitive anchor components.* With exact-name listing gone, a registration whose fixture name differed only in case was accepted. Each opened anchor and fixture component is now compared with its on-disk spelling via `fgetattrlist(ATTR_CMN_NAME)`, which returns the stored name even when opened through a case variant, without listing the parent.
+4. *Per-user anchor resolution.* The per-user anchor came from the OS temp-directory query, which creates a missing directory (a write outside the fixture), and from path canonicalization, which follows a symlink at the user-owned `T`. It is now accepted only as the canonical `/private/var/folders/<x>/<y>/T` shape, walked with no-follow components and required to be the caller's own 0700 directory. Neither call remains, and the reader boundary test forbids them.
+5. *Generation digest.* `joint_generation` hashed volatile OS-ancestor fields that the inventory comparison ignores, so unrelated temp activity changed it. They are now excluded from the digest too.
+6. *Non-regular recognized names.* A symlink or FIFO carrying a recognized name such as `3.json` reported `namespace_qualified:true`. It is now unqualified, as in B-2a; access qualification already blocked the final view.
+7. *Regex compilation.* Patterns were compiled on every match. Compiled patterns are now cached per thread. A 504-entry depth-16 inventory fell from 13.1 s to 1.23 s and its verification from 13.5 s to 1.25 s, with identical read work.
+8. *Tests and README.*
+   - The final rehash path is now exercised: a test-only helper changes a read record through a held shared mapping, leaving mtime/ctime unchanged, and verification refuses it with `admission_read_changed`.
+   - The tag matrix passes each handle with correct argument counts and asserts the tag refusals in both directions.
+   - A budget test now shows one entry budget spanning both roots: each root fits alone, only the joint total exceeds.
+   - The mutation denylist adds the rename/unlink/link/time/flags/ACL/xattr/attribute-list calls plus the two path-resolution calls.
+   - The README count is updated.
+
+**Informational.** An unsafe directory in scope (for example mode 0755 or an allow ACL) aborts the whole inventory with `unsafe_mode`/`unsafe_acl` rather than being kept as an unqualified entry. This is intentional: it fails closed and creates no partial view.
+
+**Tests and verification.** The new regressions for control bytes, exact spelling, generation stability, non-regular names and the B-2a control-byte rule fail on `9233b85`. So do the no-read floor cross-check cases. The rehash, tag-matrix and joint-budget tests are coverage additions that the old reader also passes.
+
+Verification, from a git-archive copy plus this patch, with source/test hashes fixed:
+- Normal and UBSan isolated B-2 runs each pass 350 cases with zero failures/cancellations/skips and zero UBSan runtime errors.
+- The general native suite passes all 880 existing cases, including the complete R-D SIGKILL traces. Its 59 skips are the B-2b-only cases outside isolated mode.
+- The full unit suite passes 2,561 cases, with two existing skips.
+
+Fixtures are invented and unsigned, created and removed by the tests. The pre-existing `/private/tmp` (2) and per-user temp (3) fixtures were left untouched. No real store, signing/key persistence, MCP registration, production enablement, push or Dot/market/notification/retention change is included.

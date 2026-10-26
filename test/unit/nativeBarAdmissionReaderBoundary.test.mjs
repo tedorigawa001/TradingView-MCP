@@ -48,6 +48,8 @@ test("B-2b remains disconnected from every startup/MCP/history/market module", (
 test("B-2b native implementation has no mutation path or legacy handle conversion", () => {
   const source = readFileSync(new URL("../../native/native_bar_fs/native_bar_admission.inc", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\b(?:unlinkat|renameatx_np|mkdirat|fsync|fchmod|fchown|ftruncate|write|pwrite|session_arg|target_arg|coordination_arg)\s*\(/);
+  // Metadata/namespace mutation and path-resolution calls (helpers defined in other files are covered by their own tests).
+  assert.doesNotMatch(source, /\b(?:rename|renameat|unlink|link|linkat|symlink|symlinkat|mkfifo|mknod|futimes|futimens|utimensat|utimes|chflags|fchflags|lchflags|acl_set_fd|acl_set_fd_np|acl_set_file|acl_set_link_np|fsetxattr|setxattr|fremovexattr|removexattr|setattrlist|fsetattrlist|setattrlistat|confstr|realpath)\s*\(/);
   assert.doesNotMatch(source, /\b(?:O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND)\b/);
   assert.doesNotMatch(source, /\bprop\s*\(/);
   assert.match(source, /napi_define_properties\(/);

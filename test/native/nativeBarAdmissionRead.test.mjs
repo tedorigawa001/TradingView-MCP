@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, statfsS
   rmSync, symlinkSync, linkSync, renameSync, realpathSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Worker } from "node:worker_threads";
 
 const isolated = process.env.NATIVE_BAR_B2B_ISOLATED_TEST === "1";
@@ -104,17 +104,27 @@ run("B-2b native root slots share the legacy global limit and begin never opens 
 run("B-2b native handle tags cannot enter legacy read/mutation/coordination/recovery APIs", (t) => {
   const f = fixture(t), c = f.raw(); const pair = native.openAdmissionReadPair(c); const { snapshot } = native.admissionInventory(pair, undefined);
   try {
+    // Correct argument counts, so each refusal comes from the type tag rather than an argument-count check.
     for (const handle of [c, pair, snapshot, {}]) {
-      assert.throws(() => native.closeRoot(handle)); assert.throws(() => native.inspect(handle, "captures", "2026-10-25", "invented.json"));
-      assert.throws(() => native.inventory(handle, undefined, undefined)); assert.throws(() => native.openCoordination(handle));
-      assert.throws(() => native.recoveryWindow(handle)); assert.throws(() => native.stage(handle, undefined));
+      assert.throws(() => native.closeRoot(handle), /invalid_session_handle/);
+      assert.throws(() => native.inspect(handle, "captures", "2026-10-25", "invented.json"), /invalid_session_handle/);
+      assert.throws(() => native.inventory(handle, undefined, undefined), /invalid_session_handle/);
+      assert.throws(() => native.verifyInventory(handle, handle, undefined), /invalid_session_handle/);
+      assert.throws(() => native.stage(handle, undefined), /invalid_target_handle/);
+      assert.throws(() => native.recoveryWindow(handle), /recovery_coordination_required/);
     }
-    assert.throws(() => native.openAdmissionReadPair(pair), /handle/);
-    assert.throws(() => native.admissionInventory(c, undefined), /handle/);
+    // Every admission export refuses the other admission tags and untagged objects.
+    for (const wrong of [pair, snapshot, {}]) assert.throws(() => native.openAdmissionReadPair(wrong), /admission_handle_required/);
+    for (const wrong of [c, snapshot, {}]) assert.throws(() => native.admissionInventory(wrong, undefined), /admission_handle_required/);
+    for (const wrong of [c, snapshot, {}]) assert.throws(() => native.readAdmissionEvidence(wrong, snapshot, "witness", 0, undefined), /admission_handle_required/);
+    for (const wrong of [c, pair, {}]) assert.throws(() => native.closeAdmissionInventory(pair, wrong), /admission_snapshot_required/);
+    for (const wrong of [pair, snapshot, {}]) assert.throws(() => native.closeAdmissionRead(wrong), /admission_handle_required/);
+    // A wrong snapshot inside an admitted call is refused too (and, as any in-call failure, releases the pair).
+    assert.throws(() => native.verifyAdmissionInventory(pair, c, undefined), /admission_snapshot_required/);
   } finally { native.closeAdmissionRead(c); }
 });
 for (const [field, value] of [["entries", 1], ["inventory_bytes", 1], ["metadata_bytes", 1], ["read_bytes", 1], ["response_bytes", 1]])
-  run(`B-2b lower ${field} budget fails closed without resetting per root`, (t) => {
+  run(`B-2b lower ${field} budget fails closed`, (t) => {
     const f = fixture(t); let c; try { assert.throws(() => { c = f.begin({ [field]: value }); c.openPair().inventory(); }, /limit/); }
     finally { c?.close(); }
   });
@@ -340,6 +350,75 @@ run("B-2b legacy v1/v5/R-D private names block the final view instead of passing
       const snap = c.openPair().inventory(), e = snap.report.entries.find((e) => e.root_role === "data" && e.path === legacy);
       assert.equal(e.role, "unknown_private", legacy); assert.equal(snap.report.namespace_qualified, false);
       assert.throws(() => snap.verify(), /unqualified/);
+    } finally { c.close(); }
+  }
+});
+run("B-2b one entry budget spans both roots and the common entries, never reset per root", (t) => {
+  const f = fixture(t, ({ write }) => { for (let i = 2; i <= 12; ++i) write(`admission-witness/${i}.json`); });
+  const full = f.begin(); let report; try { report = full.openPair().inventory().report; } finally { full.close(); }
+  const count = (role) => report.entries.filter((e) => e.root_role === role).length, limit = report.entries.length - 1;
+  // Each root fits together with the common entries; only the joint total is over the limit.
+  assert.ok(count("fixture") + count("data") < limit && count("fixture") + count("witness") < limit);
+  const c = f.begin({ entries: limit }); try { assert.throws(() => c.openPair().inventory(), /admission_(?:entry|inventory)_limit/); } finally { c.close(); }
+});
+run("B-2b private names with control bytes block the final view", (t) => {
+  for (const name of [`producer/${id(10)}/2.json\n`, `producer/${id(10)}/1.json\r`, "maintenance/x\ny", ".writer\nnote", "notes\n.txt"]) {
+    const f = fixture(t, ({ write }) => write(`store/${name}`)), c = f.begin();
+    try {
+      const snap = c.openPair().inventory(), e = snap.report.entries.find((e) => e.root_role === "data" && e.path === name);
+      assert.equal(e.namespace_qualified, false, JSON.stringify(name)); assert.equal(snap.report.namespace_qualified, false);
+      assert.throws(() => snap.verify(), /unqualified/);
+    } finally { c.close(); }
+  }
+});
+run("B-2b anchor and fixture components must match their on-disk spelling exactly", (t) => {
+  const f = fixture(t), name = basename(f.base);
+  const swapped = name.slice(0, 24) + [...name.slice(24)].map((ch) => ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()).join("");
+  if (swapped === name) return; // an all-digit suffix has no case variant
+  const c = native.beginAdmissionRead(Buffer.from(canonical({ registration: { ...f.registration, fixture_name: swapped }, limits, ttl_ms: 600000 })));
+  try { assert.throws(() => native.openAdmissionReadPair(c), f.registration.volume.case_sensitive ? /./ : /admission_exact_name/); }
+  finally { native.closeAdmissionRead(c); }
+});
+run("B-2b the joint generation ignores unrelated activity in the shared temp ancestor", (t) => {
+  const f = fixture(t), generation = () => { const c = f.begin(); try { return c.openPair().inventory().report.joint_generation; } finally { c.close(); } };
+  const before = generation(), unrelated = mkdtempSync("/private/tmp/native-bar-fs-synthetic-"); rmSync(unrelated, { recursive: true, force: true });
+  assert.equal(generation(), before);
+});
+run("B-2b a recognized evidence name on a symlink is not namespace-qualified", (t) => {
+  const f = fixture(t, ({ base }) => symlinkSync("1.json", join(base, "admission-witness/3.json"))), c = f.begin();
+  try {
+    const report = c.openPair().inventory().report, e = report.entries.find((e) => e.root_role === "witness" && e.path === "3.json");
+    assert.equal(e.kind, "symlink"); assert.equal(e.namespace_qualified, false); assert.equal(report.namespace_qualified, false);
+  } finally { c.close(); }
+});
+// Changes a read record's bytes through a held shared mapping, which leaves mtime/ctime untouched.
+const mmapWriter = fileURLToPath(new URL("admission-mmap-writer", build));
+run("B-2b final verification rehashes the read set and catches a content change with unchanged mtime/ctime", async (t) => {
+  const f = fixture(t), c = f.begin();
+  try {
+    const snap = c.openPair().inventory(), e = snap.report.entries.find((e) => e.root_role === "witness" && e.path === "1.json");
+    snap.readEvidence("witness", e.index);
+    const writer = spawn(mmapWriter, [join(f.base, "admission-witness/1.json")], { stdio: ["pipe", "pipe", "inherit"] });
+    const exited = new Promise((resolve) => writer.once("exit", resolve));
+    await Promise.race([new Promise((resolve) => writer.stdout.once("data", resolve)), exited.then((code) => { throw new Error(`writer exited ${code}`); })]);
+    try { assert.throws(() => snap.verify(), /admission_read_changed/); } finally { writer.stdin.end(); await exited; }
+  } finally { c.close(); }
+});
+run("B-2b the B-2a read floor covers the native reader's actual work", (t) => {
+  // Inventory plus verification with no evidence reads is the case where fixed per-pass overhead dominates.
+  for (const [anchor, records, read] of [["/private/tmp", 1, false], [userTemp, 1, false], ["/private/tmp", 30, true], [userTemp, 1, true]]) {
+    const f = fixture(t, ({ write }) => { for (let i = 2; i <= records; ++i) write(`admission-witness/${i}.json`); }, anchor), c = f.begin();
+    try {
+      const snap = c.openPair().inventory(), entries = snap.report.entries;
+      const witness = entries.filter((e) => e.root_role === "witness" && e.readable_evidence);
+      if (read) for (const e of witness) snap.readEvidence("witness", e.index);
+      const actual = BigInt(snap.verify().read_bytes);
+      const occupied = (role) => ({ entries: String(entries.filter((e) => e.root_role === role).length), inventory_bytes: "0", metadata_bytes: "0" });
+      const model = contracts.calculateSyntheticAdmissionReadBudget({ registration: f.registration,
+        inventory: { data: occupied("data"), witness: occupied("witness"), common: occupied("fixture") }, retained_metadata_bytes: "0",
+        read_work: read ? [{ kind: "content", bytes: String(unsigned.length), count: String(witness.length) }] : [],
+        response: { supplied_bytes: "0", buffer_bytes: "0" }, resources: { live_roots: "0", live_targets: "0", live_fds: "0" } });
+      assert.ok(BigInt(model.used.read_bytes) >= actual, `${anchor} ${records} read=${read}: model ${model.used.read_bytes} < native ${actual}`);
     } finally { c.close(); }
   }
 });

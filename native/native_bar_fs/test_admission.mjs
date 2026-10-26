@@ -14,6 +14,8 @@ if (process.platform === "darwin") {
   run(process.execPath, ["native/native_bar_fs/build.mjs", "--admission-validation", ...args]);
   run("/usr/bin/xcrun", ["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fstack-protector-strong",
     "native/native_bar_fs/admission_fixture_expectations.cc", "-o", join(root, "build/b2b-validation/admission-fixture-expectations")]);
+  run("/usr/bin/xcrun", ["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fstack-protector-strong",
+    "native/native_bar_fs/admission_mmap_writer.cc", "-o", join(root, "build/b2b-validation/admission-mmap-writer")]);
 }
 run(process.execPath, ["--expose-gc", "--test", "test/native/nativeBarAdmissionRead.test.mjs", "test/unit/nativeBarAdmissionReaderBoundary.test.mjs",
   "test/unit/nativeBarAdmission.test.mjs", "test/unit/nativeBarAdmissionBoundary.test.mjs", "test/unit/nativeBarAdmissionVerification.test.mjs",

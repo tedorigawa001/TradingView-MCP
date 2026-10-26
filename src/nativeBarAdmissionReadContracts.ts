@@ -206,7 +206,8 @@ export function classifySyntheticAdmissionReadEntry(input: unknown) {
   });
   const directory = s.directory || s.role === "ordinary_side" && e.kind === "directory";
   const unicode = /[^\x20-\x7e]/.test(e.path), expectedKind = directory ? "directory" : "file";
-  const namespace_status = alias || parentBlock || s.role === "unknown_private" || s.role !== "ordinary_side" && e.kind !== expectedKind
+  // Control bytes never qualify anywhere; the native classifier blocks them too, rather than deferring a decision.
+  const namespace_status = alias || parentBlock || /[\x00-\x1f\x7f]/.test(e.path) || s.role === "unknown_private" || s.role !== "ordinary_side" && e.kind !== expectedKind
     ? "blocked" as const : unicode ? "needs_native_name_check" as const : s.role === "ordinary_side" ? "ordinary_side" as const : "recognized" as const;
   const blocker = namespace_status === "blocked" ? "namespace" : unicode ? "native_name_check_required"
     : e.access !== "supplied_safe" ? "access_unverified" : e.kind !== expectedKind ? "nonregular"
@@ -274,8 +275,10 @@ export function calculateSyntheticAdmissionReadBudget(input: unknown) {
     // control and parent rechecks. Four joint inventory passes (two initial, two around verification) observe every
     // entry's name, metadata and ACL. Controls are reread at open, in every inventory pass, at final verification and
     // around every content pass. Other supplied work (directory/ACL/metadata beyond these) is added as given.
+    // Fixed overhead per joint pass and at open: guards before and after, control rereads with their ACL charges and every
+    // ancestor/root ACL observation, at 12 KiB per pinned chain element (ancestors plus parent, roots and controls).
     read_bytes: work - content + 4n * content + 4n * contentObjects * 65536n + 4n * entries * 3072n
-      + (markers + policyBytes) * (6n + 4n * contentObjects),
+      + (markers + policyBytes) * (6n + 4n * contentObjects) + 5n * (BigInt(r.bindings.ancestors.length) + 4n) * 12288n,
     response_bytes: max(BigInt(q.response.supplied_bytes), inventoryFrame + registrationBytes + 4n * BigInt(q.response.buffer_bytes)),
   };
   const blockers: string[] = [];

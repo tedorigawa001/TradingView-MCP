@@ -67,7 +67,8 @@ test("B-2a counts data, witness, fixed controls and repeated reads in one suppli
   const r = api.calculateSyntheticAdmissionReadBudget(q);
   // Supplied ACL work as given; three content objects four times each with guard passes; four inventory passes; controls.
   assert.equal(r.model_fits, true); assert.equal(r.used.entries, "508");
-  assert.equal(r.used.read_bytes, String(1000n + 4n * 3000n + 4n * 3n * 65536n + 4n * 508n * 3072n + controls * (6n + 4n * 3n)));
+  const fixed = 5n * (BigInt(q.registration.bindings.ancestors.length) + 4n) * 12288n;
+  assert.equal(r.used.read_bytes, String(1000n + 4n * 3000n + 4n * 3n * 65536n + 4n * 508n * 3072n + controls * (6n + 4n * 3n) + fixed));
   assert.equal(r.capacity_verified, false); assert.equal(r.native_read_available, false);
   q.inventory.witness.entries = "255";
   assert.deepEqual(api.calculateSyntheticAdmissionReadBudget(q).blockers, ["entries_limit"]);
@@ -336,4 +337,9 @@ test("B-2a a budget request may carry any registration that validates alone", ()
   assert.ok(Buffer.byteLength(canonical(r)) > 65536 - 4096 && Buffer.byteLength(canonical(r)) <= 65536);
   assert.equal(api.validateSyntheticAdmissionReadRegistration(r).schema, "native-bar-admission-read-registration-v1");
   assert.equal(api.calculateSyntheticAdmissionReadBudget(q).schema, "native-bar-admission-read-budget-v1");
+});
+test("B-2a control bytes block a path anywhere, including names that would otherwise be ordinary side files", () => {
+  for (const path of [`producer/${id(10)}/2.json\n`, `producer/${id(10)}/1.json\r`, "maintenance/x\ny", ".writer\nnote", "notes\n.txt", "owner/\x7f"]) {
+    const r = classify("data", path); assert.equal(r.namespace_status, "blocked", JSON.stringify(path)); assert.equal(r.raw_read_candidate, false);
+  }
 });
