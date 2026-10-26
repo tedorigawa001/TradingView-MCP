@@ -4,7 +4,8 @@ import { Worker } from "node:worker_threads";
 import { binding, publicKey } from "./helpers/checkpointProbeFixture.mjs";
 import { enrollFixedMemoryCheckpointOracle } from "../helpers/fixedMemoryCheckpointOracle.mjs";
 
-const base = "../../build/b3bc-validation/";
+// Like every other suite: the isolated build only when explicitly selected, so the standard unit run (and CI) uses build/.
+const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : "../../build/";
 const registry = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const { enrollSyntheticCheckpointProbe } = await import(new URL(`${base}nativeBarAdmissionCheckpointProbe.js`, import.meta.url));
 const contracts = await import(new URL(`${base}nativeBarAdmissionCheckpointContracts.js`, import.meta.url));

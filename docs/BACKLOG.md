@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B3-Bcの試験の読込先修正 (2026-10-27 JST)**: [記録](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bc-review-correction)。`a135a4b`のコミット側確認で、完了処理のテストが隔離ビルド`build/b3bc-validation/`を常に読み込んでいたため、通常の`build:package`後の標準単体テスト(およびCI)が`ERR_MODULE_NOT_FOUND`で失敗することを確認した(3回とも失敗)。他のテストと同じく環境変数`NATIVE_BAR_B3BC_ISOLATED_TEST=1`のときだけ隔離ビルドを使うようにした。完了処理のテストは通常ビルドで3回とも47件、隔離モードで47件成功、標準の全単体2,790成功・既存skip2。テストの読込先のみの変更で、push/配布は行わない。
+
 **105-3 B3-Bc C0/C1照会完了 (2026-10-26 JST、実装・メモリ内合成検証)**: [実装境界](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bc-implemented-boundary)。元のC0/C1ハンドル、2照会のB-1検証とsequence/tip一致、所有世代・元期限の再検証、処理終了・タイマー解除・枠解放後の最終時刻までを接続。成功はcheckpoint照会4資格だけで、native/view・完全なtranscript・authority/history・実行等はfalse、診断も常に集約資格false。C1固定故障(保留・tip変更・署名破損・旧応答)と所有者の受取待機を追加。完了の重複操作が終了済み診断を書き換える点、前回レビューで保留した未配達要求の取消しを再現・修正。新規47件(固定時計/RNGの隔離worker14件)、既存分との合同455件成功(失敗/skipなし)。5予算のexact/one-less、同時取消し、実時計でのイベントループ停止、公開直前の期限/巻き戻しを確認。既存上限・必須枠・署名形式とE-A/B-1/B-2a/B3-Aの純粋コードは不変。独立レビューとB3-C/Dは残る。実データ操作・native読取・fixture作成・鍵/署名の永続化・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/pushなし。
 
 **105-3 B3-Bbの境界テスト修正 (2026-10-26 JST)**: [記録](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bb-review-correction)。`6c9b332`のコミット側確認で、B3-Baの境界テストが名前まで照合するのは`node:*`のimportだけで、probeが登録台帳から所有者側の受け口(`claimFixedMemoryCheckpointOracleOwner`)を取り込んでも通ることを確認した(受け口を取り込むよう書き換えたprobeで旧テストは8件すべて成功)。B3-Bの3モジュールの全importを名前まで完全一致で照合し、probeが台帳から取れるのは`claimSyntheticCheckpointProbe`だけにした。書き換え検出の自己テストを追加し、`src`と他のテスト/補助ファイルが受け口を使わないことも確認する。書き換えたprobeは新しい境界テストで3件失敗する。待ち行列にあるまま取り消された要求をその場で片付ける件は、現在の補助プログラムでは到達しないため、B3-Bcの統合で再現テストとともに扱う。境界テスト8件、E/B単体473件、全単体2,743成功・既存skip2。テストのみの変更で、push/配布は行わない。

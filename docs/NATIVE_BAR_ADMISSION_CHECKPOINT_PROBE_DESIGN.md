@@ -308,3 +308,14 @@ Five fixed helper cases are added: hold C1, change signed C1 tip, corrupt C1 sig
 The completion suite has **47 cases**, including 14 disposable-worker source substitutions. It covers complete narrow success; old/copied/foreign handles/order; signed changing tip, bad signature and stale replay; state loss after C0/C1; advancement; C1 cancellation, same-turn response/cancel races, held expiry and genuine late cleanup; locally cancelled undelivered work; single-use publication/detachment/model separation; and completion at each of five exact budget boundaries with one-less preflight refusal. Worker cases cover equal samples, exclusive expiry at delivery/post-verification/retirement/cleanup/publication, rollback, monotonic expiry and C1 ID collisions. A separate actual-host test stalls the event loop beyond the original deadline. Neither category qualifies OS clocks or true entropy.
 
 The explicit completion/B3-Ba/Bb/pure/source-boundary suite passes **455 tests**, with zero failures/cancellations/skips, in isolated `build/b3bc-validation/`. Bb tests now check C0-only nonqualification rather than the superseded completion gate. No B-1 record signing, native fixture/reader runner, broad fixture-creating suite or production test is run. Independent review and B3-C/D native/host integration remain open. No real-data operation, fixture creation, MCP registration, production activation, Dot restart, rule/retention change, commit or push is part of this implementation step.
+
+### B3-Bc Review Correction
+
+The committer's review of `a135a4b` found the probe completion code consistent with the design. However, one test defect broke the standard unit run.
+
+- **Defect.** `test/unit/nativeBarCheckpointProbeCompletion.test.mjs` imported the isolated `build/b3bc-validation/` unconditionally. A plain `build:package` does not produce that build, so `node --test test/unit/*.test.mjs` (and CI) failed the whole file with `ERR_MODULE_NOT_FOUND`. It failed on three repeated runs.
+- **Fix.** Like every other suite, it now uses the isolated build only when `NATIVE_BAR_B3BC_ISOLATED_TEST=1` and `build/` otherwise.
+- **Verification.**
+  - The completion suite passes 47 on three repeated runs against the common build, and 47 in isolated mode.
+  - The standard full unit suite passes 2,790 with two existing skips.
+  - Only the test's build selection changed.
