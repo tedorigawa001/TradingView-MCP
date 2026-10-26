@@ -291,10 +291,11 @@ test("B3-A exact budget formula charges V1, copied content, bounded protocol sta
   const f = calculateSyntheticAdmissionReadBudget({ ...b2, registration: binding.registration }), r = api.calculateSyntheticAdmissionQueryProtocolBudget(q);
   const reg = binding.registration, controls = BigInt(reg.bindings.markers.base.size) + BigInt(reg.bindings.markers.admission.size)
     + BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
-  const extra = 3000n + 3n * 65536n + 2n * BigInt(f.used.entries) * 3072n + controls * 6n
-    + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n + 3n * 3000n + 10n * 4096n + 65536n;
-  assert.equal(BigInt(r.used.read_bytes) - BigInt(f.used.read_bytes), extra);
-  assert.equal(BigInt(r.native_allowance.read_bytes), 268435456n - extra);
+  // V1 native passes run inside the native allowance; only outer work (B-1 decoding, framing, scratch) is subtracted from it.
+  const v1Native = 3000n + 3n * 65536n + 2n * BigInt(f.used.entries) * 3072n + controls * 6n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
+  const outer = 3n * 3000n + 10n * 4096n + 65536n;
+  assert.equal(BigInt(r.used.read_bytes) - BigInt(f.used.read_bytes), v1Native + outer);
+  assert.equal(BigInt(r.native_allowance.read_bytes), 268435456n - outer);
   assert.equal(BigInt(r.used.metadata_bytes) - BigInt(f.used.metadata_bytes),
     6000n + 10n * 4096n + 65536n + 65536n + 521n * 4096n + BigInt(Buffer.byteLength(canonical(binding))));
   assert.ok(api.nativeBarAdmissionQueryModelBudgetResultSchema.safeParse(r).success);
@@ -310,4 +311,21 @@ for (const [label, mutate] of [
   ["registration drift", (q) => { q.binding.registration.bindings.data.inode = "888"; }],
 ]) test(`B3-A rejects budget ${label}`, () => {
   const q = budget(); mutate(q); assert.throws(() => api.calculateSyntheticAdmissionQueryProtocolBudget(q), /b[23]a_/);
+});
+test("B3-A at an exact-fit limit the native allowance still covers the B-2 floor plus the V1 native passes", () => {
+  const q = budget(); q.inventory.data.entries = "40"; q.inventory.witness.entries = "40"; q.read_work = [{ kind: "content", bytes: "16384", count: "40" }];
+  q.limits = { read_bytes: Number(api.calculateSyntheticAdmissionQueryProtocolBudget(q).used.read_bytes) };
+  const plan = api.calculateSyntheticAdmissionQueryProtocolBudget(q), reg = q.binding.registration;
+  assert.equal(plan.model_fits, true); assert.equal(plan.remaining.read_bytes, "0");
+  const { binding, retained_protocol_bytes, decoded_transcript_bytes, verifier_work_bytes, provider_work_bytes, limits, ...b2 } = q;
+  const floor = BigInt(calculateSyntheticAdmissionReadBudget({ ...b2, registration: reg }).used.read_bytes);
+  const controls = BigInt(reg.bindings.markers.base.size) + BigInt(reg.bindings.markers.admission.size)
+    + BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
+  const v1Native = 40n * 16384n + 40n * 65536n + 2n * BigInt(plan.used.entries) * 3072n + controls * 43n + 3n * BigInt(reg.bindings.ancestors.length + 4) * 12288n;
+  // Before the fix the allowance equalled the four-pass floor alone, about 4 MB short of the native work the plan counts.
+  assert.ok(BigInt(plan.native_allowance.read_bytes) >= floor + v1Native, `${plan.native_allowance.read_bytes} < ${floor + v1Native}`);
+});
+test("B3-A checkpoint and prefix sequences start at 1, as in B-1", () => {
+  const s = setup(), r = s.model.issue(s.q, { phase: "c0", challenge: id(200), observation: obs() });
+  assert.throws(() => s.model.receive(s.q, r, { observation: obs(), checkpoint_claim: claim(s.binding, id(200), { sequence: "0" }) }), /invalid_input/);
 });

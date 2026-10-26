@@ -154,7 +154,7 @@ Let `F` be the unchanged B-2 budget floor, `B` selected content bytes including 
 - Read work: `F.read + B + N*65536 + 2*E*3072 + K*(3+N) + 3*(A+4)*12288 + 3*B + H + S + verifier_work_bytes + provider_work_bytes`. This adds V1's content/inventory/control checks and bounded verifier work to the old floor.
 - Response: `F.response + 65536 + H`; combined entries and inventory bytes retain the old floor.
 
-All arithmetic is bounded-input BigInt, including very large supplied counts without count-sized loops. `used`, `remaining` and `native_allowance` are decimal counters; the latter subtracts the additional outer cost from the unchanged/lowered limit. These are pure plans, not reserved native allowances or enforcement. Eight roots, 512 FDs, 48-FD headroom and the existing shared-target ceiling remain unchanged. Capacity/native-budget flags stay false even when `model_fits` is true.
+All arithmetic is bounded-input BigInt, including very large supplied counts without count-sized loops. `used`, `remaining` and `native_allowance` are decimal counters. `native_allowance` subtracts only the outer, non-native cost from the unchanged/lowered limit: framing `H`, scratch `S`, B-1 decoding `3*B`, verifier/provider work, retained copies `2*B`, the ledger `D` and retained protocol/transcript bytes. It never subtracts the extra V1 native passes (`B + N*65536 + 2*E*3072 + K*(3+N) + 3*(A+4)*12288`), because the native reader performs them inside that allowance. Hence `model_fits` implies that the B-2 floor plus the V1 native passes fits the allowance. These are pure plans, not reserved native allowances or enforcement. Eight roots, 512 FDs, 48-FD headroom and the existing shared-target ceiling remain unchanged. Capacity/native-budget flags stay false even when `model_fits` is true.
 
 ### Synthetic Verification
 
@@ -163,6 +163,18 @@ The new slice has **79 tests** (75 model/budget tests plus four source-boundary 
 The premature-release bug was reproduced before its fix: a rejected early release left the query in `query_started` and could resume normal work. It now retains a failure and only accepts cleanup. Other cases cover exact fixture digest, detached/copy/foreign handles, single consumption, delayed C0 during C1, checkpoint/prefix changes, role/challenge replay, cancellation/release uncertainty, equal clocks, independent exclusive deadlines/rollback, strict malformed/oversized input, all five exact budget limits and one over, global resource bounds and exact additional-cost arithmetic. Source checks and their mutation tests refuse import widening, clocks/RNG/signers/capability bridges and every incoming runtime dependency.
 
 No native test runner or native fixture is used in this slice. The signing runtime suite is not rerun; B-1 source boundaries and existing public-key-only B-2a memory regressions are included. No key is generated, no checkpoint is signed, and no filesystem fixture is created, moved or deleted. Separate independent review and all B3-B/C/D integration/host checks remain pending.
+
+### B3-A Review Corrections
+
+The committer's review of `bfa9cd0` found one should-fix budget defect and one parity note:
+
+1. *Double-subtracted native allowance.* `native_allowance` subtracted every additional cost from the limit, including the V1 native rechecks that the native reader must still perform within that allowance.
+   - At an exact-fit limit (`model_fits:true`, 40 objects of 16 KiB), the allowance was 14,687,348 bytes: exactly the four-pass B-2 floor. The native work the same plan counts was 18,780,670 bytes, so the native read would have failed with `admission_read_limit` despite the fitting plan.
+   - The allowance now subtracts only outer work, as stated above. `used` is unchanged.
+   - A regression checks that at an exact-fit limit the allowance covers the B-2 floor plus the V1 native passes. The exact-formula test now separates native from outer cost.
+2. *Sequence floor.* Checkpoint-claim and prefix sequences accepted `"0"`, while B-1 checkpoints start at 1. They now start at 1.
+
+Both regressions, and the corrected formula test, fail on `bfa9cd0`. The E-A/B-1/B-2/B3-A unit suites pass 372 cases, and the full unit suite passes 2,642 with two existing skips. No native code, runtime entry point or MCP wiring changed. The uncommitted B-2c files are not part of this correction.
 
 ## Current Worktree
 

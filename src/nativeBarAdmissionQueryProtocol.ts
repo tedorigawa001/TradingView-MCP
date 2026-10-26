@@ -6,13 +6,15 @@ import { nativeBarAdmissionReadRegistrationSchema, validateSyntheticAdmissionRea
 
 const L = NATIVE_BAR_ADMISSION_LIMITS;
 const uint = z.string().regex(/^(0|[1-9][0-9]{0,29})$/), uuid = nativeBarId.refine((v) => v === v.toLowerCase());
+// A ledger always holds its enrollment record, so checkpoint and prefix sequences start at 1, as in B-1.
+const sequence = z.string().regex(/^[1-9][0-9]{0,29}$/);
 const observationSchema = z.strictObject({ utc_at: nativeBarTimestamp, monotonic_ns: uint });
 type Observation = z.infer<typeof observationSchema>;
 const registrationSchema = z.strictObject({ schema: z.literal("native-bar-admission-query-model-registration-v1"),
   scope: z.literal("synthetic_model_only"), registration: nativeBarAdmissionReadRegistrationSchema, registration_hash: nativeBarHash });
 const onlyObservation = z.strictObject({ observation: observationSchema });
 const claimSchema = z.strictObject({ fixture_id: uuid, store_id: uuid, epoch_id: uuid, authority_id: uuid, key_id: uuid,
-  enrollment_hash: nativeBarHash, authority_reference: uuid, challenge: uuid, sequence: uint, tip_hash: nativeBarHash, observed_at: nativeBarTimestamp });
+  enrollment_hash: nativeBarHash, authority_reference: uuid, challenge: uuid, sequence, tip_hash: nativeBarHash, observed_at: nativeBarTimestamp });
 const stateSchema = z.enum(["query_started", "c0_outstanding", "c0_model_received", "pair_open", "inventoried", "records_bound",
   "native_checked_before_c1", "c1_outstanding", "c1_model_received", "native_checked_after_c1", "interpretation_complete",
   "releasing", "release_unconfirmed", "released", "revoked"]);
@@ -160,7 +162,7 @@ export function createSyntheticAdmissionQueryProtocolModel(input: unknown, optio
     bindRecords(t: object, raw: unknown) {
       return run(t, (q) => {
         expect(q, "inventoried");
-        const a = parse(z.strictObject({ observation: observationSchema, sequence: uint, tip_hash: nativeBarHash, record_role_ids: z.array(uuid).max(L.entries) }), raw);
+        const a = parse(z.strictObject({ observation: observationSchema, sequence, tip_hash: nativeBarHash, record_role_ids: z.array(uuid).max(L.entries) }), raw);
         observe(q, a.observation);
         if (!q.c0 || a.sequence !== q.c0.sequence || a.tip_hash !== q.c0.tip_hash) refuse("prefix_binding");
         if (new Set(a.record_role_ids).size !== a.record_role_ids.length || a.record_role_ids.some((id) => issued.has(id)
@@ -229,21 +231,22 @@ export function calculateSyntheticAdmissionQueryProtocolBudget(input: unknown) {
   const content = selected.reduce((n, w) => n + BigInt(w.bytes) * BigInt(w.count), 0n), objects = selected.reduce((n, w) => n + BigInt(w.count), 0n);
   const controls = BigInt(r.bindings.markers.base.size) + BigInt(r.bindings.markers.admission.size) + BigInt(bytes({ schema: "native-bar-synthetic-admission-profile-v6" }));
   const external = 10n * 4096n, scratch = 65536n, ledger = 65536n + BigInt(L.entries + 9) * 4096n + BigInt(bytes(b));
-  const used: Record<keyof typeof limits, bigint> = {
-    entries: BigInt(floor.used.entries), inventory_bytes: BigInt(floor.used.inventory_bytes),
-    metadata_bytes: BigInt(floor.used.metadata_bytes) + 2n * content + external + scratch + ledger
-      + BigInt(q.retained_protocol_bytes) + BigInt(q.decoded_transcript_bytes),
-    read_bytes: BigInt(floor.used.read_bytes) + content + objects * 65536n + 2n * BigInt(floor.used.entries) * 3072n
-      + controls * (3n + objects) + 3n * (BigInt(r.bindings.ancestors.length) + 4n) * 12288n
-      + 3n * content + external + scratch + BigInt(q.verifier_work_bytes) + BigInt(q.provider_work_bytes),
-    response_bytes: BigInt(floor.used.response_bytes) + 65536n + external,
+  // The extra V1 native passes (content, guards, inventory, controls and fixed overhead) are performed by the native reader
+  // itself, inside native_allowance, so they are added to the plan but never subtracted from that allowance. Only outer
+  // work is: framing, scratch, B-1 decoding/verification, provider work, retained copies and the request ledger.
+  const v1Native = content + objects * 65536n + 2n * BigInt(floor.used.entries) * 3072n + controls * (3n + objects)
+    + 3n * (BigInt(r.bindings.ancestors.length) + 4n) * 12288n;
+  const outer: Record<keyof typeof limits, bigint> = {
+    entries: 0n, inventory_bytes: 0n,
+    metadata_bytes: 2n * content + external + scratch + ledger + BigInt(q.retained_protocol_bytes) + BigInt(q.decoded_transcript_bytes),
+    read_bytes: 3n * content + external + scratch + BigInt(q.verifier_work_bytes) + BigInt(q.provider_work_bytes),
+    response_bytes: 65536n + external,
   };
   const keys = Object.keys(limits) as (keyof typeof limits)[], blockers = floor.blockers.filter((k) => !k.endsWith("_bytes_limit") && k !== "entries_limit");
+  const used = Object.fromEntries(keys.map((k) => [k, BigInt(floor.used[k]) + (k === "read_bytes" ? v1Native : 0n) + outer[k]])) as Record<keyof typeof limits, bigint>;
   for (const k of keys) if (used[k] > BigInt(limits[k]!)) blockers.push(`${k}_limit`);
   const remaining = Object.fromEntries(keys.map((k) => [k, String(BigInt(limits[k]!) > used[k] ? BigInt(limits[k]!) - used[k] : 0n)]));
-  const native_allowance = Object.fromEntries(keys.map((k) => {
-    const externalCharge = used[k] - BigInt(floor.used[k]); return [k, String(BigInt(limits[k]!) > externalCharge ? BigInt(limits[k]!) - externalCharge : 0n)];
-  }));
+  const native_allowance = Object.fromEntries(keys.map((k) => [k, String(BigInt(limits[k]!) > outer[k] ? BigInt(limits[k]!) - outer[k] : 0n)]));
   const result = { ...noAuthority, schema: "native-bar-admission-query-model-budget-v1" as const, model_fits: blockers.length === 0, blockers,
     used: Object.fromEntries(keys.map((k) => [k, String(used[k])])), remaining, native_allowance,
     schedule: { native_inventory_passes: 6 as const, content_capture_passes: 3 as const, final_rehashes: 2 as const,
