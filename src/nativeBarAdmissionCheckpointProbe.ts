@@ -75,6 +75,9 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
       observe(q); const owned = q;
       const remaining = Math.min(owned.ttl - (Date.parse(owned.last.utc_at) - Date.parse(start.utc_at)), Number((BigInt(owned.ttl) * 1000000n - (BigInt(owned.last.monotonic_after_ns) - BigInt(start.monotonic_before_ns)) + 999999n) / 1000000n));
       owned.timer = setTimeout(() => { if (owned.state === "released") return; try { observe(owned); fail(owned, "b3ba_clock_relation_unavailable"); } catch { /* observe records cleanup. */ } }, Math.max(1, remaining));
+      // Unreferenced: an abandoned probe must not keep the process alive until its deadline. Timeliness never depends on
+      // this timer; every entry and completion samples the actual clocks.
+      owned.timer.unref();
       const t = Object.freeze(Object.create(null) as object); queries.set(t, owned); return t;
     } catch (error) { lease.release(); throw new Error(coded(error)); }
   }, requestStart(t: object): Promise<never> {

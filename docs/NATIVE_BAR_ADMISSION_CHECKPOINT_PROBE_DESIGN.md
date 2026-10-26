@@ -238,3 +238,15 @@ New tests reproduced and corrected the following during implementation:
 The explicit new/pure/boundary suite passes **375 tests**, with zero failures/cancellations/skips, using ignored `build/b3ba-validation/` output. This includes no B-1 signing runtime suite, native fixture runner, broad fixture-creating unit suite or service/production tests. TypeScript no-emit checking and diff checks pass. Existing E-A/B-1/B-2a/B3-A clock bans remain intact; only exact approved named dependencies and isolated-output selectors are added to their tests. No existing runtime module or native C++ source is changed.
 
 B3-Bb public-vector signing approval, authenticated C0/C1 success, full cancellation/race acceptance with a signed provider, independent review and B3-C/D host/native integration remain open. Dot stays PAUSED; job bytes, market/notification/retention conditions and common JS/native builds remain unchanged. No real data or filesystem fixture is recorded, moved or deleted; no MCP registration, production activation, commit or push is performed by this implementation step.
+
+### B3-Ba Review Correction
+
+The committer's review of `83c1b3c` found no must-fix issue. One low-priority defect was measured and fixed:
+
+- *Deadline timer kept the process alive.* The per-query deadline timer was referenced, so an abandoned probe (never cancelled or released) held the process open until its deadline. A 4-second probe kept a finished script running for 4.09 s; with the 600-second maximum, a forgotten probe could stall a test or process for ten minutes.
+- *Fix.* The timer is now `unref()`'d. Timeliness never depended on it, because every entry and completion samples the actual clocks, so this changes no safety rule. The same script now exits after 0.15 s.
+- *Regression.* A new test checks that beginning a probe adds no referenced timer, and that the deadline still expires a live query. It fails on `83c1b3c`.
+
+Clarification: `describe` takes one fresh clock sample, so it can record an expiry that has already occurred. It adds no verified fact.
+
+Verification: the B3-Ba probe, boundary and registry suites pass 65 cases on each of three repeated runs. The E/B unit suites pass 441, and the full unit suite passes 2,711 with two existing skips, with source/test hashes fixed. No signing, native code, fixture or runtime entry changed.

@@ -136,3 +136,11 @@ for (const scenario of ["equal_samples", "rng_throw", "rng_invalid", "rng_pin", 
       }); assert.equal(message.ok, true, message.message);
     } finally { clearTimeout(timer); await worker.terminate(); }
   });
+test("B3-Ba an abandoned probe's deadline timer does not keep the process alive, yet still expires a live query", async (t) => {
+  const { session } = setup(t, ++namespace, "pending_no_ack"), refTimers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const before = refTimers(), q = session.beginProbe({ ttl_ms: 50 });
+  // Before the fix this timer was referenced and held the process open for the whole ttl (up to 600 s).
+  assert.equal(refTimers(), before);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const r = session.describe(q); assert.notEqual(r.failure, null); assert.equal(r.state === "released" || r.state === "release_unconfirmed", true);
+});
