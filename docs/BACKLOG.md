@@ -4,6 +4,10 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B3-A 純粋な要求・順序・予算契約 (2026-10-26 JST、実装・メモリ内合成検証)**: [実装境界](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md#b3-a-implemented-boundary)。固定registration全体のdigest、モデル専用query/request handle、C0→読取ラベル/V0→C1→V1→解放の状態管理を追加。応答を解析前に一度だけ消費し、不正/取消し/期限/逆行/解放不明では解放だけ許可。保持上限内の使用済みIDを追い出さず、モデルの時刻同値を許して実順序の資格とは分離。棚卸し6回・内容5回・checkpoint2回・copy/transcript/台帳費用を固定計上し、既存上限を下げる指定だけ許可。早すぎる解放要求後に通常処理へ戻れる問題をREDで再現して停止へ修正。新規79件、純粋契約/境界との合同305件が成功(失敗/skipなし)、型検査・差分検査成功。全実検証/権限フラグはfalseのまま。B-2c差分とOS/kernel未検証を保持。実時計/RNG、native読取、oracle問い合わせ、署名/鍵生成、fixture作成、実データ操作、MCP登録/本番有効化、Dot再開、判定/通知/保持条件変更、コミット/pushは行わない。B3-B/C/Dと独立レビューは残る。
+
+**105-3 B-3 前後checkpointとjoint readの詳細設計 (2026-10-26 JST、実装提案)**: [設計書](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md)。B-1/B-2を結ぶ、固定fixture/oracle登録、単発challenge、C0→同一native contextの読取/V0→C1→V1→解放確認の順序、native全体hashとB-1 encoded hash・mirrorの一致、状態欠落/変化/取消し/解放不明時の停止を整理。B-2の4回inventory・最終rehash1回の予算を流用せず、B-3の6回inventory・各内容5回・両checkpoint・保持transcript等を有限scheduleで計上する。最初はB3-Aの純粋な要求/順序/予算契約とモデル専用要求台帳・メモリ内合成試験を提案し、実時計/RNG、native/oracle呼出し、署名保存、鍵/サービス作成は含めない。B-2c未コミット差分を保持し、OS/kernel未検証も解消扱いにしない。今回の変更は文書のみで、B-3実装・試験・fixture作成・実データ操作・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/pushは行わない。
+
 **105-3 B-2b独立レビュー対応 (2026-10-26 JST)**: [記録](NATIVE_BAR_ADMISSION_FIXTURE_READ_DESIGN.md#b-2b-independent-review-corrections)。`9233b85`のnative読取を別担当が読み取り専用でレビューし、修正必須なし・中1・低7・参考1を修正した。名前の列挙をやめた後も、大文字小文字だけの改名・入替え・時刻を戻した書換え・inode差替え・ACL/flags変更はctimeかinodeの変化で検出できることも実測で確認された。
 - 中: native側の旧版名の正規表現が`.`を使っており、改行を含む非公開名(`producer/<id>/2.json\n`など)を普通の付随ファイルとして通し、最終確認が成功していた。`[\s\S]`に変え、制御文字を含むパスはB-2a/nativeとも場所を問わず不適格にした。
 - 低:

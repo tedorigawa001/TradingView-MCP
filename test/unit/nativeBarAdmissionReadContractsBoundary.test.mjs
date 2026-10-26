@@ -55,6 +55,9 @@ test("B-2a source checks catch default imports, aliased clocks, global lookups a
 });
 test("B-2a has no incoming runtime or startup/MCP dependency", () => {
   for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionQueryProtocol.ts") {
+      assert.deepEqual(imports(parse(file)), ["zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionReadContracts.js"]); continue;
+    }
     if (file === "nativeBarAdmissionReader.ts") {
       assert.deepEqual(imports(parse(file)), ["node:module", "node:perf_hooks", "node:process", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js"]); continue;
     }
