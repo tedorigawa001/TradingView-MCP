@@ -164,3 +164,21 @@ test("B3-Bc locally retires a cancelled owner-queued request without pulling or 
   const next = session.beginProbe(), ready = session.requestStart(next); owner.completePending(); await ready;
   assert.equal(owner.describe().signed_requests, "1"); session.cancel(next);
 });
+test("B3-Bc defer_pull can resume only through the original explicit owner control", async (t) => {
+  const { session, owner } = setup(t, 789, { mode: "defer_pull" }), before = owner.describe();
+  for (const mode of ["normal", "hold_c1", "defer_pull"]) assert.throws(() => owner.setMode(mode), /initial_mode_only/);
+  assert.deepEqual(owner.describe(), before);
+  const q = session.beginProbe(), pending = session.requestStart(q);
+  assert.equal(owner.completePending(), true); const c0 = await pending, c1 = await session.requestEnd(q, c0);
+  assert.equal((await session.finishProbe(q, c1)).checkpoint_requests_verified, true);
+  assert.equal(owner.describe().signed_requests, "2"); assert.equal(owner.completePending(), false);
+});
+test("B3-Bc idle mode changes cannot enter defer_pull or install a duplicate receiver", async (t) => {
+  const { session, owner } = setup(t, 790);
+  for (const mode of ["normal", "hold_c1", "normal"]) {
+    owner.setMode(mode); const before = owner.describe();
+    assert.throws(() => owner.setMode("defer_pull"), /initial_mode_only/); assert.deepEqual(owner.describe(), before);
+  }
+  const q = session.beginProbe(), c0 = await session.requestStart(q), c1 = await session.requestEnd(q, c0);
+  assert.equal((await session.finishProbe(q, c1)).checkpoint_requests_verified, true); assert.equal(owner.describe().signed_requests, "2");
+});

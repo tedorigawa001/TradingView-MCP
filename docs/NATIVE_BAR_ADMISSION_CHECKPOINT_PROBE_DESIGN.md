@@ -1,6 +1,6 @@
 # B3-B Checkpoint Probe And Fixed Memory Oracle
 
-Status: **B3-Bc checkpoint-only completion implemented and memory-tested; independent review remains open**, 2026-10-26 JST. Design baseline: `3b202f5`; B3-Ba starts from `abdd7e6`, B3-Bb from `39c248f`, B3-Bc from the reviewed Bb baseline `ba40238`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end.
+Status: **B3-Bc independently reviewed; low-priority helper correction implemented and memory-tested**, 2026-10-27 JST. Design baseline: `3b202f5`; B3-Ba starts from `abdd7e6`, B3-Bb from `39c248f`, B3-Bc from the reviewed Bb baseline `ba40238`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end.
 
 ## Scope And Non-Goals
 
@@ -319,3 +319,13 @@ The committer's review of `a135a4b` found the probe completion code consistent w
   - The completion suite passes 47 on three repeated runs against the common build, and 47 in isolated mode.
   - The standard full unit suite passes 2,790 with two existing skips.
   - Only the test's build selection changed.
+
+### B3-Bc Independent Review And Mode Correction
+
+Two read-only independent reviewers examined `ba40238..a135a4b`, distinguishing the already committed selector correction `098b412`. The runtime lifecycle/time/cleanup review found no actionable patch regression. Contract/test/boundary review found one open low-priority test-helper issue: enrolling with `defer_pull`, then calling idle `setMode("normal")`, accepted the change without installing a receiver. The parent reproduced zero signatures and `b3ba_deadline`, with confirmed cleanup, in memory only. The corrected selector was an already-fixed finding, not a second open issue.
+
+The user authorized correction and commit. `defer_pull` is now explicitly initial-only: `setMode` rejects every transition from or into it with `b3bb_initial_mode_only` and preserves the original mode. The existing original-owner `completePending()` is the sole explicit way to resume initial deferred pulling; it changes to normal and arms exactly once. Ordinary idle mode transitions retain their existing behavior. No arbitrary receiver callback or new registry/runtime entry is introduced.
+
+Two regression tests cover rejected transitions without state changes, successful C0/C1 completion after explicit resume, rejected entry into initial-only mode, and ordinary/repeated normal-mode transitions without duplicate receiving. The first regression fails before the fix and passes after it. The completion suite now passes **49 cases** and the explicit isolated regression passes **457**, with zero failures/cancellations/skips. TypeScript no-emit and diff checks pass. These are in-memory published-test-vector signatures only. This step does not rerun the native/full fixture suites or rebuild common MCP output; the review's attempted common-build run lacked the B3 modules and is not counted as a passing run.
+
+Only the fixed test helper, its completion tests and documentation change. All `src/` modules, source-boundary restrictions, budgets/ceilings, Dot job bytes and common JS/native builds stay unchanged. No real-data operation, fixture creation, key/signature persistence, MCP registration, production activation, rule/retention change or push occurs. B3-C/D native/host work and later history/execution gates remain open.

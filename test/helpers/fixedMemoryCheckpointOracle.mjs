@@ -70,7 +70,10 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
     channel.changed(); state = next; generation++;
     if (held && channel.cancelled(held.token)) { const packet = held; held = undefined; channel.reject(packet.token, "oracle_cancelled"); arm(); }
   }, setMode(input) {
-    channel.check(); if (channel.busy()) throw Error("b3bb_owner_busy"); mode = checkpointProbeParse(modeSchema, input, 4096);
+    channel.check(); if (channel.busy()) throw Error("b3bb_owner_busy");
+    const next = checkpointProbeParse(modeSchema, input, 4096);
+    if (mode === "defer_pull" || next === "defer_pull") throw Error("b3bb_initial_mode_only");
+    mode = next;
   }, completePending() {
     if (mode === "defer_pull") { mode = "normal"; arm(); return true; }
     if (!held) return false; const packet = held; held = undefined;
