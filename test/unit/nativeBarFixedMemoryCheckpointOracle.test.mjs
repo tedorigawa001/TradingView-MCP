@@ -4,7 +4,7 @@ import { createHash, createPublicKey } from "node:crypto";
 import { binding, publicKey } from "./helpers/checkpointProbeFixture.mjs";
 import { enrollFixedMemoryCheckpointOracle } from "../helpers/fixedMemoryCheckpointOracle.mjs";
 
-const base = process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
 const registry = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const probe = await import(new URL(`${base}nativeBarAdmissionCheckpointProbe.js`, import.meta.url));
 const { evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
@@ -15,16 +15,16 @@ function setup(t, n, options) {
   t.after(() => { owner.close(); session.close(); bootstrap.close(); }); return { b, bootstrap, owner, session };
 }
 async function readFixture(session) {
-  const q = session.beginProbe(); await assert.rejects(session.requestStart(q), /probe_completion_unavailable/); return session.describe(q);
+  const q = session.beginProbe(); await session.requestStart(q); const result = session.describe(q); session.cancel(q); return result;
 }
-test("B3-Bb signs one checkpoint with the fixed memory oracle, but cannot complete a probe", async (t) => {
+test("B3-Bb signs one original checkpoint; C0 alone cannot qualify the whole probe", async (t) => {
   const b = binding(600), bootstrap = registry.createSyntheticCheckpointOracleBootstrap(b, publicKey());
   const owner = enrollFixedMemoryCheckpointOracle(bootstrap.ownerEnrollment, { sequence: "1", tip_hash: b.registration.pins.enrollment_hash });
   const session = probe.enrollSyntheticCheckpointProbe(bootstrap.readerEnrollment);
   t.after(() => { session.close(); owner.close(); bootstrap.close(); });
-  const q = session.beginProbe(); await assert.rejects(session.requestStart(q), /b3ba_probe_completion_unavailable/);
+  const q = session.beginProbe(); await session.requestStart(q);
   assert.equal(owner.describe().signed_requests, "1"); assert.equal(owner.describe().sequence, "1");
-  assert.equal(session.describe(q).state, "released"); assert.equal(session.describe(q).checkpoint_requests_verified, false);
+  assert.equal(session.describe(q).state, "c0_authenticated"); assert.equal(session.describe(q).checkpoint_requests_verified, false);
 });
 test("B3-Bb owner state advances independently between explicit queries", async (t) => {
   const { owner, session } = setup(t, 601); await readFixture(session);
@@ -128,7 +128,7 @@ test("B3-Bb cannot alter fault behavior during an active query or use a client-s
 });
 test("B3-Bb held work can sign only when explicitly completed inside its original window", async (t) => {
   const { owner, session } = setup(t, 680, { mode: "hold" }), q = session.beginProbe();
-  const stopped = assert.rejects(session.requestStart(q), /probe_completion_unavailable/);
+  const stopped = session.requestStart(q);
   await new Promise((resolve) => setImmediate(resolve)); assert.equal(owner.describe().signed_requests, "0");
   assert.equal(owner.completePending(), true); await stopped;
   assert.equal(owner.completePending(), false); assert.equal(owner.describe().signed_requests, "1");

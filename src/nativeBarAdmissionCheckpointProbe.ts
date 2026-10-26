@@ -3,7 +3,7 @@ import { hrtime } from "node:process";
 import { setTimeout, clearTimeout } from "node:timers";
 import { claimSyntheticCheckpointProbe } from "./nativeBarAdmissionOracleRegistry.js";
 import { checkpointProbeNoAuthority, checkpointProbeRefuse, checkpointProbeParse, checkpointProbeOptionsSchema,
-  checkpointProbeDiagnosticSchema, planCheckpointProbeBudget } from "./nativeBarAdmissionCheckpointContracts.js";
+  checkpointProbeDiagnosticSchema, checkpointProbeResultSchema, planCheckpointProbeBudget } from "./nativeBarAdmissionCheckpointContracts.js";
 
 const wallNow = Date.now, steadyNow = hrtime.bigint, generateUUID = randomUUID;
 const HostDate = Date, iso = Date.prototype.toISOString;
@@ -17,8 +17,10 @@ function sample(): Sample {
   } catch { checkpointProbeRefuse("clock_invalid"); }
 }
 type Claim = ReturnType<typeof claimSyntheticCheckpointProbe>;
-type Query = { id: string; start: Sample; last: Sample; ordinal: bigint; ttl: number; failure: string | null; state: "probe_started" | "c0_outstanding" | "releasing" | "release_unconfirmed" | "released";
+type Checkpoint = { handle: object; challenge: string; sequence: string; tip_hash: string; observed_at: string; sent: Sample; received: Sample };
+type Query = { id: string; start: Sample; last: Sample; ordinal: bigint; ttl: number; failure: string | null; state: "probe_started" | "c0_outstanding" | "c0_authenticated" | "c1_outstanding" | "c1_authenticated" | "finishing" | "releasing" | "release_unconfirmed" | "released";
   lease: { release(): boolean }; timer?: ReturnType<typeof setTimeout>; cap: bigint; ids: number; dispatched: number; consumed: boolean;
+  authenticated: number; responseBytes: number; c0?: Checkpoint; c1?: Checkpoint;
   operation?: ReturnType<Claim["dispatch"]>; reject?: (e: Error) => void };
 function coded(error: unknown) { return error instanceof Error && error.message.length <= 96 && /^b3ba_[a-z_]+$/.test(error.message) ? error.message : "b3ba_invalid_input"; }
 
@@ -27,8 +29,9 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
   function lookup(t: object) { const q = queries.get(t); if (!q) checkpointProbeRefuse("query_handle_required"); return q; }
   function cleanup(q: Query) {
     if (q.timer) clearTimeout(q.timer); q.timer = undefined;
-    if (q.operation && !q.operation.retired()) { q.state = "release_unconfirmed"; return; }
+    if (q.operation && !q.operation.retired()) { q.state = "release_unconfirmed"; return false; }
     q.operation = undefined; q.state = q.lease.release() ? "released" : "release_unconfirmed";
+    return q.state === "released";
   }
   function fail(q: Query, reason: string) {
     q.failure ??= reason; if (q.dispatched) q.consumed = true;
@@ -47,11 +50,12 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
   }
   function describe(q: Query) {
     const account = claim.accounting();
-    return checkpointProbeDiagnosticSchema.parse({ ...checkpointProbeNoAuthority, schema: "native-bar-unsigned-checkpoint-probe-diagnostic-v1",
+    return checkpointProbeDiagnosticSchema.parse({ ...checkpointProbeNoAuthority, schema: "native-bar-checkpoint-probe-diagnostic-v1",
       registration_hash: claim.binding.registration_hash, query_id: q.id, state: q.state, revoked: closed || claim.revoked(),
       failure: q.failure, cleanup: q.state === "released" ? "confirmed" : q.state === "release_unconfirmed" ? "unconfirmed" : "not_requested",
       first_observation: q.start, last_observation: q.last, event_ordinal: String(q.ordinal), requests_dispatched: q.dispatched, ids_generated: q.ids,
-      pending_consumed: q.consumed, retained_state_bytes: String(account.retained), active_workspace_bytes: String(account.workspace) });
+      pending_consumed: q.consumed, authenticated_requests: q.authenticated, captured_response_bytes: q.responseBytes,
+      retained_state_bytes: String(account.retained), active_workspace_bytes: String(account.workspace) });
   }
   function work(q: Query) {
     if (q.state === "released") checkpointProbeRefuse("query_terminal");
@@ -59,6 +63,57 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
       if (closed) checkpointProbeRefuse("session_closed"); claim.check();
       if (q.failure || q.state === "releasing" || q.state === "release_unconfirmed") checkpointProbeRefuse("release_only"); observe(q);
     } catch (error) { fail(q, coded(error)); throw new Error(coded(error)); }
+  }
+  function request(t: object, phase: "c0" | "c1", previous?: object): Promise<object> {
+    let q: Query | undefined;
+    return new Promise((resolve, reject) => {
+      try {
+        q = lookup(t); work(q);
+        if (q.state !== (phase === "c0" ? "probe_started" : "c0_authenticated")) checkpointProbeRefuse("phase_order");
+        if (phase === "c1" && previous !== q.c0?.handle) checkpointProbeRefuse("checkpoint_handle_required");
+        q.reject = reject; let challenge: string;
+        try { challenge = generateUUID(); } catch { checkpointProbeRefuse("rng_unavailable"); }
+        claim.identifier(challenge, q.cap); q.ids++; observe(q);
+        const { public_key_spki_sha256: _fingerprint, ...pins } = claim.binding.registration.pins;
+        const wire = { schema: "native-bar-checkpoint-probe-request-v1", scope: "synthetic_checkpoint_probe_only", ...pins,
+          registration_hash: claim.binding.registration_hash, authority_reference: claim.binding.registration.authority_reference,
+          query_id: q.id, phase, challenge };
+        q.state = phase === "c0" ? "c0_outstanding" : "c1_outstanding";
+        const sent = q.last, op = claim.dispatch(wire); q.operation = op; q.dispatched++; q.consumed = false; const owned = q;
+        op.promise.then((bytes) => {
+          let checkpoint: Checkpoint | undefined;
+          try {
+            if (owned.failure) return; owned.consumed = true; work(owned);
+            const copy = capture(bytes); owned.responseBytes += copy.byteLength; observe(owned); const received = owned.last;
+            let verified: ReturnType<Claim["verifier"]["verifyCheckpoint"]>;
+            try { verified = claim.verifier.verifyCheckpoint(copy, { challenge, sent_at: sent.utc_at, received_at: received.utc_at }); }
+            catch { checkpointProbeRefuse("checkpoint_refused"); }
+            work(owned);
+            const c = verified.checkpoint;
+            if (phase === "c1" && (c.sequence !== owned.c0?.sequence || c.tip_hash !== owned.c0.tip_hash)) checkpointProbeRefuse("changing");
+            checkpoint = { handle: Object.freeze(Object.create(null) as object), challenge, sequence: c.sequence, tip_hash: c.tip_hash,
+              observed_at: c.observed_at, sent, received }; owned.authenticated++;
+          } catch (error) { fail(owned, coded(error)); }
+          finally {
+            op.retire();
+            if (owned.failure) cleanup(owned);
+            else if (!op.retired() || !checkpoint) fail(owned, "b3ba_release_unconfirmed");
+            else {
+              owned.operation = undefined;
+              try {
+                work(owned); owned[phase] = checkpoint; owned.state = phase === "c0" ? "c0_authenticated" : "c1_authenticated";
+                owned.reject = undefined; resolve(checkpoint.handle);
+              } catch (error) { fail(owned, coded(error)); }
+            }
+          }
+        }, (error) => {
+          owned.consumed = true;
+          try { if (!owned.failure) { claim.check(); observe(owned); } fail(owned, coded(error)); }
+          catch (failure) { fail(owned, coded(failure)); }
+          finally { op.retire(); cleanup(owned); }
+        });
+      } catch (error) { if (q && q.state !== "released") fail(q, coded(error)); reject(new Error(coded(error))); }
+    });
   }
   return Object.freeze({ beginProbe(raw: unknown = {}) {
     const start = sample(); if (closed) checkpointProbeRefuse("session_closed"); claim.check();
@@ -71,7 +126,7 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
     try {
       let id: string; try { id = generateUUID(); } catch { checkpointProbeRefuse("rng_unavailable"); }
       claim.identifier(id, cap);
-      q = { id, start, last: start, ordinal: 1n, ttl: opts.ttl_ms ?? 600000, failure: null, state: "probe_started", lease, cap, ids: 1, dispatched: 0, consumed: false };
+      q = { id, start, last: start, ordinal: 1n, ttl: opts.ttl_ms ?? 600000, failure: null, state: "probe_started", lease, cap, ids: 1, dispatched: 0, consumed: false, authenticated: 0, responseBytes: 0 };
       observe(q); const owned = q;
       const remaining = Math.min(owned.ttl - (Date.parse(owned.last.utc_at) - Date.parse(start.utc_at)), Number((BigInt(owned.ttl) * 1000000n - (BigInt(owned.last.monotonic_after_ns) - BigInt(start.monotonic_before_ns)) + 999999n) / 1000000n));
       owned.timer = setTimeout(() => { if (owned.state === "released") return; try { observe(owned); fail(owned, "b3ba_clock_relation_unavailable"); } catch { /* observe records cleanup. */ } }, Math.max(1, remaining));
@@ -80,44 +135,27 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
       owned.timer.unref();
       const t = Object.freeze(Object.create(null) as object); queries.set(t, owned); return t;
     } catch (error) { lease.release(); throw new Error(coded(error)); }
-  }, requestStart(t: object): Promise<never> {
-    let q: Query | undefined;
-    return new Promise((_, reject) => {
-      try {
-        q = lookup(t); work(q); if (q.state !== "probe_started") checkpointProbeRefuse("phase_order");
-        q.reject = reject; let challenge: string;
-        try { challenge = generateUUID(); } catch { checkpointProbeRefuse("rng_unavailable"); }
-        claim.identifier(challenge, q.cap); q.ids++; observe(q);
-        const { public_key_spki_sha256: _fingerprint, ...pins } = claim.binding.registration.pins;
-        const wire = { schema: "native-bar-checkpoint-probe-request-v1", scope: "synthetic_checkpoint_probe_only", ...pins,
-          registration_hash: claim.binding.registration_hash, authority_reference: claim.binding.registration.authority_reference,
-          query_id: q.id, phase: "c0", challenge };
-        q.state = "c0_outstanding"; const sent = q.last;
-        const op = claim.dispatch(wire); q.operation = op; q.dispatched++; const owned = q;
-        op.promise.then((bytes) => {
-          try {
-            if (owned.failure) return; owned.consumed = true; work(owned);
-            const copy = capture(bytes); observe(owned);
-            try { claim.verifier.verifyCheckpoint(copy, { challenge, sent_at: sent.utc_at, received_at: owned.last.utc_at }); }
-            catch { checkpointProbeRefuse("checkpoint_refused"); }
-            // B3-Bb may authenticate a fixture envelope; successful probe completion remains gated for B3-Bc.
-            checkpointProbeRefuse("probe_completion_unavailable");
-          } catch (error) { fail(owned, coded(error)); }
-          finally { op.retire(); if (!owned.failure) fail(owned, "b3ba_probe_completion_unavailable"); else cleanup(owned); }
-        }, (error) => {
-          owned.consumed = true;
-          try { if (!owned.failure) { claim.check(); observe(owned); } fail(owned, coded(error)); }
-          catch (failure) { fail(owned, coded(failure)); }
-          finally { op.retire(); cleanup(owned); }
-        });
-      } catch (error) { if (q && q.state !== "released") fail(q, coded(error)); reject(new Error(coded(error))); }
-    });
-  }, requestEnd(t: object, _start?: object): Promise<never> {
-    try { const q = lookup(t); work(q); fail(q, "b3ba_phase_order"); checkpointProbeRefuse("phase_order"); }
-    catch (error) { return Promise.reject(new Error(coded(error))); }
-  }, finishProbe(t: object, _end?: object): Promise<never> {
-    try { const q = lookup(t); work(q); fail(q, "b3ba_phase_order"); checkpointProbeRefuse("phase_order"); }
-    catch (error) { return Promise.reject(new Error(coded(error))); }
+  }, requestStart(t: object) { return request(t, "c0"); }, requestEnd(t: object, start?: object) { return request(t, "c1", start); },
+  async finishProbe(t: object, end?: object) {
+    const q = lookup(t);
+    if (q.state === "released") checkpointProbeRefuse("query_terminal");
+    try {
+      work(q); if (q.state !== "c1_authenticated") checkpointProbeRefuse("phase_order");
+      if (end !== q.c1?.handle) checkpointProbeRefuse("checkpoint_handle_required");
+      if (q.operation || q.authenticated !== 2 || !q.c0 || !q.c1) checkpointProbeRefuse("phase_order");
+      q.state = "finishing";
+      const summary = ({ handle: _handle, ...c }: Checkpoint) => c;
+      const report = checkpointProbeResultSchema.parse({ ...describe(q), schema: "native-bar-checkpoint-probe-result-v1",
+        verification_scope: "authenticated_checkpoint_requests_only", state: "released", cleanup: "confirmed",
+        fixture_signature_verified: true, challenge_generation_verified: true, actual_request_timing_verified: true, checkpoint_requests_verified: true,
+        completed_at: q.last.utc_at, c0: summary(q.c0), c1: summary(q.c1) });
+      claim.check(); observe(q); q.state = "releasing";
+      if (!cleanup(q)) checkpointProbeRefuse("release_unconfirmed");
+      claim.check(); observe(q);
+      report.last_observation = { ...q.last }; report.completed_at = q.last.utc_at; report.event_ordinal = String(q.ordinal);
+      const account = claim.accounting(); report.retained_state_bytes = String(account.retained); report.active_workspace_bytes = String(account.workspace);
+      return report;
+    } catch (error) { fail(q, coded(error)); throw new Error(coded(error)); }
   }, cancel(t: object) { const q = lookup(t); if (q.state !== "released") { observe(q, true); fail(q, "b3ba_cancelled"); } return describe(q); },
     release(t: object) { const q = lookup(t); if (q.state !== "released") { observe(q, true); fail(q, "b3ba_release_order"); } return describe(q); },
     describe(t: object) { const q = lookup(t); if (q.state !== "released") { if (claim.revoked()) fail(q, "b3ba_oracle_unavailable"); observe(q, true); } return describe(q); },

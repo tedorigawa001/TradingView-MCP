@@ -10,6 +10,8 @@ Latest approved follow-up: [B3-Bb's fixed memory oracle](NATIVE_BAR_ADMISSION_CH
 
 ## Purpose
 
+Current approved implementation: [B3-Bc checkpoint-only completion](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bc-implemented-boundary) authenticates original C0/C1 requests and publishes a narrow report only after same-tip checks, original-deadline checks and confirmed cleanup. Diagnostics stay qualification-false; reports never qualify a native view, complete transcript, authority/history or execution. Independent review and B3-C/D native/host work remain open. Earlier slice statements above are historical; no real-data/native/MCP/production/Dot connection is added.
+
 B-3 connects the [B-1 verifier](../src/nativeBarAdmissionVerification.ts) and [B-2 reader](../src/nativeBarAdmissionReader.ts) into one bounded read. Two fresh checkpoints surround the complete native read and its content rechecks. A successful chain of signatures alone is insufficient: the expected fixture, provider state, native bytes, mirrors, complete prefix, operation order and cleanup must also agree.
 
 Keep the approved [E-B design](NATIVE_BAR_ADMISSION_READ_DESIGN.md) and [B-2 constraints](NATIVE_BAR_ADMISSION_FIXTURE_READ_DESIGN.md). Dot stays PAUSED. Trading/scenario/notification/retention rules, all current limits and the strictly-more-than-90-elapsed-day rule are unchanged. This reader cannot publish records, repair a tree, retire a writer, accept history or mint an execution/host-approval capability.

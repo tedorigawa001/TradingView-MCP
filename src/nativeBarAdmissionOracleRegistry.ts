@@ -5,7 +5,7 @@ import { createSyntheticNativeBarAdmissionVerifier } from "./nativeBarAdmissionV
 import { checkpointProbeNoAuthority, checkpointProbeRefuse, checkpointProbeBytes, checkpointProbeParse, checkpointProbeId, checkpointProbeRequestSchema, validateCheckpointOracleBinding } from "./nativeBarAdmissionCheckpointContracts.js";
 
 type Binding = ReturnType<typeof validateCheckpointOracleBinding>;
-type Lease = { bytes: bigint; cap: bigint; released: boolean; ownerGeneration: bigint; revoke: (reason: "oracle_unavailable" | "oracle_changed") => void; id?: string; challenge?: string };
+type Lease = { bytes: bigint; cap: bigint; released: boolean; ownerGeneration: bigint; requests: number; revoke: (reason: "oracle_unavailable" | "oracle_changed") => void; id?: string; challenge?: string };
 type Operation = { promise: Promise<Uint8Array>; settled: boolean; retired: boolean; cancelRequested: boolean; reject: (e: Error) => void; resolve: (bytes: Uint8Array) => void };
 type OwnerPacket = { token: object; request: z.infer<typeof checkpointProbeRequestSchema>; operation: Operation };
 type OwnerMailbox = { queued?: OwnerPacket; inflight?: OwnerPacket; waiter?: (packet: Omit<OwnerPacket, "operation"> | null) => void };
@@ -113,7 +113,7 @@ export function claimSyntheticCheckpointProbe(reader: object) {
     accounting() { return { retained: retainedBytes, workspace: workspaceBytes }; },
     acquire(bytes: bigint, cap: bigint, onRevoke: (reason: "oracle_unavailable" | "oracle_changed") => void) {
       live(e); if (e.active) checkpointProbeRefuse("query_already_active"); reserve(bytes, cap); workspaceBytes += bytes;
-      const lease: Lease = { bytes, cap, released: false, ownerGeneration: e.ownerGeneration, revoke: onRevoke }; e.active = lease; activeLeases.add(lease);
+      const lease: Lease = { bytes, cap, released: false, ownerGeneration: e.ownerGeneration, requests: 0, revoke: onRevoke }; e.active = lease; activeLeases.add(lease);
       return Object.freeze({ release() {
         if (lease.released) return true; if (e.ownerPid !== pid) return false;
         lease.released = true; workspaceBytes -= lease.bytes; activeLeases.delete(lease); if (e.active === lease) e.active = undefined; return true;
@@ -134,13 +134,14 @@ export function claimSyntheticCheckpointProbe(reader: object) {
       live(e); if (!e.ready || e.generation !== generation) checkpointProbeRefuse("oracle_unavailable");
       const wire = checkpointProbeParse(checkpointProbeRequestSchema, raw, 1024), active = e.active;
       if (!active || active.released || e.pending || wire.query_id !== active.id || wire.challenge !== active.challenge
+        || active.ownerGeneration !== e.ownerGeneration || active.requests >= 2 || wire.phase !== (active.requests === 0 ? "c0" : "c1")
         || wire.registration_hash !== e.binding.registration_hash || wire.authority_reference !== e.binding.registration.authority_reference)
         checkpointProbeRefuse("request_binding");
       for (const key of ["fixture_id", "store_id", "epoch_id", "authority_id", "key_id", "enrollment_hash"] as const)
         if (wire[key] !== e.binding.registration.pins[key]) checkpointProbeRefuse("request_binding");
       let resolve!: (bytes: Uint8Array) => void, reject!: (e: Error) => void;
       const promise = new Promise<Uint8Array>((yes, no) => { resolve = yes; reject = no; });
-      const op: Operation = { promise, settled: false, retired: false, cancelRequested: false, reject, resolve }; e.pending = op;
+      const op: Operation = { promise, settled: false, retired: false, cancelRequested: false, reject, resolve }; e.pending = op; active.requests++;
       if (e.mailbox) { e.mailbox.queued = { token: opaque(), request: wire, operation: op }; deliverOwnerPacket(e); }
       else if (e.mode?.startsWith("unsigned")) {
         let bytes: Uint8Array = Buffer.from('{"unsigned":true}');
@@ -152,7 +153,10 @@ export function claimSyntheticCheckpointProbe(reader: object) {
       else if (e.mode === "unavailable") { op.settled = true; reject(new Error("b3ba_oracle_unavailable")); }
       return Object.freeze({ promise, cancel() {
         op.cancelRequested = true;
-        if (!op.settled && !e.mailbox && e.mode !== "pending_no_ack") { op.settled = true; reject(new Error("b3ba_oracle_cancelled")); }
+        if (!op.settled && e.mailbox?.queued?.operation === op) {
+          // It never left this owner queue: removing the original packet is a local settlement, not an owner acknowledgement.
+          e.mailbox.queued = undefined; op.settled = true; reject(new Error("b3ba_oracle_cancelled"));
+        } else if (!op.settled && !e.mailbox && e.mode !== "pending_no_ack") { op.settled = true; reject(new Error("b3ba_oracle_cancelled")); }
       }, retire() { if (op.settled && e.ownerPid === pid) { op.retired = true; if (e.pending === op) e.pending = undefined; } },
       retired() { return op.retired; } });
     },

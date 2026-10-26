@@ -21,7 +21,7 @@ const named = {
       "checkpointProbeRefuse", "checkpointProbeRequestSchema", "validateCheckpointOracleBinding"] },
   "nativeBarAdmissionCheckpointProbe.ts": { "node:crypto": ["randomUUID"], "node:process": ["hrtime"], "node:timers": ["clearTimeout", "setTimeout"],
     "./nativeBarAdmissionOracleRegistry.js": ["claimSyntheticCheckpointProbe"],
-    "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeDiagnosticSchema", "checkpointProbeNoAuthority", "checkpointProbeOptionsSchema",
+    "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeDiagnosticSchema", "checkpointProbeResultSchema", "checkpointProbeNoAuthority", "checkpointProbeOptionsSchema",
       "checkpointProbeParse", "checkpointProbeRefuse", "planCheckpointProbeBudget"] },
 };
 function namedImportsExact(name, file) {

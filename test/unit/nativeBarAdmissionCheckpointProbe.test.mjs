@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Worker } from "node:worker_threads";
 import { binding, publicKey } from "./helpers/checkpointProbeFixture.mjs";
 import { enrollUnsignedCheckpointOracle } from "../helpers/unsignedCheckpointOracle.mjs";
-const base = process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../build/b3ba-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../build/b3ba-validation/" : "../../build/";
 const registry = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const api = await import(new URL(`${base}nativeBarAdmissionCheckpointProbe.js`, import.meta.url));
 const contracts = await import(new URL(`${base}nativeBarAdmissionCheckpointContracts.js`, import.meta.url));

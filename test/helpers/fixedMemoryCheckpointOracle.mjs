@@ -1,13 +1,14 @@
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { z } from "zod";
 
-const base = process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
 const { claimFixedMemoryCheckpointOracleOwner } = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const { checkpointProbeParse } = await import(new URL(`${base}nativeBarAdmissionCheckpointContracts.js`, import.meta.url));
 const { canonical, nativeBarHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const wallNow = Date.now, HostDate = Date, iso = Date.prototype.toISOString;
 const stateSchema = z.strictObject({ sequence: z.string().regex(/^[1-9][0-9]{0,29}$/), tip_hash: nativeBarHash });
-const modeSchema = z.enum(["normal", "hold", "wrong_pin", "wrong_challenge", "outside_bracket", "bad_signature", "replay_previous"]);
+const modeSchema = z.enum(["normal", "hold", "wrong_pin", "wrong_challenge", "outside_bracket", "bad_signature", "replay_previous",
+  "hold_c1", "changed_tip_at_c1", "bad_signature_c1", "replay_at_c1", "defer_pull"]);
 const optionsSchema = z.strictObject({ mode: modeSchema.optional() });
 const publicSpki = "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const fingerprint = createHash("sha256").update(Buffer.from(publicSpki, "hex")).digest("hex");
@@ -32,7 +33,7 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
   function deliver(packet) {
     if (channel.cancelled(packet.token)) { channel.reject(packet.token, "oracle_cancelled"); return; }
     if (!known || closed) { channel.reject(packet.token, "oracle_unavailable"); return; }
-    if (mode === "replay_previous") {
+    if (mode === "replay_previous" || mode === "replay_at_c1" && packet.request.phase === "c1") {
       if (replay) channel.respond(packet.token, Buffer.from(replay)); else channel.reject(packet.token, "oracle_unavailable"); return;
     }
     const wall = wallNow(); if (!Number.isSafeInteger(wall) || wall < 0 || wall > 253402300799999) throw Error("b3bb_clock");
@@ -42,19 +43,20 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
       observed_at: iso.call(new HostDate(mode === "outside_bracket" ? wall - 600001 : wall)) };
     if (mode === "wrong_pin") envelope.fixture_id = pins.store_id;
     if (mode === "wrong_challenge") envelope.challenge = pins.authority_id;
+    if (mode === "changed_tip_at_c1" && packet.request.phase === "c1") envelope.tip_hash = (state.tip_hash[0] === "0" ? "1" : "0") + state.tip_hash.slice(1);
     let signature_hex = sign(null, Buffer.from(canonical({ domain: "native-bar-eb-read-checkpoint-v1", envelope })), privateKey).toString("hex");
-    if (mode === "bad_signature") signature_hex = (signature_hex[0] === "0" ? "1" : "0") + signature_hex.slice(1);
+    if (mode === "bad_signature" || mode === "bad_signature_c1" && packet.request.phase === "c1") signature_hex = (signature_hex[0] === "0" ? "1" : "0") + signature_hex.slice(1);
     const bytes = Buffer.from(canonical({ ...envelope, signature_hex }));
     if (bytes.length > 4096) throw Error("b3bb_checkpoint_bytes"); signed++;
-    if (mode === "normal") { if (replay) replay.fill(0); replay = Buffer.from(bytes); }
+    if (mode === "normal" || mode === "replay_at_c1") { if (replay) replay.fill(0); replay = Buffer.from(bytes); }
     channel.respond(packet.token, bytes);
   }
   function arm() {
-    if (closed || !known) return;
+    if (closed || !known || mode === "defer_pull") return;
     channel.next().then((packet) => {
       if (!packet) { close(); return; }
       try {
-        if (mode === "hold" && !channel.cancelled(packet.token) && known && !closed) { held = packet; return; }
+        if ((mode === "hold" || mode === "hold_c1" && packet.request.phase === "c1") && !channel.cancelled(packet.token) && known && !closed) { held = packet; return; }
         deliver(packet);
       } catch { try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } close(); }
       arm();
@@ -70,6 +72,7 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
   }, setMode(input) {
     channel.check(); if (channel.busy()) throw Error("b3bb_owner_busy"); mode = checkpointProbeParse(modeSchema, input, 4096);
   }, completePending() {
+    if (mode === "defer_pull") { mode = "normal"; arm(); return true; }
     if (!held) return false; const packet = held; held = undefined;
     try { deliver(packet); } catch { try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } close(); }
     arm(); return true;

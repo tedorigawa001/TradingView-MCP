@@ -1,6 +1,6 @@
 # B3-B Checkpoint Probe And Fixed Memory Oracle
 
-Status: **B3-Bb fixed memory oracle implemented and memory-tested; successful B3-Bc probe orchestration remains gated**, 2026-10-26 JST. Design baseline: `3b202f5`; B3-Ba implementation starts from the committed design `abdd7e6`; B3-Bb starts from `39c248f`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end.
+Status: **B3-Bc checkpoint-only completion implemented and memory-tested; independent review remains open**, 2026-10-26 JST. Design baseline: `3b202f5`; B3-Ba starts from `abdd7e6`, B3-Bb from `39c248f`, B3-Bc from the reviewed Bb baseline `ba40238`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end.
 
 ## Scope And Non-Goals
 
@@ -253,6 +253,8 @@ Verification: the B3-Ba probe, boundary and registry suites pass 65 cases on eac
 
 ## B3-Bb Implemented Boundary
 
+This section records the historical B3-Bb boundary; the B3-Bc update is below.
+
 The user subsequently approved B3-Bb's fixed invented memory oracle. The implementation uses an internal original-owner mailbox in `nativeBarAdmissionOracleRegistry.ts` and the sole fixed consumer [fixedMemoryCheckpointOracle.mjs](../test/helpers/fixedMemoryCheckpointOracle.mjs). No runtime module imports this helper, a private-key constructor or a signer. The mailbox accepts no provider/signer callback, key, path or clock source. Its opaque token, original pending operation, enrollment pins and routing binding must agree before a response can settle once.
 
 The helper uses only RFC 8032 section 7.1 test 1's published seed and public key. The literal is public test material, not a generated credential; only its derived private KeyObject and checkpoint signature bytes are ephemeral. Enrollment consumes the original one-use owner grant and reserves its account before constructing the private KeyObject. Another public key, caller-supplied body/key/signer/time/path, malformed invented state or reused grant is refused. The signed domain and B-1 envelope format are unchanged. Sequence/tip come from the independent fixed owner state, challenge from the original issued request and observed time from the captured host wall clock, never from reader-supplied state/time.
@@ -284,3 +286,25 @@ The committer's review of `6c9b332` found no must-fix issue and one low-priority
 **Deferred.** A cancelled request still waiting in the owner queue, not yet delivered, settles only when the owner pulls and rejects it. The fixed helper always waits for the next packet, so this state is unreachable today. Retiring it locally on cancel is deferred to B3-Bc's integration, with a reachable regression.
 
 **Verification.** Both boundary tests pass 8/8. The E/B and oracle suites pass 473, and the full unit suite passes 2,743 with two existing skips. Only tests changed.
+
+## B3-Bc Implemented Boundary
+
+The user approved the next B3-Bc implementation step. `requestStart` now returns an original opaque C0 handle only after B-1 verification, fresh deadline/generation checks and original-operation retirement. `requestEnd` requires that exact C0 handle from the same query and returns an opaque C1 handle after corresponding checks. The registry independently enforces C0 then C1, at most two requests and the active owner generation. Copied/foreign/old checkpoints invalidate the addressed active query without another dispatch; unknown query handles do not poison other queries. The two fresh challenges and query ID remain permanently remembered in the shared account, without retries/resampling.
+
+Only sequence/tip, challenge and bounded owner/send/receive observations survive verification. Raw signatures/response objects are not retained in handles or returned reports. C1 must have the same sequence/tip as C0; a signed changed tip gives `b3ba_changing`. Owner generation changes invalidate the active query even with an unchanged visible tip. These checkpoint-only capabilities cannot authorize V0/V1/native or model operations.
+
+`finishProbe` requires the original C1 handle. It prepares a strict report privately, checks owner/deadline, clears the timer, confirms the original operations retired, releases its lease and samples the final publication time. Any failed check withholds success. There is no asynchronous gap in finishing/release/publication or renewed timeout. Repeated finish on a terminal query is rejected without rewriting diagnostics; the test reproduced this initially unwanted rewrite before correction. Detached publication is an as-of fact, not a promise about later consumer delivery.
+
+The diagnostic schema is now `native-bar-checkpoint-probe-diagnostic-v1`, verification scope `checkpoint_probe_lifecycle_only`, with authenticated count (0..2), captured response bytes (0..8192) and added C0/C1/finishing states. Diagnostics keep all aggregate qualifications false, even after publication. The legacy unsigned-named budget schema still denotes a negative-only model account, not successful authentication.
+
+The successful `native-bar-checkpoint-probe-result-v1` has scope `synthetic_checkpoint_probe_only`, verification scope `authenticated_checkpoint_requests_only`, confirmed cleanup, completion UTC and two bounded checkpoint summaries. It has exactly three issued IDs and two dispatched/authenticated requests. Only `fixture_signature_verified`, `challenge_generation_verified`, `actual_request_timing_verified` and `checkpoint_requests_verified` become true. Complete-transcript `checkpoint_pair_verified`, native read/bytes/snapshot/view, prefix, authority, intake, approval, history, execution/recovery, elapsed-age and physical-capacity qualifications remain false; acknowledgement/storage visibility remain not proven.
+
+Existing ceilings/floors, the joint schedule and the 64-KiB owner account are unchanged. Three 4-KiB ID slots transfer from workspace to retained tombstones; bounded request/response/decoded/provider work is precharged. Actual response/authenticated counts do not measure physical memory or CPU. Accounting fields are registry-global, so another active enrollment may leave global workspace nonzero after this query releases its own lease.
+
+Five fixed helper cases are added: hold C1, change signed C1 tip, corrupt C1 signature, replay C0 at C1 and defer the owner's initial queue pull. The latter reproduces the Bb review's deferred cancellation issue: cancellation removes and settles an original packet still in the local queue without pulling/signing it, while already-delivered work still waits for genuine owner settlement. No caller provider/key/clock/body, extra signer, new key generation or persistence is added. The sole signer still uses the same published RFC vector and one bounded replay buffer.
+
+### B3-Bc Verification And Remaining Work
+
+The completion suite has **47 cases**, including 14 disposable-worker source substitutions. It covers complete narrow success; old/copied/foreign handles/order; signed changing tip, bad signature and stale replay; state loss after C0/C1; advancement; C1 cancellation, same-turn response/cancel races, held expiry and genuine late cleanup; locally cancelled undelivered work; single-use publication/detachment/model separation; and completion at each of five exact budget boundaries with one-less preflight refusal. Worker cases cover equal samples, exclusive expiry at delivery/post-verification/retirement/cleanup/publication, rollback, monotonic expiry and C1 ID collisions. A separate actual-host test stalls the event loop beyond the original deadline. Neither category qualifies OS clocks or true entropy.
+
+The explicit completion/B3-Ba/Bb/pure/source-boundary suite passes **455 tests**, with zero failures/cancellations/skips, in isolated `build/b3bc-validation/`. Bb tests now check C0-only nonqualification rather than the superseded completion gate. No B-1 record signing, native fixture/reader runner, broad fixture-creating suite or production test is run. Independent review and B3-C/D native/host integration remain open. No real-data operation, fixture creation, MCP registration, production activation, Dot restart, rule/retention change, commit or push is part of this implementation step.

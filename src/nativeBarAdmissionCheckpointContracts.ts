@@ -4,7 +4,7 @@ import { nativeBarAdmissionReadRegistrationSchema, validateSyntheticAdmissionRea
 import { calculateSyntheticAdmissionQueryProtocolBudget } from "./nativeBarAdmissionQueryProtocol.js";
 
 export const checkpointProbeNoAuthority = Object.freeze({ scope: "synthetic_checkpoint_probe_only" as const,
-  verification_scope: "unsigned_probe_lifecycle_only" as const, native_read_available: false as const, native_bytes_verified: false as const,
+  verification_scope: "checkpoint_probe_lifecycle_only" as const, native_read_available: false as const, native_bytes_verified: false as const,
   native_snapshot_verified: false as const, view_verified: false as const, fixture_signature_verified: false as const,
   checkpoint_pair_verified: false as const, checkpoint_requests_verified: false as const, logical_prefix_verified: false as const,
   authority_state_verified: false as const, original_intake_verified: false as const, admission_verified: false as const,
@@ -57,16 +57,25 @@ export const checkpointProbeOptionsSchema = z.strictObject({ ttl_ms: z.number().
 export const checkpointProbeRequestSchema = z.strictObject({ schema: z.literal("native-bar-checkpoint-probe-request-v1"), scope: z.literal("synthetic_checkpoint_probe_only"),
   registration_hash: nativeBarHash, fixture_id: checkpointProbeId, store_id: checkpointProbeId, epoch_id: checkpointProbeId, authority_id: checkpointProbeId,
   key_id: checkpointProbeId, enrollment_hash: nativeBarHash, authority_reference: checkpointProbeId, query_id: checkpointProbeId,
-  phase: z.literal("c0"), challenge: checkpointProbeId });
+  phase: z.enum(["c0", "c1"]), challenge: checkpointProbeId });
 export const checkpointProbeObservationSchema = z.strictObject({ utc_at: nativeBarTimestamp, monotonic_before_ns: checkpointProbeUint,
   monotonic_after_ns: checkpointProbeUint });
 const flags = Object.fromEntries(Object.entries(checkpointProbeNoAuthority).map(([k, v]) => [k, z.literal(v)]));
-export const checkpointProbeDiagnosticSchema = z.strictObject({ ...flags, schema: z.literal("native-bar-unsigned-checkpoint-probe-diagnostic-v1"),
-  registration_hash: nativeBarHash, query_id: checkpointProbeId, state: z.enum(["probe_started", "c0_outstanding", "releasing", "release_unconfirmed", "released"]),
+export const checkpointProbeDiagnosticSchema = z.strictObject({ ...flags, schema: z.literal("native-bar-checkpoint-probe-diagnostic-v1"),
+  registration_hash: nativeBarHash, query_id: checkpointProbeId, state: z.enum(["probe_started", "c0_outstanding", "c0_authenticated", "c1_outstanding", "c1_authenticated", "finishing", "releasing", "release_unconfirmed", "released"]),
   revoked: z.boolean(), failure: z.string().regex(/^b3ba_[a-z_]+$/).max(96).nullable(), cleanup: z.enum(["not_requested", "unconfirmed", "confirmed"]),
   first_observation: checkpointProbeObservationSchema, last_observation: checkpointProbeObservationSchema, event_ordinal: checkpointProbeUint,
-  requests_dispatched: z.number().int().min(0).max(1), ids_generated: z.number().int().min(1).max(2), pending_consumed: z.boolean(),
+  requests_dispatched: z.number().int().min(0).max(2), ids_generated: z.number().int().min(1).max(3), pending_consumed: z.boolean(),
+  authenticated_requests: z.number().int().min(0).max(2), captured_response_bytes: z.number().int().min(0).max(8192),
   retained_state_bytes: checkpointProbeUint, active_workspace_bytes: checkpointProbeUint });
+const checkpointSummary = z.strictObject({ challenge: checkpointProbeId, sequence: z.string().regex(/^[1-9][0-9]{0,29}$/), tip_hash: nativeBarHash,
+  observed_at: nativeBarTimestamp, sent: checkpointProbeObservationSchema, received: checkpointProbeObservationSchema });
+export const checkpointProbeResultSchema = checkpointProbeDiagnosticSchema.extend({
+  schema: z.literal("native-bar-checkpoint-probe-result-v1"), verification_scope: z.literal("authenticated_checkpoint_requests_only"),
+  state: z.literal("released"), revoked: z.literal(false), failure: z.null(), cleanup: z.literal("confirmed"), active_workspace_bytes: checkpointProbeUint,
+  fixture_signature_verified: z.literal(true), challenge_generation_verified: z.literal(true), actual_request_timing_verified: z.literal(true),
+  checkpoint_requests_verified: z.literal(true), requests_dispatched: z.literal(2), authenticated_requests: z.literal(2), ids_generated: z.literal(3),
+  completed_at: nativeBarTimestamp, c0: checkpointSummary, c1: checkpointSummary });
 export function planCheckpointProbeBudget(input: unknown) {
   const q = checkpointProbeParse(z.strictObject({ binding: z.unknown(), retained_state_bytes: checkpointProbeUint, lower_limits: lowerLimits.optional() }), input, 256 * 1024);
   const b = validateCheckpointOracleBinding(q.binding), empty = () => ({ entries: "0", inventory_bytes: "0", metadata_bytes: "0" });
