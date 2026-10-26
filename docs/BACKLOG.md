@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B3-B checkpoint照会・固定メモリoracleの詳細設計 (2026-10-26 JST、実装未承認)**: [設計書](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md)。`3b202f5`を基準に、対になる一度限りの登録grant、固定照会先と完全binding、ホスト生成challenge・実観測時刻・元の期限、取消し競合・応答の一度限り消費・終了確認までの再利用停止を具体化。最初はcheckpoint照会だけのprobeとし、結果/ハンドルをB3-Cのnative読取/V0/V1証跡へ昇格させない。公開テストベクトルからのメモリ内署名はB3-Bbで別承認とし、まずB3-Baの登録/要求/予算/時刻・取消し基盤と未署名の拒否系試験を提案する。既存上限・V1 native allowance・純粋モジュールの時計禁止・全体view/history/authority不成立を維持。今回は文書のみ。コード/試験・鍵/署名/oracle/fixture作成・native読取・実データ操作・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/pushは行わない。
+
 **105-3 B3-A独立レビュー対応 (2026-10-26 JST)**: [記録](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md#b3-a-independent-review-corrections)。`96756f9`を別担当が読み取り専用でレビューし、修正必須なし・中1・低8を修正した。
 - 中: `finish`から`release`までの間の不正な操作(重複・古い応答、別モデルのハンドル、巻き戻し、`issue`等)が拒否されるだけで記録されず、`model_order_consistent: true`で終わっていた。解放中の片付け以外の操作を`b3a_release_only`として記録する。
 - 低:

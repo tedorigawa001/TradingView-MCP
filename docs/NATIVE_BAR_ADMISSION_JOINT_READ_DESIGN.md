@@ -2,6 +2,8 @@
 
 Status: **B3-A implemented and memory-tested; later slices remain proposals**, 2026-10-26 JST. The user approved B3-A only after the constrained B-2c tests. This work builds on `cbce6d3` plus the existing uncommitted B-2c adapter/test changes. It does not commit, replace or discard that work. B-2c host/kernel qualification remains open. No new provider, key, signature-bearing disk fixture or runtime entry is created.
 
+Current follow-up: B-2c is separately committed as `a9188fb`; B3-A review corrections are committed as `3b202f5`. Earlier slice/worktree statements below are historical. The next proposal is the [B3-B checkpoint-probe detailed design](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md): two-sided fixed-oracle enrollment, real local challenges/clocks/cancellation, a checkpoint-only capability boundary and separate approval for public-test-vector signing in memory. No B3-B implementation is authorized by this documentation update.
+
 ## Purpose
 
 B-3 connects the [B-1 verifier](../src/nativeBarAdmissionVerification.ts) and [B-2 reader](../src/nativeBarAdmissionReader.ts) into one bounded read. Two fresh checkpoints surround the complete native read and its content rechecks. A successful chain of signatures alone is insufficient: the expected fixture, provider state, native bytes, mirrors, complete prefix, operation order and cleanup must also agree.
