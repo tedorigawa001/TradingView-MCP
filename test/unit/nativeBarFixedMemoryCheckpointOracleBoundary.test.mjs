@@ -35,6 +35,11 @@ test("B3-Bb no runtime source imports the signer; the original-owner mailbox has
   }
   for (const name of readdirSync(new URL("../helpers/", import.meta.url)).filter((s) => s.endsWith(".mjs") && s !== "fixedMemoryCheckpointOracle.mjs"))
     assert.doesNotMatch(readFileSync(new URL(`../helpers/${name}`, import.meta.url), "utf8"), /claimFixedMemoryCheckpointOracleOwner/);
+  // Runtime sources and other tests cannot reach the mailbox either: only the registry defines it.
+  for (const name of readdirSync(new URL("../../src/", import.meta.url)).filter((s) => s.endsWith(".ts") && s !== "nativeBarAdmissionOracleRegistry.ts"))
+    assert.doesNotMatch(readFileSync(new URL(`../../src/${name}`, import.meta.url), "utf8"), /claimFixedMemoryCheckpointOracleOwner/, name);
+  for (const dir of ["./", "./helpers/"]) for (const name of readdirSync(new URL(dir, import.meta.url)).filter((s) => s.endsWith(".mjs") && s !== "nativeBarFixedMemoryCheckpointOracleBoundary.test.mjs"))
+    assert.doesNotMatch(readFileSync(new URL(`${dir}${name}`, import.meta.url), "utf8"), /claimFixedMemoryCheckpointOracleOwner/, `${dir}${name}`);
 });
 test("B3-Bb source boundary assertions detect an added key exporter, generator and storage call", () => {
   for (const source of ["generateKeyPairSync('ed25519')", "writeFileSync(path,key)", "fetch(url)"])

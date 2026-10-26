@@ -268,3 +268,19 @@ A valid invented signature now passes the existing B-1 `verifyCheckpoint` call. 
 The new suite has **28 functional cases and four source-boundary cases**. It covers valid B-1 envelope verification without probe promotion, fresh requests after owner advancement, terminal state loss, cancellation before delivery and while held, late acknowledgement/timeout, all close origins, repeated completion, wrong pins/challenges/time/signatures, stale replay, fixed-key/input restrictions, one-use grants and accounting, detached reports and no reader-selected tip. Source assertions constrain imports, the sole fixed public-vector constructor/signing domain, no export/storage/network/key generation and no runtime signer connection; small in-memory AST probes check the relevant boundary assertions. New behavior was exercised through failing tests before implementation.
 
 The explicit B3-Bb/B3-Ba/pure-contract/boundary suite passes **408 tests**, with zero failures/cancellations/skips, using ignored `build/b3bb-validation/` output. It does not run the record-signing B-1 runtime suite, a native fixture runner, broad fixture-creating suite or production tests. Independent review, B3-Bc's successful C0/C1 orchestration and B3-C/D native/host qualification remain open. No commit, push, deployment, real-data operation, filesystem fixture or persistent key/signature is part of this step. Dot and trading/notification/retention conditions remain unchanged.
+
+### B3-Bb Review Correction
+
+The committer's review of `6c9b332` found no must-fix issue and one low-priority boundary gap.
+
+**Gap.** The B3-Ba source-boundary test checked named imports only for `node:crypto`, `node:process` and `node:timers`. So the probe could import the fixed oracle's original-owner mailbox (`claimFixedMemoryCheckpointOracleOwner`) from the registry, and the test still passed. The B3-Bb consumer check also scanned `test/helpers/` alone. The unchanged tests at `6c9b332` passed 8/8 against a probe mutated to import the mailbox.
+
+**Fix.**
+- Every import of the three B3-B modules, local modules included, must now name exactly its allowlisted bindings. The probe may take only `claimSyntheticCheckpointProbe` from the registry.
+- A mutation self-test shows that adding the mailbox, or one more contracts helper, fails the allowlist.
+- The B3-Bb boundary test now also requires that no runtime source other than the registry, and no other unit test or helper, names the mailbox.
+- With these, the mutated probe fails three boundary tests.
+
+**Deferred.** A cancelled request still waiting in the owner queue, not yet delivered, settles only when the owner pulls and rejects it. The fixed helper always waits for the next packet, so this state is unreachable today. Retiring it locally on cancel is deferred to B3-Bc's integration, with a reachable regression.
+
+**Verification.** Both boundary tests pass 8/8. The E/B and oracle suites pass 473, and the full unit suite passes 2,743 with two existing skips. Only tests changed.

@@ -9,6 +9,29 @@ const specs = {
   "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js"],
   "nativeBarAdmissionCheckpointProbe.ts": ["node:crypto", "node:process", "node:timers", "./nativeBarAdmissionOracleRegistry.js", "./nativeBarAdmissionCheckpointContracts.js"],
 };
+// Exact named bindings for every import, local modules included: the probe may take only its reader claim from the
+// registry, never the fixed oracle's original-owner mailbox.
+const named = {
+  "nativeBarAdmissionCheckpointContracts.ts": { "zod": ["z"], "./nativeBarEvidence.js": ["canonical", "evidenceHash", "nativeBarHash", "nativeBarId", "nativeBarTimestamp"],
+    "./nativeBarAdmissionReadContracts.js": ["nativeBarAdmissionReadRegistrationSchema", "validateSyntheticAdmissionReadLimits", "validateSyntheticAdmissionReadRegistration"],
+    "./nativeBarAdmissionQueryProtocol.js": ["calculateSyntheticAdmissionQueryProtocolBudget"] },
+  "nativeBarAdmissionOracleRegistry.ts": { "node:crypto": ["KeyObject"], "node:process": ["pid"], "zod": ["z"],
+    "./nativeBarAdmissionVerification.js": ["createSyntheticNativeBarAdmissionVerifier"],
+    "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeBytes", "checkpointProbeId", "checkpointProbeNoAuthority", "checkpointProbeParse",
+      "checkpointProbeRefuse", "checkpointProbeRequestSchema", "validateCheckpointOracleBinding"] },
+  "nativeBarAdmissionCheckpointProbe.ts": { "node:crypto": ["randomUUID"], "node:process": ["hrtime"], "node:timers": ["clearTimeout", "setTimeout"],
+    "./nativeBarAdmissionOracleRegistry.js": ["claimSyntheticCheckpointProbe"],
+    "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeDiagnosticSchema", "checkpointProbeNoAuthority", "checkpointProbeOptionsSchema",
+      "checkpointProbeParse", "checkpointProbeRefuse", "planCheckpointProbeBudget"] },
+};
+function namedImportsExact(name, file) {
+  return file.statements.filter(ts.isImportDeclaration).every((n) => {
+    const expected = named[name][n.moduleSpecifier.text], clause = n.importClause;
+    if (!expected || !clause || clause.name || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)) return false;
+    const names = clause.namedBindings.elements.map((e) => e.propertyName?.text ?? e.name.text).sort();
+    return JSON.stringify(names) === JSON.stringify([...expected].sort());
+  });
+}
 const parse = (text) => ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, true);
 const ast = (name) => parse(readFileSync(new URL(name, root), "utf8"));
 function imports(file) {
@@ -31,6 +54,7 @@ function violations(file, timed = false) {
 test("B3-Ba exact dependency graph excludes signer, native, storage, network and startup", () => {
   for (const [name, dependencies] of Object.entries(specs)) {
     const file = ast(name); assert.deepEqual(imports(file), dependencies, name);
+    assert.ok(namedImportsExact(name, file), `${name} imports exactly its allowlisted names`);
     for (const n of file.statements.filter(ts.isImportDeclaration)) {
       assert.ok(n.importClause && !n.importClause.name && ts.isNamedImports(n.importClause.namedBindings), name);
       const allowed = { "node:crypto": name.endsWith("OracleRegistry.ts") ? ["KeyObject"] : ["randomUUID"], "node:process": name.endsWith("OracleRegistry.ts") ? ["pid"] : ["hrtime"], "node:timers": ["setTimeout", "clearTimeout"] }[n.moduleSpecifier.text];
@@ -60,4 +84,11 @@ test("B3-Ba boundary tests catch widened imports, clock aliases, signer and nati
   assert.deepEqual(imports(parse('import("./nativeBarAdmissionCheckpointProbe.js")')), ["./nativeBarAdmissionCheckpointProbe.js"]);
   const file = ast("nativeBarAdmissionCheckpointProbe.ts");
   assert.deepEqual(file.statements.filter(ts.isExportDeclaration).map((n) => n.getText()), []);
+  // The probe taking the fixed oracle's owner mailbox by name, or one more contracts helper, must fail the exact allowlist.
+  const text = readFileSync(new URL("nativeBarAdmissionCheckpointProbe.ts", root), "utf8");
+  const mailbox = ["claimFixedMemory", "CheckpointOracleOwner"].join(""); // assembled, so only real consumers spell it out
+  for (const mutation of [text.replace("import { claimSyntheticCheckpointProbe }", `import { claimSyntheticCheckpointProbe, ${mailbox} }`),
+    text.replace("planCheckpointProbeBudget }", "planCheckpointProbeBudget, validateCheckpointOracleBinding }")]) {
+    assert.notEqual(mutation, text); assert.equal(namedImportsExact("nativeBarAdmissionCheckpointProbe.ts", parse(mutation)), false);
+  }
 });
