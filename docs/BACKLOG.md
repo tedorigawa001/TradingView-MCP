@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B3-Bb 固定メモリoracle (2026-10-26 JST、実装・メモリ内合成検証)**: [実装境界](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bb-implemented-boundary)。承認済みの公開RFC 8032テストベクトルだけからメモリ内KeyObjectを導出し、架空checkpointだけに署名する固定helperを追加。runtimeは署名helperを読み込まず、元のowner grantに結びつく内部mailboxで一度だけ応答する。任意の鍵/本文/時計/path/signerは不可。独立した架空sequence/tip・owner世代、状態進行時の実行中照会の停止、状態喪失の終端化、取消し/期限後の署名前停止と元ownerの終了確認、上限4KiBの旧応答再送と拒否、固定64KiBの共有会計を実装。B-1の有効署名検証は通るが、probeは`probe_completion_unavailable`で止まり、C0/C1成功資格はすべてfalseのまま。新規28機能試験・4境界試験、既存分との合同408件成功(失敗/skipなし)。B3-Bcの成功経路と独立レビューは未実施。実データ操作・filesystem fixture・鍵/署名の永続化・新規鍵生成・native読取・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/pushなし。
+
 **105-3 B3-Baのタイマー修正 (2026-10-26 JST)**: [記録](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-ba-review-correction)。`83c1b3c`のコミット側確認で、問い合わせごとの期限タイマーが参照されたままで、取消しも解放もされない試験が期限までプロセスを生かし続けることを実測した(期限4秒で4.09秒、最大600秒)。タイマーを`unref()`にし、同じ確認で0.15秒で終了する。期限の判定は毎回実際の時計で行うため安全性は変わらない。開始時に参照タイマーが増えないことと期限が引き続き効くことを確かめるテストを追加し、修正前に失敗。`describe`は時計を1回読み直すため既に過ぎた期限を記録し得る(検証済みの事実は加えない)と明記した。B3-Baの3ファイルは3回とも65件成功、E/B単体441件、全単体2,711成功・既存skip2(検証中のhash不変)。署名・native・fixture・実行経路は変更なし。push/配布は行わない。
 
 **105-3 B3-Ba 登録・要求・時刻／取消し・予算基盤 (2026-10-26 JST、実装・未署名合成検証)**: [実装境界](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-ba-implemented-boundary)。2方向の一度限りgrant、完全binding/公開鍵照合、共有上限付き台帳と再利用拒否、ホストUUID/壁時計/単調時計・元期限、固定未署名ハーネス、応答消費・取消し・終了不明時の枠保持を実装。任意のcallback/応答/時計/署名鍵は受け付けず、requestStartは拒否系のみ、C0/C1成功とrequestEnd/finishの正経路はB3-Bb/Bcへ保留。全検証資格はfalse。ID予約の二重計上と解放残額、競合登録への低い上限の適用、拒否応答時の時計照合、時計API例外のコード化を失敗試験から修正。新規64件、既存純粋契約/境界との合同375件成功(失敗/skipなし)、型検査・差分検査成功。時計/RNG故障は隔離worker内だけ、OSの変更なし。署名・秘密鍵・fixture作成・native読取・実データ操作・MCP登録/本番有効化・Dot再開・判定/通知/保持条件変更・コミット/pushなし。独立レビューと署名用の別承認は残る。

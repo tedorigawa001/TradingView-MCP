@@ -1,5 +1,5 @@
 import { createHash, createPublicKey } from "node:crypto";
-const base = process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../../build/b3ba-validation/" : "../../../build/";
+const base = process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../../build/b3ba-validation/" : "../../../build/";
 const { canonical } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 
 export const publicKey = () => createPublicKey({ key: Buffer.from("302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex"), type: "spki", format: "der" });

@@ -6,6 +6,8 @@ Current follow-up: B-2c is separately committed as `a9188fb`; B3-A review correc
 
 Subsequent implementation approval covers [B3-Ba's unsigned foundation only](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-ba-implemented-boundary). Registration, real host issuance/observations, rejection/cancellation/cleanup and mandatory accounting are implemented without a signed provider. No probe can yet authenticate C0/C1 or mint a successful joint/native view. B3-Bb/Bc signing and orchestration remain gated.
 
+Latest approved follow-up: [B3-Bb's fixed memory oracle](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md#b3-bb-implemented-boundary) now derives the published RFC test-vector KeyObject and signs only invented checkpoint envelopes in memory. B-1 verifies these envelopes, but the probe still refuses completion and all its qualifications remain false. Successful C0/C1 orchestration remains B3-Bc work; no native read, filesystem fixture, runtime registration, Dot restart or rule change is enabled. The preceding approval statements describe their historical slices.
+
 ## Purpose
 
 B-3 connects the [B-1 verifier](../src/nativeBarAdmissionVerification.ts) and [B-2 reader](../src/nativeBarAdmissionReader.ts) into one bounded read. Two fresh checkpoints surround the complete native read and its content rechecks. A successful chain of signatures alone is insufficient: the expected fixture, provider state, native bytes, mirrors, complete prefix, operation order and cleanup must also agree.

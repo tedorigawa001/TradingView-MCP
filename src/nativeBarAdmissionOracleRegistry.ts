@@ -5,12 +5,14 @@ import { createSyntheticNativeBarAdmissionVerifier } from "./nativeBarAdmissionV
 import { checkpointProbeNoAuthority, checkpointProbeRefuse, checkpointProbeBytes, checkpointProbeParse, checkpointProbeId, checkpointProbeRequestSchema, validateCheckpointOracleBinding } from "./nativeBarAdmissionCheckpointContracts.js";
 
 type Binding = ReturnType<typeof validateCheckpointOracleBinding>;
-type Lease = { bytes: bigint; cap: bigint; released: boolean; revoke: () => void; id?: string; challenge?: string };
-type Operation = { promise: Promise<Uint8Array>; settled: boolean; retired: boolean; reject: (e: Error) => void };
+type Lease = { bytes: bigint; cap: bigint; released: boolean; ownerGeneration: bigint; revoke: (reason: "oracle_unavailable" | "oracle_changed") => void; id?: string; challenge?: string };
+type Operation = { promise: Promise<Uint8Array>; settled: boolean; retired: boolean; cancelRequested: boolean; reject: (e: Error) => void; resolve: (bytes: Uint8Array) => void };
+type OwnerPacket = { token: object; request: z.infer<typeof checkpointProbeRequestSchema>; operation: Operation };
+type OwnerMailbox = { queued?: OwnerPacket; inflight?: OwnerPacket; waiter?: (packet: Omit<OwnerPacket, "operation"> | null) => void };
 const modes = ["unavailable", "unsigned", "unsigned_decorated", "unsigned_shared", "unsigned_oversize", "pending_ack", "pending_no_ack"] as const;
 type Mode = typeof modes[number];
-type Entry = { binding: Binding; ownerPid: number; closed: boolean; ownerUsed: boolean; readerUsed: boolean; ready: boolean; generation: number;
-  mode?: Mode; active?: Lease; pending?: Operation; verifier: ReturnType<typeof createSyntheticNativeBarAdmissionVerifier> };
+type Entry = { binding: Binding; ownerPid: number; closed: boolean; ownerUsed: boolean; readerUsed: boolean; ready: boolean; generation: number; ownerGeneration: bigint;
+  mode?: Mode; active?: Lease; pending?: Operation; mailbox?: OwnerMailbox; verifier: ReturnType<typeof createSyntheticNativeBarAdmissionVerifier> };
 const readers = new WeakMap<object, Entry>(), owners = new WeakMap<object, Entry>(), aliases = new Set<string>();
 const issuedIds = new Set<string>(), roleIds = new Set<string>();
 const activeLeases = new Set<Lease>();
@@ -21,7 +23,14 @@ function reserve(bytes: bigint, ceiling = 16777216n) {
   for (const lease of activeLeases) if (lease.cap < ceiling) ceiling = lease.cap;
   if (retainedBytes + workspaceBytes + bytes > ceiling) checkpointProbeRefuse("state_budget");
 }
-function revoke(e: Entry) { e.closed = true; e.ready = false; e.generation++; e.active?.revoke(); }
+function deliverOwnerPacket(e: Entry) {
+  const m = e.mailbox; if (!m?.waiter) return;
+  if (m.queued) {
+    const packet = m.queued, waiter = m.waiter; m.queued = undefined; m.waiter = undefined; m.inflight = packet;
+    waiter(Object.freeze({ token: packet.token, request: Object.freeze({ ...packet.request }) }));
+  } else if (e.closed && !m.inflight) { const waiter = m.waiter; m.waiter = undefined; waiter(null); }
+}
+function revoke(e: Entry) { e.closed = true; e.ready = false; e.generation++; e.ownerGeneration++; e.active?.revoke("oracle_unavailable"); deliverOwnerPacket(e); }
 
 export function createSyntheticCheckpointOracleBootstrap(input: unknown, publicKey: KeyObject) {
   const binding = validateCheckpointOracleBinding(input), r = binding.registration;
@@ -34,7 +43,7 @@ export function createSyntheticCheckpointOracleBootstrap(input: unknown, publicK
   reserve(charge); retainedBytes += charge;
   for (const key of keys) aliases.add(key);
   for (const id of [...Object.values(r.pins), r.authority_reference]) if (checkpointProbeId.safeParse(id).success) roleIds.add(id);
-  const entry: Entry = { binding, ownerPid: pid, closed: false, ownerUsed: false, readerUsed: false, ready: false, generation: 0, verifier }, readerEnrollment = opaque(), ownerEnrollment = opaque();
+  const entry: Entry = { binding, ownerPid: pid, closed: false, ownerUsed: false, readerUsed: false, ready: false, generation: 0, ownerGeneration: 0n, verifier }, readerEnrollment = opaque(), ownerEnrollment = opaque();
   readers.set(readerEnrollment, entry); owners.set(ownerEnrollment, entry);
   return Object.freeze({ readerEnrollment, ownerEnrollment,
     describe() { return { ...checkpointProbeNoAuthority, registration_hash: binding.registration_hash, revoked: entry.closed || entry.ownerPid !== pid,
@@ -55,17 +64,56 @@ export function enrollUnsignedCheckpointOracleForHarness(owner: object, input: u
   } });
 }
 
+/** Internal original-owner mailbox. Only the fixed memory oracle test helper may consume it. No signer callback is registered. */
+export function claimFixedMemoryCheckpointOracleOwner(owner: object) {
+  const e = owners.get(owner); if (!e) checkpointProbeRefuse("owner_grant_required"); live(e);
+  if (e.ownerUsed) checkpointProbeRefuse("owner_grant_consumed"); e.ownerUsed = true;
+  try { reserve(65536n); retainedBytes += 65536n; e.mailbox = {}; }
+  catch (error) { revoke(e); throw error; }
+  const m = e.mailbox;
+  function original(token: object) {
+    if (e!.ownerPid !== pid) checkpointProbeRefuse("oracle_unavailable");
+    const packet = m.inflight; if (!packet || packet.token !== token || packet.operation !== e!.pending || packet.operation.settled)
+      checkpointProbeRefuse("owner_operation_required"); return packet;
+  }
+  function settle(token: object, bytes?: Uint8Array, failure?: "oracle_unavailable" | "oracle_cancelled" | "oracle_rejected") {
+    const packet = original(token), op = packet.operation; op.settled = true; m.inflight = undefined;
+    if (op.cancelRequested || failure) op.reject(new Error(`b3ba_${op.cancelRequested ? "oracle_cancelled" : failure}`));
+    else {
+      try { op.resolve(copyOwnerResponse(bytes)); } catch { op.reject(new Error("b3ba_response_bytes")); }
+    }
+    deliverOwnerPacket(e!);
+  }
+  return Object.freeze({ fixed: structuredClone({ pins: e.binding.registration.pins, authority_reference: e.binding.registration.authority_reference,
+    registration_hash: e.binding.registration_hash }),
+    activate() { live(e); if (e.ready) checkpointProbeRefuse("owner_grant_consumed"); e.ready = true; e.generation++; e.ownerGeneration++; },
+    changed() { live(e); if (!e.ready) checkpointProbeRefuse("oracle_unavailable"); e.ownerGeneration++; e.active?.revoke("oracle_changed"); },
+    check() { live(e); if (!e.ready) checkpointProbeRefuse("oracle_unavailable"); },
+    busy() { live(e); return !!e.active; },
+    next(): Promise<Omit<OwnerPacket, "operation"> | null> {
+      if (e.ownerPid !== pid) return Promise.reject(new Error("b3ba_oracle_unavailable"));
+      if (m.waiter || m.inflight) return Promise.reject(new Error("b3ba_owner_busy"));
+      return new Promise((resolve) => { m.waiter = resolve; deliverOwnerPacket(e); });
+    },
+    cancelled(token: object) { return original(token).operation.cancelRequested; },
+    respond(token: object, bytes: Uint8Array) { settle(token, bytes); },
+    reject(token: object, failure: "oracle_unavailable" | "oracle_cancelled" | "oracle_rejected") { settle(token, undefined, failure); },
+    close() { if (!e.closed) revoke(e); },
+  });
+}
+
 /** Internal bridge for the disconnected timed probe only. */
 export function claimSyntheticCheckpointProbe(reader: object) {
   const e = readers.get(reader); if (!e) checkpointProbeRefuse("reader_grant_required"); live(e);
   if (!e.ready) checkpointProbeRefuse("oracle_unavailable"); if (e.readerUsed) checkpointProbeRefuse("reader_grant_consumed"); e.readerUsed = true;
   const generation = e.generation;
   return Object.freeze({ binding: structuredClone(e.binding), verifier: e.verifier,
-    check() { live(e); if (!e.ready || e.generation !== generation) checkpointProbeRefuse("oracle_unavailable"); },
+    check() { live(e); if (!e.ready || e.generation !== generation) checkpointProbeRefuse("oracle_unavailable");
+      if (e.active && e.active.ownerGeneration !== e.ownerGeneration) checkpointProbeRefuse("oracle_changed"); },
     accounting() { return { retained: retainedBytes, workspace: workspaceBytes }; },
-    acquire(bytes: bigint, cap: bigint, onRevoke: () => void) {
+    acquire(bytes: bigint, cap: bigint, onRevoke: (reason: "oracle_unavailable" | "oracle_changed") => void) {
       live(e); if (e.active) checkpointProbeRefuse("query_already_active"); reserve(bytes, cap); workspaceBytes += bytes;
-      const lease: Lease = { bytes, cap, released: false, revoke: onRevoke }; e.active = lease; activeLeases.add(lease);
+      const lease: Lease = { bytes, cap, released: false, ownerGeneration: e.ownerGeneration, revoke: onRevoke }; e.active = lease; activeLeases.add(lease);
       return Object.freeze({ release() {
         if (lease.released) return true; if (e.ownerPid !== pid) return false;
         lease.released = true; workspaceBytes -= lease.bytes; activeLeases.delete(lease); if (e.active === lease) e.active = undefined; return true;
@@ -92,8 +140,9 @@ export function claimSyntheticCheckpointProbe(reader: object) {
         if (wire[key] !== e.binding.registration.pins[key]) checkpointProbeRefuse("request_binding");
       let resolve!: (bytes: Uint8Array) => void, reject!: (e: Error) => void;
       const promise = new Promise<Uint8Array>((yes, no) => { resolve = yes; reject = no; });
-      const op: Operation = { promise, settled: false, retired: false, reject }; e.pending = op;
-      if (e.mode?.startsWith("unsigned")) {
+      const op: Operation = { promise, settled: false, retired: false, cancelRequested: false, reject, resolve }; e.pending = op;
+      if (e.mailbox) { e.mailbox.queued = { token: opaque(), request: wire, operation: op }; deliverOwnerPacket(e); }
+      else if (e.mode?.startsWith("unsigned")) {
         let bytes: Uint8Array = Buffer.from('{"unsigned":true}');
         if (e.mode === "unsigned_decorated") Object.defineProperty(bytes, "invented_decoration", { value: true });
         if (e.mode === "unsigned_shared") bytes = new Uint8Array(new SharedArrayBuffer(16));
@@ -102,10 +151,20 @@ export function claimSyntheticCheckpointProbe(reader: object) {
       }
       else if (e.mode === "unavailable") { op.settled = true; reject(new Error("b3ba_oracle_unavailable")); }
       return Object.freeze({ promise, cancel() {
-        if (!op.settled && e.mode !== "pending_no_ack") { op.settled = true; reject(new Error("b3ba_oracle_cancelled")); }
+        op.cancelRequested = true;
+        if (!op.settled && !e.mailbox && e.mode !== "pending_no_ack") { op.settled = true; reject(new Error("b3ba_oracle_cancelled")); }
       }, retire() { if (op.settled && e.ownerPid === pid) { op.retired = true; if (e.pending === op) e.pending = undefined; } },
       retired() { return op.retired; } });
     },
     close() { revoke(e); },
   });
+}
+
+const typedArray = Object.getPrototypeOf(Uint8Array.prototype), byteLength = Object.getOwnPropertyDescriptor(typedArray, "byteLength")!.get!,
+  arrayBuffer = Object.getOwnPropertyDescriptor(typedArray, "buffer")!.get!, ordinaryLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+function copyOwnerResponse(input: unknown) {
+  const length = byteLength.call(input); ordinaryLength.call(arrayBuffer.call(input));
+  if (!(input instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(input)) || length > 4096
+    || Reflect.ownKeys(input).some((k) => typeof k !== "string" || !/^(0|[1-9][0-9]*)$/.test(k))) checkpointProbeRefuse("response_bytes");
+  const copy = Buffer.alloc(length); Uint8Array.prototype.set.call(copy, input); return copy;
 }

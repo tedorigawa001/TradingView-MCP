@@ -67,7 +67,7 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
     if (!plan.model_fits) checkpointProbeRefuse("budget");
     const cap = BigInt(plan.limits.metadata_bytes!), bytes = BigInt(plan.used.metadata_bytes) - account.retained;
     let q: Query | undefined;
-    const lease = claim.acquire(bytes, cap, () => { if (q) fail(q, "b3ba_oracle_unavailable"); });
+    const lease = claim.acquire(bytes, cap, (reason) => { if (q) fail(q, `b3ba_${reason}`); });
     try {
       let id: string; try { id = generateUUID(); } catch { checkpointProbeRefuse("rng_unavailable"); }
       claim.identifier(id, cap);
@@ -100,10 +100,10 @@ export function enrollSyntheticCheckpointProbe(reader: object) {
             const copy = capture(bytes); observe(owned);
             try { claim.verifier.verifyCheckpoint(copy, { challenge, sent_at: sent.utc_at, received_at: owned.last.utc_at }); }
             catch { checkpointProbeRefuse("checkpoint_refused"); }
-            // No signed oracle or successful authentication entry is enabled by B3-Ba.
-            checkpointProbeRefuse("signed_oracle_unavailable");
+            // B3-Bb may authenticate a fixture envelope; successful probe completion remains gated for B3-Bc.
+            checkpointProbeRefuse("probe_completion_unavailable");
           } catch (error) { fail(owned, coded(error)); }
-          finally { op.retire(); if (!owned.failure) fail(owned, "b3ba_signed_oracle_unavailable"); else cleanup(owned); }
+          finally { op.retire(); if (!owned.failure) fail(owned, "b3ba_probe_completion_unavailable"); else cleanup(owned); }
         }, (error) => {
           owned.consumed = true;
           try { if (!owned.failure) { claim.check(); observe(owned); } fail(owned, coded(error)); }
