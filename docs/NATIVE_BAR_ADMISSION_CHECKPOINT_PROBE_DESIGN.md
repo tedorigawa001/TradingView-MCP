@@ -1,12 +1,12 @@
 # B3-B Checkpoint Probe And Fixed Memory Oracle
 
-Status: **detailed design proposal; implementation and signing not yet approved**, 2026-10-26 JST. Baseline: `3b202f5`, including the B3-A independent-review corrections and the separately committed B-2c patch `a9188fb`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. This step changes documentation only.
+Status: **B3-Ba unsigned lifecycle implemented and memory-tested; B3-Bb/Bc and signing remain unapproved**, 2026-10-26 JST. Design baseline: `3b202f5`; B3-Ba implementation starts from the committed design `abdd7e6`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal below is retained, with the implemented slice and its explicit limits recorded at the end.
 
 ## Scope And Non-Goals
 
 B3-B adds real process-local request issuance, host observations and cancellation to the existing memory-only checkpoint verifier. It does **not** connect a native reader. Its first usable entry is explicitly a **checkpoint probe**, not a joint read: two checkpoint requests may be authenticated without proving any filesystem observation between them. Probe handles must never become B3-C native-order capabilities.
 
-Dot remains PAUSED. Confirmation counts, observation bands, scenario/notification rules, mail delivery rules, strictly-more-than-90-elapsed-day deletion eligibility, and every current resource ceiling remain unchanged. No real data, filesystem fixture, signed file, key file, network service, MCP registration, startup wiring, persistent log, cleanup or deployment is introduced. No test signing or host clock/RNG execution is performed during this design step.
+Dot remains PAUSED. Confirmation counts, observation bands, scenario/notification rules, mail delivery rules, strictly-more-than-90-elapsed-day deletion eligibility, and every current resource ceiling remain unchanged. No real data, filesystem fixture, signed file, key file, network service, MCP registration, startup wiring, persistent log, cleanup or deployment is introduced. The original design-only step executed no clocks/RNG/signing; the separately approved B3-Ba slice now uses local clocks/RNG and an unsigned lifecycle harness, but still performs no signing.
 
 Keep three distinctions throughout implementation:
 
@@ -204,6 +204,37 @@ Acceptance cases:
 
 Clock/RNG/cancel failure injection is test-harness-only, in isolated test processes with fixed enumerated cases and restored substitutions, not a public runtime callback or a change to the OS clock. Tests of substituted sources are reported separately from actual host-source observations. No hard real-time, true clock-freeze/remount/power-loss/kernel-close or malicious-same-UID qualification is inferred. The existing B-2c host/kernel gaps remain open.
 
-## Design-Step Verification
+## Original Design-Step Verification
 
 This step reads the repository contracts and writes only this design, its orchestration link and the backlog entry. It does not execute the proposed APIs, create a grant/oracle/key/signature/fixture, run native tests, change code or jobs, commit or push. Before reporting completion, check Markdown links, diff whitespace, the exact changed-file set, unchanged tracked code/tests, unchanged common JS/native builds and the unchanged PAUSED Dot configuration. This is document verification, not B3-B runtime qualification.
+
+## B3-Ba Implemented Boundary
+
+The user approved **B3-Ba only** after the design commit. Three disconnected modules implement the unsigned foundation:
+
+- `nativeBarAdmissionCheckpointContracts.ts`: bounded strict binding/options/request/diagnostic contracts and the mandatory whole-query budget wrapper. It imports only the B3-A budget function, never the model factory. No clock, RNG or capability issuer lives here.
+- `nativeBarAdmissionOracleRegistry.ts`: validated public-key/full-binding bootstrap, two distinct one-use grants, process-local namespace/ID tombstones, one active claim per enrollment and one shared 16-MiB metadata account. Alias and issued-ID tables have no eviction/reset API. Active lower ceilings also constrain competing enrollment. This module has no signer, filesystem/native loader or requester-selected provider.
+- `nativeBarAdmissionCheckpointProbe.ts`: captured host wall/monotonic sources and UUID source, exclusive original deadline, one timer per active query, original query membership, owned response capture, cancellation and private-settlement-based cleanup. All diagnostics remain qualification-false.
+
+The fixed `test/helpers/unsignedCheckpointOracle.mjs` alone uses the internal original-owner enrollment bridge. It selects a closed enum: `unavailable`, `unsigned`, `unsigned_decorated`, `unsigned_shared`, `unsigned_oversize`, `pending_ack`, `pending_no_ack`. There is no arbitrary callback, body, signature, key, timestamp or response argument. The unsigned dispatcher is fixed in the registry for this slice; a separate signing helper/bridge is not installed. The largest fault buffer is a fixed 4,097 bytes, intentionally refused before capture/decoding; no accepted checkpoint cap is raised. The public RFC vector is used only to construct the public validation key in memory, with no private `KeyObject`, key-pair generation or signature preparation.
+
+The implemented public session supports `beginProbe`, `requestStart`, `cancel`, `release`, `describe` and `close`. `requestStart` can only reject: unsigned bytes fail B-1 and unavailable/pending fault paths never yield a checkpoint handle. `requestEnd` and `finishProbe` enforce refusal/order contracts; their positive paths and authenticated C0/C1 orchestration remain gated for B3-Bb/Bc. No valid-looking stub or fabricated success advances the state. The emitted schema is the narrower `native-bar-unsigned-checkpoint-probe-diagnostic-v1`, not a successful B3-B result. Every signature/checkpoint/challenge/timing/native/view/authority/history/age/approval/execution/capacity qualification is literal false.
+
+Provider settlement is distinct from public-promise rejection. Cancellation/timeout consumes the pending request and rejects the public operation immediately. Its claim and workspace stay retained while the original operation is unsettled or its completion has not been retired. A late original settlement may release that claim but never erases the primary failure. The original owner can settle pending unsigned work even after revocation solely for cleanup; a caller cannot pass `released: true`. Close and invalid input do not restart a provider or replace spent grants.
+
+The budget wrapper retains the B3-A fixed joint schedule without claiming a native operation occurred. In addition to the real shared retained account it precharges three modeled native report frames, 64-KiB protocol headers, four 1-KiB request/copy frames, eight 4-KiB checkpoint/copy frames, two six-times-4-KiB decoded allowances, 8-KiB verifier work and 32-KiB provider work. Existing mandatory floors still apply through maxima; no existing limits/floors or V1 allowance semantics change. Actual issued IDs transfer 4-KiB slots from the already reserved workspace into retained tombstones, rather than adding another charge. Releasing a lease returns only its remaining workspace. These are bounded model accounts, not JavaScript heap or physical-capacity qualification.
+
+### Reproductions And Verification
+
+New tests reproduced and corrected the following during implementation:
+
+1. An exact-fit plan was refused because a reserved ID slot was added again at issue time; transferring the slot fixes this. Lease release must subtract the remaining slot balance, not its original amount, to avoid a negative workspace counter.
+2. Competing enrollment could ignore an active query's lower metadata ceiling. The shared allocator now applies the minimum of all active ceilings before any new charge.
+3. Provider rejection completion omitted its clock observation. A rollback at rejection now records the clock failure before releasing, just as a returned byte response does.
+4. A clock API throwing at query entry exposed its raw exception. All clock-source/format failures now refuse with `b3ba_clock_invalid`.
+
+**64 new cases** cover original/one-use grants, namespace aliases, strict inputs/public keys, cancellation before/after dispatch, no-ack exclusion, late settlement, duplicate request/order refusal, every close origin, all-false detached diagnostics, buffer rejection, all five exact budget boundaries and one over, shared lower ceilings and replay-state exhaustion. Sixteen fixed worker cases cover equal samples, RNG error/invalid/pin/current-or-old challenge collision, wall/monotonic invalidity/rollback/exclusive deadline, rejection-time rollback, exhausted state and throwing clock sources. Substitutions are isolated to disposable test workers and restored there, not normal API inputs or OS clock changes. A separate actual-source elapsed-wait case checks pending-request timeout; neither test category qualifies OS clock/mount/kernel behavior.
+
+The explicit new/pure/boundary suite passes **375 tests**, with zero failures/cancellations/skips, using ignored `build/b3ba-validation/` output. This includes no B-1 signing runtime suite, native fixture runner, broad fixture-creating unit suite or service/production tests. TypeScript no-emit checking and diff checks pass. Existing E-A/B-1/B-2a/B3-A clock bans remain intact; only exact approved named dependencies and isolated-output selectors are added to their tests. No existing runtime module or native C++ source is changed.
+
+B3-Bb public-vector signing approval, authenticated C0/C1 success, full cancellation/race acceptance with a signed provider, independent review and B3-C/D host/native integration remain open. Dot stays PAUSED; job bytes, market/notification/retention conditions and common JS/native builds remain unchanged. No real data or filesystem fixture is recorded, moved or deleted; no MCP registration, production activation, commit or push is performed by this implementation step.

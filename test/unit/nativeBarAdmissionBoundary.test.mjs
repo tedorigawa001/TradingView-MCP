@@ -65,6 +65,12 @@ test("E-A source checks catch aliased clocks, global lookups, constructors and d
 test("E-A is referenced only by approved B-1/B-2a memory contracts, not startup or tools", () => {
   for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith(".ts") && name !== "nativeBarAdmission.ts")) {
     const dependencies = imports(ast(name));
+    const b3ba = {
+      "nativeBarAdmissionCheckpointContracts.ts": ["zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"],
+      "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js"],
+      "nativeBarAdmissionCheckpointProbe.ts": ["node:crypto", "node:process", "node:timers", "./nativeBarAdmissionOracleRegistry.js", "./nativeBarAdmissionCheckpointContracts.js"],
+    };
+    if (Object.hasOwn(b3ba, name)) { assert.deepEqual(dependencies, b3ba[name]); continue; }
     if (name === "nativeBarAdmissionQueryProtocol.ts") {
       assert.deepEqual(dependencies, ["zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionReadContracts.js"]); continue;
     }

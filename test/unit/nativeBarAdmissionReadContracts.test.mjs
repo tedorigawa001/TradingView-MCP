@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createPublicKey, createHash } from "node:crypto";
 
-const base = process.env.NATIVE_BAR_B3A_ISOLATED_TEST === "1" ? "../../build/b3a-validation/" : process.env.NATIVE_BAR_B2B_ISOLATED_TEST === "1" ? "../../build/b2b-validation/" : process.env.NATIVE_BAR_B2A_ISOLATED_TEST === "1" ? "../../build/b2a-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../build/b3ba-validation/" : process.env.NATIVE_BAR_B3A_ISOLATED_TEST === "1" ? "../../build/b3a-validation/" : process.env.NATIVE_BAR_B2B_ISOLATED_TEST === "1" ? "../../build/b2b-validation/" : process.env.NATIVE_BAR_B2A_ISOLATED_TEST === "1" ? "../../build/b2a-validation/" : "../../build/";
 const api = await import(new URL(`${base}nativeBarAdmissionReadContracts.js`, import.meta.url));
 const { canonical, evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

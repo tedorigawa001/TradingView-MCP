@@ -64,6 +64,9 @@ test("B-1 source checks catch aliased clocks, global lookups, constructors and d
 });
 test("B-1 is used only by the approved memory-only B-2a contracts, not startup or MCP", () => {
   for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionOracleRegistry.ts") {
+      assert.deepEqual(imports(parse(file)), ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js"]); continue;
+    }
     if (file === "nativeBarAdmissionReadContracts.ts") {
       assert.deepEqual(imports(parse(file)), ["node:crypto", "node:process", "zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionVerification.js"]);
       continue;

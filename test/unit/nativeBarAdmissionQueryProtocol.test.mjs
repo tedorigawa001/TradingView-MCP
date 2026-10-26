@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-const base = process.env.NATIVE_BAR_B3A_ISOLATED_TEST === "1" ? "../../build/b3a-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../build/b3ba-validation/" : process.env.NATIVE_BAR_B3A_ISOLATED_TEST === "1" ? "../../build/b3a-validation/" : "../../build/";
 const api = await import(new URL(`${base}nativeBarAdmissionQueryProtocol.js`, import.meta.url));
 const { canonical, evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 const { calculateSyntheticAdmissionReadBudget } = await import(new URL(`${base}nativeBarAdmissionReadContracts.js`, import.meta.url));
