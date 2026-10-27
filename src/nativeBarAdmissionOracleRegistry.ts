@@ -3,6 +3,7 @@ import { pid } from "node:process";
 import { z } from "zod";
 import { createSyntheticNativeBarAdmissionVerifier } from "./nativeBarAdmissionVerification.js";
 import { checkpointProbeNoAuthority, checkpointProbeRefuse, checkpointProbeBytes, checkpointProbeParse, checkpointProbeId, checkpointProbeRequestSchema, validateCheckpointOracleBinding } from "./nativeBarAdmissionCheckpointContracts.js";
+import { validateSyntheticAdmissionJointBinding, validateSyntheticAdmissionJointWorkEnvelope } from "./nativeBarAdmissionJointReadContracts.js";
 
 type Binding = ReturnType<typeof validateCheckpointOracleBinding>;
 type Lease = { bytes: bigint; cap: bigint; released: boolean; ownerGeneration: bigint; requests: number; revoke: (reason: "oracle_unavailable" | "oracle_changed") => void; id?: string; challenge?: string };
@@ -12,9 +13,11 @@ type OwnerMailbox = { queued?: OwnerPacket; inflight?: OwnerPacket; waiter?: (pa
 const modes = ["unavailable", "unsigned", "unsigned_decorated", "unsigned_shared", "unsigned_oversize", "pending_ack", "pending_no_ack"] as const;
 type Mode = typeof modes[number];
 type Entry = { binding: Binding; ownerPid: number; closed: boolean; ownerUsed: boolean; readerUsed: boolean; ready: boolean; generation: number; ownerGeneration: bigint;
-  mode?: Mode; active?: Lease; pending?: Operation; mailbox?: OwnerMailbox; verifier: ReturnType<typeof createSyntheticNativeBarAdmissionVerifier> };
+  recordRoles?: Set<string>; mode?: Mode; active?: Lease; pending?: Operation; mailbox?: OwnerMailbox; verifier: ReturnType<typeof createSyntheticNativeBarAdmissionVerifier> };
 const readers = new WeakMap<object, Entry>(), owners = new WeakMap<object, Entry>(), aliases = new Set<string>();
+const jointReaders = new WeakMap<object, Entry>();
 const issuedIds = new Set<string>(), roleIds = new Set<string>();
+const observedRecordIds = new Set<string>();
 const activeLeases = new Set<Lease>();
 let retainedBytes = 65536n, workspaceBytes = 0n;
 const opaque = () => Object.freeze(Object.create(null) as object);
@@ -33,18 +36,27 @@ function deliverOwnerPacket(e: Entry) {
 function revoke(e: Entry) { e.closed = true; e.ready = false; e.generation++; e.ownerGeneration++; e.active?.revoke("oracle_unavailable"); deliverOwnerPacket(e); }
 
 export function createSyntheticCheckpointOracleBootstrap(input: unknown, publicKey: KeyObject) {
-  const binding = validateCheckpointOracleBinding(input), r = binding.registration;
+  return oracleBootstrap(validateCheckpointOracleBinding(input), publicKey, false, 0);
+}
+/** Separate original joint-kind enrollment; a probe grant can never be promoted. */
+export function createSyntheticJointCheckpointOracleBootstrap(input: unknown, publicKey: KeyObject, workEnvelope: unknown) {
+  const b = validateSyntheticAdmissionJointBinding(input), envelope = validateSyntheticAdmissionJointWorkEnvelope(workEnvelope);
+  return oracleBootstrap(validateCheckpointOracleBinding({ ...b, schema: "native-bar-checkpoint-oracle-binding-v1", scope: "synthetic_checkpoint_probe_only" }),
+    publicKey, true, checkpointProbeBytes(envelope));
+}
+function oracleBootstrap(binding: Binding, publicKey: KeyObject, joint: boolean, configurationBytes: number) {
+  const r = binding.registration;
   let verifier: ReturnType<typeof createSyntheticNativeBarAdmissionVerifier>;
   try { verifier = createSyntheticNativeBarAdmissionVerifier(r.pins, publicKey); } catch { checkpointProbeRefuse("public_key"); }
   const keys = [`fixture:${r.pins.fixture_id}`, `epoch:${r.pins.store_id}:${r.pins.epoch_id}`, `roots:${r.bindings.data.device}:${r.bindings.data.inode}:${r.bindings.witness.device}:${r.bindings.witness.inode}`];
   if (keys.some((k) => aliases.has(k))) checkpointProbeRefuse("duplicate_enrollment");
-  const charge = BigInt(checkpointProbeBytes(binding) + 44 + 3 * 4096);
-  if ([...Object.values(r.pins), r.authority_reference].some((id) => issuedIds.has(id))) checkpointProbeRefuse("identity_reuse");
+  const charge = BigInt(checkpointProbeBytes(binding) + 44 + 3 * 4096 + configurationBytes);
+  if ([...Object.values(r.pins), r.authority_reference].some((id) => issuedIds.has(id) || observedRecordIds.has(id))) checkpointProbeRefuse("identity_reuse");
   reserve(charge); retainedBytes += charge;
   for (const key of keys) aliases.add(key);
   for (const id of [...Object.values(r.pins), r.authority_reference]) if (checkpointProbeId.safeParse(id).success) roleIds.add(id);
   const entry: Entry = { binding, ownerPid: pid, closed: false, ownerUsed: false, readerUsed: false, ready: false, generation: 0, ownerGeneration: 0n, verifier }, readerEnrollment = opaque(), ownerEnrollment = opaque();
-  readers.set(readerEnrollment, entry); owners.set(ownerEnrollment, entry);
+  (joint ? jointReaders : readers).set(readerEnrollment, entry); owners.set(ownerEnrollment, entry);
   return Object.freeze({ readerEnrollment, ownerEnrollment,
     describe() { return { ...checkpointProbeNoAuthority, registration_hash: binding.registration_hash, revoked: entry.closed || entry.ownerPid !== pid,
       retained_state_bytes: String(retainedBytes), active_workspace_bytes: String(workspaceBytes) }; }, close() { if (!entry.closed) revoke(entry); } });
@@ -104,7 +116,27 @@ export function claimFixedMemoryCheckpointOracleOwner(owner: object) {
 
 /** Internal bridge for the disconnected timed probe only. */
 export function claimSyntheticCheckpointProbe(reader: object) {
-  const e = readers.get(reader); if (!e) checkpointProbeRefuse("reader_grant_required"); live(e);
+  return claimReader(readers, reader);
+}
+/** Internal bridge allowlisted only for the joint controller. */
+export function claimSyntheticJointCheckpointReader(reader: object) {
+  const claim = claimReader(jointReaders, reader), e = jointReaders.get(reader)!;
+  return Object.freeze({ ...claim, bindRecordIds(input: unknown, cap: bigint) {
+    live(e); const active = e.active;
+    if (!active || active.released || active.requests !== 1 || e.pending || active.ownerGeneration !== e.ownerGeneration) checkpointProbeRefuse("request_binding");
+    const ids = checkpointProbeParse(z.array(checkpointProbeId).max(512), input);
+    if (new Set(ids).size !== ids.length) checkpointProbeRefuse("identity_reuse");
+    const own = new Set([...Object.values(e.binding.registration.pins), e.binding.registration.authority_reference]);
+    const known = e.recordRoles ?? new Set<string>(), fresh = ids.filter((id) => !own.has(id) && !known.has(id));
+    if (ids.some((id) => issuedIds.has(id) || roleIds.has(id) && !own.has(id) && !known.has(id))) checkpointProbeRefuse("identity_reuse");
+    const charge = BigInt(fresh.length) * 4096n;
+    if (known.size + fresh.length > 512 || active.bytes < charge) checkpointProbeRefuse("state_budget");
+    reserve(0n, cap); active.bytes -= charge; workspaceBytes -= charge; retainedBytes += charge;
+    for (const id of fresh) { known.add(id); roleIds.add(id); observedRecordIds.add(id); } e.recordRoles = known;
+  } });
+}
+function claimReader(registry: WeakMap<object, Entry>, reader: object) {
+  const e = registry.get(reader); if (!e) checkpointProbeRefuse("reader_grant_required"); live(e);
   if (!e.ready) checkpointProbeRefuse("oracle_unavailable"); if (e.readerUsed) checkpointProbeRefuse("reader_grant_consumed"); e.readerUsed = true;
   const generation = e.generation;
   return Object.freeze({ binding: structuredClone(e.binding), verifier: e.verifier,
@@ -114,7 +146,7 @@ export function claimSyntheticCheckpointProbe(reader: object) {
     acquire(bytes: bigint, cap: bigint, onRevoke: (reason: "oracle_unavailable" | "oracle_changed") => void) {
       live(e); if (e.active) checkpointProbeRefuse("query_already_active"); reserve(bytes, cap); workspaceBytes += bytes;
       const lease: Lease = { bytes, cap, released: false, ownerGeneration: e.ownerGeneration, requests: 0, revoke: onRevoke }; e.active = lease; activeLeases.add(lease);
-      return Object.freeze({ release() {
+      return Object.freeze({ check() { live(e); if (!e.ready || e.ownerGeneration !== lease.ownerGeneration) checkpointProbeRefuse("oracle_changed"); }, release() {
         if (lease.released) return true; if (e.ownerPid !== pid) return false;
         lease.released = true; workspaceBytes -= lease.bytes; activeLeases.delete(lease); if (e.active === lease) e.active = undefined; return true;
       } });

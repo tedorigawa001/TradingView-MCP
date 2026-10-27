@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
+import { assertJointReaderImports } from "./helpers/jointReaderBoundary.mjs";
 
 const root = new URL("../../src/", import.meta.url), name = "nativeBarAdmissionJointReadContracts.ts";
 const text = readFileSync(new URL(name, root), "utf8");
@@ -66,7 +67,19 @@ test("C-A exposes no native/provider/clock/issuer entry or re-export", () => {
     "checkSyntheticAdmissionJointWorkUsage", "nativeBarAdmissionJointModelResultSchema", "validateSyntheticAdmissionJointModelResult"].sort());
 });
 test("C-A has no incoming runtime, startup, MCP, history or market consumer", () => {
-  for (const file of readdirSync(root).filter((f) => f.endsWith(".ts") && f !== name)) assert.ok(!consumes(readFileSync(new URL(file, root), "utf8")), file);
+  for (const file of readdirSync(root).filter((f) => f.endsWith(".ts") && f !== name)) {
+    const source = readFileSync(new URL(file, root), "utf8");
+    if (file === "nativeBarAdmissionJointReader.ts") { assertJointReaderImports(ast(source)); continue; }
+    if (file === "nativeBarAdmissionOracleRegistry.ts") {
+      const imports = ast(source).statements.filter(ts.isImportDeclaration);
+      const dependency = imports.find((n) => n.moduleSpecifier.text === "./nativeBarAdmissionJointReadContracts.js");
+      assert.ok(dependency.importClause && !dependency.importClause.name && ts.isNamedImports(dependency.importClause.namedBindings));
+      assert.deepEqual(dependency.importClause.namedBindings.elements.map((e) => e.propertyName?.text ?? e.name.text),
+        ["validateSyntheticAdmissionJointBinding", "validateSyntheticAdmissionJointWorkEnvelope"]);
+      assert.equal(imports.filter((n) => n.moduleSpecifier.text.includes("nativeBarAdmissionJointReadContracts")).length, 1); continue;
+    }
+    assert.ok(!consumes(source), file);
+  }
 });
 test("C-A boundary assertions detect widened imports, ambient sources, signers and token issuance", () => {
   for (const s of ["Date.now()", "const d=Date", "new Intl.DateTimeFormat().format()", "new Event('x').timeStamp", "Math.random()", "globalThis['process']",

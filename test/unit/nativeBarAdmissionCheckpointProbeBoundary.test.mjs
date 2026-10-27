@@ -2,11 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
+import { assertJointReaderImports } from "./helpers/jointReaderBoundary.mjs";
 
 const root = new URL("../../src/", import.meta.url);
 const specs = {
   "nativeBarAdmissionCheckpointContracts.ts": ["zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"],
-  "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js"],
+  "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js", "./nativeBarAdmissionJointReadContracts.js"],
   "nativeBarAdmissionCheckpointProbe.ts": ["node:crypto", "node:process", "node:timers", "./nativeBarAdmissionOracleRegistry.js", "./nativeBarAdmissionCheckpointContracts.js"],
 };
 // Exact named bindings for every import, local modules included: the probe may take only its reader claim from the
@@ -18,7 +19,8 @@ const named = {
   "nativeBarAdmissionOracleRegistry.ts": { "node:crypto": ["KeyObject"], "node:process": ["pid"], "zod": ["z"],
     "./nativeBarAdmissionVerification.js": ["createSyntheticNativeBarAdmissionVerifier"],
     "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeBytes", "checkpointProbeId", "checkpointProbeNoAuthority", "checkpointProbeParse",
-      "checkpointProbeRefuse", "checkpointProbeRequestSchema", "validateCheckpointOracleBinding"] },
+      "checkpointProbeRefuse", "checkpointProbeRequestSchema", "validateCheckpointOracleBinding"],
+    "./nativeBarAdmissionJointReadContracts.js": ["validateSyntheticAdmissionJointBinding", "validateSyntheticAdmissionJointWorkEnvelope"] },
   "nativeBarAdmissionCheckpointProbe.ts": { "node:crypto": ["randomUUID"], "node:process": ["hrtime"], "node:timers": ["clearTimeout", "setTimeout"],
     "./nativeBarAdmissionOracleRegistry.js": ["claimSyntheticCheckpointProbe"],
     "./nativeBarAdmissionCheckpointContracts.js": ["checkpointProbeDiagnosticSchema", "checkpointProbeResultSchema", "checkpointProbeNoAuthority", "checkpointProbeOptionsSchema",
@@ -74,8 +76,10 @@ test("B3-Ba helpers are unsigned and use only the single original-owner bridge",
     assert.doesNotMatch(readFileSync(new URL(`../helpers/${file}`, import.meta.url), "utf8"), /enrollUnsignedCheckpointOracleForHarness/);
 });
 test("B3-Ba no outside runtime/MCP/history module imports the disconnected implementation", () => {
-  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && !Object.hasOwn(specs, s)))
+  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && !Object.hasOwn(specs, s))) {
+    if (file === "nativeBarAdmissionJointReader.ts") { assertJointReaderImports(ast(file)); continue; }
     for (const name of Object.keys(specs)) assert.ok(!imports(ast(file)).some((v) => v.includes(name.slice(0, -3))), file);
+  }
 });
 test("B3-Ba boundary tests catch widened imports, clock aliases, signer and native loading", () => {
   for (const source of ["const D=Date; D.now()", "performance.now()", "randomUUID()", "setTimeout(f,1)", "new Event('x').timeStamp", "Math.random()",

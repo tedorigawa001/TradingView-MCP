@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
+import { assertJointReaderImports } from "./helpers/jointReaderBoundary.mjs";
 
 const root = new URL("../../src/", import.meta.url), name = "nativeBarAdmissionReadContracts.ts";
 const parse = (n) => ts.createSourceFile(n, readFileSync(new URL(n, root), "utf8"), ts.ScriptTarget.Latest, true);
@@ -58,6 +59,7 @@ test("B-2a source checks catch default imports, aliased clocks, global lookups a
 });
 test("B-2a has no incoming runtime or startup/MCP dependency", () => {
   for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionJointReader.ts") { assertJointReaderImports(parse(file)); continue; }
     if (file === "nativeBarAdmissionJointReadContracts.ts") {
       const source = parse(file); assert.deepEqual(imports(source), ["node:crypto", "zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"]);
       const dependency = source.statements.find((n) => ts.isImportDeclaration(n) && n.moduleSpecifier.text === "./nativeBarAdmissionReadContracts.js");

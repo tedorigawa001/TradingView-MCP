@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
+import { assertJointReaderImports } from "./helpers/jointReaderBoundary.mjs";
 
 const sourceRoot = new URL("../../src/", import.meta.url);
 function ast(name) {
@@ -64,10 +65,11 @@ test("E-A source checks catch aliased clocks, global lookups, constructors and d
 });
 test("E-A is referenced only by approved B-1/B-2a memory contracts, not startup or tools", () => {
   for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith(".ts") && name !== "nativeBarAdmission.ts")) {
+    if (name === "nativeBarAdmissionJointReader.ts") { assertJointReaderImports(ast(name)); continue; }
     const dependencies = imports(ast(name));
     const b3ba = {
       "nativeBarAdmissionCheckpointContracts.ts": ["zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"],
-      "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js"],
+      "nativeBarAdmissionOracleRegistry.ts": ["node:crypto", "node:process", "zod", "./nativeBarAdmissionVerification.js", "./nativeBarAdmissionCheckpointContracts.js", "./nativeBarAdmissionJointReadContracts.js"],
       "nativeBarAdmissionCheckpointProbe.ts": ["node:crypto", "node:process", "node:timers", "./nativeBarAdmissionOracleRegistry.js", "./nativeBarAdmissionCheckpointContracts.js"],
     };
     if (Object.hasOwn(b3ba, name)) { assert.deepEqual(dependencies, b3ba[name]); continue; }

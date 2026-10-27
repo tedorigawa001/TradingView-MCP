@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
+import { assertJointReaderImports } from "./helpers/jointReaderBoundary.mjs";
 const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../build/b3ba-validation/" : process.env.NATIVE_BAR_B3A_ISOLATED_TEST === "1" ? "../../build/b3a-validation/" : process.env.NATIVE_BAR_B2B_ISOLATED_TEST === "1" ? "../../build/b2b-validation/" : "../../build/";
 test("B-2b exposes a separate disconnected registry without opening or creating a fixture", async () => {
   const api = await import(new URL(`${base}nativeBarAdmissionReader.js`, import.meta.url));
@@ -42,8 +43,10 @@ test("B-2b has one fixed optional loader and no storage/network/signer/settings 
   }
 });
 test("B-2b remains disconnected from every startup/MCP/history/market module", () => {
-  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name))
+  for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionJointReader.ts") { assertJointReaderImports(ast(file)); continue; }
     assert.ok(!imports(ast(file)).some((s) => s.includes("nativeBarAdmissionReader")), file);
+  }
 });
 test("B-2b native implementation has no mutation path or legacy handle conversion", () => {
   const source = readFileSync(new URL("../../native/native_bar_fs/native_bar_admission.inc", import.meta.url), "utf8");
