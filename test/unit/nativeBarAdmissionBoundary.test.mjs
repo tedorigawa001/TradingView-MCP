@@ -74,6 +74,9 @@ test("E-A is referenced only by approved B-1/B-2a memory contracts, not startup 
     if (name === "nativeBarAdmissionQueryProtocol.ts") {
       assert.deepEqual(dependencies, ["zod", "./nativeBarEvidence.js", "./nativeBarAdmission.js", "./nativeBarAdmissionReadContracts.js"]); continue;
     }
+    if (name === "nativeBarAdmissionJointReadContracts.ts") {
+      assert.deepEqual(dependencies, ["node:crypto", "zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"]); continue;
+    }
     if (name === "nativeBarAdmissionReader.ts") {
       assert.deepEqual(dependencies, ["node:module", "node:perf_hooks", "node:process", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js"]); continue;
     }

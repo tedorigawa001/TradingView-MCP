@@ -66,6 +66,12 @@ test("B3-A boundary tests catch clock aliases, globals, signers, capability brid
 });
 test("B3-A is disconnected from all runtime/startup/MCP/history consumers", () => {
   for (const file of readdirSync(root).filter((s) => s.endsWith(".ts") && s !== name)) {
+    if (file === "nativeBarAdmissionJointReadContracts.ts") {
+      const source = ast(file); assert.deepEqual(imports(source), ["node:crypto", "zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"]);
+      const dependency = source.statements.find((n) => ts.isImportDeclaration(n) && n.moduleSpecifier.text === "./nativeBarAdmissionQueryProtocol.js");
+      assert.ok(dependency.importClause && !dependency.importClause.name && ts.isNamedImports(dependency.importClause.namedBindings));
+      assert.deepEqual(dependency.importClause.namedBindings.elements.map((e) => e.propertyName?.text ?? e.name.text), ["calculateSyntheticAdmissionQueryProtocolBudget"]); continue;
+    }
     if (file === "nativeBarAdmissionCheckpointContracts.ts") {
       const source = ast(file); assert.deepEqual(imports(source), ["zod", "./nativeBarEvidence.js", "./nativeBarAdmissionReadContracts.js", "./nativeBarAdmissionQueryProtocol.js"]);
       const dependency = source.statements.find((n) => ts.isImportDeclaration(n) && n.moduleSpecifier.text === "./nativeBarAdmissionQueryProtocol.js");
