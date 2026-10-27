@@ -17,6 +17,8 @@ if (scenario === "rng_invalid") crypto.randomUUID = () => "not-an-id";
 if (scenario === "clock_throw") Date.now = () => { throw Error("invented_clock_detail"); };
 if (scenario === "clock_rollback") crypto.randomUUID = () => { wall--; return "00000000-0000-4000-8000-000009999998"; };
 if (scenario === "clock_expired") crypto.randomUUID = () => { wall += 600000; return "00000000-0000-4000-8000-000009999999"; };
+// Off darwin, B-2 refuses before it reaches the loader at all; a supplied platform lets darwin runs check that path too.
+if (workerData.platform) Object.defineProperty(process, "platform", { value: workerData.platform });
 syncBuiltinESMExports();
 let bootstrap, owner, session;
 try {
@@ -39,7 +41,7 @@ try {
     assert.throws(() => session.describe(structuredClone(q)), /query_handle_required/);
     assert.equal(session.release(q).failure, d.failure);
   }
-  assert.equal(attempts, scenario === "native_refusal" ? 1 : 0); assert.equal(loads, 0);
+  assert.equal(attempts, scenario === "native_refusal" && process.platform === "darwin" ? 1 : 0); assert.equal(loads, 0);
   assert.equal(bootstrap.describe().active_workspace_bytes, "0");
   parentPort.postMessage({ ok: true, scenario });
 } catch (error) { parentPort.postMessage({ ok: false, scenario, message: String(error.message) }); }

@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 C-B独立レビュー・修正 (2026-10-28 JST)**: [記録](NATIVE_BAR_ADMISSION_NATIVE_JOINT_DESIGN.md#c-b-independent-review-and-corrections)。2名が`0205134`を読み取り専用で独立レビュー(native addonを含まない`git archive`複製のみ、native実行なし)。早すぎる解放・期限切れ後の成功・probe/joint許可の流用・tombstoneのすり抜けはなし。修正: 高=native実装は2つのmarkerを`raw_byte_limit:"0"`・読取不可で返すのにreaderが4096を期待し、実inventoryが必ずC0後に`native_entry`で拒否される点。中=native/oracleの拒否が`invalid_input`に潰れる点を種類別のコードに分離、darwin以外ではローダー前に拒否されworker試験が失敗する点(CIのubuntu/windowsで赤になる)、本体スレッド試験にaddon読込防止がない点。低=共有上限での`claim.acquire`の生コード、期限タイマーの早期発火(切り上げ+1ms)、`authority_reference`と同じrecord IDの受入れ、公開系拒否コードの分離、1バイトごとのキー列挙(C-A取込も、B-1と同方式に)。細目も修正。修正前に修正用の試験が失敗することを確認。本体試験の後退注入では元の試験ファイルが本体スレッドでnative requireを2回試み、新しいファイルはtripwireが止めて失敗を報告。B3関連656件・全unit 2,926/2,928件(失敗0、skip 2件は既存)。49c68b6以降に変更された23試験ファイルをlinux/win32偽装で実行し、win32の1件は`TEMP`未設定による偽装起因と確認。既存の上限・計画式・native実装は不変。実データ操作・fixture作成・署名保存・MCP登録・Dot変更・pushなし。
+
 **105-3 C-Bローカルレビュー対応 (2026-10-27 JST)**: [記録](NATIVE_BAR_ADMISSION_NATIVE_JOINT_DESIGN.md#c-b-local-review-and-corrections)。中2件を再現・修正: 重複runの拒否側が元continuationの実行中フラグを解除する点を呼出し単位の所有権で防ぎ、観測済みrecord IDを後続のprobe/joint登録IDへ使い回せる点を保持済みtombstoneで拒否する。元ソースの開始前ガードだけを隔離したメモリ試験と、未署名の実メモリ搬送による登録試験で修正前の失敗を確認。偽のnative成功経路は作らない。C-B 24件、関連19系列645件(失敗/skipなし)、3隔離出力のコンパイル・型/差分検査成功。常用build・native実体・Dot設定hash不変、PAUSEDを確認。ユーザー承認のローカルコミット対象とし、独立レビュー/実機受入ではない。C-C/B3-D・B-2c未検証事項と既存ACL予算の実用範囲は保留。native読取・fixture作成・署名ファイル保存・実データ操作・MCP登録/本番有効化・判定/通知/保持条件変更・pushなし。
 
 **C-B検証結果**: 既存621件＋C-B機能/拒否/搬送19件＋境界4件の合同644件(失敗/skipなし)、隔離コンパイル・型検査・追跡/新規ファイルの空白検査が成功。常用build・native実体・Dot設定hash不変、PAUSEDを確認。成功native経路の実行証明ではなく、レビュー・コミットは未実施。

@@ -149,7 +149,7 @@ test("C-A supplied witness byte totals cannot exceed the aggregate admission cap
 for (const [label, change] of [
   ["native hash", (x) => { x.native_sha256 = evidenceHash("wrong"); }], ["encoded hash", (x) => { x.encoded_sha256 = evidenceHash("wrong"); }],
   ["size", (x) => { x.location.size = "1"; }], ["wrong sequence", (x) => { x.location.path = "2.json"; }],
-  ["decorated view", (x) => { x.bytes.extra = true; }], ["shared buffer", (x) => { x.bytes = new Uint8Array(new SharedArrayBuffer(1)); x.location.size = "1"; }],
+  ["shared buffer", (x) => { x.bytes = new Uint8Array(new SharedArrayBuffer(1)); x.location.size = "1"; }],
   ["subclass", (x) => { x.bytes = new (class extends Uint8Array {})(x.bytes); }],
   ["detached", (x) => { x.bytes = new Uint8Array(new ArrayBuffer(1)); structuredClone(x.bytes.buffer, { transfer: [x.bytes.buffer] }); }],
   ["symbol field", (x) => { x[Symbol("extra")] = true; }],
@@ -159,8 +159,8 @@ for (const [label, change] of [
 test("C-A intrinsic copies isolate typed-array offsets and never invoke a decorated getter", () => {
   const all = new Uint8Array([99, 1, 2, 88]), bytes = all.subarray(1, 3), witness = capture("witness", "1.json", bytes);
   const r = api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", witness }); bytes[0] = 9; assert.equal(r.sha256, rawHash(new Uint8Array([1, 2])));
-  let called = 0; const bad = capture("witness", "1.json"); Object.defineProperty(bad.bytes, "toJSON", { get() { called++; return () => ({}); } });
-  assert.throws(() => api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", witness: bad }), /capture_bytes/); assert.equal(called, 0);
+  let called = 0; const decorated = capture("witness", "1.json"); Object.defineProperty(decorated.bytes, "toJSON", { get() { called++; return () => ({}); } });
+  assert.equal(api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", witness: decorated }).sha256, rawHash(decorated.bytes)); assert.equal(called, 0);
 });
 test("C-A mirrors require their declared placement, same physical bytes and distinct index", () => {
   const producer = id(100002), witness = capture("witness", "1.json"), mirror = capture("data", `producer/${producer}/1.json`), q = { sequence: "1", producer_id: producer, witness, mirror };
@@ -300,4 +300,10 @@ test("C-A model results pin every scope literal and tie a consistent status to n
   for (const change of [{ storage_visibility_at_as_of: "visible" }, { scope: "native_read" }, { verification_scope: "native" }, { primary_failure: "b3ca_deadline" },
     { model_blockers: ["deadline"] }, { model_order_consistent: false }, { model_status: "blocked_supplied_model", model_blockers: ["deadline"] }])
     assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...r, ...change }), /invalid_input/);
+});
+// C-B independent review (2026-10-27): views are copied as in B-1, never by listing one key per byte. Failed before the fix.
+test("C-A decorated byte views are copied without consulting their own properties", () => {
+  const witness = capture("witness", "1.json"); witness.bytes.extra = true; witness.bytes[Symbol("tag")] = 1;
+  const r = api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", witness });
+  assert.equal(r.sha256, rawHash(Buffer.from('{"invented":true}'))); assert.equal(JSON.stringify(r).includes("extra"), false);
 });

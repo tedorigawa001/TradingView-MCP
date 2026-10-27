@@ -126,7 +126,9 @@ export function claimSyntheticJointCheckpointReader(reader: object) {
     if (!active || active.released || active.requests !== 1 || e.pending || active.ownerGeneration !== e.ownerGeneration) checkpointProbeRefuse("request_binding");
     const ids = checkpointProbeParse(z.array(checkpointProbeId).max(512), input);
     if (new Set(ids).size !== ids.length) checkpointProbeRefuse("identity_reuse");
-    const own = new Set([...Object.values(e.binding.registration.pins), e.binding.registration.authority_reference]);
+    // Records carry the registration's pins (enrollment names its authority_id), never its authority_reference, which B-2
+    // requires to differ from every pin; a record ID equal to it is an alias and is refused like any other foreign role.
+    const own = new Set(Object.values(e.binding.registration.pins));
     const known = e.recordRoles ?? new Set<string>(), fresh = ids.filter((id) => !own.has(id) && !known.has(id));
     if (ids.some((id) => issuedIds.has(id) || roleIds.has(id) && !own.has(id) && !known.has(id))) checkpointProbeRefuse("identity_reuse");
     const charge = BigInt(fresh.length) * 4096n;

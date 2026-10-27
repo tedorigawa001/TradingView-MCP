@@ -1,6 +1,6 @@
 # B3 C Native Joint Reader Connection
 
-Status: **C-A independently reviewed/corrected; C-B implemented and locally reviewed/corrected with memory-only tests; native acceptance remains gated**, 2026-10-27 JST. C-B starts from `41a11b8`, preserving the C-A independent-review corrections. The original design baseline was `cf75726`. This refines the [joint read order](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md) and [checkpoint probe boundary](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md), without promoting a probe to a native capability. Implementation/test boundaries are recorded separately below; C-C native acceptance remains unapproved.
+Status: **C-A independently reviewed/corrected; C-B implemented, locally and independently reviewed and corrected with memory-only tests; native acceptance remains gated**, 2026-10-28 JST. C-B starts from `41a11b8`, preserving the C-A independent-review corrections. The original design baseline was `cf75726`. This refines the [joint read order](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md) and [checkpoint probe boundary](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md), without promoting a probe to a native capability. Implementation/test boundaries are recorded separately below; C-C native acceptance remains unapproved.
 
 B3-C connects the existing native paired reader, actual checkpoint transport and B-1 verifier under one original query. It does not publish evidence, accept history, grant execution, qualify the remaining B-2c host/kernel gaps or enable MCP/production/Dot operation. Dot stays PAUSED. Market/scenario/notification/mail rules, strictly-more-than-90-elapsed-day eligibility, elapsed-time-unknown holds and every existing resource ceiling remain unchanged.
 
@@ -285,3 +285,57 @@ Observed verification (2026-10-27 JST): isolated TypeScript compilation, no-emit
 2. Observed record IDs blocked later query/challenge generation but could be re-enrolled as a new bootstrap's authority reference (or other registration ID). Retained observed-record-ID tombstones now reject that later probe or joint registration before charging state or consuming namespace. The regression uses only the unsigned in-memory transport and a recomputed valid registration digest; it fails before the fix and passes after it. Existing bootstrap core-role sharing rules, numerical ceilings and per-ID accounting remain unchanged.
 
 Fresh isolated compilation of B-1/C-A/C-B, no-emit typecheck and tracked/new-file whitespace checks passed. All 645 cases in the explicit 19-suite memory/boundary set passed with zero failures/skips: prior 621 plus 19 C-B functional cases and 5 C-B source/isolated-guard cases. Common-build, native-addon and Dot configuration hashes stayed unchanged; Dot remained PAUSED. C-A pure/runtime/native sources outside the scoped oracle-registry connection are unchanged. Review was local, not a new independent review or native/host acceptance. Real native positive and late-phase acceptance, C-C/B3-D and B-2c host/kernel qualification remain open. No native addon load/read, fixture creation, signature-file persistence, real-data operation, MCP registration, production activation, trading/notification/retention-condition change or push is included.
+
+## C-B Independent Review And Corrections
+
+2026-10-28 JST. Two read-only independent reviewers examined `41a11b8..0205134`. They worked in `git archive` copies that contain no native addon, and every probe refused the loader first, so nothing native ran. One reviewer covered lifecycle, ownership and registry accounting. The other covered native facts, content binding, boundaries and tests.
+
+They found no early release, no success after expiry, rollback, owner change or cleanup failure, no crossing between probe and joint grants, and no way around the record-ID tombstones. The parent reproduced or statically confirmed each finding below before correcting it.
+
+### Corrections
+
+The user authorized these corrections.
+
+- **Fixture markers (high).** Native `acontrols`/`aread` report both fixture-root markers with `raw_byte_limit` "0" and `readable_evidence` false. The reader expected the B-2a name cap "4096", so every real inventory refused with `b3cb_native_entry` after C0. Fixture-root controls and structural directories must now carry "0" and false. Data and witness entries keep their classified cap and readability.
+- **Failure codes (medium).** Bare addon codes (optionally with `:errno`) and `b2a_`/`b2b_` codes used to collapse into `invalid_input`. They now map to:
+  - `native_unavailable`;
+  - `deadline`;
+  - `native_deadline_or_rollback`;
+  - `native_changed`;
+  - `native_busy`, for `admission_busy` and the shared root, session and FD slots;
+  - `native_budget`, for the other `_limit` codes;
+  - `native_refused`, for everything else.
+
+  Owner-side `oracle_rejected`, `oracle_cancelled`, `response_bytes` and `request_binding` keep their own codes. `b3ca_witness_bound` reports `work_envelope`, and a classification error reports `native_entry`. A native begin refusal is coded the same way and still closes the registration.
+- **Non-darwin refusal (medium).** Off darwin, B-2 refuses before it reaches the loader. The refusal worker now expects one loader attempt only on darwin. With the original expectation, runs with linux and win32 spoofed failed with `0 !== 1`; the CI matrix covers ubuntu, macOS and Windows.
+- **Main-thread tripwire (medium).** Before importing, the C-B test file replaces `createRequire` (for `.node` targets) and `process.dlopen` with refusing traps. A final case asserts that no load was attempted.
+- **Low.**
+  - **Shared-cap refusal.** A `claim.acquire` refusal under a lower shared cap is now coded as `b3cb_state_budget`; it used to escape as raw `b3ba_state_budget`.
+  - **Deadline timer.** The timer rounds the monotonic remainder up and adds 1 ms, so a millisecond-granularity timer cannot fire before the TTL. It used to floor the remainder: at a 7 ms TTL, 14 of 60 rounds reported `clock_relation_unavailable`. B-2 still gets the floored remainder, and the reviewed probe timer is unchanged.
+  - **Record IDs.** `bindRecordIds` exempts only the registration's pins. An observed record ID equal to `authority_reference` is refused as `identity_reuse`. Records never carry that ID, and B-2 requires it to differ from every pin.
+  - **Publication codes.** Pending stages, coordination or reserve entries, missing publications and unlinked producers now report `publication_pending`, `coordination_active`, `publication_missing` and `producer_unlinked` respectively.
+  - **Byte capture.** Captures in C-B and C-A no longer list one own key per byte, which cost about 87 MiB of transient heap for a 1 MiB payload. As in B-1, bytes are read only through intrinsic getters and copied, so decorations are never consulted. The C-A decorated-view cases now expect a copy that never invokes the decoration.
+- **Nits.**
+  - The factory closes the oracle and B-2 registration if fixture registration refuses.
+  - `failedBegin` is set immediately before the native begin.
+  - Maintenance metadata refuses before any evidence is read.
+  - The published result is validated and size-checked again after its final fields change.
+  - A boundary rule confines clock reads to the captured `wallNow`/`tickNow` pair, sampled in one place, and to pure `Date.parse`.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| New tests on the original source | 10 cases fail: the 7 C-B correction cases, the 2 C-A byte-view cases, and the order case with its new marker. With the original worker expectation, both spoofed-platform refusals fail too |
+| Corrected source | C-B 35 cases (29 functional, 6 boundary) and C-A 99 cases pass on three runs; 78 isolated C-B and completion cases pass |
+| Tripwire under an injected regression (non-strict options schema) | The original test file made two main-thread native `require` attempts. The corrected file intercepted them and its tripwire case failed |
+| 19-file B3 memory/boundary set | 656 pass |
+| Full unit suite | 2,926 of 2,928 pass, 0 failures; the 2 skips are existing |
+| The 23 test files changed since `49c68b6`, with the platform spoofed | linux: 807 pass. win32: 806 pass; the 1 failure comes from `os.tmpdir()` finding no `TEMP` on darwin, and passes with `TEMP` set |
+| Build and whitespace check | Pass |
+
+The native-shaped tests extract the reader's own functions and run them with the built dependencies and supplied values. They create no native backend, snapshot, fixture or success result. Spoofing changes only platform gates, so the real ubuntu and Windows CI after the push remains the check for other OS differences. Nothing after a successful native begin has run, and C-C remains the acceptance for that path.
+
+Unchanged by design: a registration's own pins stay exempt from tombstones, so a later registration may still take another registration's pin under a different role. This follows the core-role sharing rules in place since B3-Bb.
+
+Only the reader, the registry, the C-A module, their tests and helper, and this documentation change. Native sources, ceilings and plan formulas are unchanged. No real-data operation, fixture creation, signature persistence, MCP registration, Dot change or push is included.

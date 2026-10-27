@@ -18,14 +18,29 @@ type Bootstrap = { binding: ReturnType<typeof validateSyntheticAdmissionJointBin
 const enrollments = new WeakMap<object, Bootstrap>();
 const opaque = () => Object.freeze(Object.create(null) as object);
 function refuse(code: string): never { throw new Error(`b3cb_${code}`); }
+// The addon throws bare codes (a syscall failure appends ":errno"); B-2 adds b2a_/b2b_. Native refusals stay distinguishable
+// from caller input: unavailable, deadline, changed state, contention for shared native slots, work limits, anything else.
+const nativeCode = /^(?:b2[ab]_[a-z_]+|admission_[a-z_]+|native_[a-z_]+|session_expired|acl_entry_limit|unsafe_acl)(?::[0-9]{1,5})?$/;
+function nativeClass(message: string) {
+  const code = message.replace(/:[0-9]+$/, "").replace(/^b2[ab]_/, "");
+  if (code === "native_unavailable" || code === "native_protocol") return "b3cb_native_unavailable";
+  if (/deadline_or_rollback$/.test(code)) return "b3cb_native_deadline_or_rollback";
+  if (/(?:^|_)deadline$/.test(code) || code === "session_expired") return "b3cb_deadline";
+  if (/_changed$/.test(code) || code === "admission_inventory_between_passes") return "b3cb_native_changed";
+  if (["admission_busy", "admission_root_lease_limit", "admission_fd_headroom", "native_session_limit", "native_fd_limit"].includes(code)) return "b3cb_native_busy";
+  if (/_limit$/.test(code)) return "b3cb_native_budget";
+  return "b3cb_native_refused";
+}
 function coded(error: unknown) {
-  if (error instanceof Error && /^b3cb_[a-z_]+$/.test(error.message) && error.message.length <= 96) return error.message;
-  if (error instanceof Error && /^b3ba_(oracle_unavailable|oracle_changed|state_budget|identity_reuse|rng_invalid|query_already_active)$/.test(error.message))
-    return error.message.replace("b3ba_", "b3cb_");
-  if (error instanceof Error && /^b2[ab]_/.test(error.message)) return "b3cb_native_refused";
-  if (error instanceof Error && /^b3ca_(native_hash|encoded_hash|expected_hash|mirror_bytes)$/.test(error.message)) return "b3cb_byte_hash";
-  if (error instanceof Error && /^b3ca_witness_/.test(error.message)) return "b3cb_witness_prefix";
-  if (error instanceof Error && /^b3ca_selected_byte_bound$/.test(error.message)) return "b3cb_work_envelope";
+  if (!(error instanceof Error)) return "b3cb_invalid_input";
+  const m = error.message;
+  if (/^b3cb_[a-z_]+$/.test(m) && m.length <= 96) return m;
+  if (/^b3ba_(oracle_unavailable|oracle_changed|oracle_rejected|oracle_cancelled|response_bytes|request_binding|state_budget|identity_reuse|rng_invalid|query_already_active)$/.test(m))
+    return m.replace("b3ba_", "b3cb_");
+  if (nativeCode.test(m)) return nativeClass(m);
+  if (/^b3ca_(native_hash|encoded_hash|expected_hash|mirror_bytes)$/.test(m)) return "b3cb_byte_hash";
+  if (/^b3ca_(witness_bound|selected_byte_bound)$/.test(m)) return "b3cb_work_envelope";
+  if (/^b3ca_witness_/.test(m)) return "b3cb_witness_prefix";
   return "b3cb_invalid_input";
 }
 const wallNow = Date.now, tickNow = hrtime.bigint, generateUUID = randomUUID, HostDate = Date, iso = Date.prototype.toISOString;
@@ -81,11 +96,12 @@ const resultSchema = diagnosticSchema.extend({ schema: z.literal("native-bar-syn
   record_count: z.number().int().min(1).max(512), captured_bytes: uint, joint_generation: nativeBarHash, sequence: uint.refine((s) => s !== "0"), tip_hash: nativeBarHash });
 const typed = Object.getPrototypeOf(Uint8Array.prototype), lengthOf = Object.getOwnPropertyDescriptor(typed, "byteLength")!.get!,
   bufferOf = Object.getOwnPropertyDescriptor(typed, "buffer")!.get!, ordinaryLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+// Bytes are read only through intrinsic getters and copy, as in B-1, so own properties on a view are never consulted. Listing
+// them would create one key per byte (about 87 MiB of transient heap for a 1 MiB payload), outside the planned work.
 function capture(value: unknown, cap: number) {
   try {
     const n = lengthOf.call(value); ordinaryLength.call(bufferOf.call(value));
-    if (!(value instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(value)) || n < 1 || n > cap
-      || Reflect.ownKeys(value).some((k) => typeof k !== "string" || !/^(0|[1-9][0-9]*)$/.test(k))) refuse("response_bytes");
+    if (!(value instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(value)) || n < 1 || n > cap) refuse("response_bytes");
     const copy = Buffer.alloc(n); Uint8Array.prototype.set.call(copy, value); return copy;
   } catch { refuse("response_bytes"); }
 }
@@ -97,10 +113,16 @@ export function createSyntheticAdmissionJointBootstrap(input: unknown, publicKey
   } catch { refuse("budget"); }
   const nativeBootstrap = createSyntheticAdmissionReadBootstrap({ schema: "native-bar-admission-read-bootstrap-v1", scope: "synthetic_fixture_only",
     temp_anchor: r.temp_anchor, pins: r.pins, authority_reference: r.authority_reference }, publicKey);
-  const native = createSyntheticAdmissionNativeReadRegistry(nativeBootstrap.token); let oracle: Oracle;
+  const native = createSyntheticAdmissionNativeReadRegistry(nativeBootstrap.token); let oracle: Oracle, ticket: object;
   try { oracle = createSyntheticJointCheckpointOracleBootstrap(binding, publicKey, envelope); }
   catch (error) { native.close(); nativeBootstrap.close(); throw error; }
-  const state: Bootstrap = { binding, envelope, oracle, native, ticket: native.registerFixture(r), used: false, closed: false }, jointReaderEnrollment = opaque();
+  // Nothing registered above may stay open and unreachable when the fixture registration refuses.
+  try { ticket = native.registerFixture(r); }
+  catch (error) {
+    for (const close of [() => oracle.close(), () => native.close(), () => nativeBootstrap.close()]) try { close(); } catch { /* The primary error wins. */ }
+    throw error;
+  }
+  const state: Bootstrap = { binding, envelope, oracle, native, ticket, used: false, closed: false }, jointReaderEnrollment = opaque();
   enrollments.set(jointReaderEnrollment, state);
   return Object.freeze({ jointReaderEnrollment, ownerEnrollment: oracle.ownerEnrollment,
     describe() { return { ...oracle.describe(), work_envelope_hash: evidenceHash(envelope), scope: "synthetic_joint_read_only",
@@ -155,6 +177,12 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
     work(q); const left = Math.floor(Math.min(q.ttl - (Date.parse(q.last.utc_at) - Date.parse(q.start.utc_at)),
       Number((BigInt(q.ttl) * 1000000n - (BigInt(q.last.monotonic_after_ns) - BigInt(q.start.monotonic_before_ns))) / 1000000n)));
     if (left < 1) refuse("deadline"); return left;
+  }
+  // B-2 gets the floored remainder above. A Node timer can fire up to 1 ms before its delay (millisecond granularity), so
+  // the deadline timer rounds the monotonic remainder up and adds that millisecond: it never fires before the TTL.
+  function timerDelay(q: Query) {
+    work(q); const elapsed = BigInt(q.last.monotonic_after_ns) - BigInt(q.start.monotonic_before_ns);
+    return Math.max(1, Number((BigInt(q.ttl) * 1000000n - elapsed + 999999n) / 1000000n) + 1);
   }
   function describe(q: Query) {
     const account = claim.accounting();
@@ -219,11 +247,16 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
       if (e.index !== i || !e.namespace_qualified || !e.access_qualified) refuse("native_entry");
       const structural = e.root_role === "fixture" && e.role === "directory" && e.kind === "directory"
         && ["fixture-parent", "store", "admission-witness", ...b!.binding.registration.bindings.ancestors.map((_, n) => `ancestor-${n}`)].includes(e.path);
-      const c = structural ? null : classifySyntheticAdmissionReadEntry({ root_role: e.root_role, path: e.path, kind: e.kind, size: e.proof.size, access: "supplied_safe" });
-      if (["pending", "coordination", "reserve"].includes(e.role)) refuse("publication_incomplete");
+      let c: ReturnType<typeof classifySyntheticAdmissionReadEntry> | null = null;
+      if (!structural) try { c = classifySyntheticAdmissionReadEntry({ root_role: e.root_role, path: e.path, kind: e.kind, size: e.proof.size, access: "supplied_safe" }); }
+      catch { refuse("native_entry"); }
       if (c && (c.role !== e.role || c.blocker)) refuse("native_entry");
-      if (c && (e.raw_byte_limit !== (c.raw_byte_limit ?? "0")
-        || e.readable_evidence !== (e.root_role !== "fixture" && c.raw_read_candidate))) refuse("native_entry");
+      // The native reader reads the fixture-root controls (both markers) itself and never offers them, or a structural
+      // directory, as evidence: they arrive with raw_byte_limit "0" and readable_evidence false, whatever their name's cap.
+      const evidence = e.root_role !== "fixture" && c !== null;
+      if (e.raw_byte_limit !== (evidence ? c!.raw_byte_limit ?? "0" : "0") || e.readable_evidence !== (evidence && c!.raw_read_candidate)) refuse("native_entry");
+      if (e.role === "pending") refuse("publication_pending");
+      if (e.role === "coordination" || e.role === "reserve") refuse("coordination_active");
       const counters = inventory[e.root_role === "fixture" ? "common" : e.root_role]; counters.entries++; counters.inventory_bytes += BigInt(e.proof.size);
       if (["control", "witness_record", "producer_mirror", "receipt", "maintenance_metadata", "coordination", "pending"].includes(e.role)) counters.metadata_bytes += BigInt(e.proof.size);
       const key = { witness_record: "witness_records", producer_mirror: "producer_mirrors", payload: "payloads", receipt: "receipts", maintenance_metadata: "maintenance_metadata" }[e.role] as keyof typeof objects | undefined;
@@ -265,8 +298,9 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
       resources: { live_roots: "0", live_targets: "0", live_fds: "0" } }); } catch { refuse("budget"); }
     if (!plan.model_fits) refuse("budget");
     const cap = BigInt(plan.limits.metadata_bytes!), bytes = BigInt(plan.used.metadata_bytes) - account.retained - account.workspace;
-    let q: Query | undefined;
-    const lease = claim.acquire(bytes, cap, (reason) => { if (q) fail(q, `b3cb_${reason}`); });
+    let q: Query | undefined, lease: ReturnType<Claim["acquire"]>;
+    // Another live lease may hold a lower shared cap than this plan saw; that refusal is coded like every other.
+    try { lease = claim.acquire(bytes, cap, (reason) => { if (q) fail(q, `b3cb_${reason}`); }); } catch (error) { throw new Error(coded(error)); }
     try {
       let id: string; try { id = generateUUID(); } catch { refuse("rng_unavailable"); }
       claim.identifier(id, cap);
@@ -274,16 +308,18 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
         lease, cap, plan, failedBegin: false, cleaning: false, requests: 0, authenticated: 0, ids: 1 };
       const t = opaque(), owned = q; queries.set(t, owned); active = owned;
       try {
-        const ttl = remaining(owned); owned.failedBegin = true;
+        const ttl = remaining(owned);
         if (!plan.native_limits) refuse("budget");
         const limits = Object.fromEntries(Object.entries(plan.native_limits).map(([k, v]) => [k, Number(v)]));
-        owned.context = b.native.beginRead(b.ticket, limits, ttl); owned.failedBegin = false; work(owned); owned.state = "native_context_started";
+        // Only a native begin that actually threw closes the registration; earlier refusals leave the session usable.
+        owned.failedBegin = true; owned.context = b.native.beginRead(b.ticket, limits, ttl); owned.failedBegin = false;
+        work(owned); owned.state = "native_context_started";
         owned.timer = setTimeout(() => { if (owned.state === "released") return;
           try { observe(owned); fail(owned, "b3cb_clock_relation_unavailable"); } catch (error) { fail(owned, coded(error)); }
-        }, remaining(owned)); owned.timer.unref();
+        }, timerDelay(owned)); owned.timer.unref();
       } catch (error) {
         if (owned.failedBegin) { closed = true; b.closed = true; }
-        fail(owned, error instanceof Error && /^b2[ab]_/.test(error.message) ? "b3cb_native_unavailable" : coded(error));
+        fail(owned, coded(error));
       }
       return t;
     } catch (error) { if (q) fail(q, coded(error)); else lease.release(); throw new Error(coded(error)); }
@@ -297,6 +333,8 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
       const c0 = await request(q, "c0"); work(q);
       const pair = q.context!.openPair(); work(q); q.snapshot = pair.inventory(); work(q);
       const report = nativeReport(q, q.snapshot.report, false), entries = report.entries;
+      // Maintenance metadata already decides the outcome (E-D), so no evidence is read before refusing it.
+      if (entries.some((e) => e.role === "maintenance_metadata")) refuse("transaction_mapping_pending");
       const selected = selectSyntheticAdmissionJointWitnesses({ work_envelope: b.envelope, checkpoint_sequence: c0.sequence,
         entries: entries.filter((e) => e.root_role === "witness").map((e) => ({ index: e.index, root_role: e.root_role, path: e.path,
           kind: e.kind, size: e.proof.size, access: "supplied_safe" })) });
@@ -351,13 +389,12 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
       }
       for (const [path, publication] of publications) {
         const entry = entries.find((e) => e.root_role === "data" && e.path === path);
-        if (!entry || !["payload", "receipt"].includes(entry.role)) refuse("publication_incomplete");
+        if (!entry || !["payload", "receipt"].includes(entry.role)) refuse("publication_missing");
         for (const [key, value] of Object.entries(publication.proof)) if (key !== "sha256" && entry.proof[key as keyof Entry["proof"]] !== value) refuse("content_binding");
         const captured = take(entry);
         matchSyntheticAdmissionJointContentBytes({ role: entry.role, capture: { ...captured, encoded_sha256: publication.sha256 }, expected_sha256: publication.sha256 });
       }
       if (entries.some((e) => ["payload", "receipt"].includes(e.role) && !publications.has(e.path))) refuse("content_binding");
-      if (entries.some((e) => e.role === "maintenance_metadata")) refuse("transaction_mapping_pending");
       work(q); nativeReport(q, q.snapshot.verify(), true, report.joint_generation); q.state = "v0_verified";
       const c1 = await request(q, "c1", c0); work(q);
       nativeReport(q, q.snapshot.verify(), true, report.joint_generation); q.state = "v1_verified"; work(q);
@@ -366,7 +403,7 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
         end: { bytes: c1.bytes, request: c1.request }, evaluated_at: q.last.utc_at }); } catch { refuse("transcript_refused"); }
       work(q);
       if (transcript.model.tip_hash !== c0.tip_hash || transcript.model.record_count !== records.length) refuse("transcript_refused");
-      if (transcript.model.producers.some((p) => !p.linked)) refuse("publication_incomplete");
+      if (transcript.model.producers.some((p) => !p.linked)) refuse("producer_unlinked");
       if (Buffer.byteLength(canonical(transcript.model)) > BigInt(b.envelope.interpretation_bytes)) refuse("work_envelope");
       const result = resultSchema.parse({ ...describe(q), schema: "native-bar-synthetic-joint-read-result-v1", scope: "synthetic_fixture_only",
         verification_scope: "authenticated_synthetic_joint_read_only", state: "released", cleanup: "confirmed", revoked: false,
@@ -382,7 +419,10 @@ export function enrollSyntheticAdmissionJointReader(enrollment: object) {
       claim.check(); q.lease.check(); observe(q);
       result.last_observation = { ...q.last }; result.completed_at = q.last.utc_at; result.event_ordinal = String(q.ordinal);
       const account = claim.accounting(); result.retained_state_bytes = String(account.retained); result.active_workspace_bytes = String(account.workspace);
-      return result;
+      // The published fields changed after the first check, so the returned object is validated and bounded again.
+      const published = resultSchema.parse(result);
+      if (Buffer.byteLength(canonical(published)) > BigInt(q.plan.limits.response_bytes!)) refuse("response_bytes");
+      return published;
     } catch (error) { fail(q, coded(error)); throw new Error(q.failure!); }
     finally { if (ownsRun) { q.running = false; if (q.failure) cleanup(q); } }
   },

@@ -27,6 +27,22 @@ test("C-B exposes only original joint bootstrap/enrollment and exact fixed depen
   assert.deepEqual(file.statements.filter((n) => n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)).map((n) => n.name?.text),
     ["createSyntheticAdmissionJointBootstrap", "enrollSyntheticAdmissionJointReader"]);
 });
+// Clocks are read only through the wallNow/tickNow pair captured once (inside sample); elsewhere Date may appear only as the
+// pure Date.parse. A new new Date(), Date.now() or hrtime.bigint() read anywhere else is reported.
+function clockReads(file) {
+  const found = []; function visit(n, captured) {
+    const inside = captured || ts.isImportDeclaration(n) || ts.isVariableStatement(n) && n.declarationList.declarations.some((d) => d.name.getText() === "wallNow");
+    if (ts.isIdentifier(n) && (n.text === "Date" || n.text === "hrtime") && !inside
+      && !(n.text === "Date" && ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === "parse")) found.push(n.text);
+    ts.forEachChild(n, (child) => visit(child, inside));
+  } visit(file, false); return found;
+}
+test("C-B reads clocks only through the one captured pair, sampled in one place", () => {
+  assert.deepEqual(clockReads(ast(text)), []);
+  assert.equal((text.match(/\bwallNow\(/g) ?? []).length, 1); assert.equal((text.match(/\btickNow\(/g) ?? []).length, 2);
+  for (const added of ["const t1 = new Date();", "const t2 = Date.now();", "const t3 = hrtime.bigint();", "const { now } = Date;"])
+    assert.notDeepEqual(clockReads(ast(`${text}\n${added}`)), [], added);
+});
 test("C-B remains disconnected from startup, MCP, history and every other runtime consumer", () => {
   for (const f of readdirSync(root).filter((f) => f.endsWith(".ts") && f !== name))
     assert.equal(readFileSync(new URL(f, root), "utf8").includes("nativeBarAdmissionJointReader"), false, f);
@@ -36,7 +52,7 @@ test("C-B source preserves one snapshot, all captures before V0, private C1 afte
   assert.equal((text.match(/\.inventory\(/g) ?? []).length, 1); assert.equal((text.match(/q\.snapshot\.verify\(/g) ?? []).length, 2);
   const run = text.slice(text.indexOf("async run(t: object)"));
   const positions = ['request(q, "c0")', "pair.inventory()", "take(e)", "claim.bindRecordIds", "q.snapshot.verify()", 'request(q, "c1", c0)',
-    'q.state = "v1_verified"', "claim.verifier.verifyTranscript", 'q.state = "releasing"', "q.lease.check(); observe(q)", "return result"].map((s) => run.indexOf(s));
+    'q.state = "v1_verified"', "claim.verifier.verifyTranscript", 'q.state = "releasing"', "q.lease.check(); observe(q)", "return published"].map((s) => run.indexOf(s));
   assert.ok(positions.every((p, i) => p >= 0 && (!i || p > positions[i - 1])));
   assert.doesNotMatch(run.slice(run.indexOf('q.state = "v0_verified"')), /nativeCapture\(|take\(/);
 });

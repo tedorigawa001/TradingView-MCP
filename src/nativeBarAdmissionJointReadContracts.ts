@@ -171,11 +171,12 @@ function suppliedCapture(input: unknown, expectedRole: string) {
   const c = classifySyntheticAdmissionReadEntry({ root_role: m.location.root_role, path: m.location.path, kind: "file", size: m.location.size, access: "supplied_safe" });
   if (c.role !== expectedRole || c.blocker || !c.raw_read_candidate || !c.raw_byte_limit) refuse("capture_role");
   let bytes: Buffer;
+  // Read only through intrinsic getters and copy, as in B-1: own properties on a view are never consulted, and listing
+  // them would create one key per byte (about 87 MiB of transient heap for a 1 MiB payload).
   try {
     const value = f.bytes, length = byteLengthOf.call(value); ordinaryLength.call(bufferOf.call(value));
     if (!(value instanceof Uint8Array) || ![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(value))
-      || length < 1 || BigInt(length) > BigInt(c.raw_byte_limit) || String(length) !== m.location.size
-      || Reflect.ownKeys(value).some((k) => typeof k !== "string" || !/^(0|[1-9][0-9]*)$/.test(k))) refuse("capture_bytes");
+      || length < 1 || BigInt(length) > BigInt(c.raw_byte_limit) || String(length) !== m.location.size) refuse("capture_bytes");
     bytes = Buffer.alloc(length); Uint8Array.prototype.set.call(bytes, value);
   } catch { refuse("capture_bytes"); }
   const hash = createHash("sha256").update(bytes).digest("hex");
