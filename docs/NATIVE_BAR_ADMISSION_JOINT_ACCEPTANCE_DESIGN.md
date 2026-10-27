@@ -128,7 +128,7 @@ Each row expands into manifest-bound cases; counts are not promised before imple
 | U1 / C-C1 | Signed memory C0, valid markers, unsigned witness | Traverse real inventory/capture then `record_refused`; one authenticated request, no C1 or positive result |
 | U2 / C-C1 | Missing/extra/gapped witness namespace within a fitting envelope | Exact complete-prefix refusal before record decoding; no convenient shorter prefix |
 | U3 / C-C1 | Pending stage, coordination/reserve or maintenance metadata | Reachable cases return `publication_pending`, `coordination_active` or `transaction_mapping_pending`, at the layer the manifest predeclares; no unplanned evidence reads |
-| U4 / C-C1 | Case/role alias, wrong type/size/ACL/pin in a newly owned fixture | Native/classification/binding refusal and cleanup; no fix-up or normalization of evidence |
+| U4 / C-C1 | Case/role alias, wrong type/size/ACL/pin in a newly owned fixture | Native refusal (native-side binding mismatches surface as `native_refused`) or classification refusal, and cleanup; no fix-up or normalization of evidence |
 | S0 / C-C2 | Minimal one-record signed enrollment | Real original C0/read/V0/C1/V1/transcript/release order and the narrow result assertions above; normal and UBSan reported separately |
 | S1 / C-C2 | Planned exact and one-less limits for each budget dimension | Exact fitting case remains below all bounds; one-less model refusal precedes native begin/C0. No new numerical default or ceiling |
 | F0 / C-C3 | Fixed bad/replayed/changed C1 from memory owner | `checkpoint_refused` or `changing`; no record append, replacement snapshot, re-signing or transparent retry |
@@ -136,7 +136,7 @@ Each row expands into manifest-bound cases; counts are not promised before imple
 | F2 / C-C3 | Approved owned-file mutation while C1 is held | Original same-snapshot V1 rejects changed bytes/identity; no successful result with signatures alone |
 | F3 / C-C3 | Real elapsed expiry/event-loop stall; test-worker JS rollback/clock/RNG faults | Original deadline is exclusive, no renewal or success; label JS faults separately from native/OS clock qualification |
 | F4 / C-C3 | Real managed root/FD contention from explicitly owned synthetic contexts | Original native admission refuses `native_busy` before C0; release those exact contexts, no OS limit or real-store change |
-| F5 / C-C3 | Throw before a real native close, then restore/delegate cleanup | `release_unconfirmed` with retained claim until genuine close/settlement; no reads after release request, primary failure retained |
+| F5 / C-C3 | Throw before a real native close, then restore/delegate cleanup | Failure `native_release_error` (or `release_unconfirmed` while settlement stays unconfirmed) and state `release_unconfirmed` with retained claim until genuine close/settlement; no reads after release request, primary failure retained |
 | F6 / C-C3 | Missing/old/wrong-mode addon through test-process negative interposition | Coded `native_unavailable`/refusal, no opening; do not rename/replace the common binary or fabricate a positive backend |
 | B0 / applicable gate | Complete publication or another non-fitting workload | `budget`/`work_envelope` at its actual earliest gate; later behavioral row remains NOT RUN, not passed |
 
@@ -189,3 +189,18 @@ Local self-review reproduced and corrected an inherited layer-name lookup (`cons
 2026-10-28 JST: reviewed the complete five-file change, plan/observation schemas, canonical binding, detached/frozen snapshots, failure retention, bounds, unqualified flags, later-stage refusal, loader tripwire and runtime/lifecycle disconnection. No additional actionable correctness or approval-boundary defect was found. Supplementary memory probes refused own `__proto__`, `constructor`, `prototype` and an oversized unknown key without a native load. No code correction was required in this review. The 54 tests passed again with no skips; all three JavaScript syntax checks, `tsc --noEmit` and diff whitespace checks passed. This is a local review, not an independent reviewer result, native acceptance or cross-platform CI execution.
 
 The memory ledger remains self-reported and nonpersistent, and source guards are not a hostile-code isolation boundary. C-C1 still needs explicit approval for its isolated native build, new unsigned fixtures, negative reads and the selected owned-fixture teardown mechanism. C-C2 signature persistence and C-C3 faults remain separate. No native read/build, fixture creation/deletion, signing/signature persistence, real-data operation, MCP registration, production enablement or Dot/rule change was performed by C-C0 or its review. Existing runtime/native/common build files and the paused Dot configuration were hash-compared with the review start and remained unchanged. The reviewed change is approved by the user for a local commit only; no push or deployment is included.
+
+## C-C0 Expectation Corrections
+
+2026-10-28 JST, after the parent's review of `a061bc7`. Expected codes are the refusals the reviewed code actually emits, without their module prefix:
+
+- **U4 (C-C1).** The `binding: full_binding` layer is removed. `full_binding` comes only from C-A's comparison function, which the joint reader never calls. A C-C1 witness is unsigned, so C-B's `record_binding` cannot be reached there either: `record_refused` stops the run first. Native-side marker, policy or root binding mismatches surface as `native_refused`. A signed binding-negative row would belong to C-C2 and is not defined yet.
+- **F5 (C-C3).** A close fault is recorded as C-B's failure code: `native_release_error`, or `release_unconfirmed` while settlement stays unconfirmed. The cleanup state `release_unconfirmed` is observed separately.
+- **G0 (C-C0).** The placeholder labels `stage_not_approved`, `mixed_output_modes` and `copied_grant_refused` are replaced by this contract's own refusal codes:
+  - plan layer: `invalid_input`, `input_bound`, `duplicate_case`, `expectation_binding`, `envelope_binding`;
+  - ledger layer: `manifest_binding`, `case_binding`, `native_case_not_implemented`.
+
+  A test derives the codes from the contract's actual refusals and checks that each is an accepted G0 expectation.
+- **Additions.** U0 also accepts `oracle_rejected`, and F1 also accepts `oracle_changed` (owner advance).
+
+The three new tests fail on the original table. Only the test-only contract, its tests and this documentation change; no runtime, native or build output is touched, and no native stage, fixture or signature is involved.

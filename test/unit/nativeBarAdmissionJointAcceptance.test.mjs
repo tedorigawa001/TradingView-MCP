@@ -17,7 +17,7 @@ function manifest() {
     source: { commit: "a".repeat(40), patch_sha256: hash(1) },
     build: { mode: "normal", profile: "synthetic-only-protocol-6", source_sha256: hash(2), addon_sha256: null },
     ownership: { anchor: "private_tmp", creation: "exclusive_new", teardown: "not_selected", ancestor_headroom_bytes: "4096" },
-    cases: [{ case_id: "gate-1", row: "G0", expected_layer: "plan", expected_code: "stage_not_approved", envelope_sha256: null }] };
+    cases: [{ case_id: "gate-1", row: "G0", expected_layer: "plan", expected_code: "invalid_input", envelope_sha256: null }] };
 }
 test("C-C0 detaches a declared plan without approving, observing or executing it", () => {
   const input = manifest(), result = api.describeJointAcceptancePlan(input);
@@ -34,7 +34,7 @@ test("C-C0 detaches a declared plan without approving, observing or executing it
 });
 function observation(plan, changes = {}) {
   return { schema: "native-bar-joint-acceptance-memory-observation-v1", case_id: "gate-1",
-    manifest_sha256: plan.manifest_sha256, evidence: "memory_contract_only", observed_layer: "plan", observed_code: "stage_not_approved",
+    manifest_sha256: plan.manifest_sha256, evidence: "memory_contract_only", observed_layer: "plan", observed_code: "invalid_input",
     assertions: { no_native_load: true, no_fixture_io: true, no_signing: true },
     supplied_timing: { start_jst: "2026-10-28T10:00:00.000+09:00", end_jst: "2026-10-28T10:00:00.001+09:00", start_mono_ns: "100", end_mono_ns: "200" }, ...changes };
 }
@@ -43,7 +43,7 @@ test("C-C0 keeps all memory attempts and never counts a future row as native acc
     expected_code: "minimal_enrollment_consistent", envelope_sha256: hash(3) });
   const plan = api.describeJointAcceptancePlan(m), ledger = api.createJointAcceptanceMemoryLedger(m);
   assert.equal(ledger.describe().cases[0].status, "NOT_RUN");
-  ledger.record(observation(plan, { observed_code: "invalid_input" }));
+  ledger.record(observation(plan, { observed_code: "input_bound" }));
   const good = observation(plan); ledger.record(good); good.assertions.no_native_load = false;
   const report = ledger.describe();
   assert.equal(report.cases[0].status, "FAIL");
@@ -170,4 +170,30 @@ test("C-C0 bounds the append-only memory ledger and freezes past reports", () =>
   assert.throws(() => ledger.describe().attempts.pop(), TypeError);
   assert.throws(() => before.cases[0].status = "PASS", TypeError);
   assert.throws(() => ledger.begin = () => {}, TypeError);
+});
+// Expectation-table corrections (2026-10-28): each of the next three tests failed before the table was corrected.
+const declare = (row, expected_layer, expected_code) => {
+  const m = manifest(); m.cases = [{ case_id: "row-1", row, expected_layer, expected_code, envelope_sha256: row === "G0" ? null : hash(3) }];
+  return () => api.describeJointAcceptancePlan(m);
+};
+test("C-C0 G0 expectations are the refusal codes this contract actually emits", () => {
+  const thrown = (fn) => { try { fn(); } catch (error) { return error.message.replace(/^cc0_/, ""); } assert.fail("expected a refusal"); };
+  const planCodes = new Set();
+  for (const [, change] of mutations) { const m = manifest(); change(m); planCodes.add(thrown(() => api.describeJointAcceptancePlan(m))); }
+  const long = manifest(); long.run_id = "x".repeat(300); planCodes.add(thrown(() => api.describeJointAcceptancePlan(long)));
+  for (const code of planCodes) assert.doesNotThrow(declare("G0", "plan", code), code);
+  const m = manifest(); m.cases.push({ case_id: "signed-1", row: "S0", expected_layer: "released", expected_code: "minimal_enrollment_consistent", envelope_sha256: hash(3) });
+  const plan = api.describeJointAcceptancePlan(m), ledger = api.createJointAcceptanceMemoryLedger(m), ledgerCodes = new Set();
+  for (const changes of [{ manifest_sha256: hash(9) }, { case_id: "unknown-1" }, { case_id: "signed-1" }]) ledgerCodes.add(thrown(() => ledger.record(observation(plan, changes))));
+  assert.deepEqual([...ledgerCodes].sort(), ["case_binding", "manifest_binding", "native_case_not_implemented"]);
+  for (const code of ledgerCodes) assert.doesNotThrow(declare("G0", "ledger", code), code);
+  for (const label of ["stage_not_approved", "mixed_output_modes", "copied_grant_refused"]) assert.throws(declare("G0", "plan", label), /expectation_binding/, label);
+});
+test("C-C0 C-C1 rows never expect a binding code an unsigned witness cannot reach", () => {
+  for (const code of ["full_binding", "record_binding"]) assert.throws(declare("U4", "binding", code), /expectation_binding/, code);
+  assert.doesNotThrow(declare("U4", "native", "native_refused"));
+});
+test("C-C0 close, owner and checkpoint rows name the joint reader's actual failure codes", () => {
+  for (const [row, layer, code] of [["F5", "cleanup", "native_release_error"], ["F5", "cleanup", "release_unconfirmed"],
+    ["F1", "cancellation", "oracle_changed"], ["U0", "checkpoint_c0", "oracle_rejected"]]) assert.doesNotThrow(declare(row, layer, code), `${row} ${code}`);
 });

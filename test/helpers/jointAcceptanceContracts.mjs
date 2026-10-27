@@ -51,21 +51,26 @@ const label = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/), hash = z.string().rege
 const codeName = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);
 const uint = z.string().regex(/^(0|[1-9][0-9]{0,9})$/);
 const stage = z.enum(["C-C0", "C-C1", "C-C2", "C-C3"]);
+// Codes are the refusals the reviewed code actually emits, without their module prefix: cc0_ for G0 (this contract), b3cb_
+// for the joint reader. C-C1 witnesses are unsigned, so C-B's record_binding (and C-A's full_binding, which C-B never
+// calls) cannot be reached there; native-side binding mismatches surface as native_refused. A close fault is C-B's
+// failure code (native_release_error, or release_unconfirmed when settlement stays unconfirmed), not the cleanup state.
 const cases = {
-  G0: { stage: "C-C0", layers: { plan: ["stage_not_approved", "invalid_input", "mixed_output_modes", "copied_grant_refused"] } },
-  U0: { stage: "C-C1", layers: { checkpoint_c0: ["checkpoint_refused", "oracle_unavailable"] } },
+  G0: { stage: "C-C0", layers: { plan: ["invalid_input", "input_bound", "duplicate_case", "expectation_binding", "envelope_binding"],
+    ledger: ["manifest_binding", "case_binding", "native_case_not_implemented"] } },
+  U0: { stage: "C-C1", layers: { checkpoint_c0: ["checkpoint_refused", "oracle_unavailable", "oracle_rejected"] } },
   U1: { stage: "C-C1", layers: { record: ["record_refused"] } },
   U2: { stage: "C-C1", layers: { prefix: ["witness_prefix"] } },
   U3: { stage: "C-C1", layers: { inventory: ["publication_pending", "coordination_active", "work_envelope"], interpretation: ["transaction_mapping_pending"] } },
-  U4: { stage: "C-C1", layers: { native: ["native_refused", "native_changed"], inventory: ["native_entry", "work_envelope"], binding: ["full_binding"] } },
+  U4: { stage: "C-C1", layers: { native: ["native_refused", "native_changed"], inventory: ["native_entry", "work_envelope"] } },
   S0: { stage: "C-C2", layers: { released: ["minimal_enrollment_consistent"] } },
   S1: { stage: "C-C2", layers: { plan: ["budget"], released: ["minimal_enrollment_consistent"] } },
   F0: { stage: "C-C3", layers: { checkpoint_c1: ["checkpoint_refused", "changing"] } },
-  F1: { stage: "C-C3", layers: { cancellation: ["cancelled", "oracle_cancelled", "oracle_unavailable", "phase_order", "release_unconfirmed"] } },
+  F1: { stage: "C-C3", layers: { cancellation: ["cancelled", "oracle_cancelled", "oracle_unavailable", "oracle_changed", "phase_order", "release_unconfirmed"] } },
   F2: { stage: "C-C3", layers: { native_v1: ["native_changed", "native_refused"] } },
   F3: { stage: "C-C3", layers: { clock: ["deadline", "clock_invalid", "clock_rollback", "native_deadline_or_rollback", "rng_unavailable", "rng_invalid"] } },
   F4: { stage: "C-C3", layers: { native_begin: ["native_busy"] } },
-  F5: { stage: "C-C3", layers: { cleanup: ["release_unconfirmed"] } },
+  F5: { stage: "C-C3", layers: { cleanup: ["native_release_error", "release_unconfirmed"] } },
   F6: { stage: "C-C3", layers: { native_begin: ["native_unavailable", "native_refused"] } },
   B0: { stage: "C-C1", layers: { plan: ["budget"], inventory: ["work_envelope"] } },
 };

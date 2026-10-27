@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 C-C0期待値の修正 (2026-10-28 JST)**: [記録](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md#c-c0-expectation-corrections)。`a061bc7`のレビューで、受入表の期待コードを実装が実際に出すコードに合わせた。U4(C-C1)から到達不能な`binding: full_binding`を削除(C-Bは`full_binding`を出すC-A関数を使わず、未署名witnessでは`record_binding`の前に`record_refused`で止まる。native側のbinding不一致は`native_refused`)、F5のclose故障はC-Bの失敗コード`native_release_error`(未確定なら`release_unconfirmed`)とし状態とは分けて観測、G0の仮ラベル3つを本契約の実際の拒否コード(plan層5種・ledger層3種)へ置換し、実際の拒否から導いて照合する試験を追加、U0に`oracle_rejected`・F1に`oracle_changed`を追加。新規3件は旧表で失敗し修正後に成功、C-C0 57件(linux/win32偽装でも成功)、全unit 2,983/2,985件(失敗0、skip 2件は既存)。試験専用の契約・試験・文書のみで、runtime/native/build出力・native段階・fixture・署名は扱わない。pushなし。
+
 **105-3 C-C0ローカルレビュー (2026-10-28 JST)**: [記録](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md#c-c0-local-review)。5ファイルを確認し、新たな要修正事項なし。自己申告メモリ結果の権限非保有、計画/観測hash束縛、失敗履歴/上限、後続stage拒否、loader tripwireとruntime非接続を照合。54件再成功(skipなし)、3ファイルの構文検査・型/差分検査成功。既存src/native/常用buildとDot設定hashは不変、PAUSED維持。実機/他OS CI/独立レビューは未実施。ユーザー承認に基づくローカルcommit対象とし、push/本番反映なし。native読取・fixture作成/移動/削除・署名保存・実データ操作・MCP登録・判定/通知/保持条件変更なし。
 
 **105-3 C-C0実装・メモリ内合成試験 (2026-10-28 JST)**: [記録](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md#c-c0-implementation)。試験専用のmanifest記述・SHA-256束縛・固定出力区分/所有権/後片付け要件と、追記型メモリ結果台帳を追加。計画は許可証ではなく、後続C-C1/2/3は常に別承認、実行口なし。任意path/backend/clock/grant/許可token・未知項目・getter等を拒否。64ケース/128試行まで、層/コード不一致や境界assertion失敗はFAILとして保持し再試行PASSで消さない。将来のnativeケース・milestoneはNOT_RUN、時刻/所有権/資源/成果物は未検証、全qualificationはfalse。ソース境界検査とmain-thread loader tripwireを含む54件成功、構文/型検査成功。継承された層名で例外になる点を再現・修正。独立レビュー・実機受入は未実施。native読取/build・fixture作成/移動/削除・署名/署名ファイル保存・実データ操作・MCP登録/本番有効化なし。常用build・既存src/native・Dot設定は不変、PAUSED維持。判定/通知/保持条件変更・commit/pushなし。
