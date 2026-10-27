@@ -1,5 +1,7 @@
 # B3 Joint Read Orchestration
 
+Current C-C proposal (2026-10-28 JST): [native comparison and acceptance design](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md), after C-B independent corrections at `05e6fce`. C-C0 memory-only guard contracts precede separately approved unsigned/signed native fixtures and fault acceptance. No tests, builds, fixtures, signatures, native execution or production/Dot changes are included in this documentation step.
+
 Current C-B review (2026-10-27 JST): [local review corrections](NATIVE_BAR_ADMISSION_NATIVE_JOINT_DESIGN.md#c-b-local-review-and-corrections) preserve original run ownership under duplicate refusal and reject later registration aliases of observed record IDs. All 645 scoped memory/boundary cases pass; native-positive/host acceptance remains gated and no conditions or production configuration change.
 
 Current C-B status (2026-10-27 JST): [separate joint controller and private connection](NATIVE_BAR_ADMISSION_NATIVE_JOINT_DESIGN.md#c-b-implemented-boundary) are implemented from `41a11b8`. Executable connection code was separately approved while native execution stays prohibited. Memory refusal/transport and static order tests do not establish a native joint view; C-C/B3-D and review remain gated. Existing ACL/resource ceilings and trading/notification/retention conditions stay unchanged. Earlier stage statements below are historical.
