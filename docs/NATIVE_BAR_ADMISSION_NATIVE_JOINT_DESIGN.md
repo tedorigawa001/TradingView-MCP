@@ -1,6 +1,6 @@
 # B3 C Native Joint Reader Connection
 
-Status: **C-A approved and implemented with memory-only synthetic tests; C-B/C-C remain gated**, 2026-10-27 JST. Baseline: `cf75726`, after B3-Bc independent review and its helper correction. This refines the [joint read order](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md) and the [checkpoint probe boundary](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md), without promoting a probe to a native capability. The proposed live interfaces below are not implemented by C-A; its actual boundary is recorded separately at the end.
+Status: **C-A approved, implemented, independently reviewed and corrected with memory-only synthetic tests; C-B/C-C remain gated**, 2026-10-27 JST. Baseline: `cf75726`, after B3-Bc independent review and its helper correction. This refines the [joint read order](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md) and the [checkpoint probe boundary](NATIVE_BAR_ADMISSION_CHECKPOINT_PROBE_DESIGN.md), without promoting a probe to a native capability. The proposed live interfaces below are not implemented by C-A; its actual boundary is recorded separately at the end.
 
 B3-C connects the existing native paired reader, actual checkpoint transport and B-1 verifier under one original query. It does not publish evidence, accept history, grant execution, qualify the remaining B-2c host/kernel gaps or enable MCP/production/Dot operation. Dot stays PAUSED. Market/scenario/notification/mail rules, strictly-more-than-90-elapsed-day eligibility, elapsed-time-unknown holds and every existing resource ceiling remain unchanged.
 
@@ -187,3 +187,58 @@ Observed implementation verification (2026-10-27 JST): isolated TypeScript compi
 2026-10-27 JST: local review found no actionable defect within the approved pure-contract scope. Review covered full registration identity/detachment, mandatory work bounds and unchanged ceilings, ACL/capture/inventory accounting against the existing native source (static inspection only), outer/native allowance separation with V1 charged once, exact physical-byte versus logical-digest comparison, complete numerical witness selection, strict model-result false qualifications and exact import/consumer guards. No implementation or test changes were required during this review. This was a local review, not a separate independent review or host/native acceptance.
 
 Both isolated TypeScript output directories were freshly compiled from the reviewed source. The explicit 16-suite memory/boundary regression set passed all 534 cases with zero failures/skips; no-emit typecheck and tracked/new-file whitespace checks passed. Common-build, native-addon and Dot configuration hashes stayed unchanged, and Dot remained PAUSED. The user authorized a local commit of these C-A source/tests and the related detailed-design/backlog files. No push, native addon load/read, fixture creation, signature-file persistence, real-data operation, MCP registration, production activation or trading/notification/retention-condition change is included. C-B/C-C and unresolved B-2c host/kernel qualification remain separate gates.
+
+## C-A Independent Review And Corrections
+
+2026-10-27 JST. Two read-only independent reviewers examined `cf75726..bc4a5f2`. One checked the worst-case accounting against B-2a, B3-A and a static reading of the native reader. The other checked contracts, input guards, tests and source boundaries. Neither found an undercount, a false success, a raw (non-`b3ca_`) exception or a caller-getter call. The parent reproduced each finding below in a scratch copy before correcting it.
+
+### Corrections
+
+The user authorized these corrections and their commit.
+
+- **Native response bound.** The interpretation report is outer work. The native floor now uses the default 64 KiB supplied response, so `native_limits.response_bytes` no longer grows with `interpretation_bytes`. Before, an envelope with 8,282,112 interpretation bytes obtained the whole native response allowance while the model still fit. The combined plan still charges the interpretation report.
+- **Plans that do not fit.** They return `native_limits: null` instead of clamped values, some of which could be zero.
+- **Usage counters.** `checkSyntheticAdmissionJointWorkUsage` accepts any canonical decimal counter and reports a blocker for every entry, byte or object count above the envelope, including values above the global ceilings. Before, a counter above a schema maximum was refused as malformed input while the byte counters were reported.
+- **Model results.** They also refuse a `released` phase together with `release_unconfirmed`, selected indices before `inventoried`, and `bytes_bound` without a selected witness (so a complete consistent model needs at least one). Legitimate blocked reports around release and selection stay representable.
+- **Joint source-boundary test.**
+  - Literal dynamic-import specifiers are recorded, and any spelling of the module name in another `src/` file counts as a consumer, which also covers `createRequire`.
+  - `WeakSet`, the event and performance-entry clocks and the whole `Math` namespace are banned; the module uses none of them.
+  - `.constructor` and literal element access of a banned name are reported, and default exports are refused.
+  - A computed key held in a variable remains outside this static scan, as in the sibling tests.
+- **Coverage.** New tests pin the B-2 registration-validator refusal, the witness entry-count and metadata-byte bounds, a producer mirror's own hash mismatch, nine more byte-view kinds, and scope-literal and status consistency.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Correction cases on the original source | The eight correction cases fail, including the updated partial-model case; the coverage cases pass |
+| All C-A cases on the corrected source | 99 pass (95 functional, 4 boundary); 95 pass from the isolated output as well |
+| Nine boundary mutations | Each passes the original boundary test and fails the corrected one: dynamic-import and `createRequire` consumers, `CustomEvent` and `PerformanceMark` clocks, `Math` alias and element `random`, `WeakSet`, `Function` via `constructor`, and a default export |
+| 17-file B3 memory/boundary set | 621 pass |
+| Full unit suite | 2,891 of 2,893 pass, 0 failures; the 2 skips are the existing root-only and Windows-only cases |
+| TypeScript build and diff whitespace check | Pass |
+
+### Actual Planning Range
+
+The medium-severity finding is not corrected here; its range is documented instead. The ACL schedule charges 131072 bytes for every call, as if each carried the 64 KiB native ACL-text maximum. Its call count is also about twice the reviewer's static upper bound for the native reader: 1,091 against 548 calls for one witness at three ancestors. This fails closed and is not a safety defect, but it bounds what the current model can plan:
+
+| Temp anchor | Ancestors | Largest fitting envelope | One witness: read work (ACL share) | One publication (witness, mirror, payload, receipt) |
+|---|---|---|---|---|
+| `/private/tmp` | 3 | 3 witnesses, or 1 witness with 1 mirror | 144.6 MB (98.9%) | 295.4 MB, over the 268.4 MB read ceiling; refused |
+| per-user `/private/var/folders/…/T` | 7 | 2 witnesses, or 1 witness with 1 mirror | 196.0 MB (98.9%) | 364.1 MB; refused |
+
+Inputs: minimal entries (policy and the needed parent directories), 64 KiB common-inventory headroom, and decode and interpretation bounds at their mandatory minima. No C-C positive publication case can obtain a fitting plan under this schedule.
+
+The schedule stays unchanged and the decision moves to the C-B design. Options, in order of preference:
+1. Add an explicit ACL-text bound to the envelope and enforce it in the native reader. This needs a native change and its own approval.
+2. Tighten the call count to the exact native schedule. This is pure and would admit roughly one publication.
+3. Accept this range.
+
+### Notes For C-B
+
+- **Common inventory headroom.** The `common.inventory_bytes` minimum covers the markers only. Native inventory also adds the `st_size` of every ancestor, fixture-parent and root directory, which can change with unrelated activity in a shared temp anchor. An envelope at that minimum fits the model but can never pass natively, and usage checks need headroom.
+- **Combined entries.** Envelope validation accepts per-root bounds whose combined entries exceed 512; only the plan refuses them (`entries_limit`). C-B must require `model_fits` before any native begin.
+- **Unplanned reads.** Coordination files and `policy.json` are readable natively but have no object slot. Reading them in C-B would be unplanned work.
+- **Failure codes.** `primary_failure` accepts any `b3ca_[a-z_]+` token up to 96 characters, like the sibling schemas. C-B should map it to its actual codes.
+
+Only this module, its tests and documentation change. Existing ceilings, B-2a/B3-A calculators, native sources and the common build are unchanged. No native addon load or read, fixture creation, signature persistence, real-data operation, MCP registration, production activation, Dot change or push is included.

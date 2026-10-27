@@ -108,8 +108,9 @@ export function planSyntheticAdmissionJointWork(input: unknown) {
   const response = { supplied_bytes: String(max(65536n, BigInt(e.interpretation_bytes))), buffer_bytes: String(groups.reduce((n, k) => max(n, roles[k]), 0n)) };
   let plan: ReturnType<typeof calculateSyntheticAdmissionQueryProtocolBudget>, native: ReturnType<typeof calculateSyntheticAdmissionReadBudget>;
   try {
+    // The interpretation report is outer work: it sizes the protocol response, never the native reader's own response bound.
     native = calculateSyntheticAdmissionReadBudget({ registration: b.registration, ...(q.lower_limits === undefined ? {} : { limits: q.lower_limits }),
-      inventory: e.inventory, retained_metadata_bytes: "0", read_work, response, resources: q.resources });
+      inventory: e.inventory, retained_metadata_bytes: "0", read_work, response: { ...response, supplied_bytes: "65536" }, resources: q.resources });
     plan = calculateSyntheticAdmissionQueryProtocolBudget({ binding: { ...b, schema: "native-bar-admission-query-model-registration-v1", scope: "synthetic_model_only" },
       ...(q.lower_limits === undefined ? {} : { limits: q.lower_limits }), inventory: e.inventory, retained_metadata_bytes: "0",
       retained_protocol_bytes: String(protocol), decoded_transcript_bytes: String(max(decoded, BigInt(e.decoded_bytes))),
@@ -123,10 +124,11 @@ export function planSyntheticAdmissionJointWork(input: unknown) {
   // Keep V1 inside native work: clamp to the planned native bound, never subtract that work from its allowance again.
   const nativeLimits = Object.fromEntries((Object.keys(nativeBound) as (keyof typeof nativeBound)[]).map((k) =>
     [k, String(BigInt(nativeBound[k]) < BigInt(plan.native_allowance[k]) ? BigInt(nativeBound[k]) : BigInt(plan.native_allowance[k]))]));
+  // A plan that does not fit issues no limits a caller could pass to a native begin (some would be clamped to zero).
   return { ...plan, ...noAuthority, schema: "native-bar-joint-read-work-plan-v1" as const, model_fits: blockers.length === 0, blockers, limits,
     registration_hash: b.registration_hash, work_envelope_hash: evidenceHash(e), charged_selected_bytes: String(content), selected_byte_bound: e.selected_bytes,
     required_decoded_bytes: String(decoded), required_interpretation_bytes: String(interpretation), acl_calls_upper_bound: String(aclCalls),
-    additional_acl_work_bytes: String(aclCalls * 131072n), native_limits: nativeLimits, outer_read_bytes: String(outerRead) };
+    additional_acl_work_bytes: String(aclCalls * 131072n), native_limits: blockers.length === 0 ? nativeLimits : null, outer_read_bytes: String(outerRead) };
 }
 const relative = z.string().min(1).refine((s) => Buffer.from(s).toString("utf8") === s && Buffer.byteLength(s) <= 512
   && !s.includes("\\") && !s.includes("\0") && s.split("/").length <= 16 && s.split("/").every((p) => p && p !== "." && p !== ".."));
@@ -204,11 +206,12 @@ export function matchSyntheticAdmissionJointContentBytes(input: unknown) {
   return { ...noAuthority, schema: "native-bar-joint-content-byte-binding-model-v1" as const, supplied_byte_hashes_match: true as const,
     role: m.role, sha256: captured.hash, bytes: String(captured.bytes.byteLength), index: captured.location.index };
 }
-const countsSchema = z.strictObject({ witness_records: boundedUint(512n), producer_mirrors: boundedUint(512n), payloads: boundedUint(512n),
-  receipts: boundedUint(512n), maintenance_metadata: boundedUint(512n) });
+// Counters above any ceiling are reported as blockers, like the byte counters, not refused as malformed input.
+const usageBound = z.strictObject({ entries: uint, inventory_bytes: uint, metadata_bytes: uint });
+const countsSchema = z.strictObject({ witness_records: uint, producer_mirrors: uint, payloads: uint, receipts: uint, maintenance_metadata: uint });
 export function checkSyntheticAdmissionJointWorkUsage(input: unknown) {
   const q = parse(z.strictObject({ binding: z.unknown(), work_envelope: z.unknown(), usage: z.strictObject({
-    inventory: z.strictObject({ data: inventoryBound, witness: inventoryBound, common: inventoryBound }), objects: countsSchema,
+    inventory: z.strictObject({ data: usageBound, witness: usageBound, common: usageBound }), objects: countsSchema,
     selected_bytes: uint, decoded_bytes: uint, interpretation_bytes: uint }) }), input, 256 * 1024);
   const b = validateSyntheticAdmissionJointBinding(q.binding), e = validateSyntheticAdmissionJointWorkEnvelope(q.work_envelope); envelopeForBinding(e, b);
   const blockers: string[] = [];
@@ -230,7 +233,10 @@ export const nativeBarAdmissionJointModelResultSchema = z.strictObject({ ...qual
   primary_failure: z.string().regex(/^b3ca_[a-z_]+$/).max(96).nullable(), cleanup: z.literal("not_performed"),
   supplied_phases: z.array(z.enum(phaseOrder)).max(phaseOrder.length), selected_indices: z.array(z.number().int().min(0).max(511)).max(512)
 }).refine((r) => r.supplied_phases.every((p, i) => p === phaseOrder[i]) && new Set(r.selected_indices).size === r.selected_indices.length
-  && new Set(r.model_blockers).size === r.model_blockers.length && (r.model_status === "consistent_supplied_model"
+  && new Set(r.model_blockers).size === r.model_blockers.length
+  // Witnesses are selected from the inventory, bound bytes need the nonempty C0 prefix, and a release cannot be both done and unconfirmed.
+  && (r.selected_indices.length === 0 || r.supplied_phases.includes("inventoried")) && (!r.supplied_phases.includes("bytes_bound") || r.selected_indices.length > 0)
+  && !(r.supplied_phases.includes("released") && r.model_blockers.includes("release_unconfirmed")) && (r.model_status === "consistent_supplied_model"
     ? r.model_order_consistent && r.supplied_phases.length === phaseOrder.length && r.model_blockers.length === 0 && r.primary_failure === null
     : !r.model_order_consistent && (r.model_blockers.length > 0 || r.primary_failure !== null)));
 export function validateSyntheticAdmissionJointModelResult(input: unknown) { return parse(nativeBarAdmissionJointModelResultSchema, input, 128 * 1024); }

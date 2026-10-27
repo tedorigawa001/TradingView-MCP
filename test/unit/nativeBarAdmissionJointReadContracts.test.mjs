@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import vm from "node:vm";
 import { binding as oracleBinding, id } from "./helpers/checkpointProbeFixture.mjs";
 
 const base = process.env.NATIVE_BAR_B3CA_ISOLATED_TEST === "1" ? "../../build/b3ca-validation/" : "../../build/";
@@ -215,8 +216,9 @@ test("C-A model results refuse every real qualification flag and detached data c
 });
 test("C-A a blocked partial model describes no cleanup or actual phase evidence", () => {
   const r = modelResult(); r.model_status = "blocked_supplied_model"; r.model_order_consistent = false; r.model_blockers = ["transaction_mapping_pending"];
-  r.supplied_phases = r.supplied_phases.slice(0, 2);
+  r.supplied_phases = r.supplied_phases.slice(0, 2); r.selected_indices = [];
   assert.equal(api.validateSyntheticAdmissionJointModelResult(r).transaction_replay_verified, false);
+  assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...r, selected_indices: [1] }), /invalid_input/);
   assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...r, model_blockers: [] }), /invalid_input/);
   assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...r, model_blockers: ["integrity", "integrity"] }), /invalid_input/);
 });
@@ -232,4 +234,70 @@ test("C-A selecting a payload or receipt requires the right encoded role, not a 
   const c = capture("data", `captures/2026-10-27/${id(100007)}.json`);
   assert.throws(() => api.matchSyntheticAdmissionJointContentBytes({ role: "receipt", capture: c, expected_sha256: c.encoded_sha256 }), /capture_role/);
   assert.throws(() => api.matchSyntheticAdmissionJointContentBytes({ role: "payload", capture: c, expected_sha256: c.encoded_sha256, receipt_body_hash: c.encoded_sha256 }), /invalid_input/);
+});
+// Independent review corrections (2026-10-27): each of the next four groups failed before its fix.
+test("C-A the interpretation report sizes outer response work, never the native response limit", () => {
+  const base = plan(), e = envelope(); e.interpretation_bytes = "4194304"; const r = plan(e);
+  assert.equal(r.model_fits, true); assert.equal(r.native_limits.response_bytes, base.native_limits.response_bytes);
+  assert.ok(BigInt(r.native_limits.response_bytes) < 4194304n); assert.ok(BigInt(r.used.response_bytes) >= 4194304n);
+});
+test("C-A a plan that does not fit issues no native limits", () => {
+  const r = plan(envelope(), { lower_limits: { read_bytes: 1 } });
+  assert.equal(r.model_fits, false); assert.ok(r.blockers.includes("read_bytes_limit")); assert.equal(r.native_limits, null);
+});
+test("C-A usage counters above every ceiling are reported as blockers, not refused as malformed", () => {
+  const e = envelope(), usage = { inventory: structuredClone(e.inventory), objects: { ...e.objects, payloads: "513" },
+    selected_bytes: e.selected_bytes, decoded_bytes: e.decoded_bytes, interpretation_bytes: e.interpretation_bytes };
+  usage.inventory.witness.entries = "513"; usage.inventory.common.metadata_bytes = "16777217";
+  const r = api.checkSyntheticAdmissionJointWorkUsage({ binding: binding(), work_envelope: e, usage });
+  assert.equal(r.within_supplied_envelope, false); assert.deepEqual(r.blockers, ["witness_entries", "common_metadata_bytes", "payloads"]);
+  usage.objects.payloads = "01"; assert.throws(() => api.checkSyntheticAdmissionJointWorkUsage({ binding: binding(), work_envelope: e, usage }), /invalid_input/);
+});
+for (const [label, change] of [
+  ["released while its release is unconfirmed", (r) => { r.model_blockers = ["release_unconfirmed"]; }],
+  ["selected indices before any inventory", (r) => { r.supplied_phases = []; r.selected_indices = [1, 2, 3]; r.model_blockers = ["deadline"]; }],
+  ["bound bytes without a witness", (r) => { r.supplied_phases = r.supplied_phases.slice(0, 4); r.selected_indices = []; r.model_blockers = ["integrity"]; }],
+]) test(`C-A blocked model results refuse a contradictory report: ${label}`, () => {
+  const r = modelResult(); r.model_status = "blocked_supplied_model"; r.model_order_consistent = false; change(r);
+  assert.throws(() => api.validateSyntheticAdmissionJointModelResult(r), /invalid_input/);
+});
+test("C-A a complete consistent model needs at least the C0 witness", () => {
+  assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...modelResult(), selected_indices: [] }), /invalid_input/);
+});
+test("C-A legitimate blocked reports around release and selection stay representable", () => {
+  const r = modelResult(); r.model_status = "blocked_supplied_model"; r.model_order_consistent = false;
+  for (const [phases, indices, blockers] of [[8, [1], ["release_unconfirmed"]], [3, [], ["changing"]], [3, [4, 5], ["publication_incomplete"]], [9, [1], ["deadline"]]])
+    assert.equal(api.validateSyntheticAdmissionJointModelResult({ ...r, supplied_phases: r.supplied_phases.slice(0, phases), selected_indices: indices,
+      model_blockers: blockers }).model_status, "blocked_supplied_model");
+});
+// Coverage for behavior the review confirmed but no test pinned.
+test("C-A refuses a schema-valid registration that the B-2 validator rejects", () => {
+  const b = binding(); b.registration.policy_hash = evidenceHash("different policy"); b.registration_hash = evidenceHash(b.registration);
+  assert.throws(() => api.validateSyntheticAdmissionJointBinding(b), /invalid_registration/);
+});
+test("C-A witness selection also bounds the entry count and witness metadata bytes", () => {
+  const entry = (n) => ({ index: n, root_role: "witness", path: `${n}.json`, kind: "file", size: "128", access: "supplied_safe" }), e = envelope();
+  e.inventory.witness.metadata_bytes = "100";
+  assert.throws(() => api.selectSyntheticAdmissionJointWitnesses({ work_envelope: e, checkpoint_sequence: "1", entries: [entry(1)] }), /selected_byte_bound/);
+  assert.throws(() => api.selectSyntheticAdmissionJointWitnesses({ work_envelope: envelope(), checkpoint_sequence: "1", entries: [entry(1), entry(2)] }), /witness_bound/);
+});
+for (const key of ["native_sha256", "encoded_sha256"])
+  test(`C-A a producer mirror's own ${key} must match its bytes`, () => {
+    const producer = id(100008), witness = capture("witness", "1.json"), mirror = capture("data", `producer/${producer}/1.json`); mirror[key] = evidenceHash("wrong");
+    assert.throws(() => api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", producer_id: producer, witness, mirror }), key === "native_sha256" ? /native_hash/ : /encoded_hash/);
+  });
+for (const [label, make] of [["Uint8ClampedArray", (b) => new Uint8ClampedArray(b)], ["Int8Array", (b) => new Int8Array(b)], ["Uint16Array", (b) => new Uint16Array(b.length)],
+  ["DataView", (b) => new DataView(new Uint8Array(b).buffer)], ["ArrayBuffer", (b) => new Uint8Array(b).buffer],
+  ["other realm", (b) => vm.runInNewContext(`new Uint8Array(${JSON.stringify([...b])})`)],
+  ["null prototype", (b) => Object.setPrototypeOf(new Uint8Array(b), null)], ["Object prototype", (b) => Object.setPrototypeOf(new Uint8Array(b), Object.prototype)],
+  ["growable shared buffer", (b) => { const v = new Uint8Array(new SharedArrayBuffer(b.length, { maxByteLength: 2 * b.length })); v.set(b); return v; }]])
+  test(`C-A rejects supplied capture bytes as ${label}`, () => {
+    const witness = capture("witness", "1.json"); witness.bytes = make(witness.bytes);
+    assert.throws(() => api.matchSyntheticAdmissionJointRecordBytes({ sequence: "1", witness }), /capture_bytes/);
+  });
+test("C-A model results pin every scope literal and tie a consistent status to no failure", () => {
+  const r = modelResult();
+  for (const change of [{ storage_visibility_at_as_of: "visible" }, { scope: "native_read" }, { verification_scope: "native" }, { primary_failure: "b3ca_deadline" },
+    { model_blockers: ["deadline"] }, { model_order_consistent: false }, { model_status: "blocked_supplied_model", model_blockers: ["deadline"] }])
+    assert.throws(() => api.validateSyntheticAdmissionJointModelResult({ ...r, ...change }), /invalid_input/);
 });
