@@ -228,7 +228,11 @@ test("C-C1b-2 output prefix copies bypass byte-view constructor/species and prop
   }
 });
 test("C-C1b-2 configuration refuses exactly the envelopes the worker's own C-A planner refuses", async () => {
-  const joint = await import("../../build/nativeBarAdmissionJointReadContracts.js");
+  const mode = process.env.NATIVE_BAR_B3CC_MODE;
+  if (mode !== undefined && mode !== "normal" && mode !== "ubsan") throw Error("cc1b3_parity_mode");
+  const source = mode === undefined ? "../../build/nativeBarAdmissionJointReadContracts.js"
+    : `../../build/b3cc-validation/${mode}/nativeBarAdmissionJointReadContracts.js`;
+  const joint = await import(new URL(source, import.meta.url));
   const f = fixture(), base = workerConfiguration(f);
   const theirs = (c) => { try { joint.planSyntheticAdmissionJointWork({ binding: c.binding, work_envelope: c.work_envelope, retained_state_bytes: "0",
     resources: { live_roots: "0", live_targets: "0", live_fds: "0" } }); return "accepted"; } catch (e) { return e.message; } };
