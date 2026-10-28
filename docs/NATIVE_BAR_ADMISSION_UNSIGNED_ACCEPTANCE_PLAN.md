@@ -1,8 +1,10 @@
 # C-C1 Unsigned Native Acceptance Plan
 
-Status: **C-C1a and C-C1b-1 pure contracts implemented; C-C1b execution not approved or implemented**, 2026-10-28 JST. Original plan baseline: `35d29b9`, including the corrected C-C0 expectations. This specifies the C-C1 portion of the [joint acceptance design](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md). Only supplied-data models, memory tests and source checks run; no native build/read, fixture creation, signing or filesystem teardown is performed.
+Status: **C-C1a/C-C1b-1 contracts and sealed C-C1b-2 adapter sources implemented; C-C1b execution not approved**, 2026-10-28 JST. Original plan baseline: `35d29b9`, including the corrected C-C0 expectations. This specifies the C-C1 portion of the [joint acceptance design](NATIVE_BAR_ADMISSION_JOINT_ACCEPTANCE_DESIGN.md). Only supplied-data models, memory tests and source checks run; no native build/read, fixture creation, signing or filesystem teardown is performed.
 
 The [C-C1b detailed design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md), designed from `1766c0a` and implemented as pure contracts on `ca164ad`, specifies the independent observer, live fixture lifecycle, original-baseline/GO handshake, worker supervision and bounded evidence/readback. C-C1b-1 adds only memory contracts/serialization/capacity models; inert adapters, isolated build and actual execution require separate approvals. C-C1a remains sealed and its cause/ownership/teardown checks are not replaced by protocol/evidence consistency.
+
+[C-C1b-2's sealed source implementation](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md#c-c1b-2-sealed-adapter-sources), based on `367d5af`, adds independent observer source and private connection components plus an explicitly approved strict PREPARE metadata contract. Its [local review](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md#c-c1b-2-local-review) corrected bounded-copy, FD/error and teardown source paths; 417 selected memory/source tests passed. No live-run reference can currently be minted; the worker/adapter entries still refuse. Independent review, original-controller/dispatcher assembly, isolated build and all actual operations remain separate from these source/memory tests.
 
 ## Execution Boundary
 

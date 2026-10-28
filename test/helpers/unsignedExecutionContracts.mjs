@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { describeUnsignedAcceptanceRun, describeUnsignedFixture } from "./jointUnsignedAcceptanceContracts.mjs";
+import { validateUnsignedWorkerConfiguration } from "./unsignedWorkerConfiguration.mjs";
 
 const refuse = (code) => { throw Error(`cc1b_${code}`); };
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -130,7 +131,7 @@ const releasedSchema = z.object({ baseline_sha256: hash, resources: resourceSche
   primary_code: code, requests_dispatched: integer(2), authenticated_requests: integer(2),
   c0_dispatched_at: z.null(), c0_authenticated_at: z.null(), retired_at: z.null() }).strict();
 const payloadSchemas = {
-  PREPARE: empty, BASELINED: baselineSchema,
+  PREPARE: z.object({ configuration: z.unknown().optional() }).strict(), BASELINED: baselineSchema,
   GO: z.object({ baseline_sha256: hash, baseline_readback: z.literal(true), go_intent_readback: z.literal(true) }).strict(),
   CANCEL: empty, FINALIZE: empty,
   TRACE_CHUNK: z.object({ chunk_index: integer(7), events: z.array(traceEvent).min(1).max(16) }).strict(),
@@ -153,7 +154,7 @@ const failureSchema = z.object({ reason: z.enum(["worker_lost", "observer_lost",
   "receipt_failed", "source_changed", "deadline_exceeded", "unexpected_output", "supervisor_lost"]) }).strict();
 
 export function createUnsignedExecutionProtocolModel(input) {
-  const { binding, capacity } = context(input), trace = [], ordinals = { parent: 1, worker: 1 };
+  const { binding, capacity, recipe } = context(input), trace = [], ordinals = { parent: 1, worker: 1 };
   let state = "NEW", stopped = null, frames = 0, baseline = null, baselineHash = null, result = null, rejected = null, exit = null;
   let chunks = 0, cancelled = false, teardownComplete = false, traceClock = null;
   const fail = (reason) => { stopped ??= reason; state = "STOPPED"; refuse(reason); };
@@ -177,7 +178,14 @@ export function createUnsignedExecutionProtocolModel(input) {
       if ((["PREPARE", "GO", "CANCEL", "FINALIZE"].includes(f.kind) ? "parent" : "worker") !== f.direction) fail("protocol_direction");
       const p = parse(payloadSchemas[f.kind], f.payload);
       switch (f.kind) {
-        case "PREPARE": at("NEW"); state = "PREPARING"; break;
+        case "PREPARE": {
+          at("NEW");
+          if (p.configuration !== undefined) try {
+            validateUnsignedWorkerConfiguration({ fixture: recipe.declaration, registration_sha256: binding.registration_sha256,
+              envelope_sha256: binding.envelope_sha256, configuration: p.configuration });
+          } catch { fail("worker_configuration"); }
+          state = "PREPARING"; break;
+        }
         case "BASELINED": at("PREPARING"); baseline = frozen(p); baselineHash = digest(p); state = "BASELINED"; break;
         case "GO": at("BASELINED"); if (p.baseline_sha256 !== baselineHash) fail("baseline_changed"); state = "ACTIVE"; break;
         case "CANCEL": at("ACTIVE"); if (cancelled) fail("duplicate_cancel"); cancelled = true; break;

@@ -12,7 +12,8 @@ function guard(s) {
   const imports = tree.statements.filter(ts.isImportDeclaration).map((n) => [n.moduleSpecifier.text, n.importClause?.name?.text,
     n.importClause?.namedBindings?.elements?.map((e) => [e.propertyName?.text, e.name.text])]);
   assert.deepEqual(imports, [["node:crypto", undefined, [[undefined, "createHash"]]], ["zod", undefined, [[undefined, "z"]]],
-    ["./jointUnsignedAcceptanceContracts.mjs", undefined, [[undefined, "describeUnsignedAcceptanceRun"], [undefined, "describeUnsignedFixture"]]]]);
+    ["./jointUnsignedAcceptanceContracts.mjs", undefined, [[undefined, "describeUnsignedAcceptanceRun"], [undefined, "describeUnsignedFixture"]]],
+    ["./unsignedWorkerConfiguration.mjs", undefined, [[undefined, "validateUnsignedWorkerConfiguration"]]]]);
   const exports = tree.statements.filter((n) => n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)).map((n) => n.name?.text);
   assert.deepEqual(exports, ["describeUnsignedExecutionCapacity", "describeUnsignedExecutionWindow", "createUnsignedExecutionProtocolModel",
     "createUnsignedExecutionEvidenceModel", "inspectUnsignedExecutionEvidence"]);
