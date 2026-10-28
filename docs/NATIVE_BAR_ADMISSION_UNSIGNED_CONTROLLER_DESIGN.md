@@ -1,6 +1,6 @@
 # C-C1b-4 Execution Connection Design
 
-Status: **Design proposal only, revised after independent review; implementation and execution require separate approval**, 2026-10-28 JST. Baseline: `2fd35f8`, including the C-C1b-3 independent-review corrections. This specifies the missing controller and worker assembly for the [unsigned execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md). No build, signature, child process, native read, fixture, output relocation or cleanup is performed by this design step. Dot remains PAUSED; market/scenario/judgment/notification/mail and product retention rules stay unchanged.
+Status: **4-A pure contracts implemented after user approval; 4-B through 4-E remain proposals requiring separate approval**, 2026-10-28 JST. Design baseline: `2fd35f8`, including the C-C1b-3 independent-review corrections; 4-A starts from reviewed design commit `d3550a1`. This specifies the missing controller and worker assembly for the [unsigned execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md). The [4-A record](#4-a-pure-contract-implementation) covers memory/source tests only. No build, signature, operational child process, native read, fixture, output relocation or cleanup was performed. Dot remains PAUSED; market/scenario/judgment/notification/mail and product retention rules stay unchanged.
 
 ## Scope And Current Gaps
 
@@ -291,7 +291,7 @@ These subdivisions are proposed implementation units, not approvals or changes t
 
 Each later unit repeats the earlier units' checks inside its own invocation, so an earlier operational unit may be skipped once a later one is approved. None leaves a serializable handoff: each invocation makes its own fresh build and needs its own user-resolved output disposition. The pre-GO decision barrier is an automatic qualification gate inside one invocation. It passes only when every required check succeeded and every required approval is part of the opened entry; it is never an interactive prompt. Pausing/restarting a build-only run does not turn its saved record into a live grant. No undocumented rebuild or output-path fallback is proposed to avoid this prerequisite.
 
-Recommended next request is **4-A only**. Its approval would not authorize 4-B executable connection additions, any operational step, OS/C0 signatures, existing-root disposition or child termination.
+The user approved **4-A only**. This does not authorize 4-B executable connection additions, any operational step, OS/C0 signatures, existing-root disposition or child termination.
 
 ## Acceptance Tests Before Operational Approval
 
@@ -357,3 +357,68 @@ Real OS behavior is checked only in the separately approved 4-D probe and 4-E co
 - **Gaps and overclaims:** the missing clock callbacks, first-case index writer, uncalled `finishTeardown`, unref'd timers and single `js_sha256` were added to the gaps table. Overclaims about independent worker pin checks and per-supervisor process counts were corrected.
 
 Claims about macOS library validation, sanitizer exit behavior, crash-report submission and the `/tmp` cleaner come from documentation and reasoning; none was checked by execution.
+
+## 4-A Pure Contract Implementation
+
+2026-10-28 JST, implementation based on `d3550a1`, prepared for the user-approved local commit after independent review. Only four new pure helper modules and two memory/source test modules were added; existing v1 contracts, worker/adapters, product/native/build sources and package scripts are unchanged. These models accept bounded supplied data; they do not sample clocks, inspect files, start children, create fixtures or mint a live capability. Descriptor copying rejects getters and executable values; it is not isolation against hostile Proxy reflection.
+
+| Module under `test/helpers/` | Supplied-data contract |
+|---|---|
+| `unsignedControllerData.mjs` | Strict bounded data, canonical JSON/LF, SHA-256, immutable snapshots and always-false authority flags |
+| `unsignedControllerContracts.mjs` | v2 launch/setup binding, protocol/write ledger, narrow shutdown lane, independent phase windows and geometric/event/time/owner reservations |
+| `unsignedControllerObservation.mjs` | Bounded OBSERVED projections, explicit availability, byte comparisons and source-constrained cause checks; known direct assertions remain BLOCKED |
+| `unsignedControllerEvidence.mjs` | Ordered/read-back receipt model, candidate report, terminal receipt, case closes, index row, limited replay, fixed cohort order and serialization bounds |
+
+The launch binding has `setup: null`: it does not guess a future random basename or registration hash. PREPARE seals exactly one actual fixture name/recipe/registration/envelope after READY, validates the unchanged configuration contract, and changes only that binding component. The outer protocol is v2 while the nested fixed recipe request remains C-C1a/v1. Every later frame retains the full binding. Write intent, write start and completion stay separate; only write start marks GO submitted, and completion is not a worker acknowledgement.
+
+Normal progress is permanently stopped on protocol failure. The shutdown-only planner may consume one original CANCEL and one original command close; it shares frame/ordinal accounting and cannot resume GO, teardown or FINALIZE. Unknown pipe/binding, no remaining settlement time, pre-GO stop or spent cancellation gives CLOSE_ONLY. Late frames have four diagnostic slots and never supply release authority. A genuine original RELEASED can still be modeled with no OBSERVED packet; missing projections do not manufacture facts or block that release. FINALIZE requires the distinct modeled teardown completion.
+
+Windows use supplied same-domain monotonic points only. Preparation/query/settlement/teardown are 120000/600000/60000/120000 ms, never refreshed; reporting uses the remaining declared cohort bound. A detected deadline keeps its stop latch while one original settlement grace can be inspected through `inspectShutdown`; ordinary progress and teardown remain stopped. Clock-domain failure or rollback also poisons this narrow clock lane. Entering settlement after an expired query latches the deadline even when no earlier timer observation was supplied.
+
+The projection distinguishes facts from inference. U1 compares original capture hash/count with both the independently supplied witness proof and fixed recipe bytes. U3 compares complete per-role totals and object counts with the exact sealed envelope, re-derives all exceeded dimensions using the pinned reader's pre-capture mapping, and requires only `maintenance_metadata`; a claimed blocker list alone is insufficient. U4 compares actual registration objects for an inode-only data delta and separately requires unchanged non-data proofs before/after the query. Missing complete proofs yield BLOCKED; contradictory facts yield FAIL. Source-constrained inference never becomes a direct native error-location or C0 timestamp claim.
+
+`direct_c0_transport_timestamps`, `direct_native_mismatch_location` and `direct_reader_usage_builder` are explicitly BLOCKED. All transport/retirement timestamps remain null. The new assertion result is not a replacement for `assessUnsignedNegativeModel`: 4-B must later combine that unchanged negative assessment, actual trace/phase facts, original ownership/release and runtime close checks. No 4-A MODEL_CONSISTENT value is a native PASS.
+
+Receipt progress requires exact readback before its modeled effect. Root creation intent requires a READY digest; a created root with unknown proof can only be retained with its locator in a stop summary. A stopped candidate is one-shot, not replaceable. Receipts retain only observation digest/count and trace digest/count; the report holds the projection, trace and bounded comparison metadata. MODEL_CONSISTENT reports recompute their assertion result against the binding instead of accepting an assertion hash alone. Receipt links, prefix and terminal hashes cover exact canonical UTF-8 bytes including LF, not a JSON array of strings. Report and index self-close limitations remain explicit; replay never claims saved evidence, live approval, ownership, release or runtime completion.
+
+Canonical maximum-field ceilings (all kinds checked, conservative combinations included):
+
+| Value | Computed bytes | Unchanged cap |
+|---|---:|---:|
+| Worst receipt / six-detail stop summary | 7701 | 16384 |
+| Largest complete frame / PREPARE | 62102 | 65536 |
+| TRACE_CHUNK | 18450 | 65536 |
+| OBSERVED complete frame | 18403 | 65536 |
+| Candidate report, including comparison and assessment | 191957 | 262144 |
+| Case index row | 3474 | 5290 |
+| Reserved shared index, header plus 24 rows | 131056 | 131072 |
+
+The report calculation enforces separate 16384-byte observation and comparison subcaps, a 4096-byte computed assessment subcap and 128 trace events at 1024 bytes. All seventeen receipt payload kinds and eleven frame kinds are included. Four stop summaries fit the reserved `4*n+16` event schedule; thirteen entries refuse. Twelve entries fit that receipt geometry but their worst-case fourteen observer calls would exceed teardown's fixed 120000 ms; `teardown_worst_case_fits` is false, not an extended deadline. Current recipes have at most nine entries and eleven teardown calls. Fixed-owner reservation remains 65536 bytes (U0: zero), separate from observer work and the unchanged native 256 MiB budget.
+
+The cohort uses the unchanged plan's 24-case normal/UBSan order. Only a supplied cleanly-settled case with confirmed index readback can release a slot; clean FAIL/BLOCKED continues, retention/unknown state permanently stops. A later input cannot retry a retained case into clean settlement. Unstarted rows stay NOT_RUN, and an attempted unindexed case remains FAIL/unknown rather than being relabeled unstarted. Even a consistent replay or a supplied confirmed index close keeps runtime authority false.
+
+Validation is direct main-thread Node execution with `--test-isolation=none`, never npm/pretest/build. The new suite blocks child/worker launches, native loading, signing/key creation and fixture I/O before importing the models; the source suite fixes exact imports/exports and detects executable/time/key/filesystem mutations. No operational entry imports the new modules; both existing execution entries remain sealed. Final test counts and unchanged-state checks are recorded in the backlog. Independent review and subsequent corrections are recorded below, including the final re-review. Push, 4-B connection code, actual planner/owner wiring, C0-only helper changes, new build/probe/cohort and all real operations remain unperformed.
+
+## 4-A Independent Review And Corrections
+
+2026-10-28 JST: two read-only reviewers examined Contracts/Data and Observation/Evidence separately. Three P2 and two P3 findings were reproduced locally using only the supplied-data models. The original 492 passing tests did not cover these inputs. The user then approved corrections, not a commit or operational execution.
+
+- **Malformed clocks (P2):** descriptor/schema rejection now poisons the clock and latches stop before rethrowing. A later valid point cannot resume progress or the narrow shutdown clock lane, including when the original stop reason was already a deadline. Existing deadlines and the first stop reason remain intact.
+- **Write ordering and lifetime (P2):** a new original write start must be the earliest unstarted ordinal, match its command's lifecycle state, and precede original worker exit and command close. An unstarted CANCEL cannot be skipped by FINALIZE or started after release. Completion callbacks for writes already started need not arrive in start order and may still be recorded after stop; they do not acknowledge worker receipt.
+- **Malformed write notifications (P2):** schema rejection now latches STOPPED before propagating the error. A replacement notification cannot turn the original model back into normal progress.
+- **Late shutdown callbacks (P3):** a started original shutdown write may record one completed/uncertain result after command close or worker exit. New starts after either event, unstarted completions and duplicate results still refuse. The stop reason is preserved. Shutdown planning also checks the original ledger: unsent ordinal gaps, a known uncertain write or an observed worker exit force CLOSE_ONLY even if supplied qualification flags claim otherwise; no new ordinal or cancellation is spent.
+- **Serialization ceiling (P3):** detail kinds may repeat under the unchanged schema. The old six-distinct-kind example was 4140 bytes but was not an upper bound. The calculation now validates each maximum-field detail variant, chooses the largest serialized variant for every slot, and reserves six such details and four such summaries. Its conservative record ceiling is 7701 bytes and report ceiling 191957 bytes. The schema, detail/error counts and all byte caps remain unchanged; duplicate details were not silently banned to make the old calculation pass.
+
+Ten tests were added: eight exposed failures before their corresponding corrections, and two preserve valid delayed/in-order callback behavior. At this correction pass, the controller suite had 120 tests plus 10 source-boundary tests; the selected related suites totaled 502 passing tests, zero failures/skips. Direct main-thread execution performed no operational child launch, compiler/build, native load/read, signing/key creation, fixture I/O, move/delete or cleanup. Protected source/native/build/package/config hashes, the 436 existing artifact checks and Dot's PAUSED/config hash remained unchanged. No market/scenario/judgment/notification/retention condition was modified. Re-review and commit were pending at this point; the later result follows.
+
+## 4-A Final Pre-Commit Review
+
+2026-10-28 JST: the two read-only reviewers rechecked their respective Contracts/Data and Observation/Evidence scopes. Three additional P2 findings and one P3 timestamp-bookkeeping finding were reproduced and corrected before the user-approved commit:
+
+- Protocol mutation methods now share exception capture, rather than protecting only `noteWrite`: malformed original failure/exit notifications also latch STOPPED. Existing normal-progress guards remain closed after stop; valid original shutdown/result bookkeeping still obeys its narrow per-method gates.
+- Cohort mutation methods share exception capture too. A malformed or misbound case-completion notification retains the active original case as unknown, permanently stops the cohort and refuses a replacement completion or next case. Final metadata keeps that attempted case FAIL/unindexed and subsequent cases NOT_RUN; no slot is recovered from a repaired notification.
+- The window model records the first supplied stop in `first_stop_ns`. A known expired phase deadline bounds that timestamp, as does the cohort deadline, including late settlement entry and reporting-transition failures. The original settlement deadline is first-trigger plus 60000 ms, not a delayed call plus 60000 ms; entering after expiry refuses without renewing it. An unqualified clock cannot make that timestamp usable as live timing proof.
+
+Five further tests exposed the pre-correction failures and now pass. The final controller suite has 125 tests plus 10 source-boundary tests; the selected related suites total 507 passing tests, zero failures/skips. Both reviewers confirmed their fixes and reported no remaining actionable finding within their stated scopes. This is not validation of 4-B through 4-E or OS behavior.
+
+The user authorized the local commit of exactly four pure helpers, two tests and these two repository documents. No push, build, signing, native read, worker/observer execution, fixture or product-data operation, MCP registration, production activation or Dot restart is included. The existing 436 artifacts, protected runtime/native/package/config files and Dot PAUSED/config hash were checked unchanged. Judgment and notification conditions remain unchanged.
