@@ -4,6 +4,8 @@ Status: **C-C0 implemented and tested in memory only; C-C1/C-C2/C-C3 implementat
 
 C-C compares the disconnected joint reader with real synthetic-only native calls and independently prepared expectations. Its useful positive scope under the current budgets is a minimal signed enrollment witness, not a complete producer publication. A successful fixture test cannot enable MCP, Dot, history acceptance, execution or production. Dot stays PAUSED. Market/scenario/notification/mail rules, all resource ceilings and plan formulas, strictly-more-than-90-elapsed-day eligibility and elapsed-time-unknown holds remain unchanged.
 
+C-C1's proposed twelve-case scope, fresh unsigned fixture recipe and explicit cleanup approval are detailed in the [unsigned acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md), based on `35d29b9`. That document proposes C-C1a inert harness work before separately approved C-C1b execution; it does not authorize either step by itself.
+
 ## Approval Boundaries
 
 | Stage | Proposed implementation and execution scope | Still prohibited |

@@ -1,0 +1,280 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import module, { syncBuiltinESMExports } from "node:module";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+
+const effects = [], saved = [], originalRequire = module.createRequire, originalDlopen = process.dlopen;
+for (const name of ["writeFileSync", "mkdirSync", "mkdtempSync", "unlinkSync", "rmdirSync", "rmSync", "renameSync", "chmodSync", "symlinkSync", "linkSync"]) {
+  saved.push([name, fs[name]]); fs[name] = () => { effects.push(name); throw Error("cc1a_io_forbidden"); };
+}
+const open = fs.openSync;
+const sourceRoots = ["../helpers/", "../../node_modules/"].map((p) => fileURLToPath(new URL(p, import.meta.url)));
+const runnerSource = fileURLToPath(new URL("../../native/native_bar_fs/test_joint_admission.mjs", import.meta.url));
+saved.push(["openSync", open]);
+fs.openSync = (file, flags, ...rest) => {
+  const p = resolve(file instanceof URL ? fileURLToPath(file) : String(file));
+  if ((flags === "r" || flags === 0) && (sourceRoots.some((root) => p.startsWith(root)) || p === runnerSource)) return open(file, flags, ...rest);
+  effects.push("openSync"); throw Error("cc1a_io_forbidden");
+};
+module.createRequire = (...args) => new Proxy(originalRequire(...args), { apply(target, self, args) {
+  if (/\.node$/.test(String(args[0]))) { effects.push("native_require"); throw Error("cc1a_native_forbidden"); }
+  return Reflect.apply(target, self, args);
+} });
+process.dlopen = () => { effects.push("dlopen"); throw Error("cc1a_native_forbidden"); };
+syncBuiltinESMExports();
+test.after(() => { for (const [name, f] of saved) fs[name] = f; module.createRequire = originalRequire; process.dlopen = originalDlopen;
+  syncBuiltinESMExports(); assert.deepEqual(effects, []); });
+const api = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
+const request = () => ({ schema: "native-bar-unsigned-acceptance-request-v1", stage: "C-C1a", run_id: "invented-run",
+  source_commit: "a".repeat(40), patch_sha256: "b".repeat(64) });
+const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+function fixture(case_id = "u1-unsigned", mode = "normal") {
+  return { request: request(), case_id, mode, fixture_name: "native-bar-fs-synthetic-Ab123Z",
+    ids: { fixture: id(1), store: id(2), epoch: id(3), authority: id(4), key: id(5), reference: id(6), extra: id(7) } };
+}
+test("C-C1a freezes twelve cases in both modes without creating a fixture or an execution grant", () => {
+  const input = request(), plan = api.describeUnsignedAcceptanceRun(input); input.run_id = "changed";
+  assert.equal(plan.declaration.run_id, "invented-run");
+  assert.equal(plan.cases.length, 24); assert.equal(new Set(plan.cases.map((c) => c.case_id)).size, 12);
+  assert.deepEqual(plan.modes, ["normal", "ubsan"]); assert.equal(plan.anchor, "/private/tmp");
+  assert.equal(plan.execution_available, false); assert.equal(plan.native_status, "NOT_RUN");
+  assert.equal(plan.limits.maximum_live_fixtures, 1); assert.equal(plan.limits.ancestor_headroom_bytes, "196608");
+  assert.ok(Object.isFrozen(plan.cases[0]));
+});
+test("C-C1a prepares only the fixed small unsigned recipes and keeps U4's input change separate", () => {
+  const plan = api.describeUnsignedAcceptanceRun(request());
+  for (const c of plan.cases.filter((c) => c.mode === "normal")) {
+    const r = api.describeUnsignedFixture(fixture(c.case_id));
+    assert.ok(r.entries.length <= 16); assert.ok(r.content_bytes <= 131072);
+    assert.deepEqual(r.entries.filter((e) => e.path && !e.path.includes("/")).map((e) => e.path).sort(),
+      [".native-bar-admission-synthetic", ".native-bar-fs-synthetic", "admission-witness", "store"]);
+    assert.deepEqual(r.entries.filter((e) => e.path.startsWith("admission-witness/")).map((e) => e.path.slice(18)), c.witnesses);
+    assert.equal(r.binding_delta, c.row === "U4" ? "data_inode_only" : "none");
+    for (const e of r.entries) if (e.kind === "file") {
+      assert.equal(e.mode, "33152"); assert.equal(e.size, String(Buffer.byteLength(e.content))); assert.doesNotMatch(e.content, /signature|BEGIN .*KEY/);
+    }
+    assert.equal(r.ownership_verified, false); assert.ok(Object.isFrozen(r.entries));
+  }
+  const changed = fixture(); changed.ids.store = changed.ids.fixture;
+  assert.throws(() => api.describeUnsignedFixture(changed), /identity_alias/);
+});
+const proofFor = (entry, n) => ({ path: entry.path, proof: { kind: entry.kind, device: "1", inode: String(n + 100), uid: "501", gid: "20",
+  mode: entry.mode, birthtime_ns: "123", flags: "0", acl: "none", acl_hash: "c".repeat(64), nlink: entry.kind === "file" ? "1" : "2",
+  size: entry.size ?? "96", sha256: entry.sha256 ?? null } });
+const baselineResources = () => ({ fds: "0", roots: "0", workspace: "0" });
+function ownership(case_id = "u1-unsigned", baseline = baselineResources()) {
+  const f = fixture(case_id), r = api.describeUnsignedFixture(f);
+  const model = api.createUnsignedOwnershipModel({ fixture: f, supervisor_id: "supervisor-1", worker_id: "worker-1", uid: "501", gid: "20", baseline_resources: baseline });
+  const entries = r.entries.map(proofFor);
+  for (const entry of entries) model.recordCreation(entry);
+  model.finishSetup();
+  return { model, entries };
+}
+function cleanup(entries, changes = {}) {
+  return { entries, supervisor: "live", worker: "live", ancestor_chain: "same", receipt: "complete", query: "settled",
+    native: "settled", original_operation_retired: true, query_released: true,
+    resources: { fds_before: "0", fds_after: "0", roots_before: "0", roots_after: "0", workspace_before: "0", workspace_after: "0" },
+    fixture_absent: false, ...changes };
+}
+test("C-C1a models exact deepest-first removal with immutable ownership but grants no deletion authority", () => {
+  const { model, entries } = ownership("u3-maintenance"); let remaining = structuredClone(entries); const removed = [];
+  while (remaining.length) {
+    const assessed = model.assessCleanup(cleanup(remaining));
+    assert.equal(assessed.decision, "supplied_next_entry"); assert.equal(assessed.cleanup_execution_available, false);
+    const path = assessed.next_entry.path;
+    model.recordRemoval({ observation: cleanup(remaining), path, outcome: "removed", receipt_write: "confirmed" });
+    remaining = remaining.filter((e) => e.path !== path); removed.push(path);
+  }
+  assert.equal(removed.at(-1), "");
+  assert.ok(removed.indexOf("store/maintenance") > removed.findIndex((p) => p.endsWith(`${id(7)}.json`)));
+  assert.equal(model.assessCleanup(cleanup([], { fixture_absent: true })).decision, "supplied_complete");
+  assert.equal(model.describe().native_status, "NOT_RUN"); assert.deepEqual(model.describe().removed_paths, removed);
+});
+function negative(case_id = "u1-unsigned") {
+  const run = api.describeUnsignedAcceptanceRun(request()), c = run.cases.find((c) => c.case_id === case_id);
+  const phases = ["native_begin", "c0_dispatch"];
+  if (c.owner === "fixed_memory") phases.push("c0_authenticated", "open_pair");
+  if (c.owner === "fixed_memory" && c.row !== "U4") phases.push("inventory");
+  if (c.row === "U1") phases.push("witness_capture");
+  return { request: request(), case_id, mode: "normal", plan_sha256: run.plan_sha256, expected_layer: c.expected_layer,
+    observed_code: c.expected_code, phases, requests_dispatched: 1, authenticated_requests: c.owner === "fixed_memory" ? 1 : 0,
+    capture_matches_setup: c.row === "U1", markers_zero_unreadable: c.owner === "fixed_memory" && c.row !== "U4",
+    original_operation_retired: true, query_released: true, resources_at_baseline: true, teardown: "confirmed" };
+}
+test("C-C1a compares supplied negative traces but cannot turn even consistent data into a native PASS", () => {
+  for (const c of api.describeUnsignedAcceptanceRun(request()).cases.filter((c) => c.mode === "normal")) {
+    const r = api.assessUnsignedNegativeModel(negative(c.case_id));
+    assert.equal(r.model_status, "consistent_supplied_negative"); assert.equal(r.native_status, "NOT_RUN");
+    assert.equal(r.execution_available, false); assert.equal(r.view_verified, false);
+  }
+  const o = negative(); o.phases.push("v0");
+  assert.equal(api.assessUnsignedNegativeModel(o).model_status, "inconsistent_supplied_negative");
+  const r = negative(); r.teardown = "unconfirmed";
+  assert.equal(api.assessUnsignedNegativeModel(r).model_status, "inconsistent_supplied_negative");
+});
+test("C-C1a's inert harness only inspects; no flag, token or direct execute call can unlock native work", async () => {
+  const harness = await import("../helpers/jointUnsignedHarness.mjs");
+  const args = ["--inspect", "--stage", "C-C1a", "--run-id", "invented-run", "--source-commit", "a".repeat(40), "--patch-sha256", "b".repeat(64)];
+  assert.equal(harness.inspectUnsignedHarness(args).cases.length, 24);
+  for (const bad of [[], [...args, "--execute"], args.map((s) => s === "C-C1a" ? "C-C1b" : s), ["--approved", ...args]])
+    assert.throws(() => harness.inspectUnsignedHarness(bad), /cc1a_/);
+  for (const raw of [undefined, request(), { approved: true, stage: "C-C1b" }, { token: {} }])
+    await assert.rejects(harness.executeUnsignedHarness(raw), /cc1a_execution_not_approved/);
+});
+for (const [name, change] of [
+  ["lost supervisor", (o) => { o.supervisor = "lost"; }], ["lost worker", (o) => { o.worker = "lost"; }],
+  ["unknown chain", (o) => { o.ancestor_chain = "unknown"; }], ["changed chain", (o) => { o.ancestor_chain = "changed"; }],
+  ["receipt failure", (o) => { o.receipt = "failed"; }], ["unconfirmed native", (o) => { o.native = "unconfirmed"; }],
+  ["unconfirmed query", (o) => { o.query = "unconfirmed"; }], ["unretired operation", (o) => { o.original_operation_retired = false; }],
+  ["zero counters without release", (o) => { o.query_released = false; }],
+  ["remaining native FD", (o) => { o.resources.fds_after = "1"; }], ["remaining root", (o) => { o.resources.roots_after = "2"; }],
+  ["remaining workspace", (o) => { o.resources.workspace_after = "4096"; }],
+  ["missing entry", (o) => { o.entries.pop(); }], ["extra entry", (o) => { o.entries.push({ ...o.entries[0], path: "unowned" }); }],
+  ["duplicate entry", (o) => { o.entries[1] = o.entries[0]; }], ["changed root", (o) => { o.entries[0].proof.inode = "999"; }],
+  ["changed owner", (o) => { o.entries[1].proof.uid = "502"; }], ["changed device", (o) => { o.entries[1].proof.device = "2"; }],
+  ["changed ACL", (o) => { o.entries[1].proof.acl_hash = "d".repeat(64); }],
+  ["changed file", (o) => { o.entries.find((e) => e.proof.kind === "file").proof.sha256 = "d".repeat(64); }],
+]) test(`C-C1a holds on ${name} and never clears the stop on a later good observation`, () => {
+  const { model, entries } = ownership(), o = cleanup(structuredClone(entries)); change(o);
+  assert.equal(model.assessCleanup(o).decision, "hold");
+  assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold"); assert.notEqual(model.describe().stopped, null);
+});
+test("C-C1a permits only a supplied never-started rollback after setup abort", () => {
+  const f = fixture(), r = api.describeUnsignedFixture(f), model = api.createUnsignedOwnershipModel({ fixture: f,
+    supervisor_id: "supervisor-1", worker_id: "worker-1", uid: "501", gid: "20", baseline_resources: baselineResources() });
+  const entry = proofFor(r.entries[0], 0); model.recordCreation(entry); model.abortSetup();
+  const o = cleanup([entry], { worker: "never_started", query: "never_started", native: "never_started", original_operation_retired: false, query_released: false });
+  assert.equal(model.assessCleanup(o).decision, "supplied_next_entry");
+  model.recordRemoval({ observation: o, path: "", outcome: "removed", receipt_write: "confirmed" });
+  assert.equal(model.assessCleanup({ ...o, entries: [], fixture_absent: true }).decision, "supplied_complete");
+});
+test("C-C1a creation receipts stop on unrecorded or unsafe creations instead of adopting an observed tree", () => {
+  for (const change of [(e) => { e.path = "../outside"; }, (e) => { e.proof.uid = "502"; }, (e) => { e.proof.inode = "100"; },
+    (e) => { e.proof.flags = "1"; }, (e) => { e.proof.acl = "allow"; }, (e) => { e.proof.nlink = "2"; },
+    (e) => { e.proof.size = "999"; }, (e) => { e.proof.sha256 = "f".repeat(64); }]) {
+    const f = fixture(), r = api.describeUnsignedFixture(f), model = api.createUnsignedOwnershipModel({ fixture: f,
+      supervisor_id: "s", worker_id: "w", uid: "501", gid: "20", baseline_resources: baselineResources() });
+    model.recordCreation(proofFor(r.entries[0], 0));
+    for (let i = 1; i < 3; i++) model.recordCreation(proofFor(r.entries[i], i));
+    const e = proofFor(r.entries[3], 3); change(e); assert.throws(() => model.recordCreation(e), /cc1a_/);
+    assert.equal(model.describe().entries.length, 3); assert.notEqual(model.describe().stopped, null);
+  }
+});
+test("C-C1a rejects a replayed receipt and out-of-order removal rather than minting cleanup authority", () => {
+  const { model, entries } = ownership();
+  assert.throws(() => api.createUnsignedOwnershipModel(model.describe()), /cc1a_invalid_input/);
+  assert.throws(() => model.recordRemoval({ observation: cleanup(entries), path: "", outcome: "removed", receipt_write: "confirmed" }), /removal_order/);
+  assert.deepEqual(model.describe().removed_paths, []); assert.notEqual(model.describe().stopped, null);
+});
+for (const [outcome, receipt_write] of [["missing", "confirmed"], ["changed", "confirmed"], ["error", "confirmed"], ["removed", "failed"]])
+  test(`C-C1a retains partial cleanup on ${outcome}/${receipt_write} with no retry`, () => {
+    const { model, entries } = ownership(), observation = cleanup(entries), next = model.assessCleanup(observation).next_entry.path;
+    const before = model.describe(); model.recordRemoval({ observation, path: next, outcome, receipt_write });
+    assert.equal(model.describe().removed_paths.includes(next), outcome === "removed");
+    assert.equal(model.assessCleanup(observation).decision, "hold"); assert.equal(before.history.length + 1, model.describe().history.length);
+    assert.throws(() => model.recordRemoval({ observation, path: next, outcome: "removed", receipt_write: "confirmed" }), /model_stopped/);
+  });
+test("C-C1a tolerates directory size/link changes from owned child work, never immutable identity changes", () => {
+  const { model, entries } = ownership(), changed = structuredClone(entries);
+  for (const e of changed) if (e.proof.kind === "directory") { e.proof.size = "2048"; e.proof.nlink = "5"; }
+  assert.equal(model.assessCleanup(cleanup(changed)).decision, "supplied_next_entry");
+  changed[0].proof.birthtime_ns = "124"; assert.equal(model.assessCleanup(cleanup(changed)).decision, "hold");
+});
+for (const [name, change] of [
+  ["native stage", (m) => { m.stage = "C-C1b"; }], ["path override", (m) => { m.path = "/private/tmp/x"; }],
+  ["backend", (m) => { m.backend = {}; }], ["clock", (m) => { m.clock = {}; }], ["grant", (m) => { m.grant = {}; }],
+  ["approval", (m) => { m.approved = true; }], ["case override", (m) => { m.cases = []; }], ["mode override", (m) => { m.mode = "common"; }],
+  ["extra signature", (m) => { m.signature_hex = "0".repeat(128); }], ["limits", (m) => { m.limits = {}; }],
+  ["getter", (m) => { Object.defineProperty(m, "stage", { enumerable: true, get() { throw Error("getter_called"); } }); }],
+  ["cyclic data", (m) => { m.cycle = m; }], ["hidden data", (m) => { Object.defineProperty(m, "secret", { value: true }); }],
+]) test(`C-C1a rejects ${name} in a plan`, () => {
+  const m = request(); change(m); assert.throws(() => api.describeUnsignedAcceptanceRun(m), /cc1a_/);
+});
+test("C-C1a binds every declaration and returns detached immutable reports", () => {
+  const m = request(), a = api.describeUnsignedAcceptanceRun(m); m.patch_sha256 = "e".repeat(64);
+  assert.notEqual(api.describeUnsignedAcceptanceRun(m).plan_sha256, a.plan_sha256);
+  assert.equal(api.describeUnsignedAcceptanceRun(Object.fromEntries(Object.entries(request()).reverse())).plan_sha256, a.plan_sha256);
+  const n = negative(); n.plan_sha256 = "e".repeat(64); assert.throws(() => api.assessUnsignedNegativeModel(n), /plan_binding/);
+  const o = negative(), r = api.assessUnsignedNegativeModel(o); o.phases.length = 0;
+  assert.ok(r.supplied_observation.phases.length); assert.throws(() => r.supplied_observation.phases.pop(), TypeError);
+});
+test("C-C1a rejects invented positive facts on paths that never captured bytes or inventoried markers", () => {
+  const o = negative("u0-unavailable"); o.capture_matches_setup = true; o.markers_zero_unreadable = true;
+  assert.equal(api.assessUnsignedNegativeModel(o).model_status, "inconsistent_supplied_negative");
+});
+test("C-C1a cases agree with C-C0's corrected refusal vocabulary without unlocking its ledger", async () => {
+  const { describeJointAcceptancePlan } = await import("../helpers/jointAcceptanceContracts.mjs");
+  const plan = api.describeUnsignedAcceptanceRun(request());
+  const c0 = describeJointAcceptancePlan({ schema: "native-bar-joint-acceptance-plan-v1", run_id: "check-vocabulary", stage: "C-C1",
+    source: { commit: "a".repeat(40), patch_sha256: "b".repeat(64) }, build: { mode: "normal", profile: "synthetic-only-protocol-6", source_sha256: "c".repeat(64), addon_sha256: null },
+    ownership: { anchor: "private_tmp", creation: "exclusive_new", teardown: "receipt_bounded_node", ancestor_headroom_bytes: "196608" },
+    cases: plan.cases.filter((c) => c.mode === "normal").map((c) => ({ case_id: c.case_id, row: c.row, expected_layer: c.expected_layer,
+      expected_code: c.expected_code.slice(5), envelope_sha256: "d".repeat(64) })) });
+  assert.equal(c0.cases.length, 12); assert.equal(c0.execution_available, false);
+  assert.ok(c0.cases.every((c) => c.required_stage === "C-C1"));
+});
+test("C-C1a recipe bytes bind the v6 markers/profile and independent SHA-256 expectations", () => {
+  for (const case_id of ["u1-unsigned", "u2-extra", "u3-maintenance", "u4-expected-inode"]) {
+    const r = api.describeUnsignedFixture(fixture(case_id));
+    for (const e of r.entries.filter((e) => e.kind === "file")) assert.equal(e.sha256, createHash("sha256").update(e.content).digest("hex"));
+    const policy = r.entries.find((e) => e.path === "store/policy.json"), marker = JSON.parse(r.entries.find((e) => e.path === ".native-bar-admission-synthetic").content);
+    assert.equal(policy.content, '{"schema":"native-bar-synthetic-admission-profile-v6"}'); assert.equal(marker.policy_hash, policy.sha256);
+    assert.equal(marker.fixture_id, id(1)); assert.equal(marker.store_id, id(2));
+    assert.equal(r.entries.find((e) => e.path === ".native-bar-fs-synthetic").size, "21");
+  }
+});
+test("C-C1a rejects malformed ownership observations and has no persisted-receipt recovery or execution surface", () => {
+  for (const change of [(o) => { o.entries[0].proof.kind = "symlink"; }, (o) => { o.entries[0].proof.flags = "1"; },
+    (o) => { o.entries[0].proof.acl = "allow"; }, (o) => { Object.defineProperty(o, "query", { enumerable: true, get() { throw Error("getter_called"); } }); }]) {
+    const { model, entries } = ownership(), o = cleanup(structuredClone(entries)); change(o);
+    assert.throws(() => model.assessCleanup(o), /cc1a_/); assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold");
+    assert.equal(model.describe().cleanup_execution_available, false);
+    for (const key of ["run", "execute", "restore", "loadReceipt", "cleanup", "beginRead"]) assert.equal(key in model, false);
+  }
+});
+test("C-C1a's runner import is inert and native-stage arguments remain rejected", async () => {
+  const { inspectJointAdmissionArguments } = await import("../../native/native_bar_fs/test_joint_admission.mjs");
+  assert.throws(() => inspectJointAdmissionArguments([]), /cc1a_/);
+  assert.throws(() => inspectJointAdmissionArguments(["--execute", "--stage", "C-C1b"]), /cc1a_/);
+});
+test("C-C1a cannot rewrite both resource samples to conceal a changed original baseline", () => {
+  const { model, entries } = ownership(), o = cleanup(entries);
+  o.resources = { fds_before: "1", fds_after: "1", roots_before: "2", roots_after: "2", workspace_before: "4096", workspace_after: "4096" };
+  assert.equal(model.assessCleanup(o).decision, "hold");
+  assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold");
+});
+test("C-C1a latches the final absence uncertainty instead of accepting a later self-reported recovery", () => {
+  const { model, entries } = ownership(); let remaining = [...entries];
+  while (remaining.length) {
+    const observation = cleanup(remaining), path = model.assessCleanup(observation).next_entry.path;
+    model.recordRemoval({ observation, path, outcome: "removed", receipt_write: "confirmed" });
+    remaining = remaining.filter((e) => e.path !== path);
+  }
+  assert.equal(model.assessCleanup(cleanup([])).decision, "hold");
+  assert.equal(model.describe().stopped, "absence_unconfirmed");
+  assert.equal(model.assessCleanup(cleanup([], { fixture_absent: true })).decision, "hold");
+});
+for (const key of ["fds", "roots", "workspace"]) test(`C-C1a binds the original ${key} sample independently`, () => {
+  const { model, entries } = ownership(), o = cleanup(entries);
+  o.resources[`${key}_before`] = o.resources[`${key}_after`] = "1";
+  const assessed = model.assessCleanup(o);
+  assert.equal(assessed.decision, "hold"); assert.equal(assessed.reason, "resource_baseline_changed");
+});
+test("C-C1a detaches an explicit nonzero baseline and never silently assumes zero", () => {
+  const initial = { fds: "3", roots: "2", workspace: "4096" }, { model, entries } = ownership("u1-unsigned", initial);
+  initial.fds = "9";
+  assert.deepEqual(model.describe().baseline_resources, { fds: "3", roots: "2", workspace: "4096" });
+  assert.ok(Object.isFrozen(model.describe().baseline_resources));
+  const o = cleanup(entries);
+  for (const [key, value] of Object.entries(model.describe().baseline_resources)) o.resources[`${key}_before`] = o.resources[`${key}_after`] = value;
+  assert.equal(model.assessCleanup(o).decision, "supplied_next_entry");
+  assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold");
+});
+test("C-C1a requires an explicit baseline rather than reconstructing one from cleanup observations", () => {
+  const raw = { fixture: fixture(), supervisor_id: "s", worker_id: "w", uid: "501", gid: "20" };
+  assert.throws(() => api.createUnsignedOwnershipModel(raw), /cc1a_invalid_input/);
+  assert.throws(() => api.createUnsignedOwnershipModel({ ...raw, baseline_resources: { fds: "0", roots: "0" } }), /cc1a_invalid_input/);
+});
