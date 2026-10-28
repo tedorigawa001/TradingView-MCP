@@ -8,7 +8,7 @@ const uuid = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0
 const canonical = (v) => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v && typeof v === "object"
   ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}` : JSON.stringify(v);
 const sha = (b) => createHash("sha256").update(b).digest("hex");
-const proof = z.object({ device: uint, inode: uint, uid: uint, gid: uint, mode: uint, flags: uint, birthtime_ns: uint,
+const proof = z.object({ device: uint, inode: uint, uid: uint, gid: uint, mode: uint, flags: uint.refine((v) => BigInt(v) <= 4294967295n), birthtime_ns: uint,
   acl: z.enum(["none", "deny_only"]), acl_hash: hash }).strict();
 const directory = proof.extend({ mode: z.literal("16832"), flags: z.literal("0") }).strict();
 const marker = proof.extend({ mode: z.literal("33152"), flags: z.literal("0"), nlink: z.literal("1"), size: uint, sha256: hash }).strict();
@@ -72,6 +72,17 @@ export function validateUnsignedWorkerConfiguration(input) {
     || ["producer_mirrors", "payloads", "receipts"].some((k) => e.objects[k] !== "0")
     || [e.selected_bytes, e.decoded_bytes, e.interpretation_bytes].includes("0")
     || Object.values(e.inventory).some((v) => BigInt(v.metadata_bytes) > BigInt(v.inventory_bytes))) refuse();
+  // C-A's object_bound and control_bound rules, so an envelope the worker's C-A validator would refuse already stops at PREPARE.
+  const caps = { witness_records: 16384n, producer_mirrors: 8192n, payloads: 1048576n, receipts: 16384n, maintenance_metadata: 65536n };
+  const count = Object.values(e.objects).reduce((n, v) => n + BigInt(v), 0n);
+  const selected = Object.entries(caps).reduce((n, [k, cap]) => n + BigInt(e.objects[k]) * cap, 0n);
+  const policy = BigInt(Buffer.byteLength(canonical({ schema: "native-bar-synthetic-admission-profile-v6" })));
+  const markers = BigInt(r.bindings.markers.base.size) + BigInt(r.bindings.markers.admission.size);
+  if (BigInt(e.objects.witness_records) > BigInt(e.inventory.witness.entries) || count - BigInt(e.objects.witness_records) + 1n > BigInt(e.inventory.data.entries)
+    || BigInt(e.selected_bytes) < count || BigInt(e.selected_bytes) > selected
+    || BigInt(e.inventory.common.entries) < BigInt(r.bindings.ancestors.length + 5) || BigInt(e.inventory.data.entries) < 1n
+    || BigInt(e.inventory.data.inventory_bytes) < policy || BigInt(e.inventory.data.metadata_bytes) < policy
+    || BigInt(e.inventory.common.inventory_bytes) < markers || BigInt(e.inventory.common.metadata_bytes) < markers) refuse();
   return freeze({ schema: "native-bar-unsigned-worker-configuration-model-v1", configuration: c, supplied_binding_consistent: true,
     execution_available: false, native_status: "NOT_RUN", ownership_verified: false, signing_available: false });
 }

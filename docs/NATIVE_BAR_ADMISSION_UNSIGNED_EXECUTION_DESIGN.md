@@ -252,7 +252,7 @@ C-C1a's cause, ownership, child-listing and teardown model remains the authority
 
 - `native/native_bar_fs/admission_unsigned_observer.cc` is a new standalone macOS observer source, not an addon include or an extension of the legacy observer. Fixed selectors choose only the twelve recipes under `/private/tmp`: anchor, owned entry, bounded inventory or exact-basename absence. Anchor inspection needs no future basename. No caller path, directory discovery outside the owned recipe, content decoding, writer or signing interface exists. Reads use no-follow FD/path checks, independent getattrlist/ACL/volume APIs, two content passes, two ACL observations per node and checked charged-work/output bounds. Unknown names, unsafe ACLs, unstable identities and unsupported volumes refuse. Partial inventory reports known missing indices; it does not call them successful removals. Actual root group/ancestor flags are observed, not replaced with the process group or an assumed zero. Child group/device/owner stays bound to the observed root.
 - `unsignedAdapterSupport.mjs` contains memory-only byte framing, partial-write/readback cursors, fixed observer selectors, strict supplied-response inspection and digest-only unexpected-output summaries. The decoder enforces 64 KiB including LF, 32 frames and fatal UTF-8 before any JSON parser. Observer JSON uses an exact JSON round trip to reject duplicate keys, then strict fields, index/identity/node/content/work checks. Unexpected worker output keeps at most an 8 KiB prefix in memory; summaries expose hashes/counts only, and a truncated prefix is never called a whole-output hash.
-- `unsignedWorkerConfiguration.mjs` defines the strict metadata-only configuration: original joint binding/registration plus work envelope. It binds the fixed anchor, original fixture/IDs, profile/marker bytes, public-vector fingerprint, root/ancestor identities, original content hashes and fixed per-case slots. Unknown fields, opaque handles, checkpoint/signature/key fields, alternate anchors, aliases, allow ACLs and enlarged work bounds refuse even if a caller recomputes hashes. Configuration has a conservative 60000-byte sub-bound inside the unchanged 64 KiB complete PREPARE frame. The original C-A validator is still required again inside the private worker; this schema is not a substitute for native qualification or complete C-A work accounting.
+- `unsignedWorkerConfiguration.mjs` defines the strict metadata-only configuration: original joint binding/registration plus work envelope. It binds the fixed anchor, original fixture/IDs, profile/marker bytes, public-vector fingerprint, internally consistent root/ancestor identities (binding them to a fresh observation stays the controller's check), original content hashes and fixed per-case slots. Unknown fields, opaque handles, checkpoint/signature/key fields, alternate anchors, aliases, allow ACLs and enlarged work bounds refuse even if a caller recomputes hashes. Configuration has a conservative 60000-byte sub-bound inside the unchanged 64 KiB complete PREPARE frame. The original C-A validator is still required again inside the private worker; this schema is not a substitute for native qualification or complete C-A work accounting.
 - `unsignedInertAdapters.mjs` exports only inspection and an unconditional `cc1b2_execution_not_approved` refusal. Private connection functions cover observer supervision, exclusive original-FD evidence writes/readback, fixed-recipe exclusive creation, original ownership-model checks/non-recursive removal, original bootstrap/owner/query preparation, cancellation and release/close diagnostics, cache-local NAPI logging delegation, and fixed worker-command output. No existing application or C-C1a entry imports them.
 - `native/native_bar_fs/test_unsigned_worker.mjs` refuses both its callable entry and direct invocation. No flag, environment setting, plan or receipt opens it. The default native build/test scripts and package scripts are unchanged and do not build or run the new sources.
 
@@ -290,3 +290,46 @@ Next: review these inert adapters, then obtain separate C-C1b-3 build approval a
 Added one memory regression and five source-boundary tests, each failing before its correction. The latter inspect code structure only; no fake native backend, child, filesystem fixture or cleanup was run. Fresh selected verification: C-C1b-2 **57 memory + 13 boundary**, existing selected **347**, total **417 passed, zero failed/skipped**. Eight direct JS syntax checks and `tsc --noEmit` passed; each test file ran directly with `--test-isolation=none`. C++ remains uncompiled, including no compiler syntax check. Actual FD closure, pipe supervision, ACL/volume behavior, observer accounting, nonblocking opens and teardown still require separately approved OS/native tests.
 
 Dot remains PAUSED and its full automation configuration hash is unchanged. Existing application/native/common-build/package/configuration bytes are unchanged; only the new unbuilt observer/worker native-directory sources are added. There is no execution unlock, child spawn, native build/load/read, fixture/signature/evidence-file creation, cleanup, real-data operation, MCP registration or production activation. Market/judgment/notification/mail/retention conditions stay unchanged. User-approved local commit disables hooks, signing and automatic maintenance; no push. Next is separately approved C-C1b-3 isolated build; live controller/dispatcher assembly and C-C1b-4 actual operations remain unapproved.
+
+## C-C1b-2 Independent Review And Corrections
+
+2026-10-28 JST: two read-only reviewers independently checked `9af3c6a`. Both confirmed that the public seal holds: no prepared run can be minted, and the public entries and worker entry always refuse. All findings were in currently unreachable private adapters, the observer source and the tests, and all failed closed. The corrections keep the seal and change no native, application or build entry.
+
+- **Observer refusal codes (medium).** The adapter turned any observer stderr into one generic failure, so an unsupported volume (BLOCKED) looked like a changed identity (FAIL). A pure `classifyUnsignedObserverExit` now keeps exactly one bounded `observer_<code>` line from an exit-1, no-stdout child as `cc1b2_observer_<code>`; anything else stays generic. At most 64 stderr bytes are held.
+- **Teardown and creation side effects (medium).**
+  - Each removal records `attempted`, then `removed` or a bounded errno, before any later journal write can fail, and removed indices are kept.
+  - Every created directory or file is recorded as owned the moment its creation succeeds, before its identity is read.
+  - A returned root whose creation result was never recorded journals its name in a C-C1b-1 stop summary, naming the evidence model's own refusal when there is one.
+  - Filesystem errors map to `cc1b2_fs_<errno>`.
+- **Latched provenance (medium).**
+  - Build-pin, evidence-qualification, observer/addon/worker-provenance and response-inspection failures now latch the run instead of refusing once. A matching later check cannot resume it.
+  - The worker checks only its own build pins.
+  - GO is spent before its checks, so a refused GO is never retried and always closes the bootstrap and restores the instrumentation facade.
+  - The anchor observation and receipt opening moved inside the latched creation scope.
+- **Configuration parity (medium).** The worker configuration now applies C-A's `object_bound` and `control_bound` rules and the 32-bit flag bound. A parity test runs the same envelope mutations through this validator and the compiled C-A planner and requires identical accept/refuse decisions. Enlarged or inconsistent envelopes therefore stop at PREPARE instead of failing later inside the worker.
+- **Observer source (low).**
+  - Every opened anchor or fixture component must match its exact on-disk name (`ATTR_CMN_NAME`, as the native reader's `aname()`), so a case variant on a case-insensitive volume refuses.
+  - Volume information comes from `fstatfs` on the opened anchor, and its capabilities are read at that volume's own root, bound by device. `getattrlist` defines `ATTR_VOL_*` only for a volume root.
+  - The observer emits a digest of its fixed recipe, and the inspection requires the Node plan's digest, so a C++/JS recipe drift refuses every response.
+  - These are source changes only: still not compiled, so SDK compatibility is for the C-C1b-3 build.
+- **Response inspection (low).** Entries must match their recipe kinds. An entry operation may report only the selected path's chain and only that index as missing. In an inventory, a missing parent hides its children and every directory listing equals its present recipe children.
+- **Supervision and errors (low).**
+  - Observer supervision attaches synchronously after spawn, with the window fixed before spawn.
+  - Worker preparation keeps the original failure primary, with close/restore failures beside it.
+  - The ownership model's baseline is the protocol's accepted original baseline.
+  - The cohort allows one observer child and one worker at a time. A retained child or fixture keeps its slot; only a confirmed removal or completed lifecycle frees it.
+  - Command writes have a deadline inside the original window.
+  - Adapter error codes keep `b3cc_*`, bare addon codes and errno names.
+  - The no-op `execArgv` spawn option is gone.
+- **Tests (medium).**
+  - Every observer response the walk can emit is accepted for all 24 case/mode pairs: anchor, absence, full and partial inventories, and every entry, present or missing. Single-field mutations of each inspection rule refuse.
+  - The C++ guard forbids the `*at`/`f*` mutation, ACL/attribute-setting, clone/copy and process-creation calls.
+  - The seal guard pins the top-level statement kinds, read-only `preparedRuns.get(...)` references and the worker entry's three statements. `preparedRuns["set"]`, `WeakMap.prototype.set.call(preparedRuns, ...)` and a top-level global assignment passed the old guard and fail the new one.
+
+Verification in a `git archive` copy of `9af3c6a` plus the change, on Node 24.18.0 without `--preserve-symlinks`, after `build:package` (no `.node` built):
+- 102 C-C1b-2 memory tests, 20 boundary tests, 158 C-C1b-1 tests, 122 C-C1a tests and 57 C-C0 tests passed in three runs and under linux/win32 platform spoofs.
+- The adapter suite also passed on Node 20.19.6 and 26.12.1.
+- The full unit suite passed 3,385 of 3,387 tests, with no failures and two pre-existing environment skips.
+- The original sources fail all 18 new rule tests.
+
+No compiler, observer, worker, native read, fixture, signature, cleanup or evidence file was run or created.

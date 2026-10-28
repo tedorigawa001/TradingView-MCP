@@ -89,13 +89,25 @@ export function describeUnsignedObserverRequest(input) {
     entry_index: z.number().int().min(0).max(15).nullable() }).strict(), input);
   const recipe = describeUnsignedFixture(d.operation === "anchor" ? { ...d.fixture, fixture_name: "native-bar-fs-synthetic-Plan00" } : d.fixture);
   if (d.operation === "entry" ? d.entry_index === null || d.entry_index >= recipe.entries.length : d.entry_index !== null) refuse("selector");
+  // The observer emits the same digest of its own fixed recipe, so a C++/JS recipe drift refuses every response.
+  const recipe_sha256 = createHash("sha256").update(recipe.entries.map((e) => `${e.kind === "directory" ? "d" : "f"} ${e.path}\n`).join("")).digest("hex");
   return freeze({ ...flags(), relative_program: `build/b3cc-validation/${recipe.declaration.mode}/admission-unsigned-observer`,
     argv: ["--observer-v1", d.operation, recipe.declaration.case_id, d.operation === "anchor" ? "-" : recipe.declaration.fixture_name,
       recipe.declaration.ids.extra, d.entry_index === null ? "-" : String(d.entry_index)], maximum_response_bytes: 65536,
-    maximum_work_bytes: 4194304, maximum_calls: 64, recipe_paths: recipe.entries.map((e) => e.path) });
+    maximum_work_bytes: 4194304, maximum_calls: 64, recipe_paths: recipe.entries.map((e) => e.path),
+    recipe_kinds: recipe.entries.map((e) => e.kind), recipe_sha256 });
+}
+// A failed observer writes exactly one bounded `observer_<code>` line to stderr and exits 1; anything else stays generic.
+export function classifyUnsignedObserverExit(input) {
+  const d = parse(z.object({ exit_code: z.number().int().min(0).max(255).nullable(), signal: z.string().regex(/^SIG[A-Z0-9]{1,12}$/).nullable(),
+    stdout_bytes: z.number().int().min(0), stderr: z.string().max(64) }).strict(), input);
+  if (d.exit_code === 0 && d.signal === null && d.stderr === "") return freeze({ ...flags(), decision: "response", code: null });
+  const refused = d.exit_code === 1 && d.signal === null && d.stdout_bytes === 0 && /^observer_[a-z_]{1,56}\n$/.test(d.stderr);
+  return freeze({ ...flags(), decision: "refused", code: refused ? `cc1b2_${d.stderr.slice(0, -1)}` : d.stderr ? "cc1b2_child_stderr" : "cc1b2_child_exit" });
 }
 
 const uint = z.string().regex(/^(0|[1-9][0-9]{0,29})$/), hash = z.string().regex(/^[a-f0-9]{64}$/);
+const canonicalNames = (names) => JSON.stringify([...names].sort());
 const proof = z.object({ kind: z.enum(["directory", "file"]), device: uint, inode: uint, uid: uint, gid: uint, mode: uint, flags: uint,
   birthtime_ns: uint, mtime_ns: uint, ctime_ns: uint, nlink: uint, size: uint, allocated_bytes: uint,
   acl: z.enum(["none", "deny_only"]), acl_hash: hash, sha256: hash.nullable() }).strict();
@@ -106,6 +118,7 @@ export function inspectUnsignedObserverResponse(request, line) {
   if (JSON.stringify(raw) + "\n" !== line) refuse("observer_response");
   const schema = z.object({ schema: z.literal("native-bar-unsigned-observer-v1"), case_id: z.literal(expected.argv[2]),
     operation: z.literal(expected.argv[1]), fixture_name: expected.argv[1] === "anchor" ? z.null() : z.literal(expected.argv[3]), extra: z.literal(expected.argv[4]),
+    recipe_sha256: z.literal(expected.recipe_sha256),
     ancestors: z.array(z.object({ path: z.enum(["/", "/private", "/private/tmp"]), proof }).strict()).length(3),
     entries: z.array(z.object({ index: z.number().int().min(0).max(15), proof, children: z.array(z.string().max(128)).max(16).nullable() }).strict()).max(16),
     missing: z.array(z.number().int().min(0).max(15)).max(16), absent: z.boolean(),
@@ -114,7 +127,21 @@ export function inspectUnsignedObserverResponse(request, line) {
   const d = parse(schema, raw), operation = expected.argv[1], recipe = expected.recipe_paths;
   if (d.ancestors.map((a) => a.path).join(",") !== "/,/private,/private/tmp" || BigInt(d.nodes) > 19n || BigInt(d.work_bytes) > 4194304n
     || BigInt(d.content_bytes) > 262144n || new Set(d.entries.map((e) => e.index)).size !== d.entries.length
-    || new Set(d.missing).size !== d.missing.length || d.entries.some((e) => e.index >= recipe.length || d.missing.includes(e.index))) refuse("observer_response");
+    || new Set(d.missing).size !== d.missing.length || d.entries.some((e) => e.index >= recipe.length || d.missing.includes(e.index))
+    || d.missing.some((i) => i >= recipe.length) || d.entries.some((e) => e.proof.kind !== expected.recipe_kinds[e.index])) refuse("observer_response");
+  // What the C++ walk can emit: an entry operation opens only the selected path's chain, and a missing parent hides its children.
+  const indexOf = (path) => recipe.indexOf(path), parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+  const chain = (i) => { const out = [i]; for (let p = recipe[i]; p !== ""; ) { p = parentOf(p); out.push(indexOf(p)); } return out; };
+  const present = new Set(d.entries.map((e) => e.index));
+  if (operation === "entry" && (d.entries.some((e) => !chain(Number(expected.argv[5])).includes(e.index))
+    || d.missing.some((i) => i !== Number(expected.argv[5])))) refuse("observer_response");
+  if (operation === "inventory") for (const e of d.entries) {
+    if (e.index !== 0 && !present.has(indexOf(parentOf(recipe[e.index])))) refuse("observer_response");
+    if (e.children) {
+      const listed = recipe.map((p, i) => [p, i]).filter(([p, i]) => p !== "" && parentOf(p) === recipe[e.index] && present.has(i)).map(([p]) => p.slice(p.lastIndexOf("/") + 1));
+      if (canonicalNames(e.children) !== canonicalNames(listed)) refuse("observer_response");
+    }
+  }
   if (BigInt(d.nodes) !== BigInt(d.entries.length + 3) || BigInt(d.work_bytes) < BigInt(d.content_bytes) + 65536n
     || d.ancestors.some((a) => a.proof.kind !== "directory" || a.proof.sha256 !== null)
     || BigInt(d.content_bytes) !== d.entries.filter((e) => e.proof.kind === "file").reduce((n, e) => n + 2n * BigInt(e.proof.size), 0n)) refuse("observer_response");

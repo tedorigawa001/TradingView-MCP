@@ -27,25 +27,36 @@ function pure(s, expectedImports, expectedExports) {
 const supportImports = [["node:crypto", ["createHash"]], ["zod", ["z"]], ["./jointUnsignedAcceptanceContracts.mjs", ["describeUnsignedFixture"]]];
 const configImports = [["node:crypto", ["createHash"]], ["zod", ["z"]], ["./jointUnsignedAcceptanceContracts.mjs", ["describeUnsignedFixture", "describeUnsignedAcceptanceRun"]]];
 test("C-C1b-2 byte/write/configuration helpers have only exact pure dependencies and bounded data exports", () => {
-  pure(support, supportImports, ["createUnsignedProtocolDecoder", "createUnsignedWriteCursor", "describeUnsignedObserverRequest", "inspectUnsignedObserverResponse", "createUnsignedOutputSummary"]);
+  pure(support, supportImports, ["createUnsignedProtocolDecoder", "createUnsignedWriteCursor", "describeUnsignedObserverRequest", "classifyUnsignedObserverExit",
+    "inspectUnsignedObserverResponse", "createUnsignedOutputSummary"]);
   pure(config, configImports, ["validateUnsignedWorkerConfiguration"]);
 });
 function sealed(s) {
   const tree = ast(s); assert.deepEqual(exported(tree), ["inspectUnsignedAdapters", "executeUnsignedAdapters"]);
   assert.deepEqual(imports(tree), [["node:crypto", ["createHash"]], ["./jointUnsignedAcceptanceContracts.mjs", ["describeUnsignedFixture", "describeUnsignedAcceptanceRun", "createUnsignedOwnershipModel"]],
     ["./unsignedExecutionContracts.mjs", ["createUnsignedExecutionEvidenceModel"]],
-    ["./unsignedAdapterSupport.mjs", ["createUnsignedProtocolDecoder", "createUnsignedWriteCursor", "describeUnsignedObserverRequest", "inspectUnsignedObserverResponse", "createUnsignedOutputSummary"]],
+    ["./unsignedAdapterSupport.mjs", ["createUnsignedProtocolDecoder", "createUnsignedWriteCursor", "describeUnsignedObserverRequest", "inspectUnsignedObserverResponse", "createUnsignedOutputSummary",
+      "classifyUnsignedObserverExit"]],
     ["./unsignedWorkerConfiguration.mjs", ["validateUnsignedWorkerConfiguration"]]]);
   const execute = tree.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === "executeUnsignedAdapters");
   assert.equal(execute.body.statements.length, 1); assert.equal(execute.body.statements[0].getText(), 'throw Error("cc1b2_execution_not_approved");');
   const privateNames = new Set(tree.statements.filter((n) => ts.isFunctionDeclaration(n) && !n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)).map((n) => n.name.text));
   const inspect = tree.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === "inspectUnsignedAdapters");
   walk(inspect, (n) => { if (ts.isIdentifier(n)) assert.equal(privateNames.has(n.text), false, n.text); });
+  // Top level holds only imports, function declarations and constant helpers or private maps: no call, assignment or alias leaks a run.
+  for (const n of tree.statements) {
+    assert.ok(ts.isImportDeclaration(n) || ts.isFunctionDeclaration(n) || ts.isVariableStatement(n), n.getText().slice(0, 60));
+    if (ts.isVariableStatement(n)) for (const d of n.declarationList.declarations)
+      assert.ok(ts.isArrowFunction(d.initializer) || ts.isNewExpression(d.initializer) && d.initializer.expression.getText() === "WeakMap", d.getText().slice(0, 60));
+  }
   function visit(n, root) {
     if (ts.isFunctionDeclaration(n)) root = n.name?.text;
     if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) assert.ok(privateNames.has(root), root);
-    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.expression.getText() === "preparedRuns")
-      assert.equal(n.expression.name.text, "get");
+    // The run map is only ever read: every reference outside its declaration is exactly preparedRuns.get(...).
+    if (ts.isIdentifier(n) && n.text === "preparedRuns" && !(ts.isVariableDeclaration(n.parent) && n.parent.name === n))
+      assert.ok(ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === "get" && ts.isCallExpression(n.parent.parent)
+        && n.parent.parent.expression === n.parent, n.parent.getText());
+    if (ts.isIdentifier(n)) assert.equal(["globalThis", "global", "eval", "Function"].includes(n.text), false, n.text);
     if (ts.isExportDeclaration(n) || ts.isExportAssignment(n)) assert.fail("re-export");
     ts.forEachChild(n, (c) => visit(c, root));
   }
@@ -55,12 +66,16 @@ function sealed(s) {
 test("C-C1b-2 live adapters have no exported caller, run-reference mint, signal or general deletion entry", () => sealed(live));
 test("C-C1b-2 boundary checks detect an unlocked entry, forged run mint and extra pure capability", () => {
   for (const change of [live.replace('throw Error("cc1b2_execution_not_approved");', "return prepareOriginalWorker();"),
-    live + "\nexport const leaked = createOriginalFixture;", live + "\npreparedRuns.set({}, {});", live + "\nimport('node:fs');"])
+    live + "\nexport const leaked = createOriginalFixture;", live + "\npreparedRuns.set({}, {});", live + "\nimport('node:fs');",
+    live + '\npreparedRuns["set"]({}, {});', live + "\nWeakMap.prototype.set.call(preparedRuns, {}, {});", live + "\nglobalThis.leak = createOriginalFixture;",
+    live + "\ncreateOriginalFixture({}, {});", live + "\nconst runs = preparedRuns;"])
     assert.throws(() => sealed(change));
   assert.throws(() => pure(support + "\nprocess.cwd();", supportImports, []));
 });
 test("C-C1b-2 worker entry is sealed in both imported and direct-entry source branches", async () => {
   const tree = ast(worker), f = tree.statements.find(ts.isFunctionDeclaration);
+  // Exactly the URL import, the sealed function and the sealed direct-entry branch: no other top-level work can run on import.
+  assert.equal(tree.statements.length, 3); assert.deepEqual(imports(tree), [["node:url", ["pathToFileURL"]]]);
   assert.deepEqual(exported(tree), ["runUnsignedWorker"]); assert.equal(f.body.statements.length, 1);
   assert.equal(f.body.statements[0].getText(), 'throw Error("cc1b2_execution_not_approved");');
   const run = vm.runInNewContext(`(async function() ${f.body.getText()})`); await assert.rejects(run({ approved: true }), /cc1b2_execution_not_approved/);
@@ -68,14 +83,16 @@ test("C-C1b-2 worker entry is sealed in both imported and direct-entry source br
   assert.doesNotMatch(worker, /unsignedInertAdapters|\.node|createRequire|spawn/);
 });
 test("C-C1b-2 sources keep the observer independent, fixed-path, read-only and bounded, without compiling it", () => {
-  assert.doesNotMatch(cpp, /#include\s*"|napi_|classifySynthetic|std::[io]fstream|\b(?:write|pwrite|unlink|rename|mkdir|rmdir|chmod|system|execv|fork)\s*\(|O_(?:CREAT|WRONLY|RDWR|TRUNC)/);
+  assert.doesNotMatch(cpp, /#include\s*"|napi_|classifySynthetic|std::[io]fstream|O_(?:CREAT|WRONLY|RDWR|TRUNC|APPEND)/);
+  // Every mutating, signalling or process-creating libc/Darwin call, including the *at and f* variants.
+  assert.doesNotMatch(cpp, /\b(?:write|pwrite|writev|unlink|unlinkat|rename|renameat|renamex_np|renameatx_np|mkdir|mkdirat|rmdir|chmod|fchmod|fchmodat|lchmod|chown|fchown|fchownat|lchown|truncate|ftruncate|acl_set_fd_np|acl_set_file|acl_set_link_np|setattrlist|fsetattrlist|setattrlistat|utimes|futimes|lutimes|futimens|utimensat|link|linkat|symlink|symlinkat|clonefile|clonefileat|fclonefileat|copyfile|fcopyfile|exchangedata|system|popen|posix_spawn|posix_spawnp|execv|execve|execvp|execl|fork|vfork|kill|mount|unmount)\s*\(/);
   for (const part of ["MAX_NODES = 19", "MAX_WORK = 4194304", "MAX_CONTENT = 131072", "MAX_ACL = 65536", "MAX_OUTPUT = 65536",
     "FSOPT_NOFOLLOW", "O_NOFOLLOW", "AT_SYMLINK_NOFOLLOW", "ACL_EXTENDED_DENY", "filesec_query_property", "pass < 2", "i < 256",
     '"/private/tmp"', '"observer_unexpected_name"', '"observer_final_path_changed"', "charge(MAX_OUTPUT)"])
     assert.ok(cpp.includes(part), part);
   assert.doesNotMatch(read("../../native/native_bar_fs/build.mjs"), /admission_unsigned_observer|test_unsigned_worker/);
   // Conservative subdivision of the unchanged 4 MiB charge ceiling; actual qualification needs the later native comparison.
-  assert.ok(19 * 2 * 65536 + 19 * 2 * 257 * 64 + 2 * 131072 + 19 * 32768 + 65536 <= 4194304);
+  assert.ok(19 * 2 * 65536 + 19 * 2 * 257 * 64 + 2 * 131072 + 19 * 32768 + 19 * 778 + 4096 + 65536 <= 4194304);
 });
 test("C-C1b-2 U4 changes only the supplied data inode and consequent registration hash, using invented metadata only", () => {
   const f = ast(live).statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === "deriveUnsignedCaseBinding");
@@ -138,4 +155,64 @@ test("C-C1b-2 observer output stream errors enter the same retained failure path
   const f = ast(live).statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === "collectOriginalChild").getText();
   assert.match(f, /for \(const stream of \[child\.stdout, child\.stderr\]\)/);
   assert.match(f, /stream\.on\("error", \(\) => fail\("cc1b2_child_pipe"\)\)/);
+});
+const fn = (name) => ast(live).statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === name).getText();
+test("C-C1b-2 observer source checks exact names, binds volume capabilities to the anchor's own volume root and reports its recipe digest", () => {
+  const open = cpp.slice(cpp.indexOf("Node* openNode("), cpp.indexOf("Node* owned("));
+  assert.ok(open.indexOf('onDiskName(node->fd.value) == name, "observer_exact_name"') > open.indexOf("openat("));
+  assert.match(cpp, /fgetattrlist\(fd, &a, &out, sizeof\(out\), 0\)/); assert.match(cpp, /a\.commonattr = ATTR_CMN_NAME/);
+  const volume = cpp.slice(cpp.indexOf("std::string volume("), cpp.indexOf("}  // namespace"));
+  assert.match(volume, /fstatfs\(anchor\.fd\.value, &fs\)/); assert.match(volume, /mounted\.st_dev == anchor\.initial\.st_dev/);
+  assert.match(volume, /attribute<vol_capabilities_attr_t>\(root, 0, ATTR_VOL_INFO \| ATTR_VOL_CAPABILITIES\)/);
+  assert.doesNotMatch(volume, /statfs\("\/private\/tmp"|attribute<vol_capabilities_attr_t>\("\/private\/tmp"/);
+  assert.match(cpp, /text \+= e\.directory \? "d " : "f "; text \+= e\.path; text \+= '\\n';/);
+  assert.match(cpp, /",\\"recipe_sha256\\":" \+ quote\(digest\)/);
+});
+test("C-C1b-2 adapter error codes keep contract, addon and errno causes bounded", () => {
+  let initializer;
+  walk(ast(live), (n) => { if (ts.isVariableDeclaration(n) && n.name.getText() === "errorCode") initializer = n.initializer.getText(); });
+  const code = vm.runInNewContext(`(${initializer})`, { Error });
+  for (const value of ["b3cc_test_mode_refused", "b3cb_native_refused", "native_session_limit", "session_expired", "unsafe_acl", "acl_entry_limit",
+    "admission_root_changed:5", "cc1b2_observer_volume_caps"]) assert.equal(code(new Error(value)), value);
+  assert.equal(code(Object.assign(new Error("EIO: i/o error, unlink '/private/tmp/x'"), { code: "EIO" })), "cc1b2_fs_eio");
+  for (const value of [new Error("/private/tmp/secret path"), new Error(`b3cb_${"a".repeat(100)}`), Object.assign(new Error("x"), { code: "eio" }), {}])
+    assert.equal(code(value), "cc1b2_unexpected_error");
+});
+test("C-C1b-2 provenance and qualification failures latch the run; GO is spent before its checks", () => {
+  for (const name of ["checkpoint", "workerCheckpoint"]) {
+    const f = fn(name); assert.match(f, /throw retain\(run, Error\("cc1b2_live_provenance_unconfirmed"\)\)/); assert.doesNotMatch(f, /refuse\(/);
+  }
+  assert.doesNotMatch(live, /refuse\("(?:live_provenance_unconfirmed|observer_provenance|addon_provenance|worker_provenance)"\)/);
+  const go = fn("prepareOriginalWorker"), body = go.slice(go.indexOf("async go()"));
+  assert.ok(body.indexOf("used = true") < body.indexOf("workerCheckpoint(run)"));
+  assert.ok(body.indexOf("try {") < body.indexOf("workerCheckpoint(run)"));
+});
+test("C-C1b-2 observer supervision attaches synchronously after spawn and keeps the observer's refusal code", () => {
+  const f = fn("observeOriginal"), between = f.slice(f.indexOf("spawn(program"), f.indexOf("const line = await collectOriginalChild("));
+  assert.doesNotMatch(between, /throw|await|refuse/);
+  assert.match(fn("collectOriginalChild"), /classifyUnsignedObserverExit\(\{ exit_code: code, signal, stdout_bytes: count, stderr: stderr\.toString\("latin1"\) \}\)/);
+  assert.match(f, /if \(cohort\.observerChild\) throw retain/);
+});
+test("C-C1b-2 worker preparation keeps the original failure primary and close failures beside it", () => {
+  const f = fn("prepareOriginalWorker");
+  assert.doesNotMatch(f, /finally \{ restore\(\); \}/);
+  assert.match(f, /\(run\.closeErrors \?\?= \[\]\)\.push\(\.\.\.closeAll\(\)\); throw e;/);
+});
+test("C-C1b-2 creation records each object as owned before proving it and journals an unrecorded root's name", () => {
+  const f = fn("createOriginalFixture");
+  const directory = f.slice(f.indexOf("fs.mkdirSync(path"));
+  assert.ok(directory.indexOf("live.created.push(record)") < directory.indexOf("record.identity = fs.lstatSync"));
+  const file = f.slice(f.indexOf("const fd = fs.openSync(path"));
+  assert.ok(file.indexOf("live.created.push(record)") < file.indexOf("record.identity = fs.fstatSync"));
+  assert.match(f, /journal\("stop_summary", \{ reason: model\.describe\(\)\.stop_reason \?\? run\.stopped, fixture_name: live\.name \}\)/);
+  assert.ok(f.indexOf('observeOriginal(runRef, allocation.fixture, "anchor")') > f.indexOf("try {"));
+});
+test("C-C1b-2 teardown records each side effect, uses the protocol baseline and frees the cohort slot only after confirmed removal", () => {
+  const f = fn("removeOriginalFixture");
+  assert.ok(f.indexOf("live.deleting = {") < f.indexOf("fs.unlinkSync(path)"));
+  assert.ok(f.indexOf("live.removed.push(entry_index)") < f.indexOf('journal("delete_result"'));
+  assert.match(f, /run\.protocol\.describe\(\)\.baseline\.resources/); assert.doesNotMatch(f, /run\.originalBaseline/);
+  assert.ok(f.indexOf("run.originalCohort.liveFixture = null") > f.indexOf('"supplied_complete"'));
+  assert.match(fn("superviseOriginalWorker"), /cohort\.liveWorker/); assert.doesNotMatch(fn("superviseOriginalWorker"), /execArgv/);
+  assert.match(fn("sendOriginalWorkerCommand"), /cc1b2_worker_pipe_timeout/);
 });

@@ -11,6 +11,8 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <cerrno>
+#include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -59,6 +61,16 @@ template<class T> T attribute(const std::string& path, attrgroup_t common, attrg
   uint32_t n; std::memcpy(&n, bytes, 4); check(n == sizeof(T) + 4, "observer_attribute_size");
   T out; std::memcpy(&out, bytes + 4, sizeof(out)); return out;
 }
+// The on-disk spelling of an opened object. On a case-insensitive volume a case variant opens the same object, so only this
+// comparison keeps the anchor and fixture components exact (as the native reader's aname()).
+std::string onDiskName(int fd) {
+  attrlist a{}; a.bitmapcount = ATTR_BIT_MAP_COUNT; a.commonattr = ATTR_CMN_NAME;
+  struct { uint32_t length; attrreference_t ref; char buffer[NAME_MAX * 3 + 1]; } __attribute__((packed)) out{};
+  charge(sizeof(out)); check(fgetattrlist(fd, &a, &out, sizeof(out), 0) == 0, "observer_name_unavailable");
+  const auto offset = static_cast<size_t>(offsetof(decltype(out), ref)) + out.ref.attr_dataoffset;
+  check(out.ref.attr_length >= 1 && offset + out.ref.attr_length <= sizeof(out), "observer_name_unavailable");
+  const char* name = reinterpret_cast<const char*>(&out) + offset; return std::string(name, strnlen(name, out.ref.attr_length));
+}
 std::pair<std::string, std::string> acl(int fd) {
   const auto before = status(fd); charge(512);
   acl_t a = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
@@ -97,6 +109,11 @@ std::vector<Entry> recipe(const std::string& c, const std::string& extra) {
   if (c == "u3-reserve") r.push_back({"store/.quarantine-reserve-" + extra + ".tmp", false});
   if (c == "u3-maintenance" || c == "u3-maintenance-bound") { r.push_back({"store/maintenance", true}); r.push_back({"store/maintenance/" + extra + ".json", false}); }
   check(r.size() <= 16, "observer_recipe_bound"); return r;
+}
+// The same digest the Node plan computes from its recipe, so a drift between the two refuses every response.
+std::string recipeDigest(const std::vector<Entry>& r) {
+  std::string text; for (const auto& e : r) { text += e.directory ? "d " : "f "; text += e.path; text += '\n'; }
+  charge(text.size()); return hash(text);
 }
 std::string parent(const std::string& path) { const auto p = path.rfind('/'); return p == std::string::npos ? "" : path.substr(0, p); }
 std::string leaf(const std::string& path) { return path.substr(path.rfind('/') == std::string::npos ? 0 : path.rfind('/') + 1); }
@@ -167,7 +184,8 @@ Node* openNode(const std::string& key, const std::string& absolute, int pfd, con
   check(directory ? S_ISDIR(before.st_mode) : S_ISREG(before.st_mode), "observer_type");
   const int fd = openat(pfd, name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (directory ? O_DIRECTORY : 0));
   auto node = std::make_unique<Node>(fd, absolute, owned, directory);
-  check(identity(before, node->initial), "observer_open_changed"); observe(*node, owned ? key : "");
+  check(identity(before, node->initial), "observer_open_changed");
+  check(onDiskName(node->fd.value) == name, "observer_exact_name"); observe(*node, owned ? key : "");
   Node* result = node.get(); opened.emplace(key, std::move(node)); return result;
 }
 Node* owned(size_t index) {
@@ -177,10 +195,15 @@ Node* owned(size_t index) {
   check(pi < entries.size() && entries[pi].directory, "observer_recipe_parent"); Node* pn = owned(pi); if (!pn) return nullptr;
   return openNode(e.path, base + "/" + e.path, pn->fd.value, leaf(e.path), true, e.directory, true);
 }
-std::string volume() {
-  auto c = attribute<vol_capabilities_attr_t>("/private/tmp", 0, ATTR_VOL_INFO | ATTR_VOL_CAPABILITIES);
-  struct statfs fs{}; charge(sizeof(fs)); check(statfs("/private/tmp", &fs) == 0, "observer_volume");
+std::string volume(const Node& anchor) {
+  // Bind the file system to the opened anchor, then read capabilities at that volume's own root: getattrlist defines
+  // ATTR_VOL_* only for a path that is the root of a volume.
+  struct statfs fs{}; charge(sizeof(fs)); check(fstatfs(anchor.fd.value, &fs) == 0, "observer_volume");
   check(std::string(fs.f_fstypename) == "apfs" && (fs.f_flags & MNT_LOCAL) && !(fs.f_flags & MNT_IGNORE_OWNERSHIP), "observer_volume");
+  const std::string root(fs.f_mntonname, strnlen(fs.f_mntonname, sizeof(fs.f_mntonname)));
+  struct stat mounted{}; charge(sizeof(mounted));
+  check(!root.empty() && lstat(root.c_str(), &mounted) == 0 && S_ISDIR(mounted.st_mode) && mounted.st_dev == anchor.initial.st_dev, "observer_volume");
+  auto c = attribute<vol_capabilities_attr_t>(root, 0, ATTR_VOL_INFO | ATTR_VOL_CAPABILITIES);
   const auto mask = VOL_CAP_FMT_CASE_SENSITIVE | VOL_CAP_FMT_CASE_PRESERVING;
   check((c.valid[VOL_CAPABILITIES_FORMAT] & mask) == mask && (c.capabilities[VOL_CAPABILITIES_FORMAT] & VOL_CAP_FMT_CASE_PRESERVING)
     && (c.valid[VOL_CAPABILITIES_INTERFACES] & VOL_CAP_INT_EXTENDED_SECURITY) && (c.capabilities[VOL_CAPABILITIES_INTERFACES] & VOL_CAP_INT_EXTENDED_SECURITY), "observer_volume_caps");
@@ -202,7 +225,7 @@ int main(int argc, char** argv) {
     auto r = std::make_unique<Node>(dup(root.value), "/", false, true); observe(*r, ""); opened.emplace("@root", std::move(r));
     Node* p = openNode("@private", "/private", root.value, "private", false, true, false);
     Node* anchor = openNode("@anchor", "/private/tmp", p->fd.value, "tmp", false, true, false);
-    const std::string v = volume(); base = "/private/tmp/" + name;
+    const std::string v = volume(*anchor), digest = recipeDigest(entries); base = "/private/tmp/" + name;
     std::string records = "[", absent = "false", missing = "["; bool first = true, firstMissing = true;
     if (op == "absence") { struct stat s{}; charge(sizeof(s)); errno = 0;
       check(fstatat(anchor->fd.value, name.c_str(), &s, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "observer_not_absent"); absent = "true";
@@ -221,7 +244,7 @@ int main(int argc, char** argv) {
     const std::string ancestors = "[{\"path\":\"/\",\"proof\":" + opened.at("@root")->proof + "},{\"path\":\"/private\",\"proof\":"
       + opened.at("@private")->proof + "},{\"path\":\"/private/tmp\",\"proof\":" + anchor->proof + "}]";
     const auto prefix = "{\"schema\":\"native-bar-unsigned-observer-v1\",\"case_id\":" + quote(c) + ",\"operation\":" + quote(op)
-      + ",\"fixture_name\":" + (op == "anchor" ? "null" : quote(name)) + ",\"extra\":" + quote(extra)
+      + ",\"fixture_name\":" + (op == "anchor" ? "null" : quote(name)) + ",\"extra\":" + quote(extra) + ",\"recipe_sha256\":" + quote(digest)
       + ",\"ancestors\":" + ancestors + ",\"entries\":" + records + "],\"missing\":" + missing + "],\"absent\":" + absent + ",\"volume\":" + v;
     // Reserve the entire bounded JSON response once, including its counters and final newline.
     charge(MAX_OUTPUT); const std::string out = prefix + ",\"nodes\":\"" + std::to_string(nodes) + "\",\"content_bytes\":\"" + std::to_string(content)

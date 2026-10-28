@@ -16,7 +16,8 @@ block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSyn
 block(crypto, ["sign", "createSign", "createPrivateKey", "createPublicKey", "generateKeyPair", "generateKeyPairSync"]); block(process, ["dlopen"]);
 const mutators = ["writeFile", "appendFile", "copyFile", "cp", "truncate", "mkdir", "mkdtemp", "unlink", "rmdir", "rm", "rename", "chmod", "symlink", "link", "utimes"];
 block(fs, [...mutators, ...mutators.map((s) => s + "Sync"), "createWriteStream"]); block(fsp, mutators);
-const roots = ["../helpers/", "../../node_modules/"].map((s) => fileURLToPath(new URL(s, import.meta.url)));
+// build/ holds the compiled pure C-A contracts used as the configuration parity oracle; dlopen stays blocked.
+const roots = ["../helpers/", "../../node_modules/", "../../build/"].map((s) => fileURLToPath(new URL(s, import.meta.url)));
 roots.push(...roots.map((s) => fs.realpathSync(s) + sep));
 for (const [o, k, flag] of [[fs, "openSync", (a) => a[0]], [fs, "open", (a) => a[0]], [fsp, "open", (a) => a[0]],
   [fs, "readFileSync", (a) => a[0]?.flag], [fsp, "readFile", (a) => a[0]?.flag]]) {
@@ -73,6 +74,7 @@ test("C-C1b-2 observer selectors cannot become a general path browser or adopt a
 const proof = (n) => ({ kind: "directory", device: "1", inode: String(n), uid: "0", gid: "0", mode: "16877", flags: "0", birthtime_ns: "1",
   mtime_ns: "2", ctime_ns: "3", nlink: "2", size: "96", allocated_bytes: "4096", acl: "none", acl_hash: "a".repeat(64), sha256: null });
 const anchor = () => ({ schema: "native-bar-unsigned-observer-v1", case_id: "u1-unsigned", operation: "anchor", fixture_name: null, extra: id(7),
+  recipe_sha256: api.describeUnsignedObserverRequest({ fixture: (({ fixture_name, ...u }) => u)(fixture()), operation: "anchor", entry_index: null }).recipe_sha256,
   ancestors: ["/", "/private", "/private/tmp"].map((path, n) => ({ path, proof: proof(n + 1) })), entries: [], missing: [], absent: false,
   volume: { filesystem: "apfs", local: true, ownership_enforced: true, case_preserving: true, case_sensitive: false, read_only_mount: false },
   nodes: "3", content_bytes: "0", work_bytes: "65536" });
@@ -224,4 +226,89 @@ test("C-C1b-2 output prefix copies bypass byte-view constructor/species and prop
     const result = api.createUnsignedOutputSummary().push(bytes);
     assert.equal(result.complete_sha256, expected); assert.equal(calls, 0);
   }
+});
+test("C-C1b-2 configuration refuses exactly the envelopes the worker's own C-A planner refuses", async () => {
+  const joint = await import("../../build/nativeBarAdmissionJointReadContracts.js");
+  const f = fixture(), base = workerConfiguration(f);
+  const theirs = (c) => { try { joint.planSyntheticAdmissionJointWork({ binding: c.binding, work_envelope: c.work_envelope, retained_state_bytes: "0",
+    resources: { live_roots: "0", live_targets: "0", live_fds: "0" } }); return "accepted"; } catch (e) { return e.message; } };
+  const ours = (c) => { try { configApi.validateUnsignedWorkerConfiguration({ fixture: f, configuration: c,
+    registration_sha256: sha(canonical(c.binding.registration)), envelope_sha256: sha(canonical(c.work_envelope)) }); return "accepted"; } catch { return "refused"; } };
+  assert.equal(theirs(base), "accepted"); assert.equal(ours(base), "accepted");
+  for (const change of [(e) => { e.inventory.witness.entries = "0"; }, (e) => { e.inventory.common.entries = "0"; }, (e) => { e.inventory.common.entries = "7"; },
+    (e) => { e.inventory.common.entries = "8"; }, (e) => { e.inventory.data.entries = "0"; }, (e) => { e.selected_bytes = "16777216"; },
+    (e) => { e.selected_bytes = "16385"; }, (e) => { e.inventory.data.inventory_bytes = "1"; e.inventory.data.metadata_bytes = "1"; },
+    (e) => { e.inventory.common.metadata_bytes = "10"; }]) {
+    const c = structuredClone(base); change(c.work_envelope); const there = theirs(c);
+    assert.equal(ours(c) === "accepted", there === "accepted", `${there} for ${canonical(c.work_envelope)}`);
+  }
+});
+// A response exactly as the C++ walk emits it: entry operations open the selected path's chain, and a missing parent hides its children.
+const parentPath = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+function observerResponse(f, operation, index = null, gone = new Set()) {
+  const r = recipes.describeUnsignedFixture(f).entries, at = (path) => r.findIndex((e) => e.path === path);
+  const { fixture_name, ...unnamed } = f, plan = api.describeUnsignedObserverRequest({ fixture: operation === "anchor" ? unnamed : f, operation, entry_index: index });
+  const present = (i) => !gone.has(i) && (i === 0 || present(at(parentPath(r[i].path))));
+  let shown = [], missing = [];
+  if (operation === "inventory") { shown = r.map((_, i) => i).filter(present); missing = r.map((_, i) => i).filter((i) => !present(i)); }
+  if (operation === "entry") {
+    const chain = []; for (let i = index; ; i = at(parentPath(r[i].path))) { chain.unshift(i); if (i === 0) break; }
+    shown = chain.filter(present); missing = present(index) ? [] : [index];
+  }
+  const entries = shown.map((i) => ({ index: i, proof: r[i].kind === "directory"
+    ? { ...proof(100 + i), uid: "501", mode: "16832" }
+    : { ...proof(100 + i), kind: "file", uid: "501", mode: "33152", nlink: "1", size: r[i].size, sha256: r[i].sha256 },
+  children: r[i].kind === "directory" ? r.map((e, j) => [e.path, j]).filter(([p, j]) => p !== "" && parentPath(p) === r[i].path && present(j)).map(([p]) => p.slice(p.lastIndexOf("/") + 1)).sort() : null }));
+  const content = entries.filter((e) => e.proof.kind === "file").reduce((n, e) => n + 2n * BigInt(e.proof.size), 0n);
+  return { schema: "native-bar-unsigned-observer-v1", case_id: f.case_id, operation, fixture_name: operation === "anchor" ? null : f.fixture_name, extra: f.ids.extra,
+    recipe_sha256: plan.recipe_sha256, ancestors: anchor().ancestors, entries, missing, absent: operation === "absence", volume: anchor().volume,
+    nodes: String(entries.length + 3), content_bytes: String(content), work_bytes: String(content + 65536n + 1024n) };
+}
+const inspect = (f, operation, index, response) => api.inspectUnsignedObserverResponse({ fixture: operation === "anchor" ? (({ fixture_name, ...u }) => u)(f) : f,
+  operation, entry_index: index }, JSON.stringify(response) + "\n");
+for (const c of recipes.describeUnsignedAcceptanceRun(fixture().request).cases) test(`C-C1b-2 accepts every observer response the walk can emit for ${c.mode}/${c.case_id}`, () => {
+  const f = fixture(c.case_id, c.mode), n = recipes.describeUnsignedFixture(f).entries.length;
+  for (const operation of ["anchor", "absence", "inventory"]) inspect(f, operation, null, observerResponse(f, operation));
+  inspect(f, "inventory", null, observerResponse(f, "inventory", null, new Set([n - 1])));
+  for (let i = 0; i < n; i++) { inspect(f, "entry", i, observerResponse(f, "entry", i)); if (i) inspect(f, "entry", i, observerResponse(f, "entry", i, new Set([i]))); }
+});
+const nested = fixture("u3-maintenance"), slot = (r, path) => r.entries.findIndex((e) => e.index === recipes.describeUnsignedFixture(nested).entries.findIndex((v) => v.path === path));
+for (const [name, operation, index, gone, change] of [
+  ["a directory reported as a file", "inventory", null, new Set(), (r) => { Object.assign(r.entries[0].proof, { kind: "file", mode: "33152", nlink: "1", sha256: "b".repeat(64) }); r.entries[0].children = null; r.content_bytes = String(BigInt(r.content_bytes) + 2n * BigInt(r.entries[0].proof.size)); r.work_bytes = String(BigInt(r.work_bytes) + 2n * BigInt(r.entries[0].proof.size)); }],
+  ["a file with two links", "inventory", null, new Set(), (r) => { r.entries[slot(r, "store/policy.json")].proof.nlink = "2"; }],
+  ["a file without a hash", "inventory", null, new Set(), (r) => { r.entries[slot(r, "store/policy.json")].proof.sha256 = null; }],
+  ["a directory with a hash", "inventory", null, new Set(), (r) => { r.entries[0].proof.sha256 = "c".repeat(64); }],
+  ["an unexpected child name", "inventory", null, new Set(), (r) => { r.entries[0].children.push(".DS_Store"); }],
+  ["a duplicated child", "inventory", null, new Set(), (r) => { r.entries[0].children.push(r.entries[0].children[0]); }],
+  ["a listing that omits a present child", "inventory", null, new Set(), (r) => { r.entries[0].children.pop(); }],
+  ["a listing that names a missing child", "inventory", null, new Set([6]), (r) => { r.entries[slot(r, "admission-witness")].children.push("1.json"); }],
+  ["a coverage gap", "inventory", null, new Set(), (r) => { r.entries.pop(); r.nodes = String(r.entries.length + 3); r.content_bytes = String(r.entries.filter((e) => e.proof.kind === "file").reduce((n, e) => n + 2n * BigInt(e.proof.size), 0n)); }],
+  ["a present child under a missing parent", "inventory", null, new Set([7]), (r) => { const child = observerResponse(nested, "inventory").entries.find((e) => e.index === 8);
+    r.entries.push(child); r.missing = r.missing.filter((i) => i !== 8); r.nodes = String(r.entries.length + 3);
+    r.content_bytes = String(BigInt(r.content_bytes) + 2n * BigInt(child.proof.size)); r.work_bytes = String(BigInt(r.work_bytes) + 2n * BigInt(child.proof.size)); }],
+  ["miscounted content", "inventory", null, new Set(), (r) => { r.content_bytes = String(BigInt(r.content_bytes) + 2n); }],
+  ["a duplicate object identity", "inventory", null, new Set(), (r) => { r.entries[1].proof.inode = r.entries[0].proof.inode; }],
+  ["an absent flag on an inventory", "inventory", null, new Set(), (r) => { r.absent = true; }],
+  ["another recipe digest", "inventory", null, new Set(), (r) => { r.recipe_sha256 = "d".repeat(64); }],
+  ["a missing index past the recipe", "inventory", null, new Set(), (r) => { r.missing.push(15); }],
+  ["an unrelated entry beside the selected chain", "entry", 2, new Set(), (r) => { const sibling = observerResponse(nested, "inventory").entries.find((e) => e.index === 1);
+    r.entries.push(sibling); r.nodes = String(r.entries.length + 3); }],
+  ["a missing index other than the selected one", "entry", 2, new Set(), (r) => { r.missing.push(5); }],
+  ["entries on an absence check", "absence", null, new Set(), (r) => { r.entries = observerResponse(nested, "inventory").entries.slice(0, 1); r.nodes = "4"; }],
+  ["a present fixture on an absence check", "absence", null, new Set(), (r) => { r.absent = false; }],
+]) test(`C-C1b-2 refuses an observer response with ${name}`, () => {
+  const r = observerResponse(nested, operation, index, gone); inspect(nested, operation, index, observerResponse(nested, operation, index, gone)); change(r);
+  assert.throws(() => inspect(nested, operation, index, r), /cc1b2_observer_response|cc1b2_invalid_input/);
+});
+test("C-C1b-2 keeps the observer's own bounded refusal code and nothing else", () => {
+  const classify = (exit_code, signal, stdout_bytes, stderr) => api.classifyUnsignedObserverExit({ exit_code, signal, stdout_bytes, stderr });
+  assert.equal(classify(0, null, 900, "").decision, "response");
+  assert.equal(classify(1, null, 0, "observer_volume_caps\n").code, "cc1b2_observer_volume_caps");
+  assert.equal(classify(1, null, 0, "observer_final_path_changed\n").code, "cc1b2_observer_final_path_changed");
+  for (const [exit, signal, out, err, code] of [[1, null, 10, "observer_volume\n", "cc1b2_child_stderr"], [1, null, 0, "observer volume\n", "cc1b2_child_stderr"],
+    [1, null, 0, "observer_volume", "cc1b2_child_stderr"], [1, null, 0, "", "cc1b2_child_exit"], [0, null, 0, "observer_volume\n", "cc1b2_child_stderr"],
+    [null, "SIGKILL", 0, "", "cc1b2_child_exit"], [2, null, 0, "observer_volume\n", "cc1b2_child_stderr"]])
+    assert.equal(classify(exit, signal, out, err).code, code, `${exit}/${signal}/${err}`);
+  assert.throws(() => classify(1, null, 0, `observer_${"a".repeat(60)}\n`), /cc1b2_invalid_input/);
+  assert.equal(classify(1, null, 0, "observer_volume\n").execution_available, false);
 });

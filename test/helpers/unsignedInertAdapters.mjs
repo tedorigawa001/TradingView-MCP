@@ -1,15 +1,21 @@
 import { createHash } from "node:crypto";
 import { describeUnsignedFixture, describeUnsignedAcceptanceRun, createUnsignedOwnershipModel } from "./jointUnsignedAcceptanceContracts.mjs";
 import { createUnsignedExecutionEvidenceModel } from "./unsignedExecutionContracts.mjs";
-import { createUnsignedProtocolDecoder, createUnsignedWriteCursor, describeUnsignedObserverRequest, inspectUnsignedObserverResponse, createUnsignedOutputSummary } from "./unsignedAdapterSupport.mjs";
+import { createUnsignedProtocolDecoder, createUnsignedWriteCursor, describeUnsignedObserverRequest, inspectUnsignedObserverResponse, createUnsignedOutputSummary,
+  classifyUnsignedObserverExit } from "./unsignedAdapterSupport.mjs";
 import { validateUnsignedWorkerConfiguration } from "./unsignedWorkerConfiguration.mjs";
 
 const refuse = (code) => { throw Error(`cc1b2_${code}`); };
 const canonical = (v) => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v && typeof v === "object"
   ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}` : JSON.stringify(v);
 const hash = (v) => createHash("sha256").update(v).digest("hex");
-const errorCode = (e) => e instanceof Error && /^(?:(?:b2[ab]|b3(?:ba|bb|ca|cb)|cc1[ab]|cc1b2)_[a-z_]+|admission_[a-z_]+(?::[0-9]{1,5})?)$/.test(e.message)
-  && e.message.length <= 96 ? e.message : "cc1b2_unexpected_error";
+// Known contract codes, the bare addon codes C-B classifies, and a bounded errno name for filesystem failures.
+const errorCode = (e) => {
+  if (!(e instanceof Error)) return "cc1b2_unexpected_error";
+  if (e.message.length <= 96 && /^(?:(?:b2[ab]|b3(?:ba|bb|ca|cb|cc)|cc1[ab]|cc1b2)_[a-z_]+|(?:admission|native)_[a-z_]+(?::[0-9]{1,5})?|session_expired|acl_entry_limit|unsafe_acl)$/.test(e.message))
+    return e.message;
+  return typeof e.code === "string" && /^E[A-Z]{2,15}$/.test(e.code) ? `cc1b2_fs_${e.code.toLowerCase()}` : "cc1b2_unexpected_error";
+};
 
 export function inspectUnsignedAdapters(allocation) {
   const d = createUnsignedExecutionEvidenceModel(allocation).describe();
@@ -28,8 +34,16 @@ function same(a, b, directory = false) {
   return ["dev", "ino", "uid", "gid", "mode", "birthtimeNs"].every((k) => a[k] === b[k])
     && (directory || ["size", "nlink", "mtimeNs", "ctimeNs"].every((k) => a[k] === b[k]));
 }
+// A changed artifact or lost evidence qualification stops the run for good; a later matching check cannot resume it.
+function confirmed(check) { try { return check() === true; } catch { return false; } }
 function checkpoint(run) {
-  if (run.stopped || run.liveBuildPinsStillMatch() !== true || run.evidenceAclStillQualified() !== true) refuse("live_provenance_unconfirmed");
+  if (run.stopped) throw new Error(run.stopped);
+  if (!confirmed(() => run.liveBuildPinsStillMatch()) || !confirmed(() => run.evidenceAclStillQualified())) throw retain(run, Error("cc1b2_live_provenance_unconfirmed"));
+}
+// The worker process can confirm only its own build pins; evidence-namespace qualification belongs to the supervisor.
+function workerCheckpoint(run) {
+  if (run.stopped) throw new Error(run.stopped);
+  if (!confirmed(() => run.liveBuildPinsStillMatch())) throw retain(run, Error("cc1b2_live_provenance_unconfirmed"));
 }
 function checkpointEvidence(run) {
   // A native/source/worker failure must remain recordable. A corrupt or unqualified evidence namespace must not.
@@ -39,26 +53,28 @@ const workerAlive = (run) => run.workerChild && run.children.has(run.workerChild
   && run.workerChild.exitCode === null && run.workerChild.signalCode === null;
 async function observeOriginal(runRef, fixture, operation, entry_index = null) {
   const run = runOf(runRef); checkpoint(run);
+  const cohort = run.originalCohort; if (!cohort) throw retain(run, Error("cc1b2_cohort_bound"));
+  // One observer child at a time across the cohort; a hung or retained one blocks every later spawn.
+  if (cohort.observerChild) throw retain(run, Error("cc1b2_observer_busy"));
   if (!Number.isSafeInteger(run.observerCalls) || run.observerCalls < 0 || run.observerCalls >= 64) throw retain(run, Error("cc1b2_observer_call_bound"));
   run.observerCalls++;
   const request = { fixture, operation, entry_index }, plan = describeUnsignedObserverRequest(request);
-  const limit = Math.min(10000, run.remainingPhaseMs()); if (!Number.isSafeInteger(limit) || limit < 1) throw retain(run, Error("cc1b2_deadline"));
   const { fileURLToPath } = await import("node:url"), { spawn } = await import("node:child_process");
   const program = fileURLToPath(new URL(`../../${plan.relative_program}`, import.meta.url));
   // This original-run callback verifies the exact newly built binary, not an existing file selected by the caller.
-  if (run.checkObserverExecutable(program) !== true) refuse("observer_provenance"); checkpoint(run);
-  const beforeSpawn = run.remainingPhaseMs(); if (!Number.isSafeInteger(beforeSpawn) || beforeSpawn < 1) throw retain(run, Error("cc1b2_deadline"));
-  const child = spawn(program, plan.argv, { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TZ: "Asia/Tokyo" },
-    stdio: ["ignore", "pipe", "pipe"], shell: false }); run.children.add(child);
-  child.on("error", () => retain(run, Error("cc1b2_child_error")));
-  const remaining = Math.min(limit, run.remainingPhaseMs());
+  if (!confirmed(() => run.checkObserverExecutable(program))) throw retain(run, Error("cc1b2_observer_provenance")); checkpoint(run);
+  // The whole window is fixed before spawn, and supervision attaches synchronously after it: nothing can throw in between.
+  const remaining = Math.min(10000, run.remainingPhaseMs());
   if (!Number.isSafeInteger(remaining) || remaining < 1) throw retain(run, Error("cc1b2_deadline"));
+  const child = spawn(program, plan.argv, { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TZ: "Asia/Tokyo" },
+    stdio: ["ignore", "pipe", "pipe"], shell: false }); run.children.add(child); cohort.observerChild = child;
   const line = await collectOriginalChild(run, child, remaining, 65536);
-  checkpoint(run); return inspectUnsignedObserverResponse(request, line).supplied_observation;
+  checkpoint(run);
+  try { return inspectUnsignedObserverResponse(request, line).supplied_observation; } catch (e) { throw retain(run, e); }
 }
 function collectOriginalChild(run, child, timeout, stdoutCap) {
   return new Promise((resolve, reject) => {
-    let output = [], count = 0, stderr = 0, finished = false;
+    let output = [], count = 0, stderr = Buffer.alloc(0), finished = false;
     const fail = (code) => { if (finished) return; finished = true; clearTimeout(timer); output = [];
       // Do not signal, destroy or forget a still-live child. Retain its original object for the explicit later disposition.
       reject(retain(run, Error(code))); };
@@ -67,12 +83,16 @@ function collectOriginalChild(run, child, timeout, stdoutCap) {
       stream.on("error", () => fail("cc1b2_child_pipe"));
     child.stdout.on("data", (b) => { if (finished) return; count += b.length;
       if (count > stdoutCap) return fail("cc1b2_child_output_bound"); output.push(Buffer.from(b)); });
-    child.stderr.on("data", (b) => { if (finished) return; stderr += b.length;
-      fail(stderr > 8192 ? "cc1b2_child_output_bound" : "cc1b2_child_stderr"); });
+    // Keep the observer's own bounded refusal line so BLOCKED and FAIL causes stay distinguishable.
+    child.stderr.on("data", (b) => { if (finished) return; stderr = Buffer.concat([stderr, Buffer.from(b)]);
+      if (stderr.length > 64) fail("cc1b2_child_output_bound"); });
     child.on("error", () => fail("cc1b2_child_error"));
     child.on("close", (code, signal) => {
-      run.children.delete(child); if (finished) return;
-      if (code !== 0 || signal !== null) return fail("cc1b2_child_exit");
+      run.children.delete(child); if (run.originalCohort?.observerChild === child) run.originalCohort.observerChild = null;
+      if (finished) return;
+      let outcome; try { outcome = classifyUnsignedObserverExit({ exit_code: code, signal, stdout_bytes: count, stderr: stderr.toString("latin1") }); }
+      catch { return fail("cc1b2_child_exit"); }
+      if (outcome.decision !== "response") return fail(outcome.code);
       clearTimeout(timer); finished = true; resolve(Buffer.concat(output).toString("utf8")); output = [];
     });
   });
@@ -125,31 +145,36 @@ async function createOriginalFixture(runRef, allocation) {
   const fs = await import("node:fs"), model = createUnsignedExecutionEvidenceModel(allocation), live = { run, created: [], name: null, fd: null, stopped: false };
   const reference = Object.freeze(Object.create(null)); fixtures.set(reference, live);
   run.originalFixture = live;
-  const anchor = await observeOriginal(runRef, allocation.fixture, "anchor");
-  if (anchor.volume.read_only_mount) throw retain(run, Error("cc1b2_read_only_mount"));
-  run.originalAnchors = anchor.ancestors;
-  const receipt = await openOriginalEvidence(runRef, "receipt");
+  let receipt = null;
   const journal = async (kind, payload) => {
     const line = model.append({ kind, payload, stamp: run.actualParentStamp() }).line;
     model.confirmReceipt(await writeOriginalEvidence(runRef, receipt, line));
   };
-  live.journal = journal; live.receiptModel = model; live.receipt = receipt;
+  live.journal = journal; live.receiptModel = model;
   try {
+    const anchor = await observeOriginal(runRef, allocation.fixture, "anchor");
+    if (anchor.volume.read_only_mount) throw retain(run, Error("cc1b2_read_only_mount"));
+    run.originalAnchors = anchor.ancestors;
+    receipt = await openOriginalEvidence(runRef, "receipt"); live.receipt = receipt;
     await journal("case_allocated", {}); await journal("create_intent", { entry_index: 0 }); checkpoint(run);
     cohort.attempted++; cohort.liveFixture = reference;
     const full = fs.mkdtempSync("/private/tmp/native-bar-fs-synthetic-"); live.name = full.slice("/private/tmp/".length);
     // Bind the returned name before an await or a subsequent creation, even if opening/proving it later fails.
     live.fd = fs.openSync(full, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-    live.created.push({ path: "", identity: fs.fstatSync(live.fd, { bigint: true }) });
+    live.created.push({ path: "", identity: null }); live.created[0].identity = fs.fstatSync(live.fd, { bigint: true });
     const fixture = { ...allocation.fixture, fixture_name: live.name }, recipe = describeUnsignedFixture(fixture); live.fixture = fixture;
     for (const [entry_index, entry] of recipe.entries.entries()) {
       if (entry_index) {
         await journal("create_intent", { entry_index }); checkpoint(run); const path = `${full}/${entry.path}`;
-        if (entry.kind === "directory") fs.mkdirSync(path, { mode: 0o700 });
-        else {
+        // Each object is recorded as owned the moment its creation succeeds; a later identity failure leaves it recorded but unproven.
+        if (entry.kind === "directory") {
+          fs.mkdirSync(path, { mode: 0o700 }); const record = { path: entry.path, identity: null }; live.created.push(record);
+          record.identity = fs.lstatSync(path, { bigint: true });
+        } else {
           const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          const record = { path: entry.path, identity: null }; live.created.push(record);
           let primaryError;
-          try { live.created.push({ path: entry.path, identity: fs.fstatSync(fd, { bigint: true }) });
+          try { record.identity = fs.fstatSync(fd, { bigint: true });
             const b = Buffer.from(entry.content);
             if (b.length) { const cursor = createUnsignedWriteCursor({ text: entry.content, cap_bytes: 16384 });
               while (cursor.describe().remaining) { checkpoint(run); cursor.advance(fs.writeSync(fd, b, cursor.describe().offset, cursor.describe().remaining, cursor.describe().offset)); } }
@@ -158,7 +183,6 @@ async function createOriginalFixture(runRef, allocation) {
           finally { try { fs.closeSync(fd); } catch (e) { (run.closeErrors ??= []).push(errorCode(e)); primaryError ??= e; } }
           if (primaryError) throw primaryError;
         }
-        if (entry.kind === "directory") live.created.push({ path: entry.path, identity: fs.lstatSync(path, { bigint: true }) });
       }
       const seen = await observeOriginal(runRef, fixture, "entry", entry_index), row = seen.entries.find((e) => e.index === entry_index);
       if (!row) refuse("creation_observation");
@@ -167,23 +191,33 @@ async function createOriginalFixture(runRef, allocation) {
       if (row.proof.device !== String(original.dev) || row.proof.inode !== String(original.ino)) refuse("creation_identity");
       live.created[entry_index].proof = row.proof;
       await journal("create_result", { entry_index, proof: row.proof, ...(entry_index === 0 ? { fixture_name: live.name } : {}) });
+      if (entry_index === 0) live.rootRecorded = true;
     }
     live.setupObservation = await observeOriginal(runRef, fixture, "inventory");
-    if (run.checkFullSetupInventory(live.setupObservation, live.created) !== true) refuse("setup_unconfirmed");
+    if (!confirmed(() => run.checkFullSetupInventory(live.setupObservation, live.created))) refuse("setup_unconfirmed");
     return reference;
-  } catch (e) { live.stopped = true; throw retain(run, e); }
+  } catch (e) {
+    live.stopped = true; const error = retain(run, e);
+    // A returned root whose creation result was never recorded keeps its only locator in a stop summary (C-C1b-1).
+    if (live.name !== null && !live.rootRecorded && receipt !== null) {
+      try { await journal("stop_summary", { reason: model.describe().stop_reason ?? run.stopped, fixture_name: live.name }); }
+      catch (journalError) { (run.closeErrors ??= []).push(errorCode(journalError)); }
+    }
+    throw error;
+  }
 }
 async function removeOriginalFixture(runRef, reference) {
   const run = runOf(runRef), live = fixtures.get(reference); checkpoint(run);
   if (!live || live.run !== run || live.stopped || !workerAlive(run) || run.protocol.describe().state !== "RELEASED") refuse("original_release_required");
   const fs = await import("node:fs");
   try {
-    // Original baseline plus live creation records, never a replayed receipt, creates this supplied-data check.
+    // The ownership model's baseline is the protocol's accepted original baseline, the one RELEASED was compared against.
+    const { fds, roots, workspace } = run.protocol.describe().baseline.resources;
     const owner = createUnsignedOwnershipModel({ fixture: live.fixture, supervisor_id: run.supervisorId, worker_id: run.workerId,
-      uid: String(live.created[0].identity.uid), gid: String(live.created[0].identity.gid), baseline_resources: run.originalBaseline });
+      uid: String(live.created[0].identity.uid), gid: String(live.created[0].identity.gid), baseline_resources: { fds, roots, workspace } });
     for (const e of live.created) { const { allocated_bytes, mtime_ns, ctime_ns, ...proof } = e.proof;
       owner.recordCreation({ path: e.path, proof, children: proof.kind === "directory" ? [] : null, receipt_write: "confirmed" }); }
-    owner.finishSetup(); let remaining = [...live.created];
+    owner.finishSetup(); let remaining = [...live.created]; live.removed = [];
     while (remaining.length) {
       await new Promise((resolve) => setImmediate(resolve)); checkpoint(run); if (!workerAlive(run)) refuse("worker_lost");
       const seen = await observeOriginal(runRef, live.fixture, "inventory"), observation = run.originalCleanupObservation(seen, remaining);
@@ -192,17 +226,25 @@ async function removeOriginalFixture(runRef, reference) {
       await live.journal("delete_intent", { entry_index, proof: row.proof }); checkpoint(run);
       const again = await observeOriginal(runRef, live.fixture, "entry", entry_index);
       await new Promise((resolve) => setImmediate(resolve)); checkpoint(run); if (!workerAlive(run)) refuse("worker_lost");
-      if (run.checkExactRemainingAndParents(again, remaining) !== true) refuse("cleanup_unconfirmed");
+      if (!confirmed(() => run.checkExactRemainingAndParents(again, remaining))) refuse("cleanup_unconfirmed");
       const path = `/private/tmp/${live.name}${a.next_entry.path ? "/" + a.next_entry.path : ""}`;
-      if (a.next_entry.operation === "unlink_nonrecursive") fs.unlinkSync(path); else fs.rmdirSync(path);
-      await live.journal("delete_result", { entry_index, outcome: "removed" });
+      // Which side effect happened stays known: attempted, then removed or the bounded errno, before any later failure.
+      live.deleting = { entry_index, operation: a.next_entry.operation, outcome: "attempted", code: null };
+      try { if (a.next_entry.operation === "unlink_nonrecursive") fs.unlinkSync(path); else fs.rmdirSync(path); }
+      catch (e) { live.deleting.outcome = "error"; live.deleting.code = errorCode(e); throw e; }
+      live.deleting.outcome = "removed"; live.removed.push(entry_index);
+      await live.journal("delete_result", { entry_index, outcome: "removed" }); live.deleting = null;
       owner.recordRemoval({ observation, path: a.next_entry.path, outcome: "removed", receipt_write: "confirmed" });
       remaining = remaining.filter((e) => e.path !== a.next_entry.path);
     }
-    const absent = await observeOriginal(runRef, live.fixture, "absence"); if (run.checkOriginalAnchorAbsence(absent) !== true) refuse("absence_unconfirmed");
+    const absent = await observeOriginal(runRef, live.fixture, "absence");
+    if (!confirmed(() => run.checkOriginalAnchorAbsence(absent))) refuse("absence_unconfirmed");
     if (owner.assessCleanup(run.originalCleanupObservation(absent, [])).decision !== "supplied_complete") refuse("absence_unconfirmed");
     await live.journal("absence_checked", { anchor_same: true, root_removal_confirmed: true, absent: true });
-    live.closeAttempted = true; fs.closeSync(live.fd); live.fd = null; return owner.summarizeTeardown();
+    live.closeAttempted = true; fs.closeSync(live.fd); live.fd = null;
+    // Only a confirmed removal frees the cohort's single live-fixture slot; a retained fixture keeps it occupied.
+    if (run.originalCohort?.liveFixture === reference) run.originalCohort.liveFixture = null;
+    return owner.summarizeTeardown();
   } catch (e) { live.stopped = true; throw retain(run, e); }
 }
 
@@ -216,7 +258,7 @@ function deriveUnsignedCaseBinding(caseId, correct) {
 }
 // Configuration is strict metadata only. Native handles, keys and backends are created only inside this sealed worker.
 async function prepareOriginalWorker(runRef, declaration, configuration) {
-  const run = runOf(runRef); checkpoint(run);
+  const run = runOf(runRef); workerCheckpoint(run);
   const checked = validateUnsignedWorkerConfiguration({ fixture: declaration.fixture, configuration,
     registration_sha256: declaration.provenance.registration_sha256, envelope_sha256: declaration.provenance.envelope_sha256 }).configuration;
   const jointBinding = checked.binding, workEnvelope = checked.work_envelope;
@@ -226,7 +268,7 @@ async function prepareOriginalWorker(runRef, declaration, configuration) {
   const base = mode === "normal" ? "../../build/b3cc-validation/normal/" : "../../build/b3cc-validation/ubsan/";
   const { createRequire } = await import("node:module"), { createPublicKey } = await import("node:crypto"), { fileURLToPath } = await import("node:url");
   const require = createRequire(import.meta.url), nativePath = require.resolve(fileURLToPath(new URL(`${base}native-bar-fs/native_bar_fs.node`, import.meta.url)));
-  if (run.checkAddonExecutable(nativePath) !== true) refuse("addon_provenance");
+  if (!confirmed(() => run.checkAddonExecutable(nativePath))) throw retain(run, Error("cc1b2_addon_provenance"));
   const original = require(nativePath), cache = require.cache[nativePath], oldExports = cache.exports;
   const trace = [], names = { info: "info", beginAdmissionRead: "begin", openAdmissionReadPair: "open_pair", admissionInventory: "inventory",
     readAdmissionEvidence: "capture", verifyAdmissionInventory: "verify", closeAdmissionInventory: "close", closeAdmissionRead: "close" };
@@ -270,10 +312,12 @@ async function prepareOriginalWorker(runRef, declaration, configuration) {
     const baseline = Object.freeze({ fds: String(info.live_fds), roots: String(info.live_sessions), workspace: before.active_workspace_bytes, retained: before.retained_state_bytes });
     return Object.freeze({ baseline,
       async go() {
-        if (used) refuse("worker_go_once"); checkpoint(run); used = true; let primary = null, diagnostic = null, signedRequests = null; const closeErrors = [];
+        // GO is spent before its checks run, so a refused GO is never retried and always reaches the closes below.
+        if (used) refuse("worker_go_once"); used = true; let primary = null, diagnostic = null, signedRequests = null; const closeErrors = [];
         try {
+          workerCheckpoint(run);
           const helper = c.owner === "fixed_memory" ? await import("./fixedMemoryCheckpointOracle.mjs") : await import("./unsignedCheckpointOracle.mjs");
-          if (cancelled) refuse("worker_cancelled"); checkpoint(run);
+          if (cancelled) refuse("worker_cancelled"); workerCheckpoint(run);
           owner = c.owner === "fixed_memory" ? helper.enrollFixedMemoryCheckpointOracle(bootstrap.ownerEnrollment,
             { sequence: "1", tip_hash: jointBinding.registration.pins.enrollment_hash }) : helper.enrollUnsignedCheckpointOracle(bootstrap.ownerEnrollment, c.owner);
           reader = joint.enrollSyntheticAdmissionJointReader(bootstrap.jointReaderEnrollment); query = reader.beginJointRead();
@@ -298,19 +342,32 @@ async function prepareOriginalWorker(runRef, declaration, configuration) {
           c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null });
       },
       cancel() { cancelled = true; return query ? reader.cancel(query) : null; },
-      closeBeforeGo() { if (used) refuse("worker_go_once"); used = true; try { bootstrap.close(); } finally { restore(); } },
+      closeBeforeGo() {
+        if (used) refuse("worker_go_once"); used = true; const errors = closeAll(); if (errors.length) throw new Error(errors[0]);
+      },
     });
-  } catch (e) { try { bootstrap?.close(); } finally { restore(); } throw e; }
+  } catch (e) {
+    // The original failure stays primary; close/restore failures are kept beside it, never in its place.
+    (run.closeErrors ??= []).push(...closeAll()); throw e;
+  }
+  function closeAll() {
+    const errors = [];
+    try { bootstrap?.close(); } catch (closeError) { errors.push(errorCode(closeError)); }
+    try { restore(); } catch (restoreError) { errors.push(errorCode(restoreError)); }
+    return errors;
+  }
 }
 
 async function superviseOriginalWorker(runRef) {
   const run = runOf(runRef); checkpoint(run); if (run.workerStarted) refuse("one_worker_only"); run.workerStarted = true;
+  // One case worker at a time across the cohort; only a completed lifecycle frees the slot.
+  const cohort = run.originalCohort; if (!cohort || cohort.liveWorker) throw retain(run, Error("cc1b2_one_worker_only"));
   const { spawn } = await import("node:child_process"), { fileURLToPath } = await import("node:url");
   const worker = fileURLToPath(new URL("../../native/native_bar_fs/test_unsigned_worker.mjs", import.meta.url));
-  if (run.checkWorkerExecutable(worker) !== true) refuse("worker_provenance");
-  const child = spawn(process.execPath, [worker], { shell: false, execArgv: [], env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TZ: "Asia/Tokyo",
+  if (!confirmed(() => run.checkWorkerExecutable(worker))) throw retain(run, Error("cc1b2_worker_provenance"));
+  const child = spawn(process.execPath, [worker], { shell: false, env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TZ: "Asia/Tokyo",
     NATIVE_BAR_B3CC_MODE: run.mode, UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=0" }, stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] });
-  run.children.add(child); run.workerChild = child; const decoder = createUnsignedProtocolDecoder();
+  run.children.add(child); run.workerChild = child; cohort.liveWorker = child; const decoder = createUnsignedProtocolDecoder();
   for (const stream of [child.stdio[3], child.stdio[4], child.stdout, child.stderr])
     stream.on("error", () => retain(run, Error("cc1b2_worker_pipe")));
   child.stdio[4].on("data", (bytes) => { try { for (const line of decoder.push(bytes)) run.protocol.acceptFrame(line); } catch (e) { retain(run, e); } });
@@ -323,7 +380,8 @@ async function superviseOriginalWorker(runRef) {
   }
   child.on("error", () => retain(run, Error("cc1b2_worker_lost")));
   child.on("close", (exit_code, signal) => { run.children.delete(child);
-    try { run.protocol.workerExit({ exit_code, signal }); } catch (e) { retain(run, e); } });
+    try { run.protocol.workerExit({ exit_code, signal }); } catch (e) { retain(run, e); }
+    if (!run.stopped && run.protocol.describe().state === "DONE" && cohort.liveWorker === child) cohort.liveWorker = null; });
   return child;
 }
 
@@ -340,9 +398,16 @@ async function sendOriginalWorkerCommand(runRef, kind) {
   }
   const state = run.protocol.describe(), line = canonical({ binding: state.binding, direction: "parent", ordinal: state.next_ordinals.parent, kind, payload }) + "\n";
   run.protocol.acceptFrame(line); // Also enforces the complete 64 KiB frame bound before pipe output.
-  await new Promise((resolve, reject) => run.workerChild.stdio[3].write(line, "utf8", (error) => {
-    if (error) reject(retain(run, Error("cc1b2_worker_pipe"))); else resolve();
-  }));
+  // A worker that stops reading its command pipe cannot stall the supervisor past the original phase window.
+  const limit = Math.min(10000, run.remainingPhaseMs()); if (!Number.isSafeInteger(limit) || limit < 1) throw retain(run, Error("cc1b2_deadline"));
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; reject(retain(run, Error("cc1b2_worker_pipe_timeout"))); } }, limit); timer.unref();
+    run.workerChild.stdio[3].write(line, "utf8", (error) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      if (error) reject(retain(run, Error("cc1b2_worker_pipe"))); else resolve();
+    });
+  });
 }
 
 async function closeOriginalEvidenceAndFixtureFds(runRef) {
