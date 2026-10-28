@@ -2,8 +2,8 @@ import { z } from "zod";
 import { describeUnsignedFixture } from "./jointUnsignedAcceptanceContracts.mjs";
 import { validateUnsignedWorkerConfiguration } from "./unsignedWorkerConfiguration.mjs";
 import { validateUnsignedControllerObservation } from "./unsignedControllerObservation.mjs";
-import { uint, label, code, digestSchema as hash, count, parse, copyData, canonical, digest, byteLength, decode,
-  resourcesSchema, traceSchema, freeze, flags, refuse, LIMITS } from "./unsignedControllerData.mjs";
+import { uint, label, code, digestSchema as hash, count, parse, copyData, canonical, sha, digest, byteLength, decode,
+  resourcesSchema, baselineSchema, traceSchema, freeze, flags, refuse, LIMITS } from "./unsignedControllerData.mjs";
 
 const artifactSchema = z.object(Object.fromEntries(["js_set_sha256", "addon_sha256", "observer_sha256", "controller_sha256", "worker_sha256",
   "runtime_closure_sha256", "node_binary_sha256", "build_record_sha256", "reader_source_sha256", "reader_js_sha256"].map((k) => [k, hash]))).strict();
@@ -20,8 +20,7 @@ function allocation(input) {
 }
 const setupSchema = z.object({ fixture_name: z.string().regex(/^native-bar-fs-synthetic-[A-Za-z0-9]{6}$/), recipe_sha256: hash,
   registration_sha256: hash, envelope_sha256: hash }).strict();
-const baselineSchema = z.object({ resources: resourcesSchema, clock_domain: label }).strict();
-const failureSchema = z.object({ phase: z.enum(["launch", "prepare", "go", "settlement"]), primary_code: code, close_errors: z.array(code).max(8),
+const failureSchema = z.object({ phase: z.enum(["launch", "prepare", "go", "settlement", "finalize"]), primary_code: code, close_errors: z.array(code).max(8),
   diagnostic_sha256: hash.nullable(), resources: resourcesSchema.nullable(), query_created: z.boolean(), instrumentation_overflow: z.boolean() }).strict();
 const releaseSchema = z.object({ baseline_sha256: hash, resources: resourcesSchema, query: z.literal("settled"), native: z.literal("settled"),
   original_operation_retired: z.literal(true), query_released: z.literal(true), close_errors: z.array(code).max(8),
@@ -35,9 +34,9 @@ const empty = z.object({}).strict();
 
 export function createUnsignedControllerProtocolModel(input) {
   const captured = allocation(input); let binding = captured.binding, state = "NEW", stopped = null, frames = 0;
-  let baseline = null, baselineHash = null, observed = null, released = null, failure = null, exit = null;
-  let submitted = false, cancelSpent = false, close = null, teardown = false, lastTrace = null;
-  const next = { parent: 1, worker: 1 }, writes = [], trace = [], late = []; let chunks = 0;
+  let baseline = null, baselineHash = null, observed = null, released = null, failure = null, exit = null, c1 = false;
+  let submitted = false, cancelSpent = false, shutdownPlanned = false, close = null, teardown = false, lastTrace = null;
+  const next = { parent: 1, worker: 1 }, writes = [], lines = new Map(), trace = [], late = []; let chunks = 0;
   const stop = (reason) => { stopped ??= reason; state = "STOPPED"; };
   const fail = (reason) => { stop(reason); refuse(reason); };
   const at = (...allowed) => { if (!allowed.includes(state)) fail("protocol_order"); };
@@ -45,7 +44,7 @@ export function createUnsignedControllerProtocolModel(input) {
   const describe = () => freeze({ schema: "native-bar-unsigned-controller-model-v2", ...flags(), binding, state, stop_reason: stopped,
     retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state), frames, next_ordinals: { ...next },
     baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
-    release: released, failure, worker_exit: exit, go_submitted: submitted, cancel_spent: cancelSpent, command_close: close,
+    release: released, failure, worker_exit: exit, c1_violation: c1, go_submitted: submitted, cancel_spent: cancelSpent, command_close: close,
     teardown_complete: teardown, trace_chunks: chunks, trace_events: trace.length, trace_sha256: digest(trace),
     writes: writes.map((v) => ({ ...v })), late_frames: [...late], model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle" });
   function guard(action, allowStopped = false) {
@@ -77,7 +76,8 @@ export function createUnsignedControllerProtocolModel(input) {
         if (byteLength(canonical(r.configuration)) > LIMITS.configuration_bytes) fail("configuration_capacity");
         const fixture = { ...captured.input.fixture, fixture_name: s.fixture_name }, recipe = describeUnsignedFixture(fixture);
         if (r.launch_nonce !== binding.launch_nonce || s.recipe_sha256 !== recipe.recipe_sha256) fail("setup_binding");
-        validateUnsignedWorkerConfiguration({ fixture, configuration: r.configuration, registration_sha256: s.registration_sha256, envelope_sha256: s.envelope_sha256 });
+        try { validateUnsignedWorkerConfiguration({ fixture, configuration: r.configuration, registration_sha256: s.registration_sha256, envelope_sha256: s.envelope_sha256 }); }
+        catch { fail("worker_configuration"); }
         binding = newBinding; state = "PREPARING"; break;
       }
       case "BASELINED": at("PREPARING"); if (!started("PREPARE")) fail("write_not_submitted");
@@ -103,18 +103,27 @@ export function createUnsignedControllerProtocolModel(input) {
         at("ACTIVE"); if (!submitted) fail("write_not_submitted"); const r = parse(releaseSchema, p);
         if (r.baseline_sha256 !== baselineHash) fail("baseline_changed");
         if (r.trace_chunks !== chunks || r.trace_events !== trace.length || r.trace_sha256 !== digest(trace)
-          || r.observation_sha256 !== (observed ? digest(observed) : null)) fail("result_binding");
+          || r.observation_sha256 !== (observed ? digest(observed) : null) || r.authenticated_requests > r.requests_dispatched) fail("result_binding");
         if (r.close_errors.length || ["fds", "roots", "workspace"].some((k) => r.resources[k] !== baseline.resources[k])
           || BigInt(r.resources.retained) < BigInt(baseline.resources.retained)) fail("release_unconfirmed");
         // Request/projection mismatch is a case verdict, not a reason to withhold a genuine original release.
+        // A dispatched C1 still latches a violation that stops the cohort after this case's teardown.
+        if (r.requests_dispatched > 1) c1 = true;
         released = freeze(r); state = "RELEASED"; break;
       }
-      case "FAILED": at("LAUNCHED", "READY", "PREPARING", "BASELINED", "ACTIVE");
-        if (!started("LAUNCH")) fail("write_not_submitted"); failure = freeze(parse(failureSchema, p)); stop("worker_failed"); break;
+      case "FAILED": {
+        at("LAUNCHED", "READY", "PREPARING", "BASELINED", "ACTIVE", "RELEASED", "FINALIZING");
+        if (!started("LAUNCH")) fail("write_not_submitted"); const r = parse(failureSchema, p);
+        // The worker can report only the lifecycle it has been sent; a query exists only after a started GO write.
+        const phases = ["LAUNCHED", "READY"].includes(state) ? ["launch"] : ["PREPARING", "BASELINED"].includes(state) || !submitted ? ["prepare"]
+          : state === "ACTIVE" ? ["go", "settlement"] : ["finalize"];
+        if (!phases.includes(r.phase) || r.query_created && !submitted || r.phase === "finalize" && !r.query_created) fail("failure_binding");
+        failure = freeze(r); stop("worker_failed"); break;
+      }
       case "FINALIZE": at("RELEASED"); parse(empty, p); if (!teardown) fail("teardown_unconfirmed"); state = "FINALIZING"; break;
     }
     frames++; next[f.direction]++;
-    if (parent) writes.push({ kind: f.kind, ordinal: f.ordinal, started: false, outcome: "planned" });
+    if (parent) { writes.push({ kind: f.kind, ordinal: f.ordinal, started: false, outcome: "planned" }); lines.set(f.ordinal, raw); }
     return describe();
   }
   const model = {
@@ -136,25 +145,33 @@ export function createUnsignedControllerProtocolModel(input) {
       if (!stopped) refuse("shutdown_requires_stop");
       if (close !== null) refuse("command_already_closed");
       let frame = null;
-      if (submitted && !cancelSpent && exit === null && writes.every((w) => w.started && w.outcome !== "uncertain")
-        && d.binding_known && d.worker_live && d.pipe_qualified && d.settlement_remaining_ms > 0 && frames < 32) {
-        cancelSpent = true; const ordinal = next.parent++;
+      // Only a possibly running original query is cancelled: RELEASED or FAILED has already ended it.
+      const live = submitted && exit === null && released === null && failure === null && !shutdownPlanned
+        && d.binding_known && d.worker_live && d.pipe_qualified && d.settlement_remaining_ms > 0;
+      const unstarted = writes.filter((w) => !w.started), known = writes.every((w) => !w.started || w.outcome !== "uncertain");
+      if (live && known && !cancelSpent && !unstarted.length && frames < LIMITS.frames) {
+        cancelSpent = shutdownPlanned = true; const ordinal = next.parent++;
         frame = canonical({ binding, direction: "parent", ordinal, kind: "CANCEL", payload: {} }) + "\n";
         if (byteLength(frame) > LIMITS.frame_bytes) fail("byte_bound");
-        frames++; writes.push({ kind: "CANCEL", ordinal, started: false, outcome: "planned", shutdown: true });
+        frames++; writes.push({ kind: "CANCEL", ordinal, started: false, outcome: "planned", shutdown: true }); lines.set(ordinal, frame);
+      } else if (live && known && unstarted.length === 1 && unstarted[0].kind === "CANCEL") {
+        // An accepted but unwritten ordinary CANCEL keeps its ordinal; the shutdown lane may start that same frame once.
+        shutdownPlanned = true; unstarted[0].shutdown = true; frame = lines.get(unstarted[0].ordinal);
       }
       return freeze({ ...flags(), decision: frame ? "CANCEL_THEN_CLOSE" : "CLOSE_ONLY", frame, command_close_required: true });
     },
     noteShutdownWrite(input) {
-      const d = parse(z.object({ outcome: z.enum(["started", "completed", "uncertain"]) }).strict(), input), w = writes.at(-1);
-      if (!stopped || !w?.shutdown) refuse("shutdown_write_order");
+      const d = parse(z.object({ outcome: z.enum(["started", "completed", "uncertain"]) }).strict(), input), w = writes.find((v) => v.shutdown);
+      if (!stopped || !w) refuse("shutdown_write_order");
       if (d.outcome === "started" ? close !== null || exit !== null || w.outcome !== "planned" || writes.find((v) => !v.started) !== w : w.outcome !== "started") refuse("shutdown_write_order");
       w.outcome = d.outcome; if (d.outcome === "started") w.started = true; return describe();
     },
     noteCommandClose(input) { const d = parse(z.object({ outcome: z.enum(["confirmed", "unconfirmed"]) }).strict(), input);
-      if (!stopped || close !== null) refuse("close_order"); close = d.outcome; return describe(); },
+      // A stop or the normal FINALIZE path ends the original command stream exactly once; an unconfirmed close is retained.
+      if (close !== null || !stopped && !(["FINALIZING", "DONE"].includes(state) && started("FINALIZE"))) refuse("close_order");
+      close = d.outcome; if (d.outcome !== "confirmed") stop("close_unconfirmed"); return describe(); },
     observeLateFrame(line) { if (!stopped) refuse("late_requires_stop"); if (frames >= 32 || late.length >= 4 || typeof line !== "string" || byteLength(line) > 65536) refuse("late_capacity");
-      late.push({ sha256: digest(line), bytes: byteLength(line) }); frames++; return describe(); },
+      late.push({ sha256: sha(line), bytes: byteLength(line) }); frames++; return describe(); },
     finishTeardown(input) { return guard(() => { at("RELEASED");
       parse(z.object({ receipt_readback: z.literal(true), anchor_same: z.literal(true), root_removed: z.literal(true), absent: z.literal(true), worker_live: z.literal(true) }).strict(), input);
       if (teardown) fail("teardown_order"); teardown = true; return describe(); }); },
@@ -168,9 +185,13 @@ export function createUnsignedControllerProtocolModel(input) {
 export function describeUnsignedControllerCapacity(input) {
   const d = parse(z.object({ owned_entries: count(16, 1), depth: count(3), content_bytes: count(131072) }).strict(), input);
   const records = 4 * d.owned_entries + 16; if (records > LIMITS.receipt_records) refuse("receipt_capacity");
+  // The unchanged observer schedule: two ACL observations per owned node plus its three anchors, and two content passes.
+  const nodes = d.owned_entries + 3, acl = nodes * 2 * 65536, content = d.content_bytes * 2;
+  const remaining = LIMITS.observer_work_bytes - acl - content - LIMITS.observer_response_bytes; if (remaining < 0) refuse("observer_capacity");
   return freeze({ schema: "native-bar-unsigned-controller-capacity-v2", ...flags(), ...d, limits: LIMITS,
     receipt_reserved_records: records, maximum_functional_frames: 17, run_index_reserved_bytes: 4096 + 24 * 5290,
     maximum_case_ms: 900000, observer_invocations: d.owned_entries + 6,
+    observer_nodes: nodes, observer_acl_bytes: acl, observer_content_bytes: content, observer_remaining_metadata_bytes: remaining,
     teardown_observer_ms: (d.owned_entries + 2) * 10000, teardown_worst_case_fits: (d.owned_entries + 2) * 10000 <= LIMITS.teardown_ms,
     fixed_owner_reservation_bytes: 65536, u0_owner_reservation_bytes: 0,
     observer_work_separate_from_native: true, native_budget_changed: false });
@@ -181,12 +202,12 @@ export function createUnsignedControllerWindowModel(input) {
   if (BigInt(d.cohort_limit_ms) < 1n) refuse("window_bound");
   let phase = "IDLE", last = BigInt(d.started_ns), deadline = null, stopped = null, clockInvalid = false, firstStop = null;
   const end = last + BigInt(d.cohort_limit_ms) * 1000000n, starts = Object.create(null);
+  const caseNs = BigInt(LIMITS.preparation_ms + LIMITS.query_ms + LIMITS.settlement_ms + LIMITS.teardown_ms) * 1000000n;
+  const limitAt = () => deadline !== null && deadline < end ? deadline : end;
   const fail = (reason, at = last) => {
-    if (reason === "deadline") {
-      if (deadline !== null && deadline < at) at = deadline;
-      if (end < at) at = end;
-    }
     if (reason === "clock_domain" || reason === "clock_rollback") clockInvalid = true;
+    // Once a known deadline has passed, any later refusal is that deadline at its own time, not at the observation time.
+    else if (at >= limitAt()) { reason = "deadline"; at = limitAt(); }
     if (!stopped) { stopped = reason; if (!clockInvalid) firstStop = at; }
     refuse(reason);
   };
@@ -197,19 +218,22 @@ export function createUnsignedControllerWindowModel(input) {
     if (p.clock_domain !== d.clock_domain) fail("clock_domain"); const n = BigInt(p.monotonic_ns);
     if (n < last) fail("clock_rollback"); last = n; return n;
   }
-  const describe = () => freeze({ ...flags(), schema: "native-bar-unsigned-controller-window-v2", phase, stopped,
+  const describe = () => freeze({ ...flags(), schema: "native-bar-unsigned-controller-window-v2", phase, stopped, clock_invalid: clockInvalid,
     phase_deadline_ns: deadline === null ? null : String(deadline), cohort_deadline_ns: String(end), first_stop_ns: firstStop === null ? null : String(firstStop), starts: { ...starts }, renewal_available: false });
   function inspect(at, operation) {
     const n = point(at);
     if (!["phase", "observer", "command", "helper"].includes(operation) || deadline === null) fail("window_order");
-    const effectiveDeadline = deadline < end ? deadline : end, remaining = effectiveDeadline - n, ms = remaining / 1000000n;
-    if (remaining < 1000000n) fail("deadline", n < effectiveDeadline ? n : effectiveDeadline);
+    const limit = limitAt(), remaining = limit - n, ms = remaining / 1000000n;
+    if (remaining < 1000000n) fail("deadline", n);
     return freeze({ ...describe(), remaining_ms: String(ms), operation_window_ms: String(operation === "phase" || ms < 10000n ? ms : 10000n) });
   }
   function start(next, at, allowed, limit) {
     if (stopped) refuse("stopped"); const n = point(at);
-    if (!allowed.includes(phase) || starts[next] !== undefined) fail("window_order");
-    if (deadline !== null && n >= deadline || n >= end) fail("deadline", deadline !== null && deadline < end ? deadline : end);
+    // Teardown removes only what a started query's original release covered; there is none before GO.
+    if (!allowed.includes(phase) || starts[next] !== undefined || next === "teardown" && starts.query === undefined) fail("window_order");
+    if (n >= limitAt()) fail("deadline");
+    // A case starts only when its whole worst case fits, so the cohort end never cuts a later phase.
+    if (next === "preparation" && end - n < caseNs) fail("cohort_window");
     phase = next; starts[next] = String(n); deadline = n + BigInt(limit) * 1000000n; return describe();
   }
   return Object.freeze({
@@ -228,7 +252,8 @@ export function createUnsignedControllerWindowModel(input) {
     },
     startTeardown(at) { return start("teardown", at, ["settlement"], LIMITS.teardown_ms); },
     startReporting(at) {
-      if (stopped) refuse("stopped"); const n = point(at); if (phase !== "teardown" || n >= deadline || n >= end) fail("deadline");
+      if (stopped) refuse("stopped"); const n = point(at); if (phase !== "teardown") fail("window_order");
+      if (n >= limitAt()) fail("deadline");
       phase = "reporting"; deadline = end; return describe();
     },
     inspect(at, operation = "phase") {
@@ -238,7 +263,7 @@ export function createUnsignedControllerWindowModel(input) {
       if (clockInvalid || phase !== "settlement" || stopped && stopped !== "deadline") refuse("shutdown_window");
       return inspect(at, "command");
     },
-    canStartCase(at) { if (stopped) refuse("stopped"); const n = point(at); return freeze({ ...flags(), fits_supplied_cohort_window: end - n >= 900000000000n }); },
+    canStartCase(at) { if (stopped) refuse("stopped"); const n = point(at); return freeze({ ...flags(), fits_supplied_cohort_window: end - n >= caseNs }); },
     describe,
   });
 }

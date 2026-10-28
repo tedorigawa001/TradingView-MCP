@@ -51,10 +51,12 @@ export function descriptor(value, cap) {
   return freeze({ line, bytes: byteLength(line), sha256: sha(line) });
 }
 export const resourcesSchema = z.object({ fds: uint, roots: uint, workspace: uint, retained: uint }).strict();
+export const baselineSchema = z.object({ resources: resourcesSchema, clock_domain: label }).strict();
 export const traceSchema = z.object({ ordinal: count(128, 1), api: z.enum(["info", "begin", "open_pair", "inventory", "capture", "verify", "close"]),
   edge: z.enum(["begin", "end", "throw"]), clock_domain: label, monotonic_ns: uint, code: code.nullable(), byte_count: uint, sha256: digestSchema.nullable() }).strict();
 export const LIMITS = freeze({ frame_bytes: 65536, frames: 32, configuration_bytes: 60000, observation_bytes: 16384,
+  comparison_bytes: 16384, assessment_bytes: 4096,
   trace_events: 128, trace_event_bytes: 1024, trace_chunks: 8, chunk_events: 16, receipt_records: 64, receipt_record_bytes: 16384,
   receipt_bytes: 1048576, report_bytes: 262144, run_index_bytes: 131072, index_header_bytes: 4096, index_row_bytes: 5290,
   fixtures: 24, preparation_ms: 120000, query_ms: 600000, settlement_ms: 60000, teardown_ms: 120000, helper_ms: 10000,
-  observer_invocations: 64, observer_work_bytes: 4194304, native_work_bytes: 268435456 });
+  observer_invocations: 64, observer_work_bytes: 4194304, observer_response_bytes: 65536, native_work_bytes: 268435456 });
