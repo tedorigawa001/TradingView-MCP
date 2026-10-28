@@ -96,7 +96,10 @@ for (const close of ["owner", "session", "b"]) test(`B3-Ba ${close} close holds 
 });
 test("B3-Ba actual elapsed expiry rejects pending work without renewing its original window", async (t) => {
   const { owner, session } = setup(t, ++namespace, "pending_no_ack"), q = session.beginProbe({ ttl_ms: 30 });
-  await assert.rejects(session.requestStart(q), /deadline|clock_relation_unavailable/);
+  // The probe deadline timer is unref'd, so nothing else would keep the event loop open until it fires; Node 22's test runner
+  // then cancels the pending assertion and every later test in the file. Hold a referenced timer only for this wait.
+  const hold = setTimeout(() => {}, 60000);
+  try { await assert.rejects(session.requestStart(q), /deadline|clock_relation_unavailable/); } finally { clearTimeout(hold); }
   assert.equal(session.describe(q).state, "release_unconfirmed"); owner.settlePending();
   await new Promise((resolve) => setImmediate(resolve)); assert.equal(session.release(q).state, "released");
 });
