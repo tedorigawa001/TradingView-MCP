@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { describeUnsignedFixture } from "./jointUnsignedAcceptanceContracts.mjs";
+import { describeUnsignedAcceptanceRun, describeUnsignedFixture } from "./jointUnsignedAcceptanceContracts.mjs";
 
 const refuse = (code) => { throw Error(`cc1b_${code}`); };
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -77,10 +77,12 @@ export function describeUnsignedExecutionWindow(input) {
   if (d.started.clock_domain !== d.observed.clock_domain) refuse("clock_domain");
   const elapsed = BigInt(d.observed.monotonic_ns) - BigInt(d.started.monotonic_ns);
   if (elapsed < 0n) refuse("clock_rollback");
-  const remaining = BigInt(d.limit_ms) * 1000000n - elapsed;
+  const remaining = BigInt(d.limit_ms) * 1000000n - elapsed, ms = remaining / 1000000n;
+  // Under one whole millisecond left is a stop, as in C-B; a zero-length observer window would mean no timeout at all.
+  const stop = ms < 1n;
   return frozen({ schema: "native-bar-unsigned-execution-window-v1", ...unqualified(), phase: d.phase,
-    decision: remaining <= 0n ? "STOP_RETAIN" : "SUPPLIED_WINDOW_REMAINS", remaining_ns: String(remaining > 0n ? remaining : 0n),
-    observer_window_ms: remaining > 0n ? Number(remaining / 1000000n < 10000n ? remaining / 1000000n : 10000n) : 0,
+    decision: stop ? "STOP_RETAIN" : "SUPPLIED_WINDOW_REMAINS", remaining_ns: String(remaining > 0n ? remaining : 0n),
+    observer_window_ms: stop ? 0 : Number(ms < 10000n ? ms : 10000n),
     original_window_renewed: false, timestamps_verified: false, termination_available: false });
 }
 
@@ -99,18 +101,22 @@ function context(input) {
 }
 const fixtureNameSchema = z.string().regex(/^native-bar-fs-synthetic-[A-Za-z0-9]{6}$/);
 const allocationDeclaration = z.object({ fixture: z.object({ request: z.unknown(), case_id: label,
-  mode: z.enum(["normal", "ubsan"]), ids: z.unknown() }).strict(), exchange_id: label, provenance: artifacts }).strict();
+  mode: z.enum(["normal", "ubsan"]), ids: z.unknown() }).strict(), exchange_id: label, supervisor_id: label, worker_id: label,
+  provenance: artifacts }).strict();
 function allocationContext(input) {
   const d = parse(allocationDeclaration, input);
   // Only inspect the fixed logical recipe. This unused sentinel never becomes an observed name, binding, or cleanup locator.
   const recipe = describeUnsignedFixture({ ...d.fixture, fixture_name: "native-bar-fs-synthetic-Plan00" });
+  const planned = describeUnsignedAcceptanceRun(recipe.declaration.request).cases
+    .find((c) => c.case_id === recipe.declaration.case_id && c.mode === recipe.declaration.mode);
   const capacity = describeUnsignedExecutionCapacity({ owned_entries: recipe.entries.length,
     depth: Math.max(...recipe.entries.map((e) => e.path ? e.path.split("/").length : 0)), content_bytes: recipe.content_bytes });
   const allocation = frozen({ protocol: "native-bar-unsigned-receipt-allocation-v1", run_id: recipe.declaration.request.run_id,
     case_id: recipe.declaration.case_id, mode: recipe.declaration.mode, source_commit: recipe.declaration.request.source_commit,
     patch_sha256: recipe.declaration.request.patch_sha256, plan_sha256: recipe.plan_sha256,
-    template_sha256: digest({ fixture: d.fixture, entries: recipe.entries }), exchange_id: d.exchange_id, ...d.provenance });
-  return { declaration: d, recipe, capacity, allocation };
+    template_sha256: digest({ fixture: d.fixture, entries: recipe.entries }), exchange_id: d.exchange_id,
+    supervisor_id: d.supervisor_id, worker_id: d.worker_id, ...d.provenance });
+  return { declaration: d, recipe, capacity, allocation, planned };
 }
 const resourceSchema = z.object({ fds: uint, roots: uint, workspace: uint, retained: uint }).strict();
 const baselineSchema = z.object({ resources: resourceSchema, clock_domain: label }).strict();
@@ -148,15 +154,17 @@ const failureSchema = z.object({ reason: z.enum(["worker_lost", "observer_lost",
 
 export function createUnsignedExecutionProtocolModel(input) {
   const { binding, capacity } = context(input), trace = [], ordinals = { parent: 1, worker: 1 };
-  let state = "NEW", stopped = null, frames = 0, baseline = null, baselineHash = null, result = null;
+  let state = "NEW", stopped = null, frames = 0, baseline = null, baselineHash = null, result = null, rejected = null, exit = null;
   let chunks = 0, cancelled = false, teardownComplete = false, traceClock = null;
   const fail = (reason) => { stopped ??= reason; state = "STOPPED"; refuse(reason); };
   const guard = (action) => { if (stopped) refuse("stopped"); try { return action(); }
     catch (e) { if (!stopped) { stopped = /^cc1b_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input"; state = "STOPPED"; } throw e; } };
   const at = (expected) => { if (state !== expected) fail("protocol_order"); };
+  // Until an accepted release, any interruption leaves the fixture in place.
   const describe = () => frozen({ schema: "native-bar-unsigned-execution-model-v1", ...unqualified(), binding, capacity, state,
-    retain: stopped !== null, stop_reason: stopped, model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle",
-    frames, next_ordinals: { ...ordinals }, baseline, baseline_sha256: baselineHash, result, cancelled,
+    retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state), stop_reason: stopped,
+    model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle",
+    frames, next_ordinals: { ...ordinals }, baseline, baseline_sha256: baselineHash, result, rejected_release: rejected, worker_exit: exit, cancelled,
     trace_chunks: chunks, trace_events: trace.length, trace_sha256: digest(trace), teardown_complete: teardownComplete,
     exact_transport_times_available: false, provenance_verified: false, termination_available: false });
   return Object.freeze({
@@ -174,24 +182,29 @@ export function createUnsignedExecutionProtocolModel(input) {
         case "GO": at("BASELINED"); if (p.baseline_sha256 !== baselineHash) fail("baseline_changed"); state = "ACTIVE"; break;
         case "CANCEL": at("ACTIVE"); if (cancelled) fail("duplicate_cancel"); cancelled = true; break;
         case "TRACE_CHUNK": {
-          at("ACTIVE"); if (p.chunk_index !== chunks++ || chunks > limits.trace_chunks) fail("trace_order");
-          for (const event of p.events) {
-            if (bytes(canonical(event)) > limits.trace_event_bytes || trace.length >= limits.trace_events) fail("trace_capacity");
-            if (event.ordinal !== trace.length + 1 || event.clock_domain !== baseline.clock_domain
-              || traceClock !== null && BigInt(event.monotonic_ns) < traceClock) fail("trace_order");
-            traceClock = BigInt(event.monotonic_ns); trace.push(frozen(event));
-          }
-          break;
+          // The whole chunk is checked before any event joins the trace.
+          at("ACTIVE"); if (p.chunk_index !== chunks || chunks >= limits.trace_chunks) fail("trace_order");
+          let last = traceClock;
+          p.events.forEach((event, n) => {
+            if (bytes(canonical(event)) > limits.trace_event_bytes || trace.length + n >= limits.trace_events) fail("trace_capacity");
+            if (event.ordinal !== trace.length + n + 1 || event.clock_domain !== baseline.clock_domain
+              || last !== null && BigInt(event.monotonic_ns) < last) fail("trace_order");
+            last = BigInt(event.monotonic_ns);
+          });
+          chunks++; traceClock = last; trace.push(...p.events.map((event) => frozen(event))); break;
         }
         case "RELEASED": {
-          at("ACTIVE"); result = frozen(p);
+          // A refused packet stays visible as rejected, never as the accepted result.
+          at("ACTIVE"); rejected = frozen(p);
           if (p.baseline_sha256 !== baselineHash) fail("baseline_changed");
           if (p.trace_chunks !== chunks || p.trace_events !== trace.length || p.trace_sha256 !== digest(trace)) fail("trace_binding");
           if (p.query !== "settled" || p.native !== "settled" || !p.original_operation_retired || !p.query_released || p.close_errors.length)
             fail("release_unconfirmed");
           if (["fds", "roots", "workspace"].some((key) => p.resources[key] !== baseline.resources[key])
             || BigInt(p.resources.retained) < BigInt(baseline.resources.retained)) fail("resources_changed");
-          state = "RELEASED"; break;
+          // C-C1 sends exactly one C0 and never C1; nothing authenticates without having been dispatched.
+          if (p.requests_dispatched > 1 || p.authenticated_requests > p.requests_dispatched) fail("request_count");
+          result = rejected; rejected = null; state = "RELEASED"; break;
         }
         case "FINALIZE": at("RELEASED"); if (!teardownComplete) fail("teardown_unconfirmed"); state = "FINALIZING"; break;
       }
@@ -204,8 +217,11 @@ export function createUnsignedExecutionProtocolModel(input) {
       teardownComplete = true; return describe();
     }); },
     workerExit(input) { return guard(() => {
-      const p = parse(exitSchema, input); at("FINALIZING");
-      if (p.exit_code !== 0 || p.signal !== null) fail("worker_lost"); state = "DONE"; return describe();
+      // Every exit is kept; only a clean exit after finalization completes the lifecycle, and no exit proves release.
+      const p = parse(exitSchema, input); if (state === "DONE") fail("protocol_order");
+      exit = frozen(p);
+      if (state !== "FINALIZING" || p.exit_code !== 0 || p.signal !== null) fail("worker_lost");
+      state = "DONE"; return describe();
     }); },
     observeFailure(input) { return guard(() => { const p = parse(failureSchema, input); fail(p.reason); }); },
     describe,
@@ -238,8 +254,10 @@ const receiptPayloads = {
   delete_intent: entryProof, delete_result: z.object({ entry_index: integer(15), outcome: z.literal("removed") }).strict(),
   absence_checked: z.object({ anchor_same: z.literal(true), root_removal_confirmed: z.literal(true), absent: z.literal(true) }).strict(),
   worker_finalized: z.object({ exit_code: z.literal(0), signal: z.null() }).strict(),
-  ready_to_report: z.object({ outcome }).strict(), terminal: z.object({ report_sha256: hash }).strict(),
-  stop_summary: z.object({ reason: code, detail: stopDetail.optional() }).strict(),
+  ready_to_report: z.object({ outcome, negative_assessment: z.object({
+    status: z.enum(["consistent_supplied_negative", "inconsistent_supplied_negative"]), sha256: hash }).strict().optional() }).strict(),
+  terminal: z.object({ report_sha256: hash }).strict(),
+  stop_summary: z.object({ reason: code, detail: stopDetail.optional(), fixture_name: fixtureNameSchema.optional() }).strict(),
 };
 const eventKind = z.enum(Object.keys(receiptPayloads));
 const appendSchema = z.object({ kind: eventKind, payload: z.unknown(), stamp: stampSchema }).strict();
@@ -261,19 +279,26 @@ function eventSchedule(recipe) {
 
 // Only supplied strings are acknowledged. No method writes, syncs, reads a file, or establishes live ownership.
 export function createUnsignedExecutionEvidenceModel(input) {
-  const { declaration: allocated, recipe, capacity, allocation } = allocationContext(input), schedule = eventSchedule(recipe), events = [], proofs = new Map();
+  const { declaration: allocated, recipe, capacity, allocation, planned } = allocationContext(input), schedule = eventSchedule(recipe);
+  const events = [], proofs = new Map();
   let binding = null, fixtureName = null;
-  let position = 0, failures = 0, hardStop = null, pending = null, confirmedBytes = 0, report = null, reportConfirmed = false;
-  let index = null, indexConfirmed = false, baseline = null, release = null, run = null, resultOutcome = null;
-  let parentDomain = null, clock = null;
-  const guard = (f) => { if (hardStop) refuse("evidence_stopped"); try { return f(); }
-    catch (e) { hardStop = /^cc1b_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input"; throw e; } };
+  let position = 0, failures = 0, hardStop = null, refusal = null, pending = null, confirmedBytes = 0, report = null, reportConfirmed = false;
+  let index = null, indexConfirmed = false, baseline = null, release = null, run = null, resultOutcome = null, assessment = null;
+  let setupInventory = null, removedEntries = 0, absence = null, finalized = null, parentDomain = null, clock = null;
+  // A refused record is never written. Before the outcome is fixed it becomes a recordable stop that the next summary must
+  // name; a write that cannot be read back, a write while another is unconfirmed, or a report-phase refusal ends the chain.
+  const guard = (f, recordable = false) => { if (hardStop) refuse("evidence_stopped"); try { return f(); }
+    catch (e) {
+      const reason = /^cc1b_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input";
+      if (recordable && !pending && !resultOutcome && reason !== "evidence_capacity") refusal ??= reason; else hardStop = reason;
+      throw e;
+    } };
   const ensure = (condition, reason = "evidence_order") => { if (!condition) refuse(reason); };
-  function checkStamp(s) {
+  const checkStamp = (s) => {
     ensure(parentDomain === null || s.clock_domain === parentDomain, "clock_domain");
     ensure(clock === null || BigInt(s.monotonic_ns) >= clock, "clock_rollback");
-    parentDomain = s.clock_domain; clock = BigInt(s.monotonic_ns);
-  }
+  };
+  const commitStamp = (s) => { parentDomain = s.clock_domain; clock = BigInt(s.monotonic_ns); };
   const descriptor = (value, cap) => {
     const line = `${canonical(value)}\n`; ensure(bytes(line) <= cap, "evidence_capacity");
     return frozen({ line, sha256: sha(line), bytes: bytes(line) });
@@ -281,25 +306,34 @@ export function createUnsignedExecutionEvidenceModel(input) {
   const describe = () => frozen({ schema: "native-bar-unsigned-evidence-model-v1", ...unqualified(), allocation, binding, capacity,
     confirmed_records: events.length, confirmed_receipt_bytes: confirmedBytes, last_event_hash: events.at(-1)?.event_hash ?? null,
     pending_readback: pending ? "receipt" : report && !reportConfirmed ? "report" : index && !indexConfirmed ? "index" : null,
-    retain: failures > 0 || hardStop !== null, stop_reason: hardStop ?? events.find((e) => e.kind === "stop_summary")?.payload.reason ?? null,
+    retain: failures > 0 || hardStop !== null || refusal !== null,
+    stop_reason: hardStop ?? refusal ?? events.find((e) => e.kind === "stop_summary")?.payload.reason ?? null,
     model_status: indexConfirmed && !hardStop ? "consistent_supplied_evidence" : "incomplete_supplied_evidence",
     outcome: resultOutcome, report_sha256: report?.sha256 ?? null, index_sha256: index?.sha256 ?? null });
   return Object.freeze({
     append(input) { return guard(() => {
       ensure(!pending && !index && !indexConfirmed);
-      const d = parse(appendSchema, input), p = parse(receiptPayloads[d.kind], d.payload);
+      const d = parse(appendSchema, input), p = parse(receiptPayloads[d.kind], d.payload), effects = [];
       let recordBinding = binding, recordName = fixtureName;
       ensure(events.at(-1)?.kind !== "terminal");
+      const stopped = refusal !== null || failures > 0;
       if (d.kind === "stop_summary") {
-        ensure(events.length > 0 && !resultOutcome && !report && ++failures <= 4, "failure_capacity");
-      } else if (failures) {
+        ensure(events.length > 0 && !resultOutcome && !report);
+        ensure(failures < 4, "failure_capacity");
+        if (refusal !== null && failures === 0) ensure(p.reason === refusal, "refusal_binding");
+        // A root that was returned but whose creation result could not be recorded keeps its only locator here.
+        if (p.fixture_name !== undefined) {
+          ensure(fixtureName === null && events.some((e) => e.kind === "create_intent" && e.payload.entry_index === 0), "fixture_name_changed");
+          recordName = p.fixture_name;
+        }
+        effects.push(() => { failures++; });
+      } else if (stopped) {
+        ensure(failures > 0, "refusal_unrecorded");
         ensure(d.kind === (resultOutcome ? "terminal" : "ready_to_report"));
-        if (d.kind === "ready_to_report") ensure(p.outcome !== "MODEL_CONSISTENT", "false_success");
       } else {
         const expected = schedule[position]; ensure(expected?.[0] === d.kind);
         if (expected.length === 2) ensure(p.entry_index === expected[1], "entry_order");
-        position++;
-        if (d.kind === "ready_to_report") ensure(p.outcome === "MODEL_CONSISTENT", "false_success");
+        effects.push(() => { position++; });
       }
       if (d.kind === "create_result" || d.kind === "delete_intent") {
         const entry = recipe.entries[p.entry_index]; ensure(!!entry, "entry_order");
@@ -308,28 +342,51 @@ export function createUnsignedExecutionEvidenceModel(input) {
             : p.proof.nlink === "1" && p.proof.size === entry.size && p.proof.sha256 === entry.sha256), "proof_binding");
         if (d.kind === "create_result") {
           if (p.entry_index === 0) { ensure(fixtureName === null && p.fixture_name !== undefined, "fixture_name_required"); recordName = p.fixture_name; }
-          else ensure(p.fixture_name === undefined, "fixture_name_changed");
+          else {
+            ensure(p.fixture_name === undefined, "fixture_name_changed");
+            // The owned tree stays on the root's device and owner.
+            const root = proofs.get(0);
+            ensure(p.proof.device === root.device && p.proof.uid === root.uid && p.proof.gid === root.gid, "proof_binding");
+          }
           ensure(![...proofs.values()].some((proof) => proof.device === p.proof.device && proof.inode === p.proof.inode), "proof_alias");
-          proofs.set(p.entry_index, frozen(p.proof));
+          effects.push(() => { proofs.set(p.entry_index, frozen(p.proof)); });
         } else ensure(digest(entryIdentity(proofs.get(p.entry_index))) === digest(entryIdentity(p.proof)), "proof_binding");
       }
+      if (d.kind === "delete_result") effects.push(() => { removedEntries++; });
       if (d.kind === "setup_sealed") {
         ensure(binding === null && fixtureName !== null, "setup_binding");
         recordBinding = context({ fixture: { ...allocated.fixture, fixture_name: fixtureName }, exchange_id: allocated.exchange_id,
           provenance: { ...allocated.provenance, ...p.provenance } }).binding;
+        effects.push(() => { setupInventory = p.inventory_sha256; });
       }
-      if (d.kind === "baseline_bound") baseline = frozen({ resources: p.resources, clock_domain: p.clock_domain });
+      if (d.kind === "baseline_bound") effects.push(() => { baseline = frozen({ resources: p.resources, clock_domain: p.clock_domain }); });
       if (d.kind === "go_intent") ensure(p.baseline_sha256 === digest(baseline), "baseline_changed");
-      if (d.kind === "run_outcome") run = frozen(p);
+      if (d.kind === "run_outcome") effects.push(() => { run = frozen(p); });
       if (d.kind === "release_checked") {
         ensure(p.baseline_sha256 === digest(baseline), "baseline_changed");
         ensure(p.query === "settled" && p.native === "settled" && p.query_released && p.original_operation_retired && !p.close_errors.length, "release_unconfirmed");
         ensure(["fds", "roots", "workspace"].every((k) => p.resources[k] === baseline.resources[k])
           && BigInt(p.resources.retained) >= BigInt(baseline.resources.retained), "resources_changed");
         ensure(p.primary_code === run.primary_code && p.diagnostic_sha256 === run.diagnostic_sha256, "diagnostic_changed");
-        release = frozen(p);
+        ensure(p.requests_dispatched <= 1 && p.authenticated_requests <= p.requests_dispatched, "request_count");
+        effects.push(() => { release = frozen(p); });
       }
-      if (d.kind === "ready_to_report") resultOutcome = p.outcome;
+      // Nothing in the owned tree may have changed between sealing it and checking it before removal.
+      if (d.kind === "cleanup_precheck") ensure(p.inventory_sha256 === setupInventory, "inventory_changed");
+      if (d.kind === "absence_checked") effects.push(() => { absence = frozen(p); });
+      if (d.kind === "worker_finalized") effects.push(() => { finalized = frozen(p); });
+      if (d.kind === "ready_to_report") {
+        // NOT_RUN means native work never began. MODEL_CONSISTENT also needs the case's expected code and request counts plus
+        // a supplied consistent C-C1a assessment; FAIL/BLOCKED stay available, including a cleanly settled, torn-down FAIL.
+        if (p.outcome === "NOT_RUN") ensure(!events.some((e) => e.kind === "go_intent"), "outcome_stage");
+        if (p.outcome === "MODEL_CONSISTENT") {
+          ensure(!stopped, "false_success");
+          ensure(run.primary_code === planned.expected_code && release.requests_dispatched === 1
+            && release.authenticated_requests === (planned.owner === "fixed_memory" ? 1 : 0), "outcome_binding");
+          ensure(p.negative_assessment?.status === "consistent_supplied_negative", "assessment_required");
+        }
+        effects.push(() => { resultOutcome = p.outcome; assessment = p.negative_assessment ?? null; });
+      }
       if (d.kind === "terminal") ensure(reportConfirmed && p.report_sha256 === report.sha256, "report_binding");
       checkStamp(d.stamp);
       ensure(events.length < capacity.receipt_reserved_records, "evidence_capacity");
@@ -338,19 +395,23 @@ export function createUnsignedExecutionEvidenceModel(input) {
         ordinal: events.length + 1, kind: d.kind, payload: p, stamp: d.stamp, previous_event_hash: events.at(-1)?.event_hash ?? null };
       const event = frozen({ ...body, event_hash: digest(body) }), encoded = descriptor(event, limits.receipt_record_bytes);
       ensure(confirmedBytes + encoded.bytes <= limits.receipt_bytes, "evidence_capacity");
-      pending = { event, encoded, binding: recordBinding, fixtureName: recordName }; return encoded;
-    }); },
+      pending = { event, encoded, binding: recordBinding, fixtureName: recordName, stamp: d.stamp, effects }; return encoded;
+    }, true); },
+    // Every state change of a record takes effect only once its exact line is read back.
     confirmReceipt(line) { return guard(() => {
       ensure(pending && line === pending.encoded.line, "readback_mismatch");
-      events.push(pending.event); confirmedBytes += pending.encoded.bytes;
-      binding = pending.binding; fixtureName = pending.fixtureName; pending = null; return describe();
+      events.push(pending.event); confirmedBytes += pending.encoded.bytes; commitStamp(pending.stamp);
+      binding = pending.binding; fixtureName = pending.fixtureName; pending.effects.forEach((apply) => apply()); pending = null; return describe();
     }); },
     createReport(input) { return guard(() => {
       ensure(!pending && !report && events.at(-1)?.kind === "ready_to_report");
-      const p = parse(reportInput, input); checkStamp(p.save_stamp);
+      const p = parse(reportInput, input); checkStamp(p.save_stamp); commitStamp(p.save_stamp);
       report = descriptor({ schema: "native-bar-unsigned-execution-report-v1", ...unqualified(), allocation, binding, outcome: resultOutcome,
+        negative_assessment: assessment, teardown: { removed_entries: removedEntries, absence, worker_exit: finalized },
         receipt_prefix_sha256: events.at(-1).event_hash, receipt_prefix_records: events.length,
-        baseline, run_outcome: run, release, failure_summaries: events.filter((e) => e.kind === "stop_summary").map((e) => e.payload),
+        // A root locator carried by a stop stays only in the private receipt.
+        baseline, run_outcome: run, release, failure_summaries: events.filter((e) => e.kind === "stop_summary")
+          .map(({ payload: { fixture_name: _locator, ...summary } }) => summary),
         limitations: p.limitations, save_stamp: p.save_stamp,
         observation_origin: "supplied_model_data_only", timestamps_verified: false,
         c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null }, limits.report_bytes);
