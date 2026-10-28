@@ -3,29 +3,39 @@ import assert from "node:assert/strict";
 import module, { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 
 const effects = [], saved = [], originalRequire = module.createRequire, originalDlopen = process.dlopen;
-for (const name of ["writeFileSync", "mkdirSync", "mkdtempSync", "unlinkSync", "rmdirSync", "rmSync", "renameSync", "chmodSync", "symlinkSync", "linkSync"]) {
-  saved.push([name, fs[name]]); fs[name] = () => { effects.push(name); throw Error("cc1a_io_forbidden"); };
-}
-const open = fs.openSync;
 const sourceRoots = ["../helpers/", "../../node_modules/"].map((p) => fileURLToPath(new URL(p, import.meta.url)));
+// A symlinked node_modules loads modules by their real path, so that location is an allowed read root as well.
+sourceRoots.push(...sourceRoots.map((root) => fs.realpathSync(root) + sep));
 const runnerSource = fileURLToPath(new URL("../../native/native_bar_fs/test_joint_admission.mjs", import.meta.url));
-saved.push(["openSync", open]);
-fs.openSync = (file, flags, ...rest) => {
+const readOnly = (file, flags) => {
   const p = resolve(file instanceof URL ? fileURLToPath(file) : String(file));
-  if ((flags === "r" || flags === 0) && (sourceRoots.some((root) => p.startsWith(root)) || p === runnerSource)) return open(file, flags, ...rest);
-  effects.push("openSync"); throw Error("cc1a_io_forbidden");
+  return (flags === undefined || flags === "r" || flags === 0) && (sourceRoots.some((root) => p.startsWith(root)) || p === runnerSource);
 };
+const refused = (name) => { effects.push(name); return Error("cc1a_io_forbidden"); };
+function trap(target, name, wrap) { saved.push([target, name, target[name]]); target[name] = wrap(target[name]); }
+const mutating = ["writeFile", "appendFile", "copyFile", "cp", "truncate", "mkdir", "mkdtemp", "unlink", "rmdir", "rm", "rename", "chmod", "symlink", "link", "utimes"];
+for (const name of mutating) {
+  trap(fs, `${name}Sync`, () => () => { throw refused(`${name}Sync`); });
+  trap(fs, name, () => () => { throw refused(name); });
+  trap(fs.promises, name, () => async () => { throw refused(`promises.${name}`); });
+}
+trap(fs, "createWriteStream", () => () => { throw refused("createWriteStream"); });
+trap(fs, "openSync", (open) => (file, flags, ...rest) => { if (readOnly(file, flags)) return open(file, flags, ...rest); throw refused("openSync"); });
+trap(fs, "open", (open) => (file, flags, ...rest) => {
+  if (readOnly(file, typeof flags === "function" ? undefined : flags)) return open(file, flags, ...rest); throw refused("open");
+});
+trap(fs.promises, "open", (open) => async (file, flags, ...rest) => { if (readOnly(file, flags)) return open(file, flags, ...rest); throw refused("promises.open"); });
 module.createRequire = (...args) => new Proxy(originalRequire(...args), { apply(target, self, args) {
   if (/\.node$/.test(String(args[0]))) { effects.push("native_require"); throw Error("cc1a_native_forbidden"); }
   return Reflect.apply(target, self, args);
 } });
 process.dlopen = () => { effects.push("dlopen"); throw Error("cc1a_native_forbidden"); };
 syncBuiltinESMExports();
-test.after(() => { for (const [name, f] of saved) fs[name] = f; module.createRequire = originalRequire; process.dlopen = originalDlopen;
+test.after(() => { for (const [target, name, f] of saved.reverse()) target[name] = f; module.createRequire = originalRequire; process.dlopen = originalDlopen;
   syncBuiltinESMExports(); assert.deepEqual(effects, []); });
 const api = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
 const request = () => ({ schema: "native-bar-unsigned-acceptance-request-v1", stage: "C-C1a", run_id: "invented-run",
@@ -35,6 +45,19 @@ function fixture(case_id = "u1-unsigned", mode = "normal") {
   return { request: request(), case_id, mode, fixture_name: "native-bar-fs-synthetic-Ab123Z",
     ids: { fixture: id(1), store: id(2), epoch: id(3), authority: id(4), key: id(5), reference: id(6), extra: id(7) } };
 }
+test("C-C1a's tripwire refuses sync, callback, promise and stream filesystem mutation", async () => {
+  const before = effects.length, probe = "/nonexistent-cc1a-probe/x";
+  for (const name of mutating) {
+    assert.throws(() => fs[`${name}Sync`](probe, probe), /cc1a_io_forbidden/, `${name}Sync`);
+    assert.throws(() => fs[name](probe, probe, () => {}), /cc1a_io_forbidden/, name);
+    await assert.rejects(fs.promises[name](probe, probe), /cc1a_io_forbidden/, `promises.${name}`);
+  }
+  assert.throws(() => fs.createWriteStream(probe), /cc1a_io_forbidden/);
+  assert.throws(() => fs.openSync(probe, "w"), /cc1a_io_forbidden/);
+  assert.throws(() => fs.open(probe, "w", () => {}), /cc1a_io_forbidden/);
+  await assert.rejects(fs.promises.open(probe, "w"), /cc1a_io_forbidden/);
+  effects.splice(before);
+});
 test("C-C1a freezes twelve cases in both modes without creating a fixture or an execution grant", () => {
   const input = request(), plan = api.describeUnsignedAcceptanceRun(input); input.run_id = "changed";
   assert.equal(plan.declaration.run_id, "invented-run");
@@ -43,6 +66,15 @@ test("C-C1a freezes twelve cases in both modes without creating a fixture or an 
   assert.equal(plan.execution_available, false); assert.equal(plan.native_status, "NOT_RUN");
   assert.equal(plan.limits.maximum_live_fixtures, 1); assert.equal(plan.limits.ancestor_headroom_bytes, "196608");
   assert.ok(Object.isFrozen(plan.cases[0]));
+});
+test("C-C1a plan hash binds the declaration, catalog, bounds, modes, anchor and output layout", () => {
+  const plan = api.describeUnsignedAcceptanceRun(request());
+  const canonical = (v) => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v && typeof v === "object"
+    ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}` : JSON.stringify(v);
+  const digest = (v) => createHash("sha256").update(canonical(v)).digest("hex");
+  const catalog = plan.cases.filter((c) => c.mode === "normal").map(({ mode, status, ...c }) => c), outputs = plan.outputs.map(({ state, ...o }) => o);
+  assert.equal(plan.plan_sha256, digest({ declaration: plan.declaration, catalog, limits: plan.limits, modes: plan.modes, anchor: plan.anchor, outputs }));
+  assert.notEqual(plan.plan_sha256, digest({ declaration: plan.declaration, catalog, limits: plan.limits }));
 });
 test("C-C1a prepares only the fixed small unsigned recipes and keeps U4's input change separate", () => {
   const plan = api.describeUnsignedAcceptanceRun(request());
@@ -63,21 +95,40 @@ test("C-C1a prepares only the fixed small unsigned recipes and keeps U4's input 
 });
 const proofFor = (entry, n) => ({ path: entry.path, proof: { kind: entry.kind, device: "1", inode: String(n + 100), uid: "501", gid: "20",
   mode: entry.mode, birthtime_ns: "123", flags: "0", acl: "none", acl_hash: "c".repeat(64), nlink: entry.kind === "file" ? "1" : "2",
-  size: entry.size ?? "96", sha256: entry.sha256 ?? null } });
+  size: entry.size ?? "96", sha256: entry.sha256 ?? null }, children: entry.kind === "directory" ? [] : null });
+const created = (entry, n) => ({ ...proofFor(entry, n), receipt_write: "confirmed" });
 const baselineResources = () => ({ fds: "0", roots: "0", workspace: "0" });
-function ownership(case_id = "u1-unsigned", baseline = baselineResources()) {
-  const f = fixture(case_id), r = api.describeUnsignedFixture(f);
+function ownership(case_id = "u1-unsigned", baseline = baselineResources(), mode = "normal") {
+  const f = fixture(case_id, mode), r = api.describeUnsignedFixture(f);
   const model = api.createUnsignedOwnershipModel({ fixture: f, supervisor_id: "supervisor-1", worker_id: "worker-1", uid: "501", gid: "20", baseline_resources: baseline });
   const entries = r.entries.map(proofFor);
-  for (const entry of entries) model.recordCreation(entry);
+  r.entries.forEach((e, n) => model.recordCreation(created(e, n)));
   model.finishSetup();
   return { model, entries };
 }
+function partial(case_id = "u1-unsigned") {
+  const f = fixture(case_id), r = api.describeUnsignedFixture(f);
+  return { r, model: api.createUnsignedOwnershipModel({ fixture: f, supervisor_id: "s", worker_id: "w", uid: "501", gid: "20", baseline_resources: baselineResources() }) };
+}
+// The independent observer lists every remaining owned directory; here the listing is derived from the remaining owned set.
+const parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+const listed = (entries) => entries.map((e) => ({ ...structuredClone(e), children: e.proof.kind === "directory"
+  ? entries.filter((v) => v.path !== "" && parentOf(v.path) === e.path).map((v) => v.path.slice(v.path.lastIndexOf("/") + 1)) : null }));
 function cleanup(entries, changes = {}) {
-  return { entries, supervisor: "live", worker: "live", ancestor_chain: "same", receipt: "complete", query: "settled",
+  return { entries: listed(entries), supervisor: "live", worker: "live", ancestor_chain: "same", receipt: "complete", query: "settled",
     native: "settled", original_operation_retired: true, query_released: true,
     resources: { fds_before: "0", fds_after: "0", roots_before: "0", roots_after: "0", workspace_before: "0", workspace_after: "0" },
     fixture_absent: false, ...changes };
+}
+function torndown(case_id = "u1-unsigned", mode = "normal", confirm = true) {
+  const { model, entries } = ownership(case_id, baselineResources(), mode); let remaining = entries;
+  while (remaining.length) {
+    const observation = cleanup(remaining), path = model.assessCleanup(observation).next_entry.path;
+    model.recordRemoval({ observation, path, outcome: "removed", receipt_write: "confirmed" });
+    remaining = remaining.filter((e) => e.path !== path);
+  }
+  if (confirm) assert.equal(model.assessCleanup(cleanup([], { fixture_absent: true })).decision, "supplied_complete");
+  return model;
 }
 test("C-C1a models exact deepest-first removal with immutable ownership but grants no deletion authority", () => {
   const { model, entries } = ownership("u3-maintenance"); let remaining = structuredClone(entries); const removed = [];
@@ -93,27 +144,77 @@ test("C-C1a models exact deepest-first removal with immutable ownership but gran
   assert.equal(model.assessCleanup(cleanup([], { fixture_absent: true })).decision, "supplied_complete");
   assert.equal(model.describe().native_status, "NOT_RUN"); assert.deepEqual(model.describe().removed_paths, removed);
 });
-function negative(case_id = "u1-unsigned") {
-  const run = api.describeUnsignedAcceptanceRun(request()), c = run.cases.find((c) => c.case_id === case_id);
-  const phases = ["native_begin", "c0_dispatch"];
-  if (c.owner === "fixed_memory") phases.push("c0_authenticated", "open_pair");
-  if (c.owner === "fixed_memory" && c.row !== "U4") phases.push("inventory");
-  if (c.row === "U1") phases.push("witness_capture");
-  return { request: request(), case_id, mode: "normal", plan_sha256: run.plan_sha256, expected_layer: c.expected_layer,
-    observed_code: c.expected_code, phases, requests_dispatched: 1, authenticated_requests: c.owner === "fixed_memory" ? 1 : 0,
-    capture_matches_setup: c.row === "U1", markers_zero_unreadable: c.owner === "fixed_memory" && c.row !== "U4",
-    original_operation_retired: true, query_released: true, resources_at_baseline: true, teardown: "confirmed" };
+test("C-C1a records one absence confirmation and exposes only a bound, non-authoritative teardown summary", () => {
+  const model = torndown("u3-maintenance"), s = model.summarizeTeardown();
+  assert.equal(s.absence_confirmed, true); assert.equal(s.stopped, null); assert.equal(s.setup, "complete");
+  assert.equal(s.removed_entries, s.recorded_entries); assert.equal(s.cleanup_execution_available, false); assert.ok(Object.isFrozen(s));
+  model.assessCleanup(cleanup([], { fixture_absent: true }));
+  assert.equal(model.describe().history.filter((h) => h.kind === "absence_confirmed").length, 1);
+  assert.equal(torndown("u3-maintenance", "normal", false).summarizeTeardown().absence_confirmed, false);
+});
+// Literal expectations, independent of the model's derivation rules.
+const inventoried = ["native_begin", "c0_dispatch", "c0_authenticated", "open_pair", "inventory"];
+const phaseTable = { "u0-unavailable": ["native_begin", "c0_dispatch"], "u0-unsigned": ["native_begin", "c0_dispatch"],
+  "u1-unsigned": [...inventoried, "witness_capture"], "u2-missing": inventoried, "u2-extra": inventoried, "u2-gap": inventoried,
+  "u3-pending": inventoried, "u3-writer": inventoried, "u3-reserve": inventoried, "u3-maintenance": inventoried, "u3-maintenance-bound": inventoried,
+  "u4-expected-inode": ["native_begin", "c0_dispatch", "c0_authenticated", "open_pair"] };
+function negative(case_id = "u1-unsigned", mode = "normal") {
+  const run = api.describeUnsignedAcceptanceRun(request()), c = run.cases.find((c) => c.case_id === case_id && c.mode === mode);
+  return { fixture: fixture(case_id, mode), plan_sha256: run.plan_sha256, expected_layer: c.expected_layer, observed_code: c.expected_code,
+    phases: [...phaseTable[case_id]], requests_dispatched: 1, authenticated_requests: case_id.startsWith("u0-") ? 0 : 1,
+    capture_matches_setup: case_id === "u1-unsigned", markers_zero_unreadable: phaseTable[case_id].includes("inventory"),
+    original_operation_retired: true, query_released: true, usage_blockers: case_id === "u3-maintenance-bound" ? ["maintenance_metadata"] : [],
+    native_throws: case_id === "u4-expected-inode" ? ["admission_expected_binding"] : [],
+    registration_delta: case_id === "u4-expected-inode" ? ["bindings.data.inode"] : [], ownership: torndown(case_id, mode).summarizeTeardown() };
 }
-test("C-C1a compares supplied negative traces but cannot turn even consistent data into a native PASS", () => {
-  for (const c of api.describeUnsignedAcceptanceRun(request()).cases.filter((c) => c.mode === "normal")) {
-    const r = api.assessUnsignedNegativeModel(negative(c.case_id));
-    assert.equal(r.model_status, "consistent_supplied_negative"); assert.equal(r.native_status, "NOT_RUN");
-    assert.equal(r.execution_available, false); assert.equal(r.view_verified, false);
+test("C-C1a compares supplied negative traces with literal phases but cannot turn consistent data into a native PASS", () => {
+  const plan = api.describeUnsignedAcceptanceRun(request());
+  assert.deepEqual(Object.keys(phaseTable).sort(), [...new Set(plan.cases.map((c) => c.case_id))].sort());
+  for (const c of plan.cases) {
+    const r = api.assessUnsignedNegativeModel(negative(c.case_id, c.mode));
+    assert.equal(r.model_status, "consistent_supplied_negative", c.case_id); assert.deepEqual(r.blockers, []); assert.equal(r.mode, c.mode);
+    assert.equal(r.native_status, "NOT_RUN"); assert.equal(r.execution_available, false); assert.equal(r.view_verified, false);
   }
   const o = negative(); o.phases.push("v0");
-  assert.equal(api.assessUnsignedNegativeModel(o).model_status, "inconsistent_supplied_negative");
-  const r = negative(); r.teardown = "unconfirmed";
-  assert.equal(api.assessUnsignedNegativeModel(r).model_status, "inconsistent_supplied_negative");
+  assert.deepEqual(api.assessUnsignedNegativeModel(o).blockers, ["phase_order"]);
+});
+const latched = () => { const { model, entries } = ownership(); model.assessCleanup(cleanup(entries, { receipt: "failed" })); return model.summarizeTeardown(); };
+for (const [name, case_id, change, expected] of [
+  ["a dropped openPair", "u4-expected-inode", (o) => { o.phases.pop(); }, ["phase_order"]],
+  ["an inventory on U4", "u4-expected-inode", (o) => { o.phases.push("inventory"); }, ["phase_order"]],
+  ["a wrong layer", "u1-unsigned", (o) => { o.expected_layer = "prefix"; }, ["outcome_binding"]],
+  ["a wrong code", "u1-unsigned", (o) => { o.observed_code = "b3cb_record_binding"; }, ["outcome_binding"]],
+  ["an unexpected joint success", "u1-unsigned", (o) => { o.observed_code = "cc1a_unexpected_joint_success"; }, ["outcome_binding"]],
+  ["a pre-begin registration refusal", "u4-expected-inode", (o) => { o.observed_code = "b3ca_invalid_registration"; }, ["outcome_binding"]],
+  ["no C0 dispatch", "u0-unsigned", (o) => { o.requests_dispatched = 0; }, ["request_count"]],
+  ["an authenticated unsigned C0", "u0-unsigned", (o) => { o.authenticated_requests = 1; }, ["request_count"]],
+  ["an unauthenticated fixed C0", "u3-writer", (o) => { o.authenticated_requests = 0; }, ["request_count"]],
+  ["a missing U1 byte match", "u1-unsigned", (o) => { o.capture_matches_setup = false; }, ["byte_comparison"]],
+  ["a claimed capture without one", "u2-gap", (o) => { o.capture_matches_setup = true; }, ["byte_comparison"]],
+  ["a missing marker encoding", "u3-pending", (o) => { o.markers_zero_unreadable = false; }, ["marker_encoding"]],
+  ["claimed markers before inventory", "u4-expected-inode", (o) => { o.markers_zero_unreadable = true; }, ["marker_encoding"]],
+  ["an unretired operation", "u2-extra", (o) => { o.original_operation_retired = false; }, ["settlement_or_teardown"]],
+  ["an unreleased query", "u2-extra", (o) => { o.query_released = false; }, ["settlement_or_teardown"]],
+  ["an ancestor-size envelope excess", "u3-maintenance-bound", (o) => { o.usage_blockers = ["common_inventory_bytes"]; }, ["usage_cause"]],
+  ["an extra usage blocker", "u3-maintenance-bound", (o) => { o.usage_blockers.push("common_inventory_bytes"); }, ["usage_cause"]],
+  ["a missing usage cause", "u3-maintenance-bound", (o) => { o.usage_blockers = []; }, ["usage_cause"]],
+  ["a usage excess elsewhere", "u3-writer", (o) => { o.usage_blockers = ["data_inventory_bytes"]; }, ["usage_cause"]],
+  ["another openPair refusal", "u4-expected-inode", (o) => { o.native_throws = ["admission_marker_binding"]; }, ["native_cause"]],
+  ["a missing raw cause", "u4-expected-inode", (o) => { o.native_throws = []; }, ["native_cause"]],
+  ["a native throw outside U4", "u1-unsigned", (o) => { o.native_throws = ["admission_expected_binding"]; }, ["native_cause"]],
+  ["a marker delta", "u4-expected-inode", (o) => { o.registration_delta.push("bindings.markers.admission.sha256"); }, ["registration_delta"]],
+  ["a delta outside U4", "u3-reserve", (o) => { o.registration_delta = ["bindings.data.inode"]; }, ["registration_delta"]],
+  ["another case's teardown", "u3-pending", (o) => { o.ownership = torndown("u3-writer").summarizeTeardown(); }, ["ownership_binding"]],
+  ["another mode's teardown", "u1-unsigned", (o) => { o.ownership = torndown("u1-unsigned", "ubsan").summarizeTeardown(); }, ["ownership_binding"]],
+  ["a latched teardown", "u1-unsigned", (o) => { o.ownership = latched(); }, ["settlement_or_teardown"]],
+  ["an unconfirmed absence", "u1-unsigned", (o) => { o.ownership = torndown("u1-unsigned", "normal", false).summarizeTeardown(); }, ["settlement_or_teardown"]],
+]) test(`C-C1a negative model reports only ${expected.join("/")} for ${name}`, () => {
+  const o = negative(case_id); change(o); const r = api.assessUnsignedNegativeModel(o);
+  assert.equal(r.model_status, "inconsistent_supplied_negative"); assert.deepEqual(r.blockers, expected);
+});
+test("C-C1a negative model refuses a teardown summary that claims authority", () => {
+  const o = negative(); o.ownership = { ...o.ownership, cleanup_execution_available: true };
+  assert.throws(() => api.assessUnsignedNegativeModel(o), { message: "cc1a_invalid_input" });
 });
 test("C-C1a's inert harness only inspects; no flag, token or direct execute call can unlock native work", async () => {
   const harness = await import("../helpers/jointUnsignedHarness.mjs");
@@ -142,26 +243,76 @@ for (const [name, change] of [
   assert.equal(model.assessCleanup(o).decision, "hold");
   assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold"); assert.notEqual(model.describe().stopped, null);
 });
+for (const [name, change, reason] of [
+  ["an unexpected .DS_Store", (o) => { o.entries.find((e) => e.path === "store").children.push(".DS_Store"); }, "directory_contents_changed"],
+  ["a missing directory listing", (o) => { o.entries.find((e) => e.path === "").children = null; }, "directory_contents_changed"],
+  ["a listed child gone", (o) => { o.entries.find((e) => e.path === "admission-witness").children = []; }, "directory_contents_changed"],
+  ["a file with a listing", (o) => { o.entries.find((e) => e.path === "store/policy.json").children = []; }, "entry_changed"],
+]) test(`C-C1a holds on ${name} before deleting anything`, () => {
+  const { model, entries } = ownership(), o = cleanup(entries); change(o);
+  const a = model.assessCleanup(o); assert.equal(a.decision, "hold"); assert.equal(a.reason, reason);
+  assert.deepEqual(model.describe().removed_paths, []);
+});
 test("C-C1a permits only a supplied never-started rollback after setup abort", () => {
-  const f = fixture(), r = api.describeUnsignedFixture(f), model = api.createUnsignedOwnershipModel({ fixture: f,
-    supervisor_id: "supervisor-1", worker_id: "worker-1", uid: "501", gid: "20", baseline_resources: baselineResources() });
-  const entry = proofFor(r.entries[0], 0); model.recordCreation(entry); model.abortSetup();
+  const { model, r } = partial(), entry = proofFor(r.entries[0], 0); model.recordCreation(created(r.entries[0], 0)); model.abortSetup();
   const o = cleanup([entry], { worker: "never_started", query: "never_started", native: "never_started", original_operation_retired: false, query_released: false });
   assert.equal(model.assessCleanup(o).decision, "supplied_next_entry");
   model.recordRemoval({ observation: o, path: "", outcome: "removed", receipt_write: "confirmed" });
   assert.equal(model.assessCleanup({ ...o, entries: [], fixture_absent: true }).decision, "supplied_complete");
 });
+for (const [name, aborted, changes] of [
+  ["a complete setup reported as never started", false, { worker: "never_started", query: "never_started", native: "never_started", original_operation_retired: false, query_released: false }],
+  ["an aborted setup with a live worker", true, { worker: "live", query: "never_started", native: "never_started" }],
+  ["an aborted setup with a settled query", true, { worker: "never_started", query: "settled", native: "never_started" }],
+  ["an aborted setup with settled native work", true, { worker: "never_started", query: "never_started", native: "settled" }],
+]) test(`C-C1a refuses rollback for ${name}`, () => {
+  let model, entries;
+  if (aborted) { const p = partial(); p.model.recordCreation(created(p.r.entries[0], 0)); p.model.abortSetup(); model = p.model; entries = [proofFor(p.r.entries[0], 0)]; }
+  else ({ model, entries } = ownership());
+  const a = model.assessCleanup(cleanup(entries, changes));
+  assert.equal(a.decision, "hold"); assert.equal(a.reason, "release_unconfirmed");
+});
 test("C-C1a creation receipts stop on unrecorded or unsafe creations instead of adopting an observed tree", () => {
   for (const change of [(e) => { e.path = "../outside"; }, (e) => { e.proof.uid = "502"; }, (e) => { e.proof.inode = "100"; },
     (e) => { e.proof.flags = "1"; }, (e) => { e.proof.acl = "allow"; }, (e) => { e.proof.nlink = "2"; },
     (e) => { e.proof.size = "999"; }, (e) => { e.proof.sha256 = "f".repeat(64); }]) {
-    const f = fixture(), r = api.describeUnsignedFixture(f), model = api.createUnsignedOwnershipModel({ fixture: f,
-      supervisor_id: "s", worker_id: "w", uid: "501", gid: "20", baseline_resources: baselineResources() });
-    model.recordCreation(proofFor(r.entries[0], 0));
-    for (let i = 1; i < 3; i++) model.recordCreation(proofFor(r.entries[i], i));
-    const e = proofFor(r.entries[3], 3); change(e); assert.throws(() => model.recordCreation(e), /cc1a_/);
+    const { model, r } = partial();
+    model.recordCreation(created(r.entries[0], 0));
+    for (let i = 1; i < 3; i++) model.recordCreation(created(r.entries[i], i));
+    const e = created(r.entries[3], 3); change(e); assert.throws(() => model.recordCreation(e), /cc1a_/);
     assert.equal(model.describe().entries.length, 3); assert.notEqual(model.describe().stopped, null);
   }
+});
+const root = (m, r) => m.recordCreation(created(r.entries[0], 0));
+const all = (m, r) => { r.entries.forEach((e, n) => m.recordCreation(created(e, n))); m.finishSetup(); };
+const altered = (entry, n, change) => { const e = created(entry, n); change(e); return e; };
+for (const [name, code, act] of [
+  ["an unknown path", "creation_binding", (m, r) => { root(m, r); m.recordCreation({ ...created(r.entries[1], 1), path: "store2" }); }],
+  ["a duplicate path", "creation_binding", (m, r) => { root(m, r); m.recordCreation(created(r.entries[0], 1)); }],
+  ["a missing parent", "parent_required", (m, r) => { root(m, r); m.recordCreation(created(r.entries.find((e) => e.path === "store/policy.json"), 1)); }],
+  ["a wrong kind", "creation_proof", (m, r) => { root(m, r); m.recordCreation(altered(r.entries[1], 1, (e) => { e.proof.kind = "file"; })); }],
+  ["a wrong mode", "creation_proof", (m, r) => { root(m, r); m.recordCreation(altered(r.entries[3], 3, (e) => { e.proof.mode = "16832"; })); }],
+  ["a wrong group", "creation_proof", (m, r) => { m.recordCreation(altered(r.entries[0], 0, (e) => { e.proof.gid = "0"; })); }],
+  ["a directory hash", "creation_proof", (m, r) => { m.recordCreation(altered(r.entries[0], 0, (e) => { e.proof.sha256 = "c".repeat(64); })); }],
+  ["a non-empty new directory", "creation_proof", (m, r) => { m.recordCreation(altered(r.entries[0], 0, (e) => { e.children = [".DS_Store"]; })); }],
+  ["a file listing", "creation_proof", (m, r) => { root(m, r); m.recordCreation(altered(r.entries[3], 3, (e) => { e.children = []; })); }],
+  ["a device crossing", "object_alias_or_device", (m, r) => { root(m, r); m.recordCreation(altered(r.entries[1], 1, (e) => { e.proof.device = "2"; })); }],
+  ["an inode alias", "object_alias_or_device", (m, r) => { root(m, r); m.recordCreation(altered(r.entries[1], 1, (e) => { e.proof.inode = "100"; })); }],
+  ["an early finish", "setup_incomplete", (m, r) => { root(m, r); m.finishSetup(); }],
+  ["a creation after finish", "phase_order", (m, r) => { all(m, r); m.recordCreation(created(r.entries[0], 99)); }],
+  ["an abort after finish", "phase_order", (m, r) => { all(m, r); m.abortSetup(); }],
+]) test(`C-C1a creation refuses ${name} with ${code} and latches it`, () => {
+  const { model, r } = partial();
+  assert.throws(() => act(model, r), { message: `cc1a_${code}` });
+  assert.equal(model.describe().stopped, code);
+});
+test("C-C1a keeps a creation whose receipt write failed but stops setup, abort and cleanup", () => {
+  const { model, r } = partial(); root(model, r);
+  assert.equal(model.recordCreation({ ...created(r.entries[1], 1), receipt_write: "failed" }).stopped, "creation_receipt_failure");
+  assert.deepEqual(model.describe().entries.map((e) => e.path), ["", "store"]);
+  assert.throws(() => model.abortSetup(), { message: "cc1a_model_stopped" });
+  const never = { worker: "never_started", query: "never_started", native: "never_started", original_operation_retired: false, query_released: false };
+  assert.equal(model.assessCleanup(cleanup(r.entries.slice(0, 2).map(proofFor), never)).decision, "hold");
 });
 test("C-C1a rejects a replayed receipt and out-of-order removal rather than minting cleanup authority", () => {
   const { model, entries } = ownership();
@@ -203,7 +354,7 @@ test("C-C1a binds every declaration and returns detached immutable reports", () 
 });
 test("C-C1a rejects invented positive facts on paths that never captured bytes or inventoried markers", () => {
   const o = negative("u0-unavailable"); o.capture_matches_setup = true; o.markers_zero_unreadable = true;
-  assert.equal(api.assessUnsignedNegativeModel(o).model_status, "inconsistent_supplied_negative");
+  assert.deepEqual(api.assessUnsignedNegativeModel(o).blockers, ["byte_comparison", "marker_encoding"]);
 });
 test("C-C1a cases agree with C-C0's corrected refusal vocabulary without unlocking its ledger", async () => {
   const { describeJointAcceptancePlan } = await import("../helpers/jointAcceptanceContracts.mjs");
@@ -247,12 +398,7 @@ test("C-C1a cannot rewrite both resource samples to conceal a changed original b
   assert.equal(model.assessCleanup(cleanup(entries)).decision, "hold");
 });
 test("C-C1a latches the final absence uncertainty instead of accepting a later self-reported recovery", () => {
-  const { model, entries } = ownership(); let remaining = [...entries];
-  while (remaining.length) {
-    const observation = cleanup(remaining), path = model.assessCleanup(observation).next_entry.path;
-    model.recordRemoval({ observation, path, outcome: "removed", receipt_write: "confirmed" });
-    remaining = remaining.filter((e) => e.path !== path);
-  }
+  const model = torndown("u1-unsigned", "normal", false);
   assert.equal(model.assessCleanup(cleanup([])).decision, "hold");
   assert.equal(model.describe().stopped, "absence_unconfirmed");
   assert.equal(model.assessCleanup(cleanup([], { fixture_absent: true })).decision, "hold");

@@ -11,13 +11,18 @@ export async function executeUnsignedHarness() {
 async function connectOriginalUnsignedCase(request, mode, caseId, binding, envelope) {
   const plan = describeUnsignedAcceptanceRun(request), c = plan.cases.find((c) => c.mode === mode && c.case_id === caseId);
   if (!c || process.env.NATIVE_BAR_B3CC_MODE !== mode) throw Error("cc1a_mode_binding");
+  // The supplied envelope must reserve exactly this case's witness/maintenance slots and no producer hierarchy.
+  const slots = (c, e) => e !== null && typeof e === "object" && e.objects !== null && typeof e.objects === "object"
+    && e.objects.witness_records === String(c.witness_slots) && e.objects.maintenance_metadata === String(c.maintenance_slots)
+    && ["producer_mirrors", "payloads", "receipts"].every((k) => e.objects[k] === "0");
+  if (!slots(c, envelope)) throw Error("cc1a_envelope_binding");
   const base = mode === "normal" ? "../../build/b3cc-validation/normal/" : "../../build/b3cc-validation/ubsan/";
   const joint = await import(new URL(`${base}nativeBarAdmissionJointReader.js`, import.meta.url));
   const { createPublicKey } = await import("node:crypto");
   const helper = c.owner === "fixed_memory" ? await import("./fixedMemoryCheckpointOracle.mjs") : await import("./unsignedCheckpointOracle.mjs");
   const key = createPublicKey({ key: Buffer.from("302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex"), type: "spki", format: "der" });
   const code = (e) => e instanceof Error && typeof e.message === "string" && e.message.length <= 96
-    && /^(?:(?:b2[ab]|b3(?:ba|bb|ca|cb))_[a-z_]+|cc1a_[a-z_]+)$/.test(e.message) ? e.message : "cc1a_unexpected_error";
+    && /^(?:(?:b2[ab]|b3(?:ba|bb|ca|cb|cc))_[a-z_]+|cc1a_[a-z_]+)$/.test(e.message) ? e.message : "cc1a_unexpected_error";
   let bootstrap, owner, reader, query, primary = null, diagnostic = null;
   const cleanup_errors = [];
   try {

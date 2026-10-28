@@ -41,10 +41,15 @@ function canonical(v) {
 }
 const sha = (v) => createHash("sha256").update(v).digest("hex"), digest = (v) => sha(canonical(v));
 const label = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/), hash = z.string().regex(/^[a-f0-9]{64}$/);
+const codeName = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);
 const uint = z.string().regex(/^(0|[1-9][0-9]{0,29})$/), modeSchema = z.enum(["normal", "ubsan"]);
 const uuid = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
 const requestSchema = z.object({ schema: z.literal("native-bar-unsigned-acceptance-request-v1"), stage: z.literal("C-C1a"),
   run_id: label, source_commit: z.string().regex(/^[a-f0-9]{40}$/), patch_sha256: hash }).strict();
+// work_envelope covers every usage dimension and native_refused most openPair refusals, so these two rows also pin the
+// work-usage blocker or raw addon throw that caused them, and U4's only registration difference from the observed setup.
+const causes = { "u3-maintenance-bound": { usage_blockers: ["maintenance_metadata"] },
+  "u4-expected-inode": { native_throws: ["admission_expected_binding"], registration_delta: ["bindings.data.inode"] } };
 const catalog = frozen([
   ["u0-unavailable", "U0", "checkpoint_c0", "oracle_unavailable", "unavailable", ["1.json"], "none", 1, 0],
   ["u0-unsigned", "U0", "checkpoint_c0", "checkpoint_refused", "unsigned", ["1.json"], "none", 1, 0],
@@ -59,7 +64,8 @@ const catalog = frozen([
   ["u3-maintenance-bound", "U3", "inventory", "work_envelope", "fixed_memory", ["1.json"], "maintenance", 1, 0],
   ["u4-expected-inode", "U4", "native", "native_refused", "fixed_memory", ["1.json"], "none", 1, 0],
 ].map(([case_id, row, expected_layer, code, owner, witnesses, extra, witness_slots, maintenance_slots]) =>
-  ({ case_id, row, expected_layer, expected_code: `b3cb_${code}`, owner, witnesses, extra, witness_slots, maintenance_slots })));
+  ({ case_id, row, expected_layer, expected_code: `b3cb_${code}`, owner, witnesses, extra, witness_slots, maintenance_slots,
+    usage_blockers: [], native_throws: [], registration_delta: [], ...causes[case_id] })));
 function caseFor(id) { const c = catalog.find((c) => c.case_id === id); if (!c) refuse("case_binding"); return c; }
 const noAuthority = () => ({ scope: "unsigned_acceptance_memory_model_only", execution_available: false, cleanup_execution_available: false,
   approval_authenticated: false, ownership_verified: false, native_read_available: false, native_bytes_verified: false,
@@ -72,17 +78,19 @@ const limits = frozen({ maximum_fixtures: 24, maximum_live_fixtures: 1, maximum_
   fixture_depth: 3, fixture_content_bytes: 131072, ancestor_headroom_bytes: "196608", receipt_records: 64,
   receipt_bytes: 1048576, case_report_bytes: 262144, trace_events: 128, run_index_bytes: 131072 });
 
+const modes = frozen(["normal", "ubsan"]), anchor = "/private/tmp";
+const outputs = frozen(modes.map((mode) => ({ mode, directory: `build/b3cc-validation/${mode}/` })));
+
 export function describeUnsignedAcceptanceRun(input) {
   const declaration = parse(requestSchema, input);
   return frozen({ schema: "native-bar-unsigned-acceptance-plan-v1", ...noAuthority(), declaration,
-    plan_sha256: digest({ declaration, catalog, limits }), modes: ["normal", "ubsan"], anchor: "/private/tmp", limits,
-    cases: ["normal", "ubsan"].flatMap((mode) => catalog.map((c) => ({ ...c, mode, status: "NOT_RUN" }))),
-    outputs: ["normal", "ubsan"].map((mode) => ({ mode, directory: `build/b3cc-validation/${mode}/`, state: "not_observed" })),
-    execution_blocker: "C-C1b_not_approved_or_implemented" });
+    plan_sha256: digest({ declaration, catalog, limits, modes, anchor, outputs }), modes: [...modes], anchor, limits,
+    cases: modes.flatMap((mode) => catalog.map((c) => ({ ...c, mode, status: "NOT_RUN" }))),
+    outputs: outputs.map((o) => ({ ...o, state: "not_observed" })), execution_blocker: "C-C1b_not_approved_or_implemented" });
 }
 
-const fixtureSchema = z.object({ request: requestSchema, case_id: label, mode: modeSchema,
-  fixture_name: z.string().regex(/^native-bar-fs-synthetic-[A-Za-z0-9]{6}$/),
+const fixtureName = z.string().regex(/^native-bar-fs-synthetic-[A-Za-z0-9]{6}$/);
+const fixtureSchema = z.object({ request: requestSchema, case_id: label, mode: modeSchema, fixture_name: fixtureName,
   ids: z.object({ fixture: uuid, store: uuid, epoch: uuid, authority: uuid, key: uuid, reference: uuid, extra: uuid }).strict() }).strict();
 export function describeUnsignedFixture(input) {
   const d = parse(fixtureSchema, input), c = caseFor(d.case_id), run = describeUnsignedAcceptanceRun(d.request), entries = [];
@@ -111,7 +119,12 @@ export function describeUnsignedFixture(input) {
 const proofSchema = z.object({ kind: z.enum(["directory", "file"]), device: uint, inode: uint, uid: uint, gid: uint,
   mode: z.enum(["16832", "33152"]), birthtime_ns: uint, flags: z.literal("0"), acl: z.enum(["none", "deny_only"]), acl_hash: hash,
   nlink: uint, size: uint, sha256: hash.nullable() }).strict();
-const entrySchema = z.object({ path: z.string().max(128), proof: proofSchema }).strict();
+// A directory carries the observer's full child-name listing (an unexpected .DS_Store must stop cleanup before any
+// deletion); a file carries none.
+const entryShape = { path: z.string().max(128), proof: proofSchema,
+  children: z.array(z.string().regex(/^[^/\x00-\x1f\x7f]{1,128}$/)).max(16).nullable() };
+const entrySchema = z.object(entryShape).strict();
+const creationSchema = z.object({ ...entryShape, receipt_write: z.enum(["confirmed", "failed"]) }).strict();
 const cleanupSchema = z.object({ entries: z.array(entrySchema).max(16), supervisor: z.enum(["live", "lost", "unknown"]),
   worker: z.enum(["live", "lost", "never_started", "unknown"]), ancestor_chain: z.enum(["same", "changed", "unknown"]),
   receipt: z.enum(["complete", "failed", "unknown"]), query: z.enum(["never_started", "settled", "unconfirmed"]),
@@ -124,6 +137,7 @@ const ownerSchema = z.object({ fixture: fixtureSchema, supervisor_id: label, wor
 function immutableProof(p) {
   const { size, nlink, ...identity } = p; return p.kind === "directory" ? identity : p;
 }
+const parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
 function deletionOrder(entries) {
   const depth = (p) => p === "" ? 0 : p.split("/").length;
   return [...entries].sort((a, b) => depth(b.path) - depth(a.path) || (a.proof.kind === b.proof.kind ? 0 : a.proof.kind === "file" ? -1 : 1)
@@ -133,7 +147,7 @@ function deletionOrder(entries) {
 // A supplied-data lifecycle, not an importer of receipts, a live supervisor or a filesystem executor.
 export function createUnsignedOwnershipModel(input) {
   const d = parse(ownerSchema, input), recipe = describeUnsignedFixture(d.fixture), created = [], removed = [], history = [];
-  let setup = "incomplete", stopped = null;
+  let setup = "incomplete", stopped = null, completed = false;
   const fail = (reason) => { stopped ??= reason; return stopped; };
   function append(kind, detail) {
     const event = frozen({ ordinal: history.length + 1, kind, ...detail });
@@ -164,7 +178,13 @@ export function createUnsignedOwnershipModel(input) {
     if (new Set(o.entries.map((e) => e.path)).size !== o.entries.length || o.entries.length !== remaining.length) return hold("entry_set_changed");
     for (const e of remaining) {
       const actual = o.entries.find((v) => v.path === e.path);
-      if (!actual || canonical(immutableProof(e.proof)) !== canonical(immutableProof(actual.proof))) return hold("entry_changed");
+      if (!actual || canonical(immutableProof(e.proof)) !== canonical(immutableProof(actual.proof))
+        || e.proof.kind === "file" && actual.children !== null) return hold("entry_changed");
+    }
+    for (const e of remaining.filter((v) => v.proof.kind === "directory")) {
+      const listed = o.entries.find((v) => v.path === e.path).children;
+      const expected = remaining.filter((v) => v.path !== "" && parentOf(v.path) === e.path).map((v) => v.path.slice(v.path.lastIndexOf("/") + 1)).sort();
+      if (listed === null || canonical([...listed].sort()) !== canonical(expected)) return hold("directory_contents_changed");
     }
     if (!remaining.length) {
       if (!o.fixture_absent) return hold("absence_unconfirmed");
@@ -178,15 +198,17 @@ export function createUnsignedOwnershipModel(input) {
   return Object.freeze({
     recordCreation(raw) { return change(() => {
       if (setup !== "incomplete") refuse("phase_order");
-      const e = parse(entrySchema, raw), expected = recipe.entries.find((v) => v.path === e.path), p = e.proof;
+      const { receipt_write, ...e } = parse(creationSchema, raw), expected = recipe.entries.find((v) => v.path === e.path), p = e.proof;
       if (!expected || created.some((v) => v.path === e.path)) refuse("creation_binding");
-      const parent = e.path.includes("/") ? e.path.slice(0, e.path.lastIndexOf("/")) : "";
-      if (e.path !== "" && !created.some((v) => v.path === parent && v.proof.kind === "directory")) refuse("parent_required");
+      if (e.path !== "" && !created.some((v) => v.path === parentOf(e.path) && v.proof.kind === "directory")) refuse("parent_required");
       if (p.kind !== expected.kind || p.mode !== expected.mode || p.uid !== d.uid || p.gid !== d.gid
-        || p.kind === "file" && (p.nlink !== "1" || p.size !== expected.size || p.sha256 !== expected.sha256)
-        || p.kind === "directory" && p.sha256 !== null) refuse("creation_proof");
+        || p.kind === "file" && (p.nlink !== "1" || p.size !== expected.size || p.sha256 !== expected.sha256 || e.children !== null)
+        || p.kind === "directory" && (p.sha256 !== null || e.children === null || e.children.length !== 0)) refuse("creation_proof");
       if (created.some((v) => v.proof.device !== p.device || v.proof.inode === p.inode)) refuse("object_alias_or_device");
-      append("created", { entry: e }); created.push(frozen(e)); return Object.freeze({ ...noAuthority(), recorded_entries: created.length });
+      // The object exists either way; a failed receipt write keeps it owned but stops setup (no rollback, no adoption).
+      append("created", { entry: e, receipt_write }); created.push(frozen({ path: e.path, proof: e.proof }));
+      if (receipt_write !== "confirmed") fail("creation_receipt_failure");
+      return Object.freeze({ ...noAuthority(), recorded_entries: created.length, stopped });
     }); },
     finishSetup() { return change(() => {
       if (setup !== "incomplete" || created.length !== recipe.entries.length) refuse("setup_incomplete");
@@ -195,7 +217,13 @@ export function createUnsignedOwnershipModel(input) {
     abortSetup() { return change(() => {
       if (setup !== "incomplete") refuse("phase_order"); append("setup_aborted", {}); setup = "aborted";
     }); },
-    assessCleanup(raw) { try { return assess(raw); } catch (e) { fail("invalid_observation"); throw e; } },
+    assessCleanup(raw) {
+      try {
+        const a = assess(raw);
+        if (a.decision === "supplied_complete" && !completed) { append("absence_confirmed", {}); completed = true; }
+        return a;
+      } catch (e) { fail("invalid_observation"); throw e; }
+    },
     recordRemoval(raw) { return change(() => {
       const v = parse(z.object({ observation: cleanupSchema, path: z.string().max(128), outcome: z.enum(["removed", "missing", "changed", "error"]),
         receipt_write: z.enum(["confirmed", "failed"]) }).strict(), raw);
@@ -210,19 +238,36 @@ export function createUnsignedOwnershipModel(input) {
         plan_sha256: recipe.plan_sha256, recipe_sha256: recipe.recipe_sha256, case_id: d.fixture.case_id, mode: d.fixture.mode,
         supervisor_id: d.supervisor_id, worker_id: d.worker_id, fixture_name: d.fixture.fixture_name,
         baseline_resources: { ...d.baseline_resources },
-        setup, stopped, entries: [...created], removed_paths: [...removed], history: [...history], receipt_authenticated: false });
+        setup, stopped, entries: [...created], removed_paths: [...removed], history: [...history], absence_confirmed: completed,
+        receipt_authenticated: false });
+    },
+    // The compact form a negative-case assessment binds to; still self-reported, not cleanup evidence on its own.
+    summarizeTeardown() {
+      return frozen({ schema: "native-bar-unsigned-ownership-teardown-summary-v1", ...noAuthority(), plan_sha256: recipe.plan_sha256,
+        recipe_sha256: recipe.recipe_sha256, case_id: d.fixture.case_id, mode: d.fixture.mode, fixture_name: d.fixture.fixture_name,
+        setup, stopped, recorded_entries: created.length, removed_entries: removed.length, absence_confirmed: completed,
+        history_sha256: digest(history) });
     },
   });
 }
 
 const phaseSchema = z.enum(["native_begin", "c0_dispatch", "c0_authenticated", "open_pair", "inventory", "witness_capture", "c1_dispatch", "v0", "v1", "transcript"]);
-const negativeSchema = z.object({ request: requestSchema, case_id: label, mode: modeSchema, plan_sha256: hash,
-  expected_layer: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/), observed_code: z.string().regex(/^b3cb_[a-z_]{1,64}$/),
+// Any primary code the harness preserves is reportable, so an unexpected joint success or a pre-begin refusal is a
+// recorded mismatch rather than malformed input.
+const observedCode = z.string().max(96).regex(/^(?:(?:b2[ab]|b3(?:ba|bb|ca|cb|cc))_[a-z_]+|cc1a_[a-z_]+)$/);
+const teardownSchema = z.object({ schema: z.literal("native-bar-unsigned-ownership-teardown-summary-v1"),
+  ...Object.fromEntries(Object.entries(noAuthority()).map(([k, v]) => [k, z.literal(v)])), plan_sha256: hash, recipe_sha256: hash,
+  case_id: label, mode: modeSchema, fixture_name: fixtureName, setup: z.enum(["incomplete", "complete", "aborted"]), stopped: codeName.nullable(),
+  recorded_entries: z.number().int().min(0).max(16), removed_entries: z.number().int().min(0).max(16), absence_confirmed: z.boolean(),
+  history_sha256: hash }).strict();
+const negativeSchema = z.object({ fixture: fixtureSchema, plan_sha256: hash, expected_layer: codeName, observed_code: observedCode,
   phases: z.array(phaseSchema).max(128), requests_dispatched: z.number().int().min(0).max(2), authenticated_requests: z.number().int().min(0).max(2),
   capture_matches_setup: z.boolean(), markers_zero_unreadable: z.boolean(), original_operation_retired: z.boolean(), query_released: z.boolean(),
-  resources_at_baseline: z.boolean(), teardown: z.enum(["confirmed", "unconfirmed", "not_performed"]) }).strict();
+  usage_blockers: z.array(codeName).max(32), native_throws: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}(?::[0-9]{1,4})?$/)).max(8),
+  registration_delta: z.array(z.string().regex(/^[a-z][a-z0-9_.]{0,95}$/)).max(16), ownership: teardownSchema }).strict();
 export function assessUnsignedNegativeModel(input) {
-  const o = parse(negativeSchema, input), run = describeUnsignedAcceptanceRun(o.request), c = caseFor(o.case_id);
+  const o = parse(negativeSchema, input), f = o.fixture, run = describeUnsignedAcceptanceRun(f.request), c = caseFor(f.case_id);
+  const recipe = describeUnsignedFixture(f), t = o.ownership;
   if (run.plan_sha256 !== o.plan_sha256) refuse("plan_binding");
   const phases = ["native_begin", "c0_dispatch"], blockers = [];
   if (c.owner === "fixed_memory") phases.push("c0_authenticated", "open_pair");
@@ -233,9 +278,16 @@ export function assessUnsignedNegativeModel(input) {
   if (o.requests_dispatched !== 1 || o.authenticated_requests !== (c.owner === "fixed_memory" ? 1 : 0)) blockers.push("request_count");
   if (o.capture_matches_setup !== (c.row === "U1")) blockers.push("byte_comparison");
   if (o.markers_zero_unreadable !== phases.includes("inventory")) blockers.push("marker_encoding");
-  if (!o.original_operation_retired || !o.query_released || !o.resources_at_baseline || o.teardown !== "confirmed") blockers.push("settlement_or_teardown");
+  // A catch-all code counts only with the cause that produced it; ancestor-size churn is never this case's outcome.
+  if (canonical([...o.usage_blockers].sort()) !== canonical(c.usage_blockers)) blockers.push("usage_cause");
+  if (canonical(o.native_throws) !== canonical(c.native_throws)) blockers.push("native_cause");
+  if (canonical([...o.registration_delta].sort()) !== canonical(c.registration_delta)) blockers.push("registration_delta");
+  if (t.plan_sha256 !== run.plan_sha256 || t.recipe_sha256 !== recipe.recipe_sha256 || t.case_id !== c.case_id || t.mode !== f.mode
+    || t.fixture_name !== f.fixture_name) blockers.push("ownership_binding");
+  if (!o.original_operation_retired || !o.query_released || t.setup !== "complete" || t.stopped !== null
+    || t.recorded_entries !== recipe.entries.length || t.removed_entries !== t.recorded_entries || !t.absence_confirmed) blockers.push("settlement_or_teardown");
   const report = { schema: "native-bar-unsigned-negative-model-result-v1", ...noAuthority(), plan_sha256: run.plan_sha256,
-    case_id: c.case_id, mode: o.mode, model_status: blockers.length ? "inconsistent_supplied_negative" : "consistent_supplied_negative",
+    case_id: c.case_id, mode: f.mode, model_status: blockers.length ? "inconsistent_supplied_negative" : "consistent_supplied_negative",
     blockers, supplied_observation: o, minimal_positive_milestone: "NOT_RUN", timing_verified: false, native_budget_enforced: false };
   if (Buffer.byteLength(canonical(report)) > limits.case_report_bytes) refuse("report_bound");
   return frozen(report);
