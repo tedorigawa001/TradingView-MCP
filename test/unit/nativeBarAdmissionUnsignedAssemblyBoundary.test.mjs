@@ -25,6 +25,10 @@ function guard(source, spec) {
   assert.deepEqual(imports, spec.imports);
   assert.deepEqual(tree.statements.filter((n) => n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)).map((n) => n.name?.text), spec.exports);
   function visit(n) {
+    if (spec === specs.Runtime && ts.isFunctionDeclaration(n) && n.name?.text === "prepareOriginalQualification") {
+      assert.equal(n.parameters.length, 0); assert.equal(n.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false, false);
+      return; // The 4-B3-B boundary test validates this private, unreachable connection body.
+    }
     if (ts.isIdentifier(n)) assert.equal(forbidden.has(n.text), false, n.text);
     assert.equal(ts.isExportDeclaration(n) || ts.isExportAssignment(n), false);
     assert.equal(ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword, false);

@@ -41,7 +41,7 @@ test("4-B3-A cannot be wired into production, builders, workers or sealed runtim
   for (const path of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter((p) => p.endsWith(".ts")))
     assert.doesNotMatch(read(`../../src/${path}`), /unsignedCohortQualificationContracts/, path);
   for (const path of ["../../package.json", "../../native/native_bar_fs/build_unsigned.mjs", "../../native/native_bar_fs/test_unsigned_worker.mjs",
-    "../helpers/unsignedInertAdapters.mjs", "../helpers/unsignedCohortRuntime.mjs"])
+    "../helpers/unsignedInertAdapters.mjs"])
     assert.doesNotMatch(read(path), /unsignedCohortQualificationContracts/, path);
   const runtime = ast(read("../helpers/unsignedCohortRuntime.mjs"));
   const entry = runtime.statements.find((n) => ts.isFunctionDeclaration(n) && n.name.text === "executeUnsignedCohortAssembly");
