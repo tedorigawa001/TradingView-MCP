@@ -65,7 +65,14 @@ for (const [o, k, flag] of readers) {
 syncBuiltinESMExports();
 test.after(() => { restores.reverse().forEach(f => f()); syncBuiltinESMExports(); assert.deepEqual(effects, []); });
 
-block(globalThis, ["Date"]);
+// Replacing Date or hrtime would hide the earlier static guards, so each replacement carries its own recording statics.
+for (const [o, k, statics] of [[globalThis, "Date", ["now"]], [process, "hrtime", ["bigint"]]]) {
+  const record = name => function () { effects.push(name); throw Error("cc4b3b_forbidden_effect"); };
+  const f = Object.assign(record(k), Object.fromEntries(statics.map(name => [name, record(name)])));
+  replace(o, k, f); blocked.push([o, k], ...statics.map(name => [f, name]));
+}
+block(process, ["uptime", "cpuUsage", "resourceUsage"]); block(performance, ["now"]);
+if (typeof Temporal === "object") block(Temporal.Now, Object.getOwnPropertyNames(Temporal.Now));
 
 const runtime = await import("../helpers/unsignedCohortRuntime.mjs");
 const { createUnsignedCohortAssemblyModel } = await import("../helpers/unsignedCohortAssemblyModel.mjs");
@@ -78,6 +85,14 @@ const selected = ["originalQualificationClock", "armOriginalQualificationTimer",
 const declarations = rootFunction.body.statements.filter(n => ts.isFunctionDeclaration(n) && selected.includes(n.name.text));
 const plain = x => JSON.parse(JSON.stringify(x));
 const ms = n => BigInt(n) * 1000000n;
+// Invented timers and children settle synchronously, so bounded microtask turns replace waits that could hang on a lost settlement.
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+function track(promise) {
+  const r = { state: "pending" };
+  promise.then(value => Object.assign(r, { state: "fulfilled", value }), error => Object.assign(r, { state: "rejected", error }));
+  return async () => { await flush(); return r; };
+}
+async function rejected(settle, pattern) { const r = await settle(); assert.equal(r.state, "rejected"); assert.match(r.error.message, pattern); }
 const request = { schema: "native-bar-unsigned-acceptance-request-v1", stage: "C-C1a", run_id: "invented-run",
   source_commit: "a".repeat(40), patch_sha256: "b".repeat(64) };
 function memory(options = {}) {
@@ -93,7 +108,7 @@ function memory(options = {}) {
     setTimeout(callback, delay) {
       if (e.armFailure) throw Error("invented_arm_failure");
       const h = { callback, delay, ref: !e.unreferenced, hasRef() { if (e.refThrows) throw Error("invented_ref_failure"); return this.ref; } };
-      e.timers.push(h); return h;
+      e.timers.push(h); e.onTimer?.(h); return h;
     }, clearTimeout(h) { e.clears.push(h); if (e.clearFailure) throw Error("invented_clear_failure"); },
     fs: { closeSync(fd) { e.closedFd = fd; } }, path: posix, root: "/invented", Buffer, canonical, digest, crypto: { createHash: crypto.createHash },
     limits: { helper_commands: 131072, discovery_commands: 128, tool_capture_bytes: 1048576 } };
@@ -156,6 +171,11 @@ test("4-B3-C exact end latches original deadline and never samples a recovery", 
   const n = e.reads; e.now = 100n; assert.throws(() => e.clock.point(), /entry_deadline/); assert.equal(e.reads, n);
   assert.equal(e.clock.describe().clock_invalid, false);
 });
+test("4-B3-C every synchronous checkpoint spends the original entry deadline", () => {
+  const e = memory({ policy: { total_limit_ms: "1" } }); e.start(); e.api.checkpoint(e.state); e.api.checkpoint(e.state, true);
+  e.now += ms(1); assert.throws(() => e.api.checkpoint(e.state), /entry_deadline/);
+  assert.throws(() => e.api.checkpoint(e.state, true), /entry_deadline/); assert.equal(e.clock.describe().stop_ns, e.clock.end_ns);
+});
 test("4-B3-C one millisecond permitted, sub-millisecond reservation refused without renewal", () => {
   const e = memory({ policy: { total_limit_ms: "1" } }); e.start(); assert.equal(e.clock.remaining(), 1n);
   e.now++; assert.throws(() => e.clock.remaining(), /remaining_sub_ms/); assert.equal(e.clock.end_ns, "1000100");
@@ -189,6 +209,13 @@ test("4-B3-C ordinary wall quantization is not treated as a proven adjustment", 
   const e = memory(); e.start(); e.clock.stamp(); e.now += ms(2); e.wall += 2;
   assert.equal(e.clock.stamp().wall_adjustment_possible, false);
 });
+// The reviewed 4-B3-A model flags elapsed wall time outside [before - previous after, after - previous before] widened by 999999 ns.
+for (const [elapsed, wall, adjusted] of [[1999999n, 1, false], [2000000n, 1, true], [2000001n, 3, false], [2000000n, 3, true], [2000000n, 2, false]])
+  test(`4-B3-C wall adjustment uses the 4-B3-A sub-ms slack exactly: ${elapsed} ns elapsed, ${wall} ms wall`, () => {
+    const e = memory(); e.start(); e.wall = 0; e.monoQueue.push(1000n, 1000n); e.clock.stamp();
+    e.monoQueue.push(1000n + elapsed, 1000n + elapsed); e.wall = wall;
+    assert.equal(e.clock.stamp().wall_adjustment_possible, adjusted);
+  });
 for (const bad of [NaN, Infinity, 1.5, -1, "1", 253402268400000, Error("invented_wall")])
   test("4-B3-C invalid wall sample blocks new work: " + String(bad), () => {
     const e = memory(); e.start(); e.wallQueue.push(bad); assert.throws(() => e.clock.stamp(), /wall/);
@@ -246,6 +273,20 @@ for (const field of ["unreferenced", "refThrows", "armFailure"]) test("4-B3-C ti
   const e = memory(); e.start(); e[field] = true; assert.throws(e.arm); assert.ok(e.state.stopped);
   assert.equal(e.state.qualificationTimer, null); assert.throws(e.arm, /stopped/); assert.equal(e.expiries, 0);
 });
+for (const field of ["unreferenced", "refThrows"]) test("4-B3-C arm-time unreferenced stop stays primary over unknown cancellation: " + field, () => {
+  const e = memory(); e.start(); e[field] = true; e.clearFailure = true;
+  assert.throws(e.arm, /timer_unreferenced/); assert.equal(e.state.stopped, "cc4b3c_timer_unreferenced");
+  assert.equal(e.state.timerCancelUnknown, true); assert.equal(e.clears.length, 1); assert.notEqual(e.state.qualificationTimer, null);
+});
+test("4-B3-C an early callback whose handle lost its ref expires instead of rearming", () => {
+  const e = memory(); e.start(); e.arm(); e.timers[0].ref = false; e.now += ms(4000); e.fire(0);
+  assert.equal(e.expiries, 1); assert.equal(e.timers.length, 1); assert.equal(e.state.stopped, "cc4b3c_timer_unreferenced");
+});
+test("4-B3-C an early callback whose clear is unknown expires instead of rearming", () => {
+  const e = memory(); e.start(); e.arm(); e.now += ms(4000); e.clearFailure = true; e.fire(0);
+  assert.equal(e.expiries, 1); assert.equal(e.timers.length, 1); assert.equal(e.clears.length, 1);
+  assert.equal(e.state.stopped, "cc4b3c_timer_cancel_unknown"); assert.equal(e.state.timerCancelUnknown, true); assert.notEqual(e.state.qualificationTimer, null);
+});
 test("4-B3-C original timer losing its ref cannot authorize work", () => {
   const e = memory(); e.start(); const t = e.arm(); e.timers[0].ref = false;
   assert.throws(() => t.check(), /unreferenced/); e.fire(0); assert.equal(e.expiries, 1); assert.equal(e.timers.length, 1);
@@ -278,10 +319,13 @@ test("4-B3-C repeated cohort timing reads preserve original refs and origin", ()
   assert.equal(model.describe().cohort_deadline_ns, e.clock.end_ns);
   e.now += ms(1000); assert.equal(e.api.originalCohortTiming(e.state, r.build, r.namespace).binding, timing.binding);
 });
-for (const change of ["copied_build", "copied_namespace", "foreign_state", "namespace_owner", "namespace_build", "record_close", "record_identity", "taint", "stopped", "phase"])
+for (const change of ["copied_build", "copied_build_bound", "copied_namespace", "foreign_state", "unretained", "namespace_owner", "namespace_build", "record_close", "record_identity", "taint", "stopped", "phase"])
   test("4-B3-C cohort index timing rejects invalid original ownership: " + change, () => {
     const e = memory(); e.start(); const r = e.refs(); let state = e.state;
     if (change === "copied_build") r.build = {};
+    // Each isolated change below leaves every other ownership check satisfied.
+    if (change === "copied_build_bound") { r.build = Object.freeze({}); e.context.namespaceReferences.get(r.namespace).buildRef = r.build; }
+    if (change === "unretained") e.context.retainedQualificationScopes.delete(state);
     if (change === "copied_namespace") r.namespace = {};
     if (change === "foreign_state") state = { ...e.state };
     if (change === "namespace_owner") e.context.namespaceReferences.get(r.namespace).owner = {};
@@ -300,43 +344,86 @@ test("4-B3-C diagnostic payload and retained samples are bounded, not clock hist
   assert.equal(e.timers.length, 0);
 });
 test("4-B3-C connected tool closes within its original reservation and clears once", async () => {
-  const e = memory(); e.start(); const result = e.tool(); await Promise.resolve();
+  const e = memory(); e.start(); const result = track(e.tool()); await flush();
   assert.equal(e.spawned.length, 1); assert.equal(e.state.qualificationTimer.hasRef(), true);
   e.spawned[0].stdout.emit("data", Buffer.from("invented\n")); e.now += ms(1); e.spawned[0].emit("close", 0, null);
-  assert.equal((await result).toString(), "invented\n"); assert.equal(e.clears.length, 1);
+  const r = await result(); assert.equal(r.state, "fulfilled"); assert.equal(r.value.toString(), "invented\n"); assert.equal(e.clears.length, 1);
   assert.equal(e.state.children.size, 0); e.fire(0); assert.equal(e.state.stopped, null);
 });
 test("4-B3-C import wait spends original entry budget before any tool timer or spawn", async () => {
-  const e = memory({ policy: { total_limit_ms: "1" } }); e.start(); const result = e.tool();
-  e.now += ms(1); await assert.rejects(result, /entry_deadline/);
+  const e = memory({ policy: { total_limit_ms: "1" } }); e.start(); const result = track(e.tool());
+  e.now += ms(1); await rejected(result, /entry_deadline/);
   assert.equal(e.spawned.length, 0); assert.equal(e.timers.length, 0);
 });
+for (const [label, at, cause] of [["entry end", e => BigInt(e.clock.end_ns), "cc4b3c_entry_deadline"], ["sub-ms reservation", () => 100n + ms(10000) - 1n, "cc4b3c_remaining_sub_ms"]])
+  test("4-B3-C spawn-start recheck keeps its primary clock refusal: " + label, async () => {
+    const e = memory(); e.start(); e.onTimer = () => { e.now = at(e); }; const result = track(e.tool());
+    await rejected(result, /tool_start/); assert.equal(e.state.stopped, cause);
+    assert.equal(e.spawned.length, 0); assert.equal(e.clears.length, 1); assert.equal(e.state.qualificationTimer, null);
+  });
 test("4-B3-C connected timer timeout retains original child and accepts late close only", async () => {
-  const e = memory(); e.start(); const result = e.tool(); await Promise.resolve();
-  e.now += ms(10001); e.fire(0); await assert.rejects(result, /tool_deadline/);
+  const e = memory(); e.start(); const result = track(e.tool()); await flush();
+  e.now += ms(10001); e.fire(0); await rejected(result, /tool_deadline/);
   assert.equal(e.state.stopped, "cc4b3c_timer_deadline"); assert.equal(e.state.children.size, 1);
   const n = e.reads; e.spawned[0].emit("close", 23, null); e.spawned[0].emit("close", 0, null);
   assert.equal(e.reads, n); assert.equal(e.state.children.size, 0);
   assert.equal(e.state.helperDisposition.exit_code, 23); assert.equal(e.state.helperDisposition.late, true);
-  await assert.rejects(e.tool(), /stopped/); assert.equal(e.spawned.length, 1);
+  await rejected(track(e.tool()), /stopped/); assert.equal(e.spawned.length, 1);
 });
+test("4-B3-C a tool timer capped by the original entry end reports that end as its deadline", async () => {
+  const e = memory({ policy: { total_limit_ms: "5" } }); e.start(); const result = track(e.tool()); await flush();
+  assert.equal(e.timers[0].delay, 5); e.now += ms(5); e.fire(0); await rejected(result, /tool_deadline/);
+  assert.equal(e.state.stopped, "cc4b3c_entry_deadline"); assert.equal(e.state.timerDisposition.deadline_ns, e.clock.end_ns);
+});
+const timerStops = { rollback: "cc4b3c_monotonic_rollback", clock_throw: "cc4b3c_monotonic_read", unreferenced: "cc4b3c_timer_unreferenced",
+  early_clear_unknown: "cc4b3c_timer_cancel_unknown", stopped: "cc4b3b_original_stop" };
+for (const [cause, expected] of Object.entries(timerStops))
+  test("4-B3-C a timer stop other than the deadline is not reported as a tool deadline: " + cause, async () => {
+    const e = memory(); e.start(); const result = track(e.tool()); await flush();
+    if (cause === "rollback") e.now = 99n;
+    if (cause === "clock_throw") e.monoQueue.push(Error("invented_clock"));
+    if (cause === "unreferenced") e.timers[0].ref = false;
+    if (cause === "early_clear_unknown") { e.now += ms(4000); e.clearFailure = true; }
+    if (cause === "stopped") e.state.stopped = expected;
+    e.fire(0); await rejected(result, /tool_timer_stop/);
+    assert.equal(e.state.stopped, expected); assert.equal(e.state.timerDisposition.reason, expected);
+    assert.equal(e.timers.length, 1); assert.equal(e.state.children.size, 1);
+  });
 test("4-B3-C connected chunk/close checks reject deadline even before callback runs", async () => {
   for (const event of ["chunk", "close"]) {
-    const e = memory(); e.start(); const result = e.tool(); await Promise.resolve(); e.now += ms(10000);
+    const e = memory(); e.start(); const result = track(e.tool()); await flush(); e.now += ms(10000);
     if (event === "chunk") e.spawned[0].stdout.emit("data", Buffer.from("invented")); else e.spawned[0].emit("close", 0, null);
-    await assert.rejects(result, /tool_completion/); assert.equal(e.state.stopped, "cc4b3c_timer_deadline");
+    await rejected(result, /tool_completion/); assert.equal(e.state.stopped, "cc4b3c_timer_deadline");
     assert.equal(e.clears.length, 1); assert.equal(e.state.children.size, event === "chunk" ? 1 : 0);
   }
 });
+test("4-B3-C a close after the deadline is late whether or not its expiry callback ran first", async () => {
+  for (const order of ["close_first", "timer_first"]) {
+    const e = memory(); e.start(); const result = track(e.tool()); await flush(); e.now += ms(10000);
+    if (order === "timer_first") e.fire(0);
+    e.spawned[0].emit("close", 0, null); await rejected(result, order === "timer_first" ? /tool_deadline/ : /tool_completion/);
+    assert.equal(e.state.helperDisposition.late, true); assert.equal(e.state.helperDisposition.exit_code, 0);
+    assert.equal(e.state.stopped, "cc4b3c_timer_deadline"); assert.equal(e.state.children.size, 0); assert.equal(e.clears.length, 1);
+  }
+});
 test("4-B3-C connected clear failure cannot resolve a successful helper", async () => {
-  const e = memory(); e.start(); const result = e.tool(); await Promise.resolve(); e.clearFailure = true;
-  e.spawned[0].emit("close", 0, null); await assert.rejects(result, /timer_cancel_unknown/);
+  const e = memory(); e.start(); const result = track(e.tool()); await flush(); e.clearFailure = true;
+  e.spawned[0].emit("close", 0, null); await rejected(result, /timer_cancel_unknown/);
   assert.equal(e.clears.length, 1); assert.equal(e.state.stopped, "cc4b3c_timer_cancel_unknown");
 });
+test("4-B3-C a tool failure stays primary when its timer cancellation is also unknown", async () => {
+  for (const event of ["exit", "overflow"]) {
+    const e = memory(); e.start(); const result = track(e.tool()); await flush(); e.clearFailure = true;
+    if (event === "exit") e.spawned[0].emit("close", 1, null); else e.spawned[0].stdout.emit("data", Buffer.alloc(1048577));
+    await rejected(result, event === "exit" ? /tool_exit/ : /tool_output_bound/);
+    assert.equal(e.state.stopped, event === "exit" ? "cc4b3b_tool_exit" : "cc4b3b_tool_output_bound");
+    assert.equal(e.state.timerCancelUnknown, true); assert.equal(e.clears.length, 1);
+  }
+});
 test("4-B3-C cancellation uncertainty cannot overwrite the original timeout or lose its timer", async () => {
-  const e = memory(); e.start(); const result = e.tool(); await Promise.resolve();
+  const e = memory(); e.start(); const result = track(e.tool()); await flush();
   const original = e.state.qualificationTimer; e.clearFailure = true; e.now += ms(10000); e.fire(0);
-  await assert.rejects(result, /tool_deadline/); assert.equal(e.state.stopped, "cc4b3c_timer_deadline");
+  await rejected(result, /tool_deadline/); assert.equal(e.state.stopped, "cc4b3c_timer_deadline");
   assert.equal(e.state.timerCancelUnknown, true); assert.equal(e.state.qualificationTimer, original);
   e.fire(0); assert.equal(e.clears.length, 1); assert.equal(e.state.children.size, 1);
 });

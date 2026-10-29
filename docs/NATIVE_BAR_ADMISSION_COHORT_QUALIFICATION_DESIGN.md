@@ -1,6 +1,6 @@
 # 4-B3 Build, Evidence And Clock Qualification
 
-Status: **4-B3-A, 4-B3-B and 4-B3-C reviewed in memory/source scope; private connections remain unexecuted; host/OS qualification and all invocation remain blocked**, 2026-10-29 JST. Original design baseline `63ff06b`; 4-B3-B starts from reviewed 4-B3-A `c1ade36`; 4-B3-C starts from `712112c`. This refines [4-B3](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#remaining-4-b-slice-plan). The [pure-contract record](#4-b3-a-pure-contract-implementation), [private-connection record](#4-b3-b-private-unexecuted-connections), [review corrections](#4-b3-b-independent-review-and-corrections), [clock connection record](#4-b3-c-private-clock-and-timer-connections) and [clock review](#4-b3-c-independent-review-and-correction) cover memory/source tests, not operational qualification. The existing [approval bundles](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#approval-decisions), [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md) remain controlling. Conflicts block implementation rather than silently changing those contracts.
+Status: **4-B3-A, 4-B3-B and 4-B3-C reviewed in memory/source scope; private connections remain unexecuted; host/OS qualification and all invocation remain blocked**, 2026-10-29 JST. Original design baseline `63ff06b`; 4-B3-B starts from reviewed 4-B3-A `c1ade36`; 4-B3-C starts from `712112c`. This refines [4-B3](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#remaining-4-b-slice-plan). The [pure-contract record](#4-b3-a-pure-contract-implementation), [private-connection record](#4-b3-b-private-unexecuted-connections), [review corrections](#4-b3-b-independent-review-and-corrections), [clock connection record](#4-b3-c-private-clock-and-timer-connections), [clock review](#4-b3-c-independent-review-and-correction) and [second clock review](#4-b3-c-second-independent-review-and-corrections) cover memory/source tests, not operational qualification. The existing [approval bundles](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#approval-decisions), [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md) remain controlling. Conflicts block implementation rather than silently changing those contracts.
 
 The original design turn changed documentation only; separately approved implementations are recorded below. None performs build, child/worker launch, native read, fixture operation, signing, evidence-file creation, real-data operation, MCP registration or production activation. Dot stays PAUSED; market/scenario/judgment/notification/mail and retention conditions are unchanged. The existing 436 artifacts are not newly qualified. Design examples and supplied-data tests must never report live qualification or saved evidence.
 
@@ -128,7 +128,7 @@ Wall time is descriptive, never elapsed-time authority. A backward/changed wall 
 | Short qualification helper/observer/write reservation | min(10000 ms, remaining applicable window); reserve referenced timer before dispatch and consume operation identity once. Compiler supervision uses the separate original entry/build remainder. A reservation is not permission to dispatch after its expiry |
 | Ordinary dispatch | Check at planning and again at actual original write-start, after intervening qualification awaits. GO write-start, not intent/readback/acceptance/completion, starts query supervision |
 | Shutdown CANCEL | Recheck original binding, frame/ordinal budget, clock qualification, worker/pipe liveness and original settlement deadline at actual write-start; no later retry or renewed window |
-| Readback/completion/exit | Sample and apply the original completion, even after stop; lateness remains failure. Recording a close/exit does not create release/ownership proof or permit new work |
+| Readback/completion/exit | Apply the original completion, even after stop. A completion observed before stop samples the clock in its check; one arriving after stop records the fact without a new sample or invented timestamp. Lateness remains failure. Recording a close/exit does not create release/ownership proof or permit new work |
 | Timer callback | Read clock again. Early callbacks re-arm only for the remaining original deadline; delayed callbacks latch the known original deadline, not callback time. A stale operation-generation callback cannot affect a new phase |
 
 Use the unchanged preparation/query/settlement/teardown bounds of 120000/600000/60000/120000 ms and helper/write/observer cap 10000 ms. Settlement is set once from the first original stop/cancel/completion trigger, never its later observation. The clock-invalid lane cannot send a timed CANCEL; closing the original command pipe once and retaining original resource facts remain governed by the existing shutdown policy, not a guessed time window.
@@ -157,7 +157,7 @@ These are proposed approval boundaries, not authorization by this document:
 |---|---|---|
 | **4-B3-A (recommended next)** | Pure role/pin/namespace/clock-result schemas, paged manifest/capacity plan and irreversible supplied-data qualification model; explicit fixed hash-work/helper-count ceiling proposal and accounting | Main-thread memory/source tests only. No real clocks/timers, OS tools/FS qualification, key/signature, build/child/native/fixture/evidence write. Every qualification/execution/save/ownership/timestamp flag false |
 | **4-B3-B** | Reviewed private fresh-builder provenance and evidence-namespace connection code; exact effect import/command/closure list, original resource ownership and stops | Unexecuted connections; injected memory substitutions only inside source-extracted tests, never a public injectable runtime. No actual builder/tool/file creation or real reference issuance during validation |
-| **4-B3-C** | Private own-clock/referenced-timer connections to 4-B2, common entry origin/end, cohort-index owner checks, boundary/source guards | Memory clock/timer/tool results plus structural tests; no real timer, child, native, fixture, signature, saved evidence or seal opening |
+| **4-B3-C** | Private own-clock/referenced-timer connections to 4-B2, common entry origin/end, cohort-owner checks on the timing input (the index consumer itself connects in 4-B5), boundary/source guards | Memory clock/timer/tool results plus structural tests; no real timer, child, native, fixture, signature, saved evidence or seal opening |
 
 If a helper-count/hash-work bound, dependency coverage, metadata parser or entry policy is not fully specified/reviewed, its effectful connection stays blocked. No numeric cap is inferred from an old successful build. Actual OS qualification waits for 4-C/4-D/4-E; each invocation needs its own fresh build and approval bundle. Completing 4-B3 is not acceptance of a native run, recovery authority, permission to publish evidence, or approval to run a partial cohort.
 
@@ -306,3 +306,115 @@ The clock/timer reviewer found one **P3**: after an early callback cleared its t
 The clock reviewer rechecked the correction and directly reran **69 clock + six boundary tests**, reporting no remaining concrete findings. The implementing session's final thirteen-file main-thread memory/source regressions pass **754 tests**, zero failures/skips; the earlier 68/753 counts above describe the initial implementation, not this corrected total. Syntax, changed-document links/anchors and whitespace are verified. Actual scheduler/OS behavior, power-loss continuity and case lifecycle consumers are not qualified by these tests.
 
 Protected runtime/native/build/package/config content hashes (2568 files), all 436 old artifact hashes/sizes/modes and Dot's PAUSED/full-configuration hash match review start. All public and prerequisite seals, judgment/notification/mail/retention conditions and operational limits remain unchanged. Only the runtime helper, three test files and three design/backlog documents are included in the user-requested local commit. Real clocks/timers, build, operational child/worker launch, native read, fixture/signature/real-data operations, MCP registration, production activation, Dot restart and push remain unperformed.
+
+## 4-B3-C Second Independent Review And Corrections
+
+2026-10-29 JST, review of committed `930267a`. Two read-only reviewers split the work: one took clock/timer/tool lifetime, the other timing ownership, tests and documents. Every finding below was reproduced in an addon-free `git archive` copy before correction. None concerned the clock/timer core: deadlines never moved, cancellation stayed one attempt, and no promise stayed unsettled across 8000 randomized event orders.
+
+**P2, carried from `712112c`.** The connection-boundary assertion contained the literal text `"child = spawn("`. The repository-wide scan for bare-command spawns read it as a spawn call, so the whole unit suite failed on every CI platform. The assertion now uses an equivalent regex search.
+
+**P3 corrections:**
+
+- **Primary cause at timer arm.** A scheduling failure cancelled before it stopped, so an unknown clear could record `cc4b3c_timer_cancel_unknown` instead of the actual `cc4b3c_timer_unreferenced`. Stop now precedes cancellation, as tool failure already did. The transport's own unreferenced-handle refusal follows the same order.
+- **Spawn-start cause.** The start recheck's catch discarded the actual refusal and recorded `cc4b3b_tool_start`. It now stops with its own cause (entry deadline or sub-ms reservation) before the stage failure, as chunk and close checks already did.
+- **Expiry label.** Every timer expiry rejected as `cc4b3b_tool_deadline`, including:
+  - monotonic rollback;
+  - a clock read failure;
+  - a lost reference;
+  - an unknown early clear;
+  - an earlier stop.
+
+  The timer now passes its recorded reason. Only a timer or entry deadline rejects as `cc4b3b_tool_deadline`. Any other stop rejects as `cc4b3b_tool_timer_stop` and keeps its cause in `s.stopped` and the timer disposition.
+- **Wall slack.** The possible-adjustment boundary was 1 ns more lenient than the reviewed 4-B3-A stamp model on both sides. It now uses the same 999999-ns slack.
+- **Late synchronous returns.** The [timer rule](#fixed-internal-operations) requires a clock check immediately after synchronous OS calls, but the private connections did not do this. They carried on after `lstat`, `fstat`, `open`, `mkdir`, `opendir`, `read`, `write`, `fsync`, `fchmod` and `realpath` returns; for example, the record `lstat` led straight into `write` and `fsync`. A private `afterSync` check now follows every such return:
+  - `mkdir`/`open`/`opendir` first record the new resource, so it stays retained or closed.
+  - Record write/readback first counts its bytes, so the record keeps actual I/O.
+  - `close` and umask restoration remain the cleanup lane.
+  - Some checks are redundant with the next step's own check. The rule is uniform so that a later edit cannot open a gap.
+- **Late flag.** Whether a post-deadline close was `late` depended on whether its expiry callback had already run. A close before stop now runs its completion check first and records `late` when that check fails. A close after stop still reads no clock.
+
+**Test, guard and document gaps:**
+
+- The checkpoint entry deadline and the builder's returned timing had no test.
+- The static clock guard missed:
+  - an implicit `new Date()`;
+  - legacy `process.hrtime()` and `process.uptime()`;
+  - destructured or aliased `Date`/`process` readers;
+  - `globalThis` element access;
+  - a policy-supplied origin.
+- The 4-B3-B memory VM used its realm's real `Date`.
+- The main-thread `Date`/`hrtime` replacements hid the earlier `Date.now`/`hrtime.bigint` recorders.
+- Several ownership checks were masked by another check in every test.
+- BACKLOG claimed a cohort-level index check that no code performs.
+- The completion row read as if the clock were sampled after stop.
+
+### Corrections And Validation
+
+**New memory regressions.** Each of these fails on the reviewed runtime and passes after correction:
+
+- stop order at arm time and in the transport;
+- the spawn-start cause;
+- five non-deadline expiry causes;
+- both exact wall-slack edges;
+- close/expiry order;
+- three late-return sweeps.
+
+The sweeps place the deadline right after each OS return in turn and require that only close or umask-restore cleanup runs before the next check refuses. They cover:
+
+- build/record/namespace allocation;
+- discovery and snapshots, including an empty input;
+- artifact snapshots with permission repair.
+
+A lexical boundary test also requires every non-cleanup synchronous return in the private root to be followed by a checkpoint before the next return.
+
+Further tests cover:
+
+- the checkpoint deadline;
+- the builder returning the same frozen binding and exactly one post-namespace point;
+- each ownership check in isolation;
+- callback reference loss and unknown early clear;
+- tool failures staying primary over unknown cancellation;
+- an entry-capped tool timer.
+
+**Static guard.**
+
+- `Date` is allowed only as the clock's `Date.now()` or one-argument label formatting.
+- `process` is allowed only through fixed fields; `hrtime` only as the clock's `hrtime.bigint()`.
+- `policy` is allowed only as the clock's `total_limit_ms`.
+- The guard refuses `globalThis`, `global`, `performance`, `Intl`, `Temporal`, `AbortSignal` and `Atomics`, and string-keyed access to clock or timer names.
+
+The old guard let 11 of the 13 new variants through.
+
+**Tripwires.**
+
+- The replacement `Date` and `hrtime` carry their own recording `now`/`bigint`.
+- `process.uptime/cpuUsage/resourceUsage`, `performance.now` and, where present, `Temporal.Now` are recorded.
+- The 4-B3-B VM gets a recording `Date`.
+- A boundary test checks that both memory suites install every tripwire before their first helper import.
+
+**Bounded waits.** Tool waits now use bounded microtask turns instead of awaiting a promise that a defect could leave pending. Two earlier mutants hung the suite this way.
+
+**Documents.**
+
+- The 4-B3-C deliverable now reads cohort-owner checks on the timing input; the index consumer itself remains 4-B5 work.
+- BACKLOG wording is corrected.
+- The completion row now separates a check before stop from facts recorded after stop.
+- The earlier [validation statement](#validation-and-remaining-work) that real clock/timer calls were denied by tripwires overstated the coverage this section adds.
+
+**Test counts.**
+
+| Suite | Tests | Was |
+|---|---|---|
+| Clock | 91 | 69 |
+| Connection | 53 | 48 |
+| Boundary | 9 | 6 |
+
+The nine related qualification/assembly/controller suites (504 tests) pass three times, under linux and win32 platform spoofs and with CRLF copies of the changed files. The three changed suites also pass on Node 20.19.6, 24.18.0 and 26.12.1.
+
+**Mutation.** The mutation sweep kills 44 of 54 runtime mutants, including both mutants that previously hung. The 10 survivors are equivalent:
+
+- dropping the backward-wall term, because nondecreasing monotonic brackets already imply it;
+- a close after stop rechecking, because the stopped state refuses before reading the clock;
+- eight late-return checks whose next step checks the clock first.
+
+**Scope.** Only the runtime helper, three test files, this design and BACKLOG change. No real clock/timer, build, child/worker, native read, fixture, signature, real-data operation, MCP registration, production activation, Dot restart or push is performed.

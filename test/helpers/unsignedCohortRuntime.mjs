@@ -51,8 +51,9 @@ async function prepareOriginalQualification() {
       try { utc = new Date(ms).toISOString(); jst = new Date(ms + 32400000).toISOString().replace("Z", "+09:00"); }
       catch { return fail("wall_value"); }
       if (previousWall) {
-        const delta = BigInt(ms - previousWall.ms) * unit;
-        adjusted ||= delta < 0n || delta + unit < before - previousWall.after || delta - unit > after - previousWall.before;
+        // Same sub-ms quantization slack as the reviewed 4-B3-A stamp model.
+        const delta = BigInt(ms - previousWall.ms) * unit, slack = unit - 1n;
+        adjusted ||= delta < 0n || delta < before - previousWall.after - slack || delta > after - previousWall.before + slack;
       }
       previousWall = { ms, before, after };
       return Object.freeze({ stamp: Object.freeze({ clock_domain: binding.clock_domain, monotonic_ns: String(after), wall_utc: utc, wall_jst: jst }),
@@ -88,7 +89,7 @@ async function prepareOriginalQualification() {
       if (!current()) return;
       stop(s, error); cancel();
       s.timerDisposition = Object.freeze({ generation, deadline_ns: String(deadline), reason: code(error) });
-      onExpiry();
+      onExpiry(s.timerDisposition.reason);
     };
     const check = () => {
       if (!current()) throw Error("cc4b3c_timer_inactive");
@@ -115,7 +116,7 @@ async function prepareOriginalQualification() {
       if (!referenced()) throw Error("cc4b3c_timer_unreferenced");
     }
     const timer = Object.freeze({ cancel, hasRef: referenced, check }); s.qualificationTimer = timer;
-    try { schedule(clock.check()); } catch (error) { cancel(); throw stop(s, error); } return timer;
+    try { schedule(clock.check()); } catch (error) { stop(s, error); cancel(); throw error; } return timer;
   }
   function originalCohortTiming(s, buildRef, namespaceRef) {
     const namespace = namespaceReferences.get(namespaceRef);
@@ -134,6 +135,8 @@ async function prepareOriginalQualification() {
     if (s.stopped || evidence && s.evidenceTainted) refuse("stopped");
     clock.check();
   }
+  // A timer cannot interrupt a blocked synchronous OS call, so its late return stops before the next action.
+  function afterSync(s, value) { checkpoint(s); return value; }
   function newQualificationState() {
     if (retainedQualificationScopes.size) refuse("invocation_retained");
     const s = { phase: "NEW", stopped: null, evidenceTainted: false, output: path.join(root, "build/b3cc-validation"), rootOwned: false,
@@ -190,12 +193,12 @@ async function prepareOriginalQualification() {
     return digest(lines.slice(1));
   }
   async function qualifyMetadata(s, file, owned = false, mode = null, directory = true) {
-    checkpoint(s); const before = fs.lstatSync(file, { bigint: true }); safeStat(before, owned, mode, directory);
+    checkpoint(s); const before = afterSync(s, fs.lstatSync(file, { bigint: true })); safeStat(before, owned, mode, directory);
     const acl = await runOriginalTool(s, "/bin/ls", ["-lde", file], "metadata");
     const aclHash = parseMetadataListing(acl, file, false); checkpoint(s);
     const flagged = await runOriginalTool(s, "/bin/ls", ["-ldeO", file], "metadata");
     if (parseMetadataListing(flagged, file, true) !== aclHash) refuse("metadata_changed"); checkpoint(s);
-    const after = fs.lstatSync(file, { bigint: true }); safeStat(after, owned, mode, directory);
+    const after = afterSync(s, fs.lstatSync(file, { bigint: true })); safeStat(after, owned, mode, directory);
     const pin = identity(after);
     if (!sameIdentity(identity(before), pin, directory)) refuse("metadata_changed");
     return { identity: pin, aclHash };
@@ -207,7 +210,7 @@ async function prepareOriginalQualification() {
       const original = s.directories.get(p);
       if (original) {
         const h = s.handles.get(original.reference); if (!h || h.closeAttempted) refuse("directory_handle");
-        if (!sameIdentity(original.identity, q.identity, true) || !sameIdentity(q.identity, identity(fs.fstatSync(h.fd, { bigint: true })), true)) refuse("directory_identity");
+        if (!sameIdentity(original.identity, q.identity, true) || !sameIdentity(q.identity, identity(afterSync(s, fs.fstatSync(h.fd, { bigint: true }))), true)) refuse("directory_identity");
       }
     }
   }
@@ -216,11 +219,12 @@ async function prepareOriginalQualification() {
     // mkdir is exclusive; an existing path blocks rather than being adopted or repaired.
     fs.mkdirSync(file, { mode: 0o700 });
     if (file === s.output) s.rootOwned = true;
-    const known = { reference: null, identity: null }; s.directories.set(file, known);
+    // Record each new resource before checking a late return, so it is retained or closed rather than lost.
+    const known = { reference: null, identity: null }; s.directories.set(file, known); checkpoint(s);
     const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-    known.reference = ownHandle(s, fd, file, "directory");
+    known.reference = ownHandle(s, fd, file, "directory"); checkpoint(s);
     const q = await qualifyMetadata(s, file, true, 0o700n); known.identity = q.identity;
-    if (!sameIdentity(q.identity, identity(fs.fstatSync(fd, { bigint: true })), true)) refuse("directory_identity");
+    if (!sameIdentity(q.identity, identity(afterSync(s, fs.fstatSync(fd, { bigint: true }))), true)) refuse("directory_identity");
   }
   function allowedTool(s, program, args, kind) {
     if (kind === "metadata") return program === "/bin/ls" && args.length === 2 && ["-lde", "-ldeO"].includes(args[0]) && path.isAbsolute(args[1]);
@@ -239,22 +243,25 @@ async function prepareOriginalQualification() {
         child?.stdout?.pause(); child?.stderr?.pause(); out.length = 0; err.length = 0;
         reject(error);
       };
-      const timer = armOriginalQualificationTimer(s, kind, () => fail("tool_deadline"));
-      if (!timer.hasRef()) { timer.cancel(); refuse("timer_unreferenced"); }
+      // Only an original deadline is reported as one; any other timer stop keeps its cause in s.stopped.
+      const timer = armOriginalQualificationTimer(s, kind, reason => fail(/^cc4b3c_(?:timer|entry)_deadline$/.test(reason) ? "tool_deadline" : "tool_timer_stop"));
+      if (!timer.hasRef()) { const error = stop(s, Error("cc4b3b_timer_unreferenced")); timer.cancel(); throw error; }
+      try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); return fail("tool_start"); }
       try {
-        checkpoint(s); timer.check();
         child = spawn(program, args, { cwd: root, env: s.environment, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: true });
         s.helper = child; s.children.add(child);
         child.on("error", () => fail("tool_start"));
         child.on("close", (exitCode, signal) => {
           if (closed) return; closed = true;
+          // A close after stop reads no clock; one arriving before its pending expiry callback is late by the same check.
+          let late = done;
+          if (!late) try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); late = true; }
           const exitKnown = exitCode === null || Number.isSafeInteger(exitCode), signalKnown = signal === null || typeof signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(signal);
           s.helperDisposition = Object.freeze({ command_ordinal: commandOrdinal, exit_code: exitKnown ? exitCode : null,
-            signal: signalKnown ? signal : null, known: exitKnown && signalKnown, late: done });
+            signal: signalKnown ? signal : null, known: exitKnown && signalKnown, late });
           s.children.delete(child); if (s.helper === child) s.helper = null;
-          if (done) return;
+          if (late) return fail("tool_completion");
           try {
-            checkpoint(s); timer.check();
             const stdout = Buffer.concat(out), stderr = Buffer.concat(err);
             s.commandDigest = digest({ previous: s.commandDigest, program, args, exit_code: exitCode, signal, stdout: hash(stdout), stderr: hash(stderr) });
             if (exitCode !== 0 || signal !== null || stderr.length && kind === "metadata") return fail("tool_exit");
@@ -280,26 +287,27 @@ async function prepareOriginalQualification() {
     if (s.hashBytes > BigInt(limits.hash_work_bytes) || s.passBytes > BigInt(limits.pass_bytes)) refuse("hash_work_bound");
   }
   function readPinnedFile(s, file, expected = null, keep = false) {
-    checkpoint(s); const before = fs.lstatSync(file, { bigint: true }); safeStat(before, false, null, false);
+    checkpoint(s); const before = afterSync(s, fs.lstatSync(file, { bigint: true })); safeStat(before, false, null, false);
     if (before.size > BigInt(limits.file_bytes)) refuse("file_bound");
     if (expected && !sameIdentity(expected, identity(before))) refuse("input_changed");
     const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK), reference = ownHandle(s, fd, file, "input");
     let result, primary = null;
     try {
-      if (!sameIdentity(identity(before), identity(fs.fstatSync(fd, { bigint: true })))) refuse("input_changed");
+      checkpoint(s);
+      if (!sameIdentity(identity(before), identity(afterSync(s, fs.fstatSync(fd, { bigint: true }))))) refuse("input_changed");
       const accumulator = crypto.createHash("sha256"), buffer = Buffer.alloc(limits.hash_buffer_bytes), chunks = []; let offset = 0;
       while (BigInt(offset) < before.size) {
         checkpoint(s); const length = Number(before.size - BigInt(offset) < BigInt(buffer.length) ? before.size - BigInt(offset) : BigInt(buffer.length));
-        chargeHash(s, length); const n = fs.readSync(fd, buffer, 0, length, offset);
+        chargeHash(s, length); const n = afterSync(s, fs.readSync(fd, buffer, 0, length, offset));
         if (n < 1 || n > length) refuse("input_read");
         accumulator.update(buffer.subarray(0, n)); if (keep) chunks.push(Buffer.from(buffer.subarray(0, n))); offset += n;
       }
-      if (fs.readSync(fd, buffer, 0, 1, offset) !== 0 || !sameIdentity(identity(before), identity(fs.fstatSync(fd, { bigint: true })))
-        || !sameIdentity(identity(before), identity(fs.lstatSync(file, { bigint: true })))) refuse("input_changed");
+      if (afterSync(s, fs.readSync(fd, buffer, 0, 1, offset)) !== 0 || !sameIdentity(identity(before), identity(afterSync(s, fs.fstatSync(fd, { bigint: true }))))
+        || !sameIdentity(identity(before), identity(afterSync(s, fs.lstatSync(file, { bigint: true }))))) refuse("input_changed");
       result = { path: file, identity: identity(before), bytes: String(offset), sha256: accumulator.digest("hex"), ...(keep ? { content: Buffer.concat(chunks) } : {}) };
     } catch (error) { primary = error; }
     try { closeOriginal(s, reference); } catch (error) { primary ??= error; }
-    if (primary) throw primary; return result;
+    if (primary) throw primary; return afterSync(s, result);
   }
   function dependencyPaths(bytes) {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/\\\n/g, " ");
@@ -326,19 +334,20 @@ async function prepareOriginalQualification() {
     checkpoint(s); const stream = fs.opendirSync(file, { bufferSize: 32 }), ref = ownHandle(s, stream, file, "directory_stream"), names = [];
     let primary = null;
     try {
-      for (let entry; (entry = stream.readSync()) !== null;) {
-        checkpoint(s); if (names.length >= limits.manifest_rows || entry.name.length > 512 || !/^[A-Za-z0-9_@+.-]+$/.test(entry.name) || [".", ".."].includes(entry.name)) refuse("directory_bound");
+      checkpoint(s);
+      for (let entry; (entry = afterSync(s, stream.readSync())) !== null;) {
+        if (names.length >= limits.manifest_rows || entry.name.length > 512 || !/^[A-Za-z0-9_@+.-]+$/.test(entry.name) || [".", ".."].includes(entry.name)) refuse("directory_bound");
         names.push(entry.name);
       }
     } catch (error) { primary = error; }
     try { closeOriginal(s, ref); } catch (error) { primary ??= error; }
-    if (primary) throw primary; return names.sort();
+    if (primary) throw primary; return afterSync(s, names.sort());
   }
   function sourceFiles(s) {
     const files = []; let entries = 0;
     function visit(file) {
       if (++entries > limits.manifest_rows * 2 || file.length > 512) refuse("source_bound");
-      const st = fs.lstatSync(file, { bigint: true });
+      const st = afterSync(s, fs.lstatSync(file, { bigint: true }));
       if (st.isSymbolicLink()) refuse("source_alias");
       if (st.isDirectory()) { for (const name of directoryNames(s, file)) visit(path.join(file, name)); }
       else if (st.isFile()) { if (files.length >= limits.manifest_rows) refuse("manifest_rows"); files.push(file); }
@@ -391,9 +400,9 @@ async function prepareOriginalQualification() {
     const compilerLaunch = text(await runOriginalTool(s, s.toolPlans[0].program, s.toolPlans[0].args, "discovery"));
     const sdkLaunch = text(await runOriginalTool(s, s.toolPlans[1].program, s.toolPlans[1].args, "discovery"));
     function hostPath(launch) {
-      if (!path.isAbsolute(launch) || launch.length > 512) refuse("host_path"); const target = fs.realpathSync(launch);
+      if (!path.isAbsolute(launch) || launch.length > 512) refuse("host_path"); const target = afterSync(s, fs.realpathSync(launch));
       if (target.length > 512) refuse("host_path");
-      s.aliases.set(launch, { target, identity: identity(fs.lstatSync(launch, { bigint: true })) }); return target;
+      s.aliases.set(launch, { target, identity: identity(afterSync(s, fs.lstatSync(launch, { bigint: true }))) }); return target;
     }
     const compiler = hostPath(compilerLaunch), sdk = hostPath(sdkLaunch), node = hostPath(process.execPath), headers = path.resolve(path.dirname(node), "../include/node");
     const extra = ["-print-prog-name=ld", "-print-file-name=libclang_rt.ubsan_osx_dynamic.dylib", "-print-resource-dir"];
@@ -442,7 +451,7 @@ async function prepareOriginalQualification() {
       if (byteLengthRows([...rows, row]) > limits.manifest_bytes) refuse("manifest_bound");
       rows.push(row); s.pins.set(file, row.identity);
     }
-    for (const [launch, pin] of s.aliases) if (fs.realpathSync(launch) !== pin.target || !sameIdentity(pin.identity, identity(fs.lstatSync(launch, { bigint: true })) )) refuse("alias_changed");
+    for (const [launch, pin] of s.aliases) if (afterSync(s, fs.realpathSync(launch)) !== pin.target || !sameIdentity(pin.identity, identity(afterSync(s, fs.lstatSync(launch, { bigint: true }))) )) refuse("alias_changed");
     if (canonical(sourceFiles(s)) !== canonical(inputs.sources)) refuse("source_set_changed");
     await recheckTypeScriptInputs(s, inputs);
     const snapshot = { rows, sha256: digest(rows) };
@@ -477,7 +486,7 @@ async function prepareOriginalQualification() {
       await qualifyChain(s, base);
       async function visit(file) {
         checkpoint(s); if (++entries > limits.manifest_rows * 2 || file.length > 512) refuse("artifact_bound");
-        const st = fs.lstatSync(file, { bigint: true });
+        const st = afterSync(s, fs.lstatSync(file, { bigint: true }));
         if (st.isDirectory() && !st.isSymbolicLink()) {
           await qualifyMetadata(s, file, true, 0o700n); for (const name of directoryNames(s, file)) await visit(path.join(file, name)); return;
         }
@@ -487,9 +496,9 @@ async function prepareOriginalQualification() {
           const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW), ref = ownHandle(s, fd, file, "new_addon");
           let primary = null;
           try {
-            const opened = fs.fstatSync(fd, { bigint: true }); safeStat(opened, true, 0o700n, false);
-            if (!sameIdentity(identity(opened), identity(fs.lstatSync(file, { bigint: true })))) refuse("artifact_identity");
-            fs.fchmodSync(fd, 0o600);
+            checkpoint(s); const opened = afterSync(s, fs.fstatSync(fd, { bigint: true })); safeStat(opened, true, 0o700n, false);
+            if (!sameIdentity(identity(opened), identity(afterSync(s, fs.lstatSync(file, { bigint: true }))))) refuse("artifact_identity");
+            fs.fchmodSync(fd, 0o600); checkpoint(s);
           } catch (error) { primary = error; }
           try { closeOriginal(s, ref); } catch (error) { primary ??= error; }
           if (primary) throw primary;
@@ -514,29 +523,30 @@ async function prepareOriginalQualification() {
     const file = path.join(s.output, "build-record.json"), fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
     const ref = ownHandle(s, fd, file, "record"); let primary = null;
     try {
-      const original = identity(fs.fstatSync(fd, { bigint: true }));
+      checkpoint(s); const original = identity(afterSync(s, fs.fstatSync(fd, { bigint: true })));
       await qualifyMetadata(s, file, true, 0o600n, false); checkpoint(s);
-      if (original.size !== "0" || !sameIdentity(original, identity(fs.lstatSync(file, { bigint: true })))) refuse("record_identity");
+      if (original.size !== "0" || !sameIdentity(original, identity(afterSync(s, fs.lstatSync(file, { bigint: true }))))) refuse("record_identity");
       let offset = 0;
       while (offset < bytes.length) {
-        checkpoint(s); const current = fs.fstatSync(fd, { bigint: true }); safeStat(current, true, 0o600n, false);
+        checkpoint(s); const current = afterSync(s, fs.fstatSync(fd, { bigint: true })); safeStat(current, true, 0o600n, false);
         if (!sameIdentity(original, identity(current), true) || current.size !== BigInt(offset)
-          || !sameIdentity(identity(current), identity(fs.lstatSync(file, { bigint: true })))) refuse("record_identity");
+          || !sameIdentity(identity(current), identity(afterSync(s, fs.lstatSync(file, { bigint: true }))))) refuse("record_identity");
+        // Written and read bytes are counted before the late-return check, so the record keeps actual I/O.
         const n = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset); if (n < 1 || n > bytes.length - offset) refuse("record_write");
-        offset += n; s.recordIoBytes += n;
+        offset += n; s.recordIoBytes += n; checkpoint(s);
       }
-      fs.fsyncSync(fd); const copy = Buffer.alloc(bytes.length); offset = 0;
+      fs.fsyncSync(fd); checkpoint(s); const copy = Buffer.alloc(bytes.length); offset = 0;
       while (offset < copy.length) {
         checkpoint(s); const n = fs.readSync(fd, copy, offset, copy.length - offset, offset); if (n < 1 || n > copy.length - offset) refuse("record_readback");
-        offset += n; s.recordIoBytes += n;
+        offset += n; s.recordIoBytes += n; checkpoint(s);
       }
-      const readbackIdentity = identity(fs.fstatSync(fd, { bigint: true }));
+      const readbackIdentity = identity(afterSync(s, fs.fstatSync(fd, { bigint: true })));
       if (!copy.equals(bytes) || readbackIdentity.size !== String(bytes.length)) refuse("record_readback");
       await qualifyChain(s, s.output); await qualifyMetadata(s, file, true, 0o600n, false); checkpoint(s);
-      safeStat(fs.fstatSync(fd, { bigint: true }), true, 0o600n, false);
-      const final = identity(fs.fstatSync(fd, { bigint: true }));
+      safeStat(afterSync(s, fs.fstatSync(fd, { bigint: true })), true, 0o600n, false);
+      const final = identity(afterSync(s, fs.fstatSync(fd, { bigint: true })));
       if (!sameIdentity(original, final, true) || !sameIdentity(readbackIdentity, final)
-        || !sameIdentity(final, identity(fs.lstatSync(file, { bigint: true })))) refuse("record_identity");
+        || !sameIdentity(final, identity(afterSync(s, fs.lstatSync(file, { bigint: true }))))) refuse("record_identity");
       s.recordHash = hash(copy); s.recordIdentity = final;
     } catch (error) { primary = error; }
     try { closeOriginal(s, ref); } catch (error) { primary ??= error; }
@@ -546,10 +556,10 @@ async function prepareOriginalQualification() {
     try {
       if (buildReferences.get(buildRef) !== s || !s.recordClosed || !s.recordIdentity) refuse("original_build_required"); checkpoint(s);
       const recordPath = path.join(s.output, "build-record.json");
-      if (!sameIdentity(s.recordIdentity, identity(fs.lstatSync(recordPath, { bigint: true })))) refuse("record_changed");
+      if (!sameIdentity(s.recordIdentity, identity(afterSync(s, fs.lstatSync(recordPath, { bigint: true }))))) refuse("record_changed");
       const reportRoot = path.join(s.output, "reports"), directory = path.join(reportRoot, s.runId);
       await createOriginalDirectory(s, reportRoot); await createOriginalDirectory(s, directory); await qualifyChain(s, directory); checkpoint(s);
-      if (!sameIdentity(s.recordIdentity, identity(fs.lstatSync(recordPath, { bigint: true })))) refuse("record_changed");
+      if (!sameIdentity(s.recordIdentity, identity(afterSync(s, fs.lstatSync(recordPath, { bigint: true }))))) refuse("record_changed");
       const ref = Object.freeze(Object.create(null)); namespaceReferences.set(ref, { owner: s, buildRef, directory }); return ref;
     } catch (error) { throw stop(s, error, true); }
   }
@@ -561,7 +571,7 @@ async function prepareOriginalQualification() {
         || Object.keys(process.env).some(k => /^(NODE_|DYLD_)/.test(k) || ["LD_PRELOAD", "CFLAGS", "CXXFLAGS", "LDFLAGS", "SDKROOT", "DEVELOPER_DIR"].includes(k))) refuse("startup_policy");
       await qualifyChain(s, path.dirname(s.output)); checkpoint(s);
       try { fs.lstatSync(s.output); refuse("output_exists"); } catch (error) { if (error.code !== "ENOENT") throw error; }
-      previousMask = process.umask(0o077);
+      checkpoint(s); previousMask = process.umask(0o077); checkpoint(s);
       s.environment = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", TZ: "Asia/Tokyo", XCRUN_CACHE_DISABLED: "1" };
       await createOriginalDirectory(s, s.output);
       for (const rel of ["scratch", "scratch/tmp", "scratch/home", "scratch/modules", "scratch/cache"]) await createOriginalDirectory(s, path.join(s.output, rel));

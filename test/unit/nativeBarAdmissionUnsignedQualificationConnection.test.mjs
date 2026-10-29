@@ -63,6 +63,10 @@ for (const [o, k, flag] of readers) {
 }
 syncBuiltinESMExports();
 test.after(() => { restores.reverse().forEach(f => f()); syncBuiltinESMExports(); assert.deepEqual(effects, []); });
+// The VM realm's own Date would read real wall time, so extracted declarations see recorders instead.
+const vmRecord = name => function () { effects.push(name); throw Error("cc4b3b_forbidden_effect"); };
+const vmDate = Object.assign(vmRecord("vm_Date"), { now: vmRecord("vm_now") });
+blocked.push([{ Date: vmDate }, "Date"], [vmDate, "now"]);
 const runtime = await import("../helpers/unsignedCohortRuntime.mjs");
 const { describeUnsignedQualificationProfile, describeUnsignedQualificationCapacity } = await import("../helpers/unsignedCohortQualificationContracts.mjs");
 const { canonical, digest } = await import("../helpers/unsignedControllerData.mjs");
@@ -109,7 +113,7 @@ function memoryFs() {
 }
 function environment(overrides = {}, real = []) {
   const disk = memoryFs(), states = [], masks = [], buildReferences = new WeakMap(), namespaceReferences = new WeakMap();
-  const context = { fs: disk.api, path: posix, crypto: { createHash: crypto.createHash, randomBytes: () => Buffer.alloc(16, 1) },
+  const context = { Date: vmDate, fs: disk.api, path: posix, crypto: { createHash: crypto.createHash, randomBytes: () => Buffer.alloc(16, 1) },
     Buffer, TextDecoder, ts, builtinModules, canonical, digest, describeUnsignedQualificationCapacity: data => describeUnsignedQualificationCapacity(JSON.parse(JSON.stringify(data))), describeUnsignedIsolatedBuild,
     limits: describeUnsignedQualificationProfile(), root: "/virtual/repo", buildReferences, namespaceReferences, retainedQualificationScopes: new Set(),
     policy: {}, clock: { check() {}, binding: Object.freeze({ clock_domain: "invented-parent", started_ns: "0", cohort_limit_ms: "2000000" }),
@@ -145,6 +149,14 @@ test("4-B3-B isolated lifecycle obtains model-local references only after readba
   assert.ok(e.disk.calls.findIndex(c => c[0] === "fsync") < e.disk.calls.findIndex(c => c[0] === "mkdir" && c[1].endsWith("/reports")));
   assert.equal(s.record.execution_available, false); assert.equal(s.record.runtime_qualified, false);
   assert.throws(() => runtime.executeUnsignedCohortAssembly(refs), /execution_not_approved/);
+});
+test("4-B3-C builder returns the original cohort binding and one post-namespace point without re-granting build time", async () => {
+  const e = environment(); let points = 0;
+  e.clock.point = () => Object.freeze({ clock_domain: "invented-parent", monotonic_ns: String(100 + ++points) });
+  const refs = await e.api.buildAndQualify();
+  assert.deepEqual(Object.keys(refs).sort(), ["buildRef", "namespaceRef", "timing"]);
+  assert.equal(Object.isFrozen(refs.timing), true); assert.deepEqual(Object.keys(refs.timing).sort(), ["at", "binding"]);
+  assert.equal(refs.timing.binding, e.clock.binding); assert.equal(points, 1); assert.equal(refs.timing.at.monotonic_ns, "101");
 });
 for (const phase of ["discoverOriginalInputs", "buildOriginalMode", "snapshotInputs", "snapshotArtifacts"]) {
   test(`4-B3-B ${phase} failure cannot issue a build or namespace reference`, async () => {
@@ -275,18 +287,26 @@ function toolEnvironment(options = {}) {
   const api = functions(context, { armOriginalQualificationTimer: () => ({ cancel: () => { cancelled++; }, hasRef: () => true, check() {} }), ...options });
   return { ...e, api, instance, cancelled: () => cancelled, spawned: () => spawned };
 }
+// Invented children settle synchronously, so bounded microtask turns replace waits that could hang on a lost settlement.
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+function track(promise) {
+  const r = { state: "pending" };
+  promise.then(value => Object.assign(r, { state: "fulfilled", value }), error => Object.assign(r, { state: "rejected", error }));
+  return async () => { await flush(); return r; };
+}
+async function rejected(settle, pattern) { const r = await settle(); assert.equal(r.state, "rejected"); assert.match(r.error.message, pattern); }
 test("4-B3-B bounded tool transport settles only from its original child", async () => {
-  const e = toolEnvironment(), s = e.api.newQualificationState(), result = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  await Promise.resolve();
+  const e = toolEnvironment(), s = e.api.newQualificationState(), result = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  await flush();
   e.instance.stdout.emit("data", Buffer.from("invented")); e.instance.emit("close", 0, null);
-  assert.equal((await result).toString(), "invented"); assert.equal(s.helper, null); assert.equal(e.cancelled(), 1);
+  const r = await result(); assert.equal(r.state, "fulfilled"); assert.equal(r.value.toString(), "invented"); assert.equal(s.helper, null); assert.equal(e.cancelled(), 1);
 });
 test("4-B3-B overflow pauses and retains the child without signal, retry or forgetting it", async () => {
-  const e = toolEnvironment(), s = e.api.newQualificationState(), result = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  await Promise.resolve();
-  e.instance.stdout.emit("data", Buffer.alloc(1048577)); await assert.rejects(result, /tool_output_bound/);
+  const e = toolEnvironment(), s = e.api.newQualificationState(), result = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  await flush();
+  e.instance.stdout.emit("data", Buffer.alloc(1048577)); await rejected(result, /tool_output_bound/);
   assert.equal(s.children.size, 1); assert.equal(s.helper, e.instance); assert.equal(e.instance.stdout.paused, true);
-  await assert.rejects(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"), /stopped/); assert.equal(e.spawned(), 1);
+  await rejected(track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata")), /stopped/); assert.equal(e.spawned(), 1);
   e.instance.emit("close", 1, null); assert.equal(s.children.size, 0); assert.notEqual(s.stopped, null);
 });
 test("4-B3-B tripwires intercept calls and constructors without actual effects", () => {
@@ -294,11 +314,13 @@ test("4-B3-B tripwires intercept calls and constructors without actual effects",
     const n = effects.length; assert.throws(invoke, /forbidden_effect/); assert.equal(effects.length, n + 1); effects.pop();
   }
 });
-function discoveryEnvironment(onMetadata = null) {
-  const e = environment({ qualifyMetadata: async (s, file) => {
+function discoveryEnvironment(onMetadata = null, realMetadata = false) {
+  const e = environment({ ...realMetadata ? {} : { qualifyMetadata: async (s, file) => {
     onMetadata?.(s, file, e);
     return { identity: e.api.identity(e.disk.api.lstatSync(file)), aclHash: "a".repeat(64) };
-  }, runOriginalTool: async (s, program, args, kind) => {
+  } }, runOriginalTool: async (s, program, args, kind) => {
+    // The real transport starts with this same checkpoint; real metadata qualification lists through it.
+    if (realMetadata) { e.api.checkpoint(s); if (program === "/bin/ls") return listing(args[1], args[0] === "-ldeO"); }
     s.commands++; if (kind === "discovery") s.discoveryCommands++;
     if (program === "/usr/bin/xcrun") return Buffer.from(args.includes("--find") ? "/host/bin/clang\n" : "/host/sdk\n");
     if (program === "/usr/bin/git") return Buffer.from(args.includes("rev-parse") ? "a".repeat(40) + "\n" : "?? invented\0");
@@ -308,7 +330,7 @@ function discoveryEnvironment(onMetadata = null) {
     if (args.includes("--listFilesOnly")) { e.typedListCalls++; return Buffer.from(e.typedPaths.join("\n") + "\n"); }
     if (args.includes("-M")) return Buffer.from(`qualification: ${args.at(-1)} /host/include/node/node_api.h /host/sdk/used.h\n`);
     throw Error("unexpected_tool");
-  } }, ["discoverOriginalInputs", "snapshotInputs"]);
+  } }, ["discoverOriginalInputs", "snapshotInputs", ...realMetadata ? ["qualifyMetadata"] : []]);
   for (const p of ["/bin", "/usr", "/usr/bin", "/host", "/host/bin", "/host/lib", "/host/sdk", "/host/resource", "/host/include", "/host/include/node",
     "/virtual/repo/src", "/virtual/repo/native", "/virtual/repo/native/native_bar_fs", "/virtual/repo/test", "/virtual/repo/test/helpers",
     "/virtual/repo/node_modules", "/virtual/repo/node_modules/typescript", "/virtual/repo/node_modules/typescript/lib", "/virtual/repo/node_modules/typescript/bin", "/virtual/repo/node_modules/zod"]) e.disk.make(p);
@@ -347,20 +369,26 @@ test("4-B3-B unknown metadata cannot qualify a private file by POSIX mode alone"
 });
 test("4-B3-B unreferenced timer prevents the first spawn", async () => {
   const e = toolEnvironment({ armOriginalQualificationTimer: () => ({ cancel() {}, hasRef: () => false, check() {} }) }), s = e.api.newQualificationState();
-  await assert.rejects(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"), /timer_unreferenced/); assert.equal(e.spawned(), 0);
+  await rejected(track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata")), /timer_unreferenced/); assert.equal(e.spawned(), 0);
+});
+test("4-B3-C an unreferenced tool timer is stopped before cancellation can replace its cause", async () => {
+  const e = toolEnvironment({ armOriginalQualificationTimer: s => ({ cancel() { s.stopped ??= "cc4b3c_timer_cancel_unknown"; }, hasRef: () => false, check() {} }) });
+  const s = e.api.newQualificationState();
+  await rejected(track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata")), /timer_unreferenced/);
+  assert.equal(s.stopped, "cc4b3b_timer_unreferenced"); assert.equal(e.spawned(), 0);
 });
 test("4-B3-B an original helper timeout retains its child and records later exit only", async () => {
   let timeout;
   const e = toolEnvironment({ armOriginalQualificationTimer: (_s, _kind, expired) => { timeout = expired; return { cancel() {}, hasRef: () => true, check() {} }; } });
-  const s = e.api.newQualificationState(), result = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  await Promise.resolve();
-  timeout(); await assert.rejects(result, /tool_deadline/); assert.equal(s.helper, e.instance);
+  const s = e.api.newQualificationState(), result = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  await flush();
+  timeout("cc4b3c_timer_deadline"); await rejected(result, /tool_deadline/); assert.equal(s.helper, e.instance);
   e.instance.emit("close", 0, null); assert.equal(s.children.size, 0); assert.equal(s.phase, "STOPPED");
 });
 test("4-B3-B a missing pipe still keeps error/close handlers on the original child", async () => {
   const e = toolEnvironment(), s = e.api.newQualificationState(); e.instance.stdout = null;
-  const result = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  await assert.rejects(result, /tool_pipe/); assert.equal(s.children.size, 1);
+  const result = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  await rejected(result, /tool_pipe/); assert.equal(s.children.size, 1);
   e.instance.emit("error", Error("late")); e.instance.emit("close", 1, null); assert.equal(s.children.size, 0);
 });
 test("4-B3-B a record that gains another link never qualifies even with matching bytes", async () => {
@@ -373,8 +401,8 @@ test("4-B3-B failed invocations stay one-attempt even when all handles closed", 
   await assert.rejects(e.api.buildAndQualify(), /first_failure/); assert.equal(e.disk.fds.size, 0);
   const count = e.disk.calls.length; await assert.rejects(e.api.buildAndQualify(), /invocation_retained/); assert.equal(e.disk.calls.length, count);
 });
-function artifactEnvironment(extra = {}) {
-  const e = environment({ verifyOriginalNativeProfile: async () => {}, ...extra }, ["snapshotArtifacts"]), s = e.api.newQualificationState();
+function artifactEnvironment(extra = {}, real = []) {
+  const e = environment({ verifyOriginalNativeProfile: async () => {}, ...extra }, ["snapshotArtifacts", ...real]), s = e.api.newQualificationState();
   s.rootOwned = true; s.inputs = { rows: [] }; e.disk.make(s.output);
   for (const mode of ["normal", "ubsan"]) {
     const base = `${s.output}/${mode}`; e.disk.make(base); e.disk.make(`${base}/native-bar-fs`);
@@ -425,9 +453,9 @@ test("4-B3-B namespace construction rechecks the closed original record before b
 test("4-B3-B late helper close preserves its original outcome once without resuming", async () => {
   let timeout;
   const e = toolEnvironment({ armOriginalQualificationTimer: (_s, _kind, expired) => { timeout = expired; return { cancel() {}, hasRef: () => true, check() {} }; } });
-  const s = e.api.newQualificationState(), result = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  await Promise.resolve();
-  timeout(); await assert.rejects(result, /tool_deadline/); const stopped = s.stopped;
+  const s = e.api.newQualificationState(), result = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  await flush();
+  timeout("cc4b3c_timer_deadline"); await rejected(result, /tool_deadline/); const stopped = s.stopped;
   e.instance.emit("close", 23, null);
   assert.equal(s.helperDisposition?.exit_code, 23); assert.equal(s.helperDisposition?.late, true);
   assert.equal(s.helperDisposition?.command_ordinal, 1); assert.equal(s.stopped, stopped);
@@ -461,12 +489,12 @@ test("4-B3-B artifact capacity checks include the enriched row before retaining 
 });
 test("4-B3-B concurrent import continuations cannot acquire a second helper slot", async () => {
   const e = toolEnvironment(), s = e.api.newQualificationState();
-  const first = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata");
-  const second = e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata").then(() => null, error => error);
+  const first = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
+  const second = track(e.api.runOriginalTool(s, "/bin/ls", ["-lde", "/virtual/repo"], "metadata"));
   await Promise.resolve(); const spawned = e.spawned();
   e.instance.stdout.emit("data", Buffer.from("invented")); e.instance.emit("close", 0, null);
-  await first; const refused = await second;
-  assert.equal(spawned, 1); assert.match(refused?.message ?? "", /tool_busy/);
+  assert.equal((await first()).state, "fulfilled");
+  assert.equal(spawned, 1); await rejected(second, /tool_busy/);
   assert.equal(s.helperDisposition.command_ordinal, 1);
 });
 test("4-B3-B the second TypeScript recheck detects a change during snapshot collection", async () => {
@@ -480,4 +508,43 @@ test("4-B3-B the second TypeScript recheck detects a change during snapshot coll
   const s = e.api.newQualificationState(), input = await e.api.discoverOriginalInputs(s);
   await assert.rejects(e.api.snapshotInputs(s, input), /typescript_closure_changed/); assert.equal(changed, true);
   assert.equal(e.typedListCalls, 3);
+});
+// Timers cannot interrupt a blocked synchronous call: the deadline is placed right after each OS return in turn,
+// and only close or umask-restore cleanup may run before the next clock check refuses.
+const osReturns = ["lstatSync", "fstatSync", "mkdirSync", "openSync", "closeSync", "readSync", "writeSync", "fsyncSync", "fchmodSync", "realpathSync", "opendirSync"];
+function lateAfterReturn(e, at) {
+  const after = []; let returns = 0, late = false;
+  const count = (name, f) => (...a) => { if (late) after.push(name); try { return f(...a); } finally { if (++returns === at) late = true; } };
+  for (const k of osReturns) e.disk.api[k] = count(k, e.disk.api[k]);
+  const opendir = e.disk.api.opendirSync;
+  e.disk.api.opendirSync = (...a) => { const d = opendir(...a); return { readSync: count("streamReadSync", () => d.readSync()), closeSync: count("streamCloseSync", () => d.closeSync()) }; };
+  const umask = e.process.umask; e.process.umask = m => count(m === 0o077 ? "umask_set" : "umask_restore", umask)(m);
+  e.clock.check = () => { if (late) throw Error("cc4b3c_entry_deadline"); };
+  return { after: () => after.filter(k => !["closeSync", "streamCloseSync", "umask_restore"].includes(k)), returns: () => returns };
+}
+async function everyLateReturn(make, run) {
+  const dry = make(), counted = lateAfterReturn(dry, 0); await run(dry);
+  for (let at = 1; at <= counted.returns(); at++) {
+    const e = make(), probe = lateAfterReturn(e, at);
+    await assert.rejects(run(e), /cc4b3c_entry_deadline/, `OS return ${at}`); assert.deepEqual(probe.after(), [], `OS return ${at}`);
+  }
+  return counted.returns();
+}
+const listedTool = e => async (s, _program, args) => { e.api.checkpoint(s); return listing(args[1], args[0] === "-ldeO"); };
+test("4-B3-C every late OS return in build, record and namespace allocation stops before its next action", async () => {
+  const make = () => { const e = environment({ runOriginalTool: (...a) => listedTool(e)(...a) }, ["qualifyMetadata"]); return e; };
+  assert.ok(await everyLateReturn(make, e => e.api.buildAndQualify()) > 50);
+});
+test("4-B3-C every late OS return in input discovery and snapshots stops before its next action", async () => {
+  const run = async e => { const s = e.api.newQualificationState(), input = await e.api.discoverOriginalInputs(s); s.inputs = await e.api.snapshotInputs(s, input); };
+  // An empty input skips the chunk loop, so its end-of-file read follows the descriptor check directly.
+  const make = () => { const e = discoveryEnvironment(null, true); e.disk.nodes.get("/virtual/repo/package-lock.json").content = Buffer.alloc(0); return e; };
+  assert.ok(await everyLateReturn(make, run) > 100);
+});
+test("4-B3-C every late OS return in artifact snapshots, including permission repair, stops before its next action", async () => {
+  const make = () => {
+    const x = artifactEnvironment({ runOriginalTool: (...a) => listedTool(x.e)(...a) }, ["qualifyMetadata"]);
+    x.e.disk.nodes.get(`${x.s.output}/normal/native-bar-fs/native_bar_fs.node`).mode = 0o100700n; x.e.s = x.s; x.e.input = x.input; return x.e;
+  };
+  assert.ok(await everyLateReturn(make, e => e.api.snapshotArtifacts(e.s, e.input)) > 50);
 });
