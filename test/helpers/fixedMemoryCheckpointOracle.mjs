@@ -28,7 +28,7 @@ export function enrollFixedMemoryCheckpointOracleC0Only(originalOwnerGrant, inve
 }
 function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0Only) {
   const channel = claimFixedMemoryCheckpointOracleOwner(originalOwnerGrant);
-  let state, privateKey, known = true, closed = false, signed = 0n, generation = 1n, mode, held, replay, c0Attempted = false;
+  let state, privateKey, known = true, closed = false, signed = 0n, generation = 1n, mode, held, replay, c0Attempted = false, c0Refusal = null;
   try {
     state = checkpointProbeParse(stateSchema, inventedState, 4096);
     mode = checkpointProbeParse(optionsSchema, options, 4096).mode ?? "normal";
@@ -43,12 +43,15 @@ function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0On
     if (replay) replay.fill(0); replay = undefined; channel.close();
     if (held) { const packet = held; held = undefined; try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } }
   }
+  // The owner closes right after a C0-only refusal, so the reader observes owner loss; only describe() keeps the reason.
+  function refuseC0(packet, reason, failure) { c0Refusal = reason; channel.reject(packet.token, failure); close(); }
   function deliver(packet) {
     if (c0Only) {
-      const refused = c0Attempted || packet.request.phase !== "c0"; c0Attempted = true;
-      if (refused) { channel.reject(packet.token, "oracle_rejected"); close(); return; }
+      const refusal = packet.request.phase !== "c0" ? "phase" : c0Attempted ? "repeat" : null; c0Attempted = true;
+      if (refusal) { refuseC0(packet, refusal, "oracle_rejected"); return; }
+      try { channel.check(); } catch { refuseC0(packet, "unavailable", "oracle_unavailable"); return; }
     }
-    if (channel.cancelled(packet.token)) { channel.reject(packet.token, "oracle_cancelled"); if (c0Only) close(); return; }
+    if (channel.cancelled(packet.token)) { if (c0Only) refuseC0(packet, "cancelled", "oracle_cancelled"); else channel.reject(packet.token, "oracle_cancelled"); return; }
     if (!known || closed) { channel.reject(packet.token, "oracle_unavailable"); return; }
     if (mode === "replay_previous" || mode === "replay_at_c1" && packet.request.phase === "c1") {
       if (replay) channel.respond(packet.token, Buffer.from(replay)); else channel.reject(packet.token, "oracle_unavailable"); return;
@@ -62,6 +65,7 @@ function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0On
     if (mode === "wrong_challenge") envelope.challenge = pins.authority_id;
     if (mode === "changed_tip_at_c1" && packet.request.phase === "c1") envelope.tip_hash = (state.tip_hash[0] === "0" ? "1" : "0") + state.tip_hash.slice(1);
     let signature_hex = sign(null, Buffer.from(canonical({ domain: "native-bar-eb-read-checkpoint-v1", envelope })), privateKey).toString("hex");
+    if (c0Only) privateKey = undefined;
     if (mode === "bad_signature" || mode === "bad_signature_c1" && packet.request.phase === "c1") signature_hex = (signature_hex[0] === "0" ? "1" : "0") + signature_hex.slice(1);
     const bytes = Buffer.from(canonical({ ...envelope, signature_hex }));
     if (bytes.length > 4096) throw Error("b3bb_checkpoint_bytes"); signed++;
@@ -75,7 +79,10 @@ function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0On
       try {
         if ((mode === "hold" || mode === "hold_c1" && packet.request.phase === "c1") && !channel.cancelled(packet.token) && known && !closed) { held = packet; return; }
         deliver(packet);
-      } catch { try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } close(); }
+      } catch {
+        if (c0Only) c0Refusal ??= "delivery_failed";
+        try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } close();
+      }
       arm();
     }, () => close());
   }
@@ -98,9 +105,10 @@ function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0On
     arm(); return true;
   }, describe() {
     let live = known && !closed; try { channel.check(); } catch { live = false; }
-    return { schema: "native-bar-fixed-memory-checkpoint-oracle-result-v1", scope: "synthetic_memory_oracle_only", generation: String(generation), mode,
+    return { schema: "native-bar-fixed-memory-checkpoint-oracle-result-v1", scope: "synthetic_memory_oracle_only", generation: String(generation), mode: c0Only ? null : mode,
     state_known: live, sequence: live ? state.sequence : null, tip_hash: live ? state.tip_hash : null, pending_request: !!held, replay_available: !!replay,
-    signed_requests: String(signed), ...(c0Only ? { profile: "c0_only", c0_attempt_spent: c0Attempted } : {}),
+    signed_requests: String(signed),
+    ...(c0Only ? { profile: "c0_only", c0_attempt_spent: c0Attempted, c0_refusal: c0Refusal, signing_available: live && !c0Attempted } : {}),
     authority_state_verified: false, checkpoint_requests_verified: false, view_verified: false, execution_available: false }; } });
   return c0Only ? Object.freeze({ close, loseState: close, describe: owner.describe }) : owner;
 }

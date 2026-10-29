@@ -10,23 +10,39 @@ import http from "node:http";
 import https from "node:https";
 import dgram from "node:dgram";
 import tls from "node:tls";
+import http2 from "node:http2";
+import dns from "node:dns";
+import inspector from "node:inspector";
 import { syncBuiltinESMExports } from "node:module";
 import { fileURLToPath } from "node:url";
 import { resolve, sep } from "node:path";
 
-const effects = [], restores = [];
-const replace = (o, k, f) => { const own = Object.hasOwn(o, k), old = o[k]; o[k] = f; restores.push(() => { if (own) o[k] = old; else delete o[k]; }); };
-const block = (o, keys) => keys.filter((k) => typeof o[k] === "function").forEach((k) => replace(o, k, () => { effects.push(k); throw Error("cc4a_forbidden_effect"); }));
-block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]); block(workers, ["Worker"]);
+const effects = [], restores = [], blocked = [];
+// Accessor exports such as fs.ReadStream and fs.Utf8Stream are shadowed, not assigned, so a setter cannot redirect Node's own stream classes.
+const replace = (o, k, f) => {
+  const d = Object.getOwnPropertyDescriptor(o, k), accessor = d && !("value" in d);
+  if (accessor) Object.defineProperty(o, k, { value: f, writable: true, configurable: true, enumerable: d.enumerable }); else o[k] = f;
+  restores.push(() => { if (accessor) Object.defineProperty(o, k, d); else if (d) o[k] = d.value; else delete o[k]; });
+};
+// A constructible recorder: `new Worker()` must reach it instead of failing as a non-constructor before recording.
+const block = (o, keys) => keys.filter((k) => typeof o[k] === "function").forEach((k) => {
+  blocked.push([o, k]); replace(o, k, function () { effects.push(k); throw Error("cc4a_forbidden_effect"); });
+});
+block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess"]); block(workers, ["Worker"]);
 block(crypto, ["sign", "verify", "createSign", "createVerify", "createPrivateKey", "createPublicKey", "createSecretKey", "generateKey", "generateKeySync",
   "generateKeyPair", "generateKeyPairSync", "privateEncrypt", "privateDecrypt", "publicEncrypt", "publicDecrypt", "diffieHellman", "createDiffieHellman", "createECDH"]);
 block(crypto.webcrypto.subtle, ["sign", "verify", "generateKey", "importKey", "exportKey", "deriveKey", "deriveBits", "encrypt", "decrypt", "wrapKey", "unwrapKey"]);
-block(process, ["dlopen", "kill", "chdir"]);
-block(net, ["connect", "createConnection", "createServer"]); block(http, ["request", "get", "createServer"]); block(https, ["request", "get", "createServer"]);
+block(process, ["dlopen", "kill", "chdir", "execve", "binding", "_linkedBinding", "getBuiltinModule", "loadEnvFile"]);
+block(net, ["connect", "createConnection", "createServer"]); block(net.Socket.prototype, ["connect"]);
+block(http, ["request", "get", "createServer"]); block(https, ["request", "get", "createServer"]); block(http2, ["connect", "createServer", "createSecureServer"]);
 block(dgram, ["createSocket"]); block(tls, ["connect", "createServer"]); block(globalThis, ["fetch", "WebSocket", "EventSource"]);
+for (const o of [dns, dns.promises]) block(o, Object.keys(o).filter((k) => /^(lookup|resolve|reverse)/.test(k)));
+block(inspector, ["open", "Session"]);
 const mutations = ["writeFile", "appendFile", "copyFile", "cp", "truncate", "ftruncate", "mkdir", "mkdtemp", "unlink", "rmdir", "rm", "rename",
   "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown", "symlink", "link", "utimes", "futimes", "lutimes"];
-block(fs, [...mutations, ...mutations.map((k) => k + "Sync"), "createWriteStream"]); block(fsp, mutations);
+const streams = ["ReadStream", "FileReadStream", "WriteStream", "FileWriteStream", "Utf8Stream"], scans = ["glob", "statfs", "watch", "mkdtempDisposable"];
+block(fs, [...mutations, ...mutations.map((k) => k + "Sync"), "createWriteStream", ...streams, ...scans, ...scans.map((k) => k + "Sync"), "openAsBlob", "watchFile"]);
+block(fsp, [...mutations, ...scans]);
 const roots = ["../helpers/", "../../node_modules/"].map((s) => fileURLToPath(new URL(s, import.meta.url)));
 roots.push(...roots.map((s) => fs.realpathSync(s) + sep));
 // Contents, listings and metadata may be read only below the helper and dependency roots, and only read-only.
@@ -124,7 +140,12 @@ test("4-A effect tripwires are live for reads, metadata, keys, network and proce
     () => fs.chownSync(outside, 0, 0), () => crypto.webcrypto.subtle.sign(), () => crypto.generateKeySync("hmac", { length: 64 }), () => net.connect(1),
     () => process.kill(process.pid, 0)]) assert.throws(attempt, /cc4a_forbidden/);
   await assert.rejects(new Promise((accept, reject) => { try { fs.readFile(outside, (e) => e ? reject(e) : accept()); } catch (e) { reject(e); } }), /cc4a_forbidden/);
-  assert.equal(effects.length, before + 9); effects.length = before;
+  assert.equal(effects.length, before + 9);
+  for (const [o, k] of [[workers, "Worker"], [child, "ChildProcess"], [process, "getBuiltinModule"], [process, "binding"], [process, "loadEnvFile"],
+    [fs, "statfsSync"], [fs, "openAsBlob"], [fs, "ReadStream"], [fs, "WriteStream"], [fsp, "statfs"], [dns, "lookup"], [dns.promises, "lookup"],
+    [inspector, "Session"], [http2, "connect"], [net.Socket.prototype, "connect"], [globalThis, "fetch"]]) assert.ok(blocked.some(([x, y]) => x === o && y === k), k);
+  for (const [o, k] of blocked) { assert.throws(() => o[k](), /cc4a_forbidden_effect/, k); assert.throws(() => new o[k](), /cc4a_forbidden_effect/, k); }
+  assert.equal(effects.length, before + 9 + 2 * blocked.length); effects.length = before;
 });
 test("4-A reserves the unchanged receipt/index ceilings and the full launch/ready frame schedule", () => {
   const p = describeUnsignedControllerCapacity({ owned_entries: 9, depth: 3, content_bytes: 131072 });

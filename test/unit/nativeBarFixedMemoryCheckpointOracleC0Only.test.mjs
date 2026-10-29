@@ -10,22 +10,37 @@ import http from "node:http";
 import https from "node:https";
 import dgram from "node:dgram";
 import tls from "node:tls";
+import http2 from "node:http2";
+import dns from "node:dns";
+import inspector from "node:inspector";
 import { syncBuiltinESMExports } from "node:module";
 import { fileURLToPath } from "node:url";
 import { resolve, sep } from "node:path";
 
 const mode = process.env.NATIVE_BAR_B3CC_MODE;
-assert.ok(mode === undefined || ["normal", "ubsan"].includes(mode));
+assert.ok(mode === undefined || ["normal", "ubsan"].includes(mode) && !["NATIVE_BAR_B2B_ISOLATED_TEST", "NATIVE_BAR_B3BA_ISOLATED_TEST", "NATIVE_BAR_B3BB_ISOLATED_TEST",
+  "NATIVE_BAR_B3BC_ISOLATED_TEST", "NATIVE_BAR_B3CA_ISOLATED_TEST"].some((key) => process.env[key] === "1"), "b3cc_test_mode_refused");
 const base = mode !== undefined ? `../../build/b3cc-validation/${mode}/`
   : process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
-const effects = [], restores = [], privateKeys = new WeakSet(), privatePrototypes = new Set(); let keys = 0, signatures = 0, failNextSignature = false;
+const effects = [], restores = [], blocked = [], privateKeys = new WeakSet(), privatePrototypes = new Set(); let keys = 0, signatures = 0, failNextSignature = false;
 function refusePrivateExport() { effects.push("private_export"); throw Error("cc4b1_private_export"); }
-const replace = (o, k, f) => { const own = Object.hasOwn(o, k), old = o[k]; o[k] = f; restores.push(() => { if (own) o[k] = old; else delete o[k]; }); };
-const block = (o, names) => names.filter((k) => typeof o[k] === "function").forEach((k) => replace(o, k, () => { effects.push(k); throw Error("cc4b1_forbidden_effect"); }));
-block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]); block(workers, ["Worker"]);
-block(process, ["dlopen", "kill", "chdir"]);
-block(net, ["connect", "createConnection", "createServer"]); block(http, ["request", "get", "createServer"]); block(https, ["request", "get", "createServer"]);
+// Accessor exports such as fs.ReadStream and fs.Utf8Stream are shadowed, not assigned, so a setter cannot redirect Node's own stream classes.
+const replace = (o, k, f) => {
+  const d = Object.getOwnPropertyDescriptor(o, k), accessor = d && !("value" in d);
+  if (accessor) Object.defineProperty(o, k, { value: f, writable: true, configurable: true, enumerable: d.enumerable }); else o[k] = f;
+  restores.push(() => { if (accessor) Object.defineProperty(o, k, d); else if (d) o[k] = d.value; else delete o[k]; });
+};
+// A constructible recorder: `new Worker()` or `new fs.Utf8Stream()` must reach it instead of failing as a non-constructor before recording.
+const block = (o, names) => names.filter((k) => typeof o[k] === "function").forEach((k) => {
+  blocked.push([o, k]); replace(o, k, function () { effects.push(k); throw Error("cc4b1_forbidden_effect"); });
+});
+block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess"]); block(workers, ["Worker"]);
+block(process, ["dlopen", "kill", "chdir", "execve", "binding", "_linkedBinding", "getBuiltinModule", "loadEnvFile"]);
+block(net, ["connect", "createConnection", "createServer"]); block(net.Socket.prototype, ["connect"]);
+block(http, ["request", "get", "createServer"]); block(https, ["request", "get", "createServer"]); block(http2, ["connect", "createServer", "createSecureServer"]);
 block(dgram, ["createSocket"]); block(tls, ["connect", "createServer"]); block(globalThis, ["fetch", "WebSocket", "EventSource"]);
+for (const o of [dns, dns.promises]) block(o, Object.keys(o).filter((k) => /^(lookup|resolve|reverse)/.test(k)));
+block(inspector, ["open", "Session"]);
 block(crypto, ["createSign", "createSecretKey", "generateKey", "generateKeySync", "generateKeyPair", "generateKeyPairSync",
   "privateEncrypt", "privateDecrypt", "publicEncrypt", "publicDecrypt", "diffieHellman", "createDiffieHellman", "createECDH"]);
 block(crypto.webcrypto.subtle, ["sign", "verify", "generateKey", "importKey", "exportKey", "deriveKey", "deriveBits", "encrypt", "decrypt", "wrapKey", "unwrapKey"]);
@@ -51,7 +66,9 @@ replace(crypto.KeyObject.prototype, "export", function (...args) {
 });
 const mutations = ["writeFile", "appendFile", "copyFile", "cp", "truncate", "ftruncate", "mkdir", "mkdtemp", "unlink", "rmdir", "rm", "rename",
   "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown", "symlink", "link", "utimes", "futimes", "lutimes"];
-block(fs, [...mutations, ...mutations.map((k) => k + "Sync"), "createWriteStream"]); block(fsp, mutations);
+const streams = ["ReadStream", "FileReadStream", "WriteStream", "FileWriteStream", "Utf8Stream"], scans = ["glob", "statfs", "watch", "mkdtempDisposable"];
+block(fs, [...mutations, ...mutations.map((k) => k + "Sync"), "createWriteStream", ...streams, ...scans, ...scans.map((k) => k + "Sync"), "openAsBlob", "watchFile"]);
+block(fsp, [...mutations, ...scans]);
 const roots = ["../helpers/", "./helpers/", "../../node_modules/"].map((p) => fileURLToPath(new URL(p, import.meta.url)));
 const built = fileURLToPath(new URL(base, import.meta.url));
 roots.push(...roots.map((p) => fs.realpathSync(p) + sep));
@@ -92,27 +109,29 @@ test("4-B1 signs and authenticates one original C0 using only the published memo
   assert.equal(s.owner.describe().signed_requests, "1"); assert.equal(s.session.describe(q).state, "c0_authenticated");
   assert.equal(s.owner.describe().state_known, true);
   assert.equal(s.owner.describe().replay_available, false); assert.equal(s.owner.describe().c0_attempt_spent, true);
+  assert.equal(s.owner.describe().c0_refusal, null); assert.equal(s.owner.describe().signing_available, false); assert.equal(s.owner.describe().mode, null);
   assert.equal(s.owner.describe().execution_available, false); assert.equal(s.session.describe(q).checkpoint_requests_verified, false);
 });
 test("4-B1 refuses C1 before a second signature and never verifies a checkpoint pair", async (t) => {
   const s = setup(t), q = s.session.beginProbe(), start = await s.session.requestStart(q); const before = signatures;
-  await assert.rejects(s.session.requestEnd(q, start), /oracle_rejected|oracle_unavailable/);
-  assert.equal(signatures, before); assert.equal(s.owner.describe().signed_requests, "1");
+  // The owner closes right after refusing, so the reader records owner loss; the owner report keeps the refusal reason.
+  await assert.rejects(s.session.requestEnd(q, start), /b3ba_oracle_unavailable/); assert.equal(s.session.describe(q).failure, "b3ba_oracle_unavailable");
+  assert.equal(signatures, before); assert.equal(s.owner.describe().signed_requests, "1"); assert.equal(s.owner.describe().c0_refusal, "phase");
   assert.equal(s.session.describe(q).requests_dispatched, 2); assert.equal(s.session.describe(q).authenticated_requests, 1);
   assert.equal(s.session.describe(q).checkpoint_pair_verified, false); assert.equal(s.owner.describe().state_known, false);
 });
 test("4-B1 a second query cannot obtain another C0 signature from the original owner", async (t) => {
   const s = setup(t), q = s.session.beginProbe(); await s.session.requestStart(q); s.session.cancel(q);
   assert.equal(s.session.release(q).state, "released"); const before = signatures;
-  const later = s.session.beginProbe(); await assert.rejects(s.session.requestStart(later), /oracle_rejected|oracle_unavailable/);
-  assert.equal(signatures, before); assert.equal(s.owner.describe().signed_requests, "1");
+  const later = s.session.beginProbe(); await assert.rejects(s.session.requestStart(later), /b3ba_oracle_unavailable/);
+  assert.equal(signatures, before); assert.equal(s.owner.describe().signed_requests, "1"); assert.equal(s.owner.describe().c0_refusal, "repeat");
   assert.equal(s.session.describe(later).requests_dispatched, 1); assert.equal(s.session.describe(later).authenticated_requests, 0);
 });
 test("4-B1 original cancellation consumes the attempt without a late signature or replay", async (t) => {
   const s = setup(t), q = s.session.beginProbe(), before = signatures;
   const pending = assert.rejects(s.session.requestStart(q), /cancelled/); s.session.cancel(q); await pending;
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(signatures, before); assert.equal(s.owner.describe().c0_attempt_spent, true);
+  assert.equal(signatures, before); assert.equal(s.owner.describe().c0_attempt_spent, true); assert.equal(s.owner.describe().c0_refusal, "cancelled");
   assert.equal(s.owner.describe().replay_available, false); assert.equal(s.owner.describe().state_known, false);
   assert.equal(s.session.release(q).state, "released"); assert.throws(() => s.session.beginProbe(), /oracle_unavailable/);
 });
@@ -124,6 +143,7 @@ test("4-B1 exposes only close/loss/describe and retains the unchanged owner rese
   assert.equal(BigInt(bootstrap.describe().retained_state_bytes) - before, 65536n);
   assert.equal(owner.describe().profile, "c0_only"); assert.equal(owner.describe().c0_attempt_spent, false);
   assert.equal(owner.describe().replay_available, false); assert.equal(owner.describe().signed_requests, "0");
+  assert.equal(owner.describe().mode, null); assert.equal(owner.describe().c0_refusal, null); assert.equal(owner.describe().signing_available, true);
   const count = keys;
   assert.throws(() => helper.enrollFixedMemoryCheckpointOracleC0Only(bootstrap.ownerEnrollment, { sequence: "1", tip_hash: b.registration.pins.enrollment_hash }), /consumed/);
   assert.equal(keys, count);
@@ -181,6 +201,7 @@ for (const ending of ["close", "loseState"]) test(`4-B1 ${ending} before a reque
   assert.throws(() => s.session.beginProbe(), /oracle_unavailable/);
   assert.throws(() => helper.enrollFixedMemoryCheckpointOracleC0Only(s.bootstrap.ownerEnrollment, { sequence: "1", tip_hash: s.b.registration.pins.enrollment_hash }), /oracle_unavailable/);
   assert.equal(keys, before.keys); assert.equal(signatures, before.signatures); assert.equal(s.owner.describe().state_known, false);
+  assert.equal(s.owner.describe().c0_refusal, null); assert.equal(s.owner.describe().signing_available, false);
 });
 test("4-B1 a signing exception consumes the original attempt and permits no retry", async (t) => {
   const s = setup(t), q = s.session.beginProbe(), before = signatures; failNextSignature = true;
@@ -188,7 +209,33 @@ test("4-B1 a signing exception consumes the original attempt and permits no retr
   finally { failNextSignature = false; }
   assert.equal(signatures - before, 1); assert.equal(s.owner.describe().signed_requests, "0");
   assert.equal(s.owner.describe().c0_attempt_spent, true); assert.equal(s.owner.describe().state_known, false);
+  assert.equal(s.owner.describe().c0_refusal, "delivery_failed");
   assert.throws(() => s.session.beginProbe(), /oracle_unavailable/);
+});
+test("4-B1 a registry revoked after dispatch refuses C0 before signing even when the reader does not cancel", async (t) => {
+  const b = binding(++serial), bootstrap = registry.createSyntheticCheckpointOracleBootstrap(b, publicKey());
+  const owner = helper.enrollFixedMemoryCheckpointOracleC0Only(bootstrap.ownerEnrollment, { sequence: "1", tip_hash: b.registration.pins.enrollment_hash });
+  t.after(() => { owner.close(); bootstrap.close(); });
+  // The internal bridge with a no-op revoke callback models a reader that leaves its request uncancelled on revocation.
+  const claim = registry.claimSyntheticCheckpointProbe(bootstrap.readerEnrollment); claim.acquire(65536n, 16777216n, () => {});
+  const id = crypto.randomUUID(), challenge = crypto.randomUUID(); claim.identifier(id, 16777216n); claim.identifier(challenge, 16777216n);
+  const { public_key_spki_sha256: _fingerprint, ...pins } = claim.binding.registration.pins;
+  const op = claim.dispatch({ schema: "native-bar-checkpoint-probe-request-v1", scope: "synthetic_checkpoint_probe_only", ...pins,
+    registration_hash: claim.binding.registration_hash, authority_reference: claim.binding.registration.authority_reference, query_id: id, phase: "c0", challenge });
+  const before = signatures; bootstrap.close(); assert.equal(bootstrap.describe().revoked, true);
+  await assert.rejects(op.promise, /b3ba_oracle_unavailable/);
+  assert.equal(signatures, before); assert.equal(owner.describe().signed_requests, "0");
+  assert.deepEqual([owner.describe().c0_attempt_spent, owner.describe().c0_refusal, owner.describe().signing_available], [true, "unavailable", false]);
+});
+test("4-B1 effect tripwires record calls, construction and out-of-scope reads", async () => {
+  const outside = fileURLToPath(new URL("../../package.json", import.meta.url)), before = effects.length;
+  for (const [o, k] of [[workers, "Worker"], [child, "ChildProcess"], [process, "getBuiltinModule"], [process, "binding"], [process, "loadEnvFile"],
+    [fs, "statfsSync"], [fs, "openAsBlob"], [fs, "ReadStream"], [fs, "WriteStream"], [fsp, "statfs"], [dns, "lookup"], [dns.promises, "lookup"],
+    [inspector, "Session"], [http2, "connect"], [net.Socket.prototype, "connect"], [globalThis, "fetch"]]) assert.ok(blocked.some(([x, y]) => x === o && y === k), k);
+  for (const [o, k] of blocked) { assert.throws(() => o[k](), /cc4b1_forbidden_effect/, k); assert.throws(() => new o[k](), /cc4b1_forbidden_effect/, k); }
+  for (const attempt of [() => fs.statSync(outside), () => fs.readFileSync(outside), () => fsp.readFile(outside),
+    () => fs.readdirSync(fileURLToPath(new URL("../../", import.meta.url)))]) assert.throws(attempt, /cc4b1_forbidden_read/);
+  assert.equal(effects.length, before + 2 * blocked.length + 4); effects.length = before;
 });
 for (const profile of ["unavailable", "unsigned"]) test(`4-B1 U0 ${profile} creates no private key or signature`, async (t) => {
   const before = { keys, signatures }, s = setup(t, (grant) => enrollUnsignedCheckpointOracle(grant, profile));

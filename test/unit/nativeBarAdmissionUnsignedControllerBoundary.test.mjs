@@ -71,8 +71,9 @@ test("4-A cannot be reached from product, MCP, build script or operational entry
 test("4-A memory suite installs effect tripwires before loading the new modules", () => {
   const s = read("./nativeBarAdmissionUnsignedController.test.mjs");
   for (const fragment of ['block(child, ["spawn"', 'block(workers, ["Worker"])', 'block(crypto, ["sign", "verify", "createSign"', 'block(crypto.webcrypto.subtle, ["sign"',
-    'block(process, ["dlopen", "kill", "chdir"])', 'block(net, ["connect"', 'block(http, ["request"', 'block(globalThis, ["fetch"', '"chown", "fchown", "lchown"',
-    'block(fsp, mutations)', 'const metadata = ["stat", "lstat", "readdir", "opendir", "access", "readlink"]', '[fs, "readFile", (a) => a[0]?.flag]',
+    'block(process, ["dlopen", "kill", "chdir", "execve", "binding", "_linkedBinding", "getBuiltinModule", "loadEnvFile"])', 'block(inspector, ["open", "Session"])',
+    'replace(o, k, function () { effects.push(k);', 'block(net.Socket.prototype, ["connect"])', '"openAsBlob", "watchFile"', 'block(net, ["connect"', 'block(http, ["request"', 'block(globalThis, ["fetch"', '"chown", "fchown", "lchown"',
+    'block(fsp, [...mutations, ...scans])', 'const metadata = ["stat", "lstat", "readdir", "opendir", "access", "readlink"]', '[fs, "readFile", (a) => a[0]?.flag]',
     'assert.deepEqual(effects, [])', 'roots.push(...roots.map((s) => fs.realpathSync(s) + sep))']) assert.ok(s.includes(fragment), fragment);
   assert.ok(s.indexOf("syncBuiltinESMExports();") < s.indexOf('await import("../helpers/unsignedController'));
   assert.doesNotMatch(s, /fixedMemoryCheckpointOracle|executeUnsignedAdapters|import\([^)]*build\//);

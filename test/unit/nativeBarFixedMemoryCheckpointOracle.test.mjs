@@ -4,7 +4,10 @@ import { createHash, createPublicKey } from "node:crypto";
 import { binding, publicKey } from "./helpers/checkpointProbeFixture.mjs";
 import { enrollFixedMemoryCheckpointOracle } from "../helpers/fixedMemoryCheckpointOracle.mjs";
 
-const base = process.env.NATIVE_BAR_B3CC_MODE !== undefined ? `../../build/b3cc-validation/${process.env.NATIVE_BAR_B3CC_MODE}/`
+const mode = process.env.NATIVE_BAR_B3CC_MODE;
+assert.ok(mode === undefined || ["normal", "ubsan"].includes(mode) && !["NATIVE_BAR_B2B_ISOLATED_TEST", "NATIVE_BAR_B3BA_ISOLATED_TEST", "NATIVE_BAR_B3BB_ISOLATED_TEST",
+  "NATIVE_BAR_B3BC_ISOLATED_TEST", "NATIVE_BAR_B3CA_ISOLATED_TEST"].some((key) => process.env[key] === "1"), "b3cc_test_mode_refused");
+const base = mode !== undefined ? `../../build/b3cc-validation/${mode}/`
   : process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
 const registry = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const probe = await import(new URL(`${base}nativeBarAdmissionCheckpointProbe.js`, import.meta.url));
@@ -51,6 +54,9 @@ test("B3-Bb cancellation of held signing work waits for original-owner acknowled
   assert.match((await observed).message, /cancelled/); assert.equal(owner.describe().signed_requests, "0");
   owner.completePending(); await new Promise((resolve) => setImmediate(resolve));
   assert.equal(session.release(q).state, "released"); assert.equal(owner.describe().signed_requests, "0");
+  // Unlike the C0-only profile, refusing a cancelled delivery leaves the legacy owner usable for a later query.
+  assert.equal(owner.describe().state_known, true); owner.setMode("normal"); await readFixture(session);
+  assert.equal(owner.describe().signed_requests, "1");
 });
 for (const [i, mode] of ["wrong_pin", "wrong_challenge", "outside_bracket", "bad_signature"].entries())
   test(`B3-Bb fixed signed fault ${mode} is rejected by B-1`, async (t) => {
