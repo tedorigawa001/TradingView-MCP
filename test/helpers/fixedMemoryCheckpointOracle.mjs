@@ -20,11 +20,19 @@ const fingerprint = createHash("sha256").update(Buffer.from(publicSpki, "hex")).
 
 // RFC 8032 section 7.1 test 1. Published test material only; no arbitrary key, signer, body, path or time input.
 export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedState, options = {}) {
+  return enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, false);
+}
+export function enrollFixedMemoryCheckpointOracleC0Only(originalOwnerGrant, inventedState) {
+  if (arguments.length !== 2) throw Error("b3bb_c0_only_arguments");
+  return enrollFixedMemoryOwner(originalOwnerGrant, inventedState, {}, true);
+}
+function enrollFixedMemoryOwner(originalOwnerGrant, inventedState, options, c0Only) {
   const channel = claimFixedMemoryCheckpointOracleOwner(originalOwnerGrant);
-  let state, privateKey, known = true, closed = false, signed = 0n, generation = 1n, mode, held, replay;
+  let state, privateKey, known = true, closed = false, signed = 0n, generation = 1n, mode, held, replay, c0Attempted = false;
   try {
     state = checkpointProbeParse(stateSchema, inventedState, 4096);
     mode = checkpointProbeParse(optionsSchema, options, 4096).mode ?? "normal";
+    if (c0Only && state.sequence !== "1") throw Error("b3bb_c0_initial_state");
     if (channel.fixed.pins.public_key_spki_sha256 !== fingerprint) throw Error("b3bb_public_test_key_required");
     if (state.sequence === "1" && state.tip_hash !== channel.fixed.pins.enrollment_hash) throw Error("b3bb_enrollment_tip");
     privateKey = createPrivateKey({ key: Buffer.from("302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex"), type: "pkcs8", format: "der" });
@@ -36,7 +44,11 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
     if (held) { const packet = held; held = undefined; try { channel.reject(packet.token, "oracle_unavailable"); } catch { /* Already terminal. */ } }
   }
   function deliver(packet) {
-    if (channel.cancelled(packet.token)) { channel.reject(packet.token, "oracle_cancelled"); return; }
+    if (c0Only) {
+      const refused = c0Attempted || packet.request.phase !== "c0"; c0Attempted = true;
+      if (refused) { channel.reject(packet.token, "oracle_rejected"); close(); return; }
+    }
+    if (channel.cancelled(packet.token)) { channel.reject(packet.token, "oracle_cancelled"); if (c0Only) close(); return; }
     if (!known || closed) { channel.reject(packet.token, "oracle_unavailable"); return; }
     if (mode === "replay_previous" || mode === "replay_at_c1" && packet.request.phase === "c1") {
       if (replay) channel.respond(packet.token, Buffer.from(replay)); else channel.reject(packet.token, "oracle_unavailable"); return;
@@ -53,7 +65,7 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
     if (mode === "bad_signature" || mode === "bad_signature_c1" && packet.request.phase === "c1") signature_hex = (signature_hex[0] === "0" ? "1" : "0") + signature_hex.slice(1);
     const bytes = Buffer.from(canonical({ ...envelope, signature_hex }));
     if (bytes.length > 4096) throw Error("b3bb_checkpoint_bytes"); signed++;
-    if (mode === "normal" || mode === "replay_at_c1") { if (replay) replay.fill(0); replay = Buffer.from(bytes); }
+    if (!c0Only && (mode === "normal" || mode === "replay_at_c1")) { if (replay) replay.fill(0); replay = Buffer.from(bytes); }
     channel.respond(packet.token, bytes);
   }
   function arm() {
@@ -68,7 +80,7 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
     }, () => close());
   }
   arm();
-  return Object.freeze({ close, loseState: close, advance(input) {
+  const owner = Object.freeze({ close, loseState: close, advance(input) {
     channel.check(); if (!known || closed) throw Error("b3bb_oracle_unavailable");
     const next = checkpointProbeParse(stateSchema, input, 4096);
     if (BigInt(next.sequence) <= BigInt(state.sequence)) throw Error("b3bb_state_not_advanced");
@@ -88,5 +100,7 @@ export function enrollFixedMemoryCheckpointOracle(originalOwnerGrant, inventedSt
     let live = known && !closed; try { channel.check(); } catch { live = false; }
     return { schema: "native-bar-fixed-memory-checkpoint-oracle-result-v1", scope: "synthetic_memory_oracle_only", generation: String(generation), mode,
     state_known: live, sequence: live ? state.sequence : null, tip_hash: live ? state.tip_hash : null, pending_request: !!held, replay_available: !!replay,
-    signed_requests: String(signed), authority_state_verified: false, checkpoint_requests_verified: false, view_verified: false, execution_available: false }; } });
+    signed_requests: String(signed), ...(c0Only ? { profile: "c0_only", c0_attempt_spent: c0Attempted } : {}),
+    authority_state_verified: false, checkpoint_requests_verified: false, view_verified: false, execution_available: false }; } });
+  return c0Only ? Object.freeze({ close, loseState: close, describe: owner.describe }) : owner;
 }

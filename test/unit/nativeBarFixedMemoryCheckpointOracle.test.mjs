@@ -4,7 +4,8 @@ import { createHash, createPublicKey } from "node:crypto";
 import { binding, publicKey } from "./helpers/checkpointProbeFixture.mjs";
 import { enrollFixedMemoryCheckpointOracle } from "../helpers/fixedMemoryCheckpointOracle.mjs";
 
-const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
+const base = process.env.NATIVE_BAR_B3CC_MODE !== undefined ? `../../build/b3cc-validation/${process.env.NATIVE_BAR_B3CC_MODE}/`
+  : process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../build/b3bb-validation/" : "../../build/";
 const registry = await import(new URL(`${base}nativeBarAdmissionOracleRegistry.js`, import.meta.url));
 const probe = await import(new URL(`${base}nativeBarAdmissionCheckpointProbe.js`, import.meta.url));
 const { evidenceHash } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));

@@ -1,5 +1,10 @@
 import { createHash, createPublicKey } from "node:crypto";
-const base = process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../../build/b3ba-validation/" : "../../../build/";
+const cc1Mode = process.env.NATIVE_BAR_B3CC_MODE;
+if (cc1Mode !== undefined && (!["normal", "ubsan"].includes(cc1Mode)
+  || ["NATIVE_BAR_B2B_ISOLATED_TEST", "NATIVE_BAR_B3BA_ISOLATED_TEST", "NATIVE_BAR_B3BB_ISOLATED_TEST", "NATIVE_BAR_B3BC_ISOLATED_TEST", "NATIVE_BAR_B3CA_ISOLATED_TEST"]
+    .some((key) => process.env[key] === "1"))) throw Error("b3cc_test_mode_refused");
+const base = cc1Mode !== undefined ? `../../../build/b3cc-validation/${cc1Mode}/`
+  : process.env.NATIVE_BAR_B3BC_ISOLATED_TEST === "1" ? "../../../build/b3bc-validation/" : process.env.NATIVE_BAR_B3BB_ISOLATED_TEST === "1" ? "../../../build/b3bb-validation/" : process.env.NATIVE_BAR_B3BA_ISOLATED_TEST === "1" ? "../../../build/b3ba-validation/" : "../../../build/";
 const { canonical } = await import(new URL(`${base}nativeBarEvidence.js`, import.meta.url));
 
 export const publicKey = () => createPublicKey({ key: Buffer.from("302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex"), type: "spki", format: "der" });
