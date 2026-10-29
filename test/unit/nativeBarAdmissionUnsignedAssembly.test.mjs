@@ -160,7 +160,7 @@ function driver(m = assembly(), n = 0, start = 1n) {
 }
 function readyDriver(s = driver()) {
   s.record("case_allocated"); s.event("resource", { resource: "worker", action: "attach" }); s.frame("LAUNCH");
-  s.readyLine = s.frame("READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(s.m.describe().active.binding) }); return s;
+  s.readyLine = s.frame("READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(s.m.describe().active.binding) }); return s;
 }
 test("4-B2 connects LAUNCH and READY only to the original modeled worker slot", () => {
   const s = readyDriver(); assert.equal(s.m.describe().active.protocol_state, "READY");

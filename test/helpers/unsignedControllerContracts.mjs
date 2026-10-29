@@ -34,7 +34,7 @@ const empty = z.object({}).strict();
 
 export function createUnsignedControllerProtocolModel(input) {
   const captured = allocation(input); let binding = captured.binding, state = "NEW", stopped = null, frames = 0;
-  let baseline = null, baselineHash = null, observed = null, released = null, failure = null, exit = null, c1 = false;
+  let baseline = null, baselineHash = null, observed = null, released = null, failure = null, exit = null, c1 = false, workerDomain = null;
   let submitted = false, cancelSpent = false, shutdownPlanned = false, close = null, teardown = false, lastTrace = null;
   const next = { parent: 1, worker: 1 }, writes = [], lines = new Map(), trace = [], late = []; let chunks = 0;
   const stop = (reason) => { stopped ??= reason; state = "STOPPED"; };
@@ -43,7 +43,7 @@ export function createUnsignedControllerProtocolModel(input) {
   const started = (kind) => writes.some((w) => w.kind === kind && w.started);
   const describe = () => freeze({ schema: "native-bar-unsigned-controller-model-v2", ...flags(), binding, state, stop_reason: stopped,
     retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state), frames, next_ordinals: { ...next },
-    baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
+    worker_clock_domain: workerDomain, baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
     release: released, failure, worker_exit: exit, c1_violation: c1, go_submitted: submitted, cancel_spent: cancelSpent, command_close: close,
     teardown_complete: teardown, trace_chunks: chunks, trace_events: trace.length, trace_sha256: digest(trace),
     writes: writes.map((v) => ({ ...v })), late_frames: [...late], model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle" });
@@ -68,8 +68,8 @@ export function createUnsignedControllerProtocolModel(input) {
       case "LAUNCH": at("NEW"); parse(empty, p); state = "LAUNCHED"; break;
       case "READY": {
         at("LAUNCHED"); if (!started("LAUNCH")) fail("write_not_submitted");
-        const r = parse(z.object({ addon_protocol: z.literal(6), mode: z.literal("synthetic_only"), pins_sha256: hash }).strict(), p);
-        if (r.pins_sha256 !== digest(binding)) fail("ready_pins"); state = "READY"; break;
+        const r = parse(z.object({ addon_protocol: z.literal(6), mode: z.literal("synthetic_only"), pins_sha256: hash, worker_clock_domain: label }).strict(), p);
+        if (r.pins_sha256 !== digest(binding)) fail("ready_pins"); workerDomain = r.worker_clock_domain; state = "READY"; break;
       }
       case "PREPARE": {
         at("READY"); const r = parse(z.object({ configuration: z.unknown(), launch_nonce: label }).strict(), p), s = newBinding.setup;
@@ -81,7 +81,8 @@ export function createUnsignedControllerProtocolModel(input) {
         binding = newBinding; state = "PREPARING"; break;
       }
       case "BASELINED": at("PREPARING"); if (!started("PREPARE")) fail("write_not_submitted");
-        baseline = freeze(parse(baselineSchema, p)); baselineHash = digest(baseline); state = "BASELINED"; break;
+        baseline = freeze(parse(baselineSchema, p)); if (baseline.clock_domain !== workerDomain) fail("baseline_clock_domain");
+        baselineHash = digest(baseline); state = "BASELINED"; break;
       case "GO": {
         at("BASELINED"); const r = parse(z.object({ baseline_sha256: hash, baseline_readback: z.literal(true), go_intent_readback: z.literal(true) }).strict(), p);
         if (r.baseline_sha256 !== baselineHash) fail("baseline_changed"); state = "ACTIVE"; break;

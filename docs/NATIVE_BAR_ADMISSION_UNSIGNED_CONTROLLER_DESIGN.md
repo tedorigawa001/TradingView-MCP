@@ -6,6 +6,8 @@ The [4-B3 detailed qualification design](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATI
 
 ## Scope And Current Gaps
 
+The [4-B4 worker/transport detailed design](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), originally based on `930267a` and implemented/reviewed on 4-B3-C second-review `c1207aa`, separates pure contracts, private parent transport, sealed worker preparation, original query/shutdown and memory composition into B4-A through B4-E. The separately approved [B4-A implementation](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md#b4-a-pure-contract-implementation) and [review corrections](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md#b4-a-independent-review-and-corrections) cover pure transport/lifetime models and capacity tests, with the required READY domain only in the still-sealed v2 models. The retained-lifetime reference is modeled, not allocated. No runtime, worker, native, signer or operational entry is changed/opened; B4-B onward and real clock/timer/port/worker operations remain unapproved.
+
 The target remains twelve negative cases per mode, normal then UBSan, at most 24 exclusively new unsigned fixtures under `/private/tmp`, and one live fixture, one case worker and one observer at a time **within one supervisor**. Nothing scans for processes, so before any operational run the user confirms that no worker or observer from an earlier, lost run is still alive. Existing C-A/C-B/native protocol 6, case codes/causes, work limits, original release gates, the plan's continuation rule and non-recursive cleanup assumptions do not change. C-C2 positive acceptance, C1 signing, signed witness files, production data, MCP registration and production activation are excluded.
 
 Current sources are not an executable cohort:

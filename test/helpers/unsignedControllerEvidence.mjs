@@ -354,7 +354,7 @@ export function describeUnsignedControllerSerializationCapacity(input) {
     close_errors: Array(8).fill(c), diagnostic_sha256: h, observation_sha256: h, trace_chunks: 8, trace_events: 128, trace_sha256: h,
     primary_code: c, requests_dispatched: 2, authenticated_requests: 2, c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null };
   const failure = { phase: "settlement", primary_code: c, close_errors: Array(8).fill(c), diagnostic_sha256: h, resources, query_created: false, instrumentation_overflow: false };
-  const frameSizes = { LAUNCH: size(frame("LAUNCH", {})), READY: size(frame("READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: h })),
+  const frameSizes = { LAUNCH: size(frame("LAUNCH", {})), READY: size(frame("READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: h, worker_clock_domain: l })),
     PREPARE: prepare, BASELINED: size(frame("BASELINED", { resources, clock_domain: l })),
     GO: size(frame("GO", { baseline_sha256: h, baseline_readback: true, go_intent_readback: true })), TRACE_CHUNK: traceFrame,
     OBSERVED: size(frame("OBSERVED", null)) - 4 + 16384, RELEASED: size(frame("RELEASED", released)), FAILED: size(frame("FAILED", failure)),

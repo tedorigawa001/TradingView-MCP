@@ -30,7 +30,7 @@ function capacityFor(a, protocol, evidence, window) {
     runtime_completion_proven: false, stopped: false, stop_reason: c, first_stop_ns: u, clock_invalid: false, cohort_deadline_ns: u, closed: false,
     rows, index_close: "unconfirmed", capacity: cap, active: { case_id: l, mode: "normal", binding, protocol_state: "FINALIZING", next_ordinals: { parent: 33, worker: 33 },
       frames: 32, go_submitted: false, baseline_sha256: h, observation_sha256: h, trace_events: 128, trace_chunks: 8, trace_sha256: h,
-      command_close: "unconfirmed", observer_calls: 64, evidence_frozen: false, stop_recorded: false, row_recorded: false,
+      worker_clock_domain: l, command_close: "unconfirmed", observer_calls: 64, evidence_frozen: false, stop_recorded: false, row_recorded: false,
       slots: Object.fromEntries(slotNames.map((k) => [k, "retained"])), window: w, evidence: e } };
   const diagnostic = byteLength(canonical(maximal));
   const serialization = describeUnsignedControllerSerializationCapacity(a);
@@ -104,6 +104,7 @@ export function createUnsignedCohortAssemblyModel(input) {
       const r = parse(z.object({ line: z.string().max(65536) }).strict(), q.payload);
       if (c.slots.worker !== "live") refuse("worker_reference");
       if (byteLength(r.line) > LIMITS.frame_bytes) refuse("frame_bound"); const f = JSON.parse(r.line);
+      if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
       if (f.kind === "PREPARE") equal(f.binding.setup, c.confirmed.setup_sealed?.setup, "setup_readback");
       if (f.kind === "GO") {
         if (!c.confirmed.baseline_bound || !c.confirmed.go_intent || c.evidence.describe().pending_readback) refuse("go_readback");
@@ -203,7 +204,7 @@ export function createUnsignedCohortAssemblyModel(input) {
       active: active ? { case_id: p.binding.case_id, mode: p.binding.mode, binding: p.binding, protocol_state: p.state,
         next_ordinals: p.next_ordinals, frames: p.frames, go_submitted: p.go_submitted, baseline_sha256: p.baseline_sha256,
         observation_sha256: p.observation_sha256, trace_events: p.trace_events, trace_chunks: p.trace_chunks, trace_sha256: p.trace_sha256,
-        command_close: p.command_close, observer_calls: active.observerCalls, evidence_frozen: active.evidenceFrozen,
+        worker_clock_domain: p.worker_clock_domain, command_close: p.command_close, observer_calls: active.observerCalls, evidence_frozen: active.evidenceFrozen,
         stop_recorded: active.stopRecorded, row_recorded: active.indexed, slots: { ...active.slots }, window: active.window.describe(), evidence: e } : null });
   }
   function recordCase(c) {

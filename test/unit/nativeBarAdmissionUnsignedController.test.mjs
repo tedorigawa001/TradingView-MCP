@@ -111,7 +111,7 @@ function send(m, kind, payload = {}, binding) {
 }
 function ready(case_id = "u1-unsigned", mode = "normal") {
   const m = createUnsignedControllerProtocolModel(allocation(case_id, mode));
-  send(m, "LAUNCH"); send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding) }); return m;
+  send(m, "LAUNCH"); send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(m.describe().binding) }); return m;
 }
 function active(case_id = "u1-unsigned", mode = "normal", go = true, base = resources) {
   const m = ready(case_id, mode), f = fixture(case_id, mode);
@@ -170,10 +170,10 @@ for (const c of catalog) test(`4-A models ${c.mode}/${c.case_id} without executi
 test("4-A LAUNCH binds no future fixture metadata and READY requires original write submission", () => {
   const m = createUnsignedControllerProtocolModel(allocation()); assert.equal(m.describe().binding.setup, null);
   m.acceptFrame(wire(m, "LAUNCH"));
-  assert.throws(() => send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding) }), /write_not_submitted/);
+  assert.throws(() => send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(m.describe().binding) }), /write_not_submitted/);
   assert.equal(m.describe().state, "STOPPED");
   const q = createUnsignedControllerProtocolModel(allocation()); send(q, "LAUNCH");
-  assert.throws(() => send(q, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: "b".repeat(64) }), /ready_pins/);
+  assert.throws(() => send(q, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: "b".repeat(64) }), /ready_pins/);
 });
 test("4-A GO intent does not mean submitted until original write starts", () => {
   const m = active(undefined, undefined, false);
@@ -717,7 +717,7 @@ test("4-A malformed write notifications permanently stop before any replacement 
     assert.throws(() => m.noteWrite(bad), /invalid_input/);
     assert.equal(m.describe().state, "STOPPED"); assert.equal(m.describe().writes[0].outcome, "planned");
     assert.throws(() => m.noteWrite({ ordinal: 1, outcome: "started" }), /write_order/);
-    assert.throws(() => send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding) }), /stopped/);
+    assert.throws(() => send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(m.describe().binding) }), /stopped/);
   }
 });
 test("4-A already-started ordinary write completion remains recordable after stop", () => {
@@ -736,7 +736,7 @@ test("4-A original commands cannot skip an unstarted ordinal or start in a later
 test("4-A in-order original write starts do not require earlier completion callbacks", () => {
   const m = createUnsignedControllerProtocolModel(allocation());
   m.acceptFrame(wire(m, "LAUNCH")); m.noteWrite({ ordinal: 1, outcome: "started" });
-  send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding) });
+  send(m, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(m.describe().binding) });
   m.acceptFrame(wire(m, "PREPARE", { configuration: configuration(fixture()), launch_nonce: "nonce-1" }, { ...m.describe().binding, setup: setup() }));
   m.noteWrite({ ordinal: 2, outcome: "started" }); send(m, "BASELINED", { resources, clock_domain: "worker-clock" });
   m.acceptFrame(wire(m, "GO", { baseline_sha256: m.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));
