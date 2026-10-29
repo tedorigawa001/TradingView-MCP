@@ -9,7 +9,7 @@ export function executeUnsignedCohortAssembly() { throw Error("cc4b2_execution_n
 
 const retainedQualificationScopes = new Set();
 
-// No exported entry calls this composition root. Its policy and clock gates are independently sealed.
+// No exported entry calls this composition root. Operational policy remains sealed before clock access.
 async function prepareOriginalQualification() {
   const policy = originalQualificationPolicy(), clock = originalQualificationClock();
   const fs = await import("node:fs"), path = await import("node:path"), url = await import("node:url"), crypto = await import("node:crypto");
@@ -23,12 +23,112 @@ async function prepareOriginalQualification() {
   return buildAndQualify();
 
   function originalQualificationPolicy() { throw Error("cc4b3b_operational_profile_unavailable"); }
-  function originalQualificationClock() { throw Error("cc4b3b_clock_connection_unavailable"); }
-  function armOriginalQualificationTimer() { throw Error("cc4b3b_timer_connection_unavailable"); }
+  function originalQualificationClock() {
+    const maximum = 999999999999999999999999999999n, unit = 1000000n;
+    if (typeof policy.total_limit_ms !== "string" || !/^[1-9][0-9]{0,29}$/.test(policy.total_limit_ms)) throw Error("cc4b3c_entry_limit");
+    let last = null, failure = null, invalid = false, stopAt = null, previousWall = null, adjusted = false;
+    const fail = (reason, clockInvalid = true, at = last) => {
+      failure ??= `cc4b3c_${reason}`; invalid ||= clockInvalid; stopAt ??= at; throw Error(failure);
+    };
+    function sample() {
+      if (failure) throw Error(failure);
+      let n; try { n = process.hrtime.bigint(); } catch { return fail("monotonic_read"); }
+      if (typeof n !== "bigint" || n < 0n || n > maximum) return fail("monotonic_value");
+      if (last !== null && n < last) return fail("monotonic_rollback"); last = n; return n;
+    }
+    const start = sample(), end = start + BigInt(policy.total_limit_ms) * unit;
+    if (end > maximum) fail("entry_limit");
+    const binding = Object.freeze({ clock_domain: `parent-${start.toString(36)}`, started_ns: String(start), cohort_limit_ms: policy.total_limit_ms });
+    function check() {
+      const n = sample(); if (n >= end) return fail("entry_deadline", false, end); return n;
+    }
+    function stamp() {
+      const before = check(); let ms;
+      try { ms = Date.now(); } catch { return fail("wall_read"); }
+      const after = check();
+      if (!Number.isSafeInteger(ms) || ms < 0 || ms > 253402268399999) return fail("wall_value");
+      let utc, jst;
+      try { utc = new Date(ms).toISOString(); jst = new Date(ms + 32400000).toISOString().replace("Z", "+09:00"); }
+      catch { return fail("wall_value"); }
+      if (previousWall) {
+        const delta = BigInt(ms - previousWall.ms) * unit;
+        adjusted ||= delta < 0n || delta + unit < before - previousWall.after || delta - unit > after - previousWall.before;
+      }
+      previousWall = { ms, before, after };
+      return Object.freeze({ stamp: Object.freeze({ clock_domain: binding.clock_domain, monotonic_ns: String(after), wall_utc: utc, wall_jst: jst }),
+        sampling: Object.freeze({ before_ns: String(before), after_ns: String(after), wall_ms: String(ms) }), wall_adjustment_possible: adjusted });
+    }
+    return Object.freeze({ binding, end_ns: String(end), check, stamp,
+      point() { return Object.freeze({ clock_domain: binding.clock_domain, monotonic_ns: String(check()) }); },
+      remaining(deadline = end) {
+        if (typeof deadline !== "bigint" || deadline < start || deadline > end) return fail("deadline_binding");
+        const now = check(), ms = (deadline - now) / unit;
+        if (ms < 1n) throw Error("cc4b3c_remaining_sub_ms"); return ms;
+      },
+      describe() { return Object.freeze({ clock_invalid: invalid, failure, stop_ns: stopAt === null ? null : String(stopAt) }); } });
+  }
+  function armOriginalQualificationTimer(s, kind, onExpiry) {
+    checkpoint(s);
+    if (!retainedQualificationScopes.has(s) || s.qualificationTimer || typeof onExpiry !== "function"
+      || !["compiler", "discovery", "metadata"].includes(kind)) refuse("timer_binding");
+    const unit = 1000000n, now = clock.check(), entryEnd = BigInt(clock.end_ns);
+    const deadline = kind === "compiler" || now + 10000n * unit > entryEnd ? entryEnd : now + 10000n * unit;
+    clock.remaining(deadline);
+    const generation = (s.timerGeneration ?? 0) + 1;
+    if (!Number.isSafeInteger(generation)) refuse("timer_generation"); s.timerGeneration = generation;
+    let active = true, handle = null, cleared = false, clearUnknown = false, segment = 0;
+    const current = () => active && s.qualificationTimer === timer && s.timerGeneration === generation;
+    const clear = () => {
+      if (cleared || handle === null) return; cleared = true;
+      try { clearTimeout(handle); } catch { clearUnknown = true; s.timerCancelUnknown = true; stop(s, Error("cc4b3c_timer_cancel_unknown")); }
+    };
+    const cancel = () => { if (!active) return false; active = false; clear(); if (!clearUnknown && s.qualificationTimer === timer) s.qualificationTimer = null; return true; };
+    const referenced = () => { try { return current() && handle !== null && handle.hasRef() === true; } catch { return false; } };
+    const expire = error => {
+      if (!current()) return;
+      stop(s, error); cancel();
+      s.timerDisposition = Object.freeze({ generation, deadline_ns: String(deadline), reason: code(error) });
+      onExpiry();
+    };
+    const check = () => {
+      if (!current()) throw Error("cc4b3c_timer_inactive");
+      checkpoint(s); const at = clock.check();
+      if (!referenced()) throw stop(s, Error("cc4b3c_timer_unreferenced"));
+      if (at >= deadline) throw stop(s, Error("cc4b3c_timer_deadline"));
+      clock.remaining(deadline); return at;
+    };
+    function schedule(at) {
+      const ordinal = ++segment, ns = deadline - at;
+      if (ns <= 0n) throw Error("cc4b3c_timer_deadline");
+      const delay = Number((ns + unit - 1n) / unit > 2147483647n ? 2147483647n : (ns + unit - 1n) / unit);
+      handle = setTimeout(() => {
+        if (!current() || ordinal !== segment) return;
+        if (s.stopped) { expire(Error(s.stopped)); return; }
+        try {
+          const observed = clock.check();
+          if (!referenced()) return expire(Error("cc4b3c_timer_unreferenced"));
+          if (observed >= deadline) return expire(Error("cc4b3c_timer_deadline"));
+          clear(); if (s.stopped) return expire(Error(s.stopped)); schedule(clock.check());
+        } catch (error) { expire(error); }
+      }, delay);
+      cleared = false;
+      if (!referenced()) throw Error("cc4b3c_timer_unreferenced");
+    }
+    const timer = Object.freeze({ cancel, hasRef: referenced, check }); s.qualificationTimer = timer;
+    try { schedule(clock.check()); } catch (error) { cancel(); throw stop(s, error); } return timer;
+  }
+  function originalCohortTiming(s, buildRef, namespaceRef) {
+    const namespace = namespaceReferences.get(namespaceRef);
+    if (!retainedQualificationScopes.has(s) || buildReferences.get(buildRef) !== s || namespace?.owner !== s
+      || namespace.buildRef !== buildRef || !s.recordClosed || !s.recordIdentity || s.phase !== "NAMESPACE_BOUND") refuse("cohort_clock_binding");
+    checkpoint(s, true);
+    // Descriptive input for the private B2 consumer, never a writer or execution capability.
+    return Object.freeze({ binding: clock.binding, at: clock.point() });
+  }
   function verifyOriginalHostClosure() { throw Error("cc4b3b_host_closure_qualification_unavailable"); }
   function verifyOriginalNativeProfile() { throw Error("cc4b3b_signature_qualification_unavailable"); }
   function refuse(reason) { throw Error(`cc4b3b_${reason}`); }
-  function code(error) { return typeof error?.message === "string" && error.message.length <= 96 && /^cc4b3b_[a-z_]+$/.test(error.message) ? error.message : "cc4b3b_operation_failed"; }
+  function code(error) { return typeof error?.message === "string" && error.message.length <= 96 && /^cc4b3[bc]_[a-z_]+$/.test(error.message) ? error.message : "cc4b3b_operation_failed"; }
   function stop(s, error, evidence = false) { s.stopped ??= code(error); s.phase = "STOPPED"; s.evidenceTainted ||= evidence; return error; }
   function checkpoint(s, evidence = false) {
     if (s.stopped || evidence && s.evidenceTainted) refuse("stopped");
@@ -38,6 +138,7 @@ async function prepareOriginalQualification() {
     if (retainedQualificationScopes.size) refuse("invocation_retained");
     const s = { phase: "NEW", stopped: null, evidenceTainted: false, output: path.join(root, "build/b3cc-validation"), rootOwned: false,
       handles: new Map(), directories: new Map(), pins: new Map(), aliases: new Map(), helper: null, helperDisposition: null, children: new Set(),
+      qualificationTimer: null, timerGeneration: 0, timerDisposition: null, timerCancelUnknown: false,
       hashBytes: 0n, passBytes: 0n, commands: 0, discoveryCommands: 0, recordIoBytes: 0, failures: [], recordClosed: false, closureReads: new Map(),
       environment: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", TZ: "Asia/Tokyo", XCRUN_CACHE_DISABLED: "1" },
       commandDigest: digest([]), inputs: null, artifacts: null, record: null, recordHash: null, recordIdentity: null };
@@ -134,9 +235,9 @@ async function prepareOriginalQualification() {
     return new Promise((resolve, reject) => {
       let child = null, done = false, closed = false, count = 0; const out = [], err = [];
       const fail = reason => {
-        if (done) return; done = true; timer.cancel();
+        if (done) return; done = true; const error = stop(s, Error(`cc4b3b_${reason}`)); timer.cancel();
         child?.stdout?.pause(); child?.stderr?.pause(); out.length = 0; err.length = 0;
-        reject(stop(s, Error(`cc4b3b_${reason}`)));
+        reject(error);
       };
       const timer = armOriginalQualificationTimer(s, kind, () => fail("tool_deadline"));
       if (!timer.hasRef()) { timer.cancel(); refuse("timer_unreferenced"); }
@@ -157,14 +258,16 @@ async function prepareOriginalQualification() {
             const stdout = Buffer.concat(out), stderr = Buffer.concat(err);
             s.commandDigest = digest({ previous: s.commandDigest, program, args, exit_code: exitCode, signal, stdout: hash(stdout), stderr: hash(stderr) });
             if (exitCode !== 0 || signal !== null || stderr.length && kind === "metadata") return fail("tool_exit");
-            done = true; timer.cancel(); resolve(stdout);
-          } catch { fail("tool_completion"); }
+            done = true; timer.cancel(); if (s.stopped) reject(Error(s.stopped)); else resolve(stdout);
+          } catch (error) { stop(s, error); fail("tool_completion"); }
         });
         if (!child.stdout || !child.stderr) return fail("tool_pipe");
         for (const [stream, chunks] of [[child.stdout, out], [child.stderr, err]]) {
           stream.on("error", () => fail("tool_pipe"));
           stream.on("data", bytes => {
-            if (done) return; count += bytes.length;
+            if (done) return;
+            try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); return fail("tool_completion"); }
+            count += bytes.length;
             if (count > limits.tool_capture_bytes) return fail("tool_output_bound"); chunks.push(Buffer.from(bytes));
           });
         }
@@ -486,7 +589,8 @@ async function prepareOriginalQualification() {
     }
     if (!primary) try {
       checkpoint(s); const buildRef = Object.freeze(Object.create(null)); buildReferences.set(buildRef, s); s.phase = "BUILD_BOUND";
-      const namespaceRef = await qualifyOriginalNamespace(s, buildRef); s.phase = "NAMESPACE_BOUND"; return Object.freeze({ buildRef, namespaceRef });
+      const namespaceRef = await qualifyOriginalNamespace(s, buildRef); s.phase = "NAMESPACE_BOUND";
+      const timing = originalCohortTiming(s, buildRef, namespaceRef); return Object.freeze({ buildRef, namespaceRef, timing });
     } catch (error) { primary = error; }
     stop(s, primary); closeRemaining(s);
     throw primary;

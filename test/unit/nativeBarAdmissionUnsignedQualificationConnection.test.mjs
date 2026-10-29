@@ -112,7 +112,8 @@ function environment(overrides = {}, real = []) {
   const context = { fs: disk.api, path: posix, crypto: { createHash: crypto.createHash, randomBytes: () => Buffer.alloc(16, 1) },
     Buffer, TextDecoder, ts, builtinModules, canonical, digest, describeUnsignedQualificationCapacity: data => describeUnsignedQualificationCapacity(JSON.parse(JSON.stringify(data))), describeUnsignedIsolatedBuild,
     limits: describeUnsignedQualificationProfile(), root: "/virtual/repo", buildReferences, namespaceReferences, retainedQualificationScopes: new Set(),
-    policy: {}, clock: { check() {} }, process: { platform: "darwin", arch: "arm64", execArgv: [], env: {}, getuid: () => 501,
+    policy: {}, clock: { check() {}, binding: Object.freeze({ clock_domain: "invented-parent", started_ns: "0", cohort_limit_ms: "2000000" }),
+      point() { return { clock_domain: "invented-parent", monotonic_ns: "100" }; } }, process: { platform: "darwin", arch: "arm64", execArgv: [], env: {}, getuid: () => 501,
       umask: n => { masks.push(n); return 0o027; }, execPath: "/host/node", version: "v24.0.0", versions: { modules: "137" } } };
   let api;
   const fakes = {
@@ -131,7 +132,7 @@ test("4-B3-B public and private opening gates refuse before effects or caller ac
   let accessed = false; const supplied = { get approved() { accessed = true; return true; } };
   assert.throws(() => runtime.executeUnsignedCohortAssembly(supplied), /execution_not_approved/); assert.equal(accessed, false);
   const e = environment();
-  for (const name of ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "verifyOriginalHostClosure", "verifyOriginalNativeProfile"])
+  for (const name of ["originalQualificationPolicy", "verifyOriginalHostClosure", "verifyOriginalNativeProfile"])
     if (name === "verifyOriginalHostClosure") assert.throws(() => functions(e)[name](), /unavailable/);
     else assert.throws(() => e.api[name](), /unavailable/);
   assert.deepEqual(e.disk.calls, []); assert.equal(runtime.inspectUnsignedCohortAssembly().runtime_qualified, false);

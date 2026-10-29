@@ -6,7 +6,7 @@ import ts from "typescript";
 const read = file => readFileSync(new URL(file, import.meta.url), "utf8");
 const source = read("../helpers/unsignedCohortRuntime.mjs");
 const parse = s => ts.createSourceFile("runtime.mjs", s, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-const privateNames = ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
+const privateNames = ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "originalCohortTiming", "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
   "metadataText", "parseMetadataListing", "qualifyMetadata", "qualifyChain", "createOriginalDirectory", "allowedTool", "runOriginalTool", "hash", "chargeHash", "readPinnedFile",
   "dependencyPaths", "typescriptPaths", "recheckTypeScriptInputs", "contained", "byteLengthRows", "directoryNames", "sourceFiles", "runtimeClosure", "discoverOriginalInputs", "snapshotInputs", "compilePlans",
@@ -25,15 +25,25 @@ function guard(s) {
   assert.equal(root.body.statements[0].getText(), "const policy = originalQualificationPolicy(), clock = originalQualificationClock();");
   const declarations = root.body.statements.filter(ts.isFunctionDeclaration);
   assert.deepEqual(declarations.map(n => n.name.text), privateNames);
-  const gateCodes = ["operational_profile", "clock_connection", "timer_connection", "host_closure_qualification", "signature_qualification"];
-  for (const [i, name] of privateNames.slice(0, 5).entries()) {
+  const gates = { originalQualificationPolicy: "operational_profile", verifyOriginalHostClosure: "host_closure_qualification", verifyOriginalNativeProfile: "signature_qualification" };
+  for (const [name, code] of Object.entries(gates)) {
     const fn = declarations.find(n => n.name.text === name); assert.equal(fn.parameters.length, 0); assert.equal(fn.body.statements.length, 1);
-    assert.equal(fn.body.statements[0].getText(), `throw Error("cc4b3b_${gateCodes[i]}_unavailable");`);
+    assert.equal(fn.body.statements[0].getText(), `throw Error("cc4b3b_${code}_unavailable");`);
   }
   const dynamic = [], references = [], forbidden = new Set(["require", "createRequire", "eval", "Function", "Proxy", "Reflect", "Worker", "fetch", "WebSocket",
-    "createUnsignedQualificationModel", "createPrivateKey", "createPublicKey", "sign", "verify", "generateKeyPair", "dlopen", "kill", "exit", "unlinkSync", "rmdirSync", "rmSync", "renameSync", "setTimeout", "setInterval", "setImmediate"]);
+    "createUnsignedQualificationModel", "createPrivateKey", "createPublicKey", "sign", "verify", "generateKeyPair", "dlopen", "kill", "exit", "unlinkSync", "rmdirSync", "rmSync", "renameSync", "setInterval", "setImmediate"]);
   function walk(n) {
     if (ts.isIdentifier(n)) { assert.equal(forbidden.has(n.text), false, n.text); if (n.text === "prepareOriginalQualification") references.push(n); }
+    if (ts.isIdentifier(n) && ["setTimeout", "clearTimeout"].includes(n.text)) {
+      let owner = n; while (owner && !declarations.includes(owner)) owner = owner.parent;
+      assert.equal(owner?.name.text, "armOriginalQualificationTimer");
+      assert.ok(ts.isCallExpression(n.parent) && n.parent.expression === n);
+    }
+    if (ts.isPropertyAccessExpression(n) && ["now", "bigint"].includes(n.name.text)) {
+      let owner = n; while (owner && !declarations.includes(owner)) owner = owner.parent;
+      assert.equal(owner?.name.text, "originalQualificationClock");
+      assert.ok(["Date.now", "process.hrtime.bigint"].includes(n.getText()));
+    }
     assert.equal(ts.isExportDeclaration(n) || ts.isExportAssignment(n), false);
     if (ts.isPropertyAccessExpression(n)) assert.notEqual(n.name.text, "constructor");
     if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression)) assert.notEqual(n.argumentExpression.text, "constructor");
@@ -51,7 +61,7 @@ function guard(s) {
 test("4-B3-B has a private composition root behind unchanged public and prerequisite seals", () => guard(source));
 test("4-B3-B boundary detects exports, invocation, gate bypass, arbitrary modules and forbidden effects", () => {
   for (const variant of [source + "\nprepareOriginalQualification();", source.replace("async function prepareOriginalQualification", "export async function prepareOriginalQualification"),
-    source.replace('throw Error("cc4b3b_clock_connection_unavailable");', "return {};"), source.replace('import("node:fs")', 'import(chosen)'),
+    source.replace('throw Error("cc4b3b_operational_profile_unavailable");', "return {};"), source.replace('import("node:fs")', 'import(chosen)'),
     source.replace('import("node:fs")', 'import("node:net")'), source.replace("return buildAndQualify();", "process.kill(1); return buildAndQualify();"),
     source + "\nexport { retainedQualificationScopes };", source.replace("return buildAndQualify();", "eval(text); return buildAndQualify();"),
     source.replace("return buildAndQualify();", "fs.rmSync(root); return buildAndQualify();")]) assert.throws(() => guard(variant));
@@ -77,4 +87,17 @@ test("4-B3-B tests substitute only extracted private declarations and never impo
   assert.match(testSource, /await Promise\.resolve\(memoryChild\)/);
   assert.doesNotMatch(testSource, /process\.env\s*[.[]|npm run|await runtime\.prepare|build_unsigned\.mjs/);
   assert.ok(testSource.indexOf("syncBuiltinESMExports();") < testSource.indexOf('await import("../helpers/unsignedCohortRuntime'));
+});
+test("4-B3-C clocks and referenced timers have only the private fixed source callsites", () => {
+  const root = parse(source).statements.find(n => ts.isFunctionDeclaration(n) && n.name.text === "prepareOriginalQualification");
+  const functions = root.body.statements.filter(ts.isFunctionDeclaration), get = name => functions.find(n => n.name.text === name);
+  assert.equal(get("originalQualificationClock").parameters.length, 0);
+  const clock = get("originalQualificationClock").getText(), timer = get("armOriginalQualificationTimer").getText();
+  assert.equal((clock.match(/process\.hrtime\.bigint\(\)/g) ?? []).length, 1);
+  assert.equal((clock.match(/Date\.now\(\)/g) ?? []).length, 1);
+  assert.equal((timer.match(/\bsetTimeout\(/g) ?? []).length, 1); assert.equal((timer.match(/\bclearTimeout\(/g) ?? []).length, 1);
+  assert.doesNotMatch(timer, /\.unref\(|setInterval|Date|process\.|\.kill\(/);
+  assert.match(get("buildAndQualify").getText(), /originalCohortTiming\(s, buildRef, namespaceRef\)/);
+  for (const variant of [source.replace("return buildAndQualify();", "Date.now(); return buildAndQualify();"),
+    source.replace("return buildAndQualify();", "setTimeout(() => {}, 1); return buildAndQualify();")]) assert.throws(() => guard(variant));
 });
