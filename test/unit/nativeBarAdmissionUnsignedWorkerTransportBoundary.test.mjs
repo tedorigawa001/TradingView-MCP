@@ -8,9 +8,10 @@ const read = file => readFileSync(new URL(file, import.meta.url), "utf8");
 const source = read("../helpers/unsignedWorkerTransportContracts.mjs");
 const exports = ["describeUnsignedWorkerTransportCapacity", "createUnsignedWorkerTransportModel", "createUnsignedWorkerLifetimeModel"];
 const forbidden = new Set(["process", "globalThis", "global", "Date", "performance", "Intl", "Temporal", "require", "createRequire", "eval", "Function", "Proxy", "Reflect",
-  "Worker", "MessageChannel", "MessagePort", "postMessage", "SharedArrayBuffer", "Atomics", "WebAssembly", "fetch", "WebSocket", "AbortSignal",
-  "createPrivateKey", "createPublicKey", "sign", "verify", "spawn", "spawnSync", "exec", "fork", "dlopen", "openSync", "readFileSync", "writeFileSync",
-  "mkdir", "unlink", "rename", "setTimeout", "setInterval", "setImmediate", "queueMicrotask"]);
+  "Worker", "MessageChannel", "MessagePort", "BroadcastChannel", "postMessage", "SharedArrayBuffer", "Atomics", "WebAssembly", "fetch", "WebSocket", "AbortSignal",
+  "crypto", "createPrivateKey", "createPublicKey", "sign", "verify", "spawn", "spawnSync", "exec", "fork", "dlopen", "openSync", "readFileSync", "writeFileSync",
+  "mkdir", "unlink", "rename", "setTimeout", "setInterval", "setImmediate", "queueMicrotask",
+  "getPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors", "FinalizationRegistry", "WeakRef"]);
 function guard(text) {
   const tree = ts.createSourceFile("transport.mjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   assert.equal(tree.parseDiagnostics.length, 0);
@@ -25,6 +26,8 @@ function guard(text) {
     assert.equal(ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword, false);
     if (ts.isPropertyAccessExpression(n)) assert.notEqual(n.name.text, "constructor");
     if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression)) assert.equal(forbidden.has(n.argumentExpression.text) || n.argumentExpression.text === "constructor", false);
+    // Computed keys stay names, property reads or numbers, so no assembled string can reach a forbidden member.
+    if (ts.isElementAccessExpression(n)) assert.ok([ts.isIdentifier, ts.isPropertyAccessExpression, ts.isNumericLiteral].some(is => is(n.argumentExpression)), n.getText());
     if (ts.isStringLiteralLike(n) && n.text === "constructor") assert.equal(ts.isCallExpression(n.parent) || ts.isNewExpression(n.parent), false);
     ts.forEachChild(n, walk);
   }
@@ -34,7 +37,9 @@ test("B4-A exports only pure models/capacity with exact reviewed dependencies", 
 test("B4-A source boundary rejects clocks/ports/keys/processes and alternate effect paths", () => {
   for (const change of ['\nDate.now();', '\nnew MessageChannel();', '\nnew Worker();', '\nprocess.hrtime.bigint();', '\nimport("node:fs");',
     '\nsetTimeout(f,1);', '\ncreatePrivateKey(k);', '\nspawn("worker");', '\nx["constructor"]("return 1")();', '\nexport { hidden };',
-    '\nReflect.get(x,k);', '\nObject.getOwnPropertyDescriptor(Object.getPrototypeOf(f),"constructor").value("return 1")();']) assert.throws(() => guard(source + change));
+    '\nReflect.get(x,k);', '\nObject.getOwnPropertyDescriptor(Object.getPrototypeOf(f),"constructor").value("return 1")();',
+    '\nnew BroadcastChannel("x");', '\ncrypto.subtle.generateKey(a,b,c);', '\n(() => 0)["constr" + "uctor"]("return 1")();',
+    '\nObject.getOwnPropertyDescriptors(Object.getPrototypeOf(() => 0));', '\nnew FinalizationRegistry(f);', '\nnew WeakRef(o);']) assert.throws(() => guard(source + change));
 });
 test("B4-A has no runtime/production/MCP/build/worker connection or authority issuer", () => {
   for (const f of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter(f => f.endsWith(".ts")))
@@ -45,11 +50,17 @@ test("B4-A has no runtime/production/MCP/build/worker connection or authority is
 });
 test("B4-A memory tests install real clock/timer/port/key/IO tripwires before imports", () => {
   const s = read("./nativeBarAdmissionUnsignedWorkerTransport.test.mjs");
-  for (const fragment of ['block(workers, ["Worker", "MessageChannel"])', '"EventSource", "MessageChannel", "setTimeout"',
+  for (const fragment of ['block(workers, ["Worker", "MessageChannel", "BroadcastChannel"])', '"EventSource", "MessageChannel", "BroadcastChannel", "setTimeout"',
     'block(process.hrtime, ["bigint"])', 'block(Date, ["now"])', 'block(performance, ["now"])', 'block(crypto, ["sign", "verify"',
+    '"Sign", "Verify", "DiffieHellman", "DiffieHellmanGroup", "ECDH"', 'block(AbortSignal, ["timeout"])', 'block(process.report, ["writeReport"])',
+    'block(v8, ["writeHeapSnapshot"])', 'block(inspectorPromises, ["open", "Session"])', 'if (sqlite) block(sqlite, ["Database", "DatabaseSync", "backup"])', 'if (specifier === "node:sqlite")',
     'block(fsp, [...mutations, ...scans])', 'assert.deepEqual(effects, [])', 'block(process, ["dlopen", "kill"',
     'block(net.Socket.prototype, ["connect"])']) assert.ok(s.includes(fragment), fragment);
-  assert.ok(s.indexOf("syncBuiltinESMExports();") < s.indexOf('await import("../helpers/unsignedWorkerTransportContracts'));
+  const helper = s.indexOf('await import("../helpers/unsignedWorkerTransportContracts');
+  for (const fragment of ["syncBuiltinESMExports();", "nodeModule.registerHooks({", '[[globalThis, "Date", ["now"]], [process, "hrtime", ["bigint"]]]', 'block(process, ["uptime", "cpuUsage", "resourceUsage"])',
+    'block(performance, ["now"])', "block(Temporal.Now,"]) assert.ok(s.indexOf(fragment) > 0 && s.indexOf(fragment) < helper, fragment);
+  // The swallowed-effect check must be the file's last test, not only an after hook.
+  assert.equal(s.lastIndexOf("\ntest("), s.indexOf('\ntest("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));'));
   assert.doesNotMatch(s, /process\.env\s*[.[]|fixedMemoryCheckpointOracle|build\/b3|npm run/);
 });
 test("B4-A keeps native/v1/operational seals and all original numeric limits", () => {
@@ -70,7 +81,7 @@ test("B4-A encoded-size preflight matches canonical UTF-8 at exact and one-over 
     refuse: reason => { throw Error(reason); } });
   const sample = String.fromCharCode(...Array.from({ length: 256 }, (_, n) => n)) + "\u07ff\u0800\ud7ff\ud800x\udc00\udbff\udfff\ue000\uffff\u2028\u2029";
   for (let start = 0; start < sample.length; start++) {
-    const value = { z: sample.slice(start), a: [null, true, false, -0, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER] };
+    const value = { z: sample.slice(start), [sample.slice(start, start + 40)]: 0, a: [null, true, false, -0, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER] };
     assert.equal(encode(value), canonical(value) + "\n");
   }
   const overhead = Buffer.byteLength(canonical({ text: "" }) + "\n"), exact = { text: "x".repeat(65536 - overhead) };

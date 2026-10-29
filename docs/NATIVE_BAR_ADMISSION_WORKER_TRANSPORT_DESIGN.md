@@ -1,6 +1,6 @@
 # 4-B4 Worker Session And Transport Connection
 
-Status: **B4-A pure contracts reviewed and tested in memory; B4-B through B4-E remain unimplemented**, 2026-10-29 JST, design baseline `930267a`, implementation/review checkout `c1207aa` (4-B3-C second-review corrections). The [B4-A record](#b4-a-pure-contract-implementation) and [independent review](#b4-a-independent-review-and-corrections) cover the later approval and corrections, and the [design review corrections](#b4-design-review-corrections) refine the B4-B through B4-E text; this design itself confers no operational qualification or approval to invoke a connection. This refines the [4-B slice plan](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#remaining-4-b-slice-plan), [controller ordering](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#controller-state-and-ordering), [stops](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#stops-and-shutdown) and [original clocks](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md#original-clocks-and-windows). Those contracts, the [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md) remain controlling. Any incompatible requirement blocks the next slice instead of silently changing an existing contract.
+Status: **B4-A pure contracts reviewed and tested in memory; B4-B through B4-E remain unimplemented**, 2026-10-29 JST, design baseline `930267a`, implementation/review checkout `c1207aa` (4-B3-C second-review corrections). The [B4-A record](#b4-a-pure-contract-implementation) and [independent review](#b4-a-independent-review-and-corrections) cover the later approval and corrections, and the [design review corrections](#b4-design-review-corrections) refine the B4-B through B4-E text; the [second review corrections](#b4-a-second-review-corrections) fix the committed `cefe39d` models; this design itself confers no operational qualification or approval to invoke a connection. This refines the [4-B slice plan](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#remaining-4-b-slice-plan), [controller ordering](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#controller-state-and-ordering), [stops](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md#stops-and-shutdown) and [original clocks](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md#original-clocks-and-windows). Those contracts, the [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md) and [acceptance plan](NATIVE_BAR_ADMISSION_UNSIGNED_ACCEPTANCE_PLAN.md) remain controlling. Any incompatible requirement blocks the next slice instead of silently changing an existing contract.
 
 Dot stays PAUSED. Trading/scenario/judgment/notification/mail and product retention conditions do not change. No real clocks/timers, build, child/worker/observer launch, native load/read, fixture creation/move/removal, signing/key creation, signature file, real-data operation, MCP registration or production activation is part of this design turn. Existing outputs are not adopted, moved, repaired or removed. No new CLI, package script, automation hook or public runtime factory is proposed in 4-B4.
 
@@ -228,3 +228,43 @@ Protected runtime/native/build/package/config content hashes (2568 files), the 4
 - **Slice split:** the command-pipe phase timer, shutdown CANCEL/close-only lane and command close bookkeeping belong to B4-B; the controller plan's 4-B5 timers and closes remain those of the observer, creation, evidence-write and removal connections.
 
 The committed B4-A lifetime model still takes each port's state once at allocation and closes each index independently with its own outcome. It cannot represent a reference lost after allocation, and after one port closes it still reports the other as referenced. This is recorded as a B4-A model gap, not corrected by this change; a correction needs its own approval, and B4-C must not bind the real anchor to the current model shape. Document-reading unit tests were rerun on an archive copy.
+
+## B4-A Second Review Corrections
+
+2026-10-30 JST, independent review of the committed B4-A contracts in `cefe39d`, with the `68ffb31` design corrections in place. Two read-only reviewers covered transport/lifetime state and capacity/encoding/test boundaries, and every finding was reproduced on a `git archive` copy before correction. Three P2 findings were corrected:
+
+- **Callback clock fault:** a rolled-back or foreign-domain callback point latched `clock_invalid` without stopping. The completion was then applied as progress, and FINALIZE, close and exit could reach `DONE` on an invalid clock. A clock refusal inside `completeWrite` now stops with that refusal, and the completion stays a late fact with no timestamp.
+- **Deadline after an earlier stop:** after an unrelated stop, a GO callback was recorded without checking its original deadline. A callback after that deadline, or one with no time, left GO looking known and opened a shutdown CANCEL. A timed callback after stop is now checked against its original reservation, so a late one makes the write uncertain and shutdown close-only. An untimed one latches the clock as invalid, as an untimed stop already did.
+- **Refused shutdown plan:** planning shutdown while an original write's callback was still due let the protocol allocate a CANCEL frame and ordinal, then refused `command_busy` and spent the only plan. That case now refuses before any protocol allocation and leaves the plan unspent. Once the callback settles, or its deadline passes and the write becomes uncertain, one plan proceeds. An untimed plan stays close-only.
+
+Four P3 state findings were corrected:
+- A reusable unstarted CANCEL with less than 1 ms of its reservation left is no longer offered as `CANCEL_THEN_CLOSE`.
+- A sub-millisecond write-start refusal now anchors settlement at its observation, not at the future deadline, which had turned later valid window points into a rollback.
+- The shutdown CANCEL's own timed callback before its deadline now settles that write, and a late one marks it uncertain.
+- An explicit stop observed after a passed phase deadline records `phase_deadline` at that deadline, as other timed events do.
+
+The receive path also refuses lone surrogates before `decode` re-canonicalizes a line, which could reach about twice the frame reservation. The real decoder's fatal UTF-8 never produces them.
+
+Test-boundary corrections:
+- **Last-test check:** the swallowed-effect check is now also the file's last test. A failing `test.after` hook is not a failed test under `--test-isolation=none` or in a direct run; default `node --test`, which CI uses, does count it.
+- **Tripwires:** they now also deny `AbortSignal.timeout`, the `Sign`/`Verify`/Diffie-Hellman/ECDH classes, `BroadcastChannel`, `process.report.writeReport`, `v8.writeHeapSnapshot`, `node:inspector/promises` and, where present, `node:sqlite`. `syncBuiltinESMExports` cannot update `node:`-only builtins, so named imports of `node:sqlite` are refused by a test-local `module.registerHooks` resolve hook, where available.
+- **Source guard:** it forbids `BroadcastChannel`, `crypto`, prototype/descriptor reflection, `FinalizationRegistry` and `WeakRef`, and accepts only identifier, property-read or numeric computed keys.
+- **Pins:** every replacement tripwire must come before the helper imports. The encoder comparison includes escaped keys. The documented 2375680/4259840/8207-byte transport figures, the 2214-byte READY ceiling and the B2 16049/46216-byte figures are pinned exactly.
+
+Verification:
+- **Reproducing tests:** each state and receive correction has one. All 13 failed before correction.
+- **Revert checks:** reverting any single correction fails its own test.
+- **Reviewer mutations:** those for escaped keys, capacity figures, swallowed and newly denied effects, and tripwire order are now killed.
+- **Test counts:** the memory file has **81 tests** and the boundary file still six. With 154 controller and 90 assembly tests, the four affected files pass 331 tests on Node 20.19.6, 24.18.0 and 26.12.1.
+
+The B4-A record claimed that late or untimed original completions never resume progress and that planned and started reservations keep their original deadline. Neither held at `cefe39d`; both hold after this correction. A callback after stop but before its deadline now keeps its qualified time. Only late, untimed or clock-faulted callbacks have none.
+
+Recorded, not corrected:
+- An ordinary CANCEL that is planned but unstarted when a genuine RELEASED arrives can neither start nor be withdrawn. FINALIZE is then refused, so the case can only stop. This fails closed.
+- Post-stop worker frames are refused, not routed to the protocol's bounded late-frame record.
+- Write deadlines are fixed at planning from the then-current phase, which is stricter than write-start plus 10000 ms.
+- Non-clock schema errors in timed inputs latch `clock_invalid`, as B2 does.
+- The retained itemization omits parsed worker payloads; the unused part of the 32-frame parent-line reservation covers them.
+- The lifetime-model gap above remains.
+
+No limit, export, helper import, native interface or runtime connection changed.

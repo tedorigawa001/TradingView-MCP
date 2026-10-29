@@ -84,10 +84,11 @@ export function createUnsignedWorkerTransportModel(input) {
       catch { /* The original window remains expired or unqualified; no replacement grace. */ }
     }
   }
+  const reasonOf = error => typeof error?.message === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : "invalid_input";
   function guard(action) {
     qualifiedAt = null;
     try { return action(); } catch (error) {
-      stop(typeof error?.message === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : "invalid_input", clockInvalid ? null : qualifiedAt); throw error;
+      stop(reasonOf(error), clockInvalid ? null : qualifiedAt); throw error;
     } finally { qualifiedAt = null; }
   }
   function point(raw) {
@@ -148,7 +149,8 @@ export function createUnsignedWorkerTransportModel(input) {
       const q = timed(z.object({ at: pointSchema }).strict(), raw), w = current(token);
       if (w !== pending || w.started || w.decision !== "planned") refuse("write_once");
       const v = inspect(q.at, w.shutdown);
-      if (BigInt(v.at.monotonic_ns) >= BigInt(w.deadline_ns) || (BigInt(w.deadline_ns) - last) / 1000000n < 1n) { stop("write_deadline", v.at, BigInt(w.deadline_ns)); refuse("write_deadline"); }
+      // inspect() already refused an expired original write and a shutdown write follows a stop, so this anchors at the observation, never the future deadline.
+      if (BigInt(v.at.monotonic_ns) >= BigInt(w.deadline_ns) || (BigInt(w.deadline_ns) - last) / 1000000n < 1n) { stop("write_deadline", v.at); refuse("write_deadline"); }
       if (w.shutdown) protocol.noteShutdownWrite({ outcome: "started" }); else protocol.noteWrite({ ordinal: w.ordinal, outcome: "started" });
       if (w.kind === "GO") window.submitGo(v.at);
       w.started = true; w.decision = "started"; return describe();
@@ -161,10 +163,12 @@ export function createUnsignedWorkerTransportModel(input) {
       const q = timed(z.object({ outcome: z.enum(["completed", "uncertain"]), at: pointSchema.nullable() }).strict(), raw), w = current(token);
       if (!w.started || w.callback !== null) refuse("callback_once");
       let at = null;
-      if (!stopped && q.at !== null) try { at = inspect(q.at).at; } catch { /* Still retain this original completion after its stop. */ }
-      else if (!stopped) { clockInvalid = true; stop("clock_unavailable"); }
+      if (q.at === null) { clockInvalid = true; stop("clock_unavailable"); }
+      else if (!stopped) try { at = inspect(q.at).at; } catch (error) { stop(reasonOf(error)); /* Still retain this original completion after its stop. */ }
+      // An earlier stop does not waive the original deadline; a bad sample only latches the clock behind the first stop.
+      else try { const p = point(q.at); if (!expireWrite(p)) at = p; } catch { /* Close only. */ }
       w.callback = q.outcome; w.callback_at = at; w.line = null;
-      if ((!stopped || q.outcome === "uncertain") && w.decision === "started") {
+      if ((!stopped || q.outcome === "uncertain" || w.shutdown && at !== null) && w.decision === "started") {
         if (w.shutdown) protocol.noteShutdownWrite({ outcome: q.outcome }); else protocol.noteWrite({ ordinal: w.ordinal, outcome: q.outcome });
         w.decision = q.outcome;
         if (q.outcome === "uncertain") stop("pipe_uncertain", at);
@@ -172,7 +176,10 @@ export function createUnsignedWorkerTransportModel(input) {
       if (pending === w) pending = null; return describe();
     }); },
     receive(raw) { return guard(() => {
-      const q = timed(z.object({ line: z.string().max(65536), at: pointSchema }).strict(), raw), v = inspect(q.at), f = decode(q.line, LIMITS.frame_bytes);
+      const q = timed(z.object({ line: z.string().max(65536), at: pointSchema }).strict(), raw), v = inspect(q.at);
+      // Lone surrogates would double while decode re-canonicalizes; the fatal UTF-8 decoder never yields them.
+      if (!q.line.isWellFormed()) refuse("encoding");
+      const f = decode(q.line, LIMITS.frame_bytes);
       if (f.direction !== "worker") refuse("receive_direction");
       if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
       protocol.acceptFrame(q.line);
@@ -182,14 +189,20 @@ export function createUnsignedWorkerTransportModel(input) {
     stop(raw) { return guard(() => {
       const q = timed(z.object({ reason: code, at: pointSchema.nullable() }).strict(), raw);
       const at = q.at === null ? null : point(q.at); if (q.at === null) clockInvalid = true;
-      if (at) expireWrite(at); stop(q.reason, at); return describe();
+      // A passed phase deadline is the first stop, as inspect() records it for every other timed event.
+      if (at && !expireWrite(at) && !stopped) try { window.inspect(at, "phase"); } catch { stop("phase_deadline", at); }
+      stop(q.reason, at); return describe();
     }); },
     planShutdown(raw) { return guard(() => {
       if (shutdownAttempted) refuse("shutdown_once"); shutdownAttempted = true;
       const q = timed(z.object({ at: pointSchema.nullable(), worker_live: z.boolean(), pipe_qualified: z.boolean() }).strict(), raw);
       if (!stopped) refuse("shutdown_requires_stop");
       let v = null; if (!clockInvalid && q.at !== null) try { v = inspect(q.at, true); } catch { /* Close only. */ }
-      const result = protocol.planShutdown({ binding_known: true, worker_live: q.worker_live, pipe_qualified: q.pipe_qualified && v !== null,
+      // A started original write may still settle as known or uncertain; waiting for it spends no plan, frame or ordinal.
+      if (v !== null && pending?.decision === "started") { shutdownAttempted = false; refuse("command_busy"); }
+      // A reusable CANCEL with less than 1 ms of its original reservation left could never start.
+      const startable = !(pending?.kind === "CANCEL" && !pending.started) || BigInt(pending.deadline_ns) - last >= 1000000n;
+      const result = protocol.planShutdown({ binding_known: true, worker_live: q.worker_live, pipe_qualified: q.pipe_qualified && v !== null && startable,
         settlement_remaining_ms: v === null ? 0 : Number(v.window.operation_window_ms) });
       if (!result.frame) return freeze({ ...base(), decision: "CLOSE_ONLY", reference: null, line: null });
       if (pending && pending.kind === "CANCEL" && !pending.started) { pending.shutdown = true;

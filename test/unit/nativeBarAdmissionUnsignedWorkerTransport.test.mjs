@@ -13,12 +13,16 @@ import dgram from "node:dgram";
 import tls from "node:tls";
 import dns from "node:dns";
 import inspector from "node:inspector";
+import inspectorPromises from "node:inspector/promises";
+import v8 from "node:v8";
 import timers from "node:timers";
 import timerPromises from "node:timers/promises";
-import { syncBuiltinESMExports } from "node:module";
+import nodeModule, { syncBuiltinESMExports } from "node:module";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Node 20 has no node:sqlite; where present it is denied with the other builtins.
+const sqlite = await import("node:sqlite").then(m => m.default, () => null);
 const effects = [], restores = [], blocked = [];
 const replace = (o, k, f) => {
   const d = Object.getOwnPropertyDescriptor(o, k), accessor = d && !("value" in d);
@@ -28,20 +32,27 @@ const replace = (o, k, f) => {
 const block = (o, keys) => keys.filter(k => typeof o[k] === "function").forEach(k => {
   blocked.push([o, k]); replace(o, k, function () { effects.push(k); throw Error("cc4b3b_forbidden_effect"); });
 });
-block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess"]); block(workers, ["Worker", "MessageChannel"]);
+block(child, ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess"]); block(workers, ["Worker", "MessageChannel", "BroadcastChannel"]);
 block(crypto, ["sign", "verify", "createSign", "createVerify", "createPrivateKey", "createPublicKey", "createSecretKey", "generateKey", "generateKeySync",
-  "generateKeyPair", "generateKeyPairSync", "privateEncrypt", "privateDecrypt", "publicEncrypt", "publicDecrypt", "diffieHellman", "createDiffieHellman", "createECDH", "randomBytes"]);
+  "generateKeyPair", "generateKeyPairSync", "privateEncrypt", "privateDecrypt", "publicEncrypt", "publicDecrypt", "diffieHellman", "createDiffieHellman", "createECDH", "randomBytes",
+  "Sign", "Verify", "DiffieHellman", "DiffieHellmanGroup", "ECDH", "getDiffieHellman", "createDiffieHellmanGroup"]);
 block(crypto.webcrypto.subtle, ["sign", "verify", "generateKey", "importKey", "exportKey", "deriveKey", "deriveBits", "encrypt", "decrypt", "wrapKey", "unwrapKey"]);
 block(process, ["dlopen", "kill", "chdir", "execve", "binding", "_linkedBinding", "getBuiltinModule", "loadEnvFile"]);
 block(net, ["connect", "createConnection", "createServer"]); block(net.Socket.prototype, ["connect"]);
 block(http, ["request", "get", "createServer"]); block(https, ["request", "get", "createServer"]); block(http2, ["connect", "createServer", "createSecureServer"]);
 block(dgram, ["createSocket"]); block(tls, ["connect", "createServer"]);
-block(globalThis, ["fetch", "WebSocket", "EventSource", "MessageChannel", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "queueMicrotask"]);
+block(globalThis, ["fetch", "WebSocket", "EventSource", "MessageChannel", "BroadcastChannel", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "queueMicrotask"]);
+block(AbortSignal, ["timeout"]); block(process.report, ["writeReport"]); block(v8, ["writeHeapSnapshot"]);
+if (sqlite) block(sqlite, ["Database", "DatabaseSync", "backup"]);
+// syncBuiltinESMExports never reaches node:-only builtins, so their named imports are refused at resolution instead.
+const resolution = sqlite && typeof nodeModule.registerHooks === "function" ? nodeModule.registerHooks({ resolve(specifier, context, next) {
+  if (specifier === "node:sqlite") { effects.push(specifier); throw Error("cc4b3b_forbidden_effect"); } return next(specifier, context); } }) : null;
+if (resolution) restores.push(() => resolution.deregister());
 block(timers, ["setTimeout", "setInterval", "setImmediate", "clearTimeout", "clearInterval", "clearImmediate"]);
 block(timerPromises, ["setTimeout", "setInterval", "setImmediate"]); block(timerPromises.scheduler, ["wait", "yield"]);
 block(Date, ["now"]); block(process.hrtime, ["bigint"]);
 for (const o of [dns, dns.promises]) block(o, Object.keys(o).filter(k => /^(lookup|resolve|reverse)/.test(k)));
-block(inspector, ["open", "Session"]);
+block(inspector, ["open", "Session"]); block(inspectorPromises, ["open", "Session"]);
 const mutations = ["writeFile", "appendFile", "copyFile", "cp", "truncate", "ftruncate", "mkdir", "mkdtemp", "unlink", "rmdir", "rm", "rename",
   "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown", "symlink", "link", "utimes", "futimes", "lutimes"];
 const streams = ["ReadStream", "FileReadStream", "WriteStream", "FileWriteStream", "Utf8Stream"], scans = ["glob", "statfs", "watch", "mkdtempDisposable"];
@@ -142,8 +153,9 @@ const release = s => ({ baseline_sha256: s.m.describe().baseline_sha256, resourc
   original_operation_retired: true, query_released: true, close_errors: [], diagnostic_sha256: h, observation_sha256: null,
   trace_chunks: s.m.describe().trace_chunks, trace_events: s.m.describe().trace_events, trace_sha256: s.m.describe().trace_sha256,
   primary_code: "oracle_unsigned", requests_dispatched: 1, authenticated_requests: 0, c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null });
-test("B4-A effect guards intercept constructors and calls without real clocks/ports/workers", () => {
+test("B4-A effect guards intercept constructors and calls without real clocks/ports/workers", async () => {
   for (const [o,k] of blocked) { const n = effects.length; assert.throws(() => new o[k](), /forbidden_effect/); assert.equal(effects.length, n + 1); effects.pop(); }
+  if (resolution) { const n = effects.length; await assert.rejects(import("node:sqlite"), /forbidden_effect/); assert.deepEqual(effects.splice(n), ["node:sqlite"]); }
 });
 test("B4-A imported runtime stays sealed and all authority flags stay false", () => {
   const m = model(), l = createUnsignedWorkerLifetimeModel({ session_id: "invented" });
@@ -160,6 +172,11 @@ test("B4-A exact capacity reserves wire buffers separately without changing any 
   assert.equal(c.transient_buffer_bytes, 2 * 32 * 65536 + 65536);
   assert.ok(c.serialization.frame_kind_ceilings.READY < 65536); assert.ok(c.serialization.frame_kind_ceilings.FAILED < 65536);
   assert.equal(c.serialization.index_reserved_bytes, 4096 + 24 * 5290); assert.equal(c.native_budget_changed, false);
+  // The documented figures, so a dropped buffer or field cannot pass as a smaller self-consistent total.
+  assert.equal(c.retained_buffer_bytes, 2375680); assert.equal(c.transient_buffer_bytes, 4259840); assert.equal(c.diagnostic_ceiling_bytes, 8207);
+  assert.equal(c.serialization.frame_kind_ceilings.READY, 2214);
+  const a = allocation("u0-unavailable"), b2 = createUnsignedCohortAssemblyModel({ request: a.fixture.request, clock }); b2.beginCase({ allocation: a, at: point(1) });
+  assert.equal(b2.describe().capacity.diagnostic_ceiling_bytes, 16049); assert.equal(b2.describe().capacity.coordinator_json_ceiling_bytes, 46216);
 });
 for (const [name, scalar, count] of [["escaped scalar", "\0".repeat(262144), 4], ["escaped aggregate", "\0".repeat(10000), 4],
   ["plain aggregate", "x".repeat(9000), 8], ["lone surrogate aggregate", "\ud800".repeat(10000), 4]])
@@ -321,6 +338,69 @@ for (const bad of [point(0), { clock_domain: "foreign", monotonic_ns: "2" }, { c
     s.m.completeWrite(op.reference, { outcome: "completed", at: null }); assert.equal(s.m.describe().writes[0].callback_at, null);
     assert.throws(() => s.plan("PREPARE", {})); assert.ok(s.m.describe().clock_invalid);
   });
+for (const bad of [point(0), { clock_domain: "foreign", monotonic_ns: "999999999999" }])
+  test("B4-A a bad callback clock stops before progress, so FINALIZE cannot reach DONE: " + bad.clock_domain, () => {
+    const s = active(); s.receive("RELEASED", release(s)); s.m.noteTeardown({ action: "started", at: s.tick() });
+    s.m.noteTeardown({ action: "confirmed", at: s.tick(), proof: { receipt_readback: true, anchor_same: true, root_removed: true, absent: true, worker_live: true } });
+    const op = s.plan("FINALIZE"); s.m.startWrite(op.reference, { at: s.tick() }); s.m.completeWrite(op.reference, { outcome: "completed", at: bad });
+    const d = s.m.describe(), w = d.writes.at(-1); assert.equal(d.stopped, "cc4b4a_clock_order"); assert.equal(d.clock_invalid, true);
+    assert.deepEqual([w.decision, w.callback, w.callback_at], ["started", "completed", null]);
+    s.m.closeCommand({ outcome: "confirmed" }); s.m.workerExit({ exit_code: 0, signal: null }); assert.equal(s.m.describe().protocol_state, "STOPPED");
+  });
+for (const late of ["timely", "late", "untimed"]) test("B4-A a GO callback after an unrelated stop keeps its original deadline: " + late, () => {
+  const s = baselined(), op = s.plan("GO", goPayload(s)); s.m.startWrite(op.reference, { at: s.tick() }); s.m.stop({ reason: "invented_stop", at: s.tick() });
+  const at = late === "timely" ? s.tick() : late === "late" ? s.at(BigInt(op.deadline_ns) + 5000000000n) : null;
+  s.m.completeWrite(op.reference, { outcome: "completed", at });
+  const d = s.m.describe(), w = d.writes.at(-1); assert.equal(d.stopped, "invented_stop"); assert.equal(d.pending_generation, null);
+  assert.deepEqual([w.decision, w.callback_at?.monotonic_ns ?? null, d.clock_invalid],
+    late === "timely" ? ["started", at.monotonic_ns, false] : late === "late" ? ["uncertain", null, false] : ["started", null, true]);
+  assert.equal(s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, late === "timely" ? "CANCEL_THEN_CLOSE" : "CLOSE_ONLY");
+  assert.equal(s.m.describe().frames, late === "timely" ? 6 : 5);
+});
+test("B4-A shutdown planning waits for an outstanding original callback without spending a plan, frame or ordinal", () => {
+  const s = baselined(), op = s.plan("GO", goPayload(s)); s.m.startWrite(op.reference, { at: s.tick() }); s.m.stop({ reason: "invented_stop", at: s.tick() });
+  const before = s.m.describe(), shutdown = () => s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true });
+  assert.throws(shutdown, /command_busy/); const after = s.m.describe();
+  assert.deepEqual([after.frames, after.next_ordinals, after.shutdown_attempted, after.stopped], [before.frames, before.next_ordinals, false, "invented_stop"]);
+  s.m.completeWrite(op.reference, { outcome: "completed", at: s.tick() });
+  const plan = shutdown(); assert.equal(plan.decision, "CANCEL_THEN_CLOSE"); s.write(plan);
+  assert.equal(s.m.describe().writes.filter(w => w.kind === "CANCEL").length, 1); assert.throws(shutdown, /shutdown_once/);
+});
+test("B4-A an original callback that never arrives cannot hold shutdown past its deadline", () => {
+  const s = baselined(), op = s.plan("GO", goPayload(s)); s.m.startWrite(op.reference, { at: s.tick() }); s.m.stop({ reason: "invented_stop", at: s.tick() });
+  assert.equal(s.m.planShutdown({ at: s.at(op.deadline_ns), worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+  assert.equal(s.m.describe().writes.at(-1).decision, "uncertain"); assert.equal(s.m.describe().frames, 5);
+});
+for (const left of [0n, 500000n]) test("B4-A a reusable CANCEL that could no longer start is not offered to the shutdown lane: " + left, () => {
+  const s = active(), op = s.plan("CANCEL"); s.m.stop({ reason: "invented_stop", at: s.tick() });
+  const plan = s.m.planShutdown({ at: s.at(BigInt(op.deadline_ns) - left), worker_live: true, pipe_qualified: true });
+  assert.deepEqual([plan.decision, plan.reference], ["CLOSE_ONLY", null]); assert.equal(s.m.describe().writes.at(-1).started, false);
+});
+test("B4-A a sub-millisecond write-start refusal anchors settlement at its observation, not the future deadline", () => {
+  const s = active(), op = s.plan("CANCEL"), seen = BigInt(op.deadline_ns) - 500000n;
+  assert.throws(() => s.m.startWrite(op.reference, { at: s.at(seen) }), /write_deadline/);
+  const d = s.m.describe(); assert.equal(d.stopped, "write_deadline"); assert.equal(d.settlement_start_ns, String(seen));
+  assert.equal(d.phase_deadline_ns, String(seen + 60000000000n));
+});
+for (const late of [false, true]) test("B4-A the shutdown CANCEL's own callback settles only that write: " + (late ? "late" : "timely"), () => {
+  const s = active(); s.m.stop({ reason: "invented_stop", at: s.tick() });
+  const op = s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }); s.m.startWrite(op.reference, { at: s.tick() });
+  s.m.completeWrite(op.reference, { outcome: "completed", at: late ? s.at(op.deadline_ns) : s.tick() });
+  const w = s.m.describe().writes.at(-1); assert.equal(w.shutdown, true); assert.equal(w.decision, late ? "uncertain" : "completed");
+  assert.equal(w.callback_at === null, late); assert.equal(s.m.describe().stopped, "invented_stop");
+});
+test("B4-A an explicit stop observed after the phase deadline records that deadline first", () => {
+  const s = active(), deadline = BigInt(s.m.describe().phase_deadline_ns);
+  s.m.stop({ reason: "later_stop", at: s.at(deadline + 5000000000n) });
+  assert.equal(s.m.describe().stopped, "phase_deadline"); assert.equal(s.m.describe().settlement_start_ns, String(deadline));
+});
+test("B4-A receive refuses lone surrogates before decode re-canonicalizes them", () => {
+  const s = ready(), original = JSON.stringify; let serialized = 0, failure = null;
+  JSON.stringify = function(value, ...args) { if (typeof value === "string" && !value.isWellFormed()) { serialized++; throw Error("lone_surrogate_serialized"); } return original(value, ...args); };
+  try { s.m.receive({ line: '{"note":"' + "\ud800".repeat(21000) + '"}\n', at: s.tick() }); }
+  catch (error) { failure = error; } finally { JSON.stringify = original; }
+  assert.match(failure?.message ?? "no refusal", /cc4b4a_encoding/); assert.equal(serialized, 0); assert.equal(s.m.describe().frames, 2);
+});
 test("B4-A normal release/finalize uses existing teardown model without granting actual cleanup", () => {
   const s = active(); s.receive("RELEASED", release(s)); s.m.noteTeardown({ action: "started", at: s.tick() });
   s.m.noteTeardown({ action: "confirmed", at: s.tick(), proof: { receipt_readback: true, anchor_same: true, root_removed: true, absent: true, worker_live: true } });
@@ -411,3 +491,5 @@ test("B4-A lifetime cannot recreate ports or repeat original non-status operatio
   for(const kind of ["bootstrap","owner","reader","query","release"]){const m=lifetime(),p=pair(m);m.beginWork(p,{kind,ordinal:1});
     assert.throws(()=>m.beginWork(p,{kind,ordinal:2}),/work_once/);assert.equal(m.describe().works.length,1);}
 });
+// A failing after hook is not a failed test under --test-isolation=none or a direct run, so this last test carries the check.
+test("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));
