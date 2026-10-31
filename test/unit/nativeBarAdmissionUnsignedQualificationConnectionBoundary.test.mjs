@@ -8,7 +8,10 @@ const source = read("../helpers/unsignedCohortRuntime.mjs");
 const parse = s => ts.createSourceFile("runtime.mjs", s, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 const privateNames = ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "originalCohortTiming",
   "originalParentScope", "originalParentInvocation", "originalParentAllocation", "originalParentCaseReceipt", "originalParentWorkPlan", "originalParentWorkerQualification",
-  "createOriginalParentOwner", "reserveOriginalParentSession", "currentOriginalParentSession", "syncOriginalParent", "describeOriginalParent", "checkpointOriginalParent",
+  "createOriginalParentOwner", "reserveOriginalParentSession", "currentOriginalParentSession", "syncOriginalParent", "describeOriginalParent", "pointOriginalParent", "checkpointOriginalParent",
+  "stopOriginalParentSupervision", "clearOriginalParentTimer", "pointOriginalParentSupervision", "inspectOriginalParentSupervision", "checkOriginalParentSupervision",
+  "armOriginalParentTimer", "selectOriginalParentPhase", "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan",
+  "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
   "faultOriginalParent", "discardOriginalParent", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
   "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "afterSync", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
@@ -69,7 +72,8 @@ function guard(s) {
     }
     if (ts.isIdentifier(n) && ["setTimeout", "clearTimeout"].includes(n.text)) {
       let owner = n; while (owner && !declarations.includes(owner)) owner = owner.parent;
-      assert.equal(owner?.name.text, "armOriginalQualificationTimer");
+      assert.ok((n.text === "setTimeout" ? ["armOriginalQualificationTimer","armOriginalParentTimer"]
+        : ["armOriginalQualificationTimer","armOriginalParentTimer","clearOriginalParentTimer"]).includes(owner?.name.text));
       assert.ok(ts.isCallExpression(n.parent) && n.parent.expression === n);
     }
     if (ts.isPropertyAccessExpression(n) && ["now", "bigint"].includes(n.name.text)) {

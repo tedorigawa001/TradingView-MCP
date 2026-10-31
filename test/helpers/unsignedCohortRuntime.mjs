@@ -21,10 +21,11 @@ async function prepareOriginalQualification() {
   const { createUnsignedCohortAssemblyModel } = await import("./unsignedCohortAssemblyModel.mjs");
   const { createUnsignedProtocolDecoder } = await import("./unsignedAdapterSupport.mjs");
   const { planUnsignedParentCheckpoint, validateUnsignedParentTerminalFacts, summarizeUnsignedParentDiscard,
-    describeUnsignedParentConnectionCapacity } = await import("./unsignedParentConnectionContracts.mjs");
+    describeUnsignedParentConnectionCapacity, planUnsignedParentReservation } = await import("./unsignedParentConnectionContracts.mjs");
   const limits = describeUnsignedQualificationProfile(), root = path.resolve(url.fileURLToPath(new URL("../../", import.meta.url)));
   const buildReferences = new WeakMap(), namespaceReferences = new WeakMap();
   const parentOwners = new WeakMap(), parentSessions = new WeakMap();
+  const parentHelperPlans = new WeakMap();
   return buildAndQualify();
 
   function originalQualificationPolicy() { throw Error("cc4b3b_operational_profile_unavailable"); }
@@ -160,7 +161,9 @@ async function prepareOriginalQualification() {
     originalParentScope(o.s, o.buildRef, o.namespaceRef);
     if (o.active || o.generation >= 24) refuse("parent_session_once");
     const c = { owner: o, generation: ++o.generation, caseRef: null, decoder: null, child: null,
-      pipes: { command: null, status: null, stdout: null, stderr: null }, receiveBusy: false, intakeClosed: false, facts: null };
+      pipes: { command: null, status: null, stdout: null, stderr: null }, receiveBusy: false, intakeClosed: false, facts: null,
+      phaseTimer: null, operationTimer: null, phaseGeneration: 0, operationGeneration: 0, phaseSelections: 0, phaseKey: null,
+      supervisionArmed: false, supervisionTransition: false, checkingSupervision: false, stoppingSupervision: false, stoppedObserved: false, helperLease: null };
     o.active = c;
     const allocation = originalParentAllocation(); originalParentCaseReceipt(); originalParentWorkerQualification();
     const at = clock.point(); c.caseRef = o.coordinator.beginCase({ allocation, at }); o.lastNs = at.monotonic_ns;
@@ -171,7 +174,7 @@ async function prepareOriginalQualification() {
       command_end: { decision: "not_requested", outcome: null }, timers: { phase: null, operation: null },
       helper: { active: false, under_command_generation: null }, discarded_input: { frames: 0, bytes: 0, saturated: false }, secondary_errors: [] };
     c.decoder = createUnsignedProtocolDecoder();
-    const ref = Object.freeze(Object.create(null)); parentSessions.set(ref, c); return ref;
+    const ref = Object.freeze(Object.create(null)); c.reference = ref; parentSessions.set(ref, c); return ref;
   }
   function currentOriginalParentSession(ref) {
     const c = parentSessions.get(ref);
@@ -188,13 +191,18 @@ async function prepareOriginalQualification() {
         : { clock_domain: c.facts.clock_domain, monotonic_ns: d.first_stop_ns } };
       c.owner.s.stopped ??= "cc4b3b_parent_stopped";
     }
-    c.facts.clock_invalid ||= d.clock_invalid; return d;
+    c.facts.clock_invalid ||= d.clock_invalid;
+    if (d.stopped && !c.stoppedObserved) {
+      c.stoppedObserved = true;
+      if (c.supervisionArmed && !c.stoppingSupervision) stopOriginalParentSupervision(c, "parent_stopped");
+    }
+    return d;
   }
   function describeOriginalParent(ref) {
     const c = currentOriginalParentSession(ref), admission = syncOriginalParent(c);
     return freeze({ admission, terminal: validateUnsignedParentTerminalFacts(c.facts) });
   }
-  function checkpointOriginalParent(c) {
+  function pointOriginalParent(c) {
     const o = c.owner, d = syncOriginalParent(c); if (d.stopped) return null;
     let at;
     try { at = clock.point(); }
@@ -206,14 +214,18 @@ async function prepareOriginalQualification() {
     const command = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
     let q;
     try {
+      const helperEnd = c.operationTimer && c.operationTimer.fact.owner === "helper" && c.helperLease && !c.helperLease.closed ? c.operationTimer.fact.deadline_ns : null;
       q = planUnsignedParentCheckpoint({ clock_domain: clock.binding.clock_domain, last_b2_ns: o.lastNs, at,
-        phase_deadline_ns: d.active.window.phase_deadline_ns, cohort_deadline_ns: d.cohort_deadline_ns,
+        phase_deadline_ns: helperEnd !== null && BigInt(helperEnd) < BigInt(d.active.window.phase_deadline_ns) ? helperEnd : d.active.window.phase_deadline_ns,
+        cohort_deadline_ns: d.cohort_deadline_ns,
         pending: command ? { reservation: command.reservation, started: command.started } : null, stopped: false, clock_invalid: false });
     } catch (error) {
       o.coordinator.noteClockFailure(c.caseRef, { reason: "clock_malformed" }); syncOriginalParent(c); throw error;
     }
     if (q.clock_failure) { o.coordinator.noteClockFailure(c.caseRef, { reason: q.clock_failure }); syncOriginalParent(c); return null; }
     if (q.stop_first) {
+      if (c.operationTimer?.active && c.operationTimer.fact.owner === "helper" && q.stop_first.at.monotonic_ns === c.operationTimer.fact.deadline_ns)
+        q = { ...q, stop_first: { ...q.stop_first, reason: "helper_deadline" } };
       o.coordinator.stop(q.stop_first); o.lastNs = q.stop_first.at.monotonic_ns;
       if (q.pending_disposition === "uncertain" && command.decision === "started") {
         command.decision = "uncertain";
@@ -230,6 +242,232 @@ async function prepareOriginalQualification() {
       syncOriginalParent(c); return null;
     }
     return q.forward_at;
+  }
+  function checkpointOriginalParent(c) {
+    return c.supervisionArmed && !syncOriginalParent(c).stopped ? inspectOriginalParentSupervision(c) : pointOriginalParent(c);
+  }
+  function stopOriginalParentSupervision(c, reason, at = null) {
+    if (c.stoppingSupervision) return;
+    c.stoppingSupervision = true;
+    try {
+      if (!c.owner.coordinator.describe().stopped) {
+        if (at) { c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.stop({ reason, at }); }
+        else c.owner.coordinator.noteOwnerStop(c.caseRef);
+      }
+      if (!c.facts.secondary_errors.includes(reason) && c.facts.secondary_errors.length < 8) c.facts.secondary_errors.push(reason);
+      syncOriginalParent(c);
+      clearOriginalParentTimer(c, "operation"); clearOriginalParentTimer(c, "phase");
+      c.helperLease?.abort?.(reason);
+    } finally { c.stoppingSupervision = false; }
+  }
+  function clearOriginalParentTimer(c, slot) {
+    const key = slot === "phase" ? "phaseTimer" : "operationTimer", t = c[key];
+    if (!t || t.clearAttempted) return false;
+    t.active = false; t.fact.active = false; t.fact.cancel_attempted = true; t.clearAttempted = true;
+    if (t.clearing) return true;
+    try {
+      if (t.handle === null && !t.knownCleared) throw Error("unknown_timer_handle");
+      if (!t.knownCleared) clearTimeout(t.handle);
+      t.handle = null; t.knownCleared = true; if (c[key] === t) c[key] = null;
+    } catch {
+      t.fact.clear_unknown = true;
+      if (!c.stoppingSupervision) stopOriginalParentSupervision(c, "timer_cancel_unknown", pointOriginalParent(c));
+      else if (!c.facts.secondary_errors.includes("timer_cancel_unknown") && c.facts.secondary_errors.length < 8) c.facts.secondary_errors.push("timer_cancel_unknown");
+    }
+    return true;
+  }
+  function pointOriginalParentSupervision(c) {
+    const d = syncOriginalParent(c);
+    if (!d.stopped) return pointOriginalParent(c);
+    const w = d.active.window;
+    if (d.clock_invalid || d.first_stop_ns === null || w.phase !== "settlement" || w.starts.settlement === undefined) return null;
+    let at; try { at = clock.point(); } catch {
+      const failure = clock.describe();
+      if (!failure.clock_invalid && failure.stop_ns === clock.end_ns) { stopOriginalParentSupervision(c, "settlement_deadline"); return null; }
+      c.owner.coordinator.noteClockFailure(c.caseRef, { reason: "clock_unavailable" });
+      stopOriginalParentSupervision(c, "settlement_clock_unavailable"); return null;
+    }
+    const q = planUnsignedParentCheckpoint({ clock_domain: clock.binding.clock_domain, last_b2_ns: c.owner.lastNs, at,
+      phase_deadline_ns: w.phase_deadline_ns, cohort_deadline_ns: d.cohort_deadline_ns, pending: null, stopped: true, clock_invalid: false });
+    if (q.clock_failure) { c.owner.coordinator.noteClockFailure(c.caseRef, { reason: q.clock_failure }); stopOriginalParentSupervision(c, q.clock_failure); return null; }
+    if (BigInt(q.forward_at.monotonic_ns) >= BigInt(w.phase_deadline_ns) || BigInt(q.forward_at.monotonic_ns) >= BigInt(d.cohort_deadline_ns)) {
+      stopOriginalParentSupervision(c, "settlement_deadline"); return null;
+    }
+    return q.forward_at;
+  }
+  function inspectOriginalParentSupervision(c) {
+    if (c.checkingSupervision || c.supervisionTransition || c.phaseTimer?.clearing || c.operationTimer?.clearing) { stopOriginalParentSupervision(c, "timer_reentrant"); return null; }
+    c.checkingSupervision = true;
+    try {
+      let at = pointOriginalParentSupervision(c); if (!at) return null;
+      const d = c.owner.coordinator.describe(), w = d.active.window;
+      if (c.owner.s.qualificationTimer || !c.phaseTimer?.active) { stopOriginalParentSupervision(c, "phase_timer_unavailable", at); return null; }
+      for (const t of [c.phaseTimer, c.operationTimer]) if (t?.active) {
+        const pending = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
+        if (t.sessionGeneration !== c.generation || (t.fact.owner !== "command" && t.phaseKey !== w.phase + ":" + w.phase_deadline_ns)
+          || t.fact.owner === "command" && (!pending || pending.generation !== t.fact.command_generation || pending.reservation.deadline_ns !== t.fact.deadline_ns)) {
+          stopOriginalParentSupervision(c, "timer_binding", at); return null;
+        }
+        let referenced = false; try { referenced = t.handle !== null && t.handle.hasRef() === true; } catch { /* Refusal retains the original handle. */ }
+        at = pointOriginalParentSupervision(c); if (!at) return null;
+        t.fact.referenced = referenced;
+        if (!referenced) { stopOriginalParentSupervision(c, "timer_unreferenced", at); return null; }
+        if (BigInt(at.monotonic_ns) >= BigInt(t.fact.deadline_ns)) { stopOriginalParentSupervision(c, "timer_deadline", at); return null; }
+      }
+      return at;
+    } finally { c.checkingSupervision = false; }
+  }
+  function checkOriginalParentSupervision(ref) {
+    const c = currentOriginalParentSession(ref), at = inspectOriginalParentSupervision(c);
+    if (!at) refuse("parent_supervision_stopped"); return at;
+  }
+  function armOriginalParentTimer(c, slot, owner, deadline, commandGeneration, phaseKey) {
+    if (currentOriginalParentSession(c.reference) !== c || !["phase", "operation"].includes(slot)) refuse("parent_timer_reference");
+    const d = c.owner.coordinator.describe(), w = d.active.window, pending = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
+    const phaseEnd = String(BigInt(w.phase_deadline_ns) < BigInt(clock.end_ns) ? BigInt(w.phase_deadline_ns) : BigInt(clock.end_ns));
+    if (slot === "phase" ? owner !== "phase" || commandGeneration !== null || deadline !== phaseEnd || phaseKey !== w.phase + ":" + w.phase_deadline_ns
+      : owner === "command" ? !pending || pending.generation !== commandGeneration || deadline !== pending.reservation.deadline_ns
+      : owner !== "helper" || commandGeneration !== null || !c.helperLease || deadline !== c.helperLease.deadline) refuse("parent_timer_binding");
+    const key = slot === "phase" ? "phaseTimer" : "operationTimer", counter = slot === "phase" ? "phaseGeneration" : "operationGeneration";
+    if (c[key]) refuse("parent_timer_busy");
+    const generation = c[counter] + 1;
+    if (!Number.isSafeInteger(generation)) { stopOriginalParentSupervision(c, "timer_generation", pointOriginalParentSupervision(c)); refuse("parent_timer_generation"); }
+    c[counter] = generation;
+    const fact = { owner, command_generation: commandGeneration, generation, segment: 0, deadline_ns: deadline,
+      referenced: false, active: true, cancel_attempted: false, clear_unknown: false };
+    const t = { fact, handle: null, active: true, clearAttempted: false, sessionGeneration: c.generation, phaseKey, installing: false, clearing: false, knownCleared: false };
+    c[key] = t; c.facts.timers[slot] = fact;
+    const current = () => c.owner.active === c && c.owner.generation === c.generation && c[key] === t && t.active;
+    const cancel = () => {
+      if (!current()) return false;
+      const result = clearOriginalParentTimer(c, slot);
+      if (!c.owner.coordinator.describe().stopped) pointOriginalParent(c);
+      return result;
+    };
+    const control = Object.freeze({ cancel, check() {
+      if (!current()) refuse("parent_timer_inactive"); return checkOriginalParentSupervision(c.reference);
+    }, hasRef() { if (!current()) return false; try { return checkOriginalParentSupervision(c.reference) !== null; } catch { return false; } } });
+    t.control = control;
+    function schedule(at) {
+      if (!current()) return;
+      const segment = fact.segment + 1; if (!Number.isSafeInteger(segment)) { stopOriginalParentSupervision(c, "timer_segment", at); return; }
+      fact.segment = segment;
+      const left = BigInt(deadline) - BigInt(at.monotonic_ns), ms = (left + 999999n) / 1000000n;
+      if (left <= 0n) { stopOriginalParentSupervision(c, "timer_deadline", at); return; }
+      t.installing = true; t.knownCleared = false; let synchronous = false;
+      try {
+        t.handle = setTimeout(() => {
+          if (!current() || segment !== fact.segment || t.clearing) return;
+          if (t.installing) { synchronous = true; return; }
+          const observed = inspectOriginalParentSupervision(c);
+          if (!observed || !current()) return;
+          if (BigInt(observed.monotonic_ns) >= BigInt(deadline)) { stopOriginalParentSupervision(c, "timer_deadline", observed); return; }
+          // Retain the original handle across the synchronous clear; a duplicate callback cannot rearm it.
+          t.clearing = true;
+          try { clearTimeout(t.handle); t.handle = null; t.knownCleared = true; }
+          catch {
+            t.active = false; t.fact.active = false; t.fact.cancel_attempted = true; t.clearAttempted = true; t.fact.clear_unknown = true;
+            stopOriginalParentSupervision(c, "timer_cancel_unknown", pointOriginalParentSupervision(c)); return;
+          } finally { t.clearing = false; }
+          if (!current()) { if (c[key] === t) c[key] = null; return; }
+          const next = pointOriginalParentSupervision(c); if (next && current() && segment === fact.segment) schedule(next);
+        }, Number(ms > 2147483647n ? 2147483647n : ms));
+      } catch { t.installing = false; stopOriginalParentSupervision(c, "timer_arm_unknown"); return; }
+      t.installing = false;
+      if (synchronous) { stopOriginalParentSupervision(c, "timer_reentrant"); return; }
+      let referenced = false; try { referenced = t.handle.hasRef() === true; } catch { /* Unknown reference is not qualified. */ }
+      const after = pointOriginalParentSupervision(c); fact.referenced = referenced;
+      if (!after || !referenced) { stopOriginalParentSupervision(c, "timer_unreferenced", after); return; }
+    }
+    const at = pointOriginalParentSupervision(c); if (!at) { stopOriginalParentSupervision(c, "parent_stopped"); refuse("parent_supervision_stopped"); }
+    schedule(at);
+    if (!current()) refuse("parent_supervision_stopped"); return control;
+  }
+  function selectOriginalParentPhase(ref) {
+    const c = currentOriginalParentSession(ref);
+    if (c.supervisionTransition) refuse("parent_supervision_busy");
+    c.supervisionTransition = true;
+    try {
+      const at = pointOriginalParentSupervision(c); if (!at) refuse("parent_supervision_stopped");
+      if (c.owner.s.qualificationTimer) { stopOriginalParentSupervision(c, "builder_timer_busy", at); refuse("parent_supervision_stopped"); }
+      const w = c.owner.coordinator.describe().active.window, key = w.phase + ":" + w.phase_deadline_ns;
+      if (key === c.phaseKey) {
+        if (!c.phaseTimer?.active) refuse("parent_timer_retained"); c.supervisionTransition = false;
+        checkOriginalParentSupervision(ref); return c.phaseTimer.control;
+      }
+      const order = ["preparation", "query", "settlement", "teardown", "reporting"];
+      if (c.phaseSelections >= 5 || c.phaseKey && order.indexOf(w.phase) <= order.indexOf(c.phaseKey.split(":")[0])) refuse("parent_phase_binding");
+      if (c.operationTimer?.active && c.operationTimer.fact.owner === "helper") { stopOriginalParentSupervision(c, "helper_phase_changed", at); refuse("parent_supervision_stopped"); }
+      if (c.phaseTimer) clearOriginalParentTimer(c, "phase");
+      if (c.phaseTimer) refuse("parent_timer_retained");
+      c.phaseKey = key; c.phaseSelections++; c.supervisionArmed = true;
+      return armOriginalParentTimer(c, "phase", "phase", String(BigInt(w.phase_deadline_ns) < BigInt(clock.end_ns) ? BigInt(w.phase_deadline_ns) : BigInt(clock.end_ns)), null, key);
+    } finally { c.supervisionTransition = false; }
+  }
+  function armOriginalParentOperation(ref) {
+    const c = currentOriginalParentSession(ref), at = checkOriginalParentSupervision(ref), d = c.owner.coordinator.describe();
+    const pending = c.facts.commands.find(v => v.generation === c.facts.pending_generation), w = d.active.window;
+    if (d.stopped && !pending?.shutdown) refuse("parent_operation_stopped");
+    let owner, deadline, generation = null;
+    if (pending) {
+      const r = pending.reservation, expected = planUnsignedParentReservation({ clock_domain: r.clock_domain, planned_ns: r.planned_ns,
+        phase_deadline_ns: r.phase_deadline_ns, cohort_deadline_ns: r.cohort_deadline_ns }).reservation;
+      if (canonical(expected) !== canonical(r) || r.clock_domain !== clock.binding.clock_domain || r.cohort_deadline_ns !== d.cohort_deadline_ns
+        || BigInt(at.monotonic_ns) >= BigInt(r.deadline_ns) || pending.callback_seen || pending.decision === "uncertain") refuse("parent_operation_binding");
+      owner = "command"; deadline = r.deadline_ns; generation = pending.generation;
+    } else if (c.helperLease && c.facts.helper.active) { owner = "helper"; deadline = c.helperLease.deadline; }
+    else refuse("parent_operation_owner");
+    return armOriginalParentTimer(c, "operation", owner, deadline, generation, w.phase + ":" + w.phase_deadline_ns);
+  }
+  function qualifyOriginalParentDispatch(ref) {
+    const c = currentOriginalParentSession(ref), at = checkOriginalParentSupervision(ref);
+    if (c.owner.coordinator.describe().stopped || c.helperLease || c.owner.s.helper) refuse("parent_dispatch_busy");
+    if (c.facts.pending_generation !== null && (!c.operationTimer?.active || c.operationTimer.fact.command_generation !== c.facts.pending_generation)) refuse("parent_operation_unavailable");
+    return at;
+  }
+  function originalParentHelperPlan() { throw Error("cc4b3b_original_helper_plan_unavailable"); }
+  function checkOriginalParentHelper(ref, lease) {
+    const c = currentOriginalParentSession(ref), pending = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
+    if (c.helperLease !== lease || lease.closed || c.owner.s.helper !== lease.reference && c.owner.s.helper !== lease.child
+      || pending?.started || c.owner.coordinator.describe().stopped) refuse("parent_helper_binding");
+    return checkOriginalParentSupervision(ref);
+  }
+  function releaseOriginalParentHelper(c, lease) {
+    if (c.helperLease !== lease || !lease.closed) return;
+    if (c.owner.s.helper === lease.reference || c.owner.s.helper === lease.child) c.owner.s.helper = null;
+    c.facts.helper = { active: false, under_command_generation: null }; c.helperLease = null;
+  }
+  async function runOriginalParentHelper(ref) {
+    const c = currentOriginalParentSession(ref), at = checkOriginalParentSupervision(ref), s = c.owner.s;
+    if (c.owner.coordinator.describe().stopped || c.helperLease || s.helper) refuse("parent_helper_busy");
+    const pending = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
+    if (pending?.started) refuse("parent_helper_write_overlap");
+    const planRef = originalParentHelperPlan(), plan = parentHelperPlans.get(planRef);
+    if (!plan || plan.owner !== c || plan.consumed || plan.program !== "/bin/ls" || !Array.isArray(plan.args) || plan.args.length !== 2
+      || !["-lde", "-ldeO"].includes(plan.args[0]) || typeof plan.args[1] !== "string" || plan.args[1].length > 512 || !path.isAbsolute(plan.args[1])) refuse("parent_helper_plan");
+    plan.consumed = true;
+    const d = c.owner.coordinator.describe(), w = d.active.window;
+    const reservation = pending?.reservation ?? planUnsignedParentReservation({ clock_domain: clock.binding.clock_domain, planned_ns: at.monotonic_ns,
+      phase_deadline_ns: w.phase_deadline_ns, cohort_deadline_ns: d.cohort_deadline_ns }).reservation;
+    const lease = { reference: Object.freeze(Object.create(null)), plan, child: null, spawnAttempted: false, closed: false,
+      deadline: reservation.deadline_ns, borrowed: !!pending, timer: null, abort: null };
+    c.helperLease = lease; s.helper = lease.reference;
+    c.facts.helper = { active: true, under_command_generation: pending?.generation ?? null };
+    try {
+      const hashReservation = limits.acl_bytes + Buffer.byteLength(canonical({ previous: s.commandDigest, program: plan.program, args: plan.args,
+        exit_code: null, signal: "SIGXXXXXXXXXXXX", stdout: "f".repeat(64), stderr: "f".repeat(64) }));
+      chargeHash(s, hashReservation);
+      const operation = c.operationTimer?.active && pending && c.operationTimer.fact.command_generation === pending.generation
+        ? c.operationTimer.control : armOriginalParentOperation(ref);
+      lease.timer = Object.freeze({ check() { return checkOriginalParentHelper(ref, lease); }, hasRef() { try { return checkOriginalParentHelper(ref, lease) !== null; } catch { return false; } },
+        cancel() { return lease.borrowed ? false : operation.cancel(); } });
+      return await runOriginalTool(s, plan.program, plan.args, "metadata", ref);
+    } catch (error) {
+      stopOriginalParentSupervision(c, "helper_failed", checkpointOriginalParent(c)); throw error;
+    } finally {
+      if (!lease.spawnAttempted) lease.closed = true;
+      if (lease.closed) { lease.timer?.cancel(); releaseOriginalParentHelper(c, lease); }
+    }
   }
   function faultOriginalParent(c, reason) {
     const at = checkpointOriginalParent(c);
@@ -271,6 +509,10 @@ async function prepareOriginalQualification() {
           const at = checkpointOriginalParent(c);
           if (at) {
             o.lastNs = at.monotonic_ns; o.coordinator.applyModelEvent(c.caseRef, { kind: "worker_frame", payload: { line: lines[index] }, at });
+            if (c.supervisionArmed && !o.coordinator.describe().stopped) {
+              const w = o.coordinator.describe().active.window;
+              if (c.phaseKey !== w.phase + ":" + w.phase_deadline_ns) selectOriginalParentPhase(ref);
+            }
           } else o.coordinator.observeLateFrame(c.caseRef, { line: lines[index] });
         } catch {
           syncOriginalParent(c); c.intakeClosed = true;
@@ -435,54 +677,68 @@ async function prepareOriginalQualification() {
     if (kind === "metadata") return program === "/bin/ls" && args.length === 2 && ["-lde", "-ldeO"].includes(args[0]) && path.isAbsolute(args[1]);
     return s.toolPlans?.some(p => p.program === program && p.kind === kind && canonical(p.args) === canonical(args)) === true;
   }
-  async function runOriginalTool(s, program, args, kind) {
-    checkpoint(s); if (s.helper || !allowedTool(s, program, args, kind) || ++s.commands > limits.helper_commands) refuse("tool_plan");
+  async function runOriginalTool(s, program, args, kind, parentRef = null) {
+    const parent = parentRef === null ? null : currentOriginalParentSession(parentRef), lease = parent?.helperLease;
+    if (parent && (parent.owner.s !== s || !lease || lease.plan.program !== program || lease.plan.args !== args || kind !== "metadata")) refuse("parent_helper_plan");
+    const checkTool = () => parent ? checkOriginalParentHelper(parentRef, lease) : checkpoint(s);
+    const stopTool = error => {
+      if (!parent) return stop(s, error);
+      stopOriginalParentSupervision(parent, code(error), checkpointOriginalParent(parent)); return error;
+    };
+    checkTool(); if (s.helper && s.helper !== lease?.reference || !allowedTool(s, program, args, kind) || ++s.commands > limits.helper_commands) refuse("tool_plan");
     if (kind === "discovery" && ++s.discoveryCommands > limits.discovery_commands) refuse("discovery_bound");
     const commandOrdinal = s.commands;
-    const { spawn } = await import("node:child_process"); checkpoint(s);
-    if (s.helper) refuse("tool_busy");
+    const { spawn } = await import("node:child_process"); checkTool();
+    if (s.helper && s.helper !== lease?.reference) refuse("tool_busy");
     return new Promise((resolve, reject) => {
       let child = null, done = false, closed = false, count = 0; const out = [], err = [];
       const fail = reason => {
-        if (done) return; done = true; const error = stop(s, Error(`cc4b3b_${reason}`)); timer.cancel();
+        if (done) return; done = true; const error = stopTool(Error(`cc4b3b_${reason}`)); timer.cancel();
         child?.stdout?.pause(); child?.stderr?.pause(); out.length = 0; err.length = 0;
         reject(error);
       };
       // Only an original deadline is reported as one; any other timer stop keeps its cause in s.stopped.
-      const timer = armOriginalQualificationTimer(s, kind, reason => fail(/^cc4b3c_(?:timer|entry)_deadline$/.test(reason) ? "tool_deadline" : "tool_timer_stop"));
-      if (!timer.hasRef()) { const error = stop(s, Error("cc4b3b_timer_unreferenced")); timer.cancel(); throw error; }
-      try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); return fail("tool_start"); }
+      const timer = parent ? lease.timer : armOriginalQualificationTimer(s, kind, reason => fail(/^cc4b3c_(?:timer|entry)_deadline$/.test(reason) ? "tool_deadline" : "tool_timer_stop"));
+      if (parent) lease.abort = reason => fail(/deadline$/.test(reason) ? "tool_deadline" : "tool_timer_stop");
+      if (!timer.hasRef()) { const error = stopTool(Error("cc4b3b_timer_unreferenced")); timer.cancel(); throw error; }
+      try { checkTool(); timer.check(); } catch (error) { stopTool(error); return fail("tool_start"); }
       try {
+        if (parent) lease.spawnAttempted = true;
         child = spawn(program, args, { cwd: root, env: s.environment, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: true });
+        if (parent) lease.child = child;
         s.helper = child; s.children.add(child);
         child.on("error", () => fail("tool_start"));
         child.on("close", (exitCode, signal) => {
           if (closed) return; closed = true;
           // A close after stop reads no clock; one arriving before its pending expiry callback is late by the same check.
           let late = done;
-          if (!late) try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); late = true; }
+          if (!late) try { checkTool(); timer.check(); } catch (error) { stopTool(error); late = true; }
           const exitKnown = exitCode === null || Number.isSafeInteger(exitCode), signalKnown = signal === null || typeof signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(signal);
           s.helperDisposition = Object.freeze({ command_ordinal: commandOrdinal, exit_code: exitKnown ? exitCode : null,
             signal: signalKnown ? signal : null, known: exitKnown && signalKnown, late });
           s.children.delete(child); if (s.helper === child) s.helper = null;
-          if (late) return fail("tool_completion");
+          if (parent) lease.closed = true;
+          if (late) { if (parent) releaseOriginalParentHelper(parent, lease); return fail("tool_completion"); }
           try {
             const stdout = Buffer.concat(out), stderr = Buffer.concat(err);
             s.commandDigest = digest({ previous: s.commandDigest, program, args, exit_code: exitCode, signal, stdout: hash(stdout), stderr: hash(stderr) });
+            if (parent) { out.length = 0; err.length = 0; }
             if (exitCode !== 0 || signal !== null || stderr.length && kind === "metadata") return fail("tool_exit");
             done = true; timer.cancel(); if (s.stopped) reject(Error(s.stopped)); else resolve(stdout);
-          } catch (error) { stop(s, error); fail("tool_completion"); }
+          } catch (error) { stopTool(error); fail("tool_completion"); }
         });
         if (!child.stdout || !child.stderr) return fail("tool_pipe");
         for (const [stream, chunks] of [[child.stdout, out], [child.stderr, err]]) {
           stream.on("error", () => fail("tool_pipe"));
           stream.on("data", bytes => {
             if (done) return;
-            try { checkpoint(s); timer.check(); } catch (error) { stop(s, error); return fail("tool_completion"); }
+            try { checkTool(); timer.check(); } catch (error) { stopTool(error); return fail("tool_completion"); }
+            if (parent && !Buffer.isBuffer(bytes)) return fail("tool_output_encoding");
             count += bytes.length;
-            if (count > limits.tool_capture_bytes) return fail("tool_output_bound"); chunks.push(Buffer.from(bytes));
+            if (count > (parent ? limits.acl_bytes : limits.tool_capture_bytes)) return fail("tool_output_bound"); chunks.push(Buffer.from(bytes));
           });
         }
+        if (parent) try { checkTool(); timer.check(); } catch (error) { stopTool(error); fail("tool_completion"); }
       } catch { fail("tool_start"); }
     });
   }
