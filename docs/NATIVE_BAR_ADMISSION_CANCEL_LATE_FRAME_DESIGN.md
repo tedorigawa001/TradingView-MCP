@@ -1,6 +1,6 @@
 # B4 Pre-Connection Cancel And Late-Frame Design
 
-Status: **design approved; B4-P1 independently reviewed/tested in pure memory models only**, 2026-10-31 JST, source baseline `88edb86`. This refines the [worker/transport design](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [controller contract](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md) and [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md). The [P1 record](#b4-p1-memory-implementation) covers the later separate implementation approval and the [independent review](#b4-p1-independent-review) covers its local commit gate. P2/P3 and all real worker/transport connections remain unimplemented; approval of this design is not operational approval.
+Status: **design approved; B4-P1 independently reviewed/tested in pure memory models only**, 2026-10-31 JST, source baseline `88edb86`. This refines the [worker/transport design](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [controller contract](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md) and [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md). The [P1 record](#b4-p1-memory-implementation) covers the later separate implementation approval and the [independent review](#b4-p1-independent-review) covers its local commit gate; a [follow-up](#b4-p1-follow-up) keeps the retention summary true until the drained CANCEL completes. P2/P3 and all real worker/transport connections remain unimplemented; approval of this design is not operational approval.
 
 Dot stays PAUSED. Market/scenario/judgment/notification/mail, retention, confirmation counts, thresholds and bands are unchanged. No real ports/clocks/timers, build, operational child/worker, native read, fixture/signature/key/real-data operation, MCP registration or production activation is performed. Existing outputs are not adopted, moved or removed. There is no new tool, public runtime entry, wire field, receipt kind, cancellation attempt, timer or operating approval.
 
@@ -178,3 +178,18 @@ The implementing session also freshly ran all seven main-thread memory/source fi
 The implementing session's protected runtime/native/common-build/package/config content hashes (2568 files), 436 pre-existing artifact hashes/sizes/modes and Dot PAUSED/full-configuration hash match review start. The requested local commit includes only three pure helpers, six test files and four design/backlog documents, including the previously uncommitted design. It does not run hooks/builds or create a Git signature. Push, operational qualification and all prohibited effects remain unperformed.
 
 Residual limits: this proves supplied-data parent contracts and their guarded test boundary, not actual worker no-op behavior, original callback provenance, live stream/child qualification, V8/native memory bounds or native acceptance. P2/P3 and real B4-B/C/D consumers remain unimplemented; the current stopped receive limitation is not silently corrected. No runtime authority, Dot restart, market/judgment/notification/mail/retention change or evidence-save claim is introduced by this review.
+
+## B4-P1 Follow-Up
+
+2026-10-31 JST, review of the committed `8be3a6d` against the code. Its verification passed and no P1/P2 finding remained, so no further independent review was run. One P3 is corrected.
+
+The v2 protocol's diagnostic `retain` summary was false in every unstopped RELEASED state. That included the drain window, while an original CANCEL was still planned or awaiting its callback and cleanup and FINALIZE were refused. No current gate reads `retain`. Still, a later consumer treating it as releasable would have bypassed the wait. `retain` now also stays true while any original CANCEL outcome is not completed. It becomes false only after the known completion, and an uncertain outcome stops with retention. `retain` remains a diagnostic summary, not cleanup permission. B5 must still use the existing release, CANCEL, teardown and readback gates.
+
+Verification:
+- **Regressions:** three failed before correction: the revised admission test, which now expects only the CANCEL write and `retain` to change, plus completed and uncertain retention cases.
+- **Source pin:** a pin and its mutation fix the condition.
+- **Behavioral mutations:** run against memory suites only, these killed eight of the eleven P1 gate reverts. The other three are equivalent:
+  - a shutdown CANCEL exists only after a stop;
+  - RELEASED always has a release value;
+  - cleanup receipts after `cleanup_precheck` cannot see a pending CANCEL again.
+- **Unchanged:** capacity, exports, wire fields and limits.

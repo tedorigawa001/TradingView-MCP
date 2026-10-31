@@ -43,7 +43,7 @@ export function createUnsignedControllerProtocolModel(input) {
   const started = (kind) => writes.some((w) => w.kind === kind && w.started);
   const cancelPending = () => writes.some((w) => w.kind === "CANCEL" && w.outcome !== "completed");
   const describe = () => freeze({ schema: "native-bar-unsigned-controller-model-v2", ...flags(), binding, state, stop_reason: stopped,
-    retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state), frames, next_ordinals: { ...next },
+    retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state) || cancelPending(), frames, next_ordinals: { ...next },
     worker_clock_domain: workerDomain, baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
     release: released, failure, worker_exit: exit, c1_violation: c1, go_submitted: submitted, cancel_spent: cancelSpent, command_close: close,
     teardown_complete: teardown, trace_chunks: chunks, trace_events: trace.length, trace_sha256: digest(trace),

@@ -736,14 +736,22 @@ for (const started of [false, true]) test("B4-P1 protocol teardown waits for kno
   assert.throws(() => m.finishTeardown(teardown), /cancel_unsettled/);
   assert.equal(m.describe().teardown_complete, false); assert.equal(m.describe().cancel_spent, true);
 });
-test("B4-P1 pure post-release CANCEL admission changes only its original write disposition", () => {
+test("B4-P1 pure post-release CANCEL admission changes only its original write disposition and retention", () => {
   const m = active(), line = wire(m, "CANCEL"); m.acceptFrame(line);
-  send(m, "RELEASED", { ...release(m), requests_dispatched: 2 }); const before = m.describe();
+  send(m, "RELEASED", { ...release(m), requests_dispatched: 2 }); const before = m.describe(); assert.equal(before.retain, true);
   m.noteWrite({ ordinal: 4, outcome: "started" }); m.noteWrite({ ordinal: 4, outcome: "completed" });
-  const after = m.describe(); assert.deepEqual(after, { ...before, writes: before.writes.map(w => w.kind === "CANCEL" ? { ...w, started: true, outcome: "completed" } : w) });
+  const after = m.describe();
+  assert.deepEqual(after, { ...before, retain: false, writes: before.writes.map(w => w.kind === "CANCEL" ? { ...w, started: true, outcome: "completed" } : w) });
   assert.equal(after.cancel_spent, true); assert.equal(after.c1_violation, true); assert.equal(after.release.requests_dispatched, 2);
   assert.equal(JSON.parse(line).ordinal, 4); assert.deepEqual(JSON.parse(line).payload, {});
   for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(after[k], false, k);
+});
+for (const outcome of ["completed", "uncertain"]) test("B4-P1 release keeps retention until its original CANCEL completes: " + outcome, () => {
+  const m = active(); m.acceptFrame(wire(m, "CANCEL")); send(m, "RELEASED", release(m)); assert.equal(m.describe().retain, true);
+  m.noteWrite({ ordinal: 4, outcome: "started" }); assert.equal(m.describe().retain, true);
+  m.noteWrite({ ordinal: 4, outcome }); assert.equal(m.describe().retain, outcome === "uncertain");
+  if (outcome === "completed") { m.finishTeardown(teardown); m.acceptFrame(wire(m, "FINALIZE")); assert.equal(m.describe().retain, false); }
+  else assert.equal(m.describe().stop_reason, "pipe_uncertain");
 });
 test("B4-P1 an earlier uncompleted GO callback blocks the narrow released-CANCEL exception", () => {
   const m = active(undefined, undefined, false); m.acceptFrame(wire(m, "GO", { baseline_sha256: m.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));

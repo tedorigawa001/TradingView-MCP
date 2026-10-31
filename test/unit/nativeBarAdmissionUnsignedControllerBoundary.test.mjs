@@ -80,6 +80,8 @@ function cancelGuard(source) {
   assert.ok(compact(methods.get("noteWrite")).includes('stopped||close!==null||exit!==null||state!==expectedState&&!releasedCancel||w.outcome!=="planned"||writes.find((v)=>!v.started)!==w'));
   assert.ok(compact(methods.get("finishTeardown")).includes('if(cancelPending())fail("cancel_unsettled");'));
   assert.ok(source.includes('case "FINALIZE": at("RELEASED"); parse(empty, p); if (cancelPending()) fail("cancel_unsettled");'));
+  // The diagnostic retention summary must not report a release as releasable before its original CANCEL completes.
+  assert.ok(source.includes('retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state) || cancelPending(),'));
 }
 test("B4-P1 parent-only released-CANCEL exception retains all prior write and cleanup gates", () => {
   const source = read("../helpers/unsignedControllerContracts.mjs"); cancelGuard(source);
@@ -87,7 +89,7 @@ test("B4-P1 parent-only released-CANCEL exception retains all prior write and cl
     ['&& released !== null', ''], ['writes.every((v) => v === w || v.outcome === "completed")', 'true'],
     ['state !== expectedState && !releasedCancel', 'false'], ['w.outcome !== "planned"', 'false'],
     ['if (cancelPending()) fail("cancel_unsettled");', ''],
-    ['w.kind === "CANCEL" && w.outcome !== "completed"', 'false']]) {
+    ['w.kind === "CANCEL" && w.outcome !== "completed"', 'false'], ['.includes(state) || cancelPending(),', '.includes(state),']]) {
     assert.ok(source.includes(from), from); assert.throws(() => cancelGuard(source.replace(from, to)));
   }
   const tree = ast(source); let method;
