@@ -960,5 +960,282 @@ test("B4-A maximal lifetime strings and all 37 records fit before and after enta
   assert.equal(capacity.diagnostic_limit_bytes, 16384); assert.equal(capacity.coordinator_metadata_limit_bytes, 65536);
   assert.equal(capacity.lifetime_work_records, 37); assert.equal(capacity.native_budget_changed, false);
 });
+// Independent model replays of one invented schedule, not a runtime joining two protocol ledgers.
+function p3Replay() {
+  const a = allocation("u0-unavailable"), f = fixture("u0-unavailable"), recipe = describeUnsignedFixture(f);
+  let ns = 1n; const tick = () => point(ns++), at = n => { ns = BigInt(n) + 1n; return point(n); };
+  const initial = tick(), transport = model({ allocation: a, allocated_at: initial });
+  const cohort = createUnsignedCohortAssemblyModel({ request: f.request, clock }), token = cohort.beginCase({ allocation: a, at: initial });
+  const decoder = createUnsignedProtocolDecoder();
+  const event = (kind, payload = {}, when = tick()) => cohort.applyModelEvent(token, { kind, payload, at: when });
+  const record = (kind, payload = {}) => {
+    const when = tick(), result = event("receipt", { kind, payload, stamp: { ...when,
+      wall_utc: "2026-10-31T00:00:00.000Z", wall_jst: "2026-10-31T09:00:00.000+09:00" } }, when);
+    event("receipt_readback", { line: result.line }); return result;
+  };
+  const compare = () => {
+    const t = transport.describe(), b = cohort.describe().active;
+    for (const k of ["binding", "frames", "next_ordinals", "protocol_state", "go_submitted", "baseline_sha256", "trace_chunks", "trace_events", "trace_sha256"])
+      assert.deepEqual(t[k], b[k], k);
+    assert.deepEqual(t.late_frames, cohort.describeLateFrames(token).late_frames);
+    assert.deepEqual(t.late_capture, cohort.describeLateFrames(token).late_capture);
+    assert.ok(Buffer.byteLength(canonical(cohort.describe())) <= cohort.describe().capacity.diagnostic_ceiling_bytes);
+    for (const view of [t, cohort.describe()]) for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(view[k], false, k);
+    return t;
+  };
+  const command = (kind, payload = {}, binding) => {
+    const when = tick(), op = transport.planCommand({ kind, payload, ...(binding ? { binding } : {}), at: when });
+    event("frame", { line: op.line }, when); compare(); return op;
+  };
+  const start = (op, when = tick()) => { transport.startWrite(op.reference, { at: when });
+    event(JSON.parse(op.line).kind === "CANCEL" && transport.describe().stopped ? "shutdown_write" : "write",
+      transport.describe().stopped ? { outcome: "started" } : { ordinal: JSON.parse(op.line).ordinal, outcome: "started" }, when); compare(); };
+  const complete = (op, outcome = "completed", when = tick()) => { transport.completeWrite(op.reference, { outcome, at: when });
+    const shutdown = transport.describe().writes.find(w => w.ordinal === JSON.parse(op.line).ordinal).shutdown;
+    event(shutdown ? "shutdown_write" : "write", shutdown ? { outcome } : { ordinal: JSON.parse(op.line).ordinal, outcome }, when); compare(); };
+  const write = op => { start(op); complete(op); return op; };
+  const line = (kind, payload, ordinal = transport.describe().next_ordinals.worker) => canonical({
+    binding: transport.describe().binding, direction: "worker", ordinal, kind, payload }) + "\n";
+  const normal = raw => { const when = tick(); transport.receive({ line: raw, at: when }); event("frame", { line: raw }, when); compare(); };
+  const late = raw => { transport.receive({ line: raw }); cohort.observeLateFrame(token, { line: raw }); compare(); };
+  const stop = reason => { const when = tick(); transport.stop({ reason, at: when }); cohort.stop({ reason, at: when }); compare(); };
+  const shutdown = (when = tick()) => { const t = transport.planShutdown({ at: when, worker_live: true, pipe_qualified: true }), b = event("shutdown_plan", {}, when);
+    assert.equal(t.decision, b.decision); assert.equal(t.line, b.frame); compare(); return t; };
+  record("case_allocated"); event("resource", { resource: "worker", action: "attach" }); write(command("LAUNCH"));
+  const readyLine = line("READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: digest(transport.describe().binding) });
+  normal(readyLine);
+  for (const [i, e] of recipe.entries.entries()) {
+    const proof = { kind: e.kind, device: "1", inode: String(100 + i), uid: "501", gid: "20", mode: e.mode,
+      flags: "0", birthtime_ns: "1", mtime_ns: "1", ctime_ns: "1", nlink: e.kind === "file" ? "1" : "2", size: e.size ?? "0",
+      allocated_bytes: "0", acl: "none", acl_hash: h, sha256: e.sha256 ?? null };
+    record("create_intent", { entry_index: i, ...(i === 0 ? { ready_sha256: sha(readyLine) } : {}) });
+    record("create_result", { entry_index: i, proof, ...(i === 0 ? { fixture_name: f.fixture_name } : {}) });
+  }
+  record("setup_sealed", { inventory_sha256: h, setup: setup(f) });
+  write(command("PREPARE", { configuration: configuration(f), launch_nonce: a.launch_nonce }, { ...transport.describe().binding, setup: setup(f) }));
+  normal(line("BASELINED", baselineValue)); record("worker_prepared"); record("baseline_bound", baselineValue);
+  record("go_intent", { baseline_sha256: transport.describe().baseline_sha256, bound_objects_sha256: null });
+  write(command("GO", { baseline_sha256: transport.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));
+  const released = () => ({ ...release({ m: transport }), primary_code: "oracle_unavailable" });
+  return { transport, cohort, token, decoder, tick, at, event, record, compare, command, start, complete, write, line, normal, late, stop, shutdown, released };
+}
+test("B4-P3 the same reserved-CANCEL schedule replays independently through transport and B2", () => {
+  const s = p3Replay(), op = s.command("CANCEL"), before = s.compare();
+  const lines = s.decoder.push(Buffer.from(s.line("RELEASED", s.released()))); assert.equal(lines.length, 1);
+  s.normal(lines[0]); const released = s.compare(); s.write(op); const drained = s.compare();
+  assert.equal(drained.frames, before.frames + 1); assert.deepEqual(drained.next_ordinals, released.next_ordinals);
+  assert.equal(drained.writes.at(-1).sha256, sha(op.line)); assert.equal(drained.writes.at(-1).deadline_ns, op.deadline_ns);
+  assert.equal(drained.protocol_state, "RELEASED"); assert.equal(drained.late_frames.length, 0);
+  assert.equal(s.cohort.describe().active.window.starts.settlement, released.settlement_start_ns); s.decoder.end();
+});
+const p3Trace = (s, index) => s.line("TRACE_CHUNK", { chunk_index: index, events: [{ ordinal: index + 1, api: "info", edge: "end",
+  clock_domain: "worker-clock", monotonic_ns: String(index + 1), code: null, byte_count: "0", sha256: null }] });
+const p3Failure = () => ({ phase: "finalize", primary_code: "invented_finalize_failure", close_errors: [], diagnostic_sha256: h,
+  resources, query_created: true, instrumentation_overflow: false });
+for (const cut of ["before_release", "after_release", "after_start", "after_callback"])
+  test("B4-P3 stop cuts the reserved CANCEL/release/callback schedule without promoting late facts: " + cut, () => {
+    const s = p3Replay(), op = s.command("CANCEL");
+    if (cut !== "before_release") s.normal(s.line("RELEASED", s.released()));
+    if (["after_start", "after_callback"].includes(cut)) s.start(op);
+    if (cut === "after_callback") s.complete(op);
+    s.stop("primary"); const before = s.compare(), evidence = s.cohort.describe().active.evidence;
+    const raw = cut === "before_release" ? s.line("RELEASED", s.released()) : s.line("FAILED", p3Failure());
+    for (const line of s.decoder.push(Buffer.from(raw))) s.late(line);
+    const after = s.compare();
+    assert.equal(after.stopped, "primary"); assert.equal(after.frames, before.frames + 1); assert.equal(after.next_ordinals.worker, before.next_ordinals.worker + 1);
+    assert.deepEqual(after.writes, before.writes); assert.equal(after.trace_sha256, before.trace_sha256);
+    assert.equal(after.phase_deadline_ns, before.phase_deadline_ns); assert.equal(after.settlement_start_ns, before.settlement_start_ns);
+    assert.deepEqual(s.cohort.describe().active.evidence, evidence); assert.equal(after.late_capture.capture, "ended");
+    if (cut === "after_start") s.complete(op);
+    const plan = s.shutdown(); assert.equal(plan.decision, cut === "before_release" ? "CANCEL_THEN_CLOSE" : "CLOSE_ONLY");
+    if (plan.reference) { assert.equal(plan.reference, op.reference); assert.equal(plan.line, op.line); s.write(plan); }
+    const when = s.tick(); s.transport.closeCommand({ outcome: "confirmed" }); s.event("command_close", { outcome: "confirmed" }, when);
+    s.transport.workerExit({ exit_code: 1, signal: null }); s.event("worker_exit", { exit_code: 1, signal: null }); s.compare();
+    assert.equal(s.transport.describe().writes.filter(w => w.kind === "CANCEL").length, 1);
+    assert.equal(s.cohort.describe().active.window.starts.teardown, undefined); s.decoder.end();
+  });
+for (const planned of [false, true]) for (const disposition of ["capacity", "malformed", "duplicate"])
+  test(`B4-P3 ${disposition} intake with shutdown already planned=${planned} retains exactly its original authority`, () => {
+    const s = p3Replay(), original = s.command("CANCEL"); s.stop("primary"); const plan = planned ? s.shutdown() : null;
+    let invalid;
+    if (disposition === "capacity") { for (let i = 0; i < 4; i++) s.late(p3Trace(s, i)); invalid = p3Trace(s, 4); }
+    else if (disposition === "duplicate") { invalid = p3Trace(s, 0); s.late(invalid); }
+    else invalid = "{}\n";
+    const before = s.compare();
+    assert.throws(() => s.transport.receive({ line: invalid }), disposition === "capacity" ? /late_capacity/ : disposition === "duplicate" ? /protocol_ordinal/ : /invalid_input/);
+    assert.throws(() => s.cohort.observeLateFrame(s.token, { line: invalid }), disposition === "capacity" ? /late_capacity/ : disposition === "duplicate" ? /protocol_ordinal/ : /invalid_input/);
+    const after = s.compare(); assert.equal(after.frames, before.frames); assert.deepEqual(after.next_ordinals, before.next_ordinals);
+    assert.equal(after.late_capture.capture, disposition === "capacity" ? "frozen" : "refused"); assert.equal(after.stopped, "primary");
+    const allowed = disposition === "capacity", shutdown = plan ?? s.shutdown();
+    if (planned && !allowed) {
+      const when = s.tick(); assert.throws(() => s.transport.startWrite(shutdown.reference, { at: when }), /shutdown_write_order/);
+      assert.throws(() => s.event("shutdown_write", { outcome: "started" }, when), /shutdown_write_order/);
+    } else if (allowed) {
+      assert.equal(shutdown.decision, "CANCEL_THEN_CLOSE"); assert.equal(shutdown.reference, original.reference); assert.equal(shutdown.line, original.line); s.write(shutdown);
+    } else assert.equal(shutdown.decision, "CLOSE_ONLY");
+    const final = s.compare(); assert.equal(final.writes.length, 4); assert.equal(final.writes.at(-1).deadline_ns, original.deadline_ns);
+    assert.equal(final.writes.at(-1).started, allowed); assert.equal(final.settlement_start_ns, before.settlement_start_ns);
+    assert.throws(() => s.transport.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }), /shutdown_once/);
+  });
+for (const stage of ["before_report", "pending_report", "confirmed_report", "pending_index", "retained_case", "closed_index"])
+  test("B4-P3 reserved CANCEL and late RELEASED do not backfill frozen evidence at " + stage, () => {
+    const s = p3Replay(), op = s.command("CANCEL"); s.stop("primary");
+    const raw = s.line("RELEASED", s.released()); let captures = 0;
+    const arrive = current => {
+      if (current !== stage) return;
+      const before = s.cohort.describe(), t = s.transport.describe(); s.late(raw); captures++;
+      const after = s.cohort.describe(); assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.rows, before.rows);
+      assert.equal(after.first_stop_ns, before.first_stop_ns); assert.deepEqual(after.active.window, before.active.window);
+      assert.deepEqual(s.transport.describe().writes, t.writes); assert.equal(after.active.protocol_state, "STOPPED");
+    };
+    s.record("stop_summary", { reason: "primary", details: [] }); s.record("ready_to_report", { candidate_outcome: "FAIL", assessment_sha256: null });
+    arrive("before_report"); const when = s.tick(), report = s.event("report", { observation: null, trace: [], comparison: null, limitations: [],
+      save_stamp: { ...when, wall_utc: "2026-10-31T00:00:00.000Z", wall_jst: "2026-10-31T09:00:00.000+09:00" } }, when);
+    const reportBytes = report.line; arrive("pending_report"); s.event("report_readback", { line: report.line }); arrive("confirmed_report");
+    s.record("terminal", { report_sha256: report.sha256 }); s.event("case_closes", { receipt: "confirmed", report: "confirmed", errors: [] });
+    const row = s.event("index_row"), rowBytes = row.line; arrive("pending_index"); s.event("index_readback", { line: row.line });
+    s.cohort.finishCase(s.token, { at: s.tick() }); s.cohort.finishNotRun(); arrive("retained_case");
+    s.cohort.closeIndex({ outcome: "confirmed", at: s.tick() }); arrive("closed_index");
+    const b = s.cohort.describe(), t = s.compare(); assert.equal(captures, 1); assert.equal(report.line, reportBytes); assert.equal(row.line, rowBytes);
+    assert.equal(b.active.evidence.report_sha256, sha(reportBytes)); assert.equal(b.active.evidence.index_sha256, sha(rowBytes));
+    assert.equal(b.rows.length, 24); assert.equal(b.rows[0].model_verdict, "FAIL"); assert.equal(b.rows.filter(r => r.model_verdict === "NOT_RUN").length, 23);
+    assert.equal(b.closed, true); assert.equal(b.active.evidence.evidence_saved, false); assert.equal(t.writes.at(-1).started, false);
+    assert.equal(t.writes.at(-1).sha256, sha(op.line)); assert.equal(b.active.slots.fixture, "live"); assert.equal(b.active.slots.worker, "live");
+    assert.equal(t.cleanup_execution_available, false); assert.equal(t.late_capture.semantic_verified, false);
+  });
+for (const first of [0, 1]) for (const traffic of ["release", "malformed", "capacity"])
+  test(`B4-P3 late ${traffic} cannot settle original lifetime work before close event order ${first}`, () => {
+    const s = p3Replay(), l = lifetime(), ports = pair(l), work = ["query", "release", "status_write"].map(kind =>
+      l.beginWork(ports, { kind, ordinal: 1, references: references() }));
+    s.command("CANCEL"); s.stop("primary"); l.stop({ reason: "primary" }); const before = l.describe();
+    if (traffic === "release") s.late(s.line("RELEASED", s.released()));
+    else if (traffic === "malformed") {
+      assert.throws(() => s.transport.receive({ line: "{}\n" }), /invalid_input/);
+      assert.throws(() => s.cohort.observeLateFrame(s.token, { line: "{}\n" }), /invalid_input/);
+    } else {
+      for (let i = 0; i < 4; i++) s.late(p3Trace(s, i)); const overflow = p3Trace(s, 4);
+      assert.throws(() => s.transport.receive({ line: overflow }), /late_capacity/);
+      assert.throws(() => s.cohort.observeLateFrame(s.token, { line: overflow }), /late_capacity/);
+    }
+    s.compare(); assert.deepEqual(l.describe(), before);
+    for (const token of work) {
+      assert.throws(() => l.closePort(ports, { index: first, outcome: "returned" }), /close_once/);
+      assert.deepEqual(l.describe().ports, references()); assert.equal(l.describe().close_attempted, false);
+      l.settleWork(token, { outcome: "confirmed" });
+    }
+    l.closePort(ports, { index: first, outcome: "returned" }); l.observeClose(ports, { index: first });
+    assert.equal(l.describe().close_confirmed, false); l.observeClose(ports, { index: 1 - first }); assert.equal(l.describe().close_confirmed, true);
+    assert.throws(() => l.closePort(ports, { index: 1 - first, outcome: "returned" }), /close_once/);
+    assert.equal(l.describe().stopped, "primary"); assert.equal(s.transport.describe().stopped, "primary");
+    assert.ok(Buffer.byteLength(canonical({ transport: s.transport.describe(), lifetime: l.describe() })) <= s.transport.capacity().diagnostic_ceiling_bytes);
+  });
+for (const fault of ["unavailable", "foreign", "rollback"])
+  test("B4-P3 receive-time clock fault retains the reserved CANCEL and only untimed original-case diagnostics: " + fault, () => {
+    const s = p3Replay(), op = s.command("CANCEL"), before = s.compare();
+    const bad = fault === "unavailable" ? null : fault === "foreign" ? { ...s.tick(), clock_domain: "foreign" } : point(0);
+    const raw = s.line("RELEASED", s.released()), frames = s.decoder.push(Buffer.from(raw)); assert.equal(frames.length, 1);
+    s.transport.receive({ line: frames[0], at: bad });
+    assert.throws(() => s.event("frame", { line: frames[0] }, bad), /invalid_input|clock_order/);
+    s.cohort.observeLateFrame(s.token, { line: frames[0] }); const after = s.compare(), b = s.cohort.describe();
+    assert.equal(after.clock_invalid, true); assert.equal(b.clock_invalid, true); assert.equal(b.first_stop_ns, null);
+    assert.equal(after.frames, before.frames + 1); assert.deepEqual(after.writes, before.writes);
+    assert.equal(after.late_capture.receive_at, null); assert.equal(after.writes.at(-1).deadline_ns, op.deadline_ns);
+    assert.equal(after.phase_deadline_ns, before.phase_deadline_ns); assert.equal(after.settlement_start_ns, before.settlement_start_ns);
+    assert.equal(s.transport.planShutdown({ at: null, worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+    assert.throws(() => s.event("late_frame", { line: frames[0] }), /late_requires_untimed/);
+    assert.equal(s.cohort.describe().active.late_count, 1); s.decoder.end();
+  });
+for (const offset of [-2000000n, -500000n, 0n, 1n])
+  test("B4-P3 the original transport deadline dominates B2 phase-only facts at CANCEL offset " + offset, () => {
+    const s = p3Replay(), op = s.command("CANCEL"), end = BigInt(op.deadline_ns), receiveAt = end + offset;
+    const raw = s.line("RELEASED", s.released()), when = s.at(receiveAt);
+    if (offset < 0n) {
+      s.transport.receive({ line: raw, at: when }); s.event("frame", { line: raw }, when); s.compare();
+      if (offset === -2000000n) {
+        s.start(op, s.at(end - 1000000n)); s.complete(op, "completed", s.at(end - 1n));
+        assert.equal(s.transport.describe().stopped, null); assert.equal(s.transport.describe().late_frames.length, 0);
+      } else {
+        assert.throws(() => s.transport.startWrite(op.reference, { at: when }), /write_deadline/);
+        // B2 has no per-write reservation. Relay the transport's detected stop, never a write it refused.
+        s.cohort.stop({ reason: "write_deadline", at: when }); s.compare();
+        assert.equal(s.transport.describe().settlement_start_ns, String(receiveAt));
+      }
+    } else {
+      s.transport.receive({ line: raw, at: when });
+      // The known triggering deadline is supplied as a fact, not the later observation relabeled as that deadline.
+      s.cohort.stop({ reason: "write_deadline", at: point(end) }); s.cohort.observeLateFrame(s.token, { line: raw }); s.compare();
+      assert.equal(s.cohort.describe().first_stop_ns, String(end)); assert.equal(s.transport.describe().settlement_start_ns, String(end));
+      assert.equal(s.transport.describe().late_frames.length, 1); assert.equal(s.transport.describe().protocol_state, "STOPPED");
+    }
+    const t = s.transport.describe(); assert.equal(t.writes.at(-1).deadline_ns, op.deadline_ns); assert.equal(t.writes.at(-1).sha256, sha(op.line));
+    assert.equal(t.writes.at(-1).started, offset === -2000000n); assert.equal(t.writes.length, 4);
+    if (offset !== -2000000n) {
+      assert.equal(s.transport.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+      assert.equal(s.transport.describe().cleanup_execution_available, false);
+    }
+  });
+for (const input of ["partial_eof", "failed_batch", "terminal_release", "terminal_failure"])
+  test("B4-P3 decoder end/failure preserves the original reserved shutdown at " + input, () => {
+    const s = p3Replay(), op = s.command("CANCEL"); s.stop("primary"); const plan = s.shutdown(), before = s.compare();
+    let reason;
+    if (input === "partial_eof") {
+      const raw = s.line("RELEASED", s.released()); assert.deepEqual(s.decoder.push(Buffer.from(raw.slice(0, -1))), []);
+      assert.throws(() => s.decoder.end(), /partial|truncated/); reason = "truncated_frame";
+    } else if (input === "failed_batch") {
+      assert.throws(() => s.decoder.push(Buffer.concat([Buffer.from(s.line("RELEASED", s.released())), Buffer.from([255, 10])])));
+      assert.throws(() => s.decoder.push(Buffer.from("{}\n")), /stopped/); reason = "decoder_failure";
+    } else {
+      const payload = input === "terminal_release" ? s.released() : { ...p3Failure(), phase: "go" };
+      const raw = s.line(input === "terminal_release" ? "RELEASED" : "FAILED", payload);
+      for (const line of s.decoder.push(Buffer.from(raw))) s.late(line); s.decoder.end(); reason = "stream_closed";
+    }
+    s.transport.refuseReceive({ reason }); s.cohort.endLateFrames(s.token, { reason }); const after = s.compare();
+    const terminal = input.startsWith("terminal"); assert.equal(after.late_capture.capture, terminal ? "ended" : "refused");
+    assert.equal(after.frames, before.frames + (terminal ? 1 : 0)); assert.equal(after.late_frames.length, terminal ? 1 : 0);
+    assert.equal(after.stopped, "primary"); assert.equal(plan.reference, op.reference); assert.equal(plan.line, op.line);
+    if (terminal) s.write(plan);
+    else {
+      const when = s.tick(); assert.throws(() => s.transport.startWrite(plan.reference, { at: when }), /shutdown_write_order/);
+      assert.throws(() => s.event("shutdown_write", { outcome: "started" }, when), /shutdown_write_order/);
+    }
+    assert.equal(s.compare().writes.at(-1).started, terminal); assert.equal(s.transport.describe().phase_deadline_ns, before.phase_deadline_ns);
+  });
+for (const callback of ["completed", "uncertain", "late"])
+  test("B4-P3 a stopped original CANCEL callback cannot use late release to repair delivery: " + callback, () => {
+    const s = p3Replay(), op = s.command("CANCEL"); s.start(op); s.stop("primary"); s.late(s.line("RELEASED", s.released()));
+    const when = callback === "late" ? s.at(op.deadline_ns) : s.tick(), before = s.compare();
+    s.transport.completeWrite(op.reference, { outcome: callback === "uncertain" ? "uncertain" : "completed", at: when });
+    // The phase-only coordinator records the delivery disposition derived by the original transport.
+    s.event("write", { ordinal: 4, outcome: callback === "completed" ? "completed" : "uncertain" }, when); const after = s.compare();
+    assert.equal(after.frames, before.frames); assert.deepEqual(after.late_frames, before.late_frames);
+    assert.equal(after.writes.at(-1).decision, callback === "completed" ? "started" : "uncertain");
+    assert.equal(after.writes.at(-1).callback_at === null, callback === "late");
+    if (callback !== "late") assert.deepEqual(after.writes.at(-1).callback_at, when);
+    assert.equal(after.stopped, "primary");
+    assert.equal(after.settlement_start_ns, before.settlement_start_ns); assert.equal(s.shutdown().decision, "CLOSE_ONLY");
+  });
+for (const bound of ["settlement", "cohort"])
+  test("B4-P3 diagnostic traffic past the original " + bound + " end never renews grace", () => {
+    const s = p3Replay(); s.command("CANCEL"); s.stop("primary"); const before = s.compare(), first = s.cohort.describe().first_stop_ns;
+    s.late(p3Trace(s, 0)); const end = bound === "settlement" ? before.phase_deadline_ns : before.cohort_deadline_ns;
+    assert.equal(s.shutdown(s.at(BigInt(end) + 1n)).decision, "CLOSE_ONLY");
+    s.late(s.line("RELEASED", { ...s.released(), trace_chunks: 1, trace_events: 1 })); const after = s.compare();
+    assert.equal(after.frames, before.frames + 2); assert.equal(after.phase_deadline_ns, before.phase_deadline_ns);
+    assert.equal(after.settlement_start_ns, before.settlement_start_ns); assert.equal(after.cohort_deadline_ns, before.cohort_deadline_ns);
+    assert.equal(s.cohort.describe().first_stop_ns, first); assert.equal(after.late_capture.receive_at, null);
+    assert.equal(after.writes.at(-1).started, false); assert.equal(after.protocol_state, "STOPPED");
+  });
+for (const completed of [false, true])
+  test("B4-P3 a known C1 violation survives late failure and the original CANCEL callback, completed=" + completed, () => {
+    const s = p3Replay(), op = s.command("CANCEL"), released = { ...s.released(), requests_dispatched: 2 };
+    s.normal(s.line("RELEASED", released)); s.start(op); if (completed) s.complete(op);
+    s.record("run_outcome", { primary_code: released.primary_code, requests_dispatched: 2, authenticated_requests: 0, diagnostic_sha256: h,
+      observation_sha256: null, observation_bytes: 0, trace_sha256: released.trace_sha256, trace_events: 0 });
+    s.stop("primary"); const before = s.cohort.describe().active.evidence; assert.equal(before.c1_violation, true);
+    s.late(s.line("FAILED", p3Failure())); if (!completed) s.complete(op);
+    assert.equal(s.cohort.describe().active.evidence.c1_violation, true); assert.deepEqual(s.cohort.describe().active.evidence, before);
+    assert.equal(s.shutdown().decision, "CLOSE_ONLY"); assert.equal(s.transport.describe().protocol_state, "STOPPED");
+    assert.equal(s.transport.describe().stopped, "primary"); assert.equal(s.transport.describe().cleanup_execution_available, false);
+  });
 // A failing after hook is not a failed test under --test-isolation=none or a direct run, so this last test carries the check.
 test("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));
