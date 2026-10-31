@@ -55,6 +55,8 @@ function guard(s) {
 }
 test("B4-B4 launch effects stay private, fixed, source-bound and behind unavailable producers",()=>guard(source));
 test("B4-B4 source mutation probes reject new issuers, alternate arguments and lost ownership gates",()=>{
+  // Probe strings are written with LF; a CRLF checkout (Windows CI) is normalized first.
+  const text=source.replace(/\r\n/g,"\n");
   for(const [from,to]of [
     ['throw Error("cc4b3b_original_launch_plan_unavailable");','return {};'],['c.launchClaimed = true','c.launchClaimed = false'],
     ['parentLaunchPlans.get(planRef) !== plan','false'],['plan.worker.sha256 !== binding.worker_sha256','false'],
@@ -67,13 +69,13 @@ test("B4-B4 source mutation probes reject new issuers, alternate arguments and l
     ['aliases[0] === c.pipes.stdout','stdio?.[1] === c.pipes.stdout'],
     ['signal: knownSignal ? signal : null','signal: knownCode ? signal : null'],
     ['if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return null;',''],
-  ]) {assert.ok(source.includes(from),from);assert.throws(()=>guard(source.replace(from,to)),undefined,from);}
-  const tree=parse(source),root=tree.statements[4],bind=root.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name.text==="bindOriginalParentChild");
+  ]) {assert.ok(text.includes(from),from);assert.throws(()=>guard(text.replace(from,to)),undefined,from);}
+  const tree=parse(text),root=tree.statements[4],bind=root.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name.text==="bindOriginalParentChild");
   const passes=bind.body.statements.filter(n=>ts.isForOfStatement(n)&&n.expression.getText()==="bindings");
-  const [a,b]=passes;const swapped=source.slice(0,a.getStart())+b.getText()+source.slice(a.end,b.getStart())+a.getText()+source.slice(b.end);
+  const [a,b]=passes;const swapped=text.slice(0,a.getStart())+b.getText()+text.slice(a.end,b.getStart())+a.getText()+text.slice(b.end);
   assert.throws(()=>guard(swapped));
   const failure=root.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name.text==="failOriginalParentEvent");
-  const lateGuard=failure.body.statements[3];assert.throws(()=>guard(source.slice(0,lateGuard.getStart())+source.slice(lateGuard.end)));
+  const lateGuard=failure.body.statements[3];assert.throws(()=>guard(text.slice(0,lateGuard.getStart())+text.slice(lateGuard.end)));
 });
 test("B4-B4 memory harness substitutes imports only after real effects are denied",()=>{
   const s=read("./nativeBarAdmissionUnsignedParentLaunch.test.mjs"),first=s.indexOf('await import("../helpers/');
