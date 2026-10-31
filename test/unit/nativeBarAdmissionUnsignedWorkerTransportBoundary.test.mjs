@@ -46,7 +46,7 @@ function lifetimeGuard(text) {
     'stop("pair_reference_lost")', 'ports[q.index] = "unreferenced"', 'referenceAttempted[q.index]',
     'closeAttempted = true', 'referencesAtClose = [...ports]', 'closeAttempted && closeEvents.every(Boolean)',
     'closeEvents[q.index] = true', '!originalPorts[q.index]', 'original_ports: [...originalPorts]',
-    'stop("unexpected_port_close")', 'ports = ports.map(']) assert.ok(body.includes(fragment), fragment);
+    'stop("unexpected_port_close")', 'ports = ports.map(', '!originalPorts[i] ||', 'if (!closeAttempted) ports[q.index] = "unreferenced"']) assert.ok(body.includes(fragment), fragment);
   assert.doesNotMatch(body, /closeAttempted\s*\[|close_attempted:\s*\[/);
   assert.doesNotMatch(body, /unref\s*\(|postMessage\s*\(|once\s*\(/);
 }

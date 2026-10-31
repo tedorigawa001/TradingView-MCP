@@ -608,6 +608,26 @@ test("B4-A absent or unknown allocation has no identified original port to confi
     assert.equal(m.describe().close_confirmed, false); assert.equal(m.describe().stopped, "pair_unqualified");
   }
 });
+for (const status of ["absent", "unknown"]) for (const outcome of ["returned", "threw"])
+  test(`B4-A a close through the identified end leaves an unidentified ${status} end as allocated: ${outcome}`, () => {
+    const m = lifetime(), p = m.allocate({ ports: ["unreferenced", status] }); m.closePort(p, { index: 0, outcome });
+    assert.deepEqual(m.describe().ports, [outcome === "returned" ? "closing" : "unknown", status]);
+    assert.deepEqual(m.describe().references_at_close, ["unreferenced", status]);
+  });
+for (const event of ["message", "messageerror", "removed"])
+  test("B4-A a port event after the close call keeps its own stop reason and close progress: " + event, () => {
+    const m = lifetime(), p = pair(m); m.closePort(p, { index: 0, outcome: "returned" });
+    m.noteListeners(p, { index: 1, event });
+    assert.equal(m.describe().stopped, event === "removed" ? "pair_listener_removed" : "unexpected_port_event");
+    assert.deepEqual(m.describe().ports, ["closing", "closing"]); assert.throws(() => m.noteListeners(p, { index: 1, event: "installed" }));
+    m.observeClose(p, { index: 0 }); m.observeClose(p, { index: 1 }); assert.equal(m.describe().close_confirmed, true);
+    assert.throws(() => m.noteListeners(p, { index: 1, event }), /listeners_unavailable/);
+  });
+test("B4-A an unused pair closed before any listener cannot gain listeners or a reference afterwards", () => {
+  const m = lifetime(), p = m.allocate({ ports: ["unreferenced", "unreferenced"] }); m.closePort(p, { index: 0, outcome: "returned" });
+  assert.throws(() => m.noteListeners(p, { index: 1, event: "installed" }), /listeners_unavailable/);
+  assert.deepEqual(m.describe().ports, ["closing", "closing"]); assert.deepEqual(m.describe().listeners, [false, false]);
+});
 test("B4-A close starts no new work even when supplied references claim to remain valid", () => {
   const m = lifetime(), p = pair(m); m.closePort(p, { index: 0, outcome: "returned" });
   assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: references() }), /closing/);

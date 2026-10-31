@@ -253,14 +253,16 @@ export function createUnsignedWorkerLifetimeModel(input) {
     }); },
     noteListeners(ref, raw) { return guard(() => {
       same(ref); const q = parse(z.object({ index: indexSchema, event: z.enum(["installed", "removed", "message", "messageerror"]) }).strict(), raw);
-      if (closeAttempted || ports[q.index] === "closed" || ports[q.index] === "absent") refuse("listeners_unavailable");
+      if (ports[q.index] === "closed" || ports[q.index] === "absent") refuse("listeners_unavailable");
       if (q.event === "installed") {
+        if (closeAttempted) refuse("listeners_unavailable");
         if (listenerAttempted[q.index]) refuse("listeners_once");
         if (stopped) refuse("lifetime_stopped");
         listenerAttempted[q.index] = true; listeners[q.index] = true; ports[q.index] = "referenced";
       } else {
+        // Before its own close event a closing end can still report these; each keeps its own stop and leaves close progress alone.
         if (!listeners[q.index]) refuse("listeners_unavailable");
-        if (q.event === "removed") { listeners[q.index] = false; ports[q.index] = "unreferenced"; referenceConfirmed[q.index] = false; stop("pair_listener_removed"); }
+        if (q.event === "removed") { listeners[q.index] = false; if (!closeAttempted) ports[q.index] = "unreferenced"; referenceConfirmed[q.index] = false; stop("pair_listener_removed"); }
         else stop("unexpected_port_event");
       }
       return describe();
@@ -298,7 +300,7 @@ export function createUnsignedWorkerLifetimeModel(input) {
       closeAttempted = true; closeIndex = q.index; closeOutcome = q.outcome; referencesAtClose = [...ports];
       referenceConfirmed.fill(false);
       // One call affects the entangled pair; only each original asynchronous event confirms its own end.
-      ports = ports.map(p => p === "closed" || p === "absent" ? p : q.outcome === "returned" ? "closing" : "unknown");
+      ports = ports.map((p, i) => !originalPorts[i] || p === "closed" || p === "absent" ? p : q.outcome === "returned" ? "closing" : "unknown");
       if (q.outcome !== "returned") stop("port_close_unknown"); return describe();
     }); },
     observeClose(ref, raw) { return guard(() => {
