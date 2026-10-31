@@ -21,12 +21,14 @@ async function prepareOriginalQualification() {
   const { createUnsignedCohortAssemblyModel } = await import("./unsignedCohortAssemblyModel.mjs");
   const { createUnsignedProtocolDecoder } = await import("./unsignedAdapterSupport.mjs");
   const { planUnsignedParentCheckpoint, validateUnsignedParentTerminalFacts, summarizeUnsignedParentDiscard,
-    describeUnsignedParentConnectionCapacity, planUnsignedParentReservation } = await import("./unsignedParentConnectionContracts.mjs");
+    describeUnsignedParentConnectionCapacity, planUnsignedParentReservation, assessUnsignedParentCallback } = await import("./unsignedParentConnectionContracts.mjs");
+  const { encodeUnsignedTransportFrame } = await import("./unsignedWorkerTransportContracts.mjs");
   const limits = describeUnsignedQualificationProfile(), root = path.resolve(url.fileURLToPath(new URL("../../", import.meta.url)));
   const buildReferences = new WeakMap(), namespaceReferences = new WeakMap();
   const parentOwners = new WeakMap(), parentSessions = new WeakMap();
   const parentHelperPlans = new WeakMap();
   const parentLaunchPlans = new WeakMap();
+  const parentCommandPlans = new WeakMap(), parentWrites = new WeakMap();
   return buildAndQualify();
 
   function originalQualificationPolicy() { throw Error("cc4b3b_operational_profile_unavailable"); }
@@ -166,7 +168,8 @@ async function prepareOriginalQualification() {
       phaseTimer: null, operationTimer: null, phaseGeneration: 0, operationGeneration: 0, phaseSelections: 0, phaseKey: null,
       supervisionArmed: false, supervisionTransition: false, checkingSupervision: false, stoppingSupervision: false, stoppedObserved: false, helperLease: null,
       allocation: null, launchClaimed: false, handlersAttempted: false, handlersBound: false, bindingsValid: false,
-      returnedStreams: [], output: { stdout: null, stderr: null }, reverse: { bytes: 0, incomplete: false } };
+      returnedStreams: [], output: { stdout: null, stderr: null }, reverse: { bytes: 0, incomplete: false },
+      commandBusy: false, pendingWrite: null, shutdownConsidered: false, shutdownDecision: null, ending: false, endRelayed: false };
     o.active = c;
     const allocation = originalParentAllocation(); originalParentCaseReceipt(); originalParentWorkerQualification();
     c.allocation = allocation;
@@ -497,7 +500,7 @@ async function prepareOriginalQualification() {
     if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return;
     let at = null; try { at = checkpointOriginalParent(c); } catch { /* No invented point after an unavailable checkpoint. */ }
     if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return;
-    stopOriginalParentSupervision(c, reason, at);
+    stopOriginalParentSupervision(c, reason, at); return at;
   }
   function observeOriginalParentOutput(ref, original, slot, bytes) {
     const c = currentOriginalParentSession(ref);
@@ -702,6 +705,8 @@ async function prepareOriginalQualification() {
       : { ...c.facts, pipes: { ...c.facts.pipes, [slot]: changed } };
     const checked = validateUnsignedParentTerminalFacts(proposed).facts;
     if (child) c.facts.child = checked.child; else c.facts.pipes = checked.pipes;
+    if (slot === "command" && event === "error") uncertainOriginalParentWrite(c, c.pendingWrite, "command_pipe_failed");
+    if (slot === "command" && ["finish", "close", "error"].includes(event) && !c.ending) relayOriginalParentEnd(c);
     if (slot === "status" && event === "error") { faultOriginalParent(c, "decoder_failure"); return describeOriginalParent(ref); }
     if (slot === "status" && ["end", "close"].includes(event)) return endOriginalParent(ref, original);
     const d = syncOriginalParent(c);
@@ -709,6 +714,214 @@ async function prepareOriginalQualification() {
       const at = checkpointOriginalParent(c);
       if (at) { c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.stop({ reason: "parent_terminal_event", at }); }
     }
+    return describeOriginalParent(ref);
+  }
+  function qualifyOriginalParentPipe(c, child, pipe) {
+    if (currentOriginalParentSession(c.reference) !== c || c.child !== child || c.pipes.command !== pipe || !child || !pipe
+      || !c.handlersBound || !c.bindingsValid || !c.facts.launch.returned || c.facts.child.error || c.facts.child.exit || c.facts.child.close
+      || ["end_seen", "finish_seen", "close_seen", "error"].some(k => c.facts.pipes.command[k]) || c.facts.command_end.decision !== "not_requested"
+      || c.owner.coordinator.describe().active.slots.worker !== "live") refuse("parent_command_pipe");
+  }
+  function consumeOriginalParentCommandProof(c, kind) {
+    const reference = prepareOriginalParentCommand(c.reference, kind), proof = parentCommandPlans.get(reference);
+    if (!proof || proof.owner !== c || proof.kind !== kind || proof.child !== c.child || proof.pipe !== c.pipes.command || proof.consumed) refuse("parent_command_proof");
+    proof.consumed = true; return proof;
+  }
+  function retainOriginalParentWrite(c, line, reservation, shutdown) {
+    const frame = JSON.parse(line), generation = c.facts.commands.length + 1;
+    if (generation > 5 || c.pendingWrite || c.facts.pending_generation !== null || c.facts.commands.some(r => r.kind === frame.kind)) refuse("parent_command_busy");
+    const reference = Object.freeze(Object.create(null)), record = { kind: frame.kind, ordinal: frame.ordinal, generation, reservation,
+      sha256: hash(Buffer.from(line)), bytes: Buffer.byteLength(line), started: false, write_return_seen: false, backpressure: null,
+      callback_seen: false, observed_outcome: null, callback_at: null, observation_point: null, decision: "planned", shutdown };
+    const write = { reference, owner: c, record, line, child: c.child, pipe: c.pipes.command, committed: false, attempted: false, callbackClaimed: false };
+    c.facts.commands.push(record); c.facts.pending_generation = generation; c.pendingWrite = write; parentWrites.set(reference, write); return write;
+  }
+  function planOriginalParentCommand(ref, kind) {
+    const c = currentOriginalParentSession(ref);
+    if (!["LAUNCH", "PREPARE", "GO", "CANCEL", "FINALIZE"].includes(kind) || c.commandBusy || c.pendingWrite || c.facts.pending_generation !== null
+      || c.facts.commands.length >= 5 || c.facts.commands.some(r => r.kind === kind)) refuse("parent_command_busy");
+    c.commandBusy = true;
+    try {
+      qualifyOriginalParentDispatch(ref); qualifyOriginalParentPipe(c, c.child, c.pipes.command);
+      const proof = consumeOriginalParentCommandProof(c, kind), at = qualifyOriginalParentDispatch(ref);
+      qualifyOriginalParentPipe(c, proof.child, proof.pipe);
+      const d = c.owner.coordinator.describe(), binding = kind === "PREPARE" ? proof.binding : d.active.binding;
+      const payload = kind === "PREPARE" ? proof.payload : kind === "GO"
+        ? { baseline_sha256: d.active.baseline_sha256, baseline_readback: true, go_intent_readback: true } : {};
+      const reservation = planUnsignedParentReservation({ clock_domain: clock.binding.clock_domain, planned_ns: at.monotonic_ns,
+        phase_deadline_ns: d.active.window.phase_deadline_ns, cohort_deadline_ns: d.cohort_deadline_ns }).reservation;
+      const line = encodeUnsignedTransportFrame({ binding, direction: "parent", ordinal: d.active.next_ordinals.parent, kind, payload });
+      chargeHash(c.owner.s, Buffer.byteLength(line));
+      const write = retainOriginalParentWrite(c, line, reservation, false);
+      c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.applyModelEvent(c.caseRef, { kind: "frame", payload: { line }, at }); write.committed = true;
+      armOriginalParentOperation(ref); return write.reference;
+    } catch (error) { failOriginalParentEvent(c, "command_plan_failed"); throw error; }
+    finally { c.commandBusy = false; }
+  }
+  function sampleOriginalParentCompletion(c) {
+    if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return null;
+    const d = syncOriginalParent(c); if (!currentOriginalParentHandler(c, c.child) || d.clock_invalid) return null;
+    let at; try { at = clock.point(); } catch {
+      const failure = clock.describe();
+      if (!failure.clock_invalid && failure.stop_ns === clock.end_ns) at = { clock_domain: clock.binding.clock_domain, monotonic_ns: clock.end_ns };
+      else { if (currentOriginalParentHandler(c, c.child)) { c.owner.coordinator.noteClockFailure(c.caseRef, { reason: "clock_unavailable" }); syncOriginalParent(c); } return null; }
+    }
+    if (!currentOriginalParentHandler(c, c.child)) return null;
+    const pending = c.facts.commands.find(r => r.generation === c.facts.pending_generation);
+    const q = planUnsignedParentCheckpoint({ clock_domain: clock.binding.clock_domain, last_b2_ns: c.owner.lastNs, at,
+      phase_deadline_ns: d.active.window.phase_deadline_ns, cohort_deadline_ns: d.cohort_deadline_ns,
+      pending: pending ? { reservation: pending.reservation, started: pending.started } : null, stopped: d.stopped, clock_invalid: false });
+    if (q.clock_failure) { c.owner.coordinator.noteClockFailure(c.caseRef, { reason: q.clock_failure }); syncOriginalParent(c); return null; }
+    if (q.stop_first) { c.owner.lastNs = q.stop_first.at.monotonic_ns; c.owner.coordinator.stop(q.stop_first); syncOriginalParent(c); }
+    if (!currentOriginalParentHandler(c, c.child)) return null;
+    if (q.pending_disposition === "uncertain" && pending.decision === "started") {
+      pending.decision = "uncertain"; const relayAt = q.stop_first?.at ?? q.forward_at;
+      relayOriginalParentWrite(c, pending, "uncertain", relayAt);
+    }
+    if (!currentOriginalParentHandler(c, c.child)) return null;
+    const limit = BigInt(d.active.window.phase_deadline_ns) < BigInt(d.cohort_deadline_ns) ? BigInt(d.active.window.phase_deadline_ns) : BigInt(d.cohort_deadline_ns);
+    const stopped = syncOriginalParent(c).stopped; if (!currentOriginalParentHandler(c, c.child)) return null;
+    if (!stopped && limit - BigInt(at.monotonic_ns) < 1000000n) {
+      c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.stop({ reason: "deadline", at }); syncOriginalParent(c);
+    }
+    return currentOriginalParentHandler(c, c.child) ? at : null;
+  }
+  function relayOriginalParentWrite(c, record, outcome, at) {
+    if (!currentOriginalParentHandler(c, c.child)) return;
+    c.owner.lastNs = at.monotonic_ns;
+    c.owner.coordinator.applyModelEvent(c.caseRef, { kind: record.shutdown ? "shutdown_write" : "write",
+      payload: record.shutdown ? { outcome } : { ordinal: record.ordinal, outcome }, at });
+    syncOriginalParent(c);
+  }
+  function completeOriginalParentWrite(c, write, error) {
+    const r = write.record;
+    if (!currentOriginalParentHandler(c, write.child, write.pipe, "command") || r.callback_seen || write.callbackClaimed || !write.attempted) return;
+    write.callbackClaimed = true;
+    let at = null; try { at = sampleOriginalParentCompletion(c); } catch { failOriginalParentEvent(c, "callback_clock_failed"); }
+    if (!currentOriginalParentHandler(c, write.child, write.pipe, "command")) return;
+    const d = syncOriginalParent(c), q = assessUnsignedParentCallback({ kind: r.kind, reservation: r.reservation, last_ns: c.owner.lastNs, at,
+      started: r.started, callback_seen: false, previous_decision: r.decision, observed_outcome: error == null ? "completed" : "uncertain",
+      stopped: d.stopped, shutdown: r.shutdown, clock_invalid: d.clock_invalid });
+    r.callback_seen = true; r.observed_outcome = q.observed_outcome; r.callback_at = q.callback_at; r.observation_point = q.observation_point; r.decision = q.decision;
+    try {
+      if (q.clock_failure && !d.clock_invalid) c.owner.coordinator.noteClockFailure(c.caseRef, { reason: q.clock_failure });
+      if (q.stop_first?.at) { c.owner.lastNs = q.stop_first.at.monotonic_ns; c.owner.coordinator.stop(q.stop_first); }
+      syncOriginalParent(c);
+      if (q.relay_outcome && q.observation_point) relayOriginalParentWrite(c, r, q.relay_outcome, q.observation_point);
+    } catch { failOriginalParentEvent(c, "callback_relay_failed"); }
+    finally {
+      if (c.pendingWrite === write) { c.pendingWrite = null; c.facts.pending_generation = null; }
+      write.line = null;
+      if (c.operationTimer?.fact.owner === "command" && c.operationTimer.fact.command_generation === r.generation) clearOriginalParentTimer(c, "operation");
+    }
+  }
+  function uncertainOriginalParentWrite(c, write, reason) {
+    const r = write?.record; if (!r || !r.started || r.decision !== "started") return;
+    const at = failOriginalParentEvent(c, reason);
+    if (!r || !currentOriginalParentHandler(c, write.child, write.pipe, "command") || !r.started || r.decision !== "started") return;
+    r.decision = "uncertain";
+    if (at) try { relayOriginalParentWrite(c, r, "uncertain", at); } catch { /* Retain the unknown original delivery; never retry. */ }
+  }
+  function writeOriginalParentCommand(ref, token) {
+    const c = currentOriginalParentSession(ref), write = parentWrites.get(token), r = write?.record;
+    if (!write || write.owner !== c || write !== c.pendingWrite || c.commandBusy || !write.committed || write.attempted || r.started || r.callback_seen || r.decision !== "planned") refuse("parent_write_once");
+    c.commandBusy = true;
+    try {
+      const at = checkOriginalParentSupervision(ref); qualifyOriginalParentPipe(c, write.child, write.pipe);
+      if (c.helperLease || c.owner.s.helper || syncOriginalParent(c).stopped && !r.shutdown || !c.operationTimer?.active
+        || c.operationTimer.fact.command_generation !== r.generation || c.operationTimer.fact.deadline_ns !== r.reservation.deadline_ns) refuse("parent_write_binding");
+      if ((BigInt(r.reservation.deadline_ns) - BigInt(at.monotonic_ns)) / 1000000n < 1n) { failOriginalParentEvent(c, "write_deadline"); refuse("parent_write_deadline"); }
+      r.started = true; r.decision = "started"; relayOriginalParentWrite(c, r, "started", at);
+      if (!currentOriginalParentHandler(c, write.child, write.pipe, "command")) refuse("parent_write_reference");
+      const window = c.owner.coordinator.describe().active.window;
+      if (c.phaseKey !== window.phase + ":" + window.phase_deadline_ns) selectOriginalParentPhase(ref);
+      const dispatch = checkOriginalParentSupervision(ref); qualifyOriginalParentPipe(c, write.child, write.pipe);
+      if ((BigInt(r.reservation.deadline_ns) - BigInt(dispatch.monotonic_ns)) / 1000000n < 1n) refuse("parent_write_deadline");
+      write.attempted = true;
+      const returned = write.pipe.write(write.line, "utf8", error => completeOriginalParentWrite(c, write, error));
+      if (typeof returned !== "boolean") { uncertainOriginalParentWrite(c, write, "write_return_unknown"); refuse("parent_write_return"); }
+      r.write_return_seen = true; r.backpressure = !returned;
+      if (currentOriginalParentHandler(c, write.child, write.pipe, "command")) {
+        if (!r.callback_seen) checkpointOriginalParent(c); else if (!syncOriginalParent(c).stopped) checkOriginalParentSupervision(ref);
+      }
+      return describeOriginalParent(ref);
+    } catch (error) {
+      if (r.callback_seen) failOriginalParentEvent(c, "write_failed");
+      uncertainOriginalParentWrite(c, write, "write_failed"); throw error;
+    }
+    finally { c.commandBusy = false; }
+  }
+  function planOriginalParentShutdown(ref) {
+    const c = currentOriginalParentSession(ref);
+    if (c.commandBusy || c.shutdownConsidered || !syncOriginalParent(c).stopped) refuse("parent_shutdown_once");
+    if (c.helperLease || c.owner.s.helper) refuse("parent_command_busy");
+    c.commandBusy = true;
+    try {
+      const at = sampleOriginalParentCompletion(c), d = syncOriginalParent(c), pending = c.pendingWrite;
+      if (!currentOriginalParentHandler(c, c.child)) refuse("parent_shutdown_reference");
+      if (pending?.record.started && pending.record.decision === "started" && at) refuse("parent_command_busy");
+      const proof = consumeOriginalParentCommandProof(c, "CANCEL");
+      c.shutdownConsidered = true; c.shutdownDecision = "CLOSE_ONLY";
+      try { qualifyOriginalParentPipe(c, proof.child, proof.pipe); }
+      catch (error) {
+        if (error?.message !== "cc4b3b_parent_command_pipe" || !currentOriginalParentHandler(c, c.child)) throw error;
+        return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      }
+      const w = d.active.window;
+      if (!at || d.clock_invalid || d.first_stop_ns === null || w.phase !== "settlement"
+        || (BigInt(w.phase_deadline_ns) - BigInt(at.monotonic_ns)) / 1000000n < 1n) {
+        if (pending?.record.decision === "started") pending.record.decision = "uncertain";
+        return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      }
+      if (c.phaseKey === w.phase + ":" + w.phase_deadline_ns && !c.phaseTimer?.active) return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      if (pending && (pending.record.kind !== "CANCEL" || pending.record.started || BigInt(pending.record.reservation.deadline_ns) - BigInt(at.monotonic_ns) < 1000000n))
+        return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      selectOriginalParentPhase(ref); const planned = checkOriginalParentSupervision(ref), latest = c.owner.coordinator.describe();
+      if (pending && BigInt(pending.record.reservation.deadline_ns) - BigInt(planned.monotonic_ns) < 1000000n) return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      const reservation = planUnsignedParentReservation({ clock_domain: clock.binding.clock_domain, planned_ns: planned.monotonic_ns,
+        phase_deadline_ns: latest.active.window.phase_deadline_ns, cohort_deadline_ns: latest.cohort_deadline_ns }).reservation;
+      if (!pending) chargeHash(c.owner.s, 65536);
+      c.owner.lastNs = planned.monotonic_ns;
+      const result = c.owner.coordinator.applyModelEvent(c.caseRef, { kind: "shutdown_plan", payload: {}, at: planned });
+      if (result.decision === "CLOSE_ONLY") return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      let write;
+      if (pending) {
+        if (result.frame !== pending.line) refuse("parent_shutdown_line");
+        pending.record.shutdown = true; write = pending;
+      } else { write = retainOriginalParentWrite(c, result.frame, reservation, true); write.committed = true; }
+      c.shutdownDecision = "CANCEL_THEN_CLOSE";
+      armOriginalParentOperation(ref); return Object.freeze({ decision: c.shutdownDecision, reference: write.reference });
+    } catch (error) { failOriginalParentEvent(c, "shutdown_plan_failed"); throw error; }
+    finally { c.commandBusy = false; }
+  }
+  function relayOriginalParentEnd(c) {
+    const end = c.facts.command_end, pipe = c.facts.pipes.command;
+    if (c.ending || c.endRelayed || end.decision !== "attempted" || !pipe.close_seen || !currentOriginalParentHandler(c, c.child)) return;
+    c.endRelayed = true;
+    const at = sampleOriginalParentCompletion(c); if (!at || !currentOriginalParentHandler(c, c.child)) return;
+    const outcome = end.outcome === "returned" && pipe.finish_seen && !pipe.error ? "confirmed" : "unconfirmed";
+    try { c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.applyModelEvent(c.caseRef, { kind: "command_close", payload: { outcome }, at }); }
+    catch { failOriginalParentEvent(c, "command_close_failed"); }
+    syncOriginalParent(c);
+  }
+  function endOriginalParentCommand(ref) {
+    const c = currentOriginalParentSession(ref);
+    if (c.facts.command_end.decision !== "not_requested" || c.commandBusy || c.ending) refuse("parent_end_once");
+    const at = sampleOriginalParentCompletion(c), d = syncOriginalParent(c), pending = c.pendingWrite?.record;
+    if (!currentOriginalParentHandler(c, c.child)) refuse("parent_end_reference");
+    if (d.stopped) {
+      if (!c.shutdownConsidered) refuse("parent_shutdown_unconsidered");
+      if (pending?.started && pending.decision === "started") refuse("parent_command_busy");
+      if (c.shutdownDecision === "CANCEL_THEN_CLOSE" && pending && !pending.started && at
+        && BigInt(at.monotonic_ns) < BigInt(pending.reservation.deadline_ns) && d.active.late_capture !== "refused") refuse("parent_cancel_pending");
+    } else if (pending || c.facts.commands.at(-1)?.kind !== "FINALIZE" || c.facts.commands.at(-1)?.decision !== "completed") refuse("parent_finalize_pending");
+    const pipe = c.pipes.command, facts = c.facts.pipes.command;
+    if (!pipe || facts.error || facts.close_seen || !c.handlersBound) { c.facts.command_end.decision = "withheld"; return describeOriginalParent(ref); }
+    c.facts.command_end = { decision: "attempted", outcome: "unknown" }; c.ending = true;
+    try { pipe.end(); c.facts.command_end.outcome = "returned"; }
+    catch (error) { failOriginalParentEvent(c, "command_end_unknown"); throw error; }
+    finally { c.ending = false; if (currentOriginalParentHandler(c, c.child, pipe, "command")) relayOriginalParentEnd(c); }
+    if (currentOriginalParentHandler(c, c.child) && !syncOriginalParent(c).stopped) checkpointOriginalParent(c);
     return describeOriginalParent(ref);
   }
   function prepareOriginalParentCommand(ref, kind) {

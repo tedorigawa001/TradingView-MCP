@@ -14,11 +14,14 @@ const names = ["originalParentScope", "originalParentInvocation", "originalParen
   "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan", "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
   "originalParentLaunchPlan", "qualifyOriginalParentLaunch", "currentOriginalParentHandler", "failOriginalParentEvent", "observeOriginalParentOutput", "bindOriginalParentChild", "launchOriginalParent",
   "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent",
-  "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand"];
+  "endOriginalParent", "recordOriginalParentTerminal", "qualifyOriginalParentPipe", "consumeOriginalParentCommandProof", "retainOriginalParentWrite", "planOriginalParentCommand",
+  "sampleOriginalParentCompletion", "relayOriginalParentWrite", "completeOriginalParentWrite", "uncertainOriginalParentWrite", "writeOriginalParentCommand",
+  "planOriginalParentShutdown", "relayOriginalParentEnd", "endOriginalParentCommand", "prepareOriginalParentCommand"];
 const dependencies = {
   "./unsignedCohortAssemblyModel.mjs": ["createUnsignedCohortAssemblyModel"],
   "./unsignedAdapterSupport.mjs": ["createUnsignedProtocolDecoder"],
-  "./unsignedParentConnectionContracts.mjs": ["planUnsignedParentCheckpoint", "validateUnsignedParentTerminalFacts", "summarizeUnsignedParentDiscard", "describeUnsignedParentConnectionCapacity", "planUnsignedParentReservation"],
+  "./unsignedParentConnectionContracts.mjs": ["planUnsignedParentCheckpoint", "validateUnsignedParentTerminalFacts", "summarizeUnsignedParentDiscard", "describeUnsignedParentConnectionCapacity", "planUnsignedParentReservation", "assessUnsignedParentCallback"],
+  "./unsignedWorkerTransportContracts.mjs": ["encodeUnsignedTransportFrame"],
 };
 function guard(text) {
   const tree = ast(text); assert.equal(tree.parseDiagnostics.length, 0); assert.equal(tree.statements.length, 5);
@@ -73,9 +76,11 @@ function guard(text) {
         if (ts.isElementAccessExpression(n.expression)) assert.ok(ts.isStringLiteralLike(name));
         if (name.text === "on" && f.name.text === "bindOriginalParentChild") assert.equal(n.expression.getText(),"emitter.on");
         else if (name.text === "ref" && f.name.text === "launchOriginalParent") assert.equal(n.expression.getText(),"child.ref");
+        else if (name.text === "write" && f.name.text === "writeOriginalParentCommand") assert.equal(n.expression.getText(),"write.pipe.write");
         else assert.equal(members.has(name.text),false,name.text);
-        if (name.text === "applyModelEvent") assert.ok(["pointOriginalParent","receiveOriginalParent"].includes(f.name.text));
-        if (receiver.getText() === "clock" && name.text === "point") assert.ok(["reserveOriginalParentSession","pointOriginalParent","pointOriginalParentSupervision"].includes(f.name.text));
+        if (name.text === "end" && f.name.text === "endOriginalParentCommand") assert.equal(n.expression.getText(),"pipe.end");
+        if (name.text === "applyModelEvent") assert.ok(["pointOriginalParent","receiveOriginalParent","planOriginalParentCommand","relayOriginalParentWrite","planOriginalParentShutdown","relayOriginalParentEnd"].includes(f.name.text));
+        if (receiver.getText() === "clock" && name.text === "point") assert.ok(["reserveOriginalParentSession","pointOriginalParent","pointOriginalParentSupervision","sampleOriginalParentCompletion"].includes(f.name.text));
       }
       if (n.expression.getText() === "createUnsignedCohortAssemblyModel") assert.equal(f.name.text,"createOriginalParentOwner");
       if (n.expression.getText() === "createUnsignedProtocolDecoder") assert.equal(f.name.text,"reserveOriginalParentSession");

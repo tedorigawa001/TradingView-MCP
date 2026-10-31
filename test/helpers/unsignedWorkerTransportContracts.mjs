@@ -41,6 +41,8 @@ function boundedFrame(value) {
   if (byteLength(line) !== bytes) refuse("frame_measurement"); return line;
 }
 
+export function encodeUnsignedTransportFrame(value) { return boundedFrame(value); }
+
 export function describeUnsignedWorkerTransportCapacity(allocation) {
   const p = createUnsignedControllerProtocolModel(allocation), serialization = describeUnsignedControllerSerializationCapacity(allocation);
   const h = "f".repeat(64), l = "l".repeat(48), u = "9".repeat(30), c = "c".repeat(96);

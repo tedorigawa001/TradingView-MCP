@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const read = file => readFileSync(new URL(file, import.meta.url), "utf8");
 const source = read("../helpers/unsignedWorkerTransportContracts.mjs");
-const exports = ["describeUnsignedWorkerTransportCapacity", "createUnsignedWorkerTransportModel", "createUnsignedWorkerLifetimeModel"];
+const exports = ["encodeUnsignedTransportFrame", "describeUnsignedWorkerTransportCapacity", "createUnsignedWorkerTransportModel", "createUnsignedWorkerLifetimeModel"];
 const forbidden = new Set(["process", "globalThis", "global", "Date", "performance", "Intl", "Temporal", "require", "createRequire", "eval", "Function", "Proxy", "Reflect",
   "Worker", "MessageChannel", "MessagePort", "BroadcastChannel", "postMessage", "SharedArrayBuffer", "Atomics", "WebAssembly", "fetch", "WebSocket", "AbortSignal",
   "crypto", "createPrivateKey", "createPublicKey", "sign", "verify", "spawn", "spawnSync", "exec", "fork", "dlopen", "openSync", "readFileSync", "writeFileSync",
@@ -71,7 +71,9 @@ test("B4-A has no runtime/production/MCP/build/worker connection or authority is
   for (const f of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter(f => f.endsWith(".ts")))
     assert.doesNotMatch(read(`../../src/${f}`), /unsignedWorkerTransportContracts/);
   for (const f of ["../../package.json", "../../native/native_bar_fs/build_unsigned.mjs", "../../native/native_bar_fs/test_unsigned_worker.mjs",
-    "../helpers/unsignedInertAdapters.mjs", "../helpers/unsignedCohortRuntime.mjs"]) assert.doesNotMatch(read(f), /unsignedWorkerTransportContracts/);
+    "../helpers/unsignedInertAdapters.mjs"]) assert.doesNotMatch(read(f), /unsignedWorkerTransportContracts/);
+  assert.ok(read("../helpers/unsignedCohortRuntime.mjs").includes('const { encodeUnsignedTransportFrame } = await import("./unsignedWorkerTransportContracts.mjs");'));
+  assert.doesNotMatch(read("../helpers/unsignedCohortRuntime.mjs"),/createUnsignedWorkerTransportModel|createUnsignedWorkerLifetimeModel/);
   assert.doesNotMatch(source, /preparedRuns|buildReferences|namespaceReferences|originalCohortTiming|createUnsignedQualificationModel/);
 });
 test("B4-P1 transport requires its original CANCEL callback before starting teardown", () => {

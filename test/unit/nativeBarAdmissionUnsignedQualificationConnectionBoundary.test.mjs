@@ -13,7 +13,10 @@ const privateNames = ["originalQualificationPolicy", "originalQualificationClock
   "armOriginalParentTimer", "selectOriginalParentPhase", "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan",
   "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
   "originalParentLaunchPlan", "qualifyOriginalParentLaunch", "currentOriginalParentHandler", "failOriginalParentEvent", "observeOriginalParentOutput", "bindOriginalParentChild", "launchOriginalParent",
-  "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
+  "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal",
+  "qualifyOriginalParentPipe", "consumeOriginalParentCommandProof", "retainOriginalParentWrite", "planOriginalParentCommand",
+  "sampleOriginalParentCompletion", "relayOriginalParentWrite", "completeOriginalParentWrite", "uncertainOriginalParentWrite", "writeOriginalParentCommand",
+  "planOriginalParentShutdown", "relayOriginalParentEnd", "endOriginalParentCommand", "prepareOriginalParentCommand",
   "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "afterSync", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
   "metadataText", "parseMetadataListing", "qualifyMetadata", "qualifyChain", "createOriginalDirectory", "allowedTool", "runOriginalTool", "hash", "chargeHash", "readPinnedFile",
@@ -69,7 +72,8 @@ function guard(s) {
     if (ts.isIdentifier(n)) {
       const exitFact = n.text === "exit" && ownerOf(n) === "reserveOriginalParentSession" && ts.isPropertyAssignment(n.parent)
         && n.parent.name === n && n.parent.initializer.kind === ts.SyntaxKind.NullKeyword;
-      assert.equal(forbidden.has(n.text) && !exitFact, false, n.text); if (n.text === "prepareOriginalQualification") references.push(n);
+      const exitRead = n.text === "exit" && ownerOf(n) === "qualifyOriginalParentPipe" && n.parent.getText() === "c.facts.child.exit";
+      assert.equal(forbidden.has(n.text) && !exitFact && !exitRead, false, n.text); if (n.text === "prepareOriginalQualification") references.push(n);
     }
     if (ts.isIdentifier(n) && ["setTimeout", "clearTimeout"].includes(n.text)) {
       let owner = n; while (owner && !declarations.includes(owner)) owner = owner.parent;
@@ -95,6 +99,7 @@ function guard(s) {
       if (ts.isElementAccessExpression(n.expression)) assert.ok(ts.isStringLiteralLike(name));
       if (name.text === "on" && ownerOf(n) === "bindOriginalParentChild") assert.equal(n.expression.getText(),"emitter.on");
       else if (name.text === "ref" && ownerOf(n) === "launchOriginalParent") assert.equal(n.expression.getText(),"child.ref");
+      else if (name.text === "write" && ownerOf(n) === "writeOriginalParentCommand") assert.equal(n.expression.getText(),"write.pipe.write");
       else assert.equal(["write","on","once","emit","destroy","kill","ref","unref","spawn","open","read","sign"].includes(name.text),false,name.text);
     }
     ts.forEachChild(n, walk);
@@ -102,7 +107,7 @@ function guard(s) {
   walk(tree); assert.equal(references.length, 1);
   assert.deepEqual(dynamic, ["node:fs", "node:path", "node:url", "node:crypto", "typescript", "node:module", "./unsignedControllerData.mjs",
     "./unsignedCohortQualificationContracts.mjs", "./unsignedBuildPlan.mjs", "./unsignedCohortAssemblyModel.mjs", "./unsignedAdapterSupport.mjs",
-    "./unsignedParentConnectionContracts.mjs", "node:child_process", "node:child_process"]);
+    "./unsignedParentConnectionContracts.mjs", "./unsignedWorkerTransportContracts.mjs", "node:child_process", "node:child_process"]);
   assert.doesNotMatch(inspect.getText(), /process|import\(|prepareOriginal|retainedQualificationScopes/);
 }
 test("4-B3-B has a private composition root behind unchanged public and prerequisite seals", () => guard(source));
