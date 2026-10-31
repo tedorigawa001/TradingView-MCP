@@ -494,6 +494,43 @@ test("4-B2 late diagnostics obey the exact byte bound and never clear the primar
   assert.throws(() => s.event("late_frame", { line: "x".repeat(65537) }), /invalid_input/);
   assert.equal(s.m.describe().stop_reason, "primary"); assert.equal(s.m.describe().active.frames, before.frames + 1);
 });
+test("B4-B2 a worker-only frame event refuses parent direction without consuming its ordinal", () => {
+  const s = driver(); s.record("case_allocated"); s.event("resource", { resource: "worker", action: "attach" });
+  const before = s.m.describe(), line = canonical({binding:before.active.binding,direction:"parent",ordinal:1,kind:"LAUNCH",payload:{}})+"\n";
+  assert.throws(()=>s.event("worker_frame",{line}),/receive_direction/);
+  const after = s.m.describe(); assert.equal(after.stop_reason,"receive_direction"); assert.equal(after.clock_invalid,false);
+  assert.equal(after.active.late_capture,"frozen"); assert.equal(after.active.frames,before.active.frames);
+  assert.deepEqual(after.active.next_ordinals,before.active.next_ordinals);
+});
+test("B4-B2 worker-only admission shares the original frame ledger with parent planning", () => {
+  const s = driver(); s.record("case_allocated"); s.event("resource",{resource:"worker",action:"attach"}); s.frame("LAUNCH");
+  const before = s.m.describe(), payload = {addon_protocol:6,mode:"synthetic_only",worker_clock_domain:"worker-clock",pins_sha256:digest(before.active.binding)};
+  s.event("worker_frame",{line:canonical({binding:before.active.binding,direction:"worker",ordinal:1,kind:"READY",payload})+"\n"});
+  const after = s.m.describe(); assert.equal(after.active.frames,before.active.frames+1); assert.equal(after.active.next_ordinals.worker,2);
+  assert.equal(after.active.next_ordinals.parent,2); assert.equal(after.active.protocol_state,"READY"); assert.equal(after.active.late_count,0);
+});
+test("B4-B2 owner stop keeps time unknown without invalidating a healthy clock or inventing settlement", () => {
+  const s = go(), before = s.m.describe(), after = s.m.noteOwnerStop(s.token);
+  assert.equal(after.stopped,true); assert.equal(after.stop_reason,"original_owner_stopped"); assert.equal(after.first_stop_ns,null);
+  assert.equal(after.clock_invalid,false); assert.deepEqual(after.active.window,before.active.window);
+  assert.deepEqual(after.active.evidence,before.active.evidence); assert.deepEqual(after.active.next_ordinals,before.active.next_ordinals);
+  assert.equal(after.active.frames,before.active.frames); assert.equal(s.event("shutdown_plan").decision,"CLOSE_ONLY");
+  assert.equal(s.m.describe().first_stop_ns,null); assert.equal(s.m.describe().active.window.starts.settlement,undefined);
+});
+test("B4-B2 an owner stop cannot target a foreign or cleanly retired model case", () => {
+  const s = go(), before = s.m.describe();
+  for (const token of [{},structuredClone(s.token),go().token]) assert.throws(()=>s.m.noteOwnerStop(token),/case_reference/);
+  assert.deepEqual(s.m.describe(),before);
+  const done = settle(); done.m.finishCase(done.token,{at:done.tick()}); const retired = done.m.describe();
+  assert.throws(()=>done.m.noteOwnerStop(done.token),/case_reference/); assert.deepEqual(done.m.describe(),retired);
+});
+test("B4-B2 an owner stop preserves retained saved evidence and the original known primary", () => {
+  const s = stoppedIndexed(); s.m.finishCase(s.token,{at:s.tick()}); s.m.finishNotRun(); s.m.closeIndex({outcome:"confirmed",at:s.tick()});
+  const before = s.m.describe(), after = s.m.noteOwnerStop(s.token);
+  assert.equal(after.first_stop_ns,before.first_stop_ns); assert.equal(after.stop_reason,before.stop_reason);
+  assert.equal(after.clock_invalid,before.clock_invalid); assert.deepEqual(after.active.evidence,before.active.evidence);
+  assert.deepEqual(after.rows,before.rows); assert.deepEqual(after.active.window,before.active.window);
+});
 test("B4-B1 explicit clock failure stops only the original case without a fabricated timed input", () => {
   const s = go(), before = s.m.describe();
   const after = s.m.noteClockFailure(s.token, { reason: "clock_unavailable" });

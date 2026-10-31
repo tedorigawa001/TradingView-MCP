@@ -6,7 +6,11 @@ import ts from "typescript";
 const read = file => readFileSync(new URL(file, import.meta.url), "utf8");
 const source = read("../helpers/unsignedCohortRuntime.mjs");
 const parse = s => ts.createSourceFile("runtime.mjs", s, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-const privateNames = ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "originalCohortTiming", "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
+const privateNames = ["originalQualificationPolicy", "originalQualificationClock", "armOriginalQualificationTimer", "originalCohortTiming",
+  "originalParentScope", "originalParentInvocation", "originalParentAllocation", "originalParentCaseReceipt", "originalParentWorkPlan", "originalParentWorkerQualification",
+  "createOriginalParentOwner", "reserveOriginalParentSession", "currentOriginalParentSession", "syncOriginalParent", "describeOriginalParent", "checkpointOriginalParent",
+  "faultOriginalParent", "discardOriginalParent", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
+  "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "afterSync", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
   "metadataText", "parseMetadataListing", "qualifyMetadata", "qualifyChain", "createOriginalDirectory", "allowedTool", "runOriginalTool", "hash", "chargeHash", "readPinnedFile",
   "dependencyPaths", "typescriptPaths", "recheckTypeScriptInputs", "contained", "byteLengthRows", "directoryNames", "sourceFiles", "runtimeClosure", "discoverOriginalInputs", "snapshotInputs", "compilePlans",
@@ -58,7 +62,11 @@ function guard(s) {
     }
     if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression))
       assert.equal(["Date", "now", "hrtime", "bigint", "uptime", "setTimeout", "clearTimeout"].includes(n.argumentExpression.text), false);
-    if (ts.isIdentifier(n)) { assert.equal(forbidden.has(n.text), false, n.text); if (n.text === "prepareOriginalQualification") references.push(n); }
+    if (ts.isIdentifier(n)) {
+      const exitFact = n.text === "exit" && ownerOf(n) === "reserveOriginalParentSession" && ts.isPropertyAssignment(n.parent)
+        && n.parent.name === n && n.parent.initializer.kind === ts.SyntaxKind.NullKeyword;
+      assert.equal(forbidden.has(n.text) && !exitFact, false, n.text); if (n.text === "prepareOriginalQualification") references.push(n);
+    }
     if (ts.isIdentifier(n) && ["setTimeout", "clearTimeout"].includes(n.text)) {
       let owner = n; while (owner && !declarations.includes(owner)) owner = owner.parent;
       assert.equal(owner?.name.text, "armOriginalQualificationTimer");
@@ -76,11 +84,18 @@ function guard(s) {
     if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
       assert.equal(n.arguments.length, 1); assert.ok(ts.isStringLiteral(n.arguments[0])); dynamic.push(n.arguments[0].text);
     }
+    if (ts.isCallExpression(n) && /[Oo]riginalParent/.test(ownerOf(n) ?? "")
+      && (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression))) {
+      const name = ts.isPropertyAccessExpression(n.expression) ? n.expression.name : n.expression.argumentExpression;
+      if (ts.isElementAccessExpression(n.expression)) assert.ok(ts.isStringLiteralLike(name));
+      assert.equal(["write","on","once","emit","destroy","kill","unref","spawn","open","read","sign"].includes(name.text),false,name.text);
+    }
     ts.forEachChild(n, walk);
   }
   walk(tree); assert.equal(references.length, 1);
   assert.deepEqual(dynamic, ["node:fs", "node:path", "node:url", "node:crypto", "typescript", "node:module", "./unsignedControllerData.mjs",
-    "./unsignedCohortQualificationContracts.mjs", "./unsignedBuildPlan.mjs", "node:child_process"]);
+    "./unsignedCohortQualificationContracts.mjs", "./unsignedBuildPlan.mjs", "./unsignedCohortAssemblyModel.mjs", "./unsignedAdapterSupport.mjs",
+    "./unsignedParentConnectionContracts.mjs", "node:child_process"]);
   assert.doesNotMatch(inspect.getText(), /process|import\(|prepareOriginal|retainedQualificationScopes/);
 }
 test("4-B3-B has a private composition root behind unchanged public and prerequisite seals", () => guard(source));
@@ -96,6 +111,11 @@ test("4-B3-B connection and token producers remain absent from production and la
     assert.doesNotMatch(read(`../../src/${file}`), /prepareOriginalQualification|retainedQualificationScopes/);
   for (const file of ["../../package.json", "../../native/native_bar_fs/build_unsigned.mjs", "../../native/native_bar_fs/test_unsigned_worker.mjs", "../helpers/unsignedInertAdapters.mjs"])
     assert.doesNotMatch(read(file), /prepareOriginalQualification|retainedQualificationScopes/);
+});
+test("B4-B2 parent effect-call guard also rejects literal-element listener and write forms", () => {
+  const anchor = "c.decoder = createUnsignedProtocolDecoder();";
+  for (const added of ['c.pipes.status.on("data", run);','c.pipes.status["on"]("data", run);','c.pipes.command["write"]("x");'])
+    assert.throws(()=>guard(source.replace(anchor,added+anchor)));
 });
 test("4-B3-B tool transport has one fixed supervised spawn and no automatic signal or retry", () => {
   const root = parse(source).statements.find(n => ts.isFunctionDeclaration(n) && n.name.text === "prepareOriginalQualification");

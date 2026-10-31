@@ -98,7 +98,9 @@ test("B4-P2 B2 stopped-only entry has no timestamp route and delegates to its or
   assert.ok(untimedAt >= 0 && timedAppendAt >= 0 && untimedAt < timedAppendAt);
   assert.ok(source.includes('const coordinator = diagnostic + cache + pins + labels + 4096 + late.retained_json_bytes'));
   assert.ok(source.includes('diagnostic > 16384 || coordinator > 65536 || late.diagnostic_ceiling_bytes > 16384'));
-  assert.ok(source.includes('let trigger = clockInvalid ? null :'));
+  assert.ok(source.includes('function latch(reason, unknownTime = false)'));
+  assert.ok(source.includes('let trigger = clockInvalid || unknownTime ? null :'));
+  assert.ok(source.includes('if (!clockInvalid && !unknownTime && !w.starts.settlement'));
 });
 test("4-B2 remains absent from production, scripts, builders and existing sealed entries", () => {
   for (const p of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter((p) => p.endsWith(".ts")))

@@ -7,7 +7,7 @@ import { validateUnsignedParentClockFailure } from "./unsignedParentConnectionCo
 
 const refuse = (reason) => { throw Error(`cc4b2_${reason}`); };
 const atSchema = z.object({ clock_domain: label, monotonic_ns: uint }).strict();
-const eventKinds = ["resource", "frame", "write", "receipt", "receipt_readback", "command_close", "worker_exit", "report", "report_readback", "case_closes", "index_row", "index_readback", "shutdown_plan", "shutdown_write", "late_frame"];
+const eventKinds = ["resource", "frame", "worker_frame", "write", "receipt", "receipt_readback", "command_close", "worker_exit", "report", "report_readback", "case_closes", "index_row", "index_readback", "shutdown_plan", "shutdown_write", "late_frame"];
 const slotNames = ["worker", "observer", "helper", "fixture"];
 const cachedReceipts = ["case_allocated", "setup_sealed", "baseline_bound", "go_intent", "release_checked", "absence_checked", "worker_finalized"];
 const live = (slots) => Object.values(slots).some((s) => !["empty", "closed"].includes(s));
@@ -52,12 +52,12 @@ export function createUnsignedCohortAssemblyModel(input) {
   if (BigInt(d.clock.cohort_limit_ms) < 1n || end > 999999999999999999999999999999n) refuse("clock_bound");
   let last = BigInt(d.clock.started_ns), stopped = null, firstStop = null, clockInvalid = false, active = null, closed = false, notRun = false;
   let common = null, capacity = null; const modePins = new Map(), exchanges = new Set(), nonces = new Set();
-  function latch(reason) {
+  function latch(reason, unknownTime = false) {
     if (stopped) return;
     const w = active?.window.describe(), phaseEnd = w?.phase_deadline_ns === null || !w ? end : BigInt(w.phase_deadline_ns);
     const limit = phaseEnd < end ? phaseEnd : end;
-    let trigger = clockInvalid ? null : w?.first_stop_ns ?? String(last);
-    if (!clockInvalid && last >= limit) {
+    let trigger = clockInvalid || unknownTime ? null : w?.first_stop_ns ?? String(last);
+    if (!clockInvalid && !unknownTime && last >= limit) {
       reason = "deadline"; trigger = String(limit);
       if (active) try { active.window.inspect({ clock_domain: d.clock.clock_domain, monotonic_ns: String(last) }); } catch { /* Preserve the detected deadline. */ }
     }
@@ -67,7 +67,7 @@ export function createUnsignedCohortAssemblyModel(input) {
       active.evidenceFrozen = active.evidence.describe().candidate_outcome !== null || active.pendingReceipt === "ready_to_report";
       active.protocol.observeFailure({ reason });
       const w = active.window.describe();
-      if (!clockInvalid && !w.starts.settlement && ["preparation", "query"].includes(w.phase)) {
+      if (!clockInvalid && !unknownTime && !w.starts.settlement && ["preparation", "query"].includes(w.phase)) {
         try { active.window.startSettlement({ clock_domain: d.clock.clock_domain, monotonic_ns: String(last) }); } catch { /* Preserve the original stop and expired window. */ }
       }
     }
@@ -120,11 +120,12 @@ export function createUnsignedCohortAssemblyModel(input) {
         c.slots[r.resource] = r.outcome === "confirmed" ? "closed" : "retained";
         if (r.outcome !== "confirmed") latch("resource_close");
       }
-    } else if (q.kind === "frame") {
+    } else if (q.kind === "frame" || q.kind === "worker_frame") {
       try {
         const r = parse(z.object({ line: z.string().max(65536) }).strict(), q.payload);
         if (c.slots.worker !== "live") refuse("worker_reference");
         if (byteLength(r.line) > LIMITS.frame_bytes) refuse("frame_bound"); const f = JSON.parse(r.line);
+        if (q.kind === "worker_frame" && f.direction !== "worker") refuse("receive_direction");
         if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
         if (f.kind === "PREPARE") equal(f.binding.setup, c.confirmed.setup_sealed?.setup, "setup_readback");
         if (f.kind === "GO") {
@@ -283,6 +284,10 @@ export function createUnsignedCohortAssemblyModel(input) {
     noteClockFailure(token, raw) {
       current(token); const q = validateUnsignedParentClockFailure(raw);
       return guard(() => { clockInvalid = true; latch(q.reason); return summary(); }, true, true);
+    },
+    noteOwnerStop(token) {
+      current(token);
+      return guard(() => { latch("original_owner_stopped", true); return summary(); }, true, true);
     },
     observeLateFrame(token, raw) {
       if (!stopped) refuse("late_requires_stop");

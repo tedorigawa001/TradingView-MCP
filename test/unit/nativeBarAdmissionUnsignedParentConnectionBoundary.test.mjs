@@ -148,12 +148,20 @@ test("B4-B1 memory guards precede all helper imports and include the final swall
   assert.equal(s.lastIndexOf("\ntest("), s.indexOf('\ntest("B4-B1 no denied effect was swallowed", () => assert.deepEqual(effects, []));'));
   assert.doesNotMatch(s, /fixedMemoryCheckpointOracle|build\/b3|process\.env\s*[.[]/);
 });
-test("B4-B1 remains absent from runtime, product, package and native/build entry points", () => {
+test("B4-B1 stays absent from product/package/build and is consumed only inside the sealed runtime root", () => {
   for (const p of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter(p => p.endsWith(".ts")))
     assert.doesNotMatch(read(`../../src/${p}`), /unsignedParentConnectionContracts/, p);
   for (const p of ["../../package.json", "../../native/native_bar_fs/build_unsigned.mjs", "../../native/native_bar_fs/test_unsigned_worker.mjs",
-    "../helpers/unsignedCohortRuntime.mjs", "../helpers/unsignedInertAdapters.mjs"]) assert.doesNotMatch(read(p), /unsignedParentConnectionContracts/);
+    "../helpers/unsignedInertAdapters.mjs"]) assert.doesNotMatch(read(p), /unsignedParentConnectionContracts/);
   const runtime = ast(read("../helpers/unsignedCohortRuntime.mjs"));
+  let uses = 0;
+  walk(runtime,n=>{
+    if (!ts.isStringLiteral(n) || n.text !== "./unsignedParentConnectionContracts.mjs") return;
+    uses++; assert.ok(ts.isCallExpression(n.parent) && n.parent.expression.kind === ts.SyntaxKind.ImportKeyword);
+    let owner = n; while (owner && !(ts.isFunctionDeclaration(owner) && owner.name?.text === "prepareOriginalQualification")) owner = owner.parent;
+    assert.ok(owner);
+  });
+  assert.equal(uses,1);
   const execute = runtime.statements.find(n => ts.isFunctionDeclaration(n) && n.name.text === "executeUnsignedCohortAssembly");
   assert.equal(execute.parameters.length, 0); assert.equal(execute.body.statements.length, 1);
   assert.equal(execute.body.statements[0].getText(), 'throw Error("cc4b2_execution_not_approved");');

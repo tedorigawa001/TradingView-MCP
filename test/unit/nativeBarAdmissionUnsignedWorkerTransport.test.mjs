@@ -1292,7 +1292,7 @@ for (const outcome of ["completed", "uncertain"])
     // The unchanged reference transport keeps this post-deadline sample as callback_at; the parent contract keeps it only as an observation.
     assert.deepEqual(w.callback_at, late); assert.equal(expected.callback_at, null); assert.deepEqual(expected.observation_point, late);
   });
-test("B4-B1 the last sub-millisecond of a phase remains an open B4-B2 checkpoint decision", () => {
+test("B4-B1 the pure checkpoint alone does not enforce the existing sub-ms phase window", () => {
   const s = ready(), before = s.m.describe(), end = BigInt(before.phase_deadline_ns), when = s.at(end - 5000000n);
   const op = s.m.planCommand({ kind: "PREPARE", payload: { configuration: configuration(fixture()), launch_nonce: "nonce-1" },
     binding: { ...before.binding, setup: setup() }, at: when });
