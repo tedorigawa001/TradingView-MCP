@@ -3,6 +3,7 @@ import { describeUnsignedAcceptanceRun, describeUnsignedFixture } from "./jointU
 import { createUnsignedControllerProtocolModel, createUnsignedControllerWindowModel } from "./unsignedControllerContracts.mjs";
 import { createUnsignedControllerEvidenceModel, createUnsignedControllerCohortModel, describeUnsignedControllerSerializationCapacity } from "./unsignedControllerEvidence.mjs";
 import { uint, label, code, parse, canonical, digest, sha, byteLength, freeze, flags, LIMITS } from "./unsignedControllerData.mjs";
+import { validateUnsignedParentClockFailure } from "./unsignedParentConnectionContracts.mjs";
 
 const refuse = (reason) => { throw Error(`cc4b2_${reason}`); };
 const atSchema = z.object({ clock_domain: label, monotonic_ns: uint }).strict();
@@ -279,6 +280,10 @@ export function createUnsignedCohortAssemblyModel(input) {
       if (stopped && !["resource", "write", "receipt", "receipt_readback", "command_close", "worker_exit", "report", "report_readback", "case_closes", "index_row", "index_readback", "shutdown_plan", "shutdown_write", "late_frame"].includes(q.kind)) refuse("stopped");
       if (!stopped) c.window.inspect(q.at); return apply(c, q);
     }, true, true); },
+    noteClockFailure(token, raw) {
+      current(token); const q = validateUnsignedParentClockFailure(raw);
+      return guard(() => { clockInvalid = true; latch(q.reason); return summary(); }, true, true);
+    },
     observeLateFrame(token, raw) {
       if (!stopped) refuse("late_requires_stop");
       return guard(() => appendLate(current(token), raw), true, true);

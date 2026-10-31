@@ -4,6 +4,10 @@ Status: **design approved; B4-P1/P2/P3 independently reviewed/tested in pure mem
 
 Dot stays PAUSED. Market/scenario/judgment/notification/mail, retention, confirmation counts, thresholds and bands are unchanged. No real ports/clocks/timers, build, operational child/worker, native read, fixture/signature/key/real-data operation, MCP registration or production activation is performed. Existing outputs are not adopted, moved or removed. There is no new tool, public runtime entry, wire field, receipt kind, cancellation attempt, timer or operating approval.
 
+Later 2026-10-31 JST update: the separately approved [B4-B1 pure contracts/capacity implementation](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-pure-contract-implementation) starts from reviewed design commit `8c9bba1`. It adds the narrow B2 stop-only clock-fault model entry and tests deadline-first checkpoint/callback projections against the unchanged transport model, with all P1/P2/P3 regressions retained. Nine individually run main-thread memory/source files pass 795 tests. The fixed terminal metadata ceiling is 7654 bytes and the combined coordinator reservation is 54741, within unchanged limits; no additional normal protocol/window ledger or actual receiver/worker connection is created. Independent implementation review is pending, and B4-B2 onward remain separate approvals. Earlier P1/P2/P3 results below retain their historical scope.
+
+Later B4-B1 [independent review/corrections](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-independent-review-and-corrections) fix retained pending uncertainty, expired callback disposition, absent-pipe end claims and two static-boundary guard gaps. Both scoped re-reviews have no new findings; nine main-thread files pass 803 tests, with unchanged schemas/capacity/limits/runtime seals and no real connection or operational action. Initial B4-B1 test counts above remain historical.
+
 ## Baseline Evidence And Root Causes
 
 | Source | Behavior at `88edb86` | Consequence |

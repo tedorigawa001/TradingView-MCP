@@ -68,6 +68,7 @@ test.after(() => { restores.reverse().forEach((f) => f()); syncBuiltinESMExports
 const runtime = await import("../helpers/unsignedCohortRuntime.mjs");
 
 const { createUnsignedCohortAssemblyModel } = await import("../helpers/unsignedCohortAssemblyModel.mjs");
+const { validateUnsignedParentClockFailure, planUnsignedParentReservation, planUnsignedParentCheckpoint } = await import("../helpers/unsignedParentConnectionContracts.mjs");
 const { describeUnsignedFixture, describeUnsignedAcceptanceRun } = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
 const { uint, label, code, parse, canonical, digest, byteLength, sha, freeze, flags, LIMITS } = await import("../helpers/unsignedControllerData.mjs");
 const { assessUnsignedControllerAssertions } = await import("../helpers/unsignedControllerObservation.mjs");
@@ -422,7 +423,8 @@ function memoryFactory(source) {
   const tree = ts.createSourceFile("model.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS); assert.equal(tree.parseDiagnostics.length, 0);
   const body = tree.statements.filter((n) => !ts.isImportDeclaration(n)).map((n) => n.getText().replace(/^export /, "")).join("\n");
   const dependencies = { z, describeUnsignedAcceptanceRun, describeUnsignedFixture, createUnsignedControllerProtocolModel, createUnsignedControllerWindowModel,
-    createUnsignedControllerEvidenceModel, createUnsignedControllerCohortModel, describeUnsignedControllerSerializationCapacity, uint, label, code, parse, canonical, digest, sha, byteLength, freeze, flags, LIMITS };
+    createUnsignedControllerEvidenceModel, createUnsignedControllerCohortModel, describeUnsignedControllerSerializationCapacity, uint, label, code, parse, canonical, digest, sha, byteLength, freeze, flags, LIMITS,
+    validateUnsignedParentClockFailure };
   return vm.compileFunction(body + "\nreturn createUnsignedCohortAssemblyModel;", Object.keys(dependencies))(...Object.values(dependencies));
 }
 function replaceCall(source, reason) {
@@ -491,6 +493,75 @@ test("4-B2 late diagnostics obey the exact byte bound and never clear the primar
   s.event("late_frame", { line }); assert.equal(s.m.describe().active.frames, before.frames + 1);
   assert.throws(() => s.event("late_frame", { line: "x".repeat(65537) }), /invalid_input/);
   assert.equal(s.m.describe().stop_reason, "primary"); assert.equal(s.m.describe().active.frames, before.frames + 1);
+});
+test("B4-B1 explicit clock failure stops only the original case without a fabricated timed input", () => {
+  const s = go(), before = s.m.describe();
+  const after = s.m.noteClockFailure(s.token, { reason: "clock_unavailable" });
+  assert.equal(after.stopped, true); assert.equal(after.clock_invalid, true); assert.equal(after.first_stop_ns, null);
+  assert.equal(after.stop_reason, "clock_unavailable"); assert.equal(after.active.protocol_state, "STOPPED");
+  assert.equal(after.active.frames, before.active.frames); assert.deepEqual(after.active.next_ordinals, before.active.next_ordinals);
+  assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.active.window, before.active.window);
+  s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }); assert.equal(s.m.describe().active.late_count, 1);
+  assert.equal(s.event("shutdown_plan").decision, "CLOSE_ONLY");
+});
+for (const reason of ["clock_unavailable", "clock_malformed", "clock_domain", "clock_rollback"])
+  test("B4-B1 original-case clock failure cannot advance or recover: " + reason, () => {
+    const s = go(), before = s.m.describe(), after = s.m.noteClockFailure(s.token, { reason });
+    assert.equal(after.stop_reason, reason); assert.equal(after.first_stop_ns, null); assert.equal(after.clock_invalid, true);
+    assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.active.window, before.active.window);
+    assert.deepEqual(after.active.next_ordinals, before.active.next_ordinals); assert.equal(after.active.frames, before.active.frames);
+    s.m.noteClockFailure(s.token, { reason: "clock_unavailable" }); assert.equal(s.m.describe().stop_reason, reason);
+    s.m.stop({ reason: "later", at: s.tick() }); assert.equal(s.m.describe().clock_invalid, true); assert.equal(s.m.describe().first_stop_ns, null);
+    assert.throws(() => s.m.stop({ reason: "timed_still_requires_point", at: null }), /invalid_input/);
+    assert.equal(s.event("shutdown_plan").decision, "CLOSE_ONLY");
+  });
+test("B4-B1 clock failure preserves an earlier known primary stop and frozen evidence", () => {
+  const s = go(), at = s.tick(); s.m.stop({ reason: "primary", at });
+  s.record("stop_summary", { reason: "primary", details: [] }); s.record("ready_to_report", { candidate_outcome: "FAIL", assessment_sha256: null });
+  const before = s.m.describe(), after = s.m.noteClockFailure(s.token, { reason: "clock_rollback" });
+  assert.equal(after.first_stop_ns, at.monotonic_ns); assert.equal(after.stop_reason, "primary");
+  assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.active.window, before.active.window);
+  assert.equal(after.active.late_capture, before.active.late_capture); assert.equal(after.clock_invalid, true);
+});
+for (const tokenOf of [() => ({}), s => structuredClone(s.token), () => go().token])
+  test("B4-B1 a foreign clock-fault token cannot poison the original healthy case", () => {
+    const s = go(), before = s.m.describe(); assert.throws(() => s.m.noteClockFailure(tokenOf(s), { reason: "clock_unavailable" }), /case_reference/);
+    assert.deepEqual(s.m.describe(), before);
+  });
+for (const raw of [{ reason: "deadline" }, { reason: "clock_unavailable", at: null }, { reason: "clock_rollback", approved: true }, {}, null])
+  test("B4-B1 the stop-only clock entry rejects unsupported payloads without a state change: " + canonical(raw), () => {
+    const s = go(), before = s.m.describe(); assert.throws(() => s.m.noteClockFailure(s.token, raw), /invalid_input/); assert.deepEqual(s.m.describe(), before);
+  });
+test("B4-B1 clock faults do not inspect getters, create a missing case or revive a retired one", () => {
+  const m = assembly(), before = m.describe(); assert.throws(() => m.noteClockFailure({}, { reason: "clock_unavailable" }), /case_reference/); assert.deepEqual(m.describe(), before);
+  const s = go(), state = s.m.describe(); let calls = 0;
+  const raw = Object.defineProperty({}, "reason", { enumerable: true, get() { calls++; throw Error("getter"); } });
+  assert.throws(() => s.m.noteClockFailure(s.token, raw), /invalid_input/); assert.equal(calls, 0); assert.deepEqual(s.m.describe(), state);
+  const done = settle(); done.m.finishCase(done.token, { at: done.tick() }); const retired = done.m.describe();
+  assert.throws(() => done.m.noteClockFailure(done.token, { reason: "clock_unavailable" }), /case_reference/); assert.deepEqual(done.m.describe(), retired);
+});
+test("B4-B1 a retained closed case can record a clock fault but cannot revise saved model bytes", () => {
+  const s = stoppedIndexed(); s.m.finishCase(s.token, { at: s.tick() }); s.m.finishNotRun(); s.m.closeIndex({ outcome: "confirmed", at: s.tick() });
+  const before = s.m.describe(), after = s.m.noteClockFailure(s.token, { reason: "clock_unavailable" });
+  assert.equal(after.clock_invalid, true); assert.equal(after.closed, true); assert.equal(after.stop_reason, before.stop_reason); assert.equal(after.first_stop_ns, before.first_stop_ns);
+  assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.rows, before.rows);
+});
+test("B4-B1 deadline-first checkpoint precedes a later original producer point at the single B2 owner", () => {
+  const s = go(), p = s.m.describe().active, at = s.tick();
+  const line = canonical({ binding: p.binding, direction: "parent", ordinal: p.next_ordinals.parent, kind: "CANCEL", payload: {} }) + "\n";
+  s.event("frame", { line }, at);
+  const r = planUnsignedParentReservation({ clock_domain: at.clock_domain, planned_ns: at.monotonic_ns,
+    phase_deadline_ns: p.window.phase_deadline_ns, cohort_deadline_ns: p.window.cohort_deadline_ns }).reservation;
+  const observed = { clock_domain: at.clock_domain, monotonic_ns: String(BigInt(r.deadline_ns) + 900n) };
+  const checkpoint = planUnsignedParentCheckpoint({ clock_domain: at.clock_domain, last_b2_ns: at.monotonic_ns, at: observed,
+    phase_deadline_ns: p.window.phase_deadline_ns, cohort_deadline_ns: p.window.cohort_deadline_ns,
+    pending: { reservation: r, started: false }, stopped: false, clock_invalid: false });
+  assert.equal(checkpoint.route, "stop_before_input"); s.m.stop(checkpoint.stop_first);
+  s.event("command_close", { outcome: "confirmed" }, checkpoint.forward_at);
+  const after = s.m.describe(); assert.equal(after.clock_invalid, false); assert.equal(after.first_stop_ns, r.deadline_ns);
+  assert.equal(after.active.window.starts.settlement, r.deadline_ns);
+  assert.equal(after.active.window.phase_deadline_ns, String(BigInt(r.deadline_ns) + 60000000000n));
+  assert.equal(after.active.frames, p.frames + 1); assert.equal(after.active.command_close, "confirmed");
 });
 test("B4-P2 B2 clock-free late input uses the one original ledger without changing stop or evidence", () => {
   const s = go(); assert.throws(() => s.m.stop({ reason: "clock_fault", at: null })); const before = s.m.describe();

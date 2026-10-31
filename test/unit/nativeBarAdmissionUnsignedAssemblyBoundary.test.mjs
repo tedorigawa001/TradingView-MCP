@@ -10,7 +10,8 @@ const specs = {
     "zod:z", "./jointUnsignedAcceptanceContracts.mjs:describeUnsignedAcceptanceRun,describeUnsignedFixture",
     "./unsignedControllerContracts.mjs:createUnsignedControllerProtocolModel,createUnsignedControllerWindowModel",
     "./unsignedControllerEvidence.mjs:createUnsignedControllerEvidenceModel,createUnsignedControllerCohortModel,describeUnsignedControllerSerializationCapacity",
-    "./unsignedControllerData.mjs:uint,label,code,parse,canonical,digest,sha,byteLength,freeze,flags,LIMITS"] },
+    "./unsignedControllerData.mjs:uint,label,code,parse,canonical,digest,sha,byteLength,freeze,flags,LIMITS",
+    "./unsignedParentConnectionContracts.mjs:validateUnsignedParentClockFailure"] },
   Runtime: { path: "unsignedCohortRuntime", exports: ["inspectUnsignedCohortAssembly", "executeUnsignedCohortAssembly"], imports: ["./unsignedControllerData.mjs:flags,freeze"] },
 };
 const forbidden = new Set(["process", "globalThis", "global", "Date", "performance", "Intl", "SharedArrayBuffer", "Atomics", "WebAssembly", "require", "createRequire",

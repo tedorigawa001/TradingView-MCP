@@ -91,6 +91,7 @@ const { createUnsignedCohortAssemblyModel } = await import("../helpers/unsignedC
 const { describeUnsignedFixture } = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
 const { createUnsignedProtocolDecoder } = await import("../helpers/unsignedAdapterSupport.mjs");
 const { canonical, digest, sha, flags } = await import("../helpers/unsignedControllerData.mjs");
+const { planUnsignedParentReservation, assessUnsignedParentCallback } = await import("../helpers/unsignedParentConnectionContracts.mjs");
 const runtime = await import("../helpers/unsignedCohortRuntime.mjs");
 const h = "a".repeat(64), resources = { fds: "4", roots: "0", workspace: "0", retained: "0" }, baselineValue = { resources, clock_domain: "worker-clock" };
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -1236,6 +1237,44 @@ for (const completed of [false, true])
     assert.equal(s.cohort.describe().active.evidence.c1_violation, true); assert.deepEqual(s.cohort.describe().active.evidence, before);
     assert.equal(s.shutdown().decision, "CLOSE_ONLY"); assert.equal(s.transport.describe().protocol_state, "STOPPED");
     assert.equal(s.transport.describe().stopped, "primary"); assert.equal(s.transport.describe().cleanup_execution_available, false);
+  });
+for (const stopped of [false, true]) for (const outcome of ["completed", "uncertain"]) for (const timing of ["timely", "deadline", "unavailable", "foreign", "rollback"])
+  test(`B4-B1 callback calculation matches the independent GO transport model: ${stopped}/${outcome}/${timing}`, () => {
+    const s = baselined(), when = s.tick(), before = s.m.describe();
+    const op = s.m.planCommand({ kind: "GO", payload: goPayload(s), at: when });
+    const r = planUnsignedParentReservation({ clock_domain: when.clock_domain, planned_ns: when.monotonic_ns,
+      phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns }).reservation;
+    assert.equal(r.deadline_ns, op.deadline_ns); let last = s.tick(); s.m.startWrite(op.reference, { at: last });
+    if (stopped) { last = s.tick(); s.m.stop({ reason: "primary", at: last }); }
+    const at = timing === "deadline" ? s.at(op.deadline_ns) : timing === "unavailable" ? null : timing === "foreign" ? { ...s.tick(), clock_domain: "foreign" }
+      : timing === "rollback" ? point(0) : s.tick();
+    const expected = assessUnsignedParentCallback({ kind: "GO", reservation: r, last_ns: last.monotonic_ns, at, started: true, callback_seen: false,
+      previous_decision: "started", observed_outcome: outcome, stopped, shutdown: false, clock_invalid: false });
+    s.m.completeWrite(op.reference, { outcome, at }); const actual = s.m.describe(), w = actual.writes.at(-1);
+    assert.equal(w.decision, expected.decision); assert.deepEqual(w.callback_at, expected.callback_at); assert.equal(w.callback, expected.observed_outcome);
+    assert.equal(actual.clock_invalid, expected.clock_failure !== null); if (stopped) assert.equal(actual.stopped, "primary");
+  });
+for (const outcome of ["completed", "uncertain"]) for (const timing of ["timely", "deadline", "unavailable"])
+  test(`B4-B1 callback calculation matches original shutdown CANCEL: ${outcome}/${timing}`, () => {
+    const s = active(); s.m.stop({ reason: "primary", at: s.tick() }); const when = s.tick(), before = s.m.describe();
+    const op = s.m.planShutdown({ at: when, worker_live: true, pipe_qualified: true }); assert.equal(op.decision, "CANCEL_THEN_CLOSE");
+    const r = planUnsignedParentReservation({ clock_domain: when.clock_domain, planned_ns: when.monotonic_ns,
+      phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns }).reservation;
+    assert.equal(r.deadline_ns, op.deadline_ns); const last = s.tick(); s.m.startWrite(op.reference, { at: last });
+    const at = timing === "deadline" ? s.at(op.deadline_ns) : timing === "unavailable" ? null : s.tick();
+    const expected = assessUnsignedParentCallback({ kind: "CANCEL", reservation: r, last_ns: last.monotonic_ns, at, started: true, callback_seen: false,
+      previous_decision: "started", observed_outcome: outcome, stopped: true, shutdown: true, clock_invalid: false });
+    s.m.completeWrite(op.reference, { outcome, at }); const w = s.m.describe().writes.at(-1);
+    assert.equal(w.decision, expected.decision); assert.deepEqual(w.callback_at, expected.callback_at); assert.equal(s.m.describe().stopped, "primary");
+  });
+for (const left of [999999n, 1000000n, 1000500123n, 10000500123n])
+  test("B4-B1 full-ms reservation matches original transport at remaining ns " + left, () => {
+    const s = ready(), before = s.m.describe(), when = s.at(BigInt(before.phase_deadline_ns) - left);
+    const d = { clock_domain: when.clock_domain, planned_ns: when.monotonic_ns, phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns };
+    const request = { kind: "PREPARE", payload: { configuration: configuration(fixture()), launch_nonce: "nonce-1" }, binding: { ...before.binding, setup: setup() }, at: when };
+    if (left < 1000000n) {
+      assert.throws(() => planUnsignedParentReservation(d), /reservation_remainder/); assert.throws(() => s.m.planCommand(request), /deadline/);
+    } else assert.equal(planUnsignedParentReservation(d).reservation.deadline_ns, s.m.planCommand(request).deadline_ns);
   });
 // A failing after hook is not a failed test under --test-isolation=none or a direct run, so this last test carries the check.
 test("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));
