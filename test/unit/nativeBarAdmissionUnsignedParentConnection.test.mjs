@@ -85,7 +85,9 @@ block(process, ["uptime", "cpuUsage", "resourceUsage"]); block(performance, ["no
 if (typeof Temporal === "object") block(Temporal.Now, Object.getOwnPropertyNames(Temporal.Now));
 
 
-const parent = await import("../helpers/unsignedParentConnectionContracts.mjs");
+// Every result a test receives is kept for the final authority check, which therefore covers every lane exercised here.
+const results = [], contracts = await import("../helpers/unsignedParentConnectionContracts.mjs");
+const parent = Object.fromEntries(Object.entries(contracts).map(([k, f]) => [k, (...a) => { const v = f(...a); results.push([k, v, a]); return v; }]));
 const { canonical, flags } = await import("../helpers/unsignedControllerData.mjs");
 const point = n => ({ clock_domain: "parent-clock", monotonic_ns: String(n) });
 const input = (changes = {}) => ({ clock_domain: "parent-clock", planned_ns: "123", phase_deadline_ns: "9999999999", cohort_deadline_ns: "20000000000", ...changes });
@@ -363,5 +365,77 @@ test("B4-B1 a saturation sentinel cannot be presented as a complete supplied cou
     assert.throws(() => parent.summarizeUnsignedParentDiscard({ counter: c, frames: 0, bytes: 0 }), /counter_facts/);
     const d = terminal(); d.discarded_input = c; assert.throws(() => parent.validateUnsignedParentTerminalFacts(d), /counter_facts/);
   }
+});
+const completedFact = (generation, kind) => ({ ...commandFact(), kind, ordinal: generation, generation, started: true, callback_seen: true,
+  observed_outcome: "completed", callback_at: point(200 + generation), observation_point: point(200 + generation), decision: "completed" });
+test("B4-B1 only the latest pending generation may await its original callback", () => {
+  const d = terminal(); d.commands = [completedFact(1, "LAUNCH"), { ...commandFact(), kind: "PREPARE", ordinal: 2, generation: 2 }]; d.pending_generation = 2;
+  assert.equal(parent.validateUnsignedParentTerminalFacts(d).facts.pending_generation, 2);
+  const inflight = { ...commandFact(), started: true, decision: "started" };
+  for (const mutate of [x => { x.commands = [inflight, completedFact(2, "PREPARE")]; x.pending_generation = null; }, x => { x.commands[0] = inflight; },
+    x => { x.commands = [inflight]; x.pending_generation = null; }, x => { x.commands = [commandFact()]; x.pending_generation = null; },
+    x => { x.commands = [commandFact(), completedFact(2, "PREPARE")]; x.pending_generation = 1; },
+    // An unmarked in-flight write would otherwise hide a helper overlap.
+    x => { x.commands = [inflight]; x.pending_generation = null; x.helper = { active: true, under_command_generation: null };
+      x.timers.operation = { ...timerFact(), owner: "helper", command_generation: null }; }]) {
+    const bad = structuredClone(d); mutate(bad); assert.throws(() => parent.validateUnsignedParentTerminalFacts(bad), /pending_facts/);
+  }
+});
+test("B4-B1 uncertain or callback-retained started commands require the session stop", () => {
+  for (const [stopped, outcome, at] of [[false, "uncertain", point(124)], [true, "completed", point(124)], [false, "completed", null]]) {
+    const v = parent.assessUnsignedParentCallback(callback({ stopped, observed_outcome: outcome, at }));
+    const d = terminal(); d.first_stop = stopped ? { reason: "primary", at: point(124) } : v.stop_first; d.clock_invalid = v.clock_failure !== null;
+    d.commands = [{ ...commandFact(), kind: "GO", started: true, callback_seen: true, observed_outcome: v.observed_outcome,
+      callback_at: v.callback_at, observation_point: v.observation_point, decision: v.decision }];
+    assert.equal(parent.validateUnsignedParentTerminalFacts(d).facts.commands[0].decision, outcome === "uncertain" ? "uncertain" : "started");
+    d.first_stop = null; d.clock_invalid = false;
+    assert.throws(() => parent.validateUnsignedParentTerminalFacts(d), /callback_facts/);
+  }
+});
+test("B4-B1 a phase-owned helper is closed before a command reservation commits", () => {
+  const helperTimer = { ...timerFact(), owner: "helper", command_generation: null }, d = terminal();
+  d.helper = { active: true, under_command_generation: null }; d.timers.operation = helperTimer;
+  assert.equal(parent.validateUnsignedParentTerminalFacts(d).facts.helper.active, true);
+  d.commands = [completedFact(1, "LAUNCH")]; assert.equal(parent.validateUnsignedParentTerminalFacts(d).facts.helper.active, true);
+  d.commands.push({ ...commandFact(), kind: "PREPARE", ordinal: 2, generation: 2 }); d.pending_generation = 2;
+  assert.throws(() => parent.validateUnsignedParentTerminalFacts(d), /helper_facts/);
+});
+test("B4-B1 the one shutdown write is the latest original record", () => {
+  const d = terminal(); d.first_stop = { reason: "primary", at: point(124) };
+  d.commands = [completedFact(1, "LAUNCH"), { ...completedFact(2, "CANCEL"), shutdown: true }];
+  assert.equal(parent.validateUnsignedParentTerminalFacts(d).facts.commands[1].shutdown, true);
+  d.commands.push({ ...commandFact(), kind: "FINALIZE", ordinal: 3, generation: 3 }); d.pending_generation = 3;
+  assert.throws(() => parent.validateUnsignedParentTerminalFacts(d), /shutdown_state/);
+});
+const authority = new Set([...Object.entries(flags()).filter(([, v]) => typeof v === "boolean").map(([k]) => k),
+  "runtime_completion_proven", "runtime_work_qualified", "original_reference_verified", "semantic_verified"]);
+const authorityLeaks = (value, path = "$", seen = new Set()) => {
+  if (typeof value === "function") return [path + ":function"];
+  if (value === null || typeof value !== "object" || seen.has(value)) return [];
+  seen.add(value); const leaks = [];
+  if (![Object.prototype, Array.prototype, null].includes(Object.getPrototypeOf(value))) leaks.push(path + ":prototype");
+  for (const k of authority) if (k in value && value[k] !== false) leaks.push(`${path}.${k}`);
+  for (const k of Reflect.ownKeys(value)) {
+    const d = Object.getOwnPropertyDescriptor(value, k);
+    if ("value" in d) leaks.push(...authorityLeaks(d.value, `${path}.${String(k)}`, seen)); else leaks.push(`${path}.${String(k)}:accessor`);
+  }
+  return leaks;
+};
+test("B4-B1 every result returned in this file keeps every authority flag false, however it was produced", () => {
+  // Lanes no earlier test returns: a clock fault after a stop, a callback behind a latched clock, the clock-failure echo and the other command kinds.
+  parent.planUnsignedParentCheckpoint(checkpoint({ stopped: true, at: null }));
+  parent.assessUnsignedParentCallback(callback({ stopped: true, clock_invalid: true, at: null }));
+  parent.validateUnsignedParentClockFailure({ reason: "clock_unavailable" });
+  for (const kind of ["LAUNCH", "PREPARE", "FINALIZE", "CANCEL"]) for (const stopped of [false, true]) parent.assessUnsignedParentCallback(callback({ kind, stopped }));
+  const seen = (name, field) => [...new Set(results.filter(([k]) => k === name).map(([, v]) => v[field]))].sort();
+  assert.deepEqual([...new Set(results.map(([k]) => k))].sort(), Object.keys(contracts).sort());
+  assert.deepEqual(seen("planUnsignedParentCheckpoint", "route"), ["clock_failure", "normal", "stop_before_input", "terminal_only"]);
+  assert.deepEqual(seen("assessUnsignedParentCallback", "clock_failure"),
+    ["clock_domain", "clock_latched", "clock_malformed", "clock_rollback", "clock_unavailable", null]);
+  assert.deepEqual(seen("describeUnsignedParentConnectionCapacity", "work_plan_status"), ["complete_supplied_totals", "partial", "unavailable"]);
+  const kinds = results.filter(([k]) => k === "assessUnsignedParentCallback").map(([, , [q]]) => q.kind + (q.shutdown ? ":shutdown" : ""));
+  assert.deepEqual([...new Set(kinds)].sort(), ["CANCEL", "CANCEL:shutdown", "FINALIZE", "GO", "LAUNCH", "PREPARE"]);
+  assert.equal(authority.size, 14);
+  for (const [name, v] of results) assert.deepEqual(authorityLeaks(v), [], name);
 });
 test("B4-B1 no denied effect was swallowed", () => assert.deepEqual(effects, []));

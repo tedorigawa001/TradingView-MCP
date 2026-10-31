@@ -12,6 +12,8 @@ Next-step design, 2026-10-31 JST: the [B4-B private parent connection proposal](
 
 Later B4-B1 [independent review and corrections](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-independent-review-and-corrections) resolve three terminal-coherence and two static-boundary findings. Both reviewers rechecked their corrections with no new scoped findings. Nine selected main-thread files pass 803 tests; capacity, protocol/runtime seals and operating limits remain unchanged. The earlier implementation result above is historical; B4-B2 onward are not implemented or approved by this review/commit gate.
 
+The later [commit review of `cda94a7`](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-commit-review-corrections) tightens B4-B1 terminal coherence and the authority guard. Two pins compare this unchanged reference model: after a deadline has already made a write uncertain, it keeps a later callback sample as `callback_at` while the parent contract keeps it only as an observation (intentional); and with under 1 ms of phase left, its window stops at the observation while the pure checkpoint does not (an open B4-B2 decision). Nine selected files pass 812 tests.
+
 Dot stays PAUSED. Trading/scenario/judgment/notification/mail and product retention conditions do not change. No real clocks/timers, build, child/worker/observer launch, native load/read, fixture creation/move/removal, signing/key creation, signature file, real-data operation, MCP registration or production activation is part of this design turn. Existing outputs are not adopted, moved, repaired or removed. No new CLI, package script, automation hook or public runtime factory is proposed in 4-B4.
 
 ## Scope And Source Baseline

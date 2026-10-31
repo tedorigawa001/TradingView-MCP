@@ -8,6 +8,8 @@ Later 2026-10-31 JST update: the separately approved [B4-B1 pure contracts/capac
 
 Later B4-B1 [independent review/corrections](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-independent-review-and-corrections) fix retained pending uncertainty, expired callback disposition, absent-pipe end claims and two static-boundary guard gaps. Both scoped re-reviews have no new findings; nine main-thread files pass 803 tests, with unchanged schemas/capacity/limits/runtime seals and no real connection or operational action. Initial B4-B1 test counts above remain historical.
 
+The later [commit review of `cda94a7`](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b1-commit-review-corrections) requires the latest pending command to be the only callback-unseen record, a first stop for uncertain or callback-retained started commands, a closed phase helper before a reservation commits and the shutdown write as the latest record. It replaces the authority guard with a literal-false source rule plus a recorded-result walk, and pins one intentional reference-transport difference and one open B4-B2 sub-millisecond checkpoint decision. Nine main-thread files pass 812 tests; the transport model, schemas, capacity and limits are unchanged.
+
 ## Baseline Evidence And Root Causes
 
 | Source | Behavior at `88edb86` | Consequence |

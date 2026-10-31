@@ -91,7 +91,7 @@ const { createUnsignedCohortAssemblyModel } = await import("../helpers/unsignedC
 const { describeUnsignedFixture } = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
 const { createUnsignedProtocolDecoder } = await import("../helpers/unsignedAdapterSupport.mjs");
 const { canonical, digest, sha, flags } = await import("../helpers/unsignedControllerData.mjs");
-const { planUnsignedParentReservation, assessUnsignedParentCallback } = await import("../helpers/unsignedParentConnectionContracts.mjs");
+const { planUnsignedParentReservation, planUnsignedParentCheckpoint, assessUnsignedParentCallback } = await import("../helpers/unsignedParentConnectionContracts.mjs");
 const runtime = await import("../helpers/unsignedCohortRuntime.mjs");
 const h = "a".repeat(64), resources = { fds: "4", roots: "0", workspace: "0", retained: "0" }, baselineValue = { resources, clock_domain: "worker-clock" };
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -1276,5 +1276,38 @@ for (const left of [999999n, 1000000n, 1000500123n, 10000500123n])
       assert.throws(() => planUnsignedParentReservation(d), /reservation_remainder/); assert.throws(() => s.m.planCommand(request), /deadline/);
     } else assert.equal(planUnsignedParentReservation(d).reservation.deadline_ns, s.m.planCommand(request).deadline_ns);
   });
+for (const outcome of ["completed", "uncertain"])
+  test(`B4-B1 prior-uncertain late callback keeps the documented transport reference difference: ${outcome}`, () => {
+    const s = baselined(), when = s.tick(), before = s.m.describe();
+    const op = s.m.planCommand({ kind: "GO", payload: goPayload(s), at: when });
+    const r = planUnsignedParentReservation({ clock_domain: when.clock_domain, planned_ns: when.monotonic_ns,
+      phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns }).reservation;
+    s.m.startWrite(op.reference, { at: s.tick() }); const expiry = s.at(BigInt(op.deadline_ns) + 5n); s.m.stop({ reason: "primary", at: expiry });
+    assert.equal(s.m.describe().writes.at(-1).decision, "uncertain"); assert.equal(s.m.describe().stopped, "write_deadline");
+    const late = s.at(BigInt(op.deadline_ns) + 10n);
+    const expected = assessUnsignedParentCallback({ kind: "GO", reservation: r, last_ns: expiry.monotonic_ns, at: late, started: true, callback_seen: false,
+      previous_decision: "uncertain", observed_outcome: outcome, stopped: true, shutdown: false, clock_invalid: false });
+    s.m.completeWrite(op.reference, { outcome, at: late }); const w = s.m.describe().writes.at(-1);
+    assert.equal(w.decision, "uncertain"); assert.equal(expected.decision, "uncertain"); assert.equal(expected.relay_outcome, null);
+    // The unchanged reference transport keeps this post-deadline sample as callback_at; the parent contract keeps it only as an observation.
+    assert.deepEqual(w.callback_at, late); assert.equal(expected.callback_at, null); assert.deepEqual(expected.observation_point, late);
+  });
+test("B4-B1 the last sub-millisecond of a phase remains an open B4-B2 checkpoint decision", () => {
+  const s = ready(), before = s.m.describe(), end = BigInt(before.phase_deadline_ns), when = s.at(end - 5000000n);
+  const op = s.m.planCommand({ kind: "PREPARE", payload: { configuration: configuration(fixture()), launch_nonce: "nonce-1" },
+    binding: { ...before.binding, setup: setup() }, at: when });
+  const r = planUnsignedParentReservation({ clock_domain: when.clock_domain, planned_ns: when.monotonic_ns,
+    phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns }).reservation;
+  assert.equal(r.deadline_ns, op.deadline_ns); assert.equal(r.deadline_ns, String(end));
+  const started = s.tick(); s.m.startWrite(op.reference, { at: started }); const late = s.at(end - 900000n);
+  const checkpoint = planUnsignedParentCheckpoint({ clock_domain: when.clock_domain, last_b2_ns: started.monotonic_ns, at: late,
+    phase_deadline_ns: before.phase_deadline_ns, cohort_deadline_ns: before.cohort_deadline_ns, pending: { reservation: r, started: true }, stopped: false, clock_invalid: false });
+  const assessed = assessUnsignedParentCallback({ kind: "PREPARE", reservation: r, last_ns: started.monotonic_ns, at: late, started: true, callback_seen: false,
+    previous_decision: "started", observed_outcome: "completed", stopped: false, shutdown: false, clock_invalid: false });
+  s.m.completeWrite(op.reference, { outcome: "completed", at: late }); const after = s.m.describe(), w = after.writes.at(-1);
+  // The original window stops at an observation with under 1 ms of phase left; the pure checkpoint stops only at the bound itself.
+  assert.equal(after.stopped, "phase_deadline"); assert.equal(w.decision, "started"); assert.equal(w.callback_at, null);
+  assert.equal(checkpoint.route, "normal"); assert.equal(checkpoint.stop_first, null); assert.equal(assessed.decision, "completed");
+});
 // A failing after hook is not a failed test under --test-isolation=none or a direct run, so this last test carries the check.
 test("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));

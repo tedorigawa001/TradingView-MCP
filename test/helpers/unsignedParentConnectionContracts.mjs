@@ -132,16 +132,20 @@ export function validateUnsignedParentTerminalFacts(input) {
       || c.write_return_seen && !c.started || c.decision === "planned" && c.started || c.decision !== "planned" && !c.started
       || !c.callback_seen && (c.callback_at !== null || c.observation_point !== null)) refuse("callback_facts");
     if (c.shutdown && c.kind !== "CANCEL") refuse("shutdown_kind");
-    if (c.shutdown && d.first_stop === null) refuse("shutdown_state");
+    // Nothing is planned after a stop except the one shutdown write, so it is the latest record.
+    if (c.shutdown && (d.first_stop === null || index !== d.commands.length - 1)) refuse("shutdown_state");
+    // Uncertain delivery and a callback that could not settle a started write both follow the session's first stop.
+    if ((c.decision === "uncertain" || c.callback_seen && c.decision === "started") && d.first_stop === null) refuse("callback_facts");
     if (c.decision === "completed" && (!c.callback_seen || c.observed_outcome !== "completed" || c.callback_at === null)
       || c.callback_seen && c.observed_outcome === "uncertain" && c.decision !== "uncertain") refuse("callback_facts");
     if (c.callback_at !== null && (canonical(c.callback_at) !== canonical(c.observation_point) || BigInt(c.callback_at.monotonic_ns) >= BigInt(r.deadline_ns))) refuse("callback_facts");
     if (c.observation_point !== null && BigInt(c.observation_point.monotonic_ns) < BigInt(r.planned_ns)) refuse("callback_facts");
     if (c.observation_point !== null && BigInt(c.observation_point.monotonic_ns) >= BigInt(r.deadline_ns) && c.decision !== "uncertain") refuse("callback_facts");
   }
+  // One reservation exists at a time and only its original callback releases it, so it is the latest record.
   const pending = d.commands.find(c => c.generation === d.pending_generation);
-  if (d.pending_generation !== null && (!pending || pending.callback_seen || pending.decision === "completed"
-    || pending.decision === "uncertain" && d.first_stop === null)) refuse("pending_facts");
+  if (d.pending_generation !== null && (!pending || pending.callback_seen || pending.decision === "completed" || pending.generation !== d.commands.length)
+    || d.commands.some(c => !c.callback_seen && c !== pending)) refuse("pending_facts");
   for (const [slot, t] of Object.entries(d.timers)) if (t !== null) {
     const command = d.commands.find(c => c.generation === t.command_generation);
     if ((slot === "phase") !== (t.owner === "phase") || t.owner === "command" && (!command || t.deadline_ns !== command.reservation.deadline_ns)
@@ -150,7 +154,8 @@ export function validateUnsignedParentTerminalFacts(input) {
   }
   if (d.helper.under_command_generation !== null && (!d.helper.active || !pending || pending.generation !== d.helper.under_command_generation
     || pending.started || d.timers.operation?.owner !== "command" || d.timers.operation.command_generation !== pending.generation)) refuse("helper_facts");
-  if (d.helper.active && pending?.started) refuse("helper_facts");
+  // A phase-owned helper is closed before a reservation commits; later helpers run under that command.
+  if (d.helper.active && (pending?.started || pending && d.helper.under_command_generation === null)) refuse("helper_facts");
   if (d.command_end.decision === "attempted" ? !d.pipes.command.present : d.command_end.outcome !== null) refuse("end_facts");
   return freeze({ ...base(), schema: "native-bar-parent-terminal-view-v1", facts: d, semantic_verified: false });
 }

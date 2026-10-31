@@ -12,7 +12,9 @@ const exports = ["planUnsignedParentReservation", "validateUnsignedParentClockFa
 const forbidden = new Set(["process", "globalThis", "global", "Date", "performance", "Intl", "SharedArrayBuffer", "Atomics", "WebAssembly", "require", "createRequire",
   "eval", "Function", "constructor", "Proxy", "Reflect", "fetch", "Worker", "MessageChannel", "WeakMap", "WeakSet", "Promise", "createPrivateKey", "createPublicKey", "sign",
   "spawn", "exec", "fork", "dlopen", "openSync", "readFileSync", "writeFileSync", "mkdir", "unlink", "rename", "setTimeout", "setImmediate", "setInterval",
-  "queueMicrotask", "AbortSignal", "WebSocket", "EventSource", "getPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors", "setPrototypeOf"]);
+  "queueMicrotask", "AbortSignal", "WebSocket", "EventSource", "getPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors", "setPrototypeOf",
+  "defineProperty", "defineProperties", "__proto__", "JSON", "create", "fromEntries", "groupBy", "groups",
+  "RegExp", "match", "matchAll", "replace", "replaceAll", "Enum", "Values"]);
 const authority = new Set(["execution_available", "cleanup_execution_available", "approval_authenticated", "ownership_verified", "evidence_saved",
   "native_release_verified", "timestamps_verified", "history_verified", "signing_available", "runtime_qualified", "runtime_completion_proven",
   "runtime_work_qualified", "original_reference_verified", "semantic_verified"]);
@@ -29,21 +31,27 @@ function guard(text) {
     assert.equal(ts.isExportDeclaration(n) || ts.isExportAssignment(n) || ts.isAwaitExpression(n) || n.kind === ts.SyntaxKind.AsyncKeyword, false);
     assert.equal(ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword, false);
     if (ts.isPropertyAccessExpression(n)) assert.notEqual(n.name.text, "constructor");
+    // Regular-expression groups and zod enum maps would build keys from strings at run time.
+    if (ts.isPropertyAccessExpression(n) && n.name.text === "enum") assert.ok(ts.isCallExpression(n.parent) && n.parent.expression === n);
+    if (ts.isRegularExpressionLiteral(n)) assert.doesNotMatch(n.text, /\(\?<(?![=!])/);
     if (ts.isElementAccessExpression(n)) {
       assert.ok(ts.isNumericLiteral(n.argumentExpression) || ts.isStringLiteralLike(n.argumentExpression));
-      if (ts.isStringLiteralLike(n.argumentExpression)) assert.notEqual(n.argumentExpression.text, "constructor");
+      if (ts.isStringLiteralLike(n.argumentExpression)) assert.equal(forbidden.has(n.argumentExpression.text), false, n.argumentExpression.text);
     }
     if (ts.isBindingElement(n) && n.propertyName) {
       assert.ok(ts.isIdentifier(n.propertyName) || ts.isStringLiteralLike(n.propertyName) || ts.isNumericLiteral(n.propertyName));
-      assert.notEqual(n.propertyName.text, "constructor");
+      assert.equal(forbidden.has(n.propertyName.text), false, n.propertyName.text);
     }
+    if (ts.isComputedPropertyName(n)) assert.ok(ts.isStringLiteralLike(n.expression) || ts.isNumericLiteral(n.expression));
     if (ts.isPropertyAssignment(n)) {
-      let name = n.name;
-      if (ts.isComputedPropertyName(name)) {
-        name = name.expression; assert.ok(ts.isStringLiteralLike(name) || ts.isNumericLiteral(name));
-      }
-      assert.notEqual(name.text, "constructor");
-      if (authority.has(name.text)) assert.equal(n.initializer.kind, ts.SyntaxKind.FalseKeyword);
+      const name = ts.isComputedPropertyName(n.name) ? n.name.expression : n.name;
+      assert.equal(forbidden.has(name.text), false, name.text);
+    }
+    assert.equal(ts.isGetAccessor(n) || ts.isSetAccessor(n) || ts.isClassLike(n), false);
+    // Decoded names, so escapes count: an authority name is only ever a literal false property key.
+    if ((ts.isIdentifier(n) || ts.isStringLiteralLike(n)) && authority.has(n.text)) {
+      const owner = ts.isComputedPropertyName(n.parent) ? n.parent.parent : n.parent;
+      assert.ok(ts.isPropertyAssignment(owner) && owner.initializer.kind === ts.SyntaxKind.FalseKeyword, n.text);
     }
   });
   assert.doesNotMatch(text, /createUnsigned(?:ControllerProtocol|ControllerWindow|WorkerTransport|CohortAssembly)Model|next_ordinals|observeLateFrame/);
@@ -76,6 +84,33 @@ test("B4-B1 computed authority fields cannot bypass false-only validation", () =
   assert.throws(() => guard(source.replace('runtime_completion_proven: false', '["runtime_completion_proven"]: true')));
   assert.throws(() => guard(source + '\nconst hidden = { ["runtime_" + "completion_proven"]: true };'));
   assert.throws(() => guard(source + '\nconst key = "runtime_completion_proven", hidden = { [key]: true };'));
+});
+test("B4-B1 authority names appear only as literal false properties, however a write is spelled", () => {
+  const at = "view.forward_at = at;", control = source.replace(at, at + ' const extra = { semantic_verified: false, "runtime_qualified": false };');
+  assert.notEqual(control, source); guard(control);
+  for (const added of [" view.execution_available = true;", ' view["runtime_completion_proven"] = true;', " view.semantic_verified ||= true;",
+    " view.execution_available **= false;", " view.execution_available += false;", " [view.semantic_verified] = [true];", " (view.execution_available) = true;",
+    " for (view.semantic_verified of [true]);", " view.execution_available++;", ' Object.defineProperty(view, "execution_available", { value: true });',
+    ' Object.defineProperty(view, "execution_" + "available", { value: true });',
+    ' Object["defineProperty"](view, "semantic_" + "verified", { value: true });', " Object.defineProperties(view, {});",
+    ' const { "defineProperty": define } = Object; define(view, "semantic_" + "verified", { value: true });',
+    " Object.assign(view, JSON.parse('{\"semantic_verified\":true}'));", ' Object.assign(view, { get ["semantic_" + "verified"]() { return true; } });',
+    " Object.assign(view, { __proto__: at });", " Object.assign(view, JSON.parse('{\"semantic_' + 'verified\":true}'));", " view.forward_at = Object.create(at);",
+    ' Object.assign(view, Object.fromEntries([["semantic_" + "verified", true]]));', ' Object.assign(view, Object.groupBy([true], () => "semantic_" + "verified"));',
+    " view.execution\\u005Favailable = true;", " Object.assign(view, { execution\\u005Favailable: true });", ' Object.assign(view, { ["semantic_" + "verified"]() {} });',
+    ' Object.assign(view, "x".match(new RegExp("(?<semantic_" + "verified>x)")).groups);', " Object.assign(view, { get hidden() { return true; } });",
+    " Object.assign(view, new (class { hidden = true })());", " view.forward_at = view.groups;", " view.forward_at = /(?<hidden>x)/;",
+    ' Object.assign(view, z.enum(["semantic_" + "verified"]).enum);', ' Object.assign(view, z.enum(["hidden"]).Enum);', ' Object.assign(view, z.enum(["hidden"]).Values);',
+    ' "x".replace(/x/, (...a) => Object.assign(view, a.at(-1)));', ' "x".replaceAll("x", "y");', ' "x".match("(?<semantic_" + "verified>x)");',
+    ' "x".matchAll(/x/g);', ' view.forward_at = new RegExp("x");'])
+    assert.throws(() => guard(source.replace(at, at + added)), added);
+  const reservation = 'return freeze({ ...base(), schema: "native-bar-parent-reservation-model-v1",';
+  // Only the shorthand case also needs its declaration, so each literal form is refused on its own.
+  for (const [declaration, literal] of [[", execution_available = true", "execution_available, "], ["", "get semantic_verified() { return true; }, "],
+    ["", '"__proto__": d, ']]) {
+    const mutated = source.replace("const unit = 1000000n;", `const unit = 1000000n${declaration};`).replace(reservation, reservation.replace("{ ", "{ " + literal));
+    assert.notEqual(mutated, source); assert.throws(() => guard(mutated), literal);
+  }
 });
 test("B4-B1 source guards preserve full-ms rounding, deadline-first order and unavailable-time semantics", () => {
   const pin = text => {
