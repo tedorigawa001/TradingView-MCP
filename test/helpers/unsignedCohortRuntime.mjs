@@ -212,9 +212,10 @@ async function prepareOriginalQualification() {
       else { o.coordinator.noteClockFailure(c.caseRef, { reason: "clock_unavailable" }); syncOriginalParent(c); return null; }
     }
     const command = c.facts.commands.find(v => v.generation === c.facts.pending_generation);
+    // An open phase-owned helper is bounded by its reservation as soon as its lease exists, before its timer is armed.
+    const helperEnd = c.helperLease && !c.helperLease.closed && !c.helperLease.borrowed ? c.helperLease.deadline : null;
     let q;
     try {
-      const helperEnd = c.operationTimer && c.operationTimer.fact.owner === "helper" && c.helperLease && !c.helperLease.closed ? c.operationTimer.fact.deadline_ns : null;
       q = planUnsignedParentCheckpoint({ clock_domain: clock.binding.clock_domain, last_b2_ns: o.lastNs, at,
         phase_deadline_ns: helperEnd !== null && BigInt(helperEnd) < BigInt(d.active.window.phase_deadline_ns) ? helperEnd : d.active.window.phase_deadline_ns,
         cohort_deadline_ns: d.cohort_deadline_ns,
@@ -224,8 +225,7 @@ async function prepareOriginalQualification() {
     }
     if (q.clock_failure) { o.coordinator.noteClockFailure(c.caseRef, { reason: q.clock_failure }); syncOriginalParent(c); return null; }
     if (q.stop_first) {
-      if (c.operationTimer?.active && c.operationTimer.fact.owner === "helper" && q.stop_first.at.monotonic_ns === c.operationTimer.fact.deadline_ns)
-        q = { ...q, stop_first: { ...q.stop_first, reason: "helper_deadline" } };
+      if (helperEnd !== null && q.stop_first.at.monotonic_ns === helperEnd) q = { ...q, stop_first: { ...q.stop_first, reason: "helper_deadline" } };
       o.coordinator.stop(q.stop_first); o.lastNs = q.stop_first.at.monotonic_ns;
       if (q.pending_disposition === "uncertain" && command.decision === "started") {
         command.decision = "uncertain";
@@ -332,10 +332,13 @@ async function prepareOriginalQualification() {
     if (c[key]) refuse("parent_timer_busy");
     const generation = c[counter] + 1;
     if (!Number.isSafeInteger(generation)) { stopOriginalParentSupervision(c, "timer_generation", pointOriginalParentSupervision(c)); refuse("parent_timer_generation"); }
+    // Sample before the slot exists: a stop found here leaves no never-armed record to clear as unknown.
+    const at = pointOriginalParentSupervision(c); if (!at) { stopOriginalParentSupervision(c, "parent_stopped"); refuse("parent_supervision_stopped"); }
     c[counter] = generation;
     const fact = { owner, command_generation: commandGeneration, generation, segment: 0, deadline_ns: deadline,
       referenced: false, active: true, cancel_attempted: false, clear_unknown: false };
-    const t = { fact, handle: null, active: true, clearAttempted: false, sessionGeneration: c.generation, phaseKey, installing: false, clearing: false, knownCleared: false };
+    // No handle exists until schedule() calls setTimeout, which first resets knownCleared; a timer stopped before then is released as known.
+    const t = { fact, handle: null, active: true, clearAttempted: false, sessionGeneration: c.generation, phaseKey, installing: false, clearing: false, knownCleared: true };
     c[key] = t; c.facts.timers[slot] = fact;
     const current = () => c.owner.active === c && c.owner.generation === c.generation && c[key] === t && t.active;
     const cancel = () => {
@@ -379,7 +382,6 @@ async function prepareOriginalQualification() {
       const after = pointOriginalParentSupervision(c); fact.referenced = referenced;
       if (!after || !referenced) { stopOriginalParentSupervision(c, "timer_unreferenced", after); return; }
     }
-    const at = pointOriginalParentSupervision(c); if (!at) { stopOriginalParentSupervision(c, "parent_stopped"); refuse("parent_supervision_stopped"); }
     schedule(at);
     if (!current()) refuse("parent_supervision_stopped"); return control;
   }
@@ -470,6 +472,7 @@ async function prepareOriginalQualification() {
     }
   }
   function faultOriginalParent(c, reason) {
+    dropOriginalParentPending(c);
     const at = checkpointOriginalParent(c);
     if (at) { c.owner.lastNs = at.monotonic_ns; c.owner.coordinator.stop({ reason, at }); }
     syncOriginalParent(c);
@@ -478,6 +481,11 @@ async function prepareOriginalQualification() {
   function discardOriginalParent(c, frames = 0, bytes = 0, unknown = false) {
     const next = summarizeUnsignedParentDiscard({ counter: c.facts.discarded_input, frames, bytes }).counter;
     c.facts.discarded_input = unknown ? { ...next, saturated: true } : next;
+  }
+  function dropOriginalParentPending(c) {
+    // A pending partial line is lost once intake closes; its known bytes saturate the count, so a repeat cannot add them again.
+    const pending = c.decoder.describe().pending_bytes;
+    if (pending) discardOriginalParent(c, 0, pending, true);
   }
   function discardOriginalParentBytes(c, chunk) {
     let bytes = null;
@@ -493,6 +501,7 @@ async function prepareOriginalQualification() {
       if (c.intakeClosed || d.active.frames >= 32 || d.stopped && (capture !== "open" || d.active.late_count >= 4)) {
         const bytes = discardOriginalParentBytes(c, chunk);
         if (c.intakeClosed && bytes === 0) return describeOriginalParent(ref);
+        dropOriginalParentPending(c);
         if (!d.stopped) {
           const at = checkpointOriginalParent(c);
           if (at) { o.lastNs = at.monotonic_ns; o.coordinator.stop({ reason: c.intakeClosed ? "stream_closed" : "frame_capacity", at }); }
@@ -503,10 +512,11 @@ async function prepareOriginalQualification() {
       }
       let lines;
       try { lines = c.decoder.push(chunk); }
-      catch { faultOriginalParent(c, "decoder_failure"); return describeOriginalParent(ref); }
+      catch { discardOriginalParentBytes(c, chunk); faultOriginalParent(c, "decoder_failure"); return describeOriginalParent(ref); }
       for (let index = 0; index < lines.length; index++) {
+        let handed = false;
         try {
-          const at = checkpointOriginalParent(c);
+          const at = checkpointOriginalParent(c); handed = true;
           if (at) {
             o.lastNs = at.monotonic_ns; o.coordinator.applyModelEvent(c.caseRef, { kind: "worker_frame", payload: { line: lines[index] }, at });
             if (c.supervisionArmed && !o.coordinator.describe().stopped) {
@@ -515,8 +525,10 @@ async function prepareOriginalQualification() {
             }
           } else o.coordinator.observeLateFrame(c.caseRef, { line: lines[index] });
         } catch {
+          // B2's refusal records a handed line; a line the parent's own checkpoint never handed over is dropped with the rest.
+          const dropped = lines.slice(handed ? index + 1 : index);
           syncOriginalParent(c); c.intakeClosed = true;
-          discardOriginalParent(c, lines.length - index - 1); break;
+          discardOriginalParent(c, dropped.length, dropped.reduce((n, line) => n + Buffer.byteLength(line), 0)); break;
         }
       }
       const captureAfter = o.coordinator.describe().active.late_capture, pendingBytes = c.decoder.describe().pending_bytes;
@@ -533,7 +545,7 @@ async function prepareOriginalQualification() {
     if (!status || status !== c.pipes.status) refuse("parent_status_reference");
     if (c.receiveBusy) refuse("parent_receive_reentrant");
     const d = syncOriginalParent(c);
-    if (c.intakeClosed || ["frozen", "refused", "ended"].includes(d.active.late_capture)) return describeOriginalParent(ref);
+    if (c.intakeClosed || ["frozen", "refused", "ended"].includes(d.active.late_capture)) { dropOriginalParentPending(c); return describeOriginalParent(ref); }
     try { c.decoder.end(); }
     catch { faultOriginalParent(c, "truncated_frame"); return describeOriginalParent(ref); }
     if (!d.stopped && ["FINALIZING", "DONE"].includes(d.active.protocol_state) && checkpointOriginalParent(c)) c.intakeClosed = true;

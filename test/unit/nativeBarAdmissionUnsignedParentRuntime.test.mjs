@@ -388,4 +388,37 @@ test("B4-B2 source-extracted receive rejects reentrant bytes and EOF before deco
   assert.throws(()=>e.api.endOriginalParent(e.ref,e.c.pipes.status),/parent_receive_reentrant/);
   assert.deepEqual(e.c.decoder.describe(),decoder);
 });
+test("B4-B2 lines dropped after a mid-batch rejection are counted in full", () => {
+  const e = live(), good = e.ready(), view = e.receive(good+"{}\n"+good+"\u00e9\u00e9\n");
+  assert.equal(view.admission.active.late_capture,"frozen");
+  assert.deepEqual(view.terminal.facts.discarded_input,{frames:2,bytes:Buffer.byteLength(good)+5,saturated:false});
+});
+test("B4-B2 a line the parent never handed to B2 is counted with the rest of its batch", () => {
+  const e = live(), good = e.ready(); e.c.owner.lastNs = e.model.describe().active.window.phase_deadline_ns;
+  const view = e.receive(good+good); assert.equal(view.admission.stopped,true); assert.equal(view.admission.active.late_count,0);
+  assert.deepEqual(view.terminal.facts.discarded_input,{frames:2,bytes:2*Buffer.byteLength(good),saturated:false});
+});
+test("B4-B2 bytes dropped by a decoder failure or truncated EOF are recorded as an incomplete count", () => {
+  for (const tail of [Buffer.from([255,10]), Buffer.from("x\n".repeat(32))]) {
+    const e = live(), chunk = Buffer.concat([Buffer.from(e.ready()), tail]); e.now++;
+    const view = e.api.receiveOriginalParent(e.ref,e.c.pipes.status,chunk); assert.equal(view.admission.stopped,true);
+    assert.deepEqual(view.terminal.facts.discarded_input,{frames:0,bytes:chunk.length,saturated:true});
+  }
+  const e = live(), partial = e.ready().slice(0,-1); e.receive(partial);
+  const view = e.api.endOriginalParent(e.ref,e.c.pipes.status); assert.equal(view.admission.stopped,true);
+  assert.deepEqual(view.terminal.facts.discarded_input,{frames:0,bytes:Buffer.byteLength(partial),saturated:true});
+});
+test("B4-B2 a later status fault does not count already discarded pending bytes again", () => {
+  const e = live(); e.receive(e.ready()+"{}\nxyz");
+  const before = e.api.describeOriginalParent(e.ref).terminal.facts.discarded_input;
+  assert.deepEqual(before,{frames:0,bytes:3,saturated:true});
+  e.api.recordOriginalParentTerminal(e.ref,e.c.pipes.status,"status","error");
+  assert.deepEqual(e.api.describeOriginalParent(e.ref).terminal.facts.discarded_input,before);
+});
+for (const close of ["end", "empty_receive"]) test("B4-B2 a pending partial line is counted when intake closes after capture closed elsewhere: "+close, () => {
+  const e = live(); e.receive("abc"); e.model.stop({reason:"primary",at:point(++e.now)});
+  e.model.endLateFrames(e.c.caseRef,{reason:"stream_closed"}); assert.equal(e.model.describe().active.late_capture,"refused");
+  const view = close === "end" ? e.api.endOriginalParent(e.ref,e.c.pipes.status) : e.api.receiveOriginalParent(e.ref,e.c.pipes.status,Buffer.alloc(0));
+  assert.deepEqual(view.terminal.facts.discarded_input,{frames:0,bytes:3,saturated:true});
+});
 test("B4-B2 no denied effect was swallowed", () => assert.deepEqual(effects, []));

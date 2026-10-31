@@ -12,7 +12,7 @@ const privateNames = ["originalQualificationPolicy", "originalQualificationClock
   "stopOriginalParentSupervision", "clearOriginalParentTimer", "pointOriginalParentSupervision", "inspectOriginalParentSupervision", "checkOriginalParentSupervision",
   "armOriginalParentTimer", "selectOriginalParentPhase", "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan",
   "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
-  "faultOriginalParent", "discardOriginalParent", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
+  "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
   "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "afterSync", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
   "metadataText", "parseMetadataListing", "qualifyMetadata", "qualifyChain", "createOriginalDirectory", "allowedTool", "runOriginalTool", "hash", "chargeHash", "readPinnedFile",

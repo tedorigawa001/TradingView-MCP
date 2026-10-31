@@ -12,7 +12,7 @@ const names = ["originalParentScope", "originalParentInvocation", "originalParen
   "describeOriginalParent", "pointOriginalParent", "checkpointOriginalParent", "stopOriginalParentSupervision", "clearOriginalParentTimer",
   "pointOriginalParentSupervision", "inspectOriginalParentSupervision", "checkOriginalParentSupervision", "armOriginalParentTimer", "selectOriginalParentPhase",
   "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan", "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
-  "faultOriginalParent", "discardOriginalParent", "discardOriginalParentBytes", "receiveOriginalParent",
+  "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent",
   "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand"];
 const dependencies = {
   "./unsignedCohortAssemblyModel.mjs": ["createUnsignedCohortAssemblyModel"],

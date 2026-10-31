@@ -409,4 +409,59 @@ test("B4-B3 installed effect tripwires fail both calls and constructors",()=>{
     assert.equal(effects.length,before+1,k);effects.pop();
   }
 });
+// The clock moves only after the chosen read returns, so the next sample is the first to see the change; the read total proves the arm sample ran.
+const crossAfterRead=(e,count,change)=>{const point=e.context.clock.point;let reads=0;
+  e.context.clock.point=function(){const n=++reads,p=point.call(this);if(n===count)change();return p;};return()=>reads;};
+const noUnarmedRecord=(e,slot)=>{const view=e.view();
+  assert.equal(e.c[slot+"Timer"],null);assert.equal(view.terminal.facts.timers[slot],null);
+  assert.equal(view.terminal.facts.secondary_errors.includes("timer_cancel_unknown"),false);return view;};
+for(const lane of ["deadline","clock_failure"])test(`B4-B3 an arm-time ${lane} after phase selection leaves no unarmed timer record`,()=>{
+  const e=session(),deadline=BigInt(e.view().admission.active.window.phase_deadline_ns);
+  const reads=crossAfterRead(e,1,()=>{if(lane==="deadline")e.now=deadline;else e.clockFailure={clock_invalid:true,failure:"invented",stop_ns:null};});
+  assert.throws(()=>e.api.selectOriginalParentPhase(e.ref),/parent_supervision_stopped/);assert.equal(reads(),2);
+  const view=noUnarmedRecord(e,"phase");assert.equal(e.timers.length,0);assert.equal(e.clears.length,0);
+  assert.equal(view.admission.stop_reason,lane==="deadline"?"deadline":"clock_unavailable");
+  assert.equal(view.admission.first_stop_ns,lane==="deadline"?String(deadline):null);
+});
+test("B4-B3 an arm-time command deadline leaves no unarmed operation record",()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);const command=pending(e);
+  const reads=crossAfterRead(e,2,()=>{e.now=BigInt(command.reservation.deadline_ns);});
+  assert.throws(()=>e.api.armOriginalParentOperation(e.ref),/parent_supervision_stopped/);assert.equal(reads(),3);
+  const view=noUnarmedRecord(e,"operation");assert.equal(e.timers.length,1);
+  assert.equal(view.admission.stop_reason,"write_deadline");assert.equal(view.admission.first_stop_ns,command.reservation.deadline_ns);
+});
+test("B4-B3 a helper deadline passed before its operation timer is armed stops at that deadline with no unarmed record",async()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);e.plan();let refs=0,deadline=null;
+  e.onRef=()=>{if(++refs===2){deadline=e.c.helperLease.deadline;e.now=BigInt(deadline)+5n;}};
+  const r=track(e.api.runOriginalParentHelper(e.ref));await flush();
+  assert.equal(r.state,"rejected");assert.equal(e.spawned.length,0);assert.equal(e.timers.length,1);
+  const view=noUnarmedRecord(e,"operation");assert.equal(view.admission.stop_reason,"helper_deadline");assert.equal(view.admission.first_stop_ns,deadline);
+  assert.equal(e.c.helperLease,null);assert.equal(e.s.helper,null);assert.equal(view.terminal.facts.helper.active,false);
+});
+test("B4-B3 a shutdown reservation that expires before its timer is scheduled is released as known, not unknown",()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);e.now=BigInt(e.view().admission.active.window.phase_deadline_ns);e.fire(0);
+  e.api.selectOriginalParentPhase(e.ref);const v=e.view(),w=v.admission.active.window;assert.equal(w.phase,"settlement");
+  const reservation=parent.planUnsignedParentReservation({clock_domain:"parent-clock",planned_ns:String(e.now),phase_deadline_ns:w.phase_deadline_ns,
+    cohort_deadline_ns:v.admission.cohort_deadline_ns}).reservation;
+  e.c.facts.commands=[{kind:"CANCEL",ordinal:1,generation:1,reservation,sha256:h,bytes:100,started:false,write_return_seen:false,backpressure:null,
+    callback_seen:false,observed_outcome:null,callback_at:null,observation_point:null,decision:"planned",shutdown:true}];e.c.facts.pending_generation=1;
+  const timers=e.timers.length,reads=crossAfterRead(e,2,()=>{e.now=BigInt(reservation.deadline_ns);});
+  assert.throws(()=>e.api.armOriginalParentOperation(e.ref),/parent_supervision_stopped/);assert.equal(reads(),3);
+  const view=e.view(),fact=view.terminal.facts.timers.operation;assert.equal(e.timers.length,timers);assert.equal(e.c.operationTimer,null);
+  assert.equal(fact.clear_unknown,false);assert.equal(fact.active,false);
+  assert.equal(view.terminal.facts.secondary_errors.includes("timer_cancel_unknown"),false);assert.ok(view.terminal.facts.secondary_errors.includes("timer_deadline"));
+});
+test("B4-B3 a helper that closed before its deadline is not stopped retroactively before release",async()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);e.plan();const r=track(e.api.runOriginalParentHelper(e.ref));await flush();
+  const deadline=BigInt(e.c.helperLease.deadline);e.onClear=()=>{e.onClear=null;e.now=deadline+1n;};
+  e.spawned[0].child.emit("close",0,null);await flush();
+  assert.equal(r.state,"resolved");assert.equal(e.view().admission.stopped,false);assert.equal(e.c.helperLease,null);
+});
+test("B4-B3 a command deadline during a borrowed helper stays the command write deadline",async()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);const command=pending(e);e.api.armOriginalParentOperation(e.ref);e.plan();
+  const r=track(e.api.runOriginalParentHelper(e.ref));await flush();assert.equal(e.spawned.length,1);
+  e.now=BigInt(command.reservation.deadline_ns);e.fire(1);await flush();
+  const view=e.view();assert.equal(view.admission.stop_reason,"write_deadline");assert.equal(view.admission.first_stop_ns,command.reservation.deadline_ns);
+  e.spawned[0].child.emit("close",0,null);await flush();assert.equal(r.state,"rejected");assert.equal(e.s.helper,null);
+});
 test("B4-B3 no denied effect was swallowed", () => assert.deepEqual(effects, []));
