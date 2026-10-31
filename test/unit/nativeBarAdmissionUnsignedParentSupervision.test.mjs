@@ -464,4 +464,10 @@ test("B4-B3 a command deadline during a borrowed helper stays the command write 
   const view=e.view();assert.equal(view.admission.stop_reason,"write_deadline");assert.equal(view.admission.first_stop_ns,command.reservation.deadline_ns);
   e.spawned[0].child.emit("close",0,null);await flush();assert.equal(r.state,"rejected");assert.equal(e.s.helper,null);
 });
+test("B4-B3 a retired reference-check return cannot sample or stop another generation",()=>{
+  const e=session();e.api.selectOriginalParentPhase(e.ref);let reads;
+  e.onRef=()=>{e.onRef=null;e.c.owner.generation++;reads=e.reads;};
+  assert.throws(()=>e.api.checkOriginalParentSupervision(e.ref));assert.equal(e.reads,reads);
+  assert.equal(e.c.owner.coordinator.describe().stopped,false);assert.equal(e.s.stopped,null);
+});
 test("B4-B3 no denied effect was swallowed", () => assert.deepEqual(effects, []));

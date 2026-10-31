@@ -12,6 +12,7 @@ const names = ["originalParentScope", "originalParentInvocation", "originalParen
   "describeOriginalParent", "pointOriginalParent", "checkpointOriginalParent", "stopOriginalParentSupervision", "clearOriginalParentTimer",
   "pointOriginalParentSupervision", "inspectOriginalParentSupervision", "checkOriginalParentSupervision", "armOriginalParentTimer", "selectOriginalParentPhase",
   "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan", "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
+  "originalParentLaunchPlan", "qualifyOriginalParentLaunch", "currentOriginalParentHandler", "failOriginalParentEvent", "observeOriginalParentOutput", "bindOriginalParentChild", "launchOriginalParent",
   "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent",
   "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand"];
 const dependencies = {
@@ -43,33 +44,36 @@ function guard(text) {
   assert.deepEqual(imported,dependencies);
   const gates = { originalParentInvocation: "parent_invocation", originalParentAllocation: "original_allocation",
     originalParentCaseReceipt: "original_case_receipt", originalParentWorkPlan: "runtime_work_plan", originalParentWorkerQualification: "qualified_worker_closure",
-    originalParentHelperPlan: "original_helper_plan" };
+    originalParentHelperPlan: "original_helper_plan", originalParentLaunchPlan: "original_launch_plan" };
   for (const [name, reason] of Object.entries(gates)) {
     const f = selected.find(n=>n.name.text===name); assert.equal(f.parameters.length,0); assert.equal(f.body.statements.length,1);
     assert.equal(f.body.statements[0].getText(), `throw Error("cc4b3b_${reason}_unavailable");`);
   }
-  const members = new Set(["write", "on", "once", "emit", "destroy", "kill", "unref", "spawn", "open", "read", "sign"]);
+  const members = new Set(["write", "on", "once", "emit", "destroy", "kill", "ref", "unref", "spawn", "open", "read", "sign"]);
   const forbidden = new Set(["fs","crypto","process","Date","setInterval","performance","require","eval","Function","Proxy","Reflect"]);
   const timerCalls = [];
   for (const f of selected) walk(f,n=>{
     if (ts.isIdentifier(n)) assert.equal(forbidden.has(n.text),false,n.text);
-    if (ts.isIdentifier(n) && n.text === "path") {
-      assert.equal(f.name.text,"runOriginalParentHelper"); assert.equal(n.parent.getText(),"path.isAbsolute");
-      assert.equal(n.parent.parent.getText(),"path.isAbsolute(plan.args[1])");
+    if (ts.isIdentifier(n) && n.text === "path" && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
+      if (f.name.text === "qualifyOriginalParentLaunch") assert.equal(n.parent.parent.getText(),'path.join(root, "native/native_bar_fs/test_unsigned_cohort_worker.mjs")');
+      else { assert.equal(f.name.text,"runOriginalParentHelper"); assert.equal(n.parent.getText(),"path.isAbsolute");
+        assert.equal(n.parent.parent.getText(),"path.isAbsolute(plan.args[1])"); }
     }
     if (ts.isIdentifier(n) && ["setTimeout","clearTimeout"].includes(n.text)) {
       assert.ok(ts.isCallExpression(n.parent) && n.parent.expression === n);
       timerCalls.push(f.name.text+":"+n.text);
     }
-    if (ts.isAwaitExpression(n) || n.kind === ts.SyntaxKind.AsyncKeyword) assert.equal(f.name.text,"runOriginalParentHelper");
+    if (ts.isAwaitExpression(n) || n.kind === ts.SyntaxKind.AsyncKeyword) assert.ok(["runOriginalParentHelper","launchOriginalParent"].includes(f.name.text));
     assert.equal(ts.isExportDeclaration(n) || ts.isExportAssignment(n),false);
-    assert.equal(ts.isNewExpression(n),false);
+    if (ts.isNewExpression(n)) { assert.equal(f.name.text,"observeOriginalParentOutput"); assert.equal(n.getText(),"new Uint8Array(backing, offset, wanted)"); }
     if (ts.isCallExpression(n)) {
-      assert.notEqual(n.expression.kind,ts.SyntaxKind.ImportKeyword);
+      if (n.expression.kind === ts.SyntaxKind.ImportKeyword) { assert.equal(f.name.text,"launchOriginalParent"); assert.equal(n.getText(),'import("node:child_process")'); }
       if (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression)) {
         const receiver = n.expression.expression, name = ts.isPropertyAccessExpression(n.expression) ? n.expression.name : n.expression.argumentExpression;
         if (ts.isElementAccessExpression(n.expression)) assert.ok(ts.isStringLiteralLike(name));
-        assert.equal(members.has(name.text),false,name.text);
+        if (name.text === "on" && f.name.text === "bindOriginalParentChild") assert.equal(n.expression.getText(),"emitter.on");
+        else if (name.text === "ref" && f.name.text === "launchOriginalParent") assert.equal(n.expression.getText(),"child.ref");
+        else assert.equal(members.has(name.text),false,name.text);
         if (name.text === "applyModelEvent") assert.ok(["pointOriginalParent","receiveOriginalParent"].includes(f.name.text));
         if (receiver.getText() === "clock" && name.text === "point") assert.ok(["reserveOriginalParentSession","pointOriginalParent","pointOriginalParentSupervision"].includes(f.name.text));
       }

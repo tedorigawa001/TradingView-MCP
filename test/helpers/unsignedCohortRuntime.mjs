@@ -26,6 +26,7 @@ async function prepareOriginalQualification() {
   const buildReferences = new WeakMap(), namespaceReferences = new WeakMap();
   const parentOwners = new WeakMap(), parentSessions = new WeakMap();
   const parentHelperPlans = new WeakMap();
+  const parentLaunchPlans = new WeakMap();
   return buildAndQualify();
 
   function originalQualificationPolicy() { throw Error("cc4b3b_operational_profile_unavailable"); }
@@ -163,9 +164,12 @@ async function prepareOriginalQualification() {
     const c = { owner: o, generation: ++o.generation, caseRef: null, decoder: null, child: null,
       pipes: { command: null, status: null, stdout: null, stderr: null }, receiveBusy: false, intakeClosed: false, facts: null,
       phaseTimer: null, operationTimer: null, phaseGeneration: 0, operationGeneration: 0, phaseSelections: 0, phaseKey: null,
-      supervisionArmed: false, supervisionTransition: false, checkingSupervision: false, stoppingSupervision: false, stoppedObserved: false, helperLease: null };
+      supervisionArmed: false, supervisionTransition: false, checkingSupervision: false, stoppingSupervision: false, stoppedObserved: false, helperLease: null,
+      allocation: null, launchClaimed: false, handlersAttempted: false, handlersBound: false, bindingsValid: false,
+      returnedStreams: [], output: { stdout: null, stderr: null }, reverse: { bytes: 0, incomplete: false } };
     o.active = c;
     const allocation = originalParentAllocation(); originalParentCaseReceipt(); originalParentWorkerQualification();
+    c.allocation = allocation;
     const at = clock.point(); c.caseRef = o.coordinator.beginCase({ allocation, at }); o.lastNs = at.monotonic_ns;
     const pipe = () => ({ present: false, end_seen: false, finish_seen: false, close_seen: false, error: null });
     c.facts = { schema: "native-bar-parent-terminal-facts-v1", clock_domain: clock.binding.clock_domain, first_stop: null, clock_invalid: false,
@@ -277,6 +281,7 @@ async function prepareOriginalQualification() {
     return true;
   }
   function pointOriginalParentSupervision(c) {
+    if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return null;
     const d = syncOriginalParent(c);
     if (!d.stopped) return pointOriginalParent(c);
     const w = d.active.window;
@@ -470,6 +475,136 @@ async function prepareOriginalQualification() {
       if (!lease.spawnAttempted) lease.closed = true;
       if (lease.closed) { lease.timer?.cancel(); releaseOriginalParentHelper(c, lease); }
     }
+  }
+  function originalParentLaunchPlan() { throw Error("cc4b3b_original_launch_plan_unavailable"); }
+  function qualifyOriginalParentLaunch(c, plan) {
+    const s = c.owner.s;
+    qualifyOriginalParentDispatch(c.reference);
+    const rows = s.inputs?.rows, d = c.owner.coordinator.describe(), binding = d.active.binding;
+    if (!plan || plan.owner !== c || plan.buildRef !== c.owner.buildRef || plan.namespaceRef !== c.owner.namespaceRef || plan.allocation !== c.allocation
+      || !Array.isArray(rows) || !rows.includes(plan.node) || !rows.includes(plan.worker)
+      || plan.node.path !== s.sourceIdentity?.node || !plan.node.roles.includes("node")
+      || plan.worker.path !== path.join(root, "native/native_bar_fs/test_unsigned_cohort_worker.mjs") || !plan.worker.roles.includes("runtime")
+      || plan.node.sha256 !== binding.node_binary_sha256 || plan.worker.sha256 !== binding.worker_sha256
+      || s.recordHash !== binding.build_record_sha256 || c.allocation.fixture.mode !== binding.mode
+      || !["normal", "ubsan"].includes(binding.mode) || d.active.protocol_state !== "NEW" || c.facts.commands.length !== 0) refuse("parent_launch_plan");
+  }
+  function currentOriginalParentHandler(c, child, stream = null, slot = null) {
+    return parentSessions.get(c.reference) === c && c.owner.active === c && c.owner.generation === c.generation
+      && c.child === child && (slot === null || c.pipes[slot] === stream);
+  }
+  function failOriginalParentEvent(c, reason) {
+    if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return;
+    let at = null; try { at = checkpointOriginalParent(c); } catch { /* No invented point after an unavailable checkpoint. */ }
+    if (parentSessions.get(c.reference) !== c || c.owner.active !== c || c.owner.generation !== c.generation) return;
+    stopOriginalParentSupervision(c, reason, at);
+  }
+  function observeOriginalParentOutput(ref, original, slot, bytes) {
+    const c = currentOriginalParentSession(ref);
+    if (!["stdout", "stderr", "command"].includes(slot) || c.pipes[slot] !== original) refuse("parent_output_reference");
+    const reverse = slot === "command", old = reverse ? c.reverse : (c.output[slot] ??= { prefix: null, bytes: 0, incomplete: false }), cap = reverse ? 65537 : 2097153;
+    let length = null;
+    const typed = Object.getPrototypeOf(Uint8Array.prototype);
+    try {
+      length = Object.getOwnPropertyDescriptor(typed, "byteLength").get.call(bytes);
+      if (![Buffer.prototype, Uint8Array.prototype].includes(Object.getPrototypeOf(bytes))) length = null;
+    } catch { /* Unknown bytes never invoke a property getter or decoder. */ }
+    if (length === 0) return;
+    const stopped = syncOriginalParent(c).stopped;
+    old.bytes = Math.min(cap, old.bytes + (length ?? 0)); old.incomplete ||= length === null || old.bytes === cap || stopped;
+    if (!reverse && !stopped && length !== null && old.prefix === null) {
+      const wanted = Math.min(length, 8192), copy = Buffer.alloc(wanted);
+      const backing = Object.getOwnPropertyDescriptor(typed, "buffer").get.call(bytes), offset = Object.getOwnPropertyDescriptor(typed, "byteOffset").get.call(bytes);
+      Uint8Array.prototype.set.call(copy, new Uint8Array(backing, offset, wanted)); old.prefix = copy;
+      old.incomplete ||= length > wanted;
+    }
+    failOriginalParentEvent(c, reverse ? "reverse_command_bytes" : "unexpected_worker_output");
+  }
+  function bindOriginalParentChild(ref) {
+    // A stale launch still owns its returned resources, but its listeners cannot advance another generation.
+    const c = parentSessions.get(ref); if (!c || c.reference !== ref) refuse("parent_handlers_reference");
+    const child = c.child;
+    if (!child || c.handlersAttempted) refuse("parent_handlers_once"); c.handlersAttempted = true;
+    let failed = false;
+    const alive = (stream = null, slot = null) => currentOriginalParentHandler(c, child, stream, slot);
+    const add = (emitter, event, listener) => {
+      try { emitter.on(event, listener); } catch { failed = true; failOriginalParentEvent(c, "worker_listener_failed"); }
+    };
+    const terminal = (original, slot, event, payload = null) => {
+      if (!alive(slot === "child" ? null : original, slot === "child" ? null : slot)) return;
+      try { recordOriginalParentTerminal(ref, original, slot, event, payload); }
+      catch { failOriginalParentEvent(c, "worker_terminal_failed"); }
+    };
+    add(child, "error", () => { if (!alive()) return; terminal(child, "child", "error"); failOriginalParentEvent(c, "worker_child_failed"); });
+    for (const event of ["exit", "close"]) add(child, event, (exitCode, signal) => {
+      if (!alive()) return;
+      const knownCode = exitCode === null || Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 255;
+      const knownSignal = signal === null || typeof signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(signal);
+      terminal(child, "child", event, { exit_code: knownCode ? exitCode : null, signal: knownSignal ? signal : null });
+      if (!knownCode || !knownSignal) failOriginalParentEvent(c, "worker_terminal_unknown");
+    });
+    let stdio = null; const aliases = [];
+    try { stdio = child.stdio; } catch { failed = true; }
+    // Capture each returned reference before reading the next property, including on a partial return.
+    for (const [slot, index] of [["stdout", 1], ["stderr", 2], ["command", 3], ["status", 4]]) {
+      try {
+        const stream = slot === "stdout" ? child.stdout : slot === "stderr" ? child.stderr : stdio?.[index];
+        c.pipes[slot] = stream ?? null; c.facts.pipes[slot].present = !!stream;
+        if (stream && !c.returnedStreams.includes(stream)) c.returnedStreams.push(stream);
+      } catch { failed = true; }
+    }
+    for (const index of [1, 2]) try {
+      const stream = stdio?.[index]; aliases[index - 1] = stream;
+      if (stream && !c.returnedStreams.includes(stream)) c.returnedStreams.push(stream);
+    } catch { failed = true; }
+    c.bindingsValid = !failed && c.returnedStreams.length === 4 && Object.values(c.pipes).every(Boolean)
+      && aliases[0] === c.pipes.stdout && aliases[1] === c.pipes.stderr;
+    const bindings = c.returnedStreams.map(stream => ({ stream, slots: Object.keys(c.pipes).filter(slot => c.pipes[slot] === stream) }));
+    // Data registration can synchronously expose peer events, so all terminal listeners go first.
+    for (const { stream, slots } of bindings) {
+      add(stream, "error", () => {
+        if (!alive() || slots.length && !slots.some(slot => alive(stream, slot))) return;
+        for (const slot of slots) terminal(stream, slot, "error");
+        failOriginalParentEvent(c, "worker_pipe_failed");
+      });
+      for (const slot of slots) {
+        for (const event of slot === "command" ? ["end", "finish", "close"] : ["end", "close"])
+          add(stream, event, () => terminal(stream, slot, event));
+      }
+    }
+    for (const { stream, slots } of bindings) {
+      for (const slot of slots) {
+        add(stream, "data", bytes => {
+          if (!alive(stream, slot)) return;
+          try {
+            if (!c.bindingsValid) { if (slot === "status") discardOriginalParentBytes(c, bytes); return; }
+            if (slot === "status") receiveOriginalParent(ref, stream, bytes);
+            else observeOriginalParentOutput(ref, stream, slot, bytes);
+          } catch { failOriginalParentEvent(c, "worker_stream_failed"); }
+        });
+      }
+    }
+    c.handlersBound = !failed && c.bindingsValid;
+    if (!c.handlersBound) { failOriginalParentEvent(c, "worker_stdio_failed"); refuse("parent_stdio"); }
+  }
+  async function launchOriginalParent(ref) {
+    const c = currentOriginalParentSession(ref), s = c.owner.s;
+    if (c.launchClaimed || c.child || c.facts.launch.attempted) refuse("parent_launch_once"); c.launchClaimed = true;
+    try {
+      if (!c.supervisionArmed) selectOriginalParentPhase(ref);
+      const planRef = originalParentLaunchPlan(), plan = parentLaunchPlans.get(planRef);
+      qualifyOriginalParentLaunch(c, plan); if (plan.consumed) refuse("parent_launch_plan"); plan.consumed = true;
+      const { spawn } = await import("node:child_process");
+      if (currentOriginalParentSession(ref) !== c || parentLaunchPlans.get(planRef) !== plan || !plan.consumed) refuse("parent_launch_reference");
+      qualifyOriginalParentLaunch(c, plan); c.facts.launch.attempted = true;
+      const child = spawn(plan.node.path, [plan.worker.path], { cwd: root, env: { ...s.environment, NATIVE_BAR_B3CC_MODE: c.allocation.fixture.mode,
+        UBSAN_OPTIONS: "halt_on_error=1:abort_on_error=0:exitcode=86:print_stacktrace=0" },
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"], shell: false, detached: true });
+      c.child = child; c.facts.launch.returned = true; if (child) s.children.add(child);
+      bindOriginalParentChild(ref);
+      qualifyOriginalParentLaunch(c, plan); child.ref(); qualifyOriginalParentLaunch(c, plan);
+      return describeOriginalParent(ref);
+    } catch (error) { failOriginalParentEvent(c, "worker_launch_failed"); throw error; }
   }
   function faultOriginalParent(c, reason) {
     dropOriginalParentPending(c);

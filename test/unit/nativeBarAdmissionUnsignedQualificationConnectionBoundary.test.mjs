@@ -12,6 +12,7 @@ const privateNames = ["originalQualificationPolicy", "originalQualificationClock
   "stopOriginalParentSupervision", "clearOriginalParentTimer", "pointOriginalParentSupervision", "inspectOriginalParentSupervision", "checkOriginalParentSupervision",
   "armOriginalParentTimer", "selectOriginalParentPhase", "armOriginalParentOperation", "qualifyOriginalParentDispatch", "originalParentHelperPlan",
   "checkOriginalParentHelper", "releaseOriginalParentHelper", "runOriginalParentHelper",
+  "originalParentLaunchPlan", "qualifyOriginalParentLaunch", "currentOriginalParentHandler", "failOriginalParentEvent", "observeOriginalParentOutput", "bindOriginalParentChild", "launchOriginalParent",
   "faultOriginalParent", "discardOriginalParent", "dropOriginalParentPending", "discardOriginalParentBytes", "receiveOriginalParent", "endOriginalParent", "recordOriginalParentTerminal", "prepareOriginalParentCommand",
   "verifyOriginalHostClosure", "verifyOriginalNativeProfile",
   "refuse", "code", "stop", "checkpoint", "afterSync", "newQualificationState", "ownHandle", "closeOriginal", "closeRemaining", "identity", "sameIdentity", "safeStat", "fixedChain",
@@ -92,14 +93,16 @@ function guard(s) {
       && (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression))) {
       const name = ts.isPropertyAccessExpression(n.expression) ? n.expression.name : n.expression.argumentExpression;
       if (ts.isElementAccessExpression(n.expression)) assert.ok(ts.isStringLiteralLike(name));
-      assert.equal(["write","on","once","emit","destroy","kill","unref","spawn","open","read","sign"].includes(name.text),false,name.text);
+      if (name.text === "on" && ownerOf(n) === "bindOriginalParentChild") assert.equal(n.expression.getText(),"emitter.on");
+      else if (name.text === "ref" && ownerOf(n) === "launchOriginalParent") assert.equal(n.expression.getText(),"child.ref");
+      else assert.equal(["write","on","once","emit","destroy","kill","ref","unref","spawn","open","read","sign"].includes(name.text),false,name.text);
     }
     ts.forEachChild(n, walk);
   }
   walk(tree); assert.equal(references.length, 1);
   assert.deepEqual(dynamic, ["node:fs", "node:path", "node:url", "node:crypto", "typescript", "node:module", "./unsignedControllerData.mjs",
     "./unsignedCohortQualificationContracts.mjs", "./unsignedBuildPlan.mjs", "./unsignedCohortAssemblyModel.mjs", "./unsignedAdapterSupport.mjs",
-    "./unsignedParentConnectionContracts.mjs", "node:child_process"]);
+    "./unsignedParentConnectionContracts.mjs", "node:child_process", "node:child_process"]);
   assert.doesNotMatch(inspect.getText(), /process|import\(|prepareOriginal|retainedQualificationScopes/);
 }
 test("4-B3-B has a private composition root behind unchanged public and prerequisite seals", () => guard(source));
