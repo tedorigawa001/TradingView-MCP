@@ -407,6 +407,116 @@ test("B4-A normal release/finalize uses existing teardown model without granting
   s.write(s.plan("FINALIZE")); s.m.closeCommand({ outcome: "confirmed" }); s.m.workerExit({ exit_code: 0, signal: null });
   assert.equal(s.m.describe().protocol_state, "DONE"); assert.equal(s.m.describe().cleanup_execution_available, false);
 });
+test("B4-P1 normal RELEASED drains only the original reserved CANCEL without a new ordinal or deadline", () => {
+  const s = active(), op = s.plan("CANCEL"), planned = s.m.describe(), original = planned.writes.at(-1);
+  s.receive("RELEASED", release(s)); const released = s.m.describe();
+  assert.equal(released.protocol_state, "RELEASED"); assert.equal(released.pending_generation, original.generation);
+  assert.equal(released.writes.at(-1).started, false); assert.equal(released.writes.at(-1).callback, null);
+  s.write(op); const drained = s.m.describe();
+  assert.equal(drained.protocol_state, "RELEASED"); assert.equal(drained.stopped, null);
+  assert.equal(drained.frames, released.frames); assert.deepEqual(drained.next_ordinals, released.next_ordinals);
+  assert.deepEqual(drained.writes.at(-1), { ...original, started: true, decision: "completed", callback: "completed", callback_at: drained.writes.at(-1).callback_at, backpressure: false });
+  assert.equal(drained.writes.at(-1).sha256, sha(op.line)); assert.equal(drained.writes.at(-1).deadline_ns, op.deadline_ns);
+  assert.equal(drained.settlement_start_ns, released.settlement_start_ns); assert.equal(drained.phase_deadline_ns, released.phase_deadline_ns);
+  s.m.noteTeardown({ action: "started", at: s.tick() });
+  s.m.noteTeardown({ action: "confirmed", at: s.tick(), proof: { receipt_readback: true, anchor_same: true, root_removed: true, absent: true, worker_live: true } });
+  const final = s.plan("FINALIZE"); assert.equal(JSON.parse(final.line).ordinal, JSON.parse(op.line).ordinal + 1);
+  s.write(final); s.m.closeCommand({ outcome: "confirmed" }); s.m.workerExit({ exit_code: 0, signal: null });
+  assert.equal(s.m.describe().protocol_state, "DONE"); assert.equal(s.m.describe().writes.length, 5);
+  for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(s.m.describe()[k], false, k);
+});
+for (const started of [false, true]) test("B4-P1 cleanup cannot precede the original CANCEL callback: " + started, () => {
+  const s = active(), op = s.plan("CANCEL"); s.receive("RELEASED", release(s));
+  if (started) s.m.startWrite(op.reference, { at: s.tick() });
+  const before = s.m.describe();
+  assert.throws(() => s.m.noteTeardown({ action: "started", at: s.tick() }), /cancel_unsettled/);
+  const after = s.m.describe(); assert.equal(after.phase, "settlement");
+  assert.equal(after.phase_deadline_ns, before.phase_deadline_ns); assert.equal(after.writes.at(-1).callback, null);
+  assert.equal(after.pending_generation, before.pending_generation);
+});
+test("B4-P1 the last full millisecond of the original CANCEL reservation can drain without renewal", () => {
+  const s = active(), op = s.plan("CANCEL"), end = BigInt(op.deadline_ns);
+  s.m.receive({ line: canonical({ binding: s.m.describe().binding, direction: "worker", ordinal: s.m.describe().next_ordinals.worker,
+    kind: "RELEASED", payload: release(s) }) + "\n", at: s.at(end - 2000000n) });
+  const before = s.m.describe(); s.m.startWrite(op.reference, { at: s.at(end - 1000000n) });
+  s.m.completeWrite(op.reference, { outcome: "completed", at: s.at(end - 1n) }); const d = s.m.describe();
+  assert.equal(d.stopped, null); assert.equal(d.writes.at(-1).deadline_ns, op.deadline_ns);
+  assert.equal(d.phase_deadline_ns, before.phase_deadline_ns); assert.equal(d.settlement_start_ns, before.settlement_start_ns);
+});
+test("B4-P1 a CANCEL started before release still waits for its own original callback", () => {
+  const s = active(), op = s.plan("CANCEL"); s.m.startWrite(op.reference, { at: s.tick() });
+  s.receive("RELEASED", release(s)); const before = s.m.describe();
+  assert.equal(before.pending_generation, before.writes.at(-1).generation); assert.equal(before.writes.at(-1).callback, null);
+  s.m.completeWrite(op.reference, { outcome: "completed", at: s.tick() }); const d = s.m.describe();
+  assert.equal(d.pending_generation, null); assert.equal(d.stopped, null); assert.equal(d.protocol_state, "RELEASED");
+  assert.equal(d.phase_deadline_ns, before.phase_deadline_ns); assert.equal(d.writes.at(-1).deadline_ns, op.deadline_ns);
+  s.m.noteTeardown({ action: "started", at: s.tick() }); assert.equal(s.m.describe().phase, "teardown");
+});
+test("B4-P1 backpressure after release never allocates a second CANCEL or a completed callback", () => {
+  const s = active(), op = s.plan("CANCEL"); s.receive("RELEASED", release(s)); s.m.startWrite(op.reference, { at: s.tick() });
+  s.m.noteBackpressure(op.reference, { backpressure: true }); const before = s.m.describe();
+  assert.equal(before.writes.at(-1).callback, null); assert.equal(before.writes.at(-1).decision, "started");
+  s.m.completeWrite(op.reference, { outcome: "completed", at: s.tick() }); const d = s.m.describe();
+  assert.equal(d.writes.at(-1).backpressure, true); assert.equal(d.frames, before.frames); assert.deepEqual(d.next_ordinals, before.next_ordinals);
+  assert.equal(d.writes.length, 4); assert.equal(d.stopped, null);
+});
+for (const left of [999999n, 0n, -1n]) test("B4-P1 release cannot extend the original CANCEL write-start reservation: " + left, () => {
+  const s = active(), op = s.plan("CANCEL"), end = BigInt(op.deadline_ns); s.receive("RELEASED", release(s));
+  const before = s.m.describe(); assert.throws(() => s.m.startWrite(op.reference, { at: s.at(end - left) }), /write_deadline/);
+  const d = s.m.describe(); assert.equal(d.writes.at(-1).started, false); assert.equal(d.writes.at(-1).deadline_ns, op.deadline_ns);
+  assert.equal(d.frames, before.frames); assert.equal(d.settlement_start_ns, before.settlement_start_ns);
+  assert.equal(s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+});
+test("B4-P1 release first observed after the reserved CANCEL deadline never opens the exception", () => {
+  const s = active(), op = s.plan("CANCEL"), before = s.m.describe();
+  assert.throws(() => s.m.receive({ at: s.at(BigInt(op.deadline_ns) + 1n), line: canonical({ binding: before.binding, direction: "worker",
+    ordinal: before.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n" }), /write_deadline/);
+  const d = s.m.describe(); assert.equal(d.protocol_state, "STOPPED"); assert.equal(d.frames, before.frames);
+  assert.deepEqual(d.next_ordinals, before.next_ordinals); assert.equal(d.settlement_start_ns, op.deadline_ns);
+  assert.equal(d.writes.at(-1).callback, null); assert.equal(d.writes.at(-1).started, false);
+});
+for (const fault of ["rollback", "foreign", "unavailable", "stop"]) test("B4-P1 post-release CANCEL is not a clock/stop bypass: " + fault, () => {
+  const s = active(), op = s.plan("CANCEL"); s.receive("RELEASED", release(s)); const before = s.m.describe();
+  if (fault === "stop") s.m.stop({ reason: "original_stop", at: s.tick() });
+  const at = fault === "rollback" ? point(0) : fault === "foreign" ? { ...s.tick(), clock_domain: "foreign-clock" } : fault === "unavailable" ? null : s.tick();
+  assert.throws(() => s.m.startWrite(op.reference, { at })); const d = s.m.describe();
+  assert.ok(d.stopped); assert.equal(d.writes.at(-1).started, false); assert.equal(d.writes.at(-1).deadline_ns, op.deadline_ns);
+  assert.deepEqual(d.next_ordinals, before.next_ordinals); assert.equal(d.frames, before.frames);
+  assert.throws(() => s.m.startWrite(op.reference, { at: s.tick() }));
+});
+for (const outcome of ["uncertain", "late_completed"]) test("B4-P1 drained CANCEL callback never converts uncertain delivery into cleanup: " + outcome, () => {
+  const s = active(), op = s.plan("CANCEL"); s.receive("RELEASED", release(s)); s.m.startWrite(op.reference, { at: s.tick() });
+  s.m.completeWrite(op.reference, { outcome: outcome === "uncertain" ? "uncertain" : "completed",
+    at: outcome === "uncertain" ? s.tick() : s.at(op.deadline_ns) });
+  const d = s.m.describe(); assert.equal(d.writes.at(-1).decision, "uncertain"); assert.ok(d.stopped);
+  assert.equal(s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+  assert.throws(() => s.m.noteTeardown({ action: "started", at: s.tick() }));
+  assert.equal(s.m.describe().writes.length, 4); assert.equal(s.m.describe().cleanup_execution_available, false);
+});
+for (const mutate of [p => ({ ...p, baseline_sha256: "b".repeat(64) }), p => ({ ...p, resources: { ...p.resources, fds: "5" } }),
+  p => ({ ...p, close_errors: ["close_refused"] }), p => ({ ...p, query_released: false }), p => ({ ...p, observation_sha256: "b".repeat(64) })])
+  test("B4-P1 an invalid release cannot qualify the original CANCEL", () => {
+    const s = active(), op = s.plan("CANCEL"), before = s.m.describe(); assert.throws(() => s.receive("RELEASED", mutate(release(s))));
+    assert.throws(() => s.m.startWrite(op.reference, { at: s.tick() }));
+    assert.equal(s.m.describe().writes.at(-1).started, false); assert.equal(s.m.describe().frames, before.frames);
+  });
+test("B4-P1 a foreign RELEASED binding cannot qualify the reserved original CANCEL", () => {
+  const s = active(), op = s.plan("CANCEL"), before = s.m.describe();
+  assert.throws(() => s.receive("RELEASED", release(s), { ...before.binding, exchange_id: "foreign-exchange" }), /binding_changed/);
+  assert.throws(() => s.m.startWrite(op.reference, { at: s.tick() }));
+  assert.equal(s.m.describe().writes.at(-1).started, false); assert.equal(s.m.describe().frames, before.frames);
+  assert.deepEqual(s.m.describe().next_ordinals, before.next_ordinals);
+});
+test("B4-P1 a drained original CANCEL cannot be restarted, replaced or planned anew after release", () => {
+  for (const action of ["restart", "replace_token", "new_cancel", "duplicate_release"]) {
+    const s = active(), op = s.plan("CANCEL"); s.receive("RELEASED", release(s)); s.write(op); const before = s.m.describe();
+    assert.throws(() => action === "restart" ? s.m.startWrite(op.reference, { at: s.tick() })
+      : action === "replace_token" ? s.m.startWrite({}, { at: s.tick() })
+      : action === "new_cancel" ? s.plan("CANCEL") : s.receive("RELEASED", release(s)));
+    assert.equal(s.m.describe().frames, before.frames); assert.deepEqual(s.m.describe().next_ordinals, before.next_ordinals);
+    assert.equal(s.m.describe().writes.length, 4);
+  }
+});
 test("B4-A independently reachable five-command and 37-work diagnostics fit their reservation", () => {
   const s = active(); s.write(s.plan("CANCEL")); s.receive("RELEASED", release(s));
   s.m.noteTeardown({ action: "started", at: s.tick() });

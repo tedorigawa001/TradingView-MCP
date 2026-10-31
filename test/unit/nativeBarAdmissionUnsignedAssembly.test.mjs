@@ -198,6 +198,30 @@ function go(s = prepare()) {
   s.record("go_intent", { baseline_sha256: s.m.describe().active.baseline_sha256, bound_objects_sha256: null });
   s.frame("GO", goPayload(s)); return s;
 }
+function cancelReleased(started = false) {
+  const s = go(), line = s.frame("CANCEL", {}, undefined, false), ordinal = JSON.parse(line).ordinal;
+  if (started) s.event("write", { ordinal, outcome: "started" });
+  const p = s.m.describe().active, primary_code = catalog[s.n].expected_code;
+  s.frame("RELEASED", { baseline_sha256: p.baseline_sha256, resources, query: "settled", native: "settled", original_operation_retired: true, query_released: true,
+    close_errors: [], diagnostic_sha256: h, observation_sha256: null, trace_chunks: 0, trace_events: 0, trace_sha256: p.trace_sha256,
+    primary_code, requests_dispatched: 1, authenticated_requests: 0, c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null });
+  s.record("run_outcome", { primary_code, requests_dispatched: 1, authenticated_requests: 0, diagnostic_sha256: h, observation_sha256: null,
+    observation_bytes: 0, trace_sha256: p.trace_sha256, trace_events: 0 });
+  s.record("release_checked", { baseline_sha256: p.baseline_sha256, resources, query_released: true, original_operation_retired: true,
+    close_errors: [], bound_objects_sha256: null });
+  return { s, ordinal, line };
+}
+for (const started of [false, true]) test("B4-P1 B2 cleanup precheck waits for original CANCEL completion: " + started, () => {
+  const { s } = cancelReleased(started), before = s.m.describe().active;
+  assert.throws(() => s.record("cleanup_precheck", { inventory_sha256: h }), /cancel_unsettled/);
+  assert.equal(s.m.describe().active.evidence.confirmed_records, before.evidence.confirmed_records);
+  assert.equal(s.m.describe().active.window.starts.teardown, undefined); assert.equal(s.m.describe().active.slots.fixture, "live");
+});
+for (const resource of ["observer", "helper"]) test("B4-P1 B2 starts no cleanup helper before original CANCEL completion: " + resource, () => {
+  const { s } = cancelReleased();
+  assert.throws(() => s.event("resource", { resource, action: "attach" }), /cancel_unsettled/);
+  assert.equal(s.m.describe().active.slots[resource], "empty"); assert.equal(s.m.describe().active.observer_calls, 0);
+});
 function settle(s = go(), candidate = "BLOCKED", options = {}) {
   const p = s.m.describe().active, c = catalog[s.n];
   const observation = options.projection ? { primary_code: c.expected_code,
@@ -210,11 +234,16 @@ function settle(s = go(), candidate = "BLOCKED", options = {}) {
     reader_source_sha256: h, reader_js_sha256: h, registration_sha256: setup(f).registration_sha256, envelope_sha256: setup(f).envelope_sha256,
     ...comparison, bound_object_receipts: { pre_sha256: null, post_sha256: null } }) : null;
   if (observation) s.frame("OBSERVED", observation);
+  const cancelLine = options.cancelDrain ? s.frame("CANCEL", {}, undefined, false) : null;
   const released = { baseline_sha256: p.baseline_sha256, resources, query: "settled", native: "settled", original_operation_retired: true, query_released: true,
     close_errors: [], diagnostic_sha256: h, observation_sha256: observation ? digest(observation) : null, trace_chunks: 0, trace_events: 0, trace_sha256: p.trace_sha256,
     primary_code: c.expected_code, requests_dispatched: options.c1 ? 2 : 1, authenticated_requests: c.owner === "fixed_memory" ? 1 : 0,
     c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null };
   s.frame("RELEASED", released);
+  if (cancelLine) {
+    const ordinal = JSON.parse(cancelLine).ordinal;
+    s.event("write", { ordinal, outcome: "started" }); s.event("write", { ordinal, outcome: "completed" });
+  }
   s.record("run_outcome", { primary_code: released.primary_code, requests_dispatched: released.requests_dispatched, authenticated_requests: released.authenticated_requests,
     diagnostic_sha256: h, observation_sha256: released.observation_sha256, observation_bytes: observation ? byteLength(canonical(observation)) : 0,
     trace_sha256: p.trace_sha256, trace_events: 0, ...options.outcome_override });
@@ -242,6 +271,35 @@ test("4-B2 a complete model lifecycle derives clean settlement without execution
   const s = settle(); s.m.finishCase(s.token, { at: s.tick() });
   const d = s.m.describe(); assert.equal(d.rows.length, 1); assert.equal(d.rows[0].cleanly_settled, true);
   assert.equal(d.rows[0].model_verdict, "BLOCKED"); assert.equal(d.active, null); assert.equal(d.execution_available, false);
+});
+test("B4-P1 B2 completes the same receipt schedule after draining the original post-release CANCEL", () => {
+  const s = settle(go(), "BLOCKED", { cancelDrain: true }), before = s.m.describe();
+  assert.equal(before.active.protocol_state, "DONE"); assert.equal(before.active.frames, 8);
+  assert.equal(before.active.next_ordinals.parent, 6); assert.equal(before.active.evidence.removed_entries, s.proofs.length);
+  assert.ok(byteLength(canonical(before)) <= before.capacity.diagnostic_ceiling_bytes);
+  s.m.finishCase(s.token, { at: s.tick() }); const d = s.m.describe();
+  assert.equal(d.rows[0].cleanly_settled, true); assert.equal(d.rows[0].model_verdict, "BLOCKED");
+  assert.equal(d.runtime_completion_proven, false); assert.equal(d.execution_available, false);
+});
+test("B4-P1 B2 leaves settlement origin and accounting unchanged when its original CANCEL completes", () => {
+  const { s, ordinal } = cancelReleased(), before = s.m.describe().active;
+  s.event("write", { ordinal, outcome: "started" }); s.event("write", { ordinal, outcome: "completed" });
+  const after = s.m.describe().active;
+  assert.equal(after.frames, before.frames); assert.deepEqual(after.next_ordinals, before.next_ordinals);
+  assert.equal(after.window.starts.query, before.window.starts.query); assert.equal(after.window.starts.settlement, before.window.starts.settlement);
+  assert.equal(after.window.phase_deadline_ns, before.window.phase_deadline_ns); assert.equal(after.observer_calls, 0);
+  s.record("cleanup_precheck", { inventory_sha256: h }); assert.ok(s.m.describe().active.window.starts.teardown);
+});
+test("B4-P1 draining the original CANCEL never clears a B2 C1 violation or permits another case", () => {
+  const s = settle(go(), "FAIL", { cancelDrain: true, c1: true }), d = s.m.finishCase(s.token, { at: s.tick() });
+  assert.equal(d.stopped, true); assert.equal(d.rows[0].c1_violation, true); assert.equal(d.rows[0].model_verdict, "FAIL");
+  s.m.finishNotRun(); assert.equal(s.m.describe().rows.filter(r => r.model_verdict === "NOT_RUN").length, 23);
+});
+test("B4-P1 B2 cannot start its planned post-release CANCEL after an unrelated stop", () => {
+  const { s, ordinal } = cancelReleased(); s.m.stop({ reason: "original_stop", at: s.tick() }); const before = s.m.describe();
+  assert.throws(() => s.event("write", { ordinal, outcome: "started" }), /stopped_write_start/);
+  assert.equal(s.m.describe().stop_reason, "original_stop"); assert.equal(s.m.describe().active.frames, before.active.frames);
+  assert.deepEqual(s.m.describe().active.next_ordinals, before.active.next_ordinals);
 });
 test("4-B2 all 24 fixed cases retain their outcomes and one shared index without extending the deadline", () => {
   const m = assembly(), end = m.describe().cohort_deadline_ns;

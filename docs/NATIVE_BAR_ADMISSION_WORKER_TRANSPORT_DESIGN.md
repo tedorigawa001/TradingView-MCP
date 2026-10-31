@@ -4,6 +4,8 @@ Status: **B4-A pure contracts reviewed and tested in memory; B4-B through B4-E r
 
 2026-10-31 JST update: the separately approved [lifetime-model correction](#b4-a-lifetime-model-correction) resolves the recorded B4-A reference-loss and entangled-close model gap in memory only. Its [independent review](#b4-a-lifetime-correction-independent-review) includes the original-identity/late-notification and test-guard corrections, and a [follow-up](#b4-a-lifetime-correction-follow-up) corrects post-close event and unidentified-end handling. B4-B through B4-E and all real lifetime connections remain unimplemented/unapproved.
 
+2026-10-31 JST update: the [pre-B4-B CANCEL/late-frame design](NATIVE_BAR_ADMISSION_CANCEL_LATE_FRAME_DESIGN.md) was approved, with [P1 separately implemented/tested in memory](NATIVE_BAR_ADMISSION_CANCEL_LATE_FRAME_DESIGN.md#b4-p1-memory-implementation). Only the original ordinary CANCEL may start after normal RELEASED, within its original reservation and before cleanup/FINALIZE. The worker no-op consumer and runtime remain unimplemented. P2's bounded late diagnostics/narrow untimed stopped-case operation and P3 composition still need separate implementation approval; no late-frame gate has changed.
+
 Dot stays PAUSED. Trading/scenario/judgment/notification/mail and product retention conditions do not change. No real clocks/timers, build, child/worker/observer launch, native load/read, fixture creation/move/removal, signing/key creation, signature file, real-data operation, MCP registration or production activation is part of this design turn. Existing outputs are not adopted, moved, repaired or removed. No new CLI, package script, automation hook or public runtime factory is proposed in 4-B4.
 
 ## Scope And Source Baseline
@@ -262,8 +264,8 @@ Verification:
 The B4-A record claimed that late or untimed original completions never resume progress and that planned and started reservations keep their original deadline. Neither held at `cefe39d`; both hold after this correction. A callback after stop but before its deadline now keeps its qualified time. Only late, untimed or clock-faulted callbacks have none.
 
 Recorded, not corrected:
-- An ordinary CANCEL that is planned but unstarted when a genuine RELEASED arrives can neither start nor be withdrawn. FINALIZE is then refused, so the case can only stop. This fails closed.
-- Post-stop worker frames are refused, not routed to the protocol's bounded late-frame record.
+- At that review, an ordinary CANCEL planned but unstarted when a genuine RELEASED arrived could neither start nor be withdrawn. A later [separately approved P1](NATIVE_BAR_ADMISSION_CANCEL_LATE_FRAME_DESIGN.md#b4-p1-memory-implementation) corrects the pure parent admission race without a wire/ordinal rollback; the real worker consumer and runtime are still unimplemented.
+- Post-stop worker frames are refused, not routed to the protocol's bounded late-frame record. The [stopped receive proposal](NATIVE_BAR_ADMISSION_CANCEL_LATE_FRAME_DESIGN.md#stopped-receive-lane) is not implemented or approved by this record.
 - Write deadlines are fixed at planning from the then-current phase, which is stricter than write-start plus 10000 ms.
 - Non-clock schema errors in timed inputs latch `clock_invalid`, as B2 does.
 - The retained itemization omits parsed worker payloads; the unused part of the 32-frame parent-line reservation covers them.

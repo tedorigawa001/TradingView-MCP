@@ -68,6 +68,35 @@ test("4-A cannot be reached from product, MCP, build script or operational entry
   const execute = inert.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === "executeUnsignedAdapters");
   assert.equal(execute.body.statements.length, 1); assert.match(execute.body.statements[0].getText(), /throw Error\("cc1b2_execution_not_approved"\)/);
 });
+function cancelGuard(source) {
+  const tree = ast(source), declarations = new Map(), methods = new Map();
+  walk(tree, n => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) declarations.set(n.name.text, n);
+    if (ts.isMethodDeclaration(n)) methods.set(n.name.text, n);
+  });
+  const compact = n => n.getText().replace(/\s+/g, "");
+  assert.equal(compact(declarations.get("releasedCancel").initializer), 'w.kind==="CANCEL"&&!w.shutdown&&state==="RELEASED"&&released!==null&&writes.every((v)=>v===w||v.outcome==="completed")');
+  assert.equal(compact(declarations.get("cancelPending").initializer), '()=>writes.some((w)=>w.kind==="CANCEL"&&w.outcome!=="completed")');
+  assert.ok(compact(methods.get("noteWrite")).includes('stopped||close!==null||exit!==null||state!==expectedState&&!releasedCancel||w.outcome!=="planned"||writes.find((v)=>!v.started)!==w'));
+  assert.ok(compact(methods.get("finishTeardown")).includes('if(cancelPending())fail("cancel_unsettled");'));
+  assert.ok(source.includes('case "FINALIZE": at("RELEASED"); parse(empty, p); if (cancelPending()) fail("cancel_unsettled");'));
+}
+test("B4-P1 parent-only released-CANCEL exception retains all prior write and cleanup gates", () => {
+  const source = read("../helpers/unsignedControllerContracts.mjs"); cancelGuard(source);
+  for (const [from, to] of [['!w.shutdown && state === "RELEASED"', 'state === "RELEASED"'],
+    ['&& released !== null', ''], ['writes.every((v) => v === w || v.outcome === "completed")', 'true'],
+    ['state !== expectedState && !releasedCancel', 'false'], ['w.outcome !== "planned"', 'false'],
+    ['if (cancelPending()) fail("cancel_unsettled");', ''],
+    ['w.kind === "CANCEL" && w.outcome !== "completed"', 'false']]) {
+    assert.ok(source.includes(from), from); assert.throws(() => cancelGuard(source.replace(from, to)));
+  }
+  const tree = ast(source); let method;
+  walk(tree, n => { if (ts.isMethodDeclaration(n) && n.name.text === "finishTeardown") method = n; });
+  const changed = method.getText().replace('if (cancelPending()) fail("cancel_unsettled");', '');
+  assert.throws(() => cancelGuard(source.slice(0, method.getStart()) + changed + source.slice(method.getEnd())));
+  // This model is parent admission, not a worker implementation or a claim of native cancellation/release.
+  assert.match(read("../../native/native_bar_fs/test_unsigned_worker.mjs"), /runUnsignedWorker\(\) \{ throw Error\("cc1b2_execution_not_approved"\); \}/);
+});
 test("4-A memory suite installs effect tripwires before loading the new modules", () => {
   const s = read("./nativeBarAdmissionUnsignedController.test.mjs");
   for (const fragment of ['block(child, ["spawn"', 'block(workers, ["Worker"])', 'block(crypto, ["sign", "verify", "createSign"', 'block(crypto.webcrypto.subtle, ["sign"',

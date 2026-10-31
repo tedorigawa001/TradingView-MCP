@@ -41,6 +41,7 @@ export function createUnsignedControllerProtocolModel(input) {
   const fail = (reason) => { stop(reason); refuse(reason); };
   const at = (...allowed) => { if (!allowed.includes(state)) fail("protocol_order"); };
   const started = (kind) => writes.some((w) => w.kind === kind && w.started);
+  const cancelPending = () => writes.some((w) => w.kind === "CANCEL" && w.outcome !== "completed");
   const describe = () => freeze({ schema: "native-bar-unsigned-controller-model-v2", ...flags(), binding, state, stop_reason: stopped,
     retain: stopped !== null || !["RELEASED", "FINALIZING", "DONE"].includes(state), frames, next_ordinals: { ...next },
     worker_clock_domain: workerDomain, baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
@@ -121,7 +122,8 @@ export function createUnsignedControllerProtocolModel(input) {
         if (!phases.includes(r.phase) || r.query_created && !submitted || r.phase === "finalize" && !r.query_created) fail("failure_binding");
         failure = freeze(r); stop("worker_failed"); break;
       }
-      case "FINALIZE": at("RELEASED"); parse(empty, p); if (!teardown) fail("teardown_unconfirmed"); state = "FINALIZING"; break;
+      case "FINALIZE": at("RELEASED"); parse(empty, p); if (cancelPending()) fail("cancel_unsettled");
+        if (!teardown) fail("teardown_unconfirmed"); state = "FINALIZING"; break;
     }
     frames++; next[f.direction]++;
     if (parent) { writes.push({ kind: f.kind, ordinal: f.ordinal, started: false, outcome: "planned" }); lines.set(f.ordinal, raw); }
@@ -134,7 +136,10 @@ export function createUnsignedControllerProtocolModel(input) {
       const w = writes.find((v) => v.ordinal === d.ordinal); if (!w) fail("write_order");
       if (d.outcome === "started") {
         const expectedState = { LAUNCH: "LAUNCHED", PREPARE: "PREPARING", GO: "ACTIVE", CANCEL: "ACTIVE", FINALIZE: "FINALIZING" }[w.kind];
-        if (stopped || close !== null || exit !== null || state !== expectedState || w.outcome !== "planned" || writes.find((v) => !v.started) !== w) fail("write_order");
+        // Parent-only admission: the sealed future worker must consume this original post-release CANCEL as a no-op.
+        const releasedCancel = w.kind === "CANCEL" && !w.shutdown && state === "RELEASED" && released !== null
+          && writes.every((v) => v === w || v.outcome === "completed");
+        if (stopped || close !== null || exit !== null || state !== expectedState && !releasedCancel || w.outcome !== "planned" || writes.find((v) => !v.started) !== w) fail("write_order");
         w.started = true; w.outcome = "started";
         if (w.kind === "GO") submitted = true;
       } else { if (!w.started || w.outcome !== "started") fail("write_order"); w.outcome = d.outcome; if (d.outcome === "uncertain") stop("pipe_uncertain"); }
@@ -175,6 +180,7 @@ export function createUnsignedControllerProtocolModel(input) {
       late.push({ sha256: sha(line), bytes: byteLength(line) }); frames++; return describe(); },
     finishTeardown(input) { return guard(() => { at("RELEASED");
       parse(z.object({ receipt_readback: z.literal(true), anchor_same: z.literal(true), root_removed: z.literal(true), absent: z.literal(true), worker_live: z.literal(true) }).strict(), input);
+      if (cancelPending()) fail("cancel_unsettled");
       if (teardown) fail("teardown_order"); teardown = true; return describe(); }); },
     workerExit(input) { const d = parse(exitSchema, input); if (exit) fail("exit_order"); exit = freeze(d);
       if (stopped || state !== "FINALIZING" || !started("FINALIZE") || d.exit_code !== 0 || d.signal !== null) stop("worker_lost"); else state = "DONE"; return describe(); },

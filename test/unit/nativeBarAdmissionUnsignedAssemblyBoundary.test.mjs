@@ -60,6 +60,20 @@ test("4-B2 runtime cannot be opened by a pre-throw operation or option", () => {
     s.replace("executeUnsignedCohortAssembly()", "executeUnsignedCohortAssembly(options)"),
     s.replace('throw Error("cc4b2_execution_not_approved");', 'run(); throw Error("cc4b2_execution_not_approved");')]) assert.throws(() => guard(mutation, specs.Runtime));
 });
+test("B4-P1 B2 derives the original CANCEL cleanup gate without new state, event or authority", () => {
+  const source = read("../helpers/unsignedCohortAssemblyModel.mjs"), tree = ast(source); let apply;
+  const find = n => { if (ts.isFunctionDeclaration(n) && n.name?.text === "apply") apply = n; ts.forEachChild(n, find); }; find(tree);
+  const contract = text => {
+    assert.ok(text.includes('const cancelUnsettled = p.release !== null && p.writes.some((w) => w.kind === "CANCEL" && w.outcome !== "completed")'));
+    assert.ok(text.includes('if (cancelUnsettled) refuse("cancel_unsettled");'));
+    assert.ok(text.includes('if (cancelUnsettled && ["cleanup_precheck", "delete_intent", "delete_result", "absence_checked"].includes(r.kind)) refuse("cancel_unsettled");'));
+  };
+  const body = apply.getText(); contract(body);
+  for (const from of ['p.release !== null && ', 'if (cancelUnsettled) refuse("cancel_unsettled");',
+    'if (cancelUnsettled && ["cleanup_precheck", "delete_intent", "delete_result", "absence_checked"].includes(r.kind)) refuse("cancel_unsettled");'])
+    assert.throws(() => contract(body.replace(from, '')));
+  assert.doesNotMatch(source, /cancelReservation|cancel_reservation|cancel_deadline|cancel_callback/);
+});
 test("4-B2 remains absent from production, scripts, builders and existing sealed entries", () => {
   for (const p of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter((p) => p.endsWith(".ts")))
     assert.doesNotMatch(read(`../../src/${p}`), /unsignedCohort(?:AssemblyModel|Runtime)/, p);

@@ -220,6 +220,7 @@ export function createUnsignedWorkerTransportModel(input) {
       if (protocol.describe().stop_reason) stop(protocol.describe().stop_reason); return describe(); }); },
     noteTeardown(raw) { return guard(() => {
       const q = timed(z.object({ action: z.enum(["started", "confirmed"]), proof: z.unknown().optional(), at: pointSchema }).strict(), raw), v = inspect(q.at);
+      if (pending?.kind === "CANCEL") refuse("cancel_unsettled");
       if (q.action === "started") { if (q.proof !== undefined) refuse("teardown_shape"); window.startTeardown(v.at); }
       else { if (window.describe().phase !== "teardown") refuse("teardown_phase"); protocol.finishTeardown(q.proof); }
       return describe();

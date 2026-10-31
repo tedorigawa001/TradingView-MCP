@@ -87,10 +87,12 @@ export function createUnsignedCohortAssemblyModel(input) {
   function current(token) { if (!active || token !== active.token) refuse("case_reference"); return active; }
   function apply(c, q) {
     const p = c.protocol.describe();
+    const cancelUnsettled = p.release !== null && p.writes.some((w) => w.kind === "CANCEL" && w.outcome !== "completed");
     if (q.kind === "resource") {
       const r = parse(z.object({ resource: z.enum(["worker", "observer", "helper"]), action: z.enum(["attach", "close"]), outcome: z.enum(["confirmed", "unconfirmed"]).optional() }).strict(), q.payload);
       const state = c.slots[r.resource];
       if (r.action === "attach") {
+        if (cancelUnsettled) refuse("cancel_unsettled");
         if (stopped || r.outcome !== undefined || !["empty", "closed"].includes(state)
           || r.resource === "worker" && (state !== "empty" || p.state !== "NEW" || !c.confirmed.case_allocated)) refuse("resource_order");
         if (r.resource === "observer") { if (c.observerCalls >= 64) refuse("observer_capacity"); c.observerCalls++; }
@@ -119,6 +121,7 @@ export function createUnsignedCohortAssemblyModel(input) {
     }
     else if (q.kind === "receipt") {
       const r = q.payload;
+      if (cancelUnsettled && ["cleanup_precheck", "delete_intent", "delete_result", "absence_checked"].includes(r.kind)) refuse("cancel_unsettled");
       if (stopped && !["stop_summary", "ready_to_report", "terminal"].includes(r.kind)) refuse("receipt_after_stop");
       if (stopped && c.evidenceFrozen) refuse("evidence_frozen");
       if (stopped && r.kind === "ready_to_report" && (!c.stopRecorded || r.payload.candidate_outcome !== "FAIL")) refuse("stopped_evidence");

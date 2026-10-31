@@ -74,6 +74,16 @@ test("B4-A has no runtime/production/MCP/build/worker connection or authority is
     "../helpers/unsignedInertAdapters.mjs", "../helpers/unsignedCohortRuntime.mjs"]) assert.doesNotMatch(read(f), /unsignedWorkerTransportContracts/);
   assert.doesNotMatch(source, /preparedRuns|buildReferences|namespaceReferences|originalCohortTiming|createUnsignedQualificationModel/);
 });
+test("B4-P1 transport requires its original CANCEL callback before starting teardown", () => {
+  const tree = ts.createSourceFile("transport.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS); let method;
+  const find = n => { if (ts.isMethodDeclaration(n) && n.name.text === "noteTeardown") method = n; ts.forEachChild(n, find); }; find(tree);
+  const contract = text => {
+    const gate = text.indexOf('if (pending?.kind === "CANCEL") refuse("cancel_unsettled");');
+    assert.ok(gate > text.indexOf('inspect(q.at)'));
+    assert.ok(gate < text.indexOf('window.startTeardown(v.at)'));
+  };
+  contract(method.getText()); assert.throws(() => contract(method.getText().replace('if (pending?.kind === "CANCEL") refuse("cancel_unsettled");', '')));
+});
 test("B4-A memory tests install real clock/timer/port/key/IO tripwires before imports", () => {
   const s = read("./nativeBarAdmissionUnsignedWorkerTransport.test.mjs");
   for (const fragment of ['block(workers, ["Worker", "MessageChannel", "BroadcastChannel"])', '"EventSource", "MessageChannel", "BroadcastChannel", "setTimeout"',

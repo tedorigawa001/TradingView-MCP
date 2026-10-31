@@ -66,7 +66,7 @@ const { createUnsignedControllerEvidenceModel, inspectUnsignedControllerEvidence
   createUnsignedControllerCohortModel } = await import("../helpers/unsignedControllerEvidence.mjs");
 const { assessUnsignedControllerAssertions, describeUnsignedControllerLimitations, validateUnsignedControllerObservation } = await import("../helpers/unsignedControllerObservation.mjs");
 const { describeUnsignedFixture, describeUnsignedAcceptanceRun } = await import("../helpers/jointUnsignedAcceptanceContracts.mjs");
-const { canonical, digest, byteLength } = await import("../helpers/unsignedControllerData.mjs");
+const { canonical, digest, byteLength, flags } = await import("../helpers/unsignedControllerData.mjs");
 const h = "a".repeat(64), resources = { fds: "4", roots: "0", workspace: "0", retained: "0" }, baselineValue = { resources, clock_domain: "worker-clock" };
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const fixture = (case_id = "u1-unsigned", mode = "normal") => ({ request: {
@@ -725,13 +725,37 @@ test("4-A already-started ordinary write completion remains recordable after sto
   m.observeFailure({ reason: "stopped" }); m.noteWrite({ ordinal: 1, outcome: "completed" });
   assert.equal(m.describe().state, "STOPPED"); assert.equal(m.describe().writes[0].outcome, "completed");
 });
-test("4-A original commands cannot skip an unstarted ordinal or start in a later lifecycle state", () => {
-  for (const next of ["CANCEL", "FINALIZE"]) {
-    const m = active(); m.acceptFrame(wire(m, "CANCEL")); send(m, "RELEASED", release(m));
-    if (next === "FINALIZE") { m.finishTeardown(teardown); m.acceptFrame(wire(m, "FINALIZE")); }
-    assert.throws(() => m.noteWrite({ ordinal: next === "CANCEL" ? 4 : 5, outcome: "started" }), /write_order/);
-    assert.equal(m.describe().state, "STOPPED"); assert.equal(m.describe().writes.find((w) => w.kind === "CANCEL").outcome, "planned");
-  }
+test("B4-P1 FINALIZE cannot skip the original unstarted CANCEL ordinal after release", () => {
+  const m = active(); m.acceptFrame(wire(m, "CANCEL")); send(m, "RELEASED", release(m));
+  assert.throws(() => m.acceptFrame(wire(m, "FINALIZE")), /cancel_unsettled/);
+  assert.equal(m.describe().state, "STOPPED"); assert.equal(m.describe().writes.find((w) => w.kind === "CANCEL").outcome, "planned");
+});
+for (const started of [false, true]) test("B4-P1 protocol teardown waits for known original CANCEL completion: " + started, () => {
+  const m = active(), line = wire(m, "CANCEL"); m.acceptFrame(line); send(m, "RELEASED", release(m));
+  if (started) m.noteWrite({ ordinal: 4, outcome: "started" });
+  assert.throws(() => m.finishTeardown(teardown), /cancel_unsettled/);
+  assert.equal(m.describe().teardown_complete, false); assert.equal(m.describe().cancel_spent, true);
+});
+test("B4-P1 pure post-release CANCEL admission changes only its original write disposition", () => {
+  const m = active(), line = wire(m, "CANCEL"); m.acceptFrame(line);
+  send(m, "RELEASED", { ...release(m), requests_dispatched: 2 }); const before = m.describe();
+  m.noteWrite({ ordinal: 4, outcome: "started" }); m.noteWrite({ ordinal: 4, outcome: "completed" });
+  const after = m.describe(); assert.deepEqual(after, { ...before, writes: before.writes.map(w => w.kind === "CANCEL" ? { ...w, started: true, outcome: "completed" } : w) });
+  assert.equal(after.cancel_spent, true); assert.equal(after.c1_violation, true); assert.equal(after.release.requests_dispatched, 2);
+  assert.equal(JSON.parse(line).ordinal, 4); assert.deepEqual(JSON.parse(line).payload, {});
+  for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(after[k], false, k);
+});
+test("B4-P1 an earlier uncompleted GO callback blocks the narrow released-CANCEL exception", () => {
+  const m = active(undefined, undefined, false); m.acceptFrame(wire(m, "GO", { baseline_sha256: m.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));
+  m.noteWrite({ ordinal: 3, outcome: "started" }); m.acceptFrame(wire(m, "CANCEL")); send(m, "RELEASED", release(m));
+  assert.throws(() => m.noteWrite({ ordinal: 4, outcome: "started" }), /write_order/);
+  assert.equal(m.describe().writes.at(-1).started, false); assert.equal(m.describe().writes[2].outcome, "started");
+});
+test("B4-P1 a fresh CANCEL after normal release never receives a frame or ordinal", () => {
+  const m = active(); send(m, "RELEASED", release(m)); const before = m.describe();
+  assert.throws(() => m.acceptFrame(wire(m, "CANCEL")), /protocol_order/);
+  assert.equal(m.describe().cancel_spent, false); assert.equal(m.describe().frames, before.frames);
+  assert.deepEqual(m.describe().next_ordinals, before.next_ordinals); assert.deepEqual(m.describe().writes, before.writes);
 });
 test("4-A in-order original write starts do not require earlier completion callbacks", () => {
   const m = createUnsignedControllerProtocolModel(allocation());
