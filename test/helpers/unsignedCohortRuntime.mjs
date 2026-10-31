@@ -817,8 +817,16 @@ async function prepareOriginalQualification() {
   }
   function uncertainOriginalParentWrite(c, write, reason) {
     const r = write?.record; if (!r || !r.started || r.decision !== "started") return;
-    const at = failOriginalParentEvent(c, reason);
+    let at = failOriginalParentEvent(c, reason);
     if (!r || !currentOriginalParentHandler(c, write.child, write.pipe, "command") || !r.started || r.decision !== "started") return;
+    // An earlier stop leaves no checkpoint point; B2 still needs this unknown delivery, as its shutdown CANCEL gate reads it.
+    if (!at) try { at = sampleOriginalParentCompletion(c); } catch {
+      // A failed sample latches the clock fault, as a missing callback time does, so shutdown stays close-only.
+      try { if (currentOriginalParentHandler(c, c.child)) { c.owner.coordinator.noteClockFailure(c.caseRef, { reason: "clock_unavailable" }); syncOriginalParent(c); } }
+      catch { /* Retain the untimed unknown delivery. */ }
+    }
+    // That stopped-time sample may itself record an expired write; the delivery is relayed once.
+    if (!currentOriginalParentHandler(c, write.child, write.pipe, "command") || r.decision !== "started") return;
     r.decision = "uncertain";
     if (at) try { relayOriginalParentWrite(c, r, "uncertain", at); } catch { /* Retain the unknown original delivery; never retry. */ }
   }
@@ -874,6 +882,8 @@ async function prepareOriginalQualification() {
         return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
       }
       if (c.phaseKey === w.phase + ":" + w.phase_deadline_ns && !c.phaseTimer?.active) return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
+      // B2 refuses a CANCEL after any unknown delivery; the original facts keep one even when B2 could not be told.
+      if (c.facts.commands.some(r => r.decision === "uncertain")) return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
       if (pending && (pending.record.kind !== "CANCEL" || pending.record.started || BigInt(pending.record.reservation.deadline_ns) - BigInt(at.monotonic_ns) < 1000000n))
         return Object.freeze({ decision: "CLOSE_ONLY", reference: null });
       selectOriginalParentPhase(ref); const planned = checkOriginalParentSupervision(ref), latest = c.owner.coordinator.describe();

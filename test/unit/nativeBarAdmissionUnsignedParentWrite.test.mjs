@@ -236,7 +236,7 @@ function setup(f = fixture()) {
     registration_sha256: digest(c.binding.registration), envelope_sha256: digest(c.work_envelope) };
 }
 
-async function activeSession() {
+async function activeSession(go=true) {
   const e=await writeSession(),f={...e.c.allocation.fixture,fixture_name:"native-bar-fs-synthetic-Ab123Z"};
   // Invented B2 receipt events exercise later phases, not B5 IO or producer authority.
   e.record=(kind,payload={})=>{const at=point(++e.now);e.c.owner.lastNs=at.monotonic_ns;const encoded=e.c.owner.coordinator.applyModelEvent(e.c.caseRef,
@@ -258,7 +258,7 @@ async function activeSession() {
   e.send("PREPARE",{configuration:configuration(f),launch_nonce:e.c.allocation.launch_nonce},{...binding,setup:setup(f)});
   const baseline={resources,clock_domain:"worker-clock"};
   e.worker("BASELINED",baseline);e.record("worker_prepared");e.record("baseline_bound",baseline);
-  e.record("go_intent",{baseline_sha256:e.view().admission.active.baseline_sha256,bound_objects_sha256:null});e.send("GO");
+  e.record("go_intent",{baseline_sha256:e.view().admission.active.baseline_sha256,bound_objects_sha256:null});if(go)e.send("GO");
   e.release=()=>{const p=e.view().admission.active;return e.worker("RELEASED",{baseline_sha256:p.baseline_sha256,resources,query:"settled",native:"settled",
     original_operation_retired:true,query_released:true,close_errors:[],diagnostic_sha256:h,observation_sha256:null,trace_chunks:0,trace_events:0,
     trace_sha256:p.trace_sha256,primary_code:describeUnsignedAcceptanceRun(f.request).cases[0].expected_code,requests_dispatched:1,authenticated_requests:0,
@@ -526,5 +526,96 @@ test("B4-B5 reentrant original callback cannot turn increasing time into clock r
   assert.notEqual(beforeNested,undefined);assert.equal(afterNested,beforeNested);
   assert.equal(v.admission.clock_invalid,false);assert.equal(v.admission.first_stop_ns,deadline);
   assert.equal(r.observation_point.monotonic_ns,String(observed));assert.equal(r.decision,"uncertain");assert.equal(r.callback_seen,true);
+});
+// Records the write outcomes the one original B2 coordinator accepts, marking any it refuses; the model itself is unchanged.
+function recordRelays(e){const model=e.c.owner.coordinator,relays=[];e.relayTimes=[];e.c.owner.coordinator=Object.freeze({...model,applyModelEvent(token,raw){
+  const name=["write","shutdown_write"].includes(raw?.kind)?raw.kind+":"+raw.payload?.outcome:null;
+  try{const result=model.applyModelEvent(token,raw);if(name){relays.push(name);e.relayTimes.push(raw.at.monotonic_ns);}return result;}
+  catch(error){if(name)relays.push(name+":refused");throw error;}}});return relays;}
+for(const variant of ["invalid_return","throw","pipe_error"])test("B4-B5 an unknown GO write after an unrelated stop reaches B2 before shutdown: "+variant,async()=>{
+  const e=await activeSession(false);e.proof("GO");const t=e.api.planOriginalParentCommand(e.ref,"GO"),relays=recordRelays(e);
+  // An unrelated terminal event stops the case inside the original write call, before its unknown outcome.
+  e.onWrite=()=>{e.onWrite=null;e.c.pipes.stdout.emit("end");if(variant==="pipe_error")e.c.pipes.command.emit("error",Error("write_error"));};
+  if(variant==="throw")e.writeThrows=true;if(variant==="invalid_return")e.writeReturn=undefined;
+  if(variant==="pipe_error")e.api.writeOriginalParentCommand(e.ref,t);else assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t));
+  e.writeThrows=false;e.writeReturn=true;const go=e.view().terminal.facts.commands.at(-1);
+  assert.equal(go.kind,"GO");assert.equal(go.decision,"uncertain");assert.equal(e.view().admission.stop_reason,"parent_terminal_event");
+  e.writes.at(-1).callback(variant==="pipe_error"?Error("write_error"):undefined);assert.deepEqual(relays,["write:started","write:uncertain"]);
+  // Close-only below is chosen locally (the errored pipe or the retained uncertain fact); the accepted relays above and B2's ledger check at the end show B2 was told.
+  const frames=e.view().admission.active.frames,writes=e.writes.length;e.proof("CANCEL");
+  assert.equal(e.api.planOriginalParentShutdown(e.ref).decision,"CLOSE_ONLY");assert.equal(e.view().admission.active.frames,frames);
+  assert.equal(e.writes.length,writes);assert.deepEqual(e.view().terminal.facts.commands.map(r=>r.kind+":"+r.decision),["LAUNCH:completed","PREPARE:completed","GO:uncertain"]);
+  // B2's own ledger already holds the unknown delivery, so it accepts no other outcome for that write.
+  assert.throws(()=>e.event("write",{ordinal:go.ordinal,outcome:"completed"}),/write_order/);
+});
+for(const variant of ["invalid_return","throw","pipe_error","expired_throw"])test("B4-B5 an unknown stopped-case CANCEL write reaches B2: "+variant,async()=>{
+  const e=await activeSession();e.api.failOriginalParentEvent(e.c,"stop");e.proof("CANCEL");
+  const plan=e.api.planOriginalParentShutdown(e.ref);assert.equal(plan.decision,"CANCEL_THEN_CLOSE");
+  const deadline=e.view().terminal.facts.commands.at(-1).reservation.deadline_ns,relays=recordRelays(e);
+  if(variant==="pipe_error")e.onWrite=()=>{e.onWrite=null;e.c.pipes.command.emit("error",Error("write_error"));};
+  // The original deadline passes within the call, so the stopped-time sample itself records the unknown delivery once.
+  if(variant==="expired_throw")e.onWrite=()=>{e.onWrite=null;e.now=BigInt(deadline)+1n;};
+  if(variant==="invalid_return")e.writeReturn=undefined;if(["throw","expired_throw"].includes(variant))e.writeThrows=true;
+  if(variant==="pipe_error")e.api.writeOriginalParentCommand(e.ref,plan.reference);else assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,plan.reference));
+  e.writeThrows=false;e.writeReturn=true;const r=e.view().terminal.facts.commands.at(-1);
+  assert.equal(r.shutdown,true);assert.equal(r.decision,"uncertain");assert.equal(r.callback_seen,false);assert.equal(e.writes.length,4);
+  assert.deepEqual(relays,["shutdown_write:started","shutdown_write:uncertain"]);
+  assert.throws(()=>e.event("shutdown_write",{outcome:"completed"}),/shutdown_write_order/);
+});
+for(const variant of ["sample","latch"])test("B4-B5 a failed stopped-time sample keeps the original write failure and close-only shutdown: "+variant,async()=>{
+  const e=await activeSession(false);e.proof("GO");const t=e.api.planOriginalParentCommand(e.ref,"GO"),relays=recordRelays(e),clock=e.context.clock;
+  // The latch variant also loses the clock-fault note itself; the original uncertain fact alone keeps shutdown close-only.
+  if(variant==="latch"){const model=e.c.owner.coordinator;e.c.owner.coordinator=Object.freeze({...model,noteClockFailure(){throw Error("invented_note_failure");}});}
+  const point=clock.point,describe=clock.describe;e.writeReturn=undefined;
+  e.onWrite=()=>{e.onWrite=null;e.c.pipes.stdout.emit("end");clock.point=()=>{throw Error("invented_clock");};clock.describe=()=>{throw Error("invented_clock_state");};};
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t),/parent_write_return/);Object.assign(clock,{point,describe});e.writeReturn=true;
+  let v=e.view();assert.equal(v.admission.clock_invalid,variant==="sample");assert.equal(v.terminal.facts.commands.at(-1).decision,"uncertain");
+  e.writes.at(-1).callback();e.proof("CANCEL");assert.equal(e.api.planOriginalParentShutdown(e.ref).decision,"CLOSE_ONLY");
+  assert.equal(e.writes.length,3);assert.deepEqual(relays,["write:started"]);
+});
+test("B4-B5 an unknown write with a known stop point is relayed at that point without resampling",async()=>{
+  const e=await writeSession();e.proof("LAUNCH");const t=e.api.planOriginalParentCommand(e.ref,"LAUNCH"),relays=recordRelays(e),clock=e.context.clock,point=clock.point;
+  // Each later read advances, so another sample would move the relay past the recorded stop.
+  e.onWrite=()=>{e.onWrite=null;clock.point=function(){e.now++;return point.call(this);};};e.writeThrows=true;
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t),/invented_write/);clock.point=point;e.writeThrows=false;
+  const v=e.view();assert.equal(v.terminal.facts.commands[0].decision,"uncertain");assert.deepEqual(relays,["write:started","write:uncertain"]);
+  assert.equal(e.relayTimes.at(-1),v.admission.first_stop_ns);
+});
+for(const variant of ["throw","invalid_return"])test("B4-B5 an observed callback after an unrelated stop cannot hide the failed GO write from B2: "+variant,async()=>{
+  const e=await activeSession(false);e.proof("GO");const t=e.api.planOriginalParentCommand(e.ref,"GO"),relays=recordRelays(e);
+  e.onWrite=(_line,callback)=>{e.onWrite=null;e.c.pipes.stdout.emit("end");callback();};if(variant==="throw")e.writeThrows=true;else e.writeReturn=undefined;
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t));e.writeThrows=false;e.writeReturn=true;const go=e.view().terminal.facts.commands.at(-1);
+  assert.equal(go.callback_seen,true);assert.equal(go.observed_outcome,"completed");assert.equal(go.decision,"uncertain");
+  assert.deepEqual(relays,["write:started","write:uncertain"]);e.proof("CANCEL");
+  assert.equal(e.api.planOriginalParentShutdown(e.ref).decision,"CLOSE_ONLY");assert.equal(e.writes.length,3);
+});
+test("B4-B5 a failure checkpoint that stops on an unreferenced timer still relays the unknown GO write",async()=>{
+  const e=await activeSession(false);e.proof("GO");const t=e.api.planOriginalParentCommand(e.ref,"GO"),relays=recordRelays(e);
+  // The failure's own supervision check stops the healthy case without returning a point.
+  e.onWrite=()=>{e.onWrite=null;for(const timer of e.timers)timer.referenced=false;};e.writeThrows=true;
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t),/invented_write/);e.writeThrows=false;for(const timer of e.timers)timer.referenced=true;
+  const v=e.view();assert.equal(v.admission.stop_reason,"timer_unreferenced");assert.deepEqual(relays,["write:started","write:uncertain"]);
+  assert.equal(e.relayTimes.at(-1),v.admission.first_stop_ns);e.writes.at(-1).callback();e.proof("CANCEL");
+  assert.equal(e.api.planOriginalParentShutdown(e.ref).decision,"CLOSE_ONLY");assert.equal(e.writes.length,3);
+});
+test("B4-B5 a sub-ms phase stop found by the failure checkpoint relays the unknown write at that stop",async()=>{
+  const e=await writeSession();const end=BigInt(e.view().admission.active.window.phase_deadline_ns);e.now=end-5500000n;
+  e.proof("LAUNCH");const t=e.api.planOriginalParentCommand(e.ref,"LAUNCH"),relays=recordRelays(e),deadline=BigInt(e.c.facts.commands[0].reservation.deadline_ns);
+  // Within 1 ms of the phase end but before the reservation expires, B2's existing window stops at the observation itself.
+  e.onWrite=()=>{e.onWrite=null;e.now=deadline-1n;};e.writeThrows=true;
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,t),/invented_write/);e.writeThrows=false;
+  const v=e.view();assert.equal(v.admission.stop_reason,"deadline");assert.equal(v.admission.first_stop_ns,String(deadline-1n));
+  assert.equal(v.terminal.facts.commands[0].decision,"uncertain");assert.deepEqual(relays,["write:started","write:uncertain"]);
+  assert.equal(e.relayTimes.at(-1),v.admission.first_stop_ns);
+});
+for(const variant of ["sample","throwing_sample"])test("B4-B5 generation loss during the stopped-time sample records and relays no unknown delivery: "+variant,async()=>{
+  const e=await activeSession();e.api.failOriginalParentEvent(e.c,"stop");e.proof("CANCEL");const plan=e.api.planOriginalParentShutdown(e.ref);
+  const relays=recordRelays(e),clock=e.context.clock,point=clock.point,describe=clock.describe;let reads;e.writeThrows=true;
+  e.onWrite=()=>{e.onWrite=null;reads=e.reads;clock.point=function(){clock.point=point;e.c.owner.generation++;
+    if(variant==="sample")return point.call(this);e.reads++;clock.describe=()=>{clock.describe=describe;throw Error("invented_clock_state");};throw Error("invented_clock");};};
+  assert.throws(()=>e.api.writeOriginalParentCommand(e.ref,plan.reference),/invented_write/);Object.assign(clock,{point,describe});e.writeThrows=false;
+  assert.equal(e.reads,reads+1);assert.equal(e.c.facts.commands.at(-1).decision,"started");assert.deepEqual(relays,["shutdown_write:started"]);
+  // Nothing from the retired owner reaches the shared B2, including a clock-fault latch.
+  assert.equal(e.c.owner.coordinator.describe().clock_invalid,false);
 });
 test("B4-B5 no denied effect was swallowed",()=>assert.deepEqual(effects,[]));
