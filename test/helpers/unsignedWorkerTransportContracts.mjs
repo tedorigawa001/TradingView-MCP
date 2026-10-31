@@ -59,7 +59,8 @@ export function describeUnsignedWorkerTransportCapacity(allocation) {
     close_attempted: false, close_index: null, close_outcome: "returned", close_events: [false, false], close_confirmed: false,
     references_at_close: ["unreferenced", "unreferenced"],
     works: [...Array(32).fill(work), ...workKinds.slice(0, -1).map(kind => ({ kind, ordinal: 1, outcome: "confirmed" }))] };
-  const metadata = byteLength(canonical({ transport, lifetime }));
+  const lateCapacity = p.lateCapacity();
+  const metadata = byteLength(canonical({ transport, lifetime })) + lateCapacity.retained_json_bytes - 1;
   if (metadata > 16384) refuse("diagnostic_capacity");
   // These are separate byte reservations, not a V8 heap measurement or extra native work allowance.
   const retained = { protocol_parent_lines: LIMITS.frames * LIMITS.frame_bytes, pending_command: LIMITS.frame_bytes,
@@ -67,7 +68,7 @@ export function describeUnsignedWorkerTransportCapacity(allocation) {
   const transient = { input_copy: LIMITS.frames * LIMITS.frame_bytes, decoded_batch: LIMITS.frames * LIMITS.frame_bytes,
     canonical_frame: LIMITS.frame_bytes };
   return freeze({ ...base(), schema: "native-bar-worker-transport-capacity-v1", diagnostic_ceiling_bytes: metadata,
-    diagnostic_limit_bytes: 16384, coordinator_metadata_limit_bytes: 65536, serialization,
+    diagnostic_limit_bytes: 16384, coordinator_metadata_limit_bytes: 65536, serialization, late_retained_json_bytes: lateCapacity.retained_json_bytes,
     retained_buffers: retained, retained_buffer_bytes: Object.values(retained).reduce((a, b) => a + b, 0),
     transient_buffers: transient, transient_buffer_bytes: Object.values(transient).reduce((a, b) => a + b, 0),
     command_slots: 1, command_records: commands.length, lifetime_pairs: 1, lifetime_ports: 2, lifetime_work_records: LIMITS.frames + workKinds.length - 1,
@@ -138,9 +139,22 @@ export function createUnsignedWorkerTransportModel(input) {
     protocol_state: protocol.describe().state, frames: protocol.describe().frames, go_submitted: protocol.describe().go_submitted, shutdown_attempted: shutdownAttempted,
     next_ordinals: protocol.describe().next_ordinals, baseline_sha256: protocol.describe().baseline_sha256,
     trace_chunks: protocol.describe().trace_chunks, trace_events: protocol.describe().trace_events, trace_sha256: protocol.describe().trace_sha256,
+    late_capture: protocol.describe().late_capture, late_frames: protocol.describe().late_frames,
     command_close: protocol.describe().command_close, worker_exit: protocol.describe().worker_exit,
     phase: window.describe().phase, settlement_start_ns: window.describe().starts.settlement ?? null,
     phase_deadline_ns: window.describe().phase_deadline_ns, cohort_deadline_ns: String(end) });
+  function appendLate(line) {
+    try {
+      const p = protocol.describe();
+      if (p.late_capture.capture !== "open" || p.frames >= LIMITS.frames || p.late_frames.length >= 4) {
+        protocol.observeLateFrame(line); return describe();
+      }
+      if (typeof line !== "string" || !line.isWellFormed()) refuse("encoding");
+      const f = decode(line, LIMITS.frame_bytes);
+      if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
+      protocol.observeLateFrame(line); return describe();
+    } catch (error) { protocol.closeLateCapture({ reason: reasonOf(error) }); throw error; }
+  }
   const initial = point(d.allocated_at); window.startPreparation(initial);
   return Object.freeze({
     planCommand(raw) { return guard(() => {
@@ -180,15 +194,27 @@ export function createUnsignedWorkerTransportModel(input) {
       if (pending === w) pending = null; return describe();
     }); },
     receive(raw) { return guard(() => {
-      const q = timed(z.object({ line: z.string().max(65536), at: pointSchema }).strict(), raw), v = inspect(q.at);
-      // Lone surrogates would double while decode re-canonicalizes; the fatal UTF-8 decoder never yields them.
-      if (!q.line.isWellFormed()) refuse("encoding");
-      const f = decode(q.line, LIMITS.frame_bytes);
-      if (f.direction !== "worker") refuse("receive_direction");
-      if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
-      protocol.acceptFrame(q.line);
-      if (f.kind === "RELEASED") window.startSettlement(v.at);
-      if (protocol.describe().stop_reason) stop(protocol.describe().stop_reason, v.at); return describe();
+      let q;
+      try { q = parse(z.object({ line: z.string().max(65536), at: z.unknown().optional() }).strict(), raw); }
+      catch (error) { stop(reasonOf(error)); protocol.closeLateCapture({ reason: "receive_shape" }); throw error; }
+      if (stopped) return appendLate(q.line);
+      let v;
+      try { v = inspect(q.at); }
+      catch (error) { stop(reasonOf(error), clockInvalid ? null : qualifiedAt); return appendLate(q.line); }
+      try {
+        // The fatal UTF-8 decoder never produces lone surrogates; refuse them before canonical expansion.
+        if (!q.line.isWellFormed()) refuse("encoding");
+        const f = decode(q.line, LIMITS.frame_bytes);
+        if (f.direction !== "worker") refuse("receive_direction");
+        if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
+        protocol.acceptFrame(q.line);
+        if (f.kind === "RELEASED") window.startSettlement(v.at);
+        if (protocol.describe().stop_reason) stop(protocol.describe().stop_reason, v.at); return describe();
+      } catch (error) { stop(reasonOf(error), v.at); protocol.closeLateCapture({ reason: "normal_rejected" }); throw error; }
+    }); },
+    refuseReceive(raw) { return guard(() => {
+      const q = parse(z.object({ reason: z.enum(["decoder_failure", "truncated_frame", "stream_closed"]) }).strict(), raw);
+      stop(q.reason); protocol.closeLateCapture(q); return describe();
     }); },
     stop(raw) { return guard(() => {
       const q = timed(z.object({ reason: code, at: pointSchema.nullable() }).strict(), raw);

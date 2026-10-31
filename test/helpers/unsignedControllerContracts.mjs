@@ -31,13 +31,41 @@ const exitSchema = z.object({ exit_code: count(255).nullable(), signal: z.string
 const frameSchema = z.object({ binding: z.unknown(), direction: z.enum(["parent", "worker"]), ordinal: count(32, 1),
   kind: z.enum(["LAUNCH", "READY", "PREPARE", "BASELINED", "GO", "TRACE_CHUNK", "OBSERVED", "RELEASED", "FAILED", "CANCEL", "FINALIZE"]), payload: z.unknown() }).strict();
 const empty = z.object({}).strict();
+const readySchema = z.object({ addon_protocol: z.literal(6), mode: z.literal("synthetic_only"), pins_sha256: hash, worker_clock_domain: label }).strict();
+const chunkSchema = z.object({ chunk_index: count(7), events: z.array(traceSchema).min(1).max(16) }).strict();
+const singletonBits = { READY: 1, BASELINED: 2, OBSERVED: 4, RELEASED: 8, FAILED: 16 };
+const errorCode = e => /^cc4a_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input";
+function readFrame(raw) {
+  if (typeof raw !== "string") refuse("encoding");
+  if (raw.length > LIMITS.frame_bytes) refuse("byte_bound");
+  if (!raw.isWellFormed()) refuse("encoding");
+  return parse(frameSchema, decode(raw, LIMITS.frame_bytes));
+}
+function workerPayload(kind, payload) {
+  if (kind === "OBSERVED") return validateUnsignedControllerObservation(payload);
+  const schema = { READY: readySchema, BASELINED: baselineSchema, TRACE_CHUNK: chunkSchema, RELEASED: releaseSchema, FAILED: failureSchema }[kind];
+  if (!schema) refuse("protocol_direction"); return parse(schema, payload);
+}
 
 export function createUnsignedControllerProtocolModel(input) {
   const captured = allocation(input); let binding = captured.binding, state = "NEW", stopped = null, frames = 0;
   let baseline = null, baselineHash = null, observed = null, released = null, failure = null, exit = null, c1 = false, workerDomain = null;
   let submitted = false, cancelSpent = false, shutdownPlanned = false, close = null, teardown = false, lastTrace = null;
   const next = { parent: 1, worker: 1 }, writes = [], lines = new Map(), trace = [], late = []; let chunks = 0;
-  const stop = (reason) => { stopped ??= reason; state = "STOPPED"; };
+  let acceptedSeen = 0, lateCapture = null;
+  const stop = (reason) => {
+    stopped ??= reason;
+    if (lateCapture === null) lateCapture = { diagnostic_only: true, semantic_verified: false, receive_at: null,
+      capture: failure !== null || state === "DONE" ? "ended" : "open", reason: failure !== null || state === "DONE" ? "normal_terminal" : null,
+      seen: acceptedSeen, worker_domain: workerDomain, trace_chunks: chunks, trace_events: trace.length,
+      last_trace_ns: lastTrace === null ? null : String(lastTrace) };
+    state = "STOPPED";
+  };
+  // A normal rejection or exhausted capacity only freezes intake, judging no traffic; invalid late traffic or a receive fault also closes writes.
+  const freezeCapture = (reason, unjudged = false) => {
+    if (lateCapture.capture === "refused" || lateCapture.capture === "frozen") return;
+    lateCapture.capture = unjudged ? "frozen" : "refused"; lateCapture.reason = reason;
+  };
   const fail = (reason) => { stop(reason); refuse(reason); };
   const at = (...allowed) => { if (!allowed.includes(state)) fail("protocol_order"); };
   const started = (kind) => writes.some((w) => w.kind === kind && w.started);
@@ -47,13 +75,16 @@ export function createUnsignedControllerProtocolModel(input) {
     worker_clock_domain: workerDomain, baseline, baseline_sha256: baselineHash, observation: observed, observation_sha256: observed ? digest(observed) : null,
     release: released, failure, worker_exit: exit, c1_violation: c1, go_submitted: submitted, cancel_spent: cancelSpent, command_close: close,
     teardown_complete: teardown, trace_chunks: chunks, trace_events: trace.length, trace_sha256: digest(trace),
-    writes: writes.map((v) => ({ ...v })), late_frames: [...late], model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle" });
+    writes: writes.map((v) => ({ ...v })), late_frames: [...late], late_capture: lateCapture === null ? null : { ...lateCapture },
+    model_status: state === "DONE" ? "consistent_supplied_lifecycle" : "incomplete_supplied_lifecycle" });
+  const lateView = () => freeze({ schema: "native-bar-late-frame-diagnostic-v1", ...flags(), binding, stopped: stopped !== null, stop_reason: stopped,
+    frames, next_worker_ordinal: next.worker, late_capture: lateCapture === null ? null : { ...lateCapture }, late_frames: [...late] });
   function guard(action, allowStopped = false) {
     if (stopped && !allowStopped) refuse("stopped");
-    try { return action(); } catch (e) { if (!stopped) stop(/^cc4a_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input"); throw e; }
+    try { return action(); } catch (e) { if (!stopped) stop(errorCode(e)); throw e; }
   }
   function accept(raw) {
-    const f = parse(frameSchema, decode(raw, LIMITS.frame_bytes));
+    const f = readFrame(raw);
     if (frames >= LIMITS.frames) fail("frame_capacity");
     if (f.ordinal !== next[f.direction]) fail("protocol_ordinal");
     const parent = ["LAUNCH", "PREPARE", "GO", "CANCEL", "FINALIZE"].includes(f.kind);
@@ -69,7 +100,7 @@ export function createUnsignedControllerProtocolModel(input) {
       case "LAUNCH": at("NEW"); parse(empty, p); state = "LAUNCHED"; break;
       case "READY": {
         at("LAUNCHED"); if (!started("LAUNCH")) fail("write_not_submitted");
-        const r = parse(z.object({ addon_protocol: z.literal(6), mode: z.literal("synthetic_only"), pins_sha256: hash, worker_clock_domain: label }).strict(), p);
+        const r = workerPayload(f.kind, p);
         if (r.pins_sha256 !== digest(binding)) fail("ready_pins"); workerDomain = r.worker_clock_domain; state = "READY"; break;
       }
       case "PREPARE": {
@@ -82,7 +113,7 @@ export function createUnsignedControllerProtocolModel(input) {
         binding = newBinding; state = "PREPARING"; break;
       }
       case "BASELINED": at("PREPARING"); if (!started("PREPARE")) fail("write_not_submitted");
-        baseline = freeze(parse(baselineSchema, p)); if (baseline.clock_domain !== workerDomain) fail("baseline_clock_domain");
+        baseline = freeze(workerPayload(f.kind, p)); if (baseline.clock_domain !== workerDomain) fail("baseline_clock_domain");
         baselineHash = digest(baseline); state = "BASELINED"; break;
       case "GO": {
         at("BASELINED"); const r = parse(z.object({ baseline_sha256: hash, baseline_readback: z.literal(true), go_intent_readback: z.literal(true) }).strict(), p);
@@ -91,7 +122,7 @@ export function createUnsignedControllerProtocolModel(input) {
       case "CANCEL": at("ACTIVE"); parse(empty, p); if (!submitted || cancelSpent) fail("cancel_order"); cancelSpent = true; break;
       case "TRACE_CHUNK": {
         at("ACTIVE"); if (!submitted) fail("write_not_submitted");
-        const r = parse(z.object({ chunk_index: count(7), events: z.array(traceSchema).min(1).max(16) }).strict(), p);
+        const r = workerPayload(f.kind, p);
         if (r.chunk_index !== chunks || chunks >= 8 || trace.length + r.events.length > 128) fail("trace_order");
         let last = lastTrace;
         for (const [i, e] of r.events.entries()) {
@@ -100,9 +131,9 @@ export function createUnsignedControllerProtocolModel(input) {
         }
         lastTrace = last; trace.push(...r.events.map(freeze)); chunks++; break;
       }
-      case "OBSERVED": at("ACTIVE"); if (!submitted || observed !== null) fail("observation_order"); observed = validateUnsignedControllerObservation(p); break;
+      case "OBSERVED": at("ACTIVE"); if (!submitted || observed !== null) fail("observation_order"); observed = workerPayload(f.kind, p); break;
       case "RELEASED": {
-        at("ACTIVE"); if (!submitted) fail("write_not_submitted"); const r = parse(releaseSchema, p);
+        at("ACTIVE"); if (!submitted) fail("write_not_submitted"); const r = workerPayload(f.kind, p);
         if (r.baseline_sha256 !== baselineHash) fail("baseline_changed");
         if (r.trace_chunks !== chunks || r.trace_events !== trace.length || r.trace_sha256 !== digest(trace)
           || r.observation_sha256 !== (observed ? digest(observed) : null) || r.authenticated_requests > r.requests_dispatched) fail("result_binding");
@@ -115,22 +146,75 @@ export function createUnsignedControllerProtocolModel(input) {
       }
       case "FAILED": {
         at("LAUNCHED", "READY", "PREPARING", "BASELINED", "ACTIVE", "RELEASED", "FINALIZING");
-        if (!started("LAUNCH")) fail("write_not_submitted"); const r = parse(failureSchema, p);
+        if (!started("LAUNCH")) fail("write_not_submitted"); const r = workerPayload(f.kind, p);
         // The worker can report only the lifecycle it has been sent; a query exists only after a started GO write.
         const phases = ["LAUNCHED", "READY"].includes(state) ? ["launch"] : ["PREPARING", "BASELINED"].includes(state) || !submitted ? ["prepare"]
           : state === "ACTIVE" ? ["go", "settlement"] : ["finalize"];
         if (!phases.includes(r.phase) || r.query_created && !submitted || r.phase === "finalize" && !r.query_created) fail("failure_binding");
-        failure = freeze(r); stop("worker_failed"); break;
+        failure = freeze(r); break;
       }
       case "FINALIZE": at("RELEASED"); parse(empty, p); if (cancelPending()) fail("cancel_unsettled");
         if (!teardown) fail("teardown_unconfirmed"); state = "FINALIZING"; break;
     }
     frames++; next[f.direction]++;
     if (parent) { writes.push({ kind: f.kind, ordinal: f.ordinal, started: false, outcome: "planned" }); lines.set(f.ordinal, raw); }
+    else acceptedSeen |= singletonBits[f.kind] ?? 0;
+    if (f.kind === "FAILED") stop("worker_failed");
     return describe();
   }
+  function appendLate(line) {
+    if (!stopped) refuse("late_requires_stop");
+    try {
+      if (lateCapture.capture !== "open") refuse("late_closed");
+      if (frames >= LIMITS.frames || late.length >= 4) { freezeCapture("late_capacity", true); refuse("late_capacity"); }
+      const f = readFrame(line);
+      if (f.direction !== "worker") refuse("protocol_direction");
+      if (canonical(f.binding) !== canonical(binding)) refuse("binding_changed");
+      if (f.ordinal !== next.worker) refuse("protocol_ordinal");
+      const p = workerPayload(f.kind, f.payload), bit = singletonBits[f.kind] ?? 0;
+      if (bit && (lateCapture.seen & bit)) refuse("late_duplicate");
+      if ((lateCapture.seen & 8) && f.kind !== "FAILED") refuse("late_terminal");
+      if (f.kind === "READY") {
+        if (!started("LAUNCH")) refuse("write_not_submitted");
+        if (p.pins_sha256 !== digest(binding)) refuse("ready_pins");
+      } else if (f.kind === "BASELINED") {
+        if (!started("PREPARE") || !(lateCapture.seen & 1)) refuse("write_not_submitted");
+        if (p.clock_domain !== lateCapture.worker_domain) refuse("baseline_clock_domain");
+      } else if (f.kind === "FAILED") {
+        if (!started("LAUNCH")) refuse("write_not_submitted");
+        // Same phase rule as the normal reducer, which keys on an accepted PREPARE rather than a started one.
+        const phases = released !== null ? ["finalize"] : submitted ? ["go", "settlement"] : writes.some((w) => w.kind === "PREPARE") ? ["prepare"] : ["launch"];
+        if (!phases.includes(p.phase) || p.query_created && !submitted || p.phase === "finalize" && !p.query_created) refuse("failure_binding");
+      } else {
+        if (!submitted || !(lateCapture.seen & 2)) refuse("write_not_submitted");
+        if (f.kind === "TRACE_CHUNK") {
+          if (p.chunk_index !== lateCapture.trace_chunks || lateCapture.trace_chunks >= 8
+            || lateCapture.trace_events + p.events.length > 128) refuse("trace_order");
+          let last = lateCapture.last_trace_ns;
+          for (const [i, e] of p.events.entries()) {
+            if (e.ordinal !== lateCapture.trace_events + i + 1 || e.clock_domain !== lateCapture.worker_domain || byteLength(canonical(e)) > 1024
+              || last !== null && BigInt(e.monotonic_ns) < BigInt(last)) refuse("trace_order");
+            last = e.monotonic_ns;
+          }
+        } else if (f.kind === "RELEASED") {
+          if (p.baseline_sha256 !== baselineHash) refuse("baseline_changed");
+          if (p.trace_chunks !== lateCapture.trace_chunks || p.trace_events !== lateCapture.trace_events
+            || p.authenticated_requests > p.requests_dispatched) refuse("result_binding");
+        }
+      }
+      // Only diagnostic wire metadata commits; normal release/trace/evidence fields never change.
+      if (f.kind === "READY") lateCapture.worker_domain = p.worker_clock_domain;
+      if (f.kind === "TRACE_CHUNK") {
+        lateCapture.trace_chunks++; lateCapture.trace_events += p.events.length; lateCapture.last_trace_ns = p.events.at(-1).monotonic_ns;
+      }
+      lateCapture.seen |= bit; late.push({ sha256: sha(line), bytes: byteLength(line) }); frames++; next.worker++;
+      if (f.kind === "RELEASED" || f.kind === "FAILED") { lateCapture.capture = "ended"; lateCapture.reason = "terminal"; }
+      return describe();
+    } catch (e) { freezeCapture(errorCode(e)); throw e; }
+  }
   const model = {
-    acceptFrame(line) { return guard(() => accept(line)); },
+    acceptFrame(line) { return guard(() => { try { return accept(line); }
+      catch (e) { stop(errorCode(e)); freezeCapture("normal_rejected", true); throw e; } }); },
     noteWrite(input) {
       const d = parse(z.object({ ordinal: count(32, 1), outcome: z.enum(["started", "completed", "uncertain"]) }).strict(), input);
       const w = writes.find((v) => v.ordinal === d.ordinal); if (!w) fail("write_order");
@@ -152,7 +236,7 @@ export function createUnsignedControllerProtocolModel(input) {
       if (close !== null) refuse("command_already_closed");
       let frame = null;
       // Only a possibly running original query is cancelled: RELEASED or FAILED has already ended it.
-      const live = submitted && exit === null && released === null && failure === null && !shutdownPlanned
+      const live = submitted && exit === null && released === null && failure === null && !shutdownPlanned && lateCapture.capture !== "refused"
         && d.binding_known && d.worker_live && d.pipe_qualified && d.settlement_remaining_ms > 0;
       const unstarted = writes.filter((w) => !w.started), known = writes.every((w) => !w.started || w.outcome !== "uncertain");
       if (live && known && !cancelSpent && !unstarted.length && frames < LIMITS.frames) {
@@ -169,15 +253,33 @@ export function createUnsignedControllerProtocolModel(input) {
     noteShutdownWrite(input) {
       const d = parse(z.object({ outcome: z.enum(["started", "completed", "uncertain"]) }).strict(), input), w = writes.find((v) => v.shutdown);
       if (!stopped || !w) refuse("shutdown_write_order");
-      if (d.outcome === "started" ? close !== null || exit !== null || w.outcome !== "planned" || writes.find((v) => !v.started) !== w : w.outcome !== "started") refuse("shutdown_write_order");
+      if (d.outcome === "started" ? lateCapture.capture === "refused" || close !== null || exit !== null || w.outcome !== "planned" || writes.find((v) => !v.started) !== w : w.outcome !== "started") refuse("shutdown_write_order");
       w.outcome = d.outcome; if (d.outcome === "started") w.started = true; return describe();
     },
     noteCommandClose(input) { const d = parse(z.object({ outcome: z.enum(["confirmed", "unconfirmed"]) }).strict(), input);
       // A stop or the normal FINALIZE path ends the original command stream exactly once; an unconfirmed close is retained.
       if (close !== null || !stopped && !(["FINALIZING", "DONE"].includes(state) && started("FINALIZE"))) refuse("close_order");
       close = d.outcome; if (d.outcome !== "confirmed") stop("close_unconfirmed"); return describe(); },
-    observeLateFrame(line) { if (!stopped) refuse("late_requires_stop"); if (frames >= 32 || late.length >= 4 || typeof line !== "string" || byteLength(line) > 65536) refuse("late_capacity");
-      late.push({ sha256: sha(line), bytes: byteLength(line) }); frames++; return describe(); },
+    observeLateFrame: appendLate,
+    closeLateCapture(input) {
+      if (!stopped) refuse("late_requires_stop");
+      const q = parse(z.object({ reason: code }).strict(), input);
+      // A receive fault after a terminal frame changes nothing; the appender itself refuses traffic after it.
+      if (lateCapture.capture !== "ended") freezeCapture(q.reason, q.reason === "normal_rejected"); return lateView();
+    },
+    describeLate: lateView,
+    lateCapacity() {
+      const h = "f".repeat(64), l = "l".repeat(48), u = "9".repeat(30), c = "c".repeat(96);
+      const b = { ...binding, run_id: l, case_id: l, exchange_id: l, launch_nonce: l,
+        setup: { fixture_name: "native-bar-fs-synthetic-Ab123Z", recipe_sha256: h, registration_sha256: h, envelope_sha256: h } };
+      const metadata = { diagnostic_only: true, semantic_verified: false, receive_at: null, capture: "refused", reason: c,
+        seen: 31, worker_domain: l, trace_chunks: 8, trace_events: 128, last_trace_ns: u };
+      const rows = Array(4).fill({ sha256: h, bytes: 65536 });
+      const retained = byteLength(canonical({ late_capture: metadata, late_frames: rows }));
+      const view = byteLength(canonical({ schema: "native-bar-late-frame-diagnostic-v1", ...flags(), binding: b, stopped: false, stop_reason: c,
+        frames: 32, next_worker_ordinal: 33, late_capture: metadata, late_frames: rows }));
+      return freeze({ retained_json_bytes: retained, diagnostic_ceiling_bytes: view, row_limit: 4, shared_frame_limit: LIMITS.frames });
+    },
     finishTeardown(input) { return guard(() => { at("RELEASED");
       parse(z.object({ receipt_readback: z.literal(true), anchor_same: z.literal(true), root_removed: z.literal(true), absent: z.literal(true), worker_live: z.literal(true) }).strict(), input);
       if (cancelPending()) fail("cancel_unsettled");
@@ -186,7 +288,8 @@ export function createUnsignedControllerProtocolModel(input) {
       if (stopped || state !== "FINALIZING" || !started("FINALIZE") || d.exit_code !== 0 || d.signal !== null) stop("worker_lost"); else state = "DONE"; return describe(); },
     describe,
   };
-  return Object.freeze(Object.fromEntries(Object.entries(model).map(([name, method]) => [name, name === "describe" ? method : (...args) => guard(() => method(...args), true)])));
+  return Object.freeze(Object.fromEntries(Object.entries(model).map(([name, method]) => [name,
+    ["describe", "describeLate", "lateCapacity", "observeLateFrame", "closeLateCapture"].includes(name) ? method : (...args) => guard(() => method(...args), true)])));
 }
 
 export function describeUnsignedControllerCapacity(input) {

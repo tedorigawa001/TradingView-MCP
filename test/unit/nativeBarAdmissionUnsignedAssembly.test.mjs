@@ -485,10 +485,145 @@ test("4-B2 a closed case reference and a reused launch label never enter the nex
   assert.throws(() => q.m.beginCase({ allocation: a, at: q.tick() }), /exchange_reused/);
 });
 test("4-B2 late diagnostics obey the exact byte bound and never clear the primary stop", () => {
-  const s = driver(); s.m.stop({ reason: "primary", at: s.tick() });
-  s.event("late_frame", { line: "x".repeat(65536) }); assert.equal(s.m.describe().active.frames, 1);
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() }); const before = s.m.describe().active;
+  const line = canonical({ binding: before.binding, direction: "worker", ordinal: before.next_ordinals.worker, kind: "TRACE_CHUNK",
+    payload: { chunk_index: 0, events: [{ ordinal: 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: "1", code: null, byte_count: "0", sha256: null }] } }) + "\n";
+  s.event("late_frame", { line }); assert.equal(s.m.describe().active.frames, before.frames + 1);
   assert.throws(() => s.event("late_frame", { line: "x".repeat(65537) }), /invalid_input/);
-  assert.equal(s.m.describe().stop_reason, "primary"); assert.equal(s.m.describe().active.frames, 1);
+  assert.equal(s.m.describe().stop_reason, "primary"); assert.equal(s.m.describe().active.frames, before.frames + 1);
+});
+test("B4-P2 B2 clock-free late input uses the one original ledger without changing stop or evidence", () => {
+  const s = go(); assert.throws(() => s.m.stop({ reason: "clock_fault", at: null })); const before = s.m.describe();
+  const p = before.active, line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "RELEASED",
+    payload: { baseline_sha256: p.baseline_sha256, resources, query: "settled", native: "settled", original_operation_retired: true, query_released: true,
+      close_errors: [], diagnostic_sha256: h, observation_sha256: null, trace_chunks: 0, trace_events: 0, trace_sha256: p.trace_sha256,
+      primary_code: "invented", requests_dispatched: 1, authenticated_requests: 0, c0_dispatched_at: null, c0_authenticated_at: null, retired_at: null } }) + "\n";
+  const view = s.m.observeLateFrame(s.token, { line }), after = s.m.describe();
+  assert.equal(view.late_capture.diagnostic_only, true); assert.equal(view.late_capture.receive_at, null);
+  assert.equal(view.late_frames[0].sha256, sha(line)); assert.equal(after.clock_invalid, true); assert.equal(after.first_stop_ns, null);
+  assert.equal(after.active.frames, p.frames + 1); assert.equal(after.active.next_ordinals.worker, p.next_ordinals.worker + 1);
+  assert.equal(after.stop_reason, before.stop_reason); assert.deepEqual(after.active.evidence, before.active.evidence);
+  assert.deepEqual(after.active.window, before.active.window); assert.equal(after.active.protocol_state, "STOPPED");
+  assert.deepEqual(s.m.describeLateFrames(s.token), view); assert.ok(byteLength(canonical(after)) <= after.capacity.diagnostic_ceiling_bytes);
+  assert.ok(byteLength(canonical(view)) <= after.capacity.late_diagnostic_ceiling_bytes);
+});
+const lateTraceLine = (s, index = 0, ordinal = 1) => {
+  const p = s.m.describe().active;
+  return canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "TRACE_CHUNK", payload: { chunk_index: index,
+    events: [{ ordinal, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: String(ordinal), code: null, byte_count: "0", sha256: null }] } }) + "\n";
+};
+test("B4-P2 a refused B2 frame freezes late intake but keeps the original CANCEL lane", () => {
+  const s = go(); assert.throws(() => s.frame("LAUNCH", {}, undefined, false), /protocol_order/);
+  assert.equal(s.m.describe().active.late_capture, "frozen");
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /late_closed/);
+  s.m.endLateFrames(s.token, { reason: "decoder_failure" }); assert.equal(s.m.describe().active.late_capture, "frozen");
+  const p = s.event("shutdown_plan"); assert.equal(p.decision, "CANCEL_THEN_CLOSE"); assert.equal(s.m.describe().active.late_count, 0);
+});
+test("B4-P2 a timed late event on a healthy B2 case freezes intake so the bytes cannot be retried untimed", () => {
+  const s = go(), line = lateTraceLine(s); assert.throws(() => s.event("late_frame", { line }), /late_requires_stop/);
+  assert.equal(s.m.describe().stop_reason, "late_requires_stop"); assert.equal(s.m.describe().active.late_capture, "frozen");
+  assert.throws(() => s.m.observeLateFrame(s.token, { line }), /late_closed/); assert.equal(s.m.describe().active.late_count, 0);
+});
+test("B4-P2 after a clock fault the timed B2 late event refuses and only the clock-free entry captures", () => {
+  const s = go(), lastValid = s.tick(); s.event("resource", { resource: "observer", action: "attach" }, lastValid);
+  assert.throws(() => s.m.stop({ reason: "clock_fault", at: null })); assert.equal(s.m.describe().clock_invalid, true);
+  assert.throws(() => s.event("late_frame", { line: lateTraceLine(s) }, lastValid), /late_requires_untimed/);
+  assert.equal(s.m.describe().active.late_count, 0); assert.equal(s.m.describe().active.late_capture, "open");
+  s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }); assert.equal(s.m.describe().active.late_count, 1);
+});
+test("B4-P2 B2 late capacity exhaustion keeps the original shutdown CANCEL lane", () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() });
+  for (let i = 0; i < 4; i++) s.m.observeLateFrame(s.token, { line: lateTraceLine(s, i, i + 1) });
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s, 4, 5) }), /late_capacity/);
+  assert.equal(s.m.describe().active.late_capture, "frozen"); assert.equal(s.event("shutdown_plan").decision, "CANCEL_THEN_CLOSE");
+});
+test("B4-P2 a B2-level frame refusal freezes intake before protocol admission and keeps the CANCEL lane", () => {
+  const s = go(); assert.throws(() => s.event("frame", { line: "not json\n" }));
+  assert.equal(s.m.describe().active.late_capture, "frozen"); assert.equal(s.m.describe().active.frames, 5);
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /late_closed/);
+  assert.equal(s.event("shutdown_plan").decision, "CANCEL_THEN_CLOSE");
+});
+test("B4-P2 B2 late input requires the original worker slot to remain live or retained", () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() }); s.event("worker_exit", { exit_code: 1, signal: null });
+  s.event("resource", { resource: "worker", action: "close", outcome: "confirmed" }); assert.equal(s.m.describe().active.slots.worker, "closed");
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /worker_reference/);
+  assert.equal(s.m.describe().active.late_count, 0); assert.equal(s.m.describe().active.late_capture, "refused");
+});
+test("B4-P2 a stopped B2 READY cannot borrow the parent clock domain", () => {
+  const s = driver(); s.record("case_allocated"); s.event("resource", { resource: "worker", action: "attach" }); s.frame("LAUNCH");
+  const parent = s.tick().clock_domain; s.m.stop({ reason: "primary", at: s.tick() }); const p = s.m.describe().active;
+  const line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "READY",
+    payload: { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: parent, pins_sha256: digest(p.binding) } }) + "\n";
+  assert.throws(() => s.m.observeLateFrame(s.token, { line }), /worker_clock_domain/);
+  assert.equal(s.m.describe().active.late_count, 0); assert.equal(s.m.describe().active.late_capture, "refused");
+});
+for (const closed of ["refused", "exhausted"]) test("B4-P2 B2 refuses closed or exhausted late intake before parsing: " + closed, () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() });
+  if (closed === "refused") s.m.endLateFrames(s.token, { reason: "decoder_failure" });
+  else for (let i = 0; i < 4; i++) s.m.observeLateFrame(s.token, { line: lateTraceLine(s, i, i + 1) });
+  const line = lateTraceLine(s, 4, 5), original = JSON.parse; let parsed = 0;
+  try { JSON.parse = function (text, ...args) { if (text === line) { parsed++; throw Error("late_parse_after_close"); } return original.call(this, text, ...args); };
+    assert.throws(() => s.m.observeLateFrame(s.token, { line }), closed === "refused" ? /late_closed/ : /late_capacity/);
+  } finally { JSON.parse = original; }
+  assert.equal(parsed, 0); assert.equal(s.m.describe().active.late_count, closed === "refused" ? 0 : 4);
+});
+test("B4-P2 a healthy B2 case cannot manufacture a stop using the clock-free late entry", () => {
+  const s = go(), before = s.m.describe();
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /late_requires_stop/);
+  assert.throws(() => s.m.endLateFrames(s.token, { reason: "stream_closed" }), /late_requires_stop/);
+  assert.deepEqual(s.m.describe(), before);
+});
+test("B4-P2 timed and untimed B2 late entries share one count, ordinal and capture latch", () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() });
+  s.event("late_frame", { line: lateTraceLine(s) });
+  s.m.observeLateFrame(s.token, { line: lateTraceLine(s, 1, 2) }); const before = s.m.describe();
+  assert.equal(before.active.late_count, 2); assert.equal(s.m.describeLateFrames(s.token).late_frames.length, 2);
+  const duplicate = lateTraceLine(s, 1, 2); assert.throws(() => s.event("late_frame", { line: duplicate }), /trace_order/);
+  assert.equal(s.m.describe().active.frames, before.active.frames); assert.equal(s.m.describe().active.late_count, 2);
+  assert.equal(s.m.describe().active.late_capture, "refused"); assert.equal(s.m.describe().stop_reason, "primary");
+});
+for (const extra of [{ at: null }, { at: point("1") }, { extra: true }]) test("B4-P2 B2 late entry is strictly clock-free, not a generic timed bypass: " + canonical(extra), () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() }); const before = s.m.describe();
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s), ...extra }), /invalid_input/);
+  assert.equal(s.m.describe().active.frames, before.active.frames); assert.equal(s.m.describe().clock_invalid, false);
+  assert.equal(s.m.describe().active.late_capture, "refused"); assert.equal(s.m.describe().stop_reason, "primary");
+});
+for (const tokenOf of [() => ({}), s => structuredClone(s.token), () => go().token]) test("B4-P2 B2 late input rejects a foreign or cloned case identity", () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() }); const before = s.m.describe();
+  assert.throws(() => s.m.observeLateFrame(tokenOf(s), { line: lateTraceLine(s) }), /case_reference/);
+  assert.deepEqual(s.m.describe(), before);
+});
+test("B4-P2 an already cleared clean B2 case cannot be resurrected for late capture", () => {
+  const s = settle(); s.m.finishCase(s.token, { at: s.tick() }); const before = s.m.describe();
+  assert.throws(() => s.m.describeLateFrames(s.token), /case_reference/);
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: "{}\n" }), /late_requires_stop/);
+  assert.deepEqual(s.m.describe(), before);
+});
+test("B4-P2 a B2 normal-frame semantic refusal freezes late capture without a fallback", () => {
+  const s = go(); assert.throws(() => s.frame("READY", {})); const before = s.m.describe();
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /late_closed/);
+  assert.equal(s.m.describe().active.frames, before.active.frames); assert.equal(s.m.describe().active.late_count, 0);
+});
+test("B4-P2 frozen stopped report and index bytes are not backfilled with late diagnostics", () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() });
+  s.record("stop_summary", { reason: "primary", details: [] }); s.record("ready_to_report", { candidate_outcome: "FAIL", assessment_sha256: null });
+  const at = s.tick(), report = s.event("report", { observation: null, trace: [], comparison: null, limitations: [],
+    save_stamp: { ...at, wall_utc: "2026-10-29T00:00:00.000Z", wall_jst: "2026-10-29T09:00:00.000+09:00" } }, at);
+  s.event("report_readback", { line: report.line }); s.record("terminal", { report_sha256: report.sha256 });
+  s.event("case_closes", { receipt: "confirmed", report: "confirmed", errors: [] }); const row = s.event("index_row"); s.event("index_readback", { line: row.line });
+  s.m.finishCase(s.token, { at: s.tick() }); s.m.finishNotRun(); const before = s.m.describe();
+  s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }); const after = s.m.describe();
+  assert.deepEqual(after.active.evidence, before.active.evidence); assert.deepEqual(after.rows, before.rows);
+  assert.equal(after.active.evidence.report_sha256, sha(report.line)); assert.equal(after.active.evidence.index_sha256, sha(row.line));
+  assert.equal(after.rows[0].model_verdict, "FAIL"); assert.equal(after.active.late_count, 1); assert.equal(after.active.slots.worker, "live");
+});
+for (const reason of ["decoder_failure", "truncated_frame", "stream_closed"]) test("B4-P2 B2 receive closure freezes intake but keeps terminal resource facts: " + reason, () => {
+  const s = go(); s.m.stop({ reason: "primary", at: s.tick() }); s.m.endLateFrames(s.token, { reason });
+  assert.throws(() => s.m.observeLateFrame(s.token, { line: lateTraceLine(s) }), /late_closed/);
+  assert.equal(s.m.describeLateFrames(s.token).late_capture.reason, reason); assert.equal(s.event("shutdown_plan").decision, "CLOSE_ONLY");
+  s.event("command_close", { outcome: "confirmed" }); s.event("worker_exit", { exit_code: 1, signal: null });
+  s.event("resource", { resource: "worker", action: "close", outcome: "confirmed" });
+  assert.equal(s.m.describe().active.slots.worker, "closed"); assert.equal(s.m.describe().stop_reason, "primary");
 });
 test("4-B2 case-writer close failures yield FAIL and prevent all later cases", () => {
   const s = settle(go(), "BLOCKED", { closes: { receipt: "unconfirmed", report: "confirmed", errors: Array(8).fill("c".repeat(96)) } });

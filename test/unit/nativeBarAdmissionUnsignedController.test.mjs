@@ -192,7 +192,7 @@ test("4-A shutdown CANCEL is once only, shares ordinals and never resumes progre
   assert.equal(m.describe().frames, before + 1);
   m.noteShutdownWrite({ outcome: "started" }); m.noteShutdownWrite({ outcome: "completed" });
   assert.equal(m.planShutdown({ ...qualified, settlement_remaining_ms: 60000 }).decision, "CLOSE_ONLY");
-  m.observeLateFrame("ignored\n"); assert.equal(m.describe().state, "STOPPED");
+  m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] })); assert.equal(m.describe().state, "STOPPED");
   m.noteCommandClose({ outcome: "confirmed" }); assert.throws(() => m.noteCommandClose({ outcome: "confirmed" }), /close_order/);
   assert.throws(() => send(m, "RELEASED", release(m)), /stopped/);
 });
@@ -641,8 +641,9 @@ test("4-A maximum normal transcript has 17 frames and 128 original trace slots",
   for (let chunk_index = 0; chunk_index < 8; chunk_index++) send(m, "TRACE_CHUNK", { chunk_index, events: Array.from({ length: 16 }, (_, i) => traceEvent(chunk_index * 16 + i + 1)) });
   send(m, "OBSERVED", blankObservation()); send(m, "RELEASED", release(m)); m.finishTeardown(teardown); send(m, "FINALIZE"); m.workerExit({ exit_code: 0, signal: null });
   assert.equal(m.describe().frames, 17); assert.equal(m.describe().trace_events, 128); assert.equal(m.describe().state, "DONE");
-  const q = active(); q.observeFailure({ reason: "stopped" }); for (let i = 0; i < 4; i++) q.observeLateFrame("diagnostic\n");
-  assert.throws(() => q.observeLateFrame("more\n"), /late_capacity/);
+  const q = active(); q.observeFailure({ reason: "stopped" });
+  for (let i = 0; i < 4; i++) q.observeLateFrame(wire(q, "TRACE_CHUNK", { chunk_index: i, events: [traceEvent(i + 1)] }));
+  assert.throws(() => q.observeLateFrame(wire(q, "TRACE_CHUNK", { chunk_index: 4, events: [traceEvent(5)] })), /late_capacity/);
 });
 test("4-A PREPARE seals actual configuration once and refuses changed artifact/name/envelope bindings", () => {
   for (const [mutate, reason] of [[(b) => { b.reader_source_sha256 = "b".repeat(64); }, /binding_changed/], [(b) => { b.setup.fixture_name = "native-bar-fs-synthetic-Other1"; }, /setup_binding/],
@@ -938,10 +939,220 @@ test("4-A the normal FINALIZE path records one command close; any other unstoppe
   const u = active(); send(u, "RELEASED", release(u)); u.finishTeardown(teardown); u.acceptFrame(wire(u, "FINALIZE"));
   assert.throws(() => u.noteCommandClose({ outcome: "confirmed" }), /close_order/);
 });
-test("4-A late frames record the hash of their received bytes", () => {
+test("B4-P2 late frames advance only original wire accounting and record exact received-byte hashes", () => {
   const m = active(); m.observeFailure({ reason: "stopped" });
-  assert.equal(m.observeLateFrame("diagnostic\n").late_frames[0].sha256, crypto.createHash("sha256").update("diagnostic\n").digest("hex"));
-  const q = active(); assert.throws(() => q.observeLateFrame("diagnostic\n"), /late_requires_stop/);
+  const before = m.describe(), line = wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] });
+  const d = m.observeLateFrame(line);
+  assert.equal(d.late_frames[0].sha256, crypto.createHash("sha256").update(line).digest("hex"));
+  assert.equal(d.frames, before.frames + 1); assert.equal(d.next_ordinals.worker, before.next_ordinals.worker + 1);
+  assert.equal(d.late_capture.diagnostic_only, true); assert.equal(d.late_capture.semantic_verified, false); assert.equal(d.late_capture.receive_at, null);
+  assert.equal(d.trace_events, before.trace_events); assert.equal(d.trace_sha256, before.trace_sha256);
+  assert.equal(d.state, "STOPPED"); assert.equal(d.stop_reason, "stopped"); assert.equal(d.release, null);
+  const q = active(); assert.throws(() => q.observeLateFrame(line), /late_requires_stop/);
+});
+for (const [name, change] of [
+  ["raw diagnostic", () => "diagnostic\n"], ["oversize", () => "x".repeat(65537)], ["surrogate", () => '"\ud800"\n'],
+  ["noncanonical", line => " " + line], ["partial", line => line.slice(0, -1)],
+  ["foreign binding", line => { const f = JSON.parse(line); f.binding.exchange_id = "foreign"; return canonical(f) + "\n"; }],
+  ["parent direction", line => { const f = JSON.parse(line); f.direction = "parent"; return canonical(f) + "\n"; }],
+  ["parent kind", line => { const f = JSON.parse(line); f.kind = "CANCEL"; f.payload = {}; return canonical(f) + "\n"; }],
+  ["ordinal gap", line => { const f = JSON.parse(line); f.ordinal++; return canonical(f) + "\n"; }],
+  ["payload field", line => { const f = JSON.parse(line); f.payload.extra = true; return canonical(f) + "\n"; }],
+]) test("B4-P2 invalid late traffic freezes capture and lowers shutdown to close-only: " + name, () => {
+  const m = active(); m.observeFailure({ reason: "original_stop" }); const before = m.describe();
+  const good = () => wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] });
+  assert.throws(() => m.observeLateFrame(change(good()))); const d = m.describe();
+  assert.equal(d.stop_reason, "original_stop"); assert.equal(d.late_capture.capture, "refused");
+  assert.equal(d.frames, before.frames); assert.deepEqual(d.next_ordinals, before.next_ordinals); assert.equal(d.late_frames.length, 0);
+  assert.throws(() => m.observeLateFrame(good()), /late_closed/);
+  assert.equal(m.planShutdown(qualified).decision, "CLOSE_ONLY"); m.noteCommandClose({ outcome: "confirmed" });
+  assert.equal(m.describe().command_close, "confirmed"); assert.equal(m.describe().stop_reason, "original_stop");
+});
+test("B4-P2 duplicate late ordinal cannot be counted twice or repaired after capture refusal", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); const line = wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] });
+  m.observeLateFrame(line); const before = m.describe(); assert.throws(() => m.observeLateFrame(line), /protocol_ordinal/);
+  assert.equal(m.describe().late_frames.length, 1); assert.equal(m.describe().frames, before.frames);
+  assert.equal(m.describe().late_capture.trace_events, 1); assert.equal(m.describe().stop_reason, "first");
+});
+test("B4-P2 late RELEASED is terminal diagnostic data, not a normal release or C1 assertion", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); const before = m.describe();
+  const line = wire(m, "RELEASED", { ...release(m), requests_dispatched: 2, trace_sha256: "b".repeat(64) }); m.observeLateFrame(line);
+  const d = m.describe(); assert.equal(d.release, null); assert.equal(d.c1_violation, before.c1_violation);
+  assert.equal(d.late_capture.capture, "ended"); assert.equal(d.late_capture.semantic_verified, false);
+  assert.equal(d.observation, before.observation); assert.equal(d.trace_sha256, before.trace_sha256);
+  // A valid diagnostic never creates permission, but does not suppress an already eligible original shutdown.
+  assert.equal(m.planShutdown(qualified).decision, "CANCEL_THEN_CLOSE");
+  assert.throws(() => m.finishTeardown(teardown), /stopped/); assert.equal(m.describe().stop_reason, "first");
+});
+test("B4-P2 invalid late data prevents an already planned shutdown CANCEL from starting", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); const plan = m.planShutdown(qualified); assert.ok(plan.frame);
+  assert.throws(() => m.observeLateFrame("bad\n")); assert.throws(() => m.noteShutdownWrite({ outcome: "started" }), /shutdown_write_order/);
+  assert.equal(m.describe().writes.at(-1).started, false); m.noteCommandClose({ outcome: "confirmed" });
+  assert.equal(m.describe().stop_reason, "first");
+});
+test("B4-P2 an original started shutdown write can settle after late capture fails", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); m.planShutdown(qualified); m.noteShutdownWrite({ outcome: "started" });
+  assert.throws(() => m.observeLateFrame("bad\n")); m.noteShutdownWrite({ outcome: "completed" });
+  assert.equal(m.describe().writes.at(-1).outcome, "completed"); assert.equal(m.describe().stop_reason, "first");
+});
+test("B4-P2 late READY and BASELINED use shared schemas without promoting accepted fields", () => {
+  const m = createUnsignedControllerProtocolModel(allocation()); send(m, "LAUNCH"); m.observeFailure({ reason: "first" });
+  m.observeLateFrame(wire(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding), worker_clock_domain: "late-worker" }));
+  assert.equal(m.describe().worker_clock_domain, null); assert.equal(m.describe().late_capture.worker_domain, "late-worker");
+  assert.throws(() => m.observeLateFrame(wire(m, "READY", { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding), worker_clock_domain: "late-worker" })), /late_duplicate/);
+  const q = ready(), f = fixture(); send(q, "PREPARE", { configuration: configuration(f), launch_nonce: "nonce-1" }, { ...q.describe().binding, setup: setup(f) });
+  q.observeFailure({ reason: "first" }); q.observeLateFrame(wire(q, "BASELINED", { resources, clock_domain: "worker-clock" }));
+  assert.equal(q.describe().baseline, null); assert.equal(q.describe().baseline_sha256, null); assert.equal(q.describe().late_capture.seen, 3);
+  assert.throws(() => q.observeLateFrame(wire(q, "RELEASED", release(q))), /invalid_input|write_not_submitted/);
+});
+test("B4-P2 a late result requires an originally started GO, not merely its planned frame", () => {
+  const m = active(undefined, undefined, false); m.acceptFrame(wire(m, "GO", { baseline_sha256: m.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));
+  m.observeFailure({ reason: "first" }); assert.throws(() => m.observeLateFrame(wire(m, "RELEASED", release(m))), /write_not_submitted/);
+  assert.equal(m.describe().go_submitted, false); assert.equal(m.describe().release, null);
+});
+test("B4-P2 late OBSERVED and RELEASED preserve normal observation and release evidence", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); m.observeLateFrame(wire(m, "OBSERVED", blankObservation()));
+  m.observeLateFrame(wire(m, "RELEASED", release(m))); const d = m.describe();
+  assert.equal(d.observation, null); assert.equal(d.observation_sha256, null); assert.equal(d.release, null);
+  assert.equal(d.late_frames.length, 2); assert.equal(d.late_capture.semantic_verified, false);
+  assert.throws(() => m.observeLateFrame(wire(m, "FAILED", failed())), /late_closed/);
+});
+for (const problem of ["chunk", "event", "domain", "rollback"]) test("B4-P2 late trace ordering cannot borrow normal trace evidence: " + problem, () => {
+  const m = active(); send(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1, "20")] });
+  m.observeFailure({ reason: "first" }); const before = m.describe();
+  const e = traceEvent(problem === "event" ? 1 : 2, problem === "rollback" ? "19" : "21", problem === "domain" ? "foreign-clock" : "worker-clock");
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: problem === "chunk" ? 0 : 1, events: [e] })), /trace_order/);
+  assert.equal(m.describe().trace_events, before.trace_events); assert.equal(m.describe().trace_sha256, before.trace_sha256);
+  assert.equal(m.describe().late_frames.length, 0);
+});
+test("B4-P2 a failed normal reducer freezes capture without inferring an accepted singleton", () => {
+  const m = ready(), f = fixture(); send(m, "PREPARE", { configuration: configuration(f), launch_nonce: "nonce-1" }, { ...m.describe().binding, setup: setup(f) });
+  assert.throws(() => send(m, "BASELINED", { resources, clock_domain: "foreign-clock" }), /baseline_clock_domain/);
+  assert.equal(m.describe().late_capture.seen, 1); assert.equal(m.describe().late_capture.capture, "frozen");
+  assert.throws(() => m.observeLateFrame(wire(m, "BASELINED", { resources, clock_domain: "worker-clock" })), /late_closed/);
+});
+for (const rejected of ["worker", "parent"]) test("B4-P2 a normal rejection freezes late intake without closing the original CANCEL lane: " + rejected, () => {
+  const m = active();
+  if (rejected === "worker") assert.throws(() => send(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1, "1", "other-clock")] }), /trace_order/);
+  else assert.throws(() => m.acceptFrame(wire(m, "LAUNCH")), /protocol_order/);
+  assert.equal(m.describe().late_capture.capture, "frozen"); assert.equal(m.describe().late_capture.reason, "normal_rejected");
+  // Later traffic is not examined, so neither it nor a later receive fault can be judged invalid.
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] })), /late_closed/);
+  m.closeLateCapture({ reason: "decoder_failure" }); assert.equal(m.describe().late_capture.capture, "frozen");
+  assert.equal(m.describe().late_frames.length, 0); assert.equal(m.describeLate().late_capture.reason, "normal_rejected");
+  const plan = m.planShutdown(qualified); assert.equal(plan.decision, "CANCEL_THEN_CLOSE"); m.noteShutdownWrite({ outcome: "started" });
+  assert.equal(m.describe().writes.at(-1).started, true);
+});
+test("B4-P2 late trace follows the normal ordering rule after an accepted OBSERVED", () => {
+  const m = active(); send(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] }); send(m, "OBSERVED", blankObservation());
+  const normal = active(); send(normal, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] }); send(normal, "OBSERVED", blankObservation());
+  send(normal, "TRACE_CHUNK", { chunk_index: 1, events: [traceEvent(2)] }); assert.equal(normal.describe().trace_chunks, 2);
+  m.observeFailure({ reason: "first" }); m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 1, events: [traceEvent(2)] }));
+  assert.equal(m.describe().late_capture.capture, "open"); assert.equal(m.describe().late_frames.length, 1); assert.equal(m.describe().trace_chunks, 1);
+});
+test("B4-P2 a fifth late frame freezes intake without closing an eligible shutdown CANCEL", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); assert.equal(m.planShutdown(qualified).decision, "CANCEL_THEN_CLOSE");
+  for (let i = 0; i < 4; i++) m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: i, events: [traceEvent(i + 1)] }));
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 4, events: [traceEvent(5)] })), /late_capacity/);
+  const c = m.describe().late_capture; assert.deepEqual([c.capture, c.reason, m.describe().late_frames.length], ["frozen", "late_capacity", 4]);
+  m.noteShutdownWrite({ outcome: "started" }); assert.equal(m.describe().writes.at(-1).started, true);
+});
+for (const phase of ["prepare", "launch"]) test("B4-P2 late FAILED phase follows the normal rule for an accepted unstarted PREPARE: " + phase, () => {
+  const prepared = () => { const m = ready(), f = fixture();
+    m.acceptFrame(wire(m, "PREPARE", { configuration: configuration(f), launch_nonce: "nonce-1" }, { ...m.describe().binding, setup: setup(f) })); return m; };
+  const n = prepared(), l = prepared(); l.observeFailure({ reason: "first" });
+  const normal = () => n.acceptFrame(wire(n, "FAILED", failed({ phase, query_created: false })));
+  const late = () => l.observeLateFrame(wire(l, "FAILED", failed({ phase, query_created: false })));
+  if (phase === "prepare") { normal(); late(); assert.equal(l.describe().late_capture.capture, "ended"); }
+  else { assert.throws(normal, /failure_binding/); assert.throws(late, /failure_binding/); assert.equal(l.describe().late_capture.capture, "refused"); }
+});
+const lateRefusals = [
+  ["traffic after a normal release", /late_terminal/, () => { const m = active(); send(m, "RELEASED", release(m)); m.observeFailure({ reason: "first" });
+    return [m, wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] })]; }],
+  ["READY pins", /ready_pins/, () => { const m = createUnsignedControllerProtocolModel(allocation()); send(m, "LAUNCH"); m.observeFailure({ reason: "first" });
+    return [m, wire(m, "READY", { addon_protocol: 6, mode: "synthetic_only", worker_clock_domain: "worker-clock", pins_sha256: "b".repeat(64) })]; }],
+  ["BASELINED without a started PREPARE", /write_not_submitted/, () => { const m = ready(), f = fixture();
+    m.acceptFrame(wire(m, "PREPARE", { configuration: configuration(f), launch_nonce: "nonce-1" }, { ...m.describe().binding, setup: setup(f) }));
+    m.observeFailure({ reason: "first" }); return [m, wire(m, "BASELINED", { resources, clock_domain: "worker-clock" })]; }],
+  ["BASELINED domain", /baseline_clock_domain/, () => { const m = ready(), f = fixture();
+    send(m, "PREPARE", { configuration: configuration(f), launch_nonce: "nonce-1" }, { ...m.describe().binding, setup: setup(f) });
+    m.observeFailure({ reason: "first" }); return [m, wire(m, "BASELINED", { resources, clock_domain: "other-clock" })]; }],
+  ["FAILED query without GO", /failure_binding/, () => { const m = active(undefined, undefined, false); m.observeFailure({ reason: "first" });
+    return [m, wire(m, "FAILED", failed({ phase: "prepare", query_created: true }))]; }],
+  ["FAILED finalize without query", /failure_binding/, () => { const m = active(); send(m, "RELEASED", release(m)); m.observeFailure({ reason: "first" });
+    return [m, wire(m, "FAILED", failed({ phase: "finalize", query_created: false }))]; }],
+  ["RELEASED baseline", /baseline_changed/, () => { const m = active(); m.observeFailure({ reason: "first" }); return [m, wire(m, "RELEASED", { ...release(m), baseline_sha256: "b".repeat(64) })]; }],
+  ["RELEASED trace count", /result_binding/, () => { const m = active(); m.observeFailure({ reason: "first" }); return [m, wire(m, "RELEASED", { ...release(m), trace_chunks: 1 })]; }],
+  ["RELEASED authenticated over dispatched", /result_binding/, () => { const m = active(); m.observeFailure({ reason: "first" });
+    return [m, wire(m, "RELEASED", { ...release(m), requests_dispatched: 1, authenticated_requests: 2 })]; }],
+  ["late-after-late trace rollback", /trace_order/, () => { const m = active(); m.observeFailure({ reason: "first" });
+    m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1, "20")] }));
+    return [m, wire(m, "TRACE_CHUNK", { chunk_index: 1, events: [traceEvent(2, "10")] })]; }],
+];
+for (const [name, reason, build] of lateRefusals) test("B4-P2 an invalid late frame is refused, closes intake and writes: " + name, () => {
+  const [m, line] = build(), before = m.describe(); assert.throws(() => m.observeLateFrame(line), reason);
+  const d = m.describe(); assert.equal(d.late_capture.capture, "refused"); assert.equal(d.late_frames.length, before.late_frames.length);
+  assert.equal(d.frames, before.frames); assert.deepEqual(d.next_ordinals, before.next_ordinals);
+  assert.equal(m.planShutdown(qualified).decision, "CLOSE_ONLY");
+});
+test("B4-P2 a stop after normal completion starts with an ended capture", () => {
+  const m = active(); send(m, "RELEASED", release(m)); m.finishTeardown(teardown); send(m, "FINALIZE"); m.workerExit({ exit_code: 0, signal: null });
+  assert.equal(m.describe().state, "DONE"); assert.equal(m.describe().late_capture, null); m.noteCommandClose({ outcome: "unconfirmed" });
+  assert.deepEqual([m.describe().late_capture.capture, m.describe().late_capture.reason], ["ended", "normal_terminal"]);
+  assert.throws(() => m.observeLateFrame(wire(m, "FAILED", failed({ phase: "finalize" }))), /late_closed/);
+});
+test("B4-P2 a receive fault after a terminal frame leaves the capture ended", () => {
+  const m = active(); send(m, "FAILED", failed({ phase: "settlement" }));
+  assert.deepEqual([m.describe().late_capture.capture, m.describe().late_capture.reason], ["ended", "normal_terminal"]);
+  m.closeLateCapture({ reason: "stream_closed" });
+  assert.deepEqual([m.describe().late_capture.capture, m.describe().late_capture.reason], ["ended", "normal_terminal"]);
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] })), /late_closed/);
+  assert.equal(m.describe().late_capture.capture, "refused");
+});
+test("B4-P2 only finalize FAILED may follow an accepted normal release in the late lane", () => {
+  const m = active(); send(m, "RELEASED", release(m)); m.observeFailure({ reason: "first" });
+  m.observeLateFrame(wire(m, "FAILED", failed({ phase: "finalize" }))); assert.equal(m.describe().failure, null);
+  assert.equal(m.describe().late_capture.capture, "ended"); assert.equal(m.describe().stop_reason, "first");
+  const q = active(); send(q, "RELEASED", release(q)); q.observeFailure({ reason: "first" });
+  assert.throws(() => q.observeLateFrame(wire(q, "FAILED", failed({ phase: "go" }))), /failure_binding/);
+});
+test("B4-P2 explicit receive-capture closure retains immutable late facts and primary stop", () => {
+  const m = active(); m.observeFailure({ reason: "first" }); m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 0, events: [traceEvent(1)] }));
+  const prior = m.describeLate(); m.closeLateCapture({ reason: "decoder_failure" });
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 1, events: [traceEvent(2)] })), /late_closed/);
+  assert.equal(prior.late_capture.capture, "open"); assert.equal(m.describeLate().late_capture.reason, "decoder_failure");
+  assert.equal(m.describeLate().stop_reason, "first"); assert.ok(Object.isFrozen(prior.late_frames[0]));
+  assert.ok(byteLength(canonical(m.describeLate())) <= m.lateCapacity().diagnostic_ceiling_bytes);
+});
+for (const kind of ["READY", "FAILED"]) test("B4-P2 an unstarted original LAUNCH is not late-traffic authority: " + kind, () => {
+  const m = createUnsignedControllerProtocolModel(allocation()); m.acceptFrame(wire(m, "LAUNCH")); m.observeFailure({ reason: "first" });
+  const payload = kind === "READY" ? { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(m.describe().binding), worker_clock_domain: "worker-clock" }
+    : failed({ phase: "launch", query_created: false });
+  assert.throws(() => m.observeLateFrame(wire(m, kind, payload)), /write_not_submitted/);
+  assert.equal(m.describe().late_frames.length, 0); assert.equal(m.describe().stop_reason, "first");
+});
+for (const bad of [failed({ phase: "finalize" }), failed({ phase: "launch" })]) test("B4-P2 late FAILED phase stays bound to original started commands: " + bad.phase, () => {
+  const m = active(); m.observeFailure({ reason: "first" }); assert.throws(() => m.observeLateFrame(wire(m, "FAILED", bad)), /failure_binding/);
+  assert.equal(m.describe().failure, null); assert.equal(m.describe().late_frames.length, 0);
+});
+test("B4-P2 accepted normal FAILED already closes capture without being reclassified as late", () => {
+  const m = active(); send(m, "FAILED", failed()); const before = m.describe();
+  assert.equal(before.failure.primary_code, "invented_failure"); assert.equal(before.late_capture.capture, "ended"); assert.equal(before.late_capture.seen & 16, 16);
+  assert.throws(() => m.observeLateFrame(wire(m, "FAILED", failed())), /late_closed/);
+  assert.equal(m.describe().frames, before.frames); assert.equal(m.describe().stop_reason, "worker_failed");
+});
+test("B4-P2 diagnostic sizes are independently bounded without retaining raw worker payloads", () => {
+  const m = active(), h = "f".repeat(64), l = "l".repeat(48), u = "9".repeat(30), c = "c".repeat(96);
+  const metadata = { diagnostic_only: true, semantic_verified: false, receive_at: null, capture: "refused", reason: c,
+    seen: 31, worker_domain: l, trace_chunks: 8, trace_events: 128, last_trace_ns: u };
+  const rows = Array(4).fill({ sha256: h, bytes: 65536 }), cap = m.lateCapacity();
+  assert.equal(cap.retained_json_bytes, 759); assert.equal(cap.retained_json_bytes, byteLength(canonical({ late_capture: metadata, late_frames: rows })));
+  assert.equal(cap.row_limit, 4); assert.equal(cap.shared_frame_limit, 32); assert.ok(cap.diagnostic_ceiling_bytes <= 16384);
+  m.observeFailure({ reason: "c".repeat(96) }); for (let i = 0; i < 4; i++) m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: i, events: [traceEvent(i + 1)] }));
+  assert.throws(() => m.observeLateFrame(wire(m, "TRACE_CHUNK", { chunk_index: 4, events: [traceEvent(5)] })), /late_capacity/);
+  const view = m.describeLate(); assert.ok(byteLength(canonical(view)) <= cap.diagnostic_ceiling_bytes);
+  assert.deepEqual(Object.keys(view.late_frames[0]).sort(), ["bytes", "sha256"]); assert.equal(view.evidence_saved, false);
+  assert.equal(Object.hasOwn(view, "trace"), false); assert.equal(Object.hasOwn(view, "release"), false);
 });
 test("4-A worker results and cancellation require a started GO write and each arrive at most once", () => {
   const go = (m) => m.acceptFrame(wire(m, "GO", { baseline_sha256: m.describe().baseline_sha256, baseline_readback: true, go_intent_readback: true }));

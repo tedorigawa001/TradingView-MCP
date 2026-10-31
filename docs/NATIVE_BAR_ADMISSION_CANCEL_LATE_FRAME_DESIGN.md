@@ -1,6 +1,6 @@
 # B4 Pre-Connection Cancel And Late-Frame Design
 
-Status: **design approved; B4-P1 independently reviewed/tested in pure memory models only**, 2026-10-31 JST, source baseline `88edb86`. This refines the [worker/transport design](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [controller contract](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md) and [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md). The [P1 record](#b4-p1-memory-implementation) covers the later separate implementation approval and the [independent review](#b4-p1-independent-review) covers its local commit gate; a [follow-up](#b4-p1-follow-up) keeps the retention summary true until the drained CANCEL completes. P2/P3 and all real worker/transport connections remain unimplemented; approval of this design is not operational approval.
+Status: **design approved; B4-P1 and B4-P2 independently reviewed/tested in pure memory models only**, 2026-10-31 JST, design baseline `88edb86`, P2 implementation baseline `a94a27d`. This refines the [worker/transport design](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [controller contract](NATIVE_BAR_ADMISSION_UNSIGNED_CONTROLLER_DESIGN.md) and [execution design](NATIVE_BAR_ADMISSION_UNSIGNED_EXECUTION_DESIGN.md). The [P1 record](#b4-p1-memory-implementation) covers its separate implementation approval and the [independent review](#b4-p1-independent-review) covers its local commit gate; a [follow-up](#b4-p1-follow-up) keeps the retention summary true until the drained CANCEL completes. The [P2 record](#b4-p2-memory-implementation) covers the separately approved late diagnostic model, with its [review corrections](#b4-p2-review-corrections) and [independent review](#b4-p2-independent-review). P3 and all real worker/transport connections remain pending; approval of this design is not operational approval.
 
 Dot stays PAUSED. Market/scenario/judgment/notification/mail, retention, confirmation counts, thresholds and bands are unchanged. No real ports/clocks/timers, build, operational child/worker, native read, fixture/signature/key/real-data operation, MCP registration or production activation is performed. Existing outputs are not adopted, moved or removed. There is no new tool, public runtime entry, wire field, receipt kind, cancellation attempt, timer or operating approval.
 
@@ -14,7 +14,7 @@ Dot stays PAUSED. Market/scenario/judgment/notification/mail, retention, confirm
 | v2 protocol: `observeLateFrame` | A clock-free raw string hash/size append, at most four entries within 32 shared frames; no canonical/schema/binding/direction/ordinal validation and no worker ordinal advancement | Directly connecting it would call arbitrary bounded diagnostics valid late protocol traffic |
 | B2 assembly: `late_frame`, `applyModelEvent` | The event is allowed after stop, but still needs a fresh valid parent point and invokes the raw appender | No safe path from a clock-faulted session to that timed API; stale or invented points are forbidden |
 
-At baseline, the controller test named `original commands cannot skip an unstarted ordinal or start in a later lifecycle state` pinned the CANCEL/RELEASED limitation. P1 replaces it with the narrow drain case and explicit FINALIZE/cleanup/refusal coverage, not a generic state relaxation. Existing late tests still deliberately hash arbitrary diagnostic strings: P2 is not implemented. Native protocol 6, the v1 decoder/worker entry and currently sealed runtime are unchanged.
+At baseline, the controller test named `original commands cannot skip an unstarted ordinal or start in a later lifecycle state` pinned the CANCEL/RELEASED limitation. P1 replaces it with the narrow drain case and explicit FINALIZE/cleanup/refusal coverage, not a generic state relaxation. The old arbitrary-string late tests are replaced by checked v2 frames in P2. Native protocol 6, the v1 decoder/worker entry and currently sealed runtime are unchanged.
 
 ## Approved Design Decisions
 
@@ -23,7 +23,7 @@ At baseline, the controller test named `original commands cannot skip an unstart
 3. Keep the original stop, query/settlement deadlines, command/decoder identities and counters. A late frame cannot reopen ordinary work, renew grace, initiate cleanup or change the outcome to PASS.
 4. Give only the stopped original case a narrow clock-free late-diagnostic operation. Do not make B2's general timed API accept null/stale points. Runtime use remains separately sealed and requires B4-B onward.
 
-These are transport-control design changes, not changes to market signal or notification conditions. The separately approved P1 implements the post-release CANCEL admission exception only in pure parent models. Its actual worker no-op consumer is still a B4-C/D requirement, not an existing worker behavior or an effect authorized by B4-B. Implementation of P2/P3 remains a separate approval boundary.
+These are transport-control design changes, not changes to market signal or notification conditions. The separately approved P1 implements the post-release CANCEL admission exception only in pure parent models. Its actual worker no-op consumer is still a B4-C/D requirement, not an existing worker behavior or an effect authorized by B4-B. P2's later approval covers only pure models and memory tests; P3 remains a separate approval boundary.
 
 ## Reserved Cancel Overtaken By Release
 
@@ -116,7 +116,7 @@ No new receipt/log or success evidence is introduced. Frozen/saved reports and i
 
 ## Capacity And Invariants
 
-Do not increase the existing 65536-byte frame, 32-frame shared count, four late rows, five parent-command records/one pending command, 37 lifetime-work records, 16384-byte diagnostic or 65536-byte coordinator metadata ceilings. Keep 2375680 retained/4259840 transient encoded-buffer reservations unless a separately reviewed derivation proves the existing reservations cover every new view; never silently add another input batch, decoder or trace copy. The 8516-byte current transport/lifetime diagnostic does not yet include the proposed late metadata and is not the future capacity claim.
+Do not increase the existing 65536-byte frame, 32-frame shared count, four late rows, five parent-command records/one pending command, 37 lifetime-work records, 16384-byte diagnostic or 65536-byte coordinator metadata ceilings. Keep 2375680 retained/4259840 transient encoded-buffer reservations unless a separately reviewed derivation proves the existing reservations cover every new view; never silently add another input batch, decoder or trace copy. The historical 8516-byte transport/lifetime diagnostic did not include late metadata; P2's recalculation is recorded below.
 
 The implementation must derive maximal sizes for all late metadata, maximal rows, stop/freeze reasons and combined B2/transport/lifetime snapshots. Check exact limits/one-over cases, normal-versus-late shared frame accounting, rejected/partially decoded data, callbacks and frozen-evidence views. If a reservation cannot fit, block rather than raising a limit or omitting a required fact. No additional native/observer/helper work allowance or timer/cleanup authority comes from this design.
 
@@ -134,19 +134,109 @@ The implementation must derive maximal sizes for all late metadata, maximal rows
 | Time and evidence | Null/unavailable time uses only the narrow stopped-case path; foreign/retired token and healthy use refuse; no stale point, recovery, grace or receipt; frozen report/index bytes and prior delivery state unchanged |
 | Boundaries | All effect tripwires precede imports; pure schema reuse/once-only accounting/source guards; no runtime issuer/native/v1/tool/automation/package changes; exact capacity and behavioral/source mutations |
 
-This matrix specifies requirements across P1/P2/P3, not a claim that all have run. P1 results are recorded below; its old regression forbidding any CANCEL start in RELEASED is replaced only by the narrow exception plus explicit refusal coverage. Existing raw-v2-late tests remain unchanged until P2. No operational test or old fixture is reused.
+This matrix specifies requirements across P1/P2/P3, not a claim that all have run. P1/P2 results are recorded below; the old regression forbidding any CANCEL start in RELEASED is replaced only by the narrow exception plus explicit refusal coverage. No operational test or old fixture is reused.
 
 ## Proposed Implementation Boundaries
 
 | Slice | Scope after separate approval | Still excluded |
 |---|---|---|
 | **B4-P1 (implemented in memory)** | Pure normal v2 CANCEL-drain exception, reservation/deadline model, B2 mirrors/capacity and memory/source tests. Worker no-op specified as invented outcomes and source contract; no worker connection yet | Real clocks/timers/ports, runtime/worker/native/signing/fixture effects; generic protocol relaxation |
-| **B4-P2** | Shared pure v2 late syntax/ordering validation, same-ledger bounded summaries, narrow clock-free stopped-case B2 operation, transport dispatch model and exact capacities; memory/source tests | Raw unchecked-v2 bypass, new log/receipt, saved evidence edits, runtime producer or timestamp recovery |
+| **B4-P2 (implemented in memory)** | Shared pure v2 late syntax/ordering validation, same-ledger bounded summaries, narrow clock-free stopped-case B2 operation, transport dispatch model and exact capacities; memory/source tests | Raw unchecked-v2 bypass, new log/receipt, saved evidence edits, runtime producer or timestamp recovery |
 | **B4-P3** | Memory composition of both races, frozen evidence and stop/deadline interleavings; independent review before B4-B | Operational execution, full acceptance and B5 authority |
 
 Then separately approve B4-B's unexecuted original-parent connection scope. B4-C/D must implement and review the released-worker no-op before any runtime composition can use the drain exception. Until both sides agree, the runtime remains sealed; old and new peers are never mixed. B4-E, B5/B6, host/signature qualification, total operating duration and separately approved user-terminal operational units remain required afterward.
 
 The initial design request changed documentation only. P1's later separately approved pure implementation is recorded below. Neither this design nor a pure-model test is permission to execute effects, record/delete data, enable production, resume Dot or change judgment/notification conditions.
+
+## B4-P2 Memory Implementation
+
+2026-10-31 JST, after separate approval to implement P2 and run memory-only synthetic tests, based on `a94a27d`. Its P1 CANCEL-retention correction is preserved. This request does not include independent review, commit or push.
+
+- **Shared validation and accounting:** normal and late v2 worker frames reuse the same strict envelope and per-kind payload validators. The original protocol owns the only late array, shared frame count and worker ordinal. A successful late append advances those wire counters exactly once and retains only `{sha256, bytes}` per row; it never calls the normal reducer. Binding/direction/ordinal, original started commands, singleton seen-mask and bounded trace chunk/event/domain/monotonic ordering are checked before committing. The mask is seeded only from normally accepted messages, including an accepted FAILED committed before stopping, not from fields left by a failed reducer.
+- **Non-authoritative view:** `describeLate()` returns `native-bar-late-frame-diagnostic-v1` with the original binding/stop, wire counters, bounded `late_capture` and at most four rows. `late_capture` explicitly has `diagnostic_only:true`, `semantic_verified:false`, `receive_at:null`; its capture state is open/ended/frozen/refused. Diagnostic domain/trace counters remain separate from normal baseline/domain/observation/trace/release/failure fields. A late RELEASED is checked only against the original baseline hash, the normal-plus-late trace counts and authenticated not exceeding dispatched requests. Its close errors, resources and observation/trace hashes are recorded unverified even when their inputs are retained, so a genuine failure report is captured rather than refused. Late RELEASED/FAILED ends capture, never releases resources or changes a result, C1, evidence or authority flag.
+- **Fail-closed intake:** malformed/noncanonical/oversized/foreign/duplicate/out-of-order input, a fifth candidate or exhausted shared frame allowance freezes intake. Normal semantic rejection freezes it (`frozen`) without a retry through the late lane, judging no later traffic and leaving the original shutdown lane unchanged (see the [review corrections](#b4-p2-review-corrections)). Decoder failure, partial EOF and stream closure can be supplied through bounded fault operations; no favorable prefix from a failed decoder batch is reconstructed. Closed/exhausted intake refuses before parsing another line. Invalid late traffic also blocks starting an already planned shutdown CANCEL, but preserves started write callbacks and original close/exit facts; it cannot overwrite the first primary stop.
+- **Transport dispatch model:** `receive` routes an already-stopped supplied frame without reading/validating a new parent point. If its normal clock/window checkpoint first detects unavailable/invalid time or a deadline before frame admission, the same complete frame is offered to late capture once. A normally admitted frame is not appended again. `refuseReceive` supplies decoder/partial/stream-end facts without a timestamp. This is a supplied-data model, not an actual stream listener or authentication of a decoder-returned frame.
+- **Narrow B2 entry:** `observeLateFrame(originalToken, {line})` accepts only the original retained active stopped case with its worker slot live/retained, rejects extra `at` fields, and delegates once to that case's protocol. `describeLateFrames` is a read-only view of the same ledger; `endLateFrames` supplies a bounded terminal intake reason. The existing timed `late_frame` event delegates to the same appender and keeps its timed gates. Healthy/foreign/copied/retired case references cannot manufacture a stop, acquire another ledger or resurrect a clean case. Unknown first-stop time is null after an initial clock fault, not the last valid point relabeled as the stop instant.
+- **Frozen evidence:** the stopped original retained case may expose later live diagnostics even after report/index readback. Existing report/index bytes and hashes, FAIL row, readback counters, deadlines and first stop remain unchanged. No new receipt/log is created, no diagnostics are backfilled into saved bytes and no evidence-save or notification claim is made.
+
+Capacity is calculated rather than increasing a ceiling. B2's ordinary summary cannot include the full late detail without exhausting its existing 16384-byte envelope, so it adds only `late_count` and `late_capture` status; the separate detail view is derived from the same ledger, not retained as another transcript. Maximum canonical late metadata plus four rows is **759 bytes**, charged explicitly to coordinator metadata. Combined transport/lifetime metadata is **9274 bytes**; B2 ordinary diagnostic/coordinator reservations are **16161/47087 bytes**; the separate late diagnostic is independently capped at **16384 bytes**. All maxima include bounded reasons/domains/counters; these are canonical encoded-data reservations, not V8 heap/native measurements. The existing **2375680/4259840** retained/transient buffers, frame/row/command/work limits, native budgets, wire shapes, receipt kinds and module import/export inventories are unchanged.
+
+The initial valid-late accounting, stopped transport receive and clock-free B2 regressions failed before their respective implementations. Added tests cover every worker kind, original-start gating, duplicate singleton/ordinal, trace constraints, normal-failure versus pre-admission-failure routing, raw text/canonical/LF/UTF-8/surrogate/size failures, fourth/fifth rows, shared timed/untimed accounting, no parsing after freeze/row exhaustion, ordinary callbacks/close/exit after intake fault, frozen report/index invariance, unchanged healthy/P1 flows and capacity derivation. A decoder-returned two-frame batch is tested both entirely stopped and crossing from normal TRACE_CHUNK to diagnostic-only RELEASED at pre-admission deadline detection. Existing decoder tests exercise 32/33 received-frame and exact 65536/+1-byte limits; the protocol's shared 32-frame guard (including parent reservations) is also source-pinned. No claim is made of a reachable successful 32-frame lifecycle or a real stream producer.
+
+As initially implemented, before the review corrections below, seven individually run main-thread memory/source files passed **595 tests** with zero failures/cancellations/skips: controller **191**, boundary **12**, transport/lifetime **170**, boundary **9**, assembly **113**, boundary **9**, qualification clock connection **91**. New source mutation checks pin schema reuse, original accounting, normal-field non-promotion, close-only gates, dispatch order and the narrow B2 entry. These inspect source shapes, not execution of mutated implementations. Their own replacement targets are scoped to the late appender where the same text occurs in normal admission; missing-dispatch checks require a present nonnegative index before comparing order. Effect tripwires remain installed before helper imports, including final swallowed-effect checks. No whole-repository/default-isolated/build/signing/native/operational suite is run.
+
+Only three pure helper modules, six memory/source test files and four design/backlog documents are changed. The protected runtime/native/common-build/package/config content hashes (2568 files), 436 pre-existing artifact hashes/sizes/modes and Dot PAUSED/full-configuration hash match implementation start. Actual original receiver/decoder ownership, child/callback provenance, runtime composition, worker no-op implementation and P3's broader interleaving review remain unimplemented/unqualified. Judgment/notification/mail/retention conditions are preserved; no real port/clock/timer, operational child process, native read, fixture/signature/key/real-data operation, MCP registration or production activation is performed.
+
+## B4-P2 Review Corrections
+
+2026-10-31 JST, review of the uncommitted P2 files against the code and this design, before commit. The user approved the recommended corrections. All findings were reproduced on a `git archive` copy with the uncommitted diff applied. P2/P3 findings:
+
+- **Normal rejection closed the shutdown lane (P2):** every normal rejection marked late capture `refused`, the state that makes shutdown close-only. That included a rejected worker frame, a parent command whose planning the protocol refused, and a B2 frame-event refusal. For example, after an ACTIVE-state protocol rejection, the decision changed from `CANCEL_THEN_CLOSE` at `a94a27d` to `CLOSE_ONLY`. This design closes writes only for invalid late traffic; a normal rejection only freezes the remaining intake. The B4-A review had also explicitly kept the original CANCEL lane after a normal rejection with a qualified point, and P2 had rewritten that test to expect close-only.
+  - Normal rejection now sets the separate state `frozen`. It ends intake but judges no later traffic, so later frames refuse `late_closed` without parsing. A later receive fault leaves it `frozen`, and the original shutdown lane keeps its unchanged known-delivery/window/once gates.
+  - Invalid late traffic, a receive/decoder fault on open intake, and traffic after a terminal late frame still set `refused` and make writes ineligible.
+  - Both states are terminal. The restored B4-A test again expects `CANCEL_THEN_CLOSE`.
+- **Late trace ordering diverged from normal (P3):** the late lane refused a TRACE_CHUNK after an accepted OBSERVED, which the normal reducer accepts. A sequence valid under normal rules therefore refused capture and, through that, closed writes. No documented worker rule orders traces before OBSERVED, so the late check now follows the normal rule.
+
+Verification:
+- **Reproducing tests:** eight new or revised regressions failed before correction:
+  - the restored B4-A expectation;
+  - worker and parent normal rejections;
+  - a transport-level rejection made before protocol admission (`receive_direction`);
+  - a refused parent command followed by unexamined traffic and a decoder fault;
+  - a B2 frame refusal;
+  - the failed-reducer state;
+  - late trace after OBSERVED.
+- **Revert checks:** each of the five changed guards, reverted alone against the memory suites only, fails at least one test.
+- **Source pins:** they cover the `frozen`/`refused` split and the normal-rejection mapping.
+- **Unchanged:** capacity, schemas, exports and limits (`frozen` is shorter than the reserved `refused`).
+- **Test counts:** at that point the six memory/source files and the qualification clock connection file passed **601 tests**: controller **194**, boundary **12**, transport/lifetime **172**, boundary **9**, assembly **114**, boundary **9**, clock connection **91**.
+
+## B4-P2 Independent Review
+
+2026-10-31 JST, independent review of the corrected uncommitted P2 files on `a94a27d`. Two read-only reviewers each worked on their own `git archive` copy with the uncommitted diff applied:
+- one covered state, ordering and authority;
+- the other covered capacity, boundaries, test quality and documentation.
+
+Every finding below was re-run by the implementing session before correction.
+
+State, ordering and authority (one P2 and four P3 findings were corrected):
+- **Capacity exhaustion closed writes (P2):** a fifth late candidate or an exhausted shared frame allowance was refused before parsing but marked `refused`. A query stopped at a deadline that keeps streaming traces therefore lost an eligible shutdown CANCEL lane, which `a94a27d` kept. Capacity exhaustion judges no traffic, so it now sets `frozen` before refusing. Protocol, transport and B2 regressions, with the shutdown CANCEL planned before or after the overflow, failed before this change.
+- **Late FAILED phase rule:** the late FAILED phase keyed on a started PREPARE, while the normal reducer keys on an accepted one. Both lanes now use the accepted PREPARE.
+- **Timed B2 late event on a healthy case:** it stopped the case but left intake `open`, so the same bytes could be retried untimed. It now freezes intake as a normal rejection, after latching the stop.
+- **Receive fault after a terminal frame:** an EOF or decoder fault reported after a terminal frame turned `ended` into `refused`, closing a still-eligible shutdown write. A receive fault now leaves `ended` unchanged; traffic after a terminal frame is still refused.
+- **Stale timed point after a clock fault:** after a clock fault, the timed B2 `late_frame` accepted the last valid point. That predates P2, but this design forbids it, so the timed event now refuses (`late_requires_untimed`) and only the clock-free entry captures.
+- **RELEASED verification scope (recorded, not changed):** a late RELEASED leaves close errors, resources and observation/trace hashes unverified even where their inputs are retained. The P2 record now states this scope; adding those checks would refuse genuine failure reports.
+
+Capacity, boundaries, tests and docs:
+- **Untested late-lane guards (P2):** most late-lane refusal guards survived single mutations:
+  - traffic after a normal RELEASED;
+  - READY pins;
+  - BASELINED without a started PREPARE, and its domain;
+  - FAILED with a query but no GO, and finalize without a query;
+  - RELEASED baseline, trace count and authenticated count;
+  - late-after-late trace order;
+  - the ended state after a DONE stop;
+  - the B2 parent-domain READY and worker-slot gates;
+  - the transport malformed-receive closure;
+  - the B2 frame-event freeze.
+
+  Each now has a negative test asserting the specific refusal, `refused` capture with no new row or ordinal, and close-only shutdown where a CANCEL lane would otherwise exist. Malformed receive input is classified with receive faults (`refused`), not with normal semantic rejections. All 17 previously surviving mutants now fail a memory test.
+- **Vacuous order pins (P3):** three static checks of the form `indexOf(a) < indexOf(b)` passed when the guarded text was deleted. They now require both indexes. B2 also gains JSON.parse-spy tests showing that closed or exhausted intake is refused before parsing.
+- **Stale documentation (P3):** counts that still said 595 and backlog wording that called every normal rejection close-only are corrected.
+
+Confirmed by the reviewers:
+- **Capacity:** retained 759, late view ceiling 3285 ≤ 16384, transport `+759−1` = 9274 and B2 16161/47087. All limits are unchanged.
+- **Pre-serialization:** lines are checked by length and well-formedness before decode on every late path.
+- **Tripwires:** they still precede helper imports.
+- **Late appender:** it never assigns normal state, and the `frozen`/`refused` split matches the corrections.
+- **Untimed B2 entry:** it cannot manufacture a stop.
+
+Verification of the corrections:
+- **Reproducing tests:** the new second-round regressions all failed before their corrections.
+- **Revert checks:** reverting any one of the five changes, against the memory suites only, fails a test. Removing a pinned pre-parse guard fails a boundary test.
+- **Seven-file selection:** it now passes **628 tests** with zero failures/cancellations/skips: controller **209**, boundary **12**, transport/lifetime **176**, boundary **9**, assembly **122**, boundary **9**, qualification clock connection **91**. It was run on Node 20.19.6, 24.18.0 and 26.12.1, under linux/win32 platform spoofs and with CRLF checkouts.
+- **Full unit suite:** it passes on a `git archive` copy.
+- **Unchanged:** schemas, exports, wire fields, receipts and limits.
 
 ## B4-P1 Memory Implementation
 
@@ -177,7 +267,7 @@ The implementing session also freshly ran all seven main-thread memory/source fi
 
 The implementing session's protected runtime/native/common-build/package/config content hashes (2568 files), 436 pre-existing artifact hashes/sizes/modes and Dot PAUSED/full-configuration hash match review start. The requested local commit includes only three pure helpers, six test files and four design/backlog documents, including the previously uncommitted design. It does not run hooks/builds or create a Git signature. Push, operational qualification and all prohibited effects remain unperformed.
 
-Residual limits: this proves supplied-data parent contracts and their guarded test boundary, not actual worker no-op behavior, original callback provenance, live stream/child qualification, V8/native memory bounds or native acceptance. P2/P3 and real B4-B/C/D consumers remain unimplemented; the current stopped receive limitation is not silently corrected. No runtime authority, Dot restart, market/judgment/notification/mail/retention change or evidence-save claim is introduced by this review.
+Residual limits at that P1 review: this proves supplied-data parent contracts and their guarded test boundary, not actual worker no-op behavior, original callback provenance, live stream/child qualification, V8/native memory bounds or native acceptance. P2/P3 and real B4-B/C/D consumers were then unimplemented; the stopped receive limitation was not silently corrected by that review. P2's later memory-only work is recorded above. No runtime authority, Dot restart, market/judgment/notification/mail/retention change or evidence-save claim is introduced by this review.
 
 ## B4-P1 Follow-Up
 

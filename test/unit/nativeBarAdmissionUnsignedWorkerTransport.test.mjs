@@ -173,10 +173,10 @@ test("B4-A exact capacity reserves wire buffers separately without changing any 
   assert.ok(c.serialization.frame_kind_ceilings.READY < 65536); assert.ok(c.serialization.frame_kind_ceilings.FAILED < 65536);
   assert.equal(c.serialization.index_reserved_bytes, 4096 + 24 * 5290); assert.equal(c.native_budget_changed, false);
   // The documented figures, so a dropped buffer or field cannot pass as a smaller self-consistent total.
-  assert.equal(c.retained_buffer_bytes, 2375680); assert.equal(c.transient_buffer_bytes, 4259840); assert.equal(c.diagnostic_ceiling_bytes, 8516);
+  assert.equal(c.retained_buffer_bytes, 2375680); assert.equal(c.transient_buffer_bytes, 4259840); assert.equal(c.diagnostic_ceiling_bytes, 9274);
   assert.equal(c.serialization.frame_kind_ceilings.READY, 2214);
   const a = allocation("u0-unavailable"), b2 = createUnsignedCohortAssemblyModel({ request: a.fixture.request, clock }); b2.beginCase({ allocation: a, at: point(1) });
-  assert.equal(b2.describe().capacity.diagnostic_ceiling_bytes, 16049); assert.equal(b2.describe().capacity.coordinator_json_ceiling_bytes, 46216);
+  assert.equal(b2.describe().capacity.diagnostic_ceiling_bytes, 16161); assert.equal(b2.describe().capacity.coordinator_json_ceiling_bytes, 47087);
 });
 for (const [name, scalar, count] of [["escaped scalar", "\0".repeat(262144), 4], ["escaped aggregate", "\0".repeat(10000), 4],
   ["plain aggregate", "x".repeat(9000), 8], ["lone surrogate aggregate", "\ud800".repeat(10000), 4]])
@@ -306,7 +306,26 @@ test("B4-A a qualified parent point survives protocol validation failure for ori
       monotonic_ns: "1", code: null, byte_count: "0", sha256: null }] } }) + "\n" }), /trace_order/);
   assert.equal(s.m.describe().clock_invalid, false); assert.equal(s.m.describe().settlement_start_ns, at.monotonic_ns);
   assert.equal(s.m.describe().phase_deadline_ns, String(BigInt(at.monotonic_ns) + 60000000000n));
+  // A normal rejection freezes late intake only; it is not invalid late traffic.
+  assert.equal(s.m.describe().late_capture.capture, "frozen");
   assert.equal(s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, "CANCEL_THEN_CLOSE");
+});
+test("B4-P2 a transport-level normal receive rejection also freezes intake without closing the CANCEL lane", () => {
+  const s = active(), p = s.m.describe();
+  assert.throws(() => s.m.receive({ at: s.tick(), line: canonical({ binding: p.binding, direction: "parent", ordinal: p.next_ordinals.parent, kind: "CANCEL", payload: {} }) + "\n" }),
+    /receive_direction/);
+  assert.equal(s.m.describe().late_capture.capture, "frozen"); assert.equal(s.m.describe().frames, p.frames);
+  assert.equal(s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }).decision, "CANCEL_THEN_CLOSE");
+});
+test("B4-P2 a refused parent command and later unexamined traffic keep the original CANCEL lane", () => {
+  const s = active(); assert.throws(() => s.plan("LAUNCH"), /protocol_order/); const p = s.m.describe();
+  assert.equal(p.late_capture.capture, "frozen"); assert.ok(p.settlement_start_ns);
+  const line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "TRACE_CHUNK",
+    payload: { chunk_index: 0, events: [{ ordinal: 1, api: "begin", edge: "begin", clock_domain: "worker-clock", monotonic_ns: "1", code: null, byte_count: "0", sha256: null }] } }) + "\n";
+  assert.throws(() => s.m.receive({ line }), /late_closed/); s.m.refuseReceive({ reason: "decoder_failure" });
+  assert.equal(s.m.describe().late_capture.capture, "frozen"); assert.equal(s.m.describe().late_frames.length, 0);
+  const op = s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }); assert.equal(op.decision, "CANCEL_THEN_CLOSE");
+  s.m.startWrite(op.reference, { at: s.tick() }); assert.equal(s.m.describe().writes.at(-1).started, true);
 });
 test("B4-A stopped known GO has at most one original shutdown CANCEL on the same ledger", () => {
   const s = active(); s.m.stop({ reason: "invented_stop", at: s.tick() });
@@ -469,10 +488,11 @@ for (const left of [999999n, 0n, -1n]) test("B4-P1 release cannot extend the ori
 });
 test("B4-P1 release first observed after the reserved CANCEL deadline never opens the exception", () => {
   const s = active(), op = s.plan("CANCEL"), before = s.m.describe();
-  assert.throws(() => s.m.receive({ at: s.at(BigInt(op.deadline_ns) + 1n), line: canonical({ binding: before.binding, direction: "worker",
-    ordinal: before.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n" }), /write_deadline/);
-  const d = s.m.describe(); assert.equal(d.protocol_state, "STOPPED"); assert.equal(d.frames, before.frames);
-  assert.deepEqual(d.next_ordinals, before.next_ordinals); assert.equal(d.settlement_start_ns, op.deadline_ns);
+  s.m.receive({ at: s.at(BigInt(op.deadline_ns) + 1n), line: canonical({ binding: before.binding, direction: "worker",
+    ordinal: before.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n" });
+  const d = s.m.describe(); assert.equal(d.protocol_state, "STOPPED"); assert.equal(d.frames, before.frames + 1);
+  assert.deepEqual(d.next_ordinals, { ...before.next_ordinals, worker: before.next_ordinals.worker + 1 }); assert.equal(d.settlement_start_ns, op.deadline_ns);
+  assert.equal(d.stopped, "write_deadline"); assert.equal(d.late_capture.diagnostic_only, true);
   assert.equal(d.writes.at(-1).callback, null); assert.equal(d.writes.at(-1).started, false);
 });
 for (const fault of ["rollback", "foreign", "unavailable", "stop"]) test("B4-P1 post-release CANCEL is not a clock/stop bypass: " + fault, () => {
@@ -506,6 +526,137 @@ test("B4-P1 a foreign RELEASED binding cannot qualify the reserved original CANC
   assert.throws(() => s.m.startWrite(op.reference, { at: s.tick() }));
   assert.equal(s.m.describe().writes.at(-1).started, false); assert.equal(s.m.describe().frames, before.frames);
   assert.deepEqual(s.m.describe().next_ordinals, before.next_ordinals);
+});
+test("B4-P2 stopped receive records one untimed validated diagnostic without recovering the clock", () => {
+  const s = active(); s.m.stop({ reason: "original_stop", at: null }); const before = s.m.describe();
+  const line = canonical({ binding: before.binding, direction: "worker", ordinal: before.next_ordinals.worker,
+    kind: "RELEASED", payload: release(s) }) + "\n";
+  const d = s.m.receive({ line, at: null });
+  assert.equal(d.stopped, "original_stop"); assert.equal(d.clock_invalid, true); assert.equal(d.frames, before.frames + 1);
+  assert.equal(d.next_ordinals.worker, before.next_ordinals.worker + 1); assert.deepEqual(d.late_frames, [{ sha256: sha(line), bytes: Buffer.byteLength(line) }]);
+  assert.equal(d.late_capture.receive_at, null); assert.equal(d.late_capture.semantic_verified, false); assert.equal(d.protocol_state, "STOPPED");
+  assert.equal(d.phase_deadline_ns, before.phase_deadline_ns); assert.equal(d.settlement_start_ns, before.settlement_start_ns);
+  assert.equal(s.m.planShutdown({ at: null, worker_live: true, pipe_qualified: true }).decision, "CLOSE_ONLY");
+});
+for (const issue of ["unavailable", "foreign", "rollback", "phase_deadline"]) test("B4-P2 a receive-time clock/deadline refusal captures the same complete frame only once: " + issue, () => {
+  const s = active(), before = s.m.describe();
+  const at = issue === "unavailable" ? null : issue === "foreign" ? { ...s.tick(), clock_domain: "foreign-clock" }
+    : issue === "rollback" ? point(0) : s.at(before.phase_deadline_ns);
+  const line = canonical({ binding: before.binding, direction: "worker", ordinal: before.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n";
+  const d = s.m.receive({ line, at }); assert.ok(d.stopped); assert.equal(d.protocol_state, "STOPPED");
+  assert.equal(d.frames, before.frames + 1); assert.equal(d.next_ordinals.worker, before.next_ordinals.worker + 1);
+  assert.equal(d.late_frames.length, 1); assert.equal(d.late_frames[0].sha256, sha(line)); assert.equal(d.late_capture.receive_at, null);
+  assert.equal(d.baseline_sha256, before.baseline_sha256); assert.equal(d.trace_sha256, before.trace_sha256);
+  assert.throws(() => s.m.receive({ line, at: null }), /late_closed/); assert.equal(s.m.describe().frames, d.frames);
+});
+test("B4-P2 a stopped receive ignores supplied time rather than sampling or validating it as a new point", () => {
+  const s = active(); s.m.stop({ reason: "first", at: s.tick() }); const before = s.m.describe();
+  const d = s.m.receive({ line: canonical({ binding: before.binding, direction: "worker", ordinal: before.next_ordinals.worker,
+    kind: "RELEASED", payload: release(s) }) + "\n", at: { clock_domain: "foreign", monotonic_ns: "0" } });
+  assert.equal(d.clock_invalid, false); assert.equal(d.stopped, "first"); assert.equal(d.phase_deadline_ns, before.phase_deadline_ns);
+  assert.equal(d.late_capture.receive_at, null);
+});
+test("B4-P2 healthy worker traffic still uses the original normal lane, never a duplicate late row", () => {
+  const s = active(), before = s.m.describe(); s.receive("RELEASED", release(s)); const d = s.m.describe();
+  assert.equal(d.protocol_state, "RELEASED"); assert.equal(d.stopped, null); assert.equal(d.frames, before.frames + 1);
+  assert.equal(d.late_frames.length, 0); assert.equal(d.late_capture, null);
+});
+for (const reason of ["decoder_failure", "truncated_frame", "stream_closed"]) test("B4-P2 transport receive fault stops capture without losing original callback/close facts: " + reason, () => {
+  const s = baselined(), op = s.plan("GO", goPayload(s)); s.m.startWrite(op.reference, { at: s.tick() });
+  s.m.refuseReceive({ reason }); const before = s.m.describe();
+  assert.throws(() => s.receive("RELEASED", release(s)), /late_closed/); assert.equal(s.m.describe().frames, before.frames);
+  s.m.completeWrite(op.reference, { outcome: "completed", at: null }); s.m.closeCommand({ outcome: "confirmed" }); s.m.workerExit({ exit_code: 1, signal: null });
+  const d = s.m.describe(); assert.equal(d.stopped, reason); assert.equal(d.writes.at(-1).callback, "completed");
+  assert.equal(d.command_close, "confirmed"); assert.equal(d.worker_exit.exit_code, 1); assert.equal(d.protocol_state, "STOPPED");
+});
+test("B4-P2 closed capture refuses without parsing a later frame or resynchronizing the decoder", () => {
+  const s = active(); s.m.refuseReceive({ reason: "decoder_failure" }); const p = s.m.describe();
+  const line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n";
+  const original = JSON.parse; let parsed = 0;
+  try { JSON.parse = function (text, ...args) { if (text === line) { parsed++; throw Error("late_parse_after_freeze"); } return original.call(this, text, ...args); };
+    assert.throws(() => s.m.receive({ line, at: null }), /late_closed/);
+  } finally { JSON.parse = original; }
+  assert.equal(parsed, 0); assert.equal(s.m.describe().late_capture.reason, "decoder_failure");
+});
+test("B4-P2 fifth late frame is refused before parsing, hashing or reserving another row", () => {
+  const s = active(); s.m.stop({ reason: "first", at: s.tick() });
+  const frame = i => canonical({ binding: s.m.describe().binding, direction: "worker", ordinal: s.m.describe().next_ordinals.worker, kind: "TRACE_CHUNK",
+    payload: { chunk_index: i, events: [{ ordinal: i + 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: String(i + 1), code: null, byte_count: "0", sha256: null }] } }) + "\n";
+  for (let i = 0; i < 4; i++) s.m.receive({ line: frame(i) }); const before = s.m.describe(), line = frame(4), original = JSON.parse; let parsed = 0;
+  try { JSON.parse = function (text, ...args) { if (text === line) { parsed++; throw Error("late_parse_after_capacity"); } return original.call(this, text, ...args); };
+    assert.throws(() => s.m.receive({ line }), /late_capacity/);
+  } finally { JSON.parse = original; }
+  assert.equal(parsed, 0); assert.equal(s.m.describe().late_frames.length, 4); assert.equal(s.m.describe().frames, before.frames);
+  assert.equal(s.m.describe().late_capture.reason, "late_capacity"); assert.equal(s.m.describe().stopped, "first");
+});
+for (const planned of [false, true]) test("B4-P2 late capacity exhaustion keeps an eligible shutdown CANCEL: " + (planned ? "planned first" : "planned after"), () => {
+  const s = active(); s.m.stop({ reason: "first", at: s.tick() });
+  const frame = i => canonical({ binding: s.m.describe().binding, direction: "worker", ordinal: s.m.describe().next_ordinals.worker, kind: "TRACE_CHUNK",
+    payload: { chunk_index: i, events: [{ ordinal: i + 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: String(i + 1), code: null, byte_count: "0", sha256: null }] } }) + "\n";
+  const shutdown = () => s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true }), op = planned ? shutdown() : null;
+  for (let i = 0; i < 4; i++) s.m.receive({ line: frame(i) }); assert.throws(() => s.m.receive({ line: frame(4) }), /late_capacity/);
+  assert.equal(s.m.describe().late_capture.capture, "frozen");
+  const plan = op ?? shutdown(); assert.equal(plan.decision, "CANCEL_THEN_CLOSE");
+  s.m.startWrite(plan.reference, { at: s.tick() }); assert.equal(s.m.describe().writes.at(-1).started, true);
+});
+test("B4-P2 malformed receive input is a receive fault that closes late intake", () => {
+  const s = active(); assert.throws(() => s.m.receive({ line: "x".repeat(65537), at: s.tick() }));
+  assert.deepEqual([s.m.describe().late_capture.capture, s.m.describe().late_capture.reason], ["refused", "receive_shape"]);
+  const p = s.m.describe(), line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "TRACE_CHUNK",
+    payload: { chunk_index: 0, events: [{ ordinal: 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: "1", code: null, byte_count: "0", sha256: null }] } }) + "\n";
+  assert.throws(() => s.m.receive({ line }), /late_closed/); assert.equal(s.m.describe().late_frames.length, 0);
+});
+test("B4-P2 an EOF after a terminal late frame keeps the shutdown CANCEL startable", () => {
+  const s = active(); s.m.stop({ reason: "first", at: s.tick() }); const op = s.m.planShutdown({ at: s.tick(), worker_live: true, pipe_qualified: true });
+  s.m.receive({ line: canonical({ binding: s.m.describe().binding, direction: "worker", ordinal: s.m.describe().next_ordinals.worker, kind: "FAILED",
+    payload: { phase: "settlement", primary_code: "invented_failure", close_errors: [], diagnostic_sha256: null, resources: null, query_created: true, instrumentation_overflow: false } }) + "\n" });
+  s.m.refuseReceive({ reason: "stream_closed" }); assert.deepEqual([s.m.describe().late_capture.capture, s.m.describe().late_capture.reason], ["ended", "terminal"]);
+  s.m.startWrite(op.reference, { at: s.tick() }); assert.equal(s.m.describe().writes.at(-1).started, true);
+});
+test("B4-P2 a failed decoder batch never becomes a reconstructed favorable prefix", () => {
+  const s = active(), before = s.m.describe(), decoder = createUnsignedProtocolDecoder();
+  const line = canonical({ binding: before.binding, direction: "worker", ordinal: before.next_ordinals.worker, kind: "RELEASED", payload: release(s) }) + "\n";
+  assert.throws(() => decoder.push(Buffer.concat([Buffer.from(line), Buffer.from([255, 10])])));
+  s.m.refuseReceive({ reason: "decoder_failure" });
+  assert.throws(() => decoder.push(Buffer.from(line)), /decoder_stopped/);
+  assert.throws(() => s.m.receive({ line }), /late_closed/); const d = s.m.describe();
+  assert.equal(d.frames, before.frames); assert.equal(d.late_frames.length, 0); assert.equal(d.stopped, "decoder_failure");
+});
+test("B4-P2 a stopped original READY cannot borrow the parent clock domain", () => {
+  const s = driver(); s.write(s.plan("LAUNCH")); s.m.stop({ reason: "first", at: s.tick() }); const p = s.m.describe();
+  const line = canonical({ binding: p.binding, direction: "worker", ordinal: p.next_ordinals.worker, kind: "READY",
+    payload: { addon_protocol: 6, mode: "synthetic_only", pins_sha256: digest(p.binding), worker_clock_domain: "parent-clock" } }) + "\n";
+  assert.throws(() => s.m.receive({ line }), /worker_clock_domain/);
+  assert.equal(s.m.describe().late_frames.length, 0); assert.equal(s.m.describe().late_capture.capture, "refused");
+});
+test("B4-P2 one returned decoder batch can cross into stopped capture without reordering", () => {
+  const s = active(), p = s.m.describe(), decoder = createUnsignedProtocolDecoder();
+  const frame = (ordinal, kind, payload) => canonical({ binding: p.binding, direction: "worker", ordinal, kind, payload }) + "\n";
+  const trace = { chunk_index: 0, events: [{ ordinal: 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: "1", code: null, byte_count: "0", sha256: null }] };
+  const first = frame(p.next_ordinals.worker, "TRACE_CHUNK", trace), second = frame(p.next_ordinals.worker + 1, "RELEASED", { ...release(s), trace_chunks: 1, trace_events: 1 });
+  const lines = decoder.push(Buffer.from(first + second)); s.m.stop({ reason: "first", at: s.tick() });
+  for (const line of lines) s.m.receive({ line });
+  const d = s.m.describe(); assert.equal(d.late_frames.length, 2); assert.equal(d.frames, p.frames + 2);
+  assert.deepEqual(d.late_frames.map(r => r.sha256), lines.map(sha)); assert.equal(d.trace_events, 0); assert.equal(d.late_capture.trace_events, 1);
+  decoder.end();
+});
+test("B4-P2 a returned batch changes from normal to late exactly at pre-admission deadline detection", () => {
+  const s = active(), before = s.m.describe(), decoder = createUnsignedProtocolDecoder();
+  const event = { ordinal: 1, api: "info", edge: "end", clock_domain: "worker-clock", monotonic_ns: "1", code: null, byte_count: "0", sha256: null };
+  const frame = (ordinal, kind, payload) => canonical({ binding: before.binding, direction: "worker", ordinal, kind, payload }) + "\n";
+  const first = frame(before.next_ordinals.worker, "TRACE_CHUNK", { chunk_index: 0, events: [event] });
+  const second = frame(before.next_ordinals.worker + 1, "RELEASED", { ...release(s), trace_chunks: 1, trace_events: 1, trace_sha256: digest([event]) });
+  const lines = decoder.push(Buffer.from(first + second));
+  s.m.receive({ line: lines[0], at: s.tick() }); const admitted = s.m.describe();
+  assert.equal(admitted.stopped, null); assert.equal(admitted.trace_events, 1); assert.equal(admitted.late_frames.length, 0);
+  s.m.receive({ line: lines[1], at: s.at(admitted.phase_deadline_ns) }); const after = s.m.describe();
+  assert.equal(after.stopped, "phase_deadline"); assert.equal(after.frames, before.frames + 2);
+  assert.equal(after.next_ordinals.worker, before.next_ordinals.worker + 2); assert.equal(after.protocol_state, "STOPPED");
+  assert.deepEqual(after.late_frames, [{ sha256: sha(second), bytes: Buffer.byteLength(second) }]);
+  assert.equal(after.trace_sha256, admitted.trace_sha256); assert.equal(after.trace_events, 1);
+  assert.equal(after.late_capture.semantic_verified, false); assert.equal(after.late_capture.receive_at, null);
+  assert.throws(() => s.m.receive({ line: lines[1] }), /late_closed/); assert.equal(s.m.describe().frames, after.frames);
+  decoder.end();
 });
 test("B4-P1 a drained original CANCEL cannot be restarted, replaced or planned anew after release", () => {
   for (const action of ["restart", "replace_token", "new_cancel", "duplicate_release"]) {

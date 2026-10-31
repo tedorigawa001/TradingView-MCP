@@ -74,6 +74,31 @@ test("B4-P1 B2 derives the original CANCEL cleanup gate without new state, event
     assert.throws(() => contract(body.replace(from, '')));
   assert.doesNotMatch(source, /cancelReservation|cancel_reservation|cancel_deadline|cancel_callback/);
 });
+test("B4-P2 B2 stopped-only entry has no timestamp route and delegates to its original ledger", () => {
+  const source = read("../helpers/unsignedCohortAssemblyModel.mjs"), tree = ast(source), methods = new Map(); let append;
+  const find = n => { if (ts.isMethodDeclaration(n)) methods.set(n.name.text, n); if (ts.isFunctionDeclaration(n) && n.name.text === "appendLate") append = n; ts.forEachChild(n, find); }; find(tree);
+  const contract = text => {
+    assert.ok(text.includes('if (!stopped) refuse("late_requires_stop")'));
+    assert.ok(text.includes('appendLate(current(token), raw)'));
+    assert.doesNotMatch(text, /timedInput|\bpoint\(|q\.at|\.window\.|\.evidence\.|\.cohort\./);
+  };
+  const entry = methods.get("observeLateFrame").getText(); contract(entry);
+  assert.throws(() => contract(entry.replace('if (!stopped) refuse("late_requires_stop");', '')));
+  assert.throws(() => contract(entry.replace('appendLate(current(token), raw)', 'appendLate(active, raw)')));
+  assert.throws(() => contract(entry.replace('return guard(', 'point(raw.at); return guard(')));
+  const body = append.getText(); assert.ok(body.includes('c.protocol.observeLateFrame(q.line)')); assert.ok(body.includes('c.protocol.describeLate()'));
+  assert.doesNotMatch(body, /\.push\(|\bsha\(|next\.worker\+\+|frames\+\+/);
+  const closedAt = body.indexOf('p.late_capture.capture !== "open"'), parseAt = body.indexOf('JSON.parse(q.line)');
+  assert.ok(closedAt >= 0 && parseAt >= 0 && closedAt < parseAt);
+  // The timed entry neither opens a lane for a healthy case nor accepts a stale point after a clock fault.
+  for (const fragment of ['if (!stopped) { latch("late_requires_stop"); c.protocol.closeLateCapture({ reason: "normal_rejected" }); refuse("late_requires_stop"); }',
+    'if (clockInvalid) refuse("late_requires_untimed");']) assert.ok(source.includes(fragment), fragment);
+  const untimedAt = source.indexOf('if (clockInvalid) refuse("late_requires_untimed");'), timedAppendAt = source.indexOf('appendLate(c, q.payload);');
+  assert.ok(untimedAt >= 0 && timedAppendAt >= 0 && untimedAt < timedAppendAt);
+  assert.ok(source.includes('const coordinator = diagnostic + cache + pins + labels + 4096 + late.retained_json_bytes'));
+  assert.ok(source.includes('diagnostic > 16384 || coordinator > 65536 || late.diagnostic_ceiling_bytes > 16384'));
+  assert.ok(source.includes('let trigger = clockInvalid ? null :'));
+});
 test("4-B2 remains absent from production, scripts, builders and existing sealed entries", () => {
   for (const p of readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter((p) => p.endsWith(".ts")))
     assert.doesNotMatch(read(`../../src/${p}`), /unsignedCohort(?:AssemblyModel|Runtime)/, p);

@@ -99,6 +99,53 @@ test("B4-P1 parent-only released-CANCEL exception retains all prior write and cl
   // This model is parent admission, not a worker implementation or a claim of native cancellation/release.
   assert.match(read("../../native/native_bar_fs/test_unsigned_worker.mjs"), /runUnsignedWorker\(\) \{ throw Error\("cc1b2_execution_not_approved"\); \}/);
 });
+function lateGuard(source) {
+  const tree = ast(source), functions = new Map(), methods = new Map();
+  walk(tree, n => { if (ts.isFunctionDeclaration(n)) functions.set(n.name.text, n); if (ts.isMethodDeclaration(n)) methods.set(n.name.text, n); });
+  const late = functions.get("appendLate"), text = late.getText(), normal = functions.get("accept").getText();
+  for (const fragment of ['if (!stopped) refuse("late_requires_stop")', 'frames >= LIMITS.frames || late.length >= 4',
+    'const f = readFrame(line)', 'const p = workerPayload(f.kind, f.payload)', 'f.ordinal !== next.worker',
+    'canonical(f.binding) !== canonical(binding)', 'late.push({ sha256: sha(line), bytes: byteLength(line) })',
+    'frames++; next.worker++', 'freezeCapture(errorCode(e))']) {
+    assert.ok(text.includes(fragment), fragment);
+  }
+  assert.ok(source.includes('semantic_verified: false'));
+  assert.doesNotMatch(text, /\baccept\(|acceptFrame\(|trace\.push|writes\.push/);
+  const forbiddenWrites = new Set(["state", "released", "failure", "observed", "baseline", "baselineHash", "workerDomain", "lastTrace", "acceptedSeen", "stopped"]);
+  walk(late, n => { if (ts.isBinaryExpression(n) && ts.isIdentifier(n.left) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+    assert.equal(forbiddenWrites.has(n.left.text), false, n.left.text); });
+  assert.equal((normal.match(/workerPayload\(f.kind, p\)/g) ?? []).length, 6);
+  const reader = functions.get("readFrame").getText(), well = reader.indexOf('!raw.isWellFormed()'), decodeAt = reader.indexOf('decode(raw,');
+  assert.ok(well >= 0 && decodeAt >= 0 && well < decodeAt);
+  assert.ok(methods.get("planShutdown").getText().includes('lateCapture.capture !== "refused"'));
+  assert.ok(methods.get("noteShutdownWrite").getText().includes('lateCapture.capture === "refused"'));
+  assert.ok(source.includes('observeLateFrame: appendLate'));
+  assert.ok(source.includes('freezeCapture("normal_rejected", true)'));
+  // Only invalid late traffic or a receive fault closes writes; a normal rejection freezes intake.
+  for (const fragment of ['if (lateCapture.capture === "refused" || lateCapture.capture === "frozen") return;',
+    'lateCapture.capture = unjudged ? "frozen" : "refused"', 'if (lateCapture.capture !== "ended") freezeCapture(q.reason, q.reason === "normal_rejected")',
+    '{ freezeCapture("late_capacity", true); refuse("late_capacity"); }', 'writes.some((w) => w.kind === "PREPARE") ? ["prepare"]']) assert.ok(source.includes(fragment), fragment);
+}
+test("B4-P2 checked late appender shares schemas and wire accounting without normal-field promotion", () => {
+  const source = read("../helpers/unsignedControllerContracts.mjs"); lateGuard(source);
+  const tree = ast(source); let fn;
+  walk(tree, n => { if (ts.isFunctionDeclaration(n) && n.name.text === "appendLate") fn = n; });
+  for (const [from, to] of [['frames >= LIMITS.frames || late.length >= 4', 'false'], ['f.ordinal !== next.worker', 'false'],
+    ['canonical(f.binding) !== canonical(binding)', 'false'], ['frames++; next.worker++', 'frames++'],
+    ['const p = workerPayload(f.kind, f.payload)', 'const p = f.payload']]) {
+    assert.ok(fn.getText().includes(from));
+    const changed = fn.getText().replace(from, to);
+    assert.throws(() => lateGuard(source.slice(0, fn.getStart()) + changed + source.slice(fn.getEnd())), undefined, from);
+  }
+  for (const [from, to] of [['freezeCapture("normal_rejected", true)', ''], ['unjudged ? "frozen" : "refused"', '"refused"'],
+    ['freezeCapture(q.reason, q.reason === "normal_rejected")', 'freezeCapture(q.reason)'], ['if (lateCapture.capture !== "ended") freezeCapture', 'freezeCapture'],
+    ['{ freezeCapture("late_capacity", true); refuse("late_capacity"); }', 'refuse("late_capacity");'],
+    ['lateCapture.capture !== "refused"', 'true'], ['lateCapture.capture === "refused" || close', 'false || close']]) {
+    assert.ok(source.includes(from)); assert.throws(() => lateGuard(source.replaceAll(from, to)), undefined, from);
+  }
+  const changed = fn.getText().replace('return describe();', 'released = p; return describe();');
+  assert.throws(() => lateGuard(source.slice(0, fn.getStart()) + changed + source.slice(fn.getEnd())));
+});
 test("4-A memory suite installs effect tripwires before loading the new modules", () => {
   const s = read("./nativeBarAdmissionUnsignedController.test.mjs");
   for (const fragment of ['block(child, ["spawn"', 'block(workers, ["Worker"])', 'block(crypto, ["sign", "verify", "createSign"', 'block(crypto.webcrypto.subtle, ["sign"',

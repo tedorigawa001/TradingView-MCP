@@ -22,7 +22,8 @@ function capacityFor(a, protocol, evidence, window) {
     receipt_sha256: h, report_sha256: h, index_sha256: h };
   const w = { ...window.describe(), phase: "preparation", stopped: c, clock_invalid: false, phase_deadline_ns: u, cohort_deadline_ns: u, first_stop_ns: u,
     starts: Object.fromEntries(["preparation", "query", "settlement", "teardown"].map((k) => [k, u])) };
-  const cap = { diagnostic_ceiling_bytes: 99999, coordinator_json_ceiling_bytes: 99999, diagnostic_limit_bytes: 16384,
+  const late = protocol.lateCapacity();
+  const cap = { diagnostic_ceiling_bytes: 99999, coordinator_json_ceiling_bytes: 99999, late_diagnostic_ceiling_bytes: 99999, late_retained_json_bytes: 99999, diagnostic_limit_bytes: 16384,
     coordinator_json_limit_bytes: 65536, native_budget_changed: false, measurement: "canonical_payload_not_v8_heap" };
   const rows = Array(24).fill({ case_id: l, mode: "normal", model_verdict: "MODEL_CONSISTENT", cleanly_settled: false, c1_violation: false,
     index_readback: false, index_bytes: 5290, index_sha256: h, ordinal: 24, unindexed: false });
@@ -31,14 +32,16 @@ function capacityFor(a, protocol, evidence, window) {
     rows, index_close: "unconfirmed", capacity: cap, active: { case_id: l, mode: "normal", binding, protocol_state: "FINALIZING", next_ordinals: { parent: 33, worker: 33 },
       frames: 32, go_submitted: false, baseline_sha256: h, observation_sha256: h, trace_events: 128, trace_chunks: 8, trace_sha256: h,
       worker_clock_domain: l, command_close: "unconfirmed", observer_calls: 64, evidence_frozen: false, stop_recorded: false, row_recorded: false,
+      late_count: 4, late_capture: "inactive",
       slots: Object.fromEntries(slotNames.map((k) => [k, "retained"])), window: w, evidence: e } };
   const diagnostic = byteLength(canonical(maximal));
   const serialization = describeUnsignedControllerSerializationCapacity(a);
   const cache = cachedReceipts.reduce((n, k) => n + serialization.receipt_kind_ceilings[k], 0);
   const pins = 3 * byteLength(canonical(a.artifacts)), labels = byteLength(canonical({ exchanges: Array(24).fill(l), nonces: Array(24).fill(l) }));
-  const coordinator = diagnostic + cache + pins + labels + 4096;
-  if (diagnostic > 16384 || coordinator > 65536) refuse("metadata_capacity");
-  return freeze({ ...cap, diagnostic_ceiling_bytes: diagnostic, coordinator_json_ceiling_bytes: coordinator });
+  const coordinator = diagnostic + cache + pins + labels + 4096 + late.retained_json_bytes;
+  if (diagnostic > 16384 || coordinator > 65536 || late.diagnostic_ceiling_bytes > 16384) refuse("metadata_capacity");
+  return freeze({ ...cap, diagnostic_ceiling_bytes: diagnostic, coordinator_json_ceiling_bytes: coordinator,
+    late_diagnostic_ceiling_bytes: late.diagnostic_ceiling_bytes, late_retained_json_bytes: late.retained_json_bytes });
 }
 
 export function createUnsignedCohortAssemblyModel(input) {
@@ -52,7 +55,7 @@ export function createUnsignedCohortAssemblyModel(input) {
     if (stopped) return;
     const w = active?.window.describe(), phaseEnd = w?.phase_deadline_ns === null || !w ? end : BigInt(w.phase_deadline_ns);
     const limit = phaseEnd < end ? phaseEnd : end;
-    let trigger = w?.first_stop_ns ?? String(last);
+    let trigger = clockInvalid ? null : w?.first_stop_ns ?? String(last);
     if (!clockInvalid && last >= limit) {
       reason = "deadline"; trigger = String(limit);
       if (active) try { active.window.inspect({ clock_domain: d.clock.clock_domain, monotonic_ns: String(last) }); } catch { /* Preserve the detected deadline. */ }
@@ -85,6 +88,20 @@ export function createUnsignedCohortAssemblyModel(input) {
     return { ...q, at: point(q.at) };
   }
   function current(token) { if (!active || token !== active.token) refuse("case_reference"); return active; }
+  function appendLate(c, raw) {
+    try {
+      const q = parse(z.object({ line: z.string().max(65536) }).strict(), raw), p = c.protocol.describe();
+      if (!["live", "retained"].includes(c.slots.worker)) refuse("worker_reference");
+      // The authoritative appender refuses closed/exhausted intake before any further decode.
+      if (p.late_capture.capture !== "open" || p.frames >= LIMITS.frames || p.late_frames.length >= 4) {
+        c.protocol.observeLateFrame(q.line); return c.protocol.describeLate();
+      }
+      if (byteLength(q.line) > LIMITS.frame_bytes) refuse("frame_bound");
+      if (!q.line.isWellFormed()) refuse("encoding"); const f = JSON.parse(q.line);
+      if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
+      c.protocol.observeLateFrame(q.line); return c.protocol.describeLate();
+    } catch (error) { c.protocol.closeLateCapture({ reason: reasonOf(error) }); throw error; }
+  }
   function apply(c, q) {
     const p = c.protocol.describe();
     const cancelUnsettled = p.release !== null && p.writes.some((w) => w.kind === "CANCEL" && w.outcome !== "completed");
@@ -103,18 +120,20 @@ export function createUnsignedCohortAssemblyModel(input) {
         if (r.outcome !== "confirmed") latch("resource_close");
       }
     } else if (q.kind === "frame") {
-      const r = parse(z.object({ line: z.string().max(65536) }).strict(), q.payload);
-      if (c.slots.worker !== "live") refuse("worker_reference");
-      if (byteLength(r.line) > LIMITS.frame_bytes) refuse("frame_bound"); const f = JSON.parse(r.line);
-      if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
-      if (f.kind === "PREPARE") equal(f.binding.setup, c.confirmed.setup_sealed?.setup, "setup_readback");
-      if (f.kind === "GO") {
-        if (!c.confirmed.baseline_bound || !c.confirmed.go_intent || c.evidence.describe().pending_readback) refuse("go_readback");
-        equal(digest(c.confirmed.baseline_bound), p.baseline_sha256, "baseline_binding");
-        equal(f.payload, { baseline_sha256: p.baseline_sha256, baseline_readback: true, go_intent_readback: true }, "go_readback");
-      }
-      c.protocol.acceptFrame(r.line); if (f.kind === "READY") c.readyHash = sha(r.line);
-      if (f.kind === "RELEASED") c.window.startSettlement(q.at);
+      try {
+        const r = parse(z.object({ line: z.string().max(65536) }).strict(), q.payload);
+        if (c.slots.worker !== "live") refuse("worker_reference");
+        if (byteLength(r.line) > LIMITS.frame_bytes) refuse("frame_bound"); const f = JSON.parse(r.line);
+        if (f.kind === "READY" && f.payload?.worker_clock_domain === d.clock.clock_domain) refuse("worker_clock_domain");
+        if (f.kind === "PREPARE") equal(f.binding.setup, c.confirmed.setup_sealed?.setup, "setup_readback");
+        if (f.kind === "GO") {
+          if (!c.confirmed.baseline_bound || !c.confirmed.go_intent || c.evidence.describe().pending_readback) refuse("go_readback");
+          equal(digest(c.confirmed.baseline_bound), p.baseline_sha256, "baseline_binding");
+          equal(f.payload, { baseline_sha256: p.baseline_sha256, baseline_readback: true, go_intent_readback: true }, "go_readback");
+        }
+        c.protocol.acceptFrame(r.line); if (f.kind === "READY") c.readyHash = sha(r.line);
+        if (f.kind === "RELEASED") c.window.startSettlement(q.at);
+      } catch (error) { latch(reasonOf(error)); c.protocol.closeLateCapture({ reason: "normal_rejected" }); throw error; }
     } else if (q.kind === "write") {
       c.protocol.noteWrite(q.payload);
       if (q.payload.outcome === "started" && p.writes.find((w) => w.ordinal === q.payload.ordinal)?.kind === "GO") c.window.submitGo(q.at);
@@ -180,7 +199,12 @@ export function createUnsignedCohortAssemblyModel(input) {
       if (stopped && (c.evidenceFrozen || !c.stopRecorded || c.evidence.describe().candidate_outcome !== "FAIL")) refuse(c.evidenceFrozen ? "evidence_frozen" : "stopped_evidence");
       return c.evidence.createIndexRow();
     }
-    else if (q.kind === "late_frame") { const r = parse(z.object({ line: z.string().max(65536) }).strict(), q.payload); c.protocol.observeLateFrame(r.line); }
+    else if (q.kind === "late_frame") {
+      // A healthy case has no late lane and a clock-faulted one has no valid time; neither may use this timed entry.
+      if (!stopped) { latch("late_requires_stop"); c.protocol.closeLateCapture({ reason: "normal_rejected" }); refuse("late_requires_stop"); }
+      if (clockInvalid) refuse("late_requires_untimed");
+      appendLate(c, q.payload);
+    }
     else if (q.kind === "shutdown_write") {
       const r = parse(z.object({ outcome: z.enum(["started", "completed", "uncertain"]) }).strict(), q.payload);
       if (r.outcome === "started") {
@@ -208,6 +232,7 @@ export function createUnsignedCohortAssemblyModel(input) {
         next_ordinals: p.next_ordinals, frames: p.frames, go_submitted: p.go_submitted, baseline_sha256: p.baseline_sha256,
         observation_sha256: p.observation_sha256, trace_events: p.trace_events, trace_chunks: p.trace_chunks, trace_sha256: p.trace_sha256,
         worker_clock_domain: p.worker_clock_domain, command_close: p.command_close, observer_calls: active.observerCalls, evidence_frozen: active.evidenceFrozen,
+        late_count: p.late_frames.length, late_capture: p.late_capture?.capture ?? "inactive",
         stop_recorded: active.stopRecorded, row_recorded: active.indexed, slots: { ...active.slots }, window: active.window.describe(), evidence: e } : null });
   }
   function recordCase(c) {
@@ -254,6 +279,16 @@ export function createUnsignedCohortAssemblyModel(input) {
       if (stopped && !["resource", "write", "receipt", "receipt_readback", "command_close", "worker_exit", "report", "report_readback", "case_closes", "index_row", "index_readback", "shutdown_plan", "shutdown_write", "late_frame"].includes(q.kind)) refuse("stopped");
       if (!stopped) c.window.inspect(q.at); return apply(c, q);
     }, true, true); },
+    observeLateFrame(token, raw) {
+      if (!stopped) refuse("late_requires_stop");
+      return guard(() => appendLate(current(token), raw), true, true);
+    },
+    describeLateFrames(token) { return current(token).protocol.describeLate(); },
+    endLateFrames(token, raw) {
+      if (!stopped) refuse("late_requires_stop");
+      return guard(() => { const c = current(token), q = parse(z.object({ reason: z.enum(["decoder_failure", "truncated_frame", "stream_closed"]) }).strict(), raw);
+        return c.protocol.closeLateCapture(q); }, true, true);
+    },
     finishCase(token, raw) { return guard(() => {
       const c = current(token), q = timedInput(z.object({ at: z.unknown() }).strict(), raw); if (!stopped) c.window.inspect(q.at);
       recordCase(c);

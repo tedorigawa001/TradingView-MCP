@@ -84,6 +84,26 @@ test("B4-P1 transport requires its original CANCEL callback before starting tear
   };
   contract(method.getText()); assert.throws(() => contract(method.getText().replace('if (pending?.kind === "CANCEL") refuse("cancel_unsettled");', '')));
 });
+test("B4-P2 transport routes stopped and pre-admission faults only into the same bounded late ledger", () => {
+  const tree = ts.createSourceFile("transport.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS), methods = new Map(); let append;
+  const find = n => { if (ts.isMethodDeclaration(n)) methods.set(n.name.text, n); if (ts.isFunctionDeclaration(n) && n.name.text === "appendLate") append = n; ts.forEachChild(n, find); }; find(tree);
+  const receive = methods.get("receive").getText(), body = append.getText();
+  const contract = text => {
+    const route = text.indexOf('if (stopped) return appendLate(q.line)'), inspect = text.indexOf('v = inspect(q.at)');
+    assert.ok(route >= 0 && inspect >= 0 && route < inspect);
+    assert.ok(text.includes('stop(reasonOf(error), clockInvalid ? null : qualifiedAt); return appendLate(q.line)'));
+    assert.ok(text.includes('protocol.closeLateCapture({ reason: "normal_rejected" }); throw error;'));
+    assert.doesNotMatch(text, /window\.startSettlement\([^)]*last|protocol\.observeLateFrame/);
+  };
+  contract(receive);
+  assert.throws(() => contract(receive.replace('if (stopped) return appendLate(q.line);', '')));
+  assert.throws(() => contract(receive.replace('protocol.closeLateCapture({ reason: "normal_rejected" }); throw error;', 'return appendLate(q.line);')));
+  const closedAt = body.indexOf('p.late_capture.capture !== "open"'), decodeAt = body.indexOf('decode(line,');
+  assert.ok(closedAt >= 0 && decodeAt >= 0 && closedAt < decodeAt);
+  assert.doesNotMatch(body, /\.push\(|next\.worker\+\+|frames\+\+/);
+  assert.ok(source.includes('late_capture: protocol.describe().late_capture, late_frames: protocol.describe().late_frames'));
+  assert.ok(source.includes('byteLength(canonical({ transport, lifetime })) + lateCapacity.retained_json_bytes - 1'));
+});
 test("B4-A memory tests install real clock/timer/port/key/IO tripwires before imports", () => {
   const s = read("./nativeBarAdmissionUnsignedWorkerTransport.test.mjs");
   for (const fragment of ['block(workers, ["Worker", "MessageChannel", "BroadcastChannel"])', '"EventSource", "MessageChannel", "BroadcastChannel", "setTimeout"',
