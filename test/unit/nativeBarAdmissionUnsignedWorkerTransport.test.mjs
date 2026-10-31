@@ -173,7 +173,7 @@ test("B4-A exact capacity reserves wire buffers separately without changing any 
   assert.ok(c.serialization.frame_kind_ceilings.READY < 65536); assert.ok(c.serialization.frame_kind_ceilings.FAILED < 65536);
   assert.equal(c.serialization.index_reserved_bytes, 4096 + 24 * 5290); assert.equal(c.native_budget_changed, false);
   // The documented figures, so a dropped buffer or field cannot pass as a smaller self-consistent total.
-  assert.equal(c.retained_buffer_bytes, 2375680); assert.equal(c.transient_buffer_bytes, 4259840); assert.equal(c.diagnostic_ceiling_bytes, 8207);
+  assert.equal(c.retained_buffer_bytes, 2375680); assert.equal(c.transient_buffer_bytes, 4259840); assert.equal(c.diagnostic_ceiling_bytes, 8516);
   assert.equal(c.serialization.frame_kind_ceilings.READY, 2214);
   const a = allocation("u0-unavailable"), b2 = createUnsignedCohortAssemblyModel({ request: a.fixture.request, clock }); b2.beginCase({ allocation: a, at: point(1) });
   assert.equal(b2.describe().capacity.diagnostic_ceiling_bytes, 16049); assert.equal(b2.describe().capacity.coordinator_json_ceiling_bytes, 46216);
@@ -413,8 +413,8 @@ test("B4-A independently reachable five-command and 37-work diagnostics fit thei
   s.m.noteTeardown({ action: "confirmed", at: s.tick(), proof: { receipt_readback: true, anchor_same: true, root_removed: true, absent: true, worker_live: true } });
   s.write(s.plan("FINALIZE")); s.m.closeCommand({ outcome: "confirmed" }); s.m.workerExit({ exit_code: 0, signal: null });
   const l = lifetime(), p = pair(l);
-  for (let ordinal = 1; ordinal <= 32; ordinal++) l.beginWork(p, { kind: "status_write", ordinal });
-  for (const kind of ["bootstrap", "owner", "reader", "query", "release"]) l.beginWork(p, { kind, ordinal: 1 });
+  for (let ordinal = 1; ordinal <= 32; ordinal++) l.beginWork(p, { kind: "status_write", ordinal, references: references() });
+  for (const kind of ["bootstrap", "owner", "reader", "query", "release"]) l.beginWork(p, { kind, ordinal: 1, references: references() });
   assert.equal(s.m.describe().writes.length, 5); assert.equal(l.describe().works.length, 37);
   assert.ok(Buffer.byteLength(canonical({ transport: s.m.describe(), lifetime: l.describe() })) <= s.m.capacity().diagnostic_ceiling_bytes);
 });
@@ -452,44 +452,232 @@ test("B4-A B2 rejects a READY using the parent clock before any setup receipt", 
     addon_protocol:6,mode:"synthetic_only",pins_sha256:digest(binding),worker_clock_domain:"parent-clock"})}}),/worker_clock_domain/);
 });
 const lifetime = () => createUnsignedWorkerLifetimeModel({ session_id: "invented-session" });
-const pair = m => m.allocate({ ports: ["referenced","referenced"] });
+const references = () => ["referenced", "referenced"];
+const pair = m => {
+  const p = m.allocate({ ports: ["unreferenced", "unreferenced"] });
+  for (const index of [0, 1]) {
+    m.noteListeners(p, { index, event: "installed" });
+    m.referencePort(p, { index, outcome: "returned", has_ref: true });
+  }
+  return p;
+};
 test("B4-A lifetime references are model-local and allocated only once", () => {
   const m = lifetime(), p = pair(m); assert.ok(Object.isFrozen(p)); assert.deepEqual(Object.keys(p),[]);
-  assert.throws(()=>m.allocate({ports:["referenced","referenced"]}),/pair_once/);
-  for (const ref of [{},pair(lifetime())]) { const l=lifetime();pair(l);assert.throws(()=>l.beginWork(ref,{kind:"query",ordinal:1}),/reference/); }
+  assert.throws(()=>m.allocate({ports:["unreferenced","unreferenced"]}),/pair_once/);
+  for (const ref of [{},pair(lifetime())]) { const l=lifetime();pair(l);assert.throws(()=>l.beginWork(ref,{kind:"query",ordinal:1,references:references()}),/reference/); }
 });
-for (const status of ["unreferenced","unknown","absent"]) test("B4-A partial/unqualified lifetime reference blocks all new query work: "+status,()=>{
-  const m=lifetime(),p=m.allocate({ports:["referenced",status]});assert.ok(m.describe().stopped);
-  assert.throws(()=>m.beginWork(p,{kind:"query",ordinal:1}),/stopped/);assert.equal(m.describe().works.length,0);
+for (const status of ["referenced","unknown","absent"]) test("B4-A non-default/unqualified allocation blocks all new query work: "+status,()=>{
+  const m=lifetime(),p=m.allocate({ports:["unreferenced",status]});assert.ok(m.describe().stopped);
+  assert.throws(()=>m.beginWork(p,{kind:"query",ordinal:1,references:references()}),/stopped/);assert.equal(m.describe().works.length,0);
 });
 test("B4-A expired settlement/EOF cannot close lifetime ports while original query is pending",()=>{
-  const m=lifetime(),p=pair(m),q=m.beginWork(p,{kind:"query",ordinal:1});m.stop({reason:"settlement_expired"});
-  assert.throws(()=>m.closePort(p,{index:0,outcome:"confirmed"}),/close_once/);
-  assert.throws(()=>m.beginWork(p,{kind:"query",ordinal:1}),/stopped/);m.settleWork(q,{outcome:"confirmed"});
-  m.closePort(p,{index:0,outcome:"confirmed"});m.closePort(p,{index:1,outcome:"confirmed"});assert.deepEqual(m.describe().ports,["closed","closed"]);
+  const m=lifetime(),p=pair(m),q=m.beginWork(p,{kind:"query",ordinal:1,references:references()});m.stop({reason:"settlement_expired"});
+  assert.throws(()=>m.closePort(p,{index:0,outcome:"returned"}),/close_once/);
+  assert.throws(()=>m.beginWork(p,{kind:"query",ordinal:1,references:references()}),/stopped/);m.settleWork(q,{outcome:"confirmed"});
+  m.closePort(p,{index:0,outcome:"returned"});m.observeClose(p,{index:0});m.observeClose(p,{index:1});assert.deepEqual(m.describe().ports,["closed","closed"]);
 });
 test("B4-A unknown original work disposition is retained, not retried into release",()=>{
-  const m=lifetime(),p=pair(m),q=m.beginWork(p,{kind:"release",ordinal:1});m.settleWork(q,{outcome:"unknown"});
-  assert.throws(()=>m.settleWork(q,{outcome:"confirmed"}),/settle_once/);assert.throws(()=>m.closePort(p,{index:0,outcome:"confirmed"}),/close_once/);
+  const m=lifetime(),p=pair(m),q=m.beginWork(p,{kind:"release",ordinal:1,references:references()});m.settleWork(q,{outcome:"unknown"});
+  assert.throws(()=>m.settleWork(q,{outcome:"confirmed"}),/settle_once/);assert.throws(()=>m.closePort(p,{index:0,outcome:"returned"}),/close_once/);
   assert.equal(m.describe().works[0].outcome,"unknown");
 });
 test("B4-A all original operations settle independently after stop without new grace",()=>{
-  const m=lifetime(),p=pair(m),kinds=["bootstrap","owner","reader","query","release","status_write"],tokens=kinds.map(kind=>m.beginWork(p,{kind,ordinal:1}));
+  const m=lifetime(),p=pair(m),kinds=["bootstrap","owner","reader","query","release","status_write"],tokens=kinds.map(kind=>m.beginWork(p,{kind,ordinal:1,references:references()}));
   m.stop({reason:"clock_unavailable"});tokens.forEach(t=>m.settleWork(t,{outcome:"confirmed"}));
-  m.closePort(p,{index:0,outcome:"unconfirmed"});m.closePort(p,{index:1,outcome:"confirmed"});
-  assert.equal(m.describe().stopped,"clock_unavailable");assert.deepEqual(m.describe().ports,["unconfirmed","closed"]);
-  assert.throws(()=>m.closePort(p,{index:0,outcome:"confirmed"}),/close_once/);
+  m.closePort(p,{index:0,outcome:"unknown"});m.observeClose(p,{index:1});
+  assert.equal(m.describe().stopped,"clock_unavailable");assert.deepEqual(m.describe().ports,["unknown","closed"]);
+  assert.throws(()=>m.closePort(p,{index:0,outcome:"returned"}),/close_once/);
 });
 test("B4-A exact maximum retained lifetime work is 32 status writes plus five original roles",()=>{
   const m=lifetime(),p=pair(m);
-  for(let n=1;n<=32;n++)m.beginWork(p,{kind:"status_write",ordinal:n});
-  for(const kind of ["bootstrap","owner","reader","query","release"])m.beginWork(p,{kind,ordinal:1});
+  for(let n=1;n<=32;n++)m.beginWork(p,{kind:"status_write",ordinal:n,references:references()});
+  for(const kind of ["bootstrap","owner","reader","query","release"])m.beginWork(p,{kind,ordinal:1,references:references()});
   assert.equal(m.describe().works.length,37);assert.ok(Buffer.byteLength(canonical(m.describe()))<16384);
-  assert.throws(()=>m.beginWork(p,{kind:"status_write",ordinal:33}));assert.equal(m.describe().works.length,37);
+  assert.throws(()=>m.beginWork(p,{kind:"status_write",ordinal:33,references:references()}));assert.equal(m.describe().works.length,37);
 });
 test("B4-A lifetime cannot recreate ports or repeat original non-status operations",()=>{
-  for(const kind of ["bootstrap","owner","reader","query","release"]){const m=lifetime(),p=pair(m);m.beginWork(p,{kind,ordinal:1});
-    assert.throws(()=>m.beginWork(p,{kind,ordinal:2}),/work_once/);assert.equal(m.describe().works.length,1);}
+  for(const kind of ["bootstrap","owner","reader","query","release"]){const m=lifetime(),p=pair(m);m.beginWork(p,{kind,ordinal:1,references:references()});
+    assert.throws(()=>m.beginWork(p,{kind,ordinal:2,references:references()}),/work_once/);assert.equal(m.describe().works.length,1);}
+});
+test("B4-A new pair starts unreferenced and listener attachment alone never qualifies it", () => {
+  const m = lifetime(), p = m.allocate({ ports: ["unreferenced", "unreferenced"] });
+  assert.equal(m.describe().stopped, null); assert.deepEqual(m.describe().ports, ["unreferenced", "unreferenced"]);
+  for (const index of [0, 1]) m.noteListeners(p, { index, event: "installed" });
+  assert.deepEqual(m.describe().ports, references());
+  assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: references() }), /unqualified/);
+  assert.equal(m.describe().works.length, 0);
+});
+for (const index of [0, 1]) for (const status of ["unreferenced", "unknown", "absent"])
+  test(`B4-A every new work checks current port ${index} reference: ${status}`, () => {
+    const m = lifetime(), p = pair(m), first = m.beginWork(p, { kind: "query", ordinal: 1, references: references() });
+    const states = references(); states[index] = status;
+    assert.throws(() => m.beginWork(p, { kind: "release", ordinal: 1, references: states }), /reference_lost/);
+    assert.equal(m.describe().stopped, "pair_reference_lost"); assert.equal(m.describe().ports[index], status);
+    assert.equal(m.describe().reference_confirmed[index], false);
+    assert.equal(m.describe().works.length, 1); m.settleWork(first, { outcome: "confirmed" });
+    assert.throws(() => m.beginWork(p, { kind: "release", ordinal: 1, references: references() }), /stopped/);
+  });
+test("B4-A work without current reference observations refuses before enrollment", () => {
+  const m = lifetime(), p = pair(m); assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1 }));
+  assert.ok(m.describe().stopped); assert.equal(m.describe().works.length, 0);
+});
+for (const kind of ["bootstrap", "owner", "reader", "query", "release", "status_write"])
+  test("B4-A current-reference checks also gate each tracked role: " + kind, () => {
+    const m = lifetime(), p = pair(m); m.beginWork(p, { kind: "status_write", ordinal: 1, references: references() });
+    assert.throws(() => m.beginWork(p, { kind, ordinal: kind === "status_write" ? 2 : 1, references: ["referenced", "unreferenced"] }), /reference_lost/);
+    assert.equal(m.describe().works.length, 1); assert.equal(m.describe().stopped, "pair_reference_lost");
+  });
+for (const index of [0, 1]) test(`B4-A removing fixed listeners silently unreferences port ${index} and latches stop`, () => {
+  const m = lifetime(), p = pair(m), q = m.beginWork(p, { kind: "query", ordinal: 1, references: references() });
+  m.noteListeners(p, { index, event: "removed" });
+  assert.equal(m.describe().ports[index], "unreferenced"); assert.equal(m.describe().listeners[index], false);
+  assert.equal(m.describe().stopped, "pair_listener_removed");
+  assert.throws(() => m.beginWork(p, { kind: "release", ordinal: 1, references: references() }), /stopped/);
+  m.settleWork(q, { outcome: "confirmed" });
+  assert.throws(() => m.noteListeners(p, { index, event: "installed" }), /listeners_once/);
+  assert.throws(() => m.referencePort(p, { index, outcome: "returned", has_ref: true }), /reference_once/);
+});
+for (const event of ["message", "messageerror"]) test("B4-A unexpected lifetime event stops without authorizing any work: " + event, () => {
+  const m = lifetime(), p = pair(m); m.noteListeners(p, { index: 0, event });
+  assert.equal(m.describe().stopped, "unexpected_port_event");
+  assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: references() }), /stopped/);
+});
+for (const outcome of ["threw", "unknown"]) test("B4-A reference qualification failure is terminal and not retried: " + outcome, () => {
+  const m = lifetime(), p = m.allocate({ ports: ["unreferenced", "unreferenced"] });
+  m.noteListeners(p, { index: 0, event: "installed" });
+  m.referencePort(p, { index: 0, outcome, has_ref: null }); assert.equal(m.describe().stopped, "pair_unqualified");
+  assert.throws(() => m.referencePort(p, { index: 0, outcome: "returned", has_ref: true }), /reference_once/);
+  assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: references() }), /stopped/);
+});
+for (const has_ref of [false, null]) test("B4-A returned ref is not proof of hasRef: " + has_ref, () => {
+  const m = lifetime(), p = m.allocate({ ports: ["unreferenced", "unreferenced"] }); m.noteListeners(p, { index: 0, event: "installed" });
+  m.referencePort(p, { index: 0, outcome: "returned", has_ref }); assert.equal(m.describe().stopped, "pair_unqualified");
+  assert.equal(m.describe().reference_confirmed[0], false);
+});
+for (const index of [0, 1]) test(`B4-A one entangled close via port ${index} awaits both original close events`, () => {
+  const m = lifetime(), p = pair(m); m.closePort(p, { index, outcome: "returned" });
+  assert.deepEqual(m.describe().ports, ["closing", "closing"]); assert.deepEqual(m.describe().close_events, [false, false]);
+  assert.equal(m.describe().close_outcome, "returned"); assert.equal(m.describe().close_confirmed, false);
+  assert.deepEqual(m.describe().reference_confirmed, [false, false]);
+  m.observeClose(p, { index }); assert.equal(m.describe().ports[1 - index], "closing"); assert.equal(m.describe().close_confirmed, false);
+  m.observeClose(p, { index: 1 - index }); assert.equal(m.describe().close_confirmed, true); assert.deepEqual(m.describe().ports, ["closed", "closed"]);
+  for (const i of [0, 1]) assert.throws(() => m.closePort(p, { index: i, outcome: "returned" }), /close_once/);
+  assert.throws(() => m.observeClose(p, { index }), /close_event_once/);
+});
+for (const outcome of ["threw", "unknown"]) test("B4-A failed entangled close is never retried or falsely confirmed: " + outcome, () => {
+  const m = lifetime(), p = pair(m); m.closePort(p, { index: 1, outcome });
+  assert.equal(m.describe().stopped, "port_close_unknown"); assert.deepEqual(m.describe().ports, ["unknown", "unknown"]);
+  assert.deepEqual(m.describe().references_at_close, references()); assert.equal(m.describe().close_confirmed, false);
+  m.observeClose(p, { index: 0 }); assert.equal(m.describe().close_confirmed, false);
+  assert.throws(() => m.closePort(p, { index: 0, outcome: "returned" }), /close_once/);
+  m.observeClose(p, { index: 1 }); assert.equal(m.describe().close_confirmed, true); assert.equal(m.describe().close_outcome, outcome);
+});
+test("B4-A spontaneous close records fact and stops without claiming a close attempt or peer close", () => {
+  const m = lifetime(), p = pair(m), q = m.beginWork(p, { kind: "query", ordinal: 1, references: references() });
+  m.observeClose(p, { index: 0 }); assert.equal(m.describe().stopped, "unexpected_port_close");
+  assert.equal(m.describe().close_attempted, false); assert.deepEqual(m.describe().ports, ["closed", "referenced"]);
+  assert.throws(() => m.closePort(p, { index: 1, outcome: "returned" }), /close_once/);
+  m.settleWork(q, { outcome: "confirmed" }); m.closePort(p, { index: 1, outcome: "returned" });
+  m.observeClose(p, { index: 1 }); assert.equal(m.describe().close_confirmed, true);
+});
+for (const index of [0, 1]) test(`B4-A lost reference to original port ${index} cannot discard its late close notification`, () => {
+  const m = lifetime(), p = pair(m), work = m.beginWork(p, { kind: "query", ordinal: 1, references: references() });
+  const states = references(); states[index] = "absent";
+  assert.throws(() => m.beginWork(p, { kind: "release", ordinal: 1, references: states }), /reference_lost/);
+  m.settleWork(work, { outcome: "confirmed" }); m.closePort(p, { index: 1 - index, outcome: "returned" });
+  m.observeClose(p, { index: 1 - index }); assert.equal(m.describe().close_confirmed, false);
+  m.observeClose(p, { index }); assert.equal(m.describe().close_confirmed, true);
+  assert.deepEqual(m.describe().close_events, [true, true]); assert.deepEqual(m.describe().ports, ["closed", "closed"]);
+  assert.equal(m.describe().stopped, "pair_reference_lost"); assert.deepEqual(m.describe().references_at_close, states);
+});
+test("B4-A original port existence survives both lost observations without inventing a close call", () => {
+  const m = lifetime(), p = pair(m);
+  assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: ["absent", "absent"] }), /reference_lost/);
+  m.observeClose(p, { index: 0 }); m.observeClose(p, { index: 1 });
+  assert.deepEqual(m.describe().close_events, [true, true]); assert.deepEqual(m.describe().original_ports, [true, true]);
+  assert.equal(m.describe().close_attempted, false); assert.equal(m.describe().close_confirmed, false);
+  assert.equal(m.describe().stopped, "pair_reference_lost");
+});
+test("B4-A absent or unknown allocation has no identified original port to confirm later", () => {
+  for (const status of ["absent", "unknown"]) {
+    const m = lifetime(), p = m.allocate({ ports: ["unreferenced", status] });
+    assert.deepEqual(m.describe().original_ports, [true, false]);
+    assert.throws(() => m.closePort(p, { index: 1, outcome: "returned" }), /close_once/);
+    assert.throws(() => m.observeClose(p, { index: 1 }), /close_event_once/);
+    m.observeClose(p, { index: 0 }); assert.deepEqual(m.describe().close_events, [true, false]);
+    assert.equal(m.describe().close_confirmed, false); assert.equal(m.describe().stopped, "pair_unqualified");
+  }
+});
+test("B4-A close starts no new work even when supplied references claim to remain valid", () => {
+  const m = lifetime(), p = pair(m); m.closePort(p, { index: 0, outcome: "returned" });
+  assert.throws(() => m.beginWork(p, { kind: "query", ordinal: 1, references: references() }), /closing/);
+  assert.deepEqual(m.describe().ports, ["closing", "closing"]); assert.equal(m.describe().works.length, 0);
+});
+test("B4-A an already stopped session cannot allocate even its first pair", () => {
+  const m = lifetime(); m.stop({ reason: "clock_unavailable" });
+  assert.throws(() => m.allocate({ ports: ["unreferenced", "unreferenced"] }), /stopped/);
+  assert.deepEqual(m.describe().ports, ["absent", "absent"]); assert.equal(m.describe().stopped, "clock_unavailable");
+  assert.throws(() => m.allocate({ ports: ["unreferenced", "unreferenced"] }), /pair_once/);
+});
+test("B4-A explicit reference qualification requires original fixed listeners", () => {
+  const m = lifetime(), p = m.allocate({ ports: ["unreferenced", "unreferenced"] });
+  assert.throws(() => m.referencePort(p, { index: 0, outcome: "returned", has_ref: true }), /unqualified/);
+  assert.equal(m.describe().reference_confirmed[0], false); assert.equal(m.describe().works.length, 0);
+});
+for (const operation of ["noteListeners", "referencePort", "closePort", "observeClose"])
+  test("B4-A lifetime observations cannot use copied/foreign pair references: " + operation, () => {
+    for (const ref of [{}, pair(lifetime())]) {
+      const m = lifetime(); pair(m);
+      const raw = operation === "noteListeners" ? { index: 0, event: "removed" }
+        : operation === "referencePort" ? { index: 0, outcome: "returned", has_ref: true }
+        : operation === "closePort" ? { index: 0, outcome: "returned" } : { index: 0 };
+      assert.throws(() => m[operation](ref, raw), /reference/);
+      assert.deepEqual(m.describe().ports, references()); assert.equal(m.describe().close_attempted, false);
+    }
+  });
+test("B4-A malformed listener/reference/close events refuse without enrollment or fake completion", () => {
+  for (const [operation, raw] of [["noteListeners", { index: 2, event: "removed" }], ["noteListeners", { index: 0, event: "installed", once: true }],
+    ["referencePort", { index: 0, outcome: "returned" }], ["closePort", { index: 0, outcome: "confirmed" }],
+    ["observeClose", { index: 0, outcome: "confirmed" }], ["observeClose", { index: -1 }]]) {
+    const m = lifetime(), p = pair(m); assert.throws(() => m[operation](p, raw));
+    assert.equal(m.describe().works.length, 0); assert.equal(m.describe().close_attempted, false);
+    assert.deepEqual(m.describe().ports, references()); assert.deepEqual(m.describe().close_events, [false, false]);
+  }
+});
+test("B4-A lifetime diagnostic remains immutable across later close notifications", () => {
+  const m = lifetime(), p = pair(m); m.closePort(p, { index: 0, outcome: "returned" }); const prior = m.describe();
+  assert.ok(Object.isFrozen(prior)); assert.ok(Object.isFrozen(prior.references_at_close));
+  m.observeClose(p, { index: 0 }); assert.deepEqual(prior.ports, ["closing", "closing"]); assert.deepEqual(prior.close_events, [false, false]);
+});
+test("B4-A all 37 original work dispositions must settle before the sole close call", () => {
+  const m = lifetime(), p = pair(m), tokens = [];
+  for (let ordinal = 1; ordinal <= 32; ordinal++) tokens.push(m.beginWork(p, { kind: "status_write", ordinal, references: references() }));
+  for (const kind of ["bootstrap", "owner", "reader", "query", "release"]) tokens.push(m.beginWork(p, { kind, ordinal: 1, references: references() }));
+  m.stop({ reason: "eof" });
+  for (const token of tokens) {
+    assert.throws(() => m.closePort(p, { index: 0, outcome: "returned" }), /close_once/);
+    assert.equal(m.describe().close_attempted, false); m.settleWork(token, { outcome: "confirmed" });
+  }
+  m.closePort(p, { index: 1, outcome: "returned" }); m.observeClose(p, { index: 1 }); m.observeClose(p, { index: 0 });
+  assert.equal(m.describe().close_confirmed, true); assert.equal(m.describe().stopped, "eof");
+  const s = model(); assert.ok(Buffer.byteLength(canonical({ transport: s.describe(), lifetime: m.describe() })) <= s.capacity().diagnostic_ceiling_bytes);
+  for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(m.describe()[k], false, k);
+});
+test("B4-A maximal lifetime strings and all 37 records fit before and after entangled close", () => {
+  const m = createUnsignedWorkerLifetimeModel({ session_id: "l".repeat(48) }), p = pair(m), tokens = [], snapshots = [m.describe()];
+  for (let ordinal = 1; ordinal <= 32; ordinal++) tokens.push(m.beginWork(p, { kind: "status_write", ordinal, references: references() }));
+  for (const kind of ["bootstrap", "owner", "reader", "query", "release"]) tokens.push(m.beginWork(p, { kind, ordinal: 1, references: references() }));
+  m.stop({ reason: "c".repeat(96) }); tokens.forEach(t => m.settleWork(t, { outcome: "confirmed" })); snapshots.push(m.describe());
+  m.closePort(p, { index: 0, outcome: "unknown" }); snapshots.push(m.describe());
+  m.observeClose(p, { index: 1 }); snapshots.push(m.describe()); m.observeClose(p, { index: 0 }); snapshots.push(m.describe());
+  const s = model(), capacity = s.capacity();
+  for (const state of snapshots) {
+    assert.equal(state.schema, "native-bar-worker-lifetime-model-v2");
+    assert.ok(Buffer.byteLength(canonical({ transport: s.describe(), lifetime: state })) <= capacity.diagnostic_ceiling_bytes);
+    for (const [k, v] of Object.entries(flags())) if (typeof v === "boolean") assert.equal(state[k], false, k);
+  }
+  assert.equal(capacity.diagnostic_limit_bytes, 16384); assert.equal(capacity.coordinator_metadata_limit_bytes, 65536);
+  assert.equal(capacity.lifetime_work_records, 37); assert.equal(capacity.native_budget_changed, false);
 });
 // A failing after hook is not a failed test under --test-isolation=none or a direct run, so this last test carries the check.
 test("B4-A no denied effect was swallowed by an earlier test", () => assert.deepEqual(effects, []));

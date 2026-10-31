@@ -53,8 +53,12 @@ export function describeUnsignedWorkerTransportCapacity(allocation) {
     next_ordinals: { parent: 33, worker: 33 }, baseline_sha256: h, trace_chunks: 8, trace_events: 128, trace_sha256: h,
     worker_exit: { exit_code: 255, signal: "SIG" + "X".repeat(12) }, phase: "preparation", settlement_start_ns: u, phase_deadline_ns: u, cohort_deadline_ns: u };
   const work = { kind: "status_write", ordinal: 32, outcome: "confirmed" };
-  const lifetime = { ...base(), schema: "native-bar-worker-lifetime-model-v1", session_id: l, attempted: false, stopped: c, ports: ["unreferenced", "unreferenced"],
-    close_attempted: [false, false], works: [...Array(32).fill(work), ...workKinds.slice(0, -1).map(kind => ({ kind, ordinal: 1, outcome: "confirmed" }))] };
+  const lifetime = { ...base(), schema: "native-bar-worker-lifetime-model-v2", session_id: l, attempted: false, stopped: c, ports: ["unreferenced", "unreferenced"],
+    original_ports: [false, false],
+    listeners: [false, false], listener_attempted: [false, false], reference_attempted: [false, false], reference_confirmed: [false, false],
+    close_attempted: false, close_index: null, close_outcome: "returned", close_events: [false, false], close_confirmed: false,
+    references_at_close: ["unreferenced", "unreferenced"],
+    works: [...Array(32).fill(work), ...workKinds.slice(0, -1).map(kind => ({ kind, ordinal: 1, outcome: "confirmed" }))] };
   const metadata = byteLength(canonical({ transport, lifetime }));
   if (metadata > 16384) refuse("diagnostic_capacity");
   // These are separate byte reservations, not a V8 heap measurement or extra native work allowance.
@@ -226,24 +230,61 @@ export function createUnsignedWorkerTransportModel(input) {
 
 export function createUnsignedWorkerLifetimeModel(input) {
   const d = parse(z.object({ session_id: label }).strict(), input), works = new Map();
-  let attempted = false, pair = null, stopped = null, ports = ["absent", "absent"], closeAttempted = [false, false];
+  const indexSchema = z.number().int().min(0).max(1), referenceSchema = z.enum(["referenced", "unreferenced", "unknown", "absent"]);
+  const referencesSchema = z.tuple([referenceSchema, referenceSchema]);
+  const originalPorts = [false, false], listeners = [false, false], listenerAttempted = [false, false], referenceAttempted = [false, false], referenceConfirmed = [false, false], closeEvents = [false, false];
+  let attempted = false, pair = null, stopped = null, ports = ["absent", "absent"], closeAttempted = false, closeIndex = null, closeOutcome = null, referencesAtClose = null;
   const stop = reason => { stopped ??= reason; };
   const guard = f => { try { return f(); } catch (error) { stop("invalid_lifetime_event"); throw error; } };
   const same = ref => { if (ref !== pair || pair === null) refuse("lifetime_reference"); };
-  const describe = () => freeze({ ...base(), schema: "native-bar-worker-lifetime-model-v1", session_id: d.session_id, attempted, stopped,
-    ports: [...ports], close_attempted: [...closeAttempted], works: [...works.values()].map(w => ({ ...w })) });
+  const describe = () => freeze({ ...base(), schema: "native-bar-worker-lifetime-model-v2", session_id: d.session_id, attempted, stopped,
+    ports: [...ports], original_ports: [...originalPorts], listeners: [...listeners], listener_attempted: [...listenerAttempted], reference_attempted: [...referenceAttempted], reference_confirmed: [...referenceConfirmed],
+    close_attempted: closeAttempted, close_index: closeIndex, close_outcome: closeOutcome, close_events: [...closeEvents],
+    close_confirmed: closeAttempted && closeEvents.every(Boolean), references_at_close: referencesAtClose === null ? null : [...referencesAtClose],
+    works: [...works.values()].map(w => ({ ...w })) });
   return Object.freeze({
     allocate(raw) { return guard(() => {
       if (attempted) refuse("pair_once"); attempted = true;
-      const q = parse(z.object({ ports: z.tuple([z.enum(["referenced", "unreferenced", "unknown", "absent"]), z.enum(["referenced", "unreferenced", "unknown", "absent"])]) }).strict(), raw);
-      ports = [...q.ports]; pair = Object.freeze({}); if (ports.some(p => p !== "referenced")) stop("pair_unqualified"); return pair;
+      if (stopped) refuse("lifetime_stopped");
+      const q = parse(z.object({ ports: referencesSchema }).strict(), raw);
+      ports = [...q.ports];
+      for (const index of [0, 1]) originalPorts[index] = ["referenced", "unreferenced"].includes(ports[index]);
+      pair = Object.freeze({}); if (ports.some(p => p !== "unreferenced")) stop("pair_unqualified"); return pair;
+    }); },
+    noteListeners(ref, raw) { return guard(() => {
+      same(ref); const q = parse(z.object({ index: indexSchema, event: z.enum(["installed", "removed", "message", "messageerror"]) }).strict(), raw);
+      if (closeAttempted || ports[q.index] === "closed" || ports[q.index] === "absent") refuse("listeners_unavailable");
+      if (q.event === "installed") {
+        if (listenerAttempted[q.index]) refuse("listeners_once");
+        if (stopped) refuse("lifetime_stopped");
+        listenerAttempted[q.index] = true; listeners[q.index] = true; ports[q.index] = "referenced";
+      } else {
+        if (!listeners[q.index]) refuse("listeners_unavailable");
+        if (q.event === "removed") { listeners[q.index] = false; ports[q.index] = "unreferenced"; referenceConfirmed[q.index] = false; stop("pair_listener_removed"); }
+        else stop("unexpected_port_event");
+      }
+      return describe();
+    }); },
+    referencePort(ref, raw) { return guard(() => {
+      same(ref); const q = parse(z.object({ index: indexSchema, outcome: z.enum(["returned", "threw", "unknown"]), has_ref: z.boolean().nullable() }).strict(), raw);
+      if (referenceAttempted[q.index]) refuse("reference_once");
+      if (stopped || closeAttempted || !listeners[q.index]) refuse("lifetime_unqualified");
+      referenceAttempted[q.index] = true;
+      if (q.outcome !== "returned" && q.has_ref !== null) refuse("reference_shape");
+      referenceConfirmed[q.index] = q.outcome === "returned" && q.has_ref === true;
+      ports[q.index] = q.outcome !== "returned" || q.has_ref === null ? "unknown" : q.has_ref ? "referenced" : "unreferenced";
+      if (!referenceConfirmed[q.index]) stop("pair_unqualified"); return describe();
     }); },
     beginWork(ref, raw) { return guard(() => {
-      same(ref); if (stopped || ports.some(p => p !== "referenced")) refuse("lifetime_stopped");
-      const q = parse(z.object({ kind: z.enum(workKinds), ordinal: z.number().int().min(1).max(32) }).strict(), raw);
+      same(ref); if (closeAttempted) refuse("lifetime_closing"); if (stopped) refuse("lifetime_stopped");
+      const q = parse(z.object({ kind: z.enum(workKinds), ordinal: z.number().int().min(1).max(32), references: referencesSchema }).strict(), raw);
+      if (!listeners.every(Boolean) || !referenceConfirmed.every(Boolean)) refuse("lifetime_unqualified");
+      ports = [...q.references];
+      for (const index of [0, 1]) if (ports[index] !== "referenced") referenceConfirmed[index] = false;
+      if (ports.some(p => p !== "referenced")) { stop("pair_reference_lost"); refuse("pair_reference_lost"); }
       const count = [...works.values()].filter(w => w.kind === q.kind).length;
       if (q.ordinal !== count + 1 || count >= (q.kind === "status_write" ? LIMITS.frames : 1)) refuse("work_once");
-      const token = Object.freeze({}); works.set(token, { ...q, outcome: "pending" }); return token;
+      const token = Object.freeze({}); works.set(token, { kind: q.kind, ordinal: q.ordinal, outcome: "pending" }); return token;
     }); },
     settleWork(token, raw) { return guard(() => {
       const q = parse(z.object({ outcome: z.enum(["confirmed", "unknown"]) }).strict(), raw), w = works.get(token);
@@ -252,10 +293,19 @@ export function createUnsignedWorkerLifetimeModel(input) {
     }); },
     stop(raw) { return guard(() => { const q = parse(z.object({ reason: code }).strict(), raw); stop(q.reason); return describe(); }); },
     closePort(ref, raw) { return guard(() => {
-      same(ref); const q = parse(z.object({ index: z.number().int().min(0).max(1), outcome: z.enum(["confirmed", "unconfirmed"]) }).strict(), raw);
-      if ([...works.values()].some(w => w.outcome !== "confirmed") || ports[q.index] === "absent" || closeAttempted[q.index]) refuse("port_close_once");
-      closeAttempted[q.index] = true; ports[q.index] = q.outcome === "confirmed" ? "closed" : "unconfirmed";
-      if (q.outcome === "unconfirmed") stop("port_close_unknown"); return describe();
+      same(ref); const q = parse(z.object({ index: indexSchema, outcome: z.enum(["returned", "threw", "unknown"]) }).strict(), raw);
+      if ([...works.values()].some(w => w.outcome !== "confirmed") || !originalPorts[q.index] || ["absent", "closed"].includes(ports[q.index]) || closeAttempted) refuse("port_close_once");
+      closeAttempted = true; closeIndex = q.index; closeOutcome = q.outcome; referencesAtClose = [...ports];
+      referenceConfirmed.fill(false);
+      // One call affects the entangled pair; only each original asynchronous event confirms its own end.
+      ports = ports.map(p => p === "closed" || p === "absent" ? p : q.outcome === "returned" ? "closing" : "unknown");
+      if (q.outcome !== "returned") stop("port_close_unknown"); return describe();
+    }); },
+    observeClose(ref, raw) { return guard(() => {
+      same(ref); const q = parse(z.object({ index: indexSchema }).strict(), raw);
+      if (closeEvents[q.index] || !originalPorts[q.index]) refuse("close_event_once");
+      closeEvents[q.index] = true; ports[q.index] = "closed"; referenceConfirmed[q.index] = false;
+      if (!closeAttempted) stop("unexpected_port_close"); return describe();
     }); },
     describe,
   });

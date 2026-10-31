@@ -34,6 +34,32 @@ function guard(text) {
   walk(tree);
 }
 test("B4-A exports only pure models/capacity with exact reviewed dependencies", () => guard(source));
+function lifetimeGuard(text) {
+  const tree = ts.createSourceFile("transport.mjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const declaration = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === "createUnsignedWorkerLifetimeModel");
+  const body = declaration.getText();
+  const returned = declaration.body.statements.find(ts.isReturnStatement).expression.arguments[0];
+  assert.deepEqual(returned.properties.map(n => n.name.text), ["allocate", "noteListeners", "referencePort", "beginWork", "settleWork", "stop", "closePort", "observeClose", "describe"]);
+  for (const name of ["closePort", "observeClose"]) assert.match(returned.properties.find(n => n.name.text === name).getText(), /!originalPorts\[q.index\]/);
+  for (const fragment of ['schema: "native-bar-worker-lifetime-model-v2"', 'ports.some(p => p !== "unreferenced")',
+    'referenceConfirmed.every(Boolean)', 'references: referencesSchema', 'ports = [...q.references]',
+    'stop("pair_reference_lost")', 'ports[q.index] = "unreferenced"', 'referenceAttempted[q.index]',
+    'closeAttempted = true', 'referencesAtClose = [...ports]', 'closeAttempted && closeEvents.every(Boolean)',
+    'closeEvents[q.index] = true', '!originalPorts[q.index]', 'original_ports: [...originalPorts]',
+    'stop("unexpected_port_close")', 'ports = ports.map(']) assert.ok(body.includes(fragment), fragment);
+  assert.doesNotMatch(body, /closeAttempted\s*\[|close_attempted:\s*\[/);
+  assert.doesNotMatch(body, /unref\s*\(|postMessage\s*\(|once\s*\(/);
+}
+test("B4-A lifetime contract pins current-reference checks and one entangled close with two events", () => {
+  lifetimeGuard(source);
+  for (const [from, to] of [['ports = [...q.references]', 'ports = ports'], ['closeAttempted && closeEvents.every(Boolean)', 'closeAttempted'],
+    ['closeAttempted = true', 'closeAttempted = false'], ['referenceConfirmed.every(Boolean)', 'true'],
+    ['ports[q.index] = "unreferenced"', 'ports[q.index] = "referenced"'], ['ports = ports.map(', 'ports = [...ports].map('],
+    ['!originalPorts[q.index]', 'ports[q.index] === "absent"'],
+    ['closeEvents[q.index] || !originalPorts[q.index]', 'closeEvents[q.index] || ports[q.index] === "absent"']]) {
+    assert.ok(source.includes(from)); assert.throws(() => lifetimeGuard(source.replace(from, to)));
+  }
+});
 test("B4-A source boundary rejects clocks/ports/keys/processes and alternate effect paths", () => {
   for (const change of ['\nDate.now();', '\nnew MessageChannel();', '\nnew Worker();', '\nprocess.hrtime.bigint();', '\nimport("node:fs");',
     '\nsetTimeout(f,1);', '\ncreatePrivateKey(k);', '\nspawn("worker");', '\nx["constructor"]("return 1")();', '\nexport { hidden };',
