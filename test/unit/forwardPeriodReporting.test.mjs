@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ResearchPeriodUsageStore, summarizeAssessment, FORWARD_PERIOD_BACKOFF_MS } from '../../build/researchPeriodUsage.js';
-import { FORWARD_PERIOD_LIMITATIONS } from '../../build/forwardPeriod.js';
+import { FORWARD_PERIOD_LIMITATIONS, ForwardPeriodJournal } from '../../build/forwardPeriod.js';
 
 // docs/FORWARD_PERIOD_PLAN.md, step 4: the check, preflight v2, record-path fields, replay and the fallback.
 const run = promisify(execFile);
@@ -227,9 +227,14 @@ test('the back-off: a lock timeout on any path skips record reads for 30 s on th
   const started = performance.now();
   await assert.rejects(store.check(query()), (e) => e.code === 'forward_period_journal_unavailable');   // a check starts it
   assert.ok(performance.now() - started >= 1900);
-  const quick = performance.now();
-  const skipped = await make().record(manual({ accessed_at: '2026-09-01T00:00:00.000Z' }));   // another store on the same ledger
-  assert.ok(performance.now() - quick < 1000, 'no 2 s wait during the back-off');
+  // Counted, not timed: on a loaded Windows runner this record's ledger lock, read and fsync'd append took over a
+  // second, while a journal lock attempt would wait out the 2 s budget on the stale lock.
+  const withLock = ForwardPeriodJournal.prototype.withLock;
+  let lockAttempts = 0, skipped;
+  ForwardPeriodJournal.prototype.withLock = function (operation) { lockAttempts++; return withLock.call(this, operation); };
+  try { skipped = await make().record(manual({ accessed_at: '2026-09-01T00:00:00.000Z' })); }   // another store on the same ledger
+  finally { ForwardPeriodJournal.prototype.withLock = withLock; }
+  assert.equal(lockAttempts, 0, 'no journal lock attempt, so no 2 s wait, during the back-off');
   assert.deepEqual(skipped.overlapped_forward_period_declarations, { status: 'unavailable', reason: 'lock_timeout_backoff', retry_after_ms: FORWARD_PERIOD_BACKOFF_MS });
   clock.monotonic = FORWARD_PERIOD_BACKOFF_MS - 1;
   assert.equal((await store.record(manual({ access_id: 'a2', accessed_at: '2026-09-01T00:00:00.000Z' }))).overlapped_forward_period_declarations.retry_after_ms, 1);
