@@ -72,6 +72,11 @@ function pins(d, blockers) {
     for (const v of [p.integrity, p.expected_integrity]) if (v !== null && "sha512-" + Buffer.from(v.slice(7), "base64").toString("base64") !== v) refuse("integrity_encoding");
     if (p.bytes !== null && BigInt(p.bytes) === 0n) refuse("package_bytes");
   }
+  // Distinct packages never share one tarball, source commit or package tree, as supplied or as expected.
+  for (const k of ["integrity", "commit", "files_sha256"]) {
+    const [a, b] = d.packages.map(p => [p[k], p["expected_" + k]].filter(v => v !== null));
+    if (a.some(v => b.includes(v))) refuse("package_identity_alias");
+  }
   const c = d.closure;
   if (c.state !== "matched_supplied") blockers.push("closure_" + c.state);
   for (const k of ["graph_sha256", "lock_sha256"]) compare(c[k], c["expected_" + k], k, blockers);

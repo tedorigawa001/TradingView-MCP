@@ -77,6 +77,9 @@ const { createUnsignedIsolatedTypeScript } = await import("../helpers/unsignedIs
 const ts = createUnsignedIsolatedTypeScript(fs.readFileSync(new URL("../../node_modules/typescript/lib/typescript.js", import.meta.url), "utf8"));
 const source = fs.readFileSync(new URL("../helpers/unsignedWorkerParserAcceptanceContracts.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const h = "a".repeat(64), other = "b".repeat(64), integrity = "sha512-" + Buffer.alloc(64).toString("base64");
+// Each package has its own tarball, commit and tree digests; the stream-json entry digest h is also the source-bound pin.
+const own = { "stream-json": { integrity, commit: "a".repeat(40), digest: h },
+  "stream-chain": { integrity: "sha512-" + Buffer.alloc(64, 2).toString("base64"), commit: "c".repeat(40), digest: "c".repeat(64) } };
 const groups = ["pins", "initialization", "grammar", "finalization", "encoding", "canonical", "record_schema", "size_bounds", "chunking", "retention", "work_stop", "authority"];
 const parts = ["decoder_carry", "text_suffix", "decoded_fragment", "scalar_scratch", "nesting_stack", "token_batch", "canonical_window", "projection", "diagnostics"];
 const bounds = ["carry_bytes", "suffix_bytes", "decoded_bytes", "scalar_bytes", "stack_bytes", "batch_bytes", "canonical_lag_bytes", "stack_entries", "batch_items", "steps_per_fragment", "flush_steps"];
@@ -84,11 +87,11 @@ const metrics = ["feed_byte_work", "decode_byte_work", "copy_byte_work", "encode
 const edit = (s, fn) => { const c = structuredClone(s); fn(c); return c; };
 function subject() {
   return { schema: "unsigned-worker-parser-acceptance-plan-v1",
-    packages: [["stream-json", "3.8.0"], ["stream-chain", "4.4.1"]].map(([name, version]) => ({
+    packages: [["stream-json", "3.8.0"], ["stream-chain", "4.4.1"]].map(([name, version]) => { const o = own[name]; return {
       name, version, state: "matched_supplied", resolved: "https://registry.npmjs.org/" + name + "/-/" + name + "-" + version + ".tgz",
-      integrity, expected_integrity: integrity, commit: "a".repeat(40), expected_commit: "a".repeat(40),
-      files_sha256: h, expected_files_sha256: h, exports_sha256: h, expected_exports_sha256: h, entry_sha256: h, expected_entry_sha256: h,
-      license: "BSD-3-Clause", files: 10, bytes: "10000" })),
+      integrity: o.integrity, expected_integrity: o.integrity, commit: o.commit, expected_commit: o.commit,
+      files_sha256: o.digest, expected_files_sha256: o.digest, exports_sha256: o.digest, expected_exports_sha256: o.digest, entry_sha256: o.digest, expected_entry_sha256: o.digest,
+      license: "BSD-3-Clause", files: 10, bytes: "10000" }; }),
     closure: { state: "matched_supplied", graph_sha256: h, expected_graph_sha256: h, lock_sha256: h, expected_lock_sha256: h,
       chain_instances: 1, dependency: "stream-json:stream-chain:^4.4.1", entry: "stream-json/core/parser.js:jsonParser", target: "stream-json/src/core/parser.js",
       builtin: "node:string_decoder", all_edges_enumerated: true },
@@ -137,11 +140,13 @@ test("B1 source input and immutable outputs do not alias", () => {
 for (let i = 0; i < 2; i++) for (const key of ["resolved", "integrity", "expected_integrity", "commit", "expected_commit",
   "files_sha256", "expected_files_sha256", "exports_sha256", "expected_exports_sha256", "entry_sha256", "expected_entry_sha256", "license", "files", "bytes"])
   test("B1 unavailable package field " + i + " " + key, () => {
-    const p = plan(edit(subject(), s => s.packages[i][key] = null));
-    assert.equal(p.pins_consistent_supplied, false); assert.equal(p.supplied_plan_complete, false); assert.ok(p.blockers.length > 0);
+    const blocker = ["resolved", "license", "files", "bytes"].includes(key) ? subject().packages[i].name.replaceAll("-", "_") + "_" + key : key.replace(/^expected_/, "");
+    const p = blocks(edit(subject(), s => s.packages[i][key] = null), blocker + "_unavailable");
+    assert.equal(p.pins_consistent_supplied, false);
   });
 for (const state of ["unavailable", "refused"]) for (const i of [0, 1]) test("B1 package state " + i + " " + state, () => {
-  assert.equal(plan(edit(subject(), s => s.packages[i].state = state)).pins_consistent_supplied, false);
+  const p = blocks(edit(subject(), s => s.packages[i].state = state), subject().packages[i].name.replaceAll("-", "_") + "_" + state);
+  assert.equal(p.pins_consistent_supplied, false);
 });
 for (const k of ["integrity", "commit", "files_sha256", "exports_sha256", "entry_sha256"]) test("B1 own pin mismatch " + k, () => {
   refuses(edit(subject(), s => s.packages[0][k] = k === "integrity" ? "sha512-" + Buffer.alloc(64, 1).toString("base64") : k === "commit" ? "b".repeat(40) : other), k);
@@ -169,10 +174,12 @@ test("B1 fragment and controls are fixed, not record ceiling changes", () => {
   refuses(edit(subject(), s => s.profile.control_fragments.reverse()), "fragment_profile");
   assert.equal(plan().limits.record_bytes, 4194304);
 });
-for (const k of ["graph_sha256", "expected_graph_sha256", "lock_sha256", "expected_lock_sha256", "chain_instances", "all_edges_enumerated"])
-  test("B1 missing closure " + k, () => assert.equal(plan(edit(subject(), s => s.closure[k] = null)).pins_consistent_supplied, false));
-for (const key of ["effects", "runtime_sha256", "closure_sha256", "expected_closure_sha256", "settled_once"])
-  test("B1 missing initializer " + key, () => assert.equal(plan(edit(subject(), s => s.initialization[key] = null)).supplied_plan_complete, false));
+for (const [k, blocker] of [["graph_sha256", "graph_sha256_unavailable"], ["expected_graph_sha256", "graph_sha256_unavailable"], ["lock_sha256", "lock_sha256_unavailable"],
+  ["expected_lock_sha256", "lock_sha256_unavailable"], ["chain_instances", "closure_inventory_unavailable"], ["all_edges_enumerated", "closure_inventory_unavailable"]])
+  test("B1 missing closure " + k, () => assert.equal(blocks(edit(subject(), s => s.closure[k] = null), blocker).pins_consistent_supplied, false));
+for (const [key, blocker] of [["effects", "initializer_inventory_unavailable"], ["runtime_sha256", "runtime_identity_unavailable"], ["closure_sha256", "initializer_closure_unavailable"],
+  ["expected_closure_sha256", "initializer_closure_unavailable"], ["settled_once", "readiness_unavailable"]])
+  test("B1 missing initializer " + key, () => blocks(edit(subject(), s => s.initialization[key] = null), blocker));
 test("B1 readiness fulfillment is not decoder-install evidence", () => {
   blocks(edit(subject(), s => s.initialization.decoder_outcome = "unavailable"), "decoder_outcome_unavailable");
   blocks(edit(subject(), s => s.initialization.decoder_outcome = "not_installed"), "decoder_outcome_unavailable");
@@ -218,7 +225,7 @@ for (const [field, part] of [["carry_bytes", "decoder_carry"], ["decoded_bytes",
 for (const key of ["source_sha256", "includes_prior_state"]) test("B1 source and prior-state evidence " + key, () => blocks(edit(subject(), s => s.source_bounds[key] = null), "source_bounds_incomplete"));
 for (const state of ["unavailable", "refused"]) for (const path of ["heap", "source_bounds", "cost_profile"]) test("B1 unqualified " + path + " " + state, () => {
   const s = subject(); if (path === "heap") s.heap = state; else if (path === "cost_profile") s.work.cost_profile = state; else s.source_bounds.state = state;
-  assert.equal(plan(s).supplied_plan_complete, false);
+  blocks(s, path + "_" + state);
 });
 test("B1 standalone capacity adds simultaneous C2a transient reservation without clearing overlap", () => {
   const p = blocks(edit(subject(), s => s.memory[1].transient.token_batch = "1"), "transient_overlap_unproven");
@@ -336,9 +343,72 @@ for (const group of groups) for (const state of ["unavailable", "refused"]) test
 for (const key of ["positive_cases", "negative_cases"]) test("B1 case count unknown " + key, () => {
   const p = blocks(edit(subject(), s => s.acceptance[0][key] = null), "acceptance_pins_incomplete"); assert.equal(p.synthetic_acceptance_complete, false);
 });
+test("B1 blockers shared by both packages are reported once", () => {
+  const p = blocks(edit(subject(), s => s.packages.forEach(p => p.integrity = null)), "integrity_unavailable");
+  assert.deepEqual(p.blockers, ["integrity_unavailable"]);
+});
 test("B1 missing tarball is not obscured by complete acceptance summaries", () => {
   const p = plan(edit(subject(), s => s.packages[0].integrity = null));
   assert.equal(p.synthetic_acceptance_complete, true); assert.equal(p.pins_consistent_supplied, false); assert.equal(p.supplied_plan_complete, false);
+});
+// A coherent summary whose stack and batch cardinalities and steps exceed the 256-item fragment minimum.
+const wide = s => { Object.assign(s.source_bounds, { stack_entries: "1000", stack_bytes: "1000", batch_items: "1000", batch_bytes: "1000", steps_per_fragment: "1000" });
+  s.memory[1].retained.nesting_stack = s.memory[1].retained.token_batch = "1000"; s.work.modes.forEach(m => m.token_work = "32000"); };
+test("B1 cardinalities above the fragment minimum are accepted when bytes, steps and work cover them", () => {
+  const p = plan(edit(subject(), wide)); assert.equal(p.supplied_plan_complete, true); assert.equal(p.work.units.token_work.modeled, "768000");
+  assert.equal(plan(sizedSubject(257)).supplied_plan_complete, true);
+});
+test("B1 shared export maps and entry digests are not package identity aliases", () => {
+  for (const k of ["exports_sha256", "entry_sha256"])
+    assert.equal(plan(edit(subject(), s => { s.packages[1][k] = s.packages[1]["expected_" + k] = s.packages[0][k]; })).supplied_plan_complete, true);
+});
+test("B1 package order is not a package identity", () => {
+  assert.equal(plan(edit(subject(), s => s.packages.reverse())).supplied_plan_complete, true);
+});
+test("B1 known token work rounds a partial fragment up when its cost is unknown", () => {
+  const p = blocks(edit(subject(), s => { Object.assign(s, sizedSubject(1)); s.work.modes.forEach(m => m.token_work = null); }), "token_work_unknown");
+  assert.equal(p.work.units.token_work.known, "6144"); assert.equal(p.work.units.token_work.modeled, null);
+});
+const nonCanonical = "sha512-" + "A".repeat(85) + "B==", encodingCheck = 'for (const v of [p.integrity, p.expected_integrity]) if', parserSteps = 'const parserSteps = max(cardinalityMinimum(b.batch_items), BigInt(b.steps_per_fragment ?? 0));';
+const aliasRule = 'if (a.some(v => b.includes(v))) refuse("package_identity_alias");';
+// Each case changes one fact that only its own gate decides; its trial removes or weakens exactly that gate.
+const gateCases = [
+  ["closure state unavailable", s => s.closure.state = "unavailable", ["block", "closure_unavailable"], ['if (c.state !== "matched_supplied") blockers.push("closure_" + c.state);', '']],
+  ["closure state refused", s => s.closure.state = "refused", ["block", "closure_refused"], ['if (c.state !== "matched_supplied") blockers.push("closure_" + c.state);', '']],
+  ["closure edges not enumerated", s => s.closure.all_edges_enumerated = false, ["block", "closure_inventory_unavailable"], ['c.all_edges_enumerated !== true)', 'c.all_edges_enumerated === null)']],
+  ...[0, 1].flatMap(i => [
+    ["non-canonical SRI on both sides " + i, s => { s.packages[i].integrity = s.packages[i].expected_integrity = nonCanonical; }, ["refuse", "integrity_encoding"], [encodingCheck + ' (v !== null && "sha512-"', encodingCheck + ' (false && "sha512-"']],
+    ["non-canonical expected SRI with unknown integrity " + i, s => { s.packages[i].integrity = null; s.packages[i].expected_integrity = nonCanonical; }, ["refuse", "integrity_encoding"], [encodingCheck, 'for (const v of [p.integrity]) if']],
+    ["non-canonical supplied SRI with unknown expectation " + i, s => { s.packages[i].integrity = nonCanonical; s.packages[i].expected_integrity = null; }, ["refuse", "integrity_encoding"], [encodingCheck, 'for (const v of [p.expected_integrity]) if']],
+  ]),
+  ["source bounds bind the stream-json entry, not stream-chain's", s => s.source_bounds.source_sha256 = s.packages[1].entry_sha256, ["refuse", "parser_source_binding"],
+    ['d.packages.find(p => p.name === "stream-json").entry_sha256', '(d.packages.find(p => p.entry_sha256 === s.source_sha256) ?? d.packages[0]).entry_sha256']],
+  ["source bounds bind the stream-json entry by name, not position", s => { s.packages.reverse(); s.source_bounds.source_sha256 = s.packages[0].entry_sha256; }, ["refuse", "parser_source_binding"],
+    ['d.packages.find(p => p.name === "stream-json").entry_sha256', 'd.packages[0].entry_sha256']],
+  ...[["scalar_bytes", 'scalar_scratch: "scalar_bytes",', ''], ["canonical_lag_bytes", ', canonical_window: "canonical_lag_bytes" };', ' };']].map(([bound, from, to]) =>
+    ["memory below the source " + bound, s => s.source_bounds[bound] = "4096", ["refuse", "source_memory_floor"], [from, to]]),
+  ["a known side above its floor does not refund an unknown side's overrun", s => {
+    s.memory[1].retained.decoder_carry = null; s.memory[1].transient.decoder_carry = "4000000"; s.memory[1].retained.diagnostics = "2375681";
+  }, ["refuse", "capacity_bound"], ['const missing = max(0n, floor - declared);', 'const missing = floor - declared;']],
+  ["stack bytes below a known stack cardinality", s => { wide(s); s.source_bounds.stack_bytes = "999"; }, ["refuse", "source_geometry"], ['stack_bytes: cardinalityMinimum(s.stack_entries),', 'stack_bytes: 256n,']],
+  ["batch bytes below a known batch cardinality", s => { wide(s); s.source_bounds.batch_bytes = "999"; }, ["refuse", "source_geometry"], ['batch_bytes: cardinalityMinimum(s.batch_items), steps', 'batch_bytes: 256n, steps']],
+  ["steps below a known batch cardinality", s => { wide(s); s.source_bounds.steps_per_fragment = "999"; }, ["refuse", "source_geometry"], ['steps_per_fragment: cardinalityMinimum(s.batch_items) };', 'steps_per_fragment: 256n };']],
+  ["token work below declared steps per fragment", s => { s.source_bounds.steps_per_fragment = "1000"; s.work.modes.forEach(m => m.token_work = "31999"); }, ["refuse", "parser_work_floor"],
+    [parserSteps, 'const parserSteps = cardinalityMinimum(b.batch_items);']],
+  ["token work below the batch cardinality with unknown steps", s => { wide(s); s.source_bounds.steps_per_fragment = null; s.work.modes.forEach(m => m.token_work = "31999"); }, ["refuse", "parser_work_floor"],
+    [parserSteps, 'const parserSteps = BigInt(b.steps_per_fragment ?? 256);']],
+  ...[[1, "255"], [257, "511"]].map(([bytes, work]) => ["token work rounds a partial fragment up " + bytes, s => { Object.assign(s, sizedSubject(bytes)); s.work.modes.forEach(m => m.token_work = work); },
+    ["refuse", "parser_work_floor"], ['BigInt(m.token_work) < BigInt(Math.ceil(m.record_bytes / 256))', 'BigInt(m.token_work) < BigInt(Math.floor(m.record_bytes / 256))']]),
+  ...["integrity", "commit", "files_sha256"].flatMap(k => [
+    ["package " + k + " alias", s => { s.packages[1][k] = s.packages[1]["expected_" + k] = s.packages[0][k]; }, ["refuse", "package_identity_alias"], [aliasRule, '']],
+    ["expected package " + k + " alias with unknown supplied value", s => { s.packages[1][k] = null; s.packages[1]["expected_" + k] = s.packages[0][k]; }, ["refuse", "package_identity_alias"], [aliasRule, '']],
+    ["supplied package " + k + " alias with unknown expectation", s => { s.packages[0]["expected_" + k] = null; s.packages[0][k] = s.packages[1][k]; }, ["refuse", "package_identity_alias"], [aliasRule, '']],
+  ]),
+];
+const gate = (fn, s, [kind, code]) => kind === "refuse" ? assert.throws(() => fn(s), { message: "cc4c2cb1_" + code }) : assert.ok(fn(s).blockers.includes(code), code);
+for (const [name, change, expected] of gateCases) test("B1 commit-review gate " + name, () => {
+  const s = edit(subject(), change); gate(plan, s, expected);
+  if (expected[0] === "block") assert.equal(plan(s).supplied_plan_complete, false);
 });
 const invalid = [
   ["extra", s => s.backend = "/tmp/record"], ["callback", s => s.packages[0].loader = () => {}],
@@ -352,9 +422,21 @@ const invalid = [
   ["zero prefix", s => s.memory[0].retained.decoder_carry = "00"], ["nested closure", s => s.closure.paths = ["./a"]],
   ["overlong integer", s => s.work.prior_hash_bytes = "1".repeat(31)], ["wrong starts", s => s.work.modes[0].starts = 24],
   ["option extra", s => s.profile.options.jsonLines = true],
-  ["noncanonical sri", s => s.packages[0].integrity = "sha512-" + "A".repeat(85) + "B=="],
+  ["missing phase", s => s.memory.splice(1, 1)], ["extra phase", s => s.memory.push(structuredClone(s.memory[1]))],
+  ["zero files", s => s.packages[0].files = 0], ["zero record", s => s.work.modes.forEach(m => { m.record_bytes = 0; m.c2a_record_hash_bytes = "0"; })],
+  ["passes over", s => s.work.modes[0].additional_record_hash_passes = 65], ["license", s => s.packages[0].license = "MIT"],
+  ["sri padding", s => { s.packages[0].integrity = s.packages[0].expected_integrity = "sha512-" + "A".repeat(87) + "="; }],
+  ["abbreviated commit", s => { s.packages[0].commit = s.packages[0].expected_commit = "abcdef1"; }], ["files over", s => s.packages[0].files = 257],
+  ["builtin", s => s.closure.builtin = "node:buffer"], ["schema id", s => s.schema = "unsigned-worker-parser-acceptance-plan-v2"],
+  ["missing mode", s => s.work.modes.pop()], ["extra mode", s => s.work.modes.push(structuredClone(s.work.modes[1]))],
+  ["unknown phase", s => s.memory[1].phase = "parse"], ["unknown mode", s => s.work.modes[1].mode = "asan"], ["unknown group", s => s.acceptance[11].group = "other"],
+  ["negative count zero", s => s.acceptance[0].negative_cases = 0], ["negative count over", s => s.acceptance[0].negative_cases = 129],
+  ["uppercase digest", s => { s.packages[0].files_sha256 = s.packages[0].expected_files_sha256 = "A".repeat(64); }],
+  ...[["package", s => s.packages[0]], ["memory parts", s => s.memory[1].retained], ["profile", s => s.profile], ["initialization", s => s.initialization],
+    ["source bounds", s => s.source_bounds], ["memory phase", s => s.memory[1]], ["mode", s => s.work.modes[0]], ["work", s => s.work], ["acceptance group", s => s.acceptance[0]]]
+    .map(([name, at]) => ["unknown key in " + name, s => at(s).unlisted = "4000000"]),
 ];
-for (const [name, fn] of invalid) test("B1 bounded data rejects " + name, () => assert.throws(() => plan(edit(subject(), fn)), /cc4(?:a|c2cb1)_/));
+for (const [name, fn] of invalid) test("B1 bounded data rejects " + name, () => assert.throws(() => plan(edit(subject(), fn)), { message: "cc4a_invalid_input" }));
 for (const bytes of [1, 4194303, 4194304]) test("B1 coherent record summary accepts size " + bytes, () => {
   assert.equal(plan(sizedSubject(bytes)).supplied_plan_complete, true);
 });
@@ -432,6 +514,9 @@ const mutants = [
   }, (fn, s) => assert.throws(() => fn(s), { message: "cc4c2cb1_source_memory_floor" })],
   ['max(BigInt(m[k] ?? 0), minimumWork[k] ?? 0n)', 'BigInt(m[k] ?? 0)', s => s.work.modes[0].token_work = null,
     (fn, s) => { const p = fn(s); assert.equal(p.work.units.token_work.known, "196608"); assert.equal(p.work.units.token_work.modeled, null); }],
+  ...gateCases.map(([, change, expected, [from, to]]) => [from, to, change, (fn, s) => gate(fn, s, expected)]),
+  ['token_work: BigInt(Math.ceil(m.record_bytes / 256)) * parserSteps, flush_work', 'token_work: BigInt(Math.floor(m.record_bytes / 256)) * parserSteps, flush_work',
+    s => { Object.assign(s, sizedSubject(1)); s.work.modes.forEach(m => m.token_work = null); }, (fn, s) => assert.equal(fn(s).work.units.token_work.known, "6144")],
 ];
 for (const [index, [from, to, change, check]] of mutants.entries()) test("B1 behavioral mutation " + index + " " + from, () => {
   assert.equal(source.split(from).length, 2); const original = compile(source), s = edit(subject(), change);
