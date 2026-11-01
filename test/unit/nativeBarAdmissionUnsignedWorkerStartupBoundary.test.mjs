@@ -9,15 +9,23 @@ const source = read("../helpers/unsignedWorkerStartupContracts.mjs"), wire = rea
 const ast = s => ts.createSourceFile("memory.mjs", s, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 function pure(input, shared = false) {
   const s = input.replace(/\r\n/g, "\n"), tree = ast(s); assert.equal(tree.parseDiagnostics.length, 0);
-  assert.deepEqual(Array.from(tree.statements.filter(n => n.importClause), n => n.moduleSpecifier.text), shared ? ["zod", "./unsignedControllerData.mjs"]
+  // Inventories come from syntax, not text: every import is a named import, and every export is an export-modified declaration.
+  const imports = Array.from(tree.statements.filter(ts.isImportDeclaration), n => {
+    const named = n.importClause?.namedBindings; assert.equal(n.importClause?.name, undefined); assert.ok(named !== undefined && ts.isNamedImports(named));
+    return n.moduleSpecifier.text;
+  });
+  assert.deepEqual(imports, shared ? ["zod", "./unsignedControllerData.mjs"]
     : ["zod", "./unsignedControllerData.mjs", "./unsignedControllerWireContracts.mjs", "./jointUnsignedAcceptanceContracts.mjs", "./unsignedCohortQualificationContracts.mjs"]);
-  const exports = Array.from(tree.statements.filter(n => /^export\s/.test(n.getText()))).flatMap(n => n.name ? [n.name.text] : Array.from(n.declarationList.declarations, d => d.name.text));
+  const exports = Array.from(tree.statements.filter(n => n.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)))
+    .flatMap(n => ts.isVariableStatement(n) ? Array.from(n.declarationList.declarations, d => d.name.text) : [n.name?.text]);
   assert.deepEqual(exports, shared ? ["artifactSchema", "setupSchema", "readySchema", "failureSchema", "readUnsignedControllerFrame", "validateUnsignedWireBinding"]
     : ["planUnsignedWorkerStartup", "validateUnsignedWorkerStartupEnvelope", "describeUnsignedWorkerStartupCapacity"]);
   const denied = new Set(["process", "globalThis", "global", "Date", "performance", "Temporal", "Intl", "require", "createRequire", "Worker", "MessageChannel", "BroadcastChannel",
     "WeakRef", "FinalizationRegistry", "setTimeout", "clearTimeout", "setInterval", "setImmediate", "queueMicrotask", "fetch", "eval", "Function", "createPrivateKey", "createPublicKey", "sign", "verify", "spawn", "readFileSync", "writeFileSync"]);
   const visit = n => {
     if (ts.isIdentifier(n)) assert.equal(denied.has(n.text), false, n.text);
+    // Exports are declarations only; an export statement or re-export would bypass both inventories above.
+    assert.equal(ts.isExportDeclaration(n) || ts.isExportAssignment(n), false);
     if (ts.isCallExpression(n)) {
       assert.notEqual(n.expression.kind, ts.SyntaxKind.ImportKeyword);
       assert.ok(!/^(?:Reflect\.|Object\.(?:defineProperty|setPrototypeOf))/.test(n.expression.getText()));
@@ -40,7 +48,9 @@ function pure(input, shared = false) {
       'helpers > profile.helper_commands', 'metadata > 16384', 'sum(retained) > 2375680', 'sum(transient) > 4259840',
       'error.startup_work = freeze({ charged_hash_bytes: String(wireCharge), refunded: false })', 'const d = subject(input), p = plan(d)',
       'configurationBytes > LIMITS.configuration_bytes', 'h.callback !== "completed" || h.write_return === null']) assert.ok(s.includes(pin), pin);
-    assert.ok(s.indexOf('if (BigInt(d.reserved_hash_bytes)') < s.indexOf('f = readUnsignedControllerFrame(d.line)'));
+    const envelope = Array.from(tree.statements).find(n => ts.isFunctionDeclaration(n) && n.name?.text === "validateUnsignedWorkerStartupEnvelope").getText();
+    const capacity = envelope.indexOf('if (expected.frames_spent >= LIMITS.frames) refuse("frame_capacity");'), reserve = envelope.indexOf('if (BigInt(d.reserved_hash_bytes)');
+    assert.ok(capacity >= 0 && capacity < reserve && reserve < envelope.indexOf('f = readUnsignedControllerFrame(d.line)'));
     assert.ok(s.indexOf('  work(d);') >= 0 && s.indexOf('  work(d);') < s.indexOf('digest(b) !== d.expected.binding_sha256'));
     assert.doesNotMatch(s, /createUnsignedControllerProtocolModel|createUnsignedWorkerPreparationModel|validateUnsignedWorkerConfiguration|JSON\.parse|input\.binding/);
   }
@@ -51,7 +61,16 @@ test("C2a exact pure exports/dependencies and seals under LF/CRLF", () => {
 });
 test("C2a boundary mutations reject effects, widened authority and missing capacity checks", () => {
   for (const mutation of ['\nprocess.hrtime.bigint();', '\nnew Date();', '\nimport("node:fs");', '\nnew MessageChannel();', '\nx["constructor"]("return 1")();',
-    '\nObject.getOwnPropertyDescriptor(Object.getPrototypeOf(f), "constructor").value("return 1")();', '\nexport function run() {}']) assert.throws(() => pure(source + mutation), undefined, mutation);
+    '\nObject.getOwnPropertyDescriptor(Object.getPrototypeOf(f), "constructor").value("return 1")();', '\nexport function run() {}',
+    '\nexport{planUnsignedWorkerStartup as run};', '\nexport*from"node:child_process";', '\nexport/**/function run() {}', '\nimport "./unsignedCohortRuntime.mjs";'])
+    assert.throws(() => pure(source + mutation), { code: "ERR_ASSERTION" }, mutation);
+  for (const mutation of ['\nexport*from"node:fs";', '\nexport/**/const run = 1;', '\nimport "node:fs";']) assert.throws(() => pure(wire + mutation, true), { code: "ERR_ASSERTION" }, mutation);
+  // The fba58d5 order (limit after the reservation and decode), and the limit moved out of the envelope function.
+  const lf = source.replace(/\r\n/g, "\n"), early = '  if (expected.frames_spent >= LIMITS.frames) refuse("frame_capacity");\n';
+  const decoded = 'f = readUnsignedControllerFrame(d.line);\n', opened = 'function subject(input) {\n';
+  for (const s of [early, decoded, opened]) assert.equal(lf.split(s).length, 2, s);
+  for (const moved of [lf.replace(early, "").replace(decoded, decoded + early), lf.replace(early, "").replace(opened, opened + early)])
+    assert.throws(() => pure(moved), { code: "ERR_ASSERTION" });
   for (const [from, to] of [['runtime_producers: "unavailable"', 'runtime_producers: "ready"'], ['record_reader_available: false', 'record_reader_available: true'],
     ['parent_wrapper_calculated: false', 'parent_wrapper_calculated: true'], ['metadata > 16384', 'false'], ['sum(retained) > 2375680', 'false'],
     ['sum(transient) > 4259840', 'false'], ['expected.frames_spent >= LIMITS.frames', 'false'], ['helpers > profile.helper_commands', 'false']]) {

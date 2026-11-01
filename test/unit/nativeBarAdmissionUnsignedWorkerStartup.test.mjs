@@ -118,12 +118,31 @@ function envelope(kind = "LAUNCH", s = subject()) {
     expected: { kind, direction: kind === "LAUNCH" || kind === "PREPARE" ? "parent" : "worker", next_ordinal: 1,
       frames_spent: kind === "LAUNCH" ? 0 : 1, binding: s.binding, worker_clock_domain: "worker-clock" }, reserved_hash_bytes: String(8 * 65536) };
 }
+const setup = { fixture_name: "native-bar-fs-synthetic-Ab123Z", recipe_sha256: h, registration_sha256: h, envelope_sha256: h };
 function setupFailure() {
-  const d = envelope("FAILED"), setup = { fixture_name: "native-bar-fs-synthetic-Ab123Z", recipe_sha256: h, registration_sha256: h, envelope_sha256: h };
+  const d = envelope("FAILED");
   d.expected.binding = { ...d.expected.binding, setup }; d.expected.next_ordinal = 2; d.expected.frames_spent = 3;
   const f = JSON.parse(d.line); f.binding = clone(d.expected.binding); f.ordinal = 2; f.payload.phase = "prepare";
   d.line = canonical(f) + "\n"; return d;
 }
+function prepareEnvelope() {
+  const d = envelope("PREPARE"); d.expected.next_ordinal = 2; d.expected.frames_spent = 2;
+  const f = JSON.parse(d.line); f.ordinal = 2; f.binding.setup = setup; f.payload = { launch_nonce: f.binding.launch_nonce, configuration: { invented: "x".repeat(59985) } };
+  d.line = canonical(f) + "\n"; return d;
+}
+// The same frame and caller context with a setup-bearing binding on both sides, as if the initial LAUNCH carried setup.
+function withSetup(d) {
+  const v = clone(d), f = JSON.parse(v.line); v.expected.binding = { ...v.expected.binding, setup }; f.binding = clone(v.expected.binding);
+  if (f.kind === "READY") f.payload.pins_sha256 = digest(f.binding);
+  v.line = canonical(f) + "\n"; return v;
+}
+const withheldSubject = () => edit(handoffSubject(), v => Object.assign(v.handoff, { write_return: null, callback: "pending", decision: "withheld", pending_prepare: null }));
+// Moves a frame and its caller context to another ordinal and shared spent count.
+const at = (d, ordinal, spent) => editFrame(edit(d, v => { v.expected.next_ordinal = ordinal; v.expected.frames_spent = spent; }), f => f.ordinal = ordinal);
+const incompletePlans = [["unavailable component", v => v.components.record_reader = "unavailable"], ["refused component", v => v.components.native_profile = "refused"],
+  ["unknown hash cost", v => v.work.modes[1].module_bytes = null], ["unknown helper cost", v => v.work.other_helper_commands = null]];
+const changedBases = [["run", f => f.binding.run_id = "foreign-run"], ["mode", f => f.binding.mode = "ubsan"], ["artifact", f => f.binding.addon_sha256 = "b".repeat(64)],
+  ["template", f => f.binding.template_sha256 = "b".repeat(64)], ["binding nonce", f => f.binding.launch_nonce = "nonce-2"]];
 const edit = (input, f) => { const v = clone(input); f(v); return v; };
 const editFrame = (d, f) => edit(d, v => { const frame = JSON.parse(v.line); f(frame); v.line = canonical(frame) + "\n"; });
 const noAuthority = v => { assert.equal(v.native_status, "NOT_RUN"); for (const [k, value] of Object.entries(data.flags())) if (typeof value === "boolean") assert.equal(v[k], false, k); assert.ok(Object.isFrozen(v)); };
@@ -242,14 +261,73 @@ test("C2a setup-bearing FAILED accepts exact prepare binding, never launch or st
   assert.throws(() => check(edit(d, v => v.expected.binding.setup = null)), /wire_binding/);
 });
 test("C2a PREPARE is opaque pending C3, never a fixture/bootstrap grant", () => {
-  const d = envelope("PREPARE"), setup = { fixture_name: "native-bar-fs-synthetic-Ab123Z", recipe_sha256: h, registration_sha256: h, envelope_sha256: h };
-  d.expected.next_ordinal = 2; d.expected.frames_spent = 2;
-  const f = JSON.parse(d.line); f.ordinal = 2; f.binding.setup = setup; f.payload = { launch_nonce: f.binding.launch_nonce, configuration: { invented: "x".repeat(59985) } };
-  d.line = canonical(f) + "\n"; const result = check(d); noAuthority(result);
+  const d = prepareEnvelope(), result = check(d); noAuthority(result);
   assert.equal(result.classification, "pending_c3_validation"); assert.equal(result.payload, null); assert.ok(result.configuration_bytes <= 60000);
   assert.throws(() => check(editFrame(d, v => v.payload.configuration.invented += "xx")), /prepare_payload/);
   assert.throws(() => check(editFrame(d, v => v.payload.launch_nonce = "foreign")), /prepare_payload/);
   assert.throws(() => check(editFrame(d, v => v.binding.setup = null)), /prepare_binding/);
+});
+test("C2a commit review: PREPARE keeps the exact LAUNCH base binding apart from setup", () => {
+  const d = prepareEnvelope(); assert.equal(check(d).classification, "pending_c3_validation");
+  // The payload nonce stays original, so only the base binding comparison can refuse these.
+  for (const [name, change] of changedBases) assert.throws(() => check(editFrame(d, change)), /prepare_binding/, name);
+});
+test("C2a commit review: LAUNCH, READY and the startup subject require the initial null setup", () => {
+  for (const kind of ["LAUNCH", "READY"]) { assert.equal(check(envelope(kind)).kind, kind); assert.throws(() => check(withSetup(envelope(kind))), new RegExp(kind.toLowerCase() + "_binding")); }
+  const s = subject(); s.binding = { ...s.binding, setup }; s.expected.binding_sha256 = digest(s.binding);
+  assert.throws(() => plan(s), /subject_binding/);
+});
+test("C2a commit review: supplied frame context must name the first LAUNCH and the frame's kind and direction", () => {
+  assert.throws(() => check(edit(envelope(), v => v.expected.frames_spent = 1)), /launch_binding/);
+  assert.throws(() => check(edit(envelope("READY"), v => v.expected.kind = "FAILED")), /wire_order/);
+  assert.throws(() => check(edit(envelope("READY"), v => v.expected.direction = "parent")), /wire_direction/);
+});
+test("C2a commit review: handoff stays incomplete while any supplied plan input is incomplete", () => {
+  const s = handoffSubject(); assert.equal(plan(s).supplied_handoff_complete, true);
+  // Each case changes one plan input only; the handoff itself stays healthy.
+  for (const [name, change] of incompletePlans) {
+    const p = plan(edit(s, change)); assert.equal(p.supplied_plan_complete, false, name); assert.equal(p.supplied_handoff_complete, false, name); noAuthority(p);
+  }
+});
+test("C2a commit review: handoff READY pins must name the original binding", () => {
+  assert.throws(() => plan(edit(handoffSubject(), v => v.handoff.ready_payload.pins_sha256 = "b".repeat(64))), /handoff_binding/);
+});
+test("C2a commit review: a withheld READY cannot carry a pending PREPARE", () => {
+  const withheld = withheldSubject(), p = plan(withheld); assert.equal(p.supplied_handoff_complete, false); assert.equal(p.pending_prepare, null);
+  // PREPARE follows observed READY bytes, so it cannot exist after a READY that was never started.
+  assert.throws(() => plan(edit(withheld, v => v.handoff.pending_prepare = { bytes: 100, sha256: h })), /handoff_outcome/);
+  assert.equal(plan(edit(withheld, v => { v.handoff.decision = "pending"; v.handoff.pending_prepare = { bytes: 100, sha256: h }; })).pending_prepare.bytes, 100);
+});
+test("C2a commit review: a withheld READY has neither a write return nor a callback", () => {
+  assert.throws(() => plan(edit(withheldSubject(), v => v.handoff.write_return = false)), /handoff_outcome/);
+  assert.throws(() => plan(edit(withheldSubject(), v => v.handoff.callback = "completed")), /handoff_outcome/);
+});
+test("C2a commit review: manifest bytes above record bytes and an overflowing preparation end refuse on their own", () => {
+  assert.throws(() => plan(edit(subject(), v => { v.manifest.record_bytes = 4095; for (const m of v.work.modes) m.record_bytes = "4095"; })), /manifest_work/);
+  // The local end stays well after the start, so only the 120 s preparation end overflows the 30-digit ceiling.
+  assert.throws(() => plan(edit(subject(), v => { v.clock.started_ns = "999999999999999999880000000000"; v.clock.local_end_ns = "9".repeat(30); })), /clock_subject/);
+});
+test("C2a commit review: READY, FAILED and PREPARE need frame counts a startup can reach", () => {
+  for (const d of [envelope("READY"), envelope("FAILED"), at(envelope("FAILED"), 2, 2), setupFailure(), prepareEnvelope()]) assert.doesNotThrow(() => check(d));
+  for (const [name, d, reason] of [["READY as worker frame 2", at(envelope("READY"), 2, 2), /ready_binding/], ["READY before LAUNCH", at(envelope("READY"), 1, 0), /ready_binding/],
+    ["FAILED before LAUNCH", at(envelope("FAILED"), 1, 0), /failure_binding/], ["FAILED 2 before READY", at(envelope("FAILED"), 2, 1), /failure_binding/],
+    ["FAILED 3", at(envelope("FAILED"), 3, 3), /failure_binding/], ["setup FAILED 1", at(setupFailure(), 1, 3), /failure_binding/],
+    ["setup FAILED before PREPARE", at(setupFailure(), 2, 2), /failure_binding/], ["PREPARE 3", at(prepareEnvelope(), 3, 3), /prepare_binding/],
+    ["PREPARE before READY", at(prepareEnvelope(), 2, 1), /prepare_binding/]]) assert.throws(() => check(d), reason, name);
+});
+test("C2a commit review: frame ordinal must equal the expected next ordinal, and LAUNCH is ordinal 1", () => {
+  assert.throws(() => check(edit(envelope("READY"), v => v.expected.next_ordinal = 2)), /wire_order/);
+  assert.throws(() => check(at(envelope(), 2, 0)), /launch_binding/);
+});
+test("C2a commit review: unknown keys refuse at every supplied level", () => {
+  for (const [name, d] of [["envelope", edit(envelope(), v => v.extra = 1)], ["expected", edit(envelope(), v => v.expected.extra = 1)],
+    ["PREPARE payload", editFrame(prepareEnvelope(), f => f.payload.extra = 1)]]) assert.throws(() => check(d), /invalid_input/, name);
+  assert.throws(() => plan(edit(handoffSubject(), v => v.handoff.extra = 1)), /invalid_input/);
+});
+test("C2a commit review: one unknown cost nulls only its own modeled total", () => {
+  const known = plan(subject()), helper = plan(edit(subject(), v => v.work.other_helper_commands = null)), hash = plan(edit(subject(), v => v.work.modes[1].module_bytes = null));
+  assert.equal(helper.modeled_hash_bytes, known.modeled_hash_bytes); assert.equal(helper.modeled_helper_commands, null);
+  assert.equal(hash.modeled_hash_bytes, null); assert.equal(hash.modeled_helper_commands, known.modeled_helper_commands);
 });
 test("C2a capacity is bounded supplied geometry, not a parent-wrapper or runtime proof", () => {
   const s = subject(), cap = capacity(s); noAuthority(cap);
@@ -304,6 +382,25 @@ test("C2a reservation precedes shared decode and the full debit survives its fai
     assert.equal(e.message, "invented_decode_failure"); assert.deepEqual(e.startup_work, { charged_hash_bytes: "524288", refunded: false }); return true;
   }); assert.equal(calls, 1);
 });
+test("C2a commit review: exhausted shared frames refuse before any reservation or decode", () => {
+  const exhausted = (line, reserved = "524288") => edit(envelope("READY"), v => { v.line = line; v.expected.frames_spent = 32; v.reserved_hash_bytes = reserved; });
+  for (const line of [envelope("READY").line, "{}\n", "x".repeat(65535) + "\n"]) for (const reserved of ["0", "524288"])
+    assert.throws(() => check(exhausted(line, reserved)), e => { assert.match(e.message, /frame_capacity/); assert.equal(e.startup_work, undefined); return true; });
+  let calls = 0; const decode = { readUnsignedControllerFrame: (...a) => { calls++; return wire.readUnsignedControllerFrame(...a); } };
+  const strict = m => { for (const reserved of ["0", "524288"]) {
+    calls = 0; assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(exhausted("{}\n", reserved)), e => {
+      assert.match(e.message, /frame_capacity/); assert.equal(e.startup_work, undefined); return true; }); assert.equal(calls, 0);
+  } };
+  strict(compile(helperSource, decode));
+  const early = '  if (expected.frames_spent >= LIMITS.frames) refuse("frame_capacity");\n', decoded = 'f = readUnsignedControllerFrame(d.line);\n';
+  const reserve = '  if (BigInt(d.reserved_hash_bytes) < BigInt(wireCharge)) refuse("wire_reservation");\n', open = '  try {\n';
+  for (const s of [early, decoded, early + reserve, open]) assert.equal(helperSource.split(s).length, 2, s);
+  // Each wrong placement is compiled first, so only its behavior can fail the strict check; fba58d5 checked after the decode.
+  for (const [name, candidate] of [["after decode", compile(helperSource.replace(early, "").replace(decoded, decoded + early), decode)],
+    ["after reservation", compile(helperSource.replace(early + reserve, reserve + early), decode)],
+    ["charged inside the try", compile(helperSource.replace(early, "").replace(open, open + "  " + early), decode)]])
+    assert.throws(() => strict(candidate), { code: "ERR_ASSERTION" }, name);
+});
 test("C2a exhausted subject work refuses before binding or acceptance-plan hashing", () => {
   let calls = 0; const overrides = { digest: (...a) => { calls++; return digest(...a); },
     describeUnsignedAcceptanceRun: (...a) => { calls++; return recipes.describeUnsignedAcceptanceRun(...a); } };
@@ -327,7 +424,53 @@ test("C2a independent mutation controls detect missing binding/work/handoff/fram
     }],
     ['(b.setup === null ? "launch" : "prepare")', '"launch"', m => assert.doesNotThrow(() => m.validateUnsignedWorkerStartupEnvelope(setupFailure()))],
     ['expected.frames_spent >= LIMITS.frames', 'false', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope("READY"), v => v.expected.frames_spent = 32)))],
-    ['payload.worker_clock_domain !== expected.worker_clock_domain', 'false', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(editFrame(envelope("READY"), f => f.payload.worker_clock_domain = "foreign")))]
+    ['payload.worker_clock_domain !== expected.worker_clock_domain', 'false', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(editFrame(envelope("READY"), f => f.payload.worker_clock_domain = "foreign")))],
+    // Commit review: gates that no single-condition test isolated in fba58d5.
+    // One trial per case, so every case is shown to depend on the removed gate.
+    ...incompletePlans.map(([, change]) => ['complete && h && ', 'h && ', m => assert.equal(m.planUnsignedWorkerStartup(edit(handoffSubject(), change)).supplied_handoff_complete, false)]),
+    ...changedBases.map(([, change]) => ['|| canonical({ ...fb, setup: null }) !== canonical(b)', '', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(editFrame(prepareEnvelope(), change)), /prepare_binding/)]),
+    ['if (b.setup !== null || f.ordinal !== 1', 'if (f.ordinal !== 1', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(withSetup(envelope())), /launch_binding/)],
+    ['if (b.setup !== null || payload.pins_sha256', 'if (payload.pins_sha256', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(withSetup(envelope("READY"))), /ready_binding/)],
+    ['if (b.setup !== null || b.mode !== d.expected.mode', 'if (b.mode !== d.expected.mode', m => {
+      const s = subject(); s.binding = { ...s.binding, setup }; s.expected.binding_sha256 = digest(s.binding); assert.throws(() => m.planUnsignedWorkerStartup(s), /subject_binding/);
+    }],
+    [' || h.ready_payload.pins_sha256 !== d.expected.binding_sha256', '', m => assert.throws(() => m.planUnsignedWorkerStartup(edit(handoffSubject(), v => v.handoff.ready_payload.pins_sha256 = "b".repeat(64))), /handoff_binding/)],
+    [' || expected.frames_spent !== 0', '', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope(), v => v.expected.frames_spent = 1)), /launch_binding/)],
+    ['f.kind !== expected.kind || ', '', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope("READY"), v => v.expected.kind = "FAILED")), /wire_order/)],
+    [' || expected.direction !== direction', '', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope("READY"), v => v.expected.direction = "parent")), /wire_direction/)],
+    [' || h.pending_prepare !== null', '', m => assert.throws(() => m.planUnsignedWorkerStartup(edit(withheldSubject(), v => v.handoff.pending_prepare = { bytes: 100, sha256: h })), /handoff_outcome/)],
+    ['h.write_return !== null || h.callback !== "pending" || h.pending_prepare', 'h.callback !== "pending" || h.pending_prepare',
+      m => assert.throws(() => m.planUnsignedWorkerStartup(edit(withheldSubject(), v => v.handoff.write_return = false)), /handoff_outcome/)],
+    [' || h.callback !== "pending" || h.pending_prepare', ' || h.pending_prepare',
+      m => assert.throws(() => m.planUnsignedWorkerStartup(edit(withheldSubject(), v => v.handoff.callback = "completed")), /handoff_outcome/)],
+    ['\n    || m.manifest_bytes > m.record_bytes', '', m => assert.throws(() => m.planUnsignedWorkerStartup(edit(subject(), v => {
+      v.manifest.record_bytes = 4095; for (const w of v.work.modes) w.record_bytes = "4095"; })), /manifest_work/)],
+    ['start + BigInt(LIMITS.preparation_ms) * 1000000n > max || ', '', m => assert.throws(() => m.planUnsignedWorkerStartup(edit(subject(), v => {
+      v.clock.started_ns = "999999999999999999880000000000"; v.clock.local_end_ns = "9".repeat(30); })), /clock_subject/)],
+    [' || f.ordinal !== expected.next_ordinal', '', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope("READY"), v => v.expected.next_ordinal = 2)), /wire_order/)],
+    ['f.ordinal !== 1 || expected.frames_spent !== 0', 'expected.frames_spent !== 0', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(at(envelope(), 2, 0)), /launch_binding/)],
+    // Reachable frame counts for READY, FAILED and PREPARE.
+    ...[['f.ordinal !== 1 || expected.frames_spent < 1', 'expected.frames_spent < 1', () => at(envelope("READY"), 2, 2), /ready_binding/],
+      [' || expected.frames_spent < 1', '', () => at(envelope("READY"), 1, 0), /ready_binding/],
+      [' || f.ordinal > 2', '', () => at(envelope("FAILED"), 3, 3), /failure_binding/],
+      [' || b.setup !== null && f.ordinal !== 2', '', () => at(setupFailure(), 1, 3), /failure_binding/],
+      ['(b.setup === null ? 0 : 1)', '0', () => at(setupFailure(), 2, 2), /failure_binding/],
+      ['\n          || expected.frames_spent < f.ordinal + (b.setup === null ? 0 : 1)', '', () => at(envelope("FAILED"), 1, 0), /failure_binding/],
+      ['\n          || expected.frames_spent < f.ordinal + (b.setup === null ? 0 : 1)', '', () => at(envelope("FAILED"), 2, 1), /failure_binding/],
+      ['f.ordinal !== 2 || expected.frames_spent < 2', 'expected.frames_spent < 2', () => at(prepareEnvelope(), 3, 3), /prepare_binding/],
+      [' || expected.frames_spent < 2', '', () => at(prepareEnvelope(), 2, 1), /prepare_binding/]]
+      .map(([from, to, input, reason]) => [from, to, m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(input()), reason)]),
+    // Strict schemas and per-total cost attribution.
+    ['reserved_hash_bytes: uint }).strict();', 'reserved_hash_bytes: uint });', m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope(), v => v.extra = 1)), /invalid_input/)],
+    ['worker_clock_domain: label }).strict(), reserved_hash_bytes', 'worker_clock_domain: label }), reserved_hash_bytes',
+      m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(edit(envelope(), v => v.expected.extra = 1)), /invalid_input/)],
+    ['launch_nonce: label }).strict(), f.payload)', 'launch_nonce: label }), f.payload)',
+      m => assert.throws(() => m.validateUnsignedWorkerStartupEnvelope(editFrame(prepareEnvelope(), f => f.payload.extra = 1)), /invalid_input/)],
+    ['.strict().nullable() }).strict();', '.strict().nullable() });', m => assert.throws(() => m.planUnsignedWorkerStartup(edit(handoffSubject(), v => v.handoff.extra = 1)), /invalid_input/)],
+    ['modeled_hash_bytes: blockers.some(k => !k.includes("helper_commands"))', 'modeled_hash_bytes: blockers.length > 0',
+      m => assert.notEqual(m.planUnsignedWorkerStartup(edit(subject(), v => v.work.other_helper_commands = null)).modeled_hash_bytes, null)],
+    ['modeled_helper_commands: blockers.some(k => k.includes("helper_commands"))', 'modeled_helper_commands: blockers.length > 0',
+      m => assert.notEqual(m.planUnsignedWorkerStartup(edit(subject(), v => v.work.modes[1].module_bytes = null)).modeled_helper_commands, null)]
   ];
   for (const [from, to, assertion] of trials) { assert.equal(helperSource.split(from).length, 2, from); assertion(control); const candidate = compile(helperSource.replace(from, to)); assert.throws(() => assertion(candidate), { code: "ERR_ASSERTION" }, from); }
 });

@@ -45,8 +45,9 @@ function subject(input) {
   if (h) {
     if (h.binding_sha256 !== d.expected.binding_sha256 || h.ready_payload.pins_sha256 !== d.expected.binding_sha256
       || h.ready_payload.worker_clock_domain !== d.clock.clock_domain) refuse("handoff_binding");
+    // PREPARE follows observed READY bytes, so a withheld READY that was never started cannot have one pending.
     if (h.decision === "completed" && (h.callback !== "completed" || h.write_return === null)
-      || h.decision === "withheld" && (h.write_return !== null || h.callback !== "pending")) refuse("handoff_outcome");
+      || h.decision === "withheld" && (h.write_return !== null || h.callback !== "pending" || h.pending_prepare !== null)) refuse("handoff_outcome");
   }
   return { ...d, binding: b };
 }
@@ -91,19 +92,23 @@ const envelopeSchema = z.object({ line: z.string(), expected: z.object({ kind: z
   binding: z.unknown(), worker_clock_domain: label }).strict(), reserved_hash_bytes: uint }).strict();
 
 export function validateUnsignedWorkerStartupEnvelope(input) {
-  const d = parse(envelopeSchema, input);
+  const d = parse(envelopeSchema, input), expected = d.expected;
+  // A frame beyond the shared limit was never reserved, so it refuses before any debit or decode.
+  if (expected.frames_spent >= LIMITS.frames) refuse("frame_capacity");
   if (BigInt(d.reserved_hash_bytes) < BigInt(wireCharge)) refuse("wire_reservation");
   // Reservation is consumed before decode/canonical/hash. Failure carries the same debit; there is no refund or runtime ledger here.
   try {
-    const expected = d.expected, b = validateUnsignedWireBinding(expected.binding), f = readUnsignedControllerFrame(d.line);
-    if (expected.frames_spent >= LIMITS.frames) refuse("frame_capacity");
+    const b = validateUnsignedWireBinding(expected.binding), f = readUnsignedControllerFrame(d.line);
     if (f.kind !== expected.kind || f.ordinal !== expected.next_ordinal) refuse("wire_order");
     const direction = ["LAUNCH", "PREPARE"].includes(f.kind) ? "parent" : "worker";
     if (f.direction !== direction || expected.direction !== direction) refuse("wire_direction");
     const fb = validateUnsignedWireBinding(f.binding);
     let payload = null, configurationBytes = null;
+    // Counts are those a startup can reach: LAUNCH is parent frame 1, READY worker frame 1, PREPARE parent frame 2 after READY, and
+    // FAILED worker frame 1 or 2 (2 with setup, after READY and PREPARE). Bytes before a spent LAUNCH never attribute status.
     if (f.kind === "PREPARE") {
-      if (b.setup !== null || fb.setup === null || canonical({ ...fb, setup: null }) !== canonical(b)) refuse("prepare_binding");
+      if (b.setup !== null || fb.setup === null || canonical({ ...fb, setup: null }) !== canonical(b)
+        || f.ordinal !== 2 || expected.frames_spent < 2) refuse("prepare_binding");
       const p = parse(z.object({ configuration: z.unknown(), launch_nonce: label }).strict(), f.payload);
       configurationBytes = byteLength(canonical(p.configuration));
       if (configurationBytes > LIMITS.configuration_bytes || p.launch_nonce !== b.launch_nonce) refuse("prepare_payload");
@@ -114,10 +119,12 @@ export function validateUnsignedWorkerStartupEnvelope(input) {
         parse(z.object({}).strict(), f.payload);
       } else if (f.kind === "READY") {
         payload = parse(readySchema, f.payload);
-        if (b.setup !== null || payload.pins_sha256 !== digest(b) || payload.worker_clock_domain !== expected.worker_clock_domain) refuse("ready_binding");
+        if (b.setup !== null || payload.pins_sha256 !== digest(b) || payload.worker_clock_domain !== expected.worker_clock_domain
+          || f.ordinal !== 1 || expected.frames_spent < 1) refuse("ready_binding");
       } else {
         payload = parse(failureSchema, f.payload);
-        if (payload.query_created || payload.phase !== (b.setup === null ? "launch" : "prepare")) refuse("failure_binding");
+        if (payload.query_created || payload.phase !== (b.setup === null ? "launch" : "prepare") || f.ordinal > 2 || b.setup !== null && f.ordinal !== 2
+          || expected.frames_spent < f.ordinal + (b.setup === null ? 0 : 1)) refuse("failure_binding");
       }
     }
     return freeze({ ...base(), schema: "native-bar-worker-startup-envelope-v1", kind: f.kind, direction: f.direction, ordinal: f.ordinal,

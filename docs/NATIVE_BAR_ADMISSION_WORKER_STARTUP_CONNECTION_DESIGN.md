@@ -1,6 +1,6 @@
 # B4-C2 Worker Startup Connection
 
-Status: **C2a implemented, memory-tested and independently reviewed after test-coverage corrections; C2b/c/d remain pending**, 2026-11-01 JST. The [review checkpoint](#c2a-independent-review-and-corrections) supersedes the initial [implementation checkpoint](#c2a-implementation-and-memory-verification) and next-approval recommendation below. Baseline: `0ca489a`, including the [latest C1 status-stream correction](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#b4-c1-commit-review-correction). This refines [B4-C2](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#proposed-slices), not operational 4-C. The [transport](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and [qualification](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md) contracts remain controlling. Invocation is not approved.
+Status: **C2a implemented, memory-tested, independently reviewed and corrected after commit review; C2b/c/d remain pending**, 2026-11-01 JST. The [commit review correction](#c2a-commit-review-correction) supersedes the envelope/handoff rules and counts of the [review checkpoint](#c2a-independent-review-and-corrections), which superseded the initial [implementation checkpoint](#c2a-implementation-and-memory-verification) and next-approval recommendation below. Baseline: `0ca489a`, including the [latest C1 status-stream correction](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#b4-c1-commit-review-correction). This refines [B4-C2](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#proposed-slices), not operational 4-C. The [transport](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and [qualification](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md) contracts remain controlling. Invocation is not approved.
 
 No real port, clock or timer, build, subprocess, native load/read, fixture operation, signing, real-data operation, MCP registration or production activation is permitted. Dot remains PAUSED. Judgment, observation bands, confirmation counts, notification/mail and retention conditions are unchanged. Later connection-code approval does not authorize invocation.
 
@@ -203,3 +203,49 @@ The test reviewer re-read the corrections and found all three closed, no masking
 The implementing session reran all eight selected files with Node 24.18.0, one file per `--test --test-isolation=none` invocation: **783 pass, 0 fail, 0 skips**. Startup is now **72**, startup boundary **5**; controller/controller boundary/C1/C1 boundary/transport/parent composition remain 209/14/158/5/250/70. New coverage detects **8 behavioral / 19 static mutations** with successful controls. Diagnostic/frame/buffer measurements remain 4371, 1912/3287 and 393216/4259840 bytes respectively; the previous 779 and 69/4 counts are historical implementation evidence.
 
 Dot remains PAUSED with its full configuration hash unchanged. No real ports/clocks/timers, build, test-runner child processes, native load/read, fixture/signing/data operations, MCP registration, production activation or push was performed. Full-unit and operational qualification remain unrun. C2b/c/d and later producer gates are not unlocked by this review.
+
+## C2a Commit Review Correction
+
+2026-11-01 JST, memory-only. The commit review of `fba58d5` compared the code with this design and reran it in archive copies. The 25 related files (1430 tests) passed in every condition: Node 24 three times, linux/win32 spoofs, Node 20.19.6 and 26.12.1, isolation=none and CRLF. The full unit suite passed 4955 of 4957 tests on Node 24 and Node 20 (0 fail, 0 cancelled, 2 existing skips). The shared definitions matched `0ca489a` text and the capacity table above. The review found no contract defect for valid startup paths, but did find the following:
+
+- **Untested gates (P2).** Removing any one of these checks left all 72 startup tests passing:
+  - plan completeness inside the handoff projection, which was masked because every incomplete-plan example also had an incomplete handoff;
+  - PREPARE base-binding equality;
+  - the initial null-setup checks for LAUNCH, READY and the startup subject.
+  The independent review of this correction found more masked checks: the next-ordinal check and LAUNCH's ordinal 1 (each hid the other), the withheld write and callback checks, manifest bytes above record bytes, and the preparation-end overflow (hidden by the local-end check). The handoff READY pins, LAUNCH's spent count, the expected kind and direction, schema strictness for the envelope, its expected context, the handoff and the PREPARE payload, and the attribution of one unknown cost to its own modeled total were also untested (P3).
+- **Frame-count context (P2, from the helper review; existed before this correction).** Only LAUNCH checked its counters. READY, FAILED and PREPARE were accepted with counts no startup can reach, including worker status before a spent LAUNCH, against Startup Sequence step 3.
+- **Frame limit checked after decode (P3).** With 32 frames spent, a malformed line was refused with a decode code, and a 33rd wire charge was debited although the plan reserves only 32 per start.
+- **Withheld READY with a pending PREPARE (P3).** The projection accepted and echoed it, although PREPARE follows observed READY bytes, which a never-started READY cannot have produced.
+- **Boundary inventory gaps (P2 after review).** The text-based export inventory missed `export{...}`, `export*from"..."` and `export/**/function`, and side-effect imports escaped the import inventory, for both the startup and shared wire modules.
+
+Corrections, in the startup helper and its two tests only:
+
+- `validateUnsignedWorkerStartupEnvelope` refuses `frame_capacity` first, before the wire-reservation check and any decode. That refusal carries no `startup_work` debit, so a start never takes more than its 32 reserved wire charges. Refusals inside the frame budget keep their debit as before. This follows the parent's `appendLate()` order. The parent's normal `accept()` is unchanged: it still decodes first, so a malformed 33rd line is refused there with a decode code. Both refuse.
+- Envelopes need counts a startup can reach:
+  - READY is worker ordinal 1 with at least 1 spent frame;
+  - PREPARE is parent ordinal 2 with at least 2;
+  - FAILED is worker ordinal 1 or 2 with spent frames at least its ordinal;
+  - a setup-bearing FAILED is ordinal 2 with at least 3.
+  These are lower bounds. Caller-supplied counters remain model context, not an independent lifecycle.
+- A withheld READY with a non-null `pending_prepare` refuses `handoff_outcome`.
+- Every gate above now has a test that changes one condition from a passing control. Each gate also has a behavioral mutation trial, and looped cases get one trial per case. The frame-limit test compiles the three wrong placements (after the decode as in `fba58d5`, after the reservation, and charged inside the try) as negative controls.
+- The boundary guard builds both inventories from syntax, as the controller `guard()` does. Imports must be named imports, exports must be export-modified declarations, and export statements or re-exports are refused. The frame-limit order is pinned inside the envelope function.
+
+These rules replace the earlier checkpoints' statements that every refused frame carries the wire debit, that review left no actionable contract defect and that no helper logic changed, together with their test and mutation counts. Public exports, schemas, wire payloads, budgets, capacities (diagnostic 4371 / 16384, READY/FAILED 1912 / 3287, retained 393216, transient 4259840) and parent behavior are unchanged.
+
+Not adopted:
+- The handoff decision `pending` covers both C1's planned and started READY. A supplied projection can therefore pair a planned READY with a pending PREPARE that C1 would refuse. Distinguishing the two needs a started fact in the schema, which belongs with the original event ordering in C2d. Such a handoff stays incomplete.
+- The `pending_prepare.bytes` minimum stays 1. That value grants nothing.
+- The counts stay lower bounds. A null-setup FAILED with 3 spent frames is accepted, although the parent would require prepare phase once PREPARE is counted. Whether a counted frame was a PREPARE is frame history, which belongs to the C2d composition. That composition must not offer such a FAILED.
+- Running several effect-denying files in one isolation=none process blocks module resolution of the next file. This already happens with the controller and C1 harnesses. CI uses the default process isolation.
+
+Verification:
+- Startup 85 tests and startup boundary 5.
+- 41 distinct behavioral mutations (49 trial runs) and 28 static mutations are detected with successful controls.
+- Of the new behavioral tests, 4 fail on `fba58d5`: the frame counts, the withheld PREPARE, the frame-limit order and the trial list. The single-condition coverage tests pass there and detect their mutants instead.
+- 29 further independent mutants, run outside the test file, are each detected by a dedicated test.
+- The 25 related files (1443 tests) pass in all nine conditions. The full unit suite passes 4968 of 4970 tests on Node 24 and Node 20 (0 fail, 0 cancelled, 2 existing skips).
+- Two read-only reviewers covered helper semantics and tests/mutations; their findings were adopted as described.
+- The helper re-review also found a C1 issue that predates this correction. After a READY is withheld by a stop, the C1 preparation model numbers the FAILED write as worker ordinal 2 (`statuses.length + 1` still counts the withheld READY), while the parent expects ordinal 1. This correction does not change C1; the fix needs its own approval.
+
+Dot remains PAUSED. No real port, clock, timer, native, fixture, signing, data, MCP registration, production activation or push operation was performed. C2b/c/d remain pending.
