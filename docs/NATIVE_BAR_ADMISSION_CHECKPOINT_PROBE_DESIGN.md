@@ -1,6 +1,6 @@
 # B3-B Checkpoint Probe And Fixed Memory Oracle
 
-Status: **B3-Bc independently reviewed; low-priority helper correction implemented and memory-tested**, 2026-10-27 JST. Design baseline: `3b202f5`; B3-Ba starts from `abdd7e6`, B3-Bb from `39c248f`, B3-Bc from the reviewed Bb baseline `ba40238`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end.
+Status: **B3-Bc independently reviewed; low-priority helper correction implemented and memory-tested**, 2026-10-27 JST. Design baseline: `3b202f5`; B3-Ba starts from `abdd7e6`, B3-Bb from `39c248f`, B3-Bc from the reviewed Bb baseline `ba40238`. This document refines [B-3 orchestration](NATIVE_BAR_ADMISSION_JOINT_READ_DESIGN.md), not its market or retention rules. The original proposal and historical slice boundaries below are retained; the latest approved boundary is recorded at the end. Test-only update, 2026-11-01 JST: [B3-Ba worker hang-guard correction](#b3-ba-worker-hang-guard-correction).
 
 ## Scope And Non-Goals
 
@@ -250,6 +250,39 @@ The committer's review of `83c1b3c` found no must-fix issue. One low-priority de
 Clarification: `describe` takes one fresh clock sample, so it can record an expiry that has already occurred. It adds no verified fact.
 
 Verification: the B3-Ba probe, boundary and registry suites pass 65 cases on each of three repeated runs. The E/B unit suites pass 441, and the full unit suite passes 2,711 with two existing skips, with source/test hashes fixed. No signing, native code, fixture or runtime entry changed.
+
+### B3-Ba Worker Hang-Guard Correction
+
+Test-only update, 2026-11-01 JST, on `2c2a484`. Pre-push full-suite runs found one timing failure in this unchanged test file:
+
+- *Symptom.* Each of the sixteen isolated host-source fault cases races its worker's result against a parent timer, which was 5 s. In the full parallel unit suite on Node 20.19.6 (standing in for CI's Node 22), `state_exhaustion` rose from 1.7–2.0 s on `origin/main` (3,387 tests) to 3.3–3.6 s at `2c2a484` (4,715 tests). One of three runs failed at 5.01 s. Run alone, the file still takes 1.7–2.1 s. The case fills the 16-MiB registry state budget with up to 2,000 synthetic enrollments. The added B4 suites change none of its code; they only add CPU contention, and CI runners are slower per core.
+- *Fix.* The parent timer is now a 30-s hang guard. The worker's wall clock, monotonic clock and UUID source are faked before the probe loads, so no scenario outcome depends on real time. The probe's unref'd ttl timer is cleared before any macrotask turn. A worker that exits without posting a result now fails at once instead of waiting for the guard; Node delivers a worker's messages before its `exit` event.
+- *Reproduction.* The load was sixteen background-QoS busy loops filling the efficiency cores. Under it, the old and new files ran concurrently:
+  - The 5-s version failed 6 of 8 runs at 5.04–5.12 s.
+  - The 30-s version passed all 8, taking up to 10.1 s.
+  - Three whole-file runs of the final version under the same load passed, with `state_exhaustion` at 11.5–11.8 s.
+- *Mutants.*
+  - A worker that awaits forever and exits without a result fails in under 1 s; without the new `exit` listener it waited the full 30 s.
+  - A spinning worker fails at 30 s with the deadline message.
+  - An uncaught worker error still fails at once.
+  - No worker is left behind.
+  - 600 runs on each of Node 20.19.6, 24.18.0 and 26.12.1 never saw `exit` before the message. These included a 1-MiB message followed at once by `process.exit(0)`.
+- *Verification.* The file passes 49 tests:
+  - three times on Node 24;
+  - with linux and win32 platform spoofs;
+  - on Node 20.19.6 and 26.12.1;
+  - with `--test-isolation=none`;
+  - and as CRLF.
+
+  The full unit suite passes 4,713 of 4,715 tests, with two existing skips and no failures or cancellations, once on Node 24 and three times on Node 20.19.6.
+- *Review.* Two read-only reviewers reported no P1 or P2 issues:
+  - The first checked the change, the faked clocks, the 16-MiB figure and the runner and CI behaviour. Its two P3 suggestions are adopted: the `exit` listener and shorter comment wording. Its re-review of the corrected diff found nothing left.
+  - The second surveyed every other wall-clock limit in the unit suite against baseline and current logs. It found no other test past its limit.
+- *Unchanged.* The sibling B3-Bc completion guard stays at 10 s, with a 0.7-s maximum observed. No source, build output, native code, signing, fixture, data path, MCP registration or production setting changed.
+- *Left for a separate decision.* The redaction stall test (`test/unit/redact.test.mjs`) allows 2 s per input:
+  - Its slowest input takes 0.13 s alone.
+  - It failed at 2.16 s under the same artificial load.
+  - Neither that test nor its source changed in these commits.
 
 ## B3-Bb Implemented Boundary
 

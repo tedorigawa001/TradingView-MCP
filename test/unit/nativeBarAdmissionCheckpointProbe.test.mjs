@@ -135,7 +135,11 @@ for (const scenario of ["equal_samples", "rng_throw", "rng_invalid", "rng_pin", 
     let timer;
     try {
       const message = await new Promise((resolve, reject) => {
-        worker.once("message", resolve); worker.once("error", reject); timer = setTimeout(() => reject(Error("host-fault worker deadline")), 5000);
+        // A hang guard only: the worker's clocks are faked, so no outcome depends on real time. state_exhaustion fills the
+        // 16 MiB state budget and can exceed 5 s in the full parallel suite. A worker that exits without a result fails at once.
+        worker.once("message", resolve); worker.once("error", reject);
+        worker.once("exit", (code) => reject(Error(`host-fault worker exited (${code}) without a result`)));
+        timer = setTimeout(() => reject(Error("host-fault worker deadline")), 30000);
       }); assert.equal(message.ok, true, message.message);
     } finally { clearTimeout(timer); await worker.terminate(); }
   });
