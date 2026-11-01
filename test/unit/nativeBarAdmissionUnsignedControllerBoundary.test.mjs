@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import ts from "typescript";
+import { createUnsignedIsolatedTypeScript } from "../helpers/unsignedIsolatedTypeScript.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const ts = createUnsignedIsolatedTypeScript(read("../../node_modules/typescript/lib/typescript.js"));
 const ast = (s) => ts.createSourceFile("memory.mjs", s, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 const walk = (n, f) => { f(n); ts.forEachChild(n, (child) => walk(child, f)); };
 const specifications = {
@@ -14,8 +15,11 @@ const specifications = {
     exports: ["observationSchema", "validateUnsignedControllerObservation", "describeUnsignedControllerLimitations", "assessUnsignedControllerAssertions"] },
   Contracts: { imports: ["zod:z", "./jointUnsignedAcceptanceContracts.mjs:describeUnsignedFixture", "./unsignedWorkerConfiguration.mjs:validateUnsignedWorkerConfiguration",
     "./unsignedControllerObservation.mjs:validateUnsignedControllerObservation",
-    "./unsignedControllerData.mjs:uint,label,code,digestSchema as hash,count,parse,copyData,canonical,sha,digest,byteLength,decode,resourcesSchema,baselineSchema,traceSchema,freeze,flags,refuse,LIMITS"],
+    "./unsignedControllerWireContracts.mjs:artifactSchema,setupSchema,readySchema,failureSchema,readUnsignedControllerFrame as readFrame",
+    "./unsignedControllerData.mjs:uint,label,code,digestSchema as hash,count,parse,copyData,canonical,sha,digest,byteLength,resourcesSchema,baselineSchema,traceSchema,freeze,flags,refuse,LIMITS"],
     exports: ["createUnsignedControllerProtocolModel", "describeUnsignedControllerCapacity", "createUnsignedControllerWindowModel"] },
+  WireContracts: { imports: ["zod:z", "./unsignedControllerData.mjs:label,code,digestSchema as hash,count,parse,decode,resourcesSchema,freeze,refuse,LIMITS"],
+    exports: ["artifactSchema", "setupSchema", "readySchema", "failureSchema", "readUnsignedControllerFrame", "validateUnsignedWireBinding"] },
   Evidence: { imports: ["zod:z", "./jointUnsignedAcceptanceContracts.mjs:describeUnsignedFixture,describeUnsignedAcceptanceRun", "./unsignedControllerContracts.mjs:createUnsignedControllerProtocolModel",
     "./unsignedControllerObservation.mjs:observationSchema,validateUnsignedControllerObservation,assessUnsignedControllerAssertions",
     "./unsignedControllerData.mjs:uint,code,label,digestSchema as hash,count,parse,canonical,digest,sha,byteLength,descriptor,decode,resourcesSchema,baselineSchema,traceSchema,freeze,flags,refuse,LIMITS"],
@@ -27,12 +31,12 @@ const forbidden = new Set(["process", "globalThis", "global", "crypto", "Date", 
   "queueMicrotask", "AbortSignal", "AbortController", "WebSocket", "EventSource", "XMLHttpRequest", "MessageChannel", "BroadcastChannel"]);
 function guard(s, expected) {
   const tree = ast(s);
-  const imports = tree.statements.filter(ts.isImportDeclaration).map((n) => {
+  const imports = Array.from(tree.statements.filter(ts.isImportDeclaration), (n) => {
     assert.equal(n.importClause?.name, undefined); assert.ok(ts.isNamedImports(n.importClause?.namedBindings));
     return n.moduleSpecifier.text + ":" + n.importClause.namedBindings.elements.map((e) => e.propertyName ? `${e.propertyName.text} as ${e.name.text}` : e.name.text).join(",");
   });
   assert.deepEqual(imports, expected.imports);
-  const exports = tree.statements.filter((n) => n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword))
+  const exports = Array.from(tree.statements.filter((n) => n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)))
     .flatMap((n) => ts.isVariableStatement(n) ? n.declarationList.declarations.map((d) => d.name.text) : [n.name?.text]);
   assert.deepEqual(exports, expected.exports);
   walk(tree, (n) => {
@@ -115,7 +119,7 @@ function lateGuard(source) {
   walk(late, n => { if (ts.isBinaryExpression(n) && ts.isIdentifier(n.left) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
     assert.equal(forbiddenWrites.has(n.left.text), false, n.left.text); });
   assert.equal((normal.match(/workerPayload\(f.kind, p\)/g) ?? []).length, 6);
-  const reader = functions.get("readFrame").getText(), well = reader.indexOf('!raw.isWellFormed()'), decodeAt = reader.indexOf('decode(raw,');
+  const reader = read("../helpers/unsignedControllerWireContracts.mjs"), well = reader.indexOf('!raw.isWellFormed()'), decodeAt = reader.indexOf('decode(raw,');
   assert.ok(well >= 0 && decodeAt >= 0 && well < decodeAt);
   assert.ok(methods.get("planShutdown").getText().includes('lateCapture.capture !== "refused"'));
   assert.ok(methods.get("noteShutdownWrite").getText().includes('lateCapture.capture === "refused"'));

@@ -2,11 +2,10 @@ import { z } from "zod";
 import { describeUnsignedFixture } from "./jointUnsignedAcceptanceContracts.mjs";
 import { validateUnsignedWorkerConfiguration } from "./unsignedWorkerConfiguration.mjs";
 import { validateUnsignedControllerObservation } from "./unsignedControllerObservation.mjs";
-import { uint, label, code, digestSchema as hash, count, parse, copyData, canonical, sha, digest, byteLength, decode,
+import { artifactSchema, setupSchema, readySchema, failureSchema, readUnsignedControllerFrame as readFrame } from "./unsignedControllerWireContracts.mjs";
+import { uint, label, code, digestSchema as hash, count, parse, copyData, canonical, sha, digest, byteLength,
   resourcesSchema, baselineSchema, traceSchema, freeze, flags, refuse, LIMITS } from "./unsignedControllerData.mjs";
 
-const artifactSchema = z.object(Object.fromEntries(["js_set_sha256", "addon_sha256", "observer_sha256", "controller_sha256", "worker_sha256",
-  "runtime_closure_sha256", "node_binary_sha256", "build_record_sha256", "reader_source_sha256", "reader_js_sha256"].map((k) => [k, hash]))).strict();
 const allocationSchema = z.object({ fixture: z.object({ request: z.unknown(), case_id: label, mode: z.enum(["normal", "ubsan"]), ids: z.unknown() }).strict(),
   exchange_id: label, launch_nonce: label, source_tree_sha256: hash, signature_profile: z.literal("linker_adhoc"), artifacts: artifactSchema }).strict();
 function allocation(input) {
@@ -18,29 +17,16 @@ function allocation(input) {
     plan_sha256: recipe.plan_sha256, template_sha256: digest({ declaration: logical, entries: recipe.entries }),
     exchange_id: d.exchange_id, launch_nonce: d.launch_nonce, signature_profile: d.signature_profile, ...d.artifacts, setup: null }) };
 }
-const setupSchema = z.object({ fixture_name: z.string().regex(/^native-bar-fs-synthetic-[A-Za-z0-9]{6}$/), recipe_sha256: hash,
-  registration_sha256: hash, envelope_sha256: hash }).strict();
-const failureSchema = z.object({ phase: z.enum(["launch", "prepare", "go", "settlement", "finalize"]), primary_code: code, close_errors: z.array(code).max(8),
-  diagnostic_sha256: hash.nullable(), resources: resourcesSchema.nullable(), query_created: z.boolean(), instrumentation_overflow: z.boolean() }).strict();
 const releaseSchema = z.object({ baseline_sha256: hash, resources: resourcesSchema, query: z.literal("settled"), native: z.literal("settled"),
   original_operation_retired: z.literal(true), query_released: z.literal(true), close_errors: z.array(code).max(8),
   diagnostic_sha256: hash, observation_sha256: hash.nullable(), trace_chunks: count(8), trace_events: count(128), trace_sha256: hash,
   primary_code: code, requests_dispatched: count(2), authenticated_requests: count(2),
   c0_dispatched_at: z.null(), c0_authenticated_at: z.null(), retired_at: z.null() }).strict();
 const exitSchema = z.object({ exit_code: count(255).nullable(), signal: z.string().regex(/^SIG[A-Z0-9]{1,12}$/).nullable() }).strict();
-const frameSchema = z.object({ binding: z.unknown(), direction: z.enum(["parent", "worker"]), ordinal: count(32, 1),
-  kind: z.enum(["LAUNCH", "READY", "PREPARE", "BASELINED", "GO", "TRACE_CHUNK", "OBSERVED", "RELEASED", "FAILED", "CANCEL", "FINALIZE"]), payload: z.unknown() }).strict();
 const empty = z.object({}).strict();
-const readySchema = z.object({ addon_protocol: z.literal(6), mode: z.literal("synthetic_only"), pins_sha256: hash, worker_clock_domain: label }).strict();
 const chunkSchema = z.object({ chunk_index: count(7), events: z.array(traceSchema).min(1).max(16) }).strict();
 const singletonBits = { READY: 1, BASELINED: 2, OBSERVED: 4, RELEASED: 8, FAILED: 16 };
 const errorCode = e => /^cc4a_[a-z_]+$/.test(e?.message) ? e.message.slice(5) : "invalid_input";
-function readFrame(raw) {
-  if (typeof raw !== "string") refuse("encoding");
-  if (raw.length > LIMITS.frame_bytes) refuse("byte_bound");
-  if (!raw.isWellFormed()) refuse("encoding");
-  return parse(frameSchema, decode(raw, LIMITS.frame_bytes));
-}
 function workerPayload(kind, payload) {
   if (kind === "OBSERVED") return validateUnsignedControllerObservation(payload);
   const schema = { READY: readySchema, BASELINED: baselineSchema, TRACE_CHUNK: chunkSchema, RELEASED: releaseSchema, FAILED: failureSchema }[kind];
