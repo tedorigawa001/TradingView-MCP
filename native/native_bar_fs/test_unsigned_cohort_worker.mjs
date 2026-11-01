@@ -233,7 +233,9 @@ async function prepareOriginalWorkerStartup() {
       else if (event === "finish") s.statusFinish = true;
       else if (event === "end") s.statusEnd = true;
       else s.statusError ??= event === "reverse" ? "reverse_traffic" : "status_error";
-      if (event !== "finish" && (event !== "end" || !s.endAttempted)) stopOriginalWorker(s, "status_" + event);
+      if (event !== "finish" && (event !== "end" || !s.endAttempted)) {
+        if (s.pending?.started) s.pending.decision = "uncertain"; stopOriginalWorker(s, "status_" + event);
+      }
     } else { if (event === "close") s.commandClosed = true; stopOriginalWorker(s, "command_" + event); }
     progressOriginalWorkerStop(s);
   }
@@ -342,7 +344,8 @@ async function prepareOriginalWorkerStartup() {
     if (!s.exitAttempted) { s.exitAttempted = true; try { process.exitCode = 1; } catch { noteOriginalWorkerError(s, "exit_code_unknown"); } }
     const r = s.pending;
     if (r && !r.started) { r.decision = "withheld"; r.line = null; s.pending = null; clearOriginalWorkerTimer(s, "operation"); }
-    else if (r && r.started) r.decision = "uncertain";
+    // A stopped READY never qualifies. FAILED is written after the stop, so only its own completion and status-stream facts decide it.
+    else if (r && r.started && r.kind !== "FAILED") r.decision = "uncertain";
     progressOriginalWorkerStop(s);
   }
   function progressOriginalWorkerStop(s) {

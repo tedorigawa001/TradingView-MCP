@@ -1,6 +1,6 @@
 # B4-C2 Worker Startup Connection
 
-Status: **C2a independently reviewed/corrected; C2b independently reviewed/corrected and memory-tested with its entry closed; C2c/d remain pending**, 2026-11-01 JST. The [C2b review correction](#c2b-independent-review-and-corrections) supersedes the initial [implementation checkpoint](#c2b-implementation-and-memory-verification) below. Review and a conditional commit are approved; all invocation remains unapproved/unperformed. The [C2a commit review correction](#c2a-commit-review-correction) supersedes the envelope/handoff rules and counts of the [review checkpoint](#c2a-independent-review-and-corrections), which superseded the initial [implementation checkpoint](#c2a-implementation-and-memory-verification) and next-approval recommendation below. C2b source baseline: `69e13f1`; original design baseline: `0ca489a`, including the [latest C1 status-stream correction](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#b4-c1-commit-review-correction). This refines [B4-C2](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#proposed-slices), not operational 4-C. The [transport](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and [qualification](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md) contracts remain controlling.
+Status: **C2a independently reviewed/corrected; C2b independently reviewed, committed as `4b69fc3`, corrected after commit review and memory-tested with its entry closed; C2c/d remain pending**, 2026-11-01 JST. The [C2b commit review correction](#c2b-commit-review-correction) supersedes the counts of the [C2b review correction](#c2b-independent-review-and-corrections) and changes how a stop treats an in-flight FAILED; that review correction superseded the initial [implementation checkpoint](#c2b-implementation-and-memory-verification) below. Review and a conditional commit are approved; all invocation remains unapproved/unperformed. The [C2a commit review correction](#c2a-commit-review-correction) supersedes the envelope/handoff rules and counts of the [review checkpoint](#c2a-independent-review-and-corrections), which superseded the initial [implementation checkpoint](#c2a-implementation-and-memory-verification) and next-approval recommendation below. C2b source baseline: `69e13f1`; original design baseline: `0ca489a`, including the [latest C1 status-stream correction](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#b4-c1-commit-review-correction). This refines [B4-C2](NATIVE_BAR_ADMISSION_WORKER_PREPARATION_DESIGN.md#proposed-slices), not operational 4-C. The [transport](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md), [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and [qualification](NATIVE_BAR_ADMISSION_COHORT_QUALIFICATION_DESIGN.md) contracts remain controlling.
 
 No real port, clock or timer, build, subprocess, native load/read, fixture operation, signing, real-data operation, MCP registration or production activation is permitted. Dot remains PAUSED. Judgment, observation bands, confirmation counts, notification/mail and retention conditions are unchanged. Later connection-code approval does not authorize invocation.
 
@@ -313,3 +313,84 @@ Five P2 test-boundary/coverage findings were corrected:
 Verification uses Node 24.18.0, one file per `--test --test-isolation=none` invocation: connection **71**, connection boundary **4**, startup **85/5**, preparation **158/5**, controller **209/14**, transport **250**, parent composition **70**; **871 passed**, no failures/cancellations/skips. The connection suite detects **21 behavioral mutants**, each after a successful control and unique syntax-checked source substitution. Boundary tests detect **21 static mutations** (15 worker-source and 6 low-level guard/inventory deletions). A mutant's setup/anchor error is not accepted as coverage.
 
 The independent connection maximum remains **3260 bytes**, combined startup/connection diagnostics **7645 / 16384**. There are no schema, shared helper/model, parent wire, frame/work/native/buffer-limit or judgment/notification changes. The C1 withheld-READY ordinal defect is still separate and unmodified. C2c record parser, startup/disposition/work producers, C2d/full preparation and host/operational qualification remain unavailable. No full unit/effectful suite, real port/clock/timer, child process, build, native read, fixture operation, signing, real-data operation, MCP registration, production activation or push is performed. Dot remains PAUSED and its full configuration SHA-256 is unchanged.
+
+
+## C2b Commit Review Correction
+
+2026-11-01 JST, review of `4b69fc3` against the code. In `git archive` copies the commit passed 27 related files / 1518 tests with Node 24.18.0 three times, linux/win32 platform spoofs, Node 20.19.6/26.12.1 and isolation=none. Its full unit suite passed 5043 of 5045 tests on Node 24 and Node 20, with no failures or cancellations and the 2 existing skips. A CRLF checkout failed one connection-boundary test.
+
+Findings:
+
+- P2: The connection boundary's mutation probes searched the raw checkout for `runUnsignedCohortWorker();\n`. The repository has no `.gitattributes` and windows-latest checks out CRLF, so the probe was not found and the test failed. This is the same class of failure as `76cf5da`.
+- P2: The stream-level status tests send no LAUNCH, so FAILED was withheld by the missing binding alone. Removing the status-error checks in stop progression, planning, dispatch and settlement together passed all 71 connection tests, and so did removing the matching status-close checks.
+- P2: No test passed an error to the write callback, and none asserted a completed FAILED. Ignoring a callback error, or classifying every FAILED as uncertain, passed every test. The current behavior was correct: READY became uncertain, the worker stopped and FAILED was withheld.
+- P2: The builtin inventory recorded only direct `process.getBuiltinModule(...)` calls. The root body never runs in the memory harness, and `Reflect.apply` is the file's normal call form. Inserting `Reflect.apply(process.getBuiltinModule, process, ["node:child_process"])` or `globalThis.process.getBuiltinModule("node:fs")` there still passed all four boundary tests.
+- P3: `stopOriginalWorker` marked every started write uncertain. FAILED is always written after the stop, so any later unrelated stop made a FAILED with a known callback and return uncertain. For example, FD3 `close` can follow EOF before the FAILED callback.
+- P3: Of 150 independent source mutants, 25 failed a behavioral test. Some behaviors had no test even with every redundant gate removed: receive-time rechecks after decode/hash, timer-callback faults, unexpected lifetime-pair events and monotonic rollback. The root order after the imports was not pinned either.
+
+Corrections:
+
+- Worker: a stop still makes an in-flight READY uncertain, because a stopped READY never qualifies. An in-flight FAILED is decided by its callback, return, time, references and status-stream facts. A status-stream error, close, end or reverse data makes the in-flight write of either kind uncertain at once. No other rule, limit, payload or seal changes.
+- Connection tests (71 to 94). New tests cover:
+  - status error, close or reverse data after a completed READY withholds FAILED;
+  - a status `end` before FAILED leaves the write method replaced, as `net.Socket` does with `allowHalfOpen: false`, so the dispatch identity check withholds FAILED without spending an ordinal;
+  - a callback error before or after the return leaves READY uncertain and stops;
+  - a known FAILED completes, and its callback error is uncertain;
+  - a command close before the FAILED callback leaves it completed, while an in-flight READY becomes uncertain; the callback-first order is a settled control;
+  - status-stream facts make an in-flight FAILED uncertain before its callback and keep it uncertain after a good callback;
+  - a fired timer that is no longer referenced stops without rearming;
+  - an early wake-up whose clear is unknown retains its slot without a retry;
+  - an unexpected lifetime `message`, `messageerror` or `close` stops the worker;
+  - input after the deadline is not decoded;
+  - a deadline crossed while splitting lines precedes any work reservation;
+  - LAUNCH is rechecked after validation, for both time and references;
+  - a monotonic rollback is a sticky clock fault.
+- Harness: the fake status pipe now replaces `write` on an inbound `end` before any worker listener, like Node 24's `net.Socket`.
+- Trials: 18 behavioral trials are added. Two of them remove all three status-stream layers (stop progression, planning, dispatch) together, because each single layer is intentionally redundant. The trial loop now accepts such multi-edit trials.
+- Boundary tests (still 4):
+  - mutation probes run on LF text;
+  - `process`, global objects, `eval`/`Function`/`fetch`/`require`, the network, timer and messaging globals and `crypto`/`performance` never appear as values;
+  - the capability bindings (`setTimeout`, `clearTimeout`, `Socket`, `MessageChannel`) appear only as callees or as their builtin binding;
+  - `constructor`, `__proto__`, `prototype`, `unref`, `postMessage`, `destroy` and `transfer` are refused as identifiers, property names or string keys;
+  - builtins are recorded only from direct, non-optional `process.getBuiltinModule("...")` calls, and constructors and timer callsites are counted from syntax;
+  - every non-function root statement, the whole initialization try block and its catch are pinned.
+  - This is a denylist plus a counted inventory, not a free-identifier allowlist; keys computed at run time stay outside a static check.
+  - Twenty-six static mutations are added. Nineteen capability probes are inserted into an added private declaration, outside the pinned root, so only the syntax inventory can refuse them; a benign added declaration is accepted as their control. Seven root-shape changes cover the emptied catch, the missing pipe checkpoint, the decoder/helper order, the removed clock, `return null` and two inserted root statements.
+
+Intentional differences from the C1 reference model:
+
+- C1 leaves a stopped READY as started and refuses FAILED only after an uncertain write. A READY whose callback and return succeed after an unrelated stop can therefore still be followed by FAILED there. C2b marks that READY uncertain at the stop and withholds FAILED.
+- C1 `status_close` does not mark an in-flight write. C2b makes it uncertain.
+- C1 has no status `end` fact. In C2b a status `end` makes an in-flight write uncertain. The stop decision does not check it before FAILED is planned. However, with `allowHalfOpen: false`, Node 24's `net.Socket` replaces `write` with `writeAfterFIN` in a listener it registers first. The dispatch identity check therefore withholds FAILED unwritten, and the new test pins this.
+
+All three keep C2b on the safer side.
+
+Not adopted, and documented here as defense in depth rather than claimed coverage:
+
+- 92 surviving source mutants:
+  - once and stale-reference guards that callers already prevent;
+  - time, reference and timer checks repeated behind another checkpoint;
+  - shape checks on real primitives that the invented ones cannot violate without a purpose-built fake (pair distinctness and initial reference state, port method identity, handle shape);
+  - retirement conditions masked by another retained fact;
+  - reason labels;
+  - the unused wall-stamp plumbing.
+- 12 mutants that fail only because a trial no longer finds its search text, which is not coverage:
+  - the six single status-stream layers;
+  - four other redundant gates whose text adjoins those layers (`endAttempted`, `pendingPrepare`);
+  - two settlement conditions masked by an earlier explicit uncertain decision.
+
+Verification uses `git archive` copies:
+
+- **Connection tests:** 94 connection and 4 boundary tests pass.
+- **Mutations:** 39 behavioral trials (previously 21) and 47 static mutations (previously 21) are detected after successful controls.
+- **Independent sweep:**
+  - On the same 150 source mutants, 44 now fail a behavioral test (previously 25).
+  - The full re-run has 161 mutants, adding nine multi-edit mutants and two of the new rule: 51 fail a behavioral test, 6 are refused statically, and the 12 search-text and 92 surviving mutants are as listed above.
+- **Failing first:**
+  - On the uncorrected worker, the command-close-before-callback FAILED test failed.
+  - The uncorrected boundary test accepted all 26 new static mutations and failed on the CRLF checkout.
+- **Related tests:** 27 related files / 1541 tests pass in every condition: Node 24 three times, linux/win32 spoofs, Node 20.19.6/26.12.1, isolation=none and a CRLF copy that includes the worker source.
+- **Full unit suite:** 5066 of 5068 tests pass on Node 24 and on Node 20, with no failures or cancellations and the 2 existing skips.
+- **Diagnostics:** the reservations stay 3260 bytes for the connection and 7645 / 16384 combined.
+
+The C1 withheld-READY ordinal defect remains separate and unmodified. Dot remains PAUSED. No real port, clock, timer, child process, native read, fixture, signing, data, MCP registration, production activation or push operation was performed. C2c/d remain pending.

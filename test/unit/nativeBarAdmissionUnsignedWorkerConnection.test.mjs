@@ -108,7 +108,8 @@ function memory(options = {}) {
   }
   class Channel { constructor() { this.port1 = new Port(); this.port2 = new Port(); pairs.push([this.port1, this.port2]); if (options.channelThrows) throw Error("invented_channel"); } }
   class Pipe extends EventEmitter {
-    constructor(opts) { super(); assert.deepEqual(opts, sockets.length === 0
+    // Like net.Socket with allowHalfOpen false, an inbound end replaces write before any listener the worker installs.
+    constructor(opts) { super(); super.on("end", () => { this.write = function writeAfterFIN() { return false; }; }); assert.deepEqual(opts, sockets.length === 0
       ? { fd: 3, readable: true, writable: false, allowHalfOpen: false }
       : { fd: 4, readable: true, writable: true, allowHalfOpen: false });
       this.options = opts; this.lines = []; this.endCalls = 0; sockets.push(this); options.onSocket?.(api, opts); if (options.socketThrow === opts.fd) throw Error("invented_socket"); }
@@ -222,6 +223,46 @@ test("C2b stream error changes only current pending write and never a completed 
   assert.equal(e.view().statuses[0].decision, "completed"); assert.equal(e.statusFrames()[1].kind, "FAILED");
   e.sockets[1].emit("error", Error("invented")); e.callback(); assert.equal(e.view().statuses[0].decision, "completed"); assert.equal(e.view().statuses[1].decision, "uncertain");
 });
+async function statusFactWithholdsFailed(options, event) {
+  const e = await healthy(options); e.callback(); e.sockets[1].emit(event, Buffer.from("reverse"));
+  assert.ok(e.view().stopped); assert.deepEqual(e.statusFrames().map(f => f.kind), ["READY"]); assert.equal(e.view().failure_decision, "withheld");
+}
+for (const event of ["error", "close", "data"]) test(`C2b stream-level status ${event} after a completed READY forbids FAILED`, () => statusFactWithholdsFailed({}, event));
+async function statusEndWithholdsFailed(options) {
+  const e = await healthy(options); e.callback(); e.sockets[1].emit("end"); const v = e.view();
+  assert.equal(v.stopped, "status_end"); assert.deepEqual(e.statusFrames().map(f => f.kind), ["READY"]); assert.equal(v.failure_decision, "attempted");
+  assert.deepEqual(v.statuses.map(r => [r.kind, r.decision]), [["READY", "completed"], ["FAILED", "withheld"]]); assert.equal(v.next_ordinals.worker, 2);
+}
+test("C2b a status end replaces write before FAILED, so the dispatch identity check withholds it", () => statusEndWithholdsFailed({}));
+async function callbackErrorStops(options, order = "after_return") {
+  const e = await healthy({ ...options, ...(order === "before_return" ? { onWrite(api, callback) { callback(Error("invented")); } } : {}) });
+  if (order === "after_return") e.callback(Error("invented")); const v = e.view();
+  assert.equal(v.statuses[0].callback_okay, false); assert.equal(v.statuses[0].decision, "uncertain"); assert.equal(v.stopped, "status_callback_failed");
+  assert.equal(v.ready_complete, false); assert.deepEqual(e.statusFrames().map(f => f.kind), ["READY"]); assert.equal(v.failure_decision, "withheld");
+}
+for (const order of ["after_return", "before_return"]) test(`C2b write callback error leaves READY uncertain and stops ${order}`, () => callbackErrorStops({}, order));
+async function knownFailedCompletes(options) {
+  const e = await healthy({ ...options, refuseStartup: true }); e.callback(); assert.equal(e.view().statuses[0].decision, "completed");
+  const bad = await healthy({ ...options, refuseStartup: true }); bad.callback(Error("invented"));
+  assert.equal(bad.view().statuses[0].decision, "uncertain"); assert.equal(bad.view().statuses[0].callback_okay, false); assert.equal(bad.view().stopped, "startup_failed");
+}
+test("C2b a known FAILED write completes, while its callback error is uncertain", () => knownFailedCompletes({}));
+async function commandCloseKeepsFailed(options, order = "close_first") {
+  const e = await healthy(options); e.callback(); e.sockets[0].emit("end"); assert.equal(e.view().statuses[1].decision, "started");
+  if (order === "close_first") { e.sockets[0].emit("close"); e.callback(); } else { e.callback(); e.sockets[0].emit("close"); }
+  assert.equal(e.view().statuses[1].decision, "completed"); assert.equal(e.view().retained, false);
+}
+// Only close_first reaches the FAILED while it is in flight; callback_first is the settled-first control.
+for (const order of ["close_first", "callback_first"]) test(`C2b a later command close leaves a known FAILED completed ${order}`, async () => {
+  await commandCloseKeepsFailed({}, order);
+  const ready = await healthy(); ready.sockets[0].emit("close"); assert.equal(ready.view().statuses[0].decision, "uncertain");
+});
+async function statusFactUncertainFailed(options, event) {
+  const e = await healthy({ ...options, refuseStartup: true }); assert.equal(e.view().statuses[0].decision, "started");
+  e.sockets[1].emit(event, Buffer.from("reverse")); assert.equal(e.view().statuses[0].decision, "uncertain");
+  e.callback(); assert.equal(e.view().statuses[0].callback_okay, true); assert.equal(e.view().statuses[0].decision, "uncertain");
+}
+for (const event of ["error", "close", "data", "end"]) test(`C2b status-stream ${event} makes an in-flight FAILED uncertain before and after its callback`, () => statusFactUncertainFailed({}, event));
 test("C2b unknown acquisition and late acquisition retain original proof until known disposition", async () => {
   const e = memory({ deferStartup: true, realDisposition: true }).initialize(); e.send(); await tick(); e.connection.stopOriginalWorker(e.state, "ordinary_stop");
   assert.equal(e.view().startup.pending, true); e.resolveStartup(); await tick(); e.closePeer();
@@ -249,6 +290,11 @@ for (const point of [null, { clock_domain: "foreign", monotonic_ns: "1" }, { clo
     const e = await healthy(); e.setPoint(() => point); e.callback(); assert.equal(e.view().clock_invalid, true); assert.equal(e.view().statuses[0].decision, "uncertain");
     e.setPoint(() => ({ clock_domain: "worker-clock", monotonic_ns: "1" })); assert.throws(() => e.connection.checkpointOriginalWorker(e.state));
   });
+function rollbackIsSticky(options) {
+  const e = memory(options).initialize(); e.setTime(5000000000n); e.connection.checkpointOriginalWorker(e.state); e.setTime(1000000000n);
+  assert.throws(() => e.connection.checkpointOriginalWorker(e.state)); assert.equal(e.view().clock_invalid, true); assert.equal(e.view().stopped, "clock_invalid");
+}
+test("C2b a monotonic rollback is a sticky clock fault", () => rollbackIsSticky({}));
 test("C2b status deadline equality is late and preserves the first failure", async () => {
   const e = await healthy(); e.setTime(10000000000n); e.callback(); assert.equal(e.view().statuses[0].decision, "uncertain"); assert.equal(e.view().stopped, "status_deadline");
   e.sockets[1].emit("error", Error("later")); assert.equal(e.view().stopped, "status_deadline");
@@ -280,6 +326,24 @@ test("C2b stop during an early clear retires the known-cleared slot without anot
   assert.equal(e.state.timers.phase, null); assert.equal(e.handles[0].clears, 1); assert.equal(e.handles.length, 1);
   assert.equal(e.view().retained, false); assert.equal(e.pairs[0][0].closeCalls, 1);
 });
+function firedTimerUnreferenced(options) {
+  const e = memory(options).initialize(), old = e.handles[0]; e.setTime(1000000n); old.referenced = false; old.cb();
+  assert.equal(e.view().stopped, "timer_unreferenced"); assert.equal(e.handles.length, 1);
+}
+test("C2b a fired timer that is no longer referenced stops without rearming", () => firedTimerUnreferenced({}));
+function earlyClearUnknown(options) {
+  const e = memory({ ...options, clearThrows: true }).initialize(), old = e.handles[0]; e.setTime(1000000n); old.cb();
+  assert.equal(e.view().stopped, "timer_clear_unknown"); assert.equal(e.view().timers.phase.clear_unknown, true);
+  e.closePeer(); assert.equal(old.clears, 1); assert.equal(e.handles.length, 1); assert.equal(e.view().retained, true); assert.equal(e.pairs[0][0].closeCalls, 0);
+}
+test("C2b an early wake-up whose clear is unknown retains the slot without a retry", () => earlyClearUnknown({}));
+function unexpectedLifetimeStops(options, event, reason) {
+  const e = memory(options).initialize(); e.pairs[0][1].emit(event); e.closePeer();
+  assert.equal(e.view().stopped, reason);
+  if (event === "close") { assert.equal(e.view().ports[1].closed, true); assert.equal(e.pairs[0][0].closeCalls, 0); assert.equal(e.view().retained, true); }
+}
+for (const [event, reason] of [["message", "lifetime_message"], ["messageerror", "lifetime_message_error"], ["close", "lifetime_closed"]])
+  test(`C2b unexpected lifetime ${event} stops before any status`, () => unexpectedLifetimeStops({}, event, reason));
 test("C2b unknown clear retains its original timer slot, without a retry", () => {
   const e = memory({ clearThrows: true }).initialize(); e.connection.stopOriginalWorker(e.state, "ordinary_stop");
   e.closePeer(); assert.equal(e.handles[0].clears, 1); assert.equal(e.view().timers.phase.clear_unknown, true); assert.equal(e.view().retained, true);
@@ -305,6 +369,23 @@ test("C2b shared frame exhaustion refuses before decoding or charging", () => {
   const e = memory().initialize(); e.state.frames = 32; let calls = 0; e.state.decoder = { push() { calls++; throw Error("decoded"); } };
   const charges = e.charges.length; e.send(); assert.equal(calls, 0); assert.equal(e.charges.length, charges);
 });
+function wrapDecoder(e, before) { const d = e.state.decoder; e.state.decoder = { push(bytes) { before(); return d.push(bytes); }, end() { return d.end(); } }; }
+function lateInputNotDecoded(options) {
+  const e = memory(options).initialize(); let pushes = 0; wrapDecoder(e, () => { pushes++; });
+  e.setTime(120000000000n); e.send(); assert.equal(pushes, 0); assert.equal(e.view().frames, 0); assert.equal(e.view().stopped, "preparation_deadline");
+}
+test("C2b input arriving after the deadline is not decoded", () => lateInputNotDecoded({}));
+function splitCrossingNotCharged(options) {
+  const e = memory(options).initialize(); wrapDecoder(e, () => e.setTime(120000000000n)); const charges = e.charges.length;
+  e.send(); assert.equal(e.charges.length, charges); assert.equal(e.view().frames, 0);
+}
+test("C2b a deadline crossed while splitting lines precedes any work reservation", () => splitCrossingNotCharged({}));
+function validationRechecked(options, change) {
+  const e = memory({ ...options, readFrame: (...a) => { const f = wire.readUnsignedControllerFrame(...a); change(e); return f; } }).initialize();
+  e.send(); assert.equal(e.view().frames, 0); assert.equal(e.view().binding_sha256, null);
+}
+for (const change of [api => api.setTime(120000000000n), api => { api.pairs[0][0].referenced = false; }])
+  test(`C2b LAUNCH is rechecked after hashing and validation: ${change}`, () => validationRechecked({}, change));
 test("C2b invalid suffix is not silently lost, and stopped traffic is bounded without parsing", () => {
   const e = memory().initialize(); e.sockets[0].emit("data", Buffer.from("{}\n{}\n")); const first = e.view().stopped;
   e.sockets[0].emit("data", Buffer.alloc(2097153)); assert.equal(e.view().stopped, first); assert.equal(e.view().discarded_bytes, 2097152); assert.equal(e.view().discard_unknown, true);
@@ -489,10 +570,33 @@ test("C2b controlled behavioral mutations fail after a successful unmodified set
     ['try { n = checkpointOriginalWorker(s, r.kind === "FAILED"); }', 'try { n = sampleOriginalWorker(s); }', async options => {
       const e = await healthy({ ...options, callbackFirst: true, onWrite(api) { api.pairs[0][0].referenced = false; } }); assert.equal(e.view().ready_complete, false);
     }],
+    ['|| BigInt(p.monotonic_ns) < s.last) throw Error("clock_invalid");', ') throw Error("clock_invalid");', async options => rollbackIsSticky(options)],
+    ['if (sampleOriginalWorker(s) === null || error != null) {', 'if (sampleOriginalWorker(s) === null) {', options => callbackErrorStops(options)],
+    ['r.callbackOkay = error == null;', 'r.callbackOkay = true;', options => callbackErrorStops(options, "before_return")],
+    ['(!s.stopped || r.kind === "FAILED")', '!s.stopped', options => knownFailedCompletes(options)],
+    ['r.started && r.kind !== "FAILED"', 'r.started', options => commandCloseKeepsFailed(options)],
+    ['|| r.pipe.write !== s.statusWrite', '', options => statusEndWithholdsFailed(options)],
+    ['if (r.decision !== "uncertain" && r.callbackOkay', 'if (r.callbackOkay', options => statusFactUncertainFailed(options, "end")],
+    ['if (s.pending?.started) s.pending.decision = "uncertain"; stopOriginalWorker(s, "status_" + event);', 'stopOriginalWorker(s, "status_" + event);', options => statusFactUncertainFailed(options, "error")],
+    ['if (!referenced) { stopOriginalWorker(s, "timer_unreferenced"); return; }', '', async options => firedTimerUnreferenced(options)],
+    ['catch { t.clearUnknown = true; t.clearAttempted = true; t.active = false; stopOriginalWorker(s, "timer_clear_unknown"); return; }', 'catch { return; }', async options => earlyClearUnknown(options)],
+    ['() => { if (liveOriginalWorker(s)) stopOriginalWorker(s, "lifetime_message"); }', '() => {}', async options => unexpectedLifetimeStops(options, "message", "lifetime_message")],
+    ['() => { if (liveOriginalWorker(s)) stopOriginalWorker(s, "lifetime_message_error"); }', '() => {}', async options => unexpectedLifetimeStops(options, "messageerror", "lifetime_message_error")],
+    ['if (!s.pairCloseAttempted) stopOriginalWorker(s, "lifetime_closed");', '', async options => unexpectedLifetimeStops(options, "close", "lifetime_closed")],
+    ['checkpointOriginalWorker(s); if (s.frames >= 32) rejectOriginalWorker("frame_capacity");\n      const lines', 'if (s.frames >= 32) rejectOriginalWorker("frame_capacity");\n      const lines', async options => lateInputNotDecoded(options)],
+    ['checkpointOriginalWorker(s); if (s.frames >= 32) rejectOriginalWorker("frame_capacity");\n        reserve', 'if (s.frames >= 32) rejectOriginalWorker("frame_capacity");\n        reserve', async options => splitCrossingNotCharged(options)],
+    ['reserved_hash_bytes: "524288" });\n        checkpointOriginalWorker(s);\n', 'reserved_hash_bytes: "524288" });\n', async options => validationRechecked(options, api => api.setTime(120000000000n))],
+    // Status-stream facts gate FAILED in three layers (stop progression, planning, dispatch); only removing every layer writes FAILED.
+    [[['!s.statusError && !s.pendingPrepare', '!s.pendingPrepare'], ['|| s.statusError || s.endAttempted || s.pendingPrepare', '|| s.endAttempted || s.pendingPrepare'],
+      ['|| s.statusError || s.endAttempted || r.pipe', '|| s.endAttempted || r.pipe']], null, options => statusFactWithholdsFailed(options, "error")],
+    [[['!s.statusClosed && !s.statusError && !s.pendingPrepare', '!s.statusError && !s.pendingPrepare'], ['|| s.statusClosed || s.statusError || s.endAttempted || s.pendingPrepare', '|| s.statusError || s.endAttempted || s.pendingPrepare'],
+      ['s.frames >= 32 || s.statusClosed', 's.frames >= 32']], null, options => statusFactWithholdsFailed(options, "close")],
   ];
   for (const [from, to, assertion] of trials) {
-    assert.equal(source.split(from).length, 2, from); await assertion({}); const changed = source.replace(from, to); assert.equal(parse(changed).parseDiagnostics.length, 0);
-    await assert.rejects(assertion({ source: changed }), e => e.code === "ERR_ASSERTION", from);
+    let changed = source;
+    for (const [a, b] of Array.isArray(from) ? from : [[from, to]]) { assert.equal(changed.split(a).length, 2, a); changed = changed.replace(a, b); }
+    await assertion({}); assert.equal(parse(changed).parseDiagnostics.length, 0);
+    await assert.rejects(assertion({ source: changed }), e => e.code === "ERR_ASSERTION", String(from));
   }
 });
 test("C2b independent required sinks are guarded, without probing a real capability", () => {
