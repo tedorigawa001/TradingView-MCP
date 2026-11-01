@@ -168,6 +168,8 @@ export function createUnsignedWorkerPreparationModel(input) {
   }
   function forward(at) { if (stopped) refuse("stopped"); const q = point(at); if (stopped) refuse("stopped"); return q; }
   function take(ref, kind) { const op = actions.get(ref); if (!op || op.kind !== kind) refuse("action_reference"); return op; }
+  // A status stream close/error is stream-level: before any status write there is no action to name, yet it still gates FAILED.
+  function statusAction(ref) { return ref === null ? null : take(ref, "status"); }
   function wireCharge(n) { if (wireHash + BigInt(n) > BigInt(d.work.wire_hash_bytes_per_start)) refuse("wire_work_bound"); wireHash += BigInt(n); }
   function promote(op) {
     if (!op.fact.callback_seen || !op.fact.return_seen) return;
@@ -264,10 +266,15 @@ export function createUnsignedWorkerPreparationModel(input) {
           promote(op); break;
         }
         case "status_close": {
-          const op = take(refs.action, "status"); if (op.fact.close_seen) refuse("status_close_once");
-          op.fact.close_seen = true; statusClosed = true; stop("status_closed"); break;
+          const op = statusAction(refs.action); if (statusClosed) refuse("status_close_once");
+          if (op) op.fact.close_seen = true; statusClosed = true; stop("status_closed"); break;
         }
-        case "status_error": { const op = take(refs.action, "status"); statusError ??= q.reason; op.fact.decision = "uncertain"; stop(q.reason, point(q.at, true)); break; }
+        case "status_error": {
+          // Only a started write still awaiting its callback or return becomes uncertain; a write with both known keeps its decision and
+          // stop() withholds an unstarted one. The named action is an identity check only.
+          statusAction(refs.action); statusError ??= q.reason; if (pending?.fact.started) pending.fact.decision = "uncertain";
+          stop(q.reason, point(q.at, true)); break;
+        }
         case "prepare": {
           forward(q.at); const ready = statuses.find(v => v.fact.kind === "READY");
           if (!ready?.fact.started || prepareSeen) refuse("prepare_order"); prepareSeen = true;

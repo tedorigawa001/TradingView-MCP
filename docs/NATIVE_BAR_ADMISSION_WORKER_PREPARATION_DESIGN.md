@@ -1,6 +1,6 @@
 # B4-C Worker Preparation Connection
 
-Status: **B4-C1 implemented, memory-tested and independently reviewed after corrections; all C2/C3/C4 connections remain pending**, 2026-11-01 JST. The [C1 independent review/corrections](#b4-c1-independent-review-and-corrections) supersede the initial [implementation checkpoint](#b4-c1-implementation-and-memory-verification) below. Design source baseline: `2f2a9ab`, including the B4-B5 stopped-write correction in `2c2a484` and reviewed B4-B6 `230cc63`. This refines [B4-C](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md#proposed-implementation-slices), not the separately gated operational **4-C**. The [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and its [latest correction](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b5-and-b4-b6-commit-review-correction) remain controlling.
+Status: **B4-C1 implemented, memory-tested and independently reviewed after corrections; all C2/C3/C4 connections remain pending**, 2026-11-01 JST. The [C1 independent review/corrections](#b4-c1-independent-review-and-corrections) supersede the initial [implementation checkpoint](#b4-c1-implementation-and-memory-verification) below, and the [commit review correction](#b4-c1-commit-review-correction) supersedes their status-stream rules and test counts. Design source baseline: `2f2a9ab`, including the B4-B5 stopped-write correction in `2c2a484` and reviewed B4-B6 `230cc63`. This refines [B4-C](NATIVE_BAR_ADMISSION_WORKER_TRANSPORT_DESIGN.md#proposed-implementation-slices), not the separately gated operational **4-C**. The [parent connection](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md) and its [latest correction](NATIVE_BAR_ADMISSION_PARENT_CONNECTION_DESIGN.md#b4-b5-and-b4-b6-commit-review-correction) remain controlling.
 
 The original request authorized documents only; the later approval covers C1 pure contracts and memory tests, not connection code. No real port/clock/timer, build, operational subprocess, native load/read, fixture operation, signing/key operation, signature-file output, real-data operation, MCP registration, production activation or Dot restart is performed. Dot remains PAUSED; judgment/scenario/notification/mail/retention rules, observation bands, confirmation counts and delivery conditions do not change. Design or model acceptance never issues operational authority.
 
@@ -242,3 +242,46 @@ The sticky error code adds **114** maximal encoded bytes: the corrected diagnost
 The requested local commit is confined to these six files and does not include push. C2/C3/C4, B4-D/E, 4-B5/B6, actual port/clock/timer lifetime, bootstrap/native/signature/fixture/evidence/cleanup/host/work qualification, MCP registration and production activation remain separately gated. Dot stays PAUSED with its full configuration hash unchanged; all judgment/scenario/notification/mail/retention rules and numerical limits stay unchanged.
 
 Final review verification: all three new JavaScript syntax checks, 55 scoped document links/anchors, four new-file ASCII/newline/whitespace checks and the diff whitespace check pass. The protected 262 existing tracked files and Dot's PAUSED/full-configuration hash match the review-start checkpoint. Only the six named C1 files are eligible for this commit; no unrelated change, hook, signature or automatic maintenance is included.
+
+## B4-C1 Commit Review Correction
+
+2026-11-01 JST, the committer's review of `bc38f13`. Every result above was reproduced:
+- The 23 selected files pass 1337 tests under nine conditions: Node 24 three times, linux and win32 platform spoofs, Node 20.19.6 and 26.12.1, `--test-isolation=none`, and CRLF.
+- The full unit suite runs 4864 tests on Node 24 and on Node 20.19.6: 4862 pass, 0 fail, 2 existing skips.
+- The maximal capacity view covers every field of actual PREPARED, FAILED and bootstrap-closed views, and no field there is longer than its reservation.
+
+The review found one P2 and one P3 in the status-stream facts:
+
+- **P2, stream failure before the first status write.**
+  - `status_close` and `status_error` required an existing status action token, and none exists before the first status write is planned.
+  - A status stream close or error in that window could therefore only be recorded as a generic `stop`, which left `status_closed` / `status_error` unset.
+  - A FAILED write was then planned, started and completed on a stream known to be closed. That contradicts rule 6 and the sticky-close rule above.
+- **P3, relabelled known decisions.**
+  - `status_error` marked whatever write it named `uncertain`.
+  - A completed READY (callback completed, return true) became uncertain.
+  - So did a never-started READY that a stop had withheld, which kept `started: false`.
+
+The correction is made in the helper and its two tests only:
+
+- **Stream-level facts.**
+  - `status_close` and `status_error` accept `action: null` as a stream-level fact. It still requires the original session, and it sets the same sticky flag and stop.
+  - A named action must still be an original status write.
+  - A stream closes once: any second close, stream-level or op-level, is refused, so a second, op-level close cannot attribute an earlier stream-level close to a write.
+- **What an error changes.**
+  - An error makes only a started write still awaiting its callback or return uncertain, whichever action it names.
+  - A write with both outcomes known keeps its decision, and `stop()` still withholds an unstarted one.
+  - That in-flight write still settles its lifetime work once its callback completes and its return is known, but it stays uncertain.
+- **Not adopted.** A generic `stop` may still use the reason `status_closed` without setting the flag. Reserving the model's own stop codes would need an enumerated list and is left for a later decision. The C2 connection must use the stream-level fact.
+
+Verification, in scratch copies from `git archive`:
+
+- **Failing first.** Eleven new behavioral tests were added. Nine fail on `bc38f13`. The other two are controls: the original session and action identity checks, and an error naming its own in-flight READY, which was already handled.
+- **Mutations.**
+  - Three new behavioral mutation probes and three new static pins and mutations are detected.
+  - So are separate scratch mutants: one removes the stream-level close dedupe, one skips the action identity check, and one marks only FAILED uncertain. The last is caught by the in-flight READY tests.
+- **Totals.** The preparation memory suite now has **158** tests and its boundary suite **5**, with 21 behavioral and 23 static mutations.
+  - The 23 selected files pass **1351** tests under all nine conditions above.
+  - The full unit suite runs **4878** tests on Node 24 and Node 20.19.6: 4876 pass, 0 fail, 2 existing skips.
+- **Review.** Two read-only reviewers covered the helper semantics and the tests, mutations and pins. Neither found a P1. Their P3 on symmetric close dedupe and the comment wording, and the test reviewer's two P2 coverage gaps (mixed-order closes, an error during an in-flight READY write), are adopted.
+
+No view field, capacity figure, schema reservation, wire payload, native/product schema, runtime, source, build, package or job configuration changes. The diagnostic reservation stays **9713 / 16384** and the comparison wrapper **64513 / 65536**. Dot stays PAUSED, with judgment, notification and retention rules unchanged. Push is not included.

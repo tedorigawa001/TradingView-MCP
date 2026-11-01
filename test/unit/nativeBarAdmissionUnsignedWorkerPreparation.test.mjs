@@ -374,6 +374,14 @@ const probes=[
     for(const index of [0,1]){r({type:"pair_listeners",pair,index,event:"installed"});r({type:"pair_reference",pair,index,outcome:"returned",has_ref:true});}
     const action=r({type:"startup_begin"}).action_ref;r({type:"startup_result",action,outcome:"unknown",components:null,pins:null,addon:null});
     assert.throws(()=>r({type:"pair_close",pair,index:0,outcome:"returned",at:null}),/anchor_retained/);}],
+  ["stream-level status close",'ref === null ? null : take(ref, "status")','take(ref, "status")',api=>{const e=environment(subject(),api.createUnsignedWorkerPreparationModel);
+    assert.doesNotThrow(()=>e.record({type:"status_close",action:null}));assert.throws(()=>e.status("FAILED"),/status_closed/);}],
+  ["status error keeps known decisions",'if (pending?.fact.started) pending.fact.decision = "uncertain";','if (refs.action !== null) take(refs.action, "status").fact.decision = "uncertain";',api=>{
+    const e=environment(subject(),api.createUnsignedWorkerPreparationModel),w=e.status("READY");e.start(w);e.returned(w);e.callback(w);
+    e.record({type:"status_error",action:w,reason:"invented_pipe_error"});assert.equal(e.m.describe().statuses[0].decision,"completed");}],
+  ["status error leaves an in-flight write unknown",'if (pending?.fact.started) pending.fact.decision = "uncertain";','void 0;',api=>{
+    const e=environment(subject(),api.createUnsignedWorkerPreparationModel);e.record({type:"stop",reason:"invented_eof"});const w=e.status("FAILED");e.start(w);
+    e.record({type:"status_error",action:null,reason:"invented_pipe_error"});e.returned(w);e.callback(w);assert.equal(e.m.describe().statuses[0].decision,"uncertain");}],
 ];
 test("C1-16 unmodified extracted declarations pass every behavioral mutation probe",()=>{
   const api=compile(helperSource);for(const [, , ,probe]of probes)probe(api);
@@ -478,5 +486,42 @@ for(const kind of ["READY","BASELINED","FAILED"])for(const order of ["callback_f
   if(b){e.record({type:"bootstrap_close_begin",action:b,at:null});e.record({type:"bootstrap_close_result",action:b,outcome:"confirmed",at:null});}
   assert.equal(e.m.describe().lifetime.works.filter(w=>w.kind==="status_write").at(-1).outcome,"pending");
   assert.throws(()=>e.record({type:"pair_close",pair:e.pair,index:0,outcome:"returned",at:null}),/port_close_once/);
+});
+// Commit review: a status stream close/error is stream-level. Before any status write there is no action to name, yet it still
+// forbids FAILED; and an error changes only a started write still awaiting its outcome, never a known decision.
+for(const kind of ["close","error"])test(`C1 commit review: a stream ${kind} before any status write is sticky and forbids FAILED`,()=>{
+  const e=environment();e.record(kind==="close"?{type:"status_close",action:null}:{type:"status_error",action:null,reason:"invented_pipe_error"});
+  const v=e.m.describe();assert.equal(v.state,"STOPPED");assert.equal(v.first_stop,kind==="close"?"status_closed":"invented_pipe_error");
+  assert.equal(v.statuses.length,0);assert.equal(v.lifetime.works.length,0);
+  assert.equal(v.status_closed,kind==="close");assert.equal(v.status_error,kind==="error"?"invented_pipe_error":null);
+  assert.throws(()=>e.status("FAILED"),kind==="close"?/status_closed/:/status_pipe_failed/);assert.equal(e.m.describe().statuses.length,0);
+});
+for(const order of ["stream_first","write_first"])test(`C1 commit review: one stream close is recorded once (${order})`,()=>{
+  const e=environment(),w=e.status("READY");e.start(w);const [first,second]=order==="stream_first"?[null,w]:[w,null];
+  e.record({type:"status_close",action:first});assert.throws(()=>e.record({type:"status_close",action:second}),/status_close_once/);
+  assert.equal(e.m.describe().statuses[0].close_seen,order==="write_first","a second, op-level close cannot attribute an earlier stream close to a write");
+});
+test("C1 commit review: stream-level facts still require the original session and a named action must be an original status write",()=>{
+  const g=environment();assert.throws(()=>g.record({type:"status_close",action:null,session:{}}),/original_reference/);assert.equal(g.m.describe().status_closed,false);
+  for(const f of [{type:"status_close",action:{}},{type:"status_error",action:{},reason:"invented_pipe_error"}]){
+    const e=environment();assert.throws(()=>e.record(f),/action_reference/);assert.equal(e.m.describe().status_closed,false);assert.equal(e.m.describe().status_error,null);}
+});
+for(const prior of ["completed","withheld"])test(`C1 commit review: a status error keeps the known ${prior} decision of the write it names`,()=>{
+  const e=environment(),w=e.status("READY");if(prior==="completed"){e.start(w);e.returned(w);e.callback(w);}else e.record({type:"stop",reason:"invented_eof"});
+  e.record({type:"status_error",action:w,reason:"invented_pipe_error"});const v=e.m.describe();
+  assert.equal(v.statuses[0].decision,prior);assert.equal(v.statuses[0].started,prior==="completed");assert.equal(v.status_error,"invented_pipe_error");
+  assert.throws(()=>e.status("FAILED"),/status_pipe_failed/);
+});
+for(const named of ["stream","write"])test(`C1 commit review: a ${named} error during the READY write leaves it uncertain despite a completed callback`,()=>{
+  const e=environment(),w=e.status("READY");e.start(w);e.record({type:"status_error",action:named==="stream"?null:w,reason:"invented_pipe_error"});
+  e.returned(w);e.callback(w);const v=e.m.describe();
+  assert.equal(v.statuses[0].decision,"uncertain");assert.equal(v.state,"STOPPED");assert.equal(v.pending_status,null);
+});
+for(const named of ["stream","completed READY"])test(`C1 commit review: an error naming the ${named} leaves the started FAILED write uncertain despite a completed callback`,()=>{
+  const e=environment(),q=e.status("READY");e.start(q);e.returned(q);e.callback(q);e.record({type:"stop",reason:"invented_eof"});
+  const w=e.status("FAILED");e.start(w);e.record({type:"status_error",action:named==="stream"?null:q,reason:"invented_pipe_error"});
+  e.returned(w);e.callback(w);const v=e.m.describe();
+  assert.equal(v.statuses[0].decision,"completed");assert.equal(v.statuses[1].decision,"uncertain");assert.equal(v.pending_status,null);
+  assert.equal(v.lifetime.works[1].outcome,"confirmed","the completed callback and known return still settle its original work");
 });
 test("C1 no denied effect was swallowed",()=>assert.deepEqual(effects,[]));
