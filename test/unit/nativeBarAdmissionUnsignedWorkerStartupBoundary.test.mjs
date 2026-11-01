@@ -108,5 +108,7 @@ test("C2a has no worker/product/operational registration or effectful dependency
     assert.doesNotMatch(read(f), /unsignedWorkerStartup|UnsignedWorkerStartup|unsignedControllerWire/);
   for (const f of fs.readdirSync(new URL("../../src/", import.meta.url), { recursive: true }).filter(n => n.endsWith(".ts")))
     assert.doesNotMatch(read("../../src/" + f), /unsignedWorkerStartup|UnsignedWorkerStartup|unsignedControllerWire/);
-  assert.equal(fs.existsSync(new URL("../../native/native_bar_fs/test_unsigned_cohort_worker.mjs", import.meta.url)), false);
+  const worker = read("../../native/native_bar_fs/test_unsigned_cohort_worker.mjs");
+  assert.match(worker, /export function runUnsignedCohortWorker\(\) \{ throw Error\("cc2b_execution_not_approved"\); \}/);
+  assert.match(worker, /\nrunUnsignedCohortWorker\(\);\s*$/);
 });

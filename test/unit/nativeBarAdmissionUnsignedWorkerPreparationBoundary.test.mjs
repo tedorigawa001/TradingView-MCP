@@ -75,5 +75,7 @@ test("C1-12 product/worker/package entries do not import the preparation model",
     assert.doesNotMatch(read(f),/unsignedWorkerPreparation|UnsignedWorkerPreparation/);
   for(const f of fs.readdirSync(new URL("../../src/",import.meta.url),{recursive:true}).filter(n=>n.endsWith('.ts')))
     assert.doesNotMatch(read("../../src/"+f),/unsignedWorkerPreparation|UnsignedWorkerPreparation/);
-  assert.equal(fs.existsSync(new URL("../../native/native_bar_fs/test_unsigned_cohort_worker.mjs",import.meta.url)),false);
+  const worker=read("../../native/native_bar_fs/test_unsigned_cohort_worker.mjs");
+  assert.match(worker,/export function runUnsignedCohortWorker\(\) \{ throw Error\("cc2b_execution_not_approved"\); \}/);
+  assert.match(worker,/\nrunUnsignedCohortWorker\(\);\s*$/);
 });
