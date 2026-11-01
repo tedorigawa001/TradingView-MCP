@@ -76,7 +76,9 @@ const { z } = await import("zod");
 const { createUnsignedIsolatedTypeScript } = await import("../helpers/unsignedIsolatedTypeScript.mjs");
 const ts = createUnsignedIsolatedTypeScript(fs.readFileSync(new URL("../../node_modules/typescript/lib/typescript.js", import.meta.url), "utf8"));
 const source = fs.readFileSync(new URL("../helpers/unsignedWorkerRecordInitializationContracts.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-const { canonical, digest } = data, h = "a".repeat(64), other = "b".repeat(64);
+const { canonical, digest } = data, h = "a".repeat(64), other = "b".repeat(64), addonPin = "d".repeat(64), readerPin = "e".repeat(64), readerSourcePin = "f".repeat(64);
+// Fixed-role artifacts are distinct files; the addon, reader and reader-source digests are also their LAUNCH pins.
+const pins = { reader: readerPin, addon: addonPin, registry: "1".repeat(64), contracts: "2".repeat(64), fixed_owner: "3".repeat(64), unsigned_owner: "4".repeat(64) };
 const steps = ["record_open", "record_validate", "closed_set", "initialization", "modules", "cache", "complete"];
 const metrics = ["hash_bytes", "read_bytes", "parser_steps", "helper_commands"];
 const zero = () => Object.fromEntries(metrics.map(k => [k, "0"]));
@@ -86,7 +88,7 @@ function subject() {
   const uuid = n => "00000000-0000-4000-8000-" + String(n).padStart(12, "0");
   const allocation = { fixture: { request: { schema: "native-bar-unsigned-acceptance-request-v1", stage: "C-C1a", run_id: "invented-run", source_commit: "a".repeat(40), patch_sha256: h },
     case_id: "u1-unsigned", mode: "normal", ids: Object.fromEntries(["fixture", "store", "epoch", "authority", "key", "reference", "extra"].map((k, i) => [k, uuid(i + 1)])) },
-    exchange_id: "exchange-1", launch_nonce: "nonce-1", source_tree_sha256: h, signature_profile: "linker_adhoc", artifacts: Object.fromEntries(["js_set", "addon", "observer", "controller", "worker", "runtime_closure", "node_binary", "build_record", "reader_source", "reader_js"].map(k => [k + "_sha256", h])) };
+    exchange_id: "exchange-1", launch_nonce: "nonce-1", source_tree_sha256: h, signature_profile: "linker_adhoc", artifacts: Object.fromEntries(["js_set", "addon", "observer", "controller", "worker", "runtime_closure", "node_binary", "build_record", "reader_source", "reader_js"].map(k => [k + "_sha256", { addon: addonPin, reader_js: readerPin, reader_source: readerSourcePin }[k] ?? h])) };
   const binding = parent.createUnsignedControllerProtocolModel(allocation).describe().binding;
   const costs = steps.map(step => ({ step, cost: { ...zero(), ...(step === "record_open" ? { hash_bytes: "100", helper_commands: "1" }
     : step === "record_validate" ? { hash_bytes: "8292", read_bytes: "16384", parser_steps: "8192" }
@@ -102,7 +104,7 @@ function subject() {
   record: { schema: "native-bar-cohort-private-build-v1", bytes: 8192, rows: 1, pages: 1, manifest_bytes: 4096, sha256: h,
     inputs_sha256: h, artifacts_sha256: h, expected_inputs_sha256: h, expected_artifacts_sha256: h, identity: "matched_supplied", canonical: "exact_supplied", membership: "matched_supplied",
     page: { index: 0, bytes: 4096, rows: [{ path_sha256: h, identity_sha256: h, bytes: "100", sha256: h, kind: "input", mode: null, roles: ["source"] }] } },
-  modules: ["reader", "registry", "contracts", "fixed_owner", "unsigned_owner", "addon"].map(role => ({ id: role.replaceAll("_", "-"), role, mode: "normal", source_sha256: h, artifact_sha256: h, expected_artifact_sha256: h, edges: [],
+  modules: ["reader", "registry", "contracts", "fixed_owner", "unsigned_owner", "addon"].map(role => ({ id: role.replaceAll("_", "-"), role, mode: "normal", source_sha256: role === "reader" ? readerSourcePin : h, artifact_sha256: pins[role], expected_artifact_sha256: pins[role], edges: [],
     exports: role === "fixed_owner" ? ["enrollFixedMemoryCheckpointOracleC0Only"] : role === "unsigned_owner" ? ["enrollUnsignedCheckpointOracle"] : [], effects: ["allocation"] })),
   host: { source: "supplied_worker", namespace: "matched_supplied", acl: "matched_supplied", launch: "matched_supplied", native_profile: "matched_supplied", loader: "matched_supplied", clock_domain: "worker-clock", generation: "1", identity_sha256: h, expected_identity_sha256: h },
   work: { modes: ["normal", "ubsan"].map(mode => ({ mode, startups: 12, extra_record_hash_bytes: "0", subset_hash_bytes: "100", initialization_hash_bytes: "100", extra_helper_commands: "0", steps: clone(costs) })), prior_other_hash_bytes: "0", prior_other_helper_commands: "0" },
@@ -121,6 +123,11 @@ function sequence(s, n = steps.length) { for (const step of steps.slice(0, n)) {
   s.events.push(fact("reserve", { step, action_id, cost: clone(cost) }), fact("begin", { action_id }), fact("result", { action_id, outcome: "returned" }));
 } return s; }
 
+const refuses = (fn, s, reason) => assert.throws(() => fn(s), { message: "cc4c2ca_" + reason });
+const blocks = (fn, s, blocker) => { const p = fn(s); assert.equal(p.supplied_plan_complete, false); assert.ok(p.blockers.includes(blocker), blocker); };
+function stopsWith(fn, s, reason, actions = 0) { const m = fn(s).model; assert.equal(m.first_stop, reason); assert.equal(m.modeled_actions, actions); assert.equal(m.completed_steps, 0); }
+const reserveFact = (s, fields = {}, ns = "0") => fact("reserve", { step: "record_open", action_id: "record-open", cost: clone(s.work.modes[0].steps[0].cost), ...fields }, ns);
+const steps0 = (s, i) => s.work.modes[0].steps[i].cost;
 test("C2c-A supplied complete projection has no runtime authority or live proof", () => {
   const s = sequence(subject()), p = plan(s); assert.equal(p.supplied_plan_complete, true); assert.equal(p.model.state, "SUPPLIED_COMPLETE");
   for (const k of ["execution_available", "runtime_completion_proven", "record_reader_available", "startup_proof_issued", "signing_available", "evidence_saved"]) assert.equal(p[k], false);
@@ -135,8 +142,8 @@ for (const source of ["unavailable", "supplied_parent", "candidate_self"]) test(
 });
 const invalid = [
   ["extra field", s => s.extra = true], ["startup binding", s => s.startup.expected.binding_sha256 = other], ["record digest", s => s.record.sha256 = other],
-  ["record size", s => s.record.bytes++], ["oversized record", s => s.record.bytes = 4194305], ["page index", s => s.record.page.index = 1],
-  ["duplicate rows", s => s.record.page.rows.push(clone(s.record.page.rows[0]))], ["role translation", s => s.record.page.rows[0].roles = ["header"]],
+  ["record size", s => s.record.bytes--], ["oversized record", s => s.record.bytes = 4194305], ["page index", s => s.record.page.index = 1],
+  ["cloned row above record rows", s => s.record.page.rows.push(clone(s.record.page.rows[0]))], ["role translation", s => s.record.page.rows[0].roles = ["header"]],
   ["artifact role", s => s.record.page.rows[0].kind = "artifact"], ["row limit", s => s.record.page.rows[0].bytes = "67108865"],
   ["wrong module mode", s => s.modules[0].mode = "ubsan"], ["missing edge", s => s.modules[0].edges = ["foreign"]],
   ["duplicate module", s => s.modules.push(clone(s.modules[0]))], ["unrestricted owner", s => s.modules[3].exports = ["enrollFixedMemoryCheckpointOracle"]],
@@ -147,7 +154,15 @@ const invalid = [
   ["missing decoder reservation", s => s.memory[0].retained.decoder = "0"], ["missing comparison page", s => s.memory[1].retained.canonical_compare_page = "0"],
   ["retained bound", s => s.memory[0].retained.membership = "2375680"], ["transient bound", s => s.memory[0].transient.membership = "4259841"],
 ];
-for (const [name, change] of invalid) test(`C2c-A refuses ${name}`, () => assert.throws(() => plan(edit(subject(), change))));
+// Each case is refused by its own gate; the exact code keeps another gate from masking it.
+const invalidCodes = { "extra field": "cc4a_invalid_input", "startup binding": "cc4c2a_subject_binding", "record digest": "cc4c2ca_record_projection", "record size": "cc4c2ca_record_projection",
+  "oversized record": "cc4a_invalid_input", "page index": "cc4c2ca_record_projection", "cloned row above record rows": "cc4c2ca_record_projection", "role translation": "cc4a_invalid_input",
+  "artifact role": "cc4c2ca_row_role_mapping", "row limit": "cc4c2ca_row_role_mapping", "wrong module mode": "cc4c2ca_module_closure", "missing edge": "cc4c2ca_module_closure",
+  "duplicate module": "cc4c2ca_module_alias", "unrestricted owner": "cc4c2ca_owner_exports", "forbidden effect": "cc4a_invalid_input", "duplicate work mode": "cc4c2ca_work_modes",
+  "duplicate step": "cc4c2ca_work_steps", "fractional pass": "cc4c2ca_record_pass_cost", "underspent comparison": "cc4c2ca_record_compare_cost", "underspent parser": "cc4c2ca_parser_work_cost",
+  "cost aggregate": "cc4c2ca_step_cost_total", "other cost mapping": "cc4c2ca_other_work_mapping", "missing decoder reservation": "cc4c2ca_retained_floor",
+  "missing comparison page": "cc4c2ca_parser_memory_floor", "retained bound": "cc4c2ca_capacity_bound", "transient bound": "cc4c2ca_capacity_bound" };
+for (const [name, change] of invalid) test(`C2c-A refuses ${name}`, () => assert.throws(() => plan(edit(subject(), change)), { message: invalidCodes[name] }));
 for (const [name, change, blocker] of [
   ["hash-only canonical", s => s.record.canonical = "hash_only", "exact_canonical_comparison_unavailable"],
   ["subset mismatch", s => s.record.inputs_sha256 = other, "record_subset_mismatch"],
@@ -191,7 +206,7 @@ test("C2c-A known helper lower bounds include extra helpers even when the total 
 });
 test("C2c-A exact memory ceilings accept, with zero implied spare transient space", () => {
   const s = subject(), row = s.memory[0]; row.retained.membership = String(2375680 - (289792 - 1024)); row.transient.parser_queue = "4259840";
-  const p = plan(s); assert.equal(p.memory.retained_peak_bytes, "2375680"); assert.equal(p.memory.transient_peak_bytes, "4259840");
+  const p = plan(s); assert.equal(p.memory.retained_peak_bytes, "2375680"); assert.equal(p.memory.transient_peak_bytes, "4259840"); assert.ok(p.blockers.includes("transient_overlap_unproven"));
   row.transient.token_scratch = "1"; assert.throws(() => plan(s), /capacity_bound/);
 });
 test("C2c-A supplied ubsan selection never changes to fit a module", () => {
@@ -199,15 +214,16 @@ test("C2c-A supplied ubsan selection never changes to fit a module", () => {
   for (const m of s.modules) m.mode = "ubsan";
   assert.equal(plan(sequence(s)).model.state, "SUPPLIED_COMPLETE"); s.modules[0].mode = "normal"; assert.throws(() => plan(s), /module_closure/);
 });
-for (const [name, event] of [
-  ["read before reservation", fact("begin", { action_id: "record-open" })],
-  ["foreign session", fact("stop", { session_id: "foreign", reason: "foreign_stop" })],
-  ["foreign epoch", fact("stop", { generation: "2", reason: "foreign_stop" })],
-  ["foreign clock", fact("stop", { at: { clock_domain: "parent-clock", monotonic_ns: "0" }, reason: "stop" })],
-  ["null clock", fact("stop", { at: null, reason: "stop" })],
-  ["deadline equality", fact("begin", { action_id: "record-open" }, "120000000000")],
-  ["lost lifetime", fact("stop", { references: ["unreferenced", "referenced"], reason: "stop" })],
-]) test(`C2c-A state refuses ${name} without progress`, () => { const p = plan(edit(subject(), s => s.events.push(event))); assert.equal(p.model.state, "STOPPED"); assert.equal(p.model.completed_steps, 0); });
+// Non-stop facts: a stop event would stop the model by itself and hide the gate under test.
+for (const [name, change, reason] of [
+  ["read before reservation", () => fact("begin", { action_id: "record-open" }), "begin_without_reservation"],
+  ["foreign session", s => reserveFact(s, { session_id: "foreign" }), "foreign_event"],
+  ["foreign epoch", s => reserveFact(s, { generation: "2" }), "foreign_event"],
+  ["foreign clock", s => reserveFact(s, { at: { clock_domain: "parent-clock", monotonic_ns: "0" } }), "clock_invalid"],
+  ["null clock", s => reserveFact(s, { at: null }), "clock_invalid"],
+  ["deadline equality", s => reserveFact(s, {}, "120000000000"), "preparation_deadline"],
+  ["lost lifetime", s => reserveFact(s, { references: ["unreferenced", "referenced"] }), "lifetime_unqualified"],
+]) test(`C2c-A state refuses ${name} without progress`, () => { const s = subject(); s.events.push(change(s)); stopsWith(plan, s, reason); });
 test("C2c-A unknown acquisition settles late but never resumes and costs never refund", () => {
   const s = sequence(subject(), 1); s.events[2].outcome = "unknown";
   s.events.push(fact("result", { action_id: "record-open", outcome: "returned" }));
@@ -334,6 +350,111 @@ test("C2c-A all unknown profiles stay blocked even if events claim a result", ()
   const s = sequence(subject(), 1); for (const k of Object.keys(s.profiles)) s.profiles[k] = "unavailable";
   const p = plan(s); assert.equal(p.model.completed_steps, 0); assert.equal(p.model.modeled_actions, 0); assert.equal(p.model.resources.record.disposition, "absent");
 });
+// Each gate below is reached by one changed condition, and its trial removes exactly that gate.
+const gateCases = [
+  ["generation zero", 'd.generation === "0" || ', '', fn => refuses(fn, edit(subject(), s => s.generation = "0"), "record_projection")],
+  ["record bytes against C2a", '|| r.bytes !== d.startup.manifest.record_bytes ', '', fn => refuses(fn, edit(subject(), s => s.record.bytes = 8191), "record_projection")],
+  ["record rows against C2a", '|| r.rows !== d.startup.manifest.rows ', '', fn => refuses(fn, edit(subject(), s => s.record.rows = 2), "record_projection")],
+  ["record pages against C2a", '|| r.pages !== d.startup.manifest.pages', '', fn => refuses(fn, edit(subject(), s => s.record.pages = 2), "record_projection")],
+  ["manifest bytes against C2a", '|| r.manifest_bytes !== d.startup.manifest.manifest_bytes ', '', fn => refuses(fn, edit(subject(), s => s.record.manifest_bytes = 8192), "record_projection")],
+  ["page rows above record rows", '|| r.page.rows.length > r.rows ', '', fn => refuses(fn, edit(subject(), s => {
+    s.startup.manifest.page_rows = 2; s.record.page.rows.push({ ...s.record.page.rows[0], path_sha256: other, identity_sha256: other }); }), "record_projection")],
+  ["page bytes above manifest bytes", '|| r.page.bytes > r.manifest_bytes', '', fn => refuses(fn, edit(subject(), s => { s.startup.manifest.page_bytes = 8192; s.record.page.bytes = 8192; }), "record_projection")],
+  ["canonical projection size", 'byteLength(canonical(r.page.rows)) > r.page.bytes', 'false', fn => refuses(fn, edit(subject(), s => s.record.page.bytes = 100), "record_projection")],
+  ["input row mode", 'row.mode !== null || ', '', fn => refuses(fn, edit(subject(), s => s.record.page.rows[0].mode = "normal"), "row_role_mapping")],
+  ["input row artifact role", ' || row.roles.some(v => ["js", "addon", "observer"].includes(v))', '', fn => refuses(fn, edit(subject(), s => s.record.page.rows[0].roles = ["source", "js"]), "row_role_mapping")],
+  ["artifact row mode", 'row.mode === null || ', '', fn => refuses(fn, edit(subject(), s => Object.assign(s.record.page.rows[0], { kind: "artifact", mode: null, roles: ["js"] })), "row_role_mapping")],
+  ["artifact row role count", 'row.roles.length !== 1 || ', '', fn => refuses(fn, edit(subject(), s => Object.assign(s.record.page.rows[0], { kind: "artifact", mode: "normal", roles: ["js", "addon"] })), "row_role_mapping")],
+  ["artifact row role", ' || !["js", "addon", "observer"].includes(row.roles[0])', '', fn => refuses(fn, edit(subject(), s => Object.assign(s.record.page.rows[0], { kind: "artifact", mode: "normal", roles: ["source"] })), "row_role_mapping")],
+  ["duplicate row roles", 'unique(row.roles, "row_roles");', '', fn => refuses(fn, edit(subject(), s => s.record.page.rows[0].roles = ["source", "source"]), "row_roles")],
+  ["duplicate module edges", 'unique(m.edges, "module_edges"); ', '', fn => refuses(fn, edit(subject(), s => s.modules[0].edges = ["registry", "registry"]), "module_edges")],
+  ["duplicate module exports", 'unique(m.exports, "module_exports"); ', '', fn => refuses(fn, edit(subject(), s => s.modules[1].exports = ["value", "value"]), "module_exports")],
+  ["duplicate module effects", 'unique(m.effects, "module_effects");', '', fn => refuses(fn, edit(subject(), s => s.modules[0].effects = ["allocation", "allocation"]), "module_effects")],
+  ["unsigned owner export", 'm.role === "unsigned_owner" && canonical(m.exports) !==', 'false && canonical(m.exports) !==', fn => refuses(fn, edit(subject(), s => {
+    s.modules.find(m => m.role === "unsigned_owner").exports = ["enrollUnsignedCheckpointOracle", "enrollUnsignedCheckpointOracleExtra"]; }), "owner_exports")],
+  ["fixed-role identity alias", 'm.role !== "dependency" && d.modules.filter(v => v.artifact_sha256 === m.artifact_sha256).length !== 1', 'false', fn => refuses(fn, edit(subject(), s => {
+    const registry = s.modules.find(m => m.role === "registry"); registry.artifact_sha256 = registry.expected_artifact_sha256 = readerPin; }), "module_identity_alias")],
+  ["host statuses", 'if (d.host[k] !== "matched_supplied") blockers.push("host_" + k + "_" + d.host[k]);', ';', fn => {
+    for (const k of ["namespace", "acl", "launch", "native_profile", "loader"]) blocks(fn, edit(subject(), s => s.host[k] = "unavailable"), `host_${k}_unavailable`); }],
+  ["record identity and membership", 'if (r[k] !== "matched_supplied") blockers.push("record_" + k + "_" + r[k]);', ';', fn => {
+    blocks(fn, edit(subject(), s => s.record.identity = "refused"), "record_identity_refused"); blocks(fn, edit(subject(), s => s.record.membership = "unavailable"), "record_membership_unavailable"); }],
+  ["artifact subset digest", ' || r.artifacts_sha256 !== r.expected_artifacts_sha256) blockers', ') blockers', fn => blocks(fn, edit(subject(), s => s.record.artifacts_sha256 = other), "record_subset_mismatch")],
+  ["unknown helper cost", 'modeled_helper_commands: completeHelpers && startup.modeled_helper_commands !== null ? String(helpers) : null,', 'modeled_helper_commands: String(helpers),',
+    fn => blocks(fn, edit(subject(), s => steps0(s, 0).helper_commands = null), "helper_commands_unknown")],
+  ["unknown parser cost", 'modeled_parser_steps: completeOperations ? String(operations) : null', 'modeled_parser_steps: String(operations)',
+    fn => blocks(fn, edit(subject(), s => steps0(s, 1).parser_steps = null), "parser_steps_unknown")],
+  ["unknown step hash", 'completeHash &&= known(m.steps.map(v => v.cost.hash_bytes));', '', fn => blocks(fn, edit(subject(), s => steps0(s, 5).hash_bytes = null), "hash_bytes_unknown")],
+  ["unknown extra hash", 'completeHash &&= known(extras);', '', fn => blocks(fn, edit(subject(), s => { s.work.modes[0].subset_hash_bytes = null; s.startup.work.other_hash_bytes = "3600"; }), "hash_bytes_unknown")],
+  ["known steps above known expected", '|| known(expected) && sum(values) > sum(expected) ', '', fn => refuses(fn, edit(subject(), s => { steps0(s, 4).hash_bytes = "9000"; steps0(s, 5).hash_bytes = null; }), "step_cost_total")],
+  ["known steps below known expected", ' || known(values) && sum(values) < sum(expected)', '', fn => refuses(fn, edit(subject(), s => {
+    s.work.modes[0].extra_helper_commands = null; steps0(s, 0).helper_commands = "0"; }), "step_cost_total")],
+  ["record hash floor", 'if (validation.hash_bytes !== null && BigInt(validation.hash_bytes) < BigInt(d.record.bytes) + sum([m.extra_record_hash_bytes, m.subset_hash_bytes])) refuse("record_hash_cost");', '',
+    fn => refuses(fn, edit(subject(), s => { steps0(s, 1).hash_bytes = "8200"; steps0(s, 3).hash_bytes = "192"; }), "record_hash_cost")],
+  ["record hash floor subset term", 'BigInt(d.record.bytes) + sum([m.extra_record_hash_bytes, m.subset_hash_bytes])) refuse("record_hash_cost")', 'BigInt(d.record.bytes) + sum([m.extra_record_hash_bytes])) refuse("record_hash_cost")',
+    fn => refuses(fn, edit(subject(), s => { steps0(s, 1).hash_bytes = "8200"; steps0(s, 3).hash_bytes = "192"; }), "record_hash_cost")],
+  ["record compare floor extra pass", 'BigInt(d.record.bytes) * 2n + sum([m.extra_record_hash_bytes])) refuse("record_compare_cost")', 'BigInt(d.record.bytes) * 2n) refuse("record_compare_cost")',
+    fn => refuses(fn, edit(subject(), s => { s.startup.work.other_hash_bytes = String(4800 + 24 * 8192);
+      for (const m of s.work.modes) { m.extra_record_hash_bytes = "8192"; m.steps[1].cost.hash_bytes = String(8292 + 8192); m.steps[1].cost.read_bytes = String(16384 + 8192); }
+      steps0(s, 1).read_bytes = String(16384 + 8191); }), "record_compare_cost")],
+  ["other helper mapping", '\n    || completeHelpers && declaredHelpers !== null && BigInt(declaredHelpers) !== extraHelpers', '', fn => refuses(fn, edit(subject(), s => s.startup.work.other_helper_commands = 1), "other_work_mapping")],
+  ["known step helpers above unknown C2a helpers", 'startHelpers += 12n * max(sum(expectedHelpers), sum(m.steps.map(v => v.cost.helper_commands)));', 'startHelpers += 12n * sum(expectedHelpers);',
+    fn => refuses(fn, edit(subject(), s => { s.startup.work.modes[0].helper_commands = null; steps0(s, 0).helper_commands = "20000"; }), "work_bound")],
+  ["pending PREPARE floor", '[["decoder", 65536n], ["pending_prepare", 65536n], ["status_lines", 131072n]]', '[["decoder", 65536n], ["status_lines", 131072n]]',
+    fn => refuses(fn, edit(subject(), s => s.memory[0].retained.pending_prepare = "0"), "retained_floor")],
+  ["status line floor", '[["decoder", 65536n], ["pending_prepare", 65536n], ["status_lines", 131072n]]', '[["decoder", 65536n], ["pending_prepare", 65536n]]',
+    fn => refuses(fn, edit(subject(), s => s.memory[0].retained.status_lines = "0"), "retained_floor")],
+  ["record page floor", 'BigInt(Math.min(d.record.bytes, 65536))', '1n', fn => refuses(fn, edit(subject(), s => s.memory[1].retained.record_input_page = "1"), "parser_memory_floor")],
+  ["duplicate memory step", 'unique(d.memory.map(v => v.step), "memory_steps");', '', fn => refuses(fn, edit(subject(), s => s.memory[1].step = "record_open"), "memory_steps")],
+  ["duplicate work step", 'unique(m.steps.map(v => v.step), "work_steps");', '', fn => refuses(fn, edit(subject(), s => s.work.modes[0].steps[6].step = "cache"), "work_steps")],
+  ["foreign session", 'if (e.session_id !== d.session_id || e.generation !== d.generation)', 'if (e.generation !== d.generation)', fn => {
+    const s = subject(); s.events.push(reserveFact(s, { session_id: "foreign" })); stopsWith(fn, s, "foreign_event"); }],
+  ["foreign generation", 'if (e.session_id !== d.session_id || e.generation !== d.generation)', 'if (e.session_id !== d.session_id)', fn => {
+    const s = subject(); s.events.push(reserveFact(s, { generation: "2" })); stopsWith(fn, s, "foreign_event"); }],
+  ["foreign clock domain", ' || e.at.clock_domain !== d.startup.clock.clock_domain || BigInt', ' || BigInt', fn => {
+    const s = subject(); s.events.push(reserveFact(s, { at: { clock_domain: "parent-clock", monotonic_ns: "0" } })); stopsWith(fn, s, "clock_invalid"); }],
+  ["lost lifetime reference", 'if (e.references.some(v => v !== "referenced")) stop("lifetime_unqualified");', '', fn => {
+    const s = subject(); s.events.push(reserveFact(s, { references: ["referenced", "unknown"] })); stopsWith(fn, s, "lifetime_unqualified"); }],
+  ["reservation cost", 'if (metrics.some(k => expected[k] === null || e.cost[k] !== expected[k]))', 'if (metrics.some(k => expected[k] === null))', fn => {
+    const s = subject(); s.events.push(reserveFact(s, { cost: { ...steps0(s, 0), hash_bytes: "99" } })); stopsWith(fn, s, "reservation_cost"); }],
+  ["reservation step order", 'e.step !== steps[index] || ', '', fn => { const s = subject(); s.events.push(reserveFact(s, { step: "closed_set", cost: clone(steps0(s, 2)) })); stopsWith(fn, s, "reservation_order"); }],
+  ["reservation while another is active", 'active || index >= steps.length', 'index >= steps.length', fn => {
+    const s = subject(); s.events.push(reserveFact(s), reserveFact(s, { action_id: "record-open-2" })); stopsWith(fn, s, "reservation_order", 1); }],
+  ["reused action id", ' || actions.has(e.action_id)) { stop("reservation_order")', ') { stop("reservation_order")', fn => {
+    const s = sequence(subject(), 1); s.events.push(fact("reserve", { step: "record_validate", action_id: "record-open", cost: clone(steps0(s, 1)) }));
+    const m = fn(s).model; assert.equal(m.first_stop, "reservation_order"); assert.equal(m.completed_steps, 1); assert.equal(m.active_step, null); }],
+  ["sub-millisecond reservation window", 'if (remaining < 1n) { stop("operation_window"); continue; }', '', fn => {
+    const s = subject(); s.events.push(reserveFact(s, {}, "119999500000")); stopsWith(fn, s, "operation_window"); }],
+  ["result before begin", '!a.begun || ', '', fn => {
+    const s = subject(); s.events.push(reserveFact(s), fact("result", { action_id: "record-open", outcome: "returned" }));
+    const m = fn(s).model; assert.equal(m.first_stop, "result_order"); assert.equal(m.resources.record.disposition, "absent"); assert.equal(m.completed_steps, 0); }],
+  ["second begin", ' || a.begun) { stop("begin_without_reservation")', ') { stop("begin_without_reservation")', fn => {
+    const s = subject(); s.events.push(reserveFact(s), fact("begin", { action_id: "record-open" }), fact("begin", { action_id: "record-open" }));
+    assert.equal(fn(s).model.first_stop, "begin_without_reservation"); }],
+  ["begun record acquisition is unknown", 'if (a.step === "record_open") resources.record.disposition = "unknown";', '', fn => {
+    const s = subject(); s.events.push(reserveFact(s), fact("begin", { action_id: "record-open" })); assert.equal(fn(s).model.resources.record.disposition, "unknown"); }],
+  ["begun cache acquisition is unknown", 'if (a.step === "cache") resources.cache.disposition = "unknown";', '', fn => {
+    const s = sequence(subject(), 5); s.events.push(fact("reserve", { step: "cache", action_id: "cache", cost: clone(steps0(s, 5)) }), fact("begin", { action_id: "cache" }));
+    assert.equal(fn(s).model.resources.cache.disposition, "unknown"); }],
+  ["close before stop", 'if (!stopped) { stop("close_before_stop"); continue; }', '', fn => {
+    const s = sequence(subject(), 1); s.events.push(fact("close_begin", { resource: "record", original_matches: true }));
+    const m = fn(s).model; assert.equal(m.first_stop, "close_before_stop"); assert.equal(m.resources.record.close_attempted, false); assert.equal(m.resources.record.disposition, "owned"); }],
+  ["close of an unowned resource", 'if (resource.close_attempted || resource.disposition !== "owned")', 'if (resource.close_attempted)', fn => {
+    const s = subject(); s.events.push(fact("stop", { reason: "stop" }), fact("close_begin", { resource: "record", original_matches: true }));
+    assert.deepEqual(fn(s).model.resources.record, { disposition: "absent", close_attempted: false }); }],
+  ["unknown module import keeps the session retained", 'retained: active !== null || Object.values', 'retained: Object.values', fn => {
+    const s = sequence(subject(), 4); s.events.push(fact("reserve", { step: "modules", action_id: "modules", cost: clone(steps0(s, 4)) }), fact("begin", { action_id: "modules" }),
+      fact("result", { action_id: "modules", outcome: "unknown" }), fact("close_begin", { resource: "record", original_matches: true }), fact("close_result", { resource: "record", outcome: "confirmed" }));
+    const m = fn(s).model; assert.equal(m.resources.record.disposition, "released"); assert.equal(m.active_step, "modules"); assert.equal(m.retained, true); }],
+  ["unproven transient overlap", 'if (BigInt(memory.known_transient_peak_bytes) > 0n) blockers.push("transient_overlap_unproven");', '', fn => {
+    blocks(fn, edit(subject(), s => s.memory[2].transient.token_scratch = "1"), "transient_overlap_unproven"); assert.equal(fn(subject()).blockers.includes("transient_overlap_unproven"), false); }],
+  ["blocked state label", 'state = blocked ? "BLOCKED" : "PRECONDITIONS_KNOWN"', 'state = "PRECONDITIONS_KNOWN"', fn => assert.equal(fn(edit(subject(), s => s.profiles.parser = "unavailable")).model.state, "BLOCKED")],
+];
+for (const [name, , , run] of gateCases) test(`C2c-A isolates ${name}`, () => run(plan));
+test("C2c-A identical dependency copies may repeat without aliasing a fixed role", () => {
+  const s = subject(); for (const id of ["dep-a", "dep-b"]) s.modules.push({ ...clone(s.modules[1]), id, role: "dependency", artifact_sha256: other, expected_artifact_sha256: other });
+  assert.equal(plan(sequence(s)).supplied_plan_complete, true);
+  s.modules[6].artifact_sha256 = s.modules[6].expected_artifact_sha256 = addonPin; assert.throws(() => plan(s), { message: "cc4c2ca_module_identity_alias" });
+});
 test("C2c-A targeted behavior mutations require successful controls and syntax-valid changes", () => {
   const compile = text => {
     const tree = ts.createSourceFile("model.mjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS); assert.equal(tree.parseDiagnostics.length, 0);
@@ -391,6 +512,7 @@ test("C2c-A targeted behavior mutations require successful controls and syntax-v
     ['m.extra_record_hash_bytes) % BigInt(d.record.bytes) !== 0n', 'm.extra_record_hash_bytes) < 0n', fn => assert.throws(() => fn(edit(subject(), s => {
       s.work.modes[0].extra_record_hash_bytes = "1"; s.work.modes[0].steps[1].cost.hash_bytes = "8293"; s.work.modes[0].steps[1].cost.read_bytes = "16385"; s.startup.work.other_hash_bytes = "4812";
     })))],
+    ...gateCases.map(([, from, to, run]) => [from, to, run]),
   ];
   for (const [from, to, check] of trials) { assert.equal(source.split(from).length, 2, from); check(compile(source)); const changed = source.replace(from, to); assert.notEqual(changed, source);
     assert.throws(() => check(compile(changed)), { code: "ERR_ASSERTION" }, from); }

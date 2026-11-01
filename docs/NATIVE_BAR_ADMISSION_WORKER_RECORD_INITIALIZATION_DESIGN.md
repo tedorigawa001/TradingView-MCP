@@ -1,6 +1,6 @@
 # C2c Record, Initialization And Host Qualification
 
-Status: **C2c-A independently reviewed/corrected and memory-tested; C2c-B/C/H/J remain pending**, 2026-11-01 JST, source baseline `76c618b`. The [review correction](#c2c-a-independent-review-and-corrections) supersedes the initial [implementation checkpoint](#c2c-a-implementation-and-memory-verification), including its counts and pending-review statements. Review and a conditional commit are separately approved. This refines [C2 startup](NATIVE_BAR_ADMISSION_WORKER_STARTUP_CONNECTION_DESIGN.md), including its latest commit-review correction, without qualifying C2c runtime. Existing C2b entry, policy, work, startup/disposition and C3 refusals remain closed. C2d and C3/C4 remain separate. The initial design below does not authorize any broader implementation or execution.
+Status: **C2c-A independently reviewed/corrected, committed as `e2730ad`, corrected after commit review and memory-tested; C2c-B/C/H/J remain pending**, 2026-11-01 JST, source baseline `76c618b`, commit-review correction baseline `e2730ad`. The [commit review correction](#c2c-a-commit-review-correction) supersedes the counts of the [review correction](#c2c-a-independent-review-and-corrections) and enforces the transient sentence in Capacity And Work as a blocker; that review correction superseded the initial [implementation checkpoint](#c2c-a-implementation-and-memory-verification), including its counts and pending-review statements. Review and a conditional commit are separately approved. This refines [C2 startup](NATIVE_BAR_ADMISSION_WORKER_STARTUP_CONNECTION_DESIGN.md), including its latest commit-review correction, without qualifying C2c runtime. Existing C2b entry, policy, work, startup/disposition and C3 refusals remain closed. C2d and C3/C4 remain separate. The initial design below does not authorize any broader implementation or execution.
 
 No real port/clock/timer, build, child process, native read/load, fixture operation, signature/key operation, real-data operation, MCP registration or production activation is authorized. Dot stays PAUSED. Judgment, observation bands, confirmation counts, notification/mail, retention and all existing resource/time ceilings are unchanged. Inspection below is of repository text, not a readback of a build record, addon or host qualification.
 
@@ -238,3 +238,71 @@ Fresh verification, Node 24.18.0, separate `--test --test-isolation=none` invoca
 No failures, cancellations or skips. **25 behavioral trials** (12 initial plus 13 targeted new trials) detect their mutations after successful controls and unique syntax-checked substitutions. **26 static mutations** comprise 17 contract/source mutations and 9 guard/inventory removals. Missing anchors, compile/setup failure or unrelated masking are not accepted as killed behavior mutants. Maximal plan diagnostics remain **7546 / 16384 encoded bytes**; the successful small invented buffer reservation remains **289792 retained / 0 transient**. These are not real parser/heap/native measurements, a complete manifest proof or a parent-wrapper calculation.
 
 Only these seven C2c files are included for the requested conditional commit. No shared helper/model, existing worker/runtime, source, package/lock, automation configuration, judgment/notification rule, resource/time ceiling or operational seal changes. Parser/dependency adoption, real parsing, connection code, real ports/clocks/timers, build/subprocess/native read, fixture/signature/real-data operations, MCP registration, production activation and push are not performed. Dot remains PAUSED with its full configuration hash unchanged. Full unit/effectful and operational suites remain unrun; later C2c-B/C/H/J and C2d approvals are still required.
+
+
+## C2c-A Commit Review Correction
+
+2026-11-01 JST, review of `e2730ad` against the code. In `git archive` copies the commit passed 29 related files / 1647 tests in every condition: Node 24.18.0 three times, linux/win32 platform spoofs, Node 20.19.6/26.12.1, isolation=none and CRLF. Its full unit suite passed 5172 of 5174 tests on Node 24 and Node 20, with no failures or cancellations and the 2 existing skips. Every probe of the reviewed paths returned the intended refusal code or stop reason, so no helper defect was found there.
+
+Findings, all in the tests unless noted:
+
+- P2: The state tests fed foreign-session/epoch, foreign-clock and lost-lifetime facts as `stop` events, which stop the model by themselves. Each of those gates could be removed with all 102 tests passing. So could:
+  - the reservation gates: planned cost, step order, an active reservation, a reused action id and a sub-millisecond window;
+  - result before begin;
+  - the close gates: close before stop and close of an unowned resource.
+- P2: Projection and role-mapping gates were not tested one at a time:
+  - record bytes, rows, pages and manifest bytes against C2a;
+  - page rows above record rows and page bytes above manifest bytes;
+  - canonical projection size and generation zero;
+  - input-row mode and roles, and artifact-row mode, role count and role.
+
+  The invalid list asserted only that something threw. The "record size" case was actually refused by the record-hash cost floor, and "duplicate step" still passed through a TypeError when its own gate was removed.
+- P2: Several gates had no blocker or refusal test at all: host namespace/ACL/launch/native-profile/loader statuses, record identity/membership, the artifact subset digest, the unsigned-owner export restriction and unknown helper/parser/hash costs.
+- P3 (design and helper): Capacity And Work says no additional transient scratch fits beside C2a's 4259840-byte reservation until non-overlap is proved. Yet the planner accepted a full-ceiling C2c transient as complete, a test asserted it, and the reported transient peak omits C2a's receive copies.
+- P3 (helper): Distinct fixed roles with identical artifact digests were accepted, and the fixture used one digest for every module, although the effect manifest rejects aliased identities.
+- Of 130 independent single-condition helper mutants, 64 failed a behavioral test.
+
+Corrections:
+
+- **Helper, two rules:**
+  - A reader, registry, contracts, fixed-owner, unsigned-owner or addon artifact digest must appear on exactly one module (`module_identity_alias`). Identical dependency copies may repeat among themselves, but never alias a fixed role. Only artifact identity is checked. Source digests remain correlations, and the reader source is compared with its LAUNCH pin.
+  - Any known nonzero C2c transient peak adds the blocker `transient_overlap_unproven`.
+    - C2c-A cannot show that C2c transient buffers never coexist with C2a's receive reservation: C2b starts startup inside its `data` handler (`startOriginalWorker` runs the producer up to its first await there).
+    - The Capacity And Work sentence therefore stands, and the planner's transient figure is a C2c-only phase figure, not an invocation peak. A phase above the ceiling is still refused.
+    - C2c-B/C must either yield out of the handler before allocating transient buffers or charge that prefix on top of C2a's reservation. Released there means unreachable, not freed.
+- **Tests, 102 to 159:**
+  - The fixture gives each fixed role its own artifact digest. Its addon, reader and reader-source digests are the LAUNCH pins.
+  - The invalid list asserts each exact code, and "record size" now changes only the record size.
+  - The state list feeds non-stop facts and asserts the first stop.
+  - 56 single-gate cases each have a test and a trial that removes exactly that gate. They cover:
+    - record projection and row role mapping;
+    - module edge/export/effect uniqueness, the unsigned-owner export and fixed-role identity;
+    - host/record/subset blockers, unknown helper/parser/hash costs and unproven transient overlap;
+    - both partial step-total clauses (the lower clause through helper commands, because the stage floors already imply it for hash bytes), the record hash/compare floors, the other-helper mapping and the step-helper lower bound;
+    - the retained/page floors and memory/work step uniqueness;
+    - foreign session/generation/clock/lifetime and the reservation cost/order/active/id/window gates;
+    - result before begin, a second begin, begun acquisitions, close before stop, unowned close, retention of an unknown module import and the blocked state.
+  - A control shows that identical dependency copies are accepted.
+
+Remaining defense in depth: 11 of the 132 re-run mutants still pass behavioral tests.
+
+- Four fail only because a trial's search text disappears, which is not coverage:
+  - the exact step-total clause, covered by the two partial clauses;
+  - the post-completion step index;
+  - a null planned cost, which always blocks first;
+  - the close-attempted bit behind the owned check.
+- Seven are masked by an earlier gate:
+  - the C2c re-check of C2a's null setup;
+  - begin's stopped/blocked/unknown-action/active checks;
+  - result's active and outcome checks behind each other.
+
+Verification uses `git archive` copies:
+
+- **Record-initialization tests:** 159 tests and 4 boundary tests pass. 81 behavioral trials (previously 25) and the 26 static mutations are detected after successful controls.
+- **Independent sweep:** on the same 130 mutants, 119 now fail a behavioral test (previously 64). The two new-rule mutants are also detected, giving 121 of 132.
+- **Failing first:** on the uncorrected helper, the alias and transient-blocker tests and their trials failed. The other new tests are coverage tests, and the sweep measures their effect.
+- **Related tests:** 29 related files / 1704 tests pass in every condition: Node 24 three times, linux/win32 spoofs, Node 20.19.6/26.12.1, isolation=none and CRLF.
+- **Full unit suite:** 5229 of 5231 tests pass on Node 24 and on Node 20, with no failures or cancellations and the 2 existing skips.
+- **Diagnostics:** maximal plan diagnostics stay 7546 / 16384; the bound already allows 48 blockers and at most 45 occur. The small invented buffer reservation stays 289792 retained / 0 transient.
+
+No shared helper/model, worker/runtime, source, package/lock, limit, judgment/notification rule or seal changes. Dot remains PAUSED. No real port, clock, timer, child process, native read, fixture, signing, data, MCP registration, production activation or push operation was performed. C2c-B/C/H/J and C2d remain pending.

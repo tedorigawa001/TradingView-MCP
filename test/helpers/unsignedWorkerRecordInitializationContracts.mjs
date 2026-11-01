@@ -141,6 +141,8 @@ function subject(input) {
     if (m.role === "fixed_owner" && canonical(m.exports) !== '["enrollFixedMemoryCheckpointOracleC0Only"]'
       || m.role === "unsigned_owner" && canonical(m.exports) !== '["enrollUnsignedCheckpointOracle"]') refuse("owner_exports");
   }
+  // Fixed-role artifacts are distinct files. Identical dependency copies may repeat, but never alias a fixed role.
+  if (d.modules.some(m => m.role !== "dependency" && d.modules.filter(v => v.artifact_sha256 === m.artifact_sha256).length !== 1)) refuse("module_identity_alias");
   const blockers = [...startup.blockers, ...gates.filter(k => d.profiles[k] !== "matched_supplied").map(k => k + "_" + d.profiles[k])];
   for (const k of ["namespace", "acl", "launch", "native_profile", "loader"]) if (d.host[k] !== "matched_supplied") blockers.push("host_" + k + "_" + d.host[k]);
   if (d.host.source !== "supplied_worker") blockers.push("worker_host_observation_unavailable");
@@ -153,6 +155,8 @@ function subject(input) {
   if (d.modules.some(m => m.role === "addon" && m.artifact_sha256 !== d.startup.binding.addon_sha256
     || m.role === "reader" && (m.artifact_sha256 !== d.startup.binding.reader_js_sha256 || m.source_sha256 !== d.startup.binding.reader_source_sha256))) blockers.push("module_launch_pin_mismatch");
   if (!memory.complete) blockers.push("memory_overlap_unknown");
+  // C2b starts startup inside its data handler, so C2c transient scratch may coexist with C2a's full receive reservation until shown otherwise.
+  if (BigInt(memory.known_transient_peak_bytes) > 0n) blockers.push("transient_overlap_unproven");
   for (const key of ["hash_bytes", "helper_commands", "read_bytes", "parser_steps"]) if (w["modeled_" + key] === null) blockers.push(key + "_unknown");
   return { d, startup, w, memory, blockers };
 }
