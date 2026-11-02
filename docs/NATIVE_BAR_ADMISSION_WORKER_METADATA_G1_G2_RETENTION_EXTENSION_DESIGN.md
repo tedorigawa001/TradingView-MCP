@@ -48,3 +48,5 @@ A separately approved next planning slice may use only the remaining planning ba
 Independent review, commit and push of this reflection are not performed or implied. New source/effect work needs its own exact approval even if budget remains. Inspection of existing control documents is not qualification of a trusted runtime or producer.
 
 [Auxiliary allocation](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md): approved6144 from unallocated20480; remaining14336. No search grant.
+
+[Primary-read planning](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_DOCUMENT_READ_SCOPE_DESIGN.md): approved4096 from unallocated14336 to planning55; balances4151/10240 before this reflection. No URL access.

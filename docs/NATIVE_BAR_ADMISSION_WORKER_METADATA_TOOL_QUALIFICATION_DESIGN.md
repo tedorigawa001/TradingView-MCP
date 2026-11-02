@@ -152,6 +152,8 @@ No finite static estimate proves V8 heap, OS/TLS/DNS work, synchronous interrupt
 
 ## Exit Criteria And Next Request
 
+[Primary-document read plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_DOCUMENT_READ_SCOPE_DESIGN.md): exact URLs only, bounded method unknown; read blocked. Locator exception does not extend.
+
 [Auxiliary exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md): documentation only; search approval separate.
 
 The [G1/G2 scope gate](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_QUALIFICATION_SCOPE_DESIGN.md) requires an exact nomination and separately approved bounded manifest before lookup; no candidate or read is granted.
