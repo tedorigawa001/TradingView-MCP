@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Auxiliary locator review fixes (2026-11-02 JST)**: [untrusted output](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md) and [STOP pointer](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_QUALIFICATION_SCOPE_DESIGN.md). Review bucket 1067; no search grant.
+
 [Auxiliary locator design](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md): allocation only; no search.
 
 **105-3 G1/G2 scope design (2026-11-02 JST)**: [nomination/read gate](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_QUALIFICATION_SCOPE_DESIGN.md). Selected artifacts unknown; no source/effect grant.

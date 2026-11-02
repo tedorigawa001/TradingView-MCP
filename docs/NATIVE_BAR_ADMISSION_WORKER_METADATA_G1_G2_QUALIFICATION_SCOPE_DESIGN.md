@@ -33,3 +33,5 @@ Design only; charge 528 planning bytes. Proposed queries:
 - site:nodejs.org "release" "source code"
 
 Max3 searches, max2 new locators (G1<=1,G2<=1); no page opens/retry/pagination. Snippets locate, not prove. Before search, approve tool/byte/pass/work bounds under Gates2/3; unknown bounds STOP. Pages need separate exact URL approval and primary project/maintainer-origin checks. No search now.
+
+The later [auxiliary exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md) narrows this STOP for its separately approved locator-only search only: advance guarantees of backend received bytes/internal work may be omitted and recorded as unknown, with no strict whole-work total guarantee. Other unknown bounds still STOP.
