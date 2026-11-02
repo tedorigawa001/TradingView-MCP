@@ -64,6 +64,14 @@ test("B2-A false authority and budget literal erasure are detected", () => {
 });
 function harness(s) {
   const first = s.indexOf('await import("../helpers/'); assert.ok(first > 0);
+  // Tests registered before a top-level await can finish before it resolves, letting the root after hook lift the guards early.
+  const K = ts.SyntaxKind, scoped = new Set([K.FunctionDeclaration, K.FunctionExpression, K.ArrowFunction, K.MethodDeclaration, K.GetAccessor, K.SetAccessor, K.Constructor]);
+  const registers = n => ts.isCallExpression(n) && n.expression.getText() === "test" || !scoped.has(n.kind) && ts.forEachChild(n, registers);
+  const awaits = n => n.kind === K.AwaitExpression || n.kind === K.ForOfStatement && n.awaitModifier !== undefined
+    || n.kind === K.VariableDeclarationList && (n.flags & 6) === 6 || !scoped.has(n.kind) && ts.forEachChild(n, awaits);
+  let registered = false;
+  for (const n of syntax(s).statements) { const r = Boolean(registers(n));
+    assert.equal((registered || r) && Boolean(awaits(n)), false, "top-level await after test registration"); registered ||= r; }
   for (const pin of ['block(fs, ["read", "readSync", "readv", "readvSync", "createReadStream"', 'block(child, ["spawn"', 'block(workers, ["Worker", "MessageChannel"',
     'block(crypto, ["sign", "verify"', 'block(process, ["dlopen", "getBuiltinModule"', 'block(net, ["Socket", "Server"',
     '[globalThis, "Date", ["now"]]', '[process, "hrtime", ["bigint"]]', 'block(timerPromises, ["setTimeout"', 'syncBuiltinESMExports();',
@@ -84,6 +92,13 @@ test("B2-A guards precede imports and guard deletion controls fail", () => {
     ['block(JSON, ["parse"]);', ''], ['[JSON, "parse"]', '[JSON, "__missing"]']]) {
     assert.equal(s.split(from).length, 2); const changed = s.replace(from, to);
     assert.equal(syntax(changed).parseDiagnostics.length, 0); assert.throws(() => harness(changed), { code: "ERR_ASSERTION" });
+  }
+  const last = 'test("B2-A no denied effect was swallowed"', firstName = 'test("B2-A empty evidence grants no authority"';
+  for (const [late, at] of [['const late = await import("zod");', last], ['{ let late = (await import("zod")).z; }', last], ['for await (const late of []) {}', last],
+    ['{ await using late = null; }', last], ['for (const late of []) { test(late); await late; }', firstName]]) {
+    const changed = s.replace(at, late + '\n' + at);
+    assert.equal(syntax(changed).parseDiagnostics.length, 0);
+    for (const text of [changed, changed.replace(/\n/g, "\r\n")]) assert.throws(() => harness(text), { message: /^top-level await after test registration/ });
   }
 });
 test("B2-A is not registered, imported by operational code or adopted as a dependency", () => {

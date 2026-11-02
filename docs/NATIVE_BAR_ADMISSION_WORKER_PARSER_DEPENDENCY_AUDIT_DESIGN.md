@@ -1,6 +1,6 @@
 # C2c-B2 Dependency Acquisition, Pinning And Static Audit
 
-Current implementation status (2026-11-02 JST): **B2-A independently reviewed and corrected, final memory verification complete; local commit approved** on baseline `c257abf`. See [B2-A Implementation](#b2-a-implementation) and [Independent Review](#b2-a-independent-review). The user approved a local commit after review and verification, not any later effectful stage. The historical design and review records below describe their own steps.
+Current implementation status (2026-11-02 JST): **B2-A committed as `85f7b75` and corrected after commit review** on baseline `c257abf`, commit-review correction baseline `85f7b75`. See [B2-A Implementation](#b2-a-implementation), [Independent Review](#b2-a-independent-review) and [Commit Review Correction](#b2-a-commit-review-correction); the last supersedes the earlier test counts. Each local commit had its own user approval, and none approves a later effectful stage. The historical design and review records below describe their own steps.
 
 Design-step status: **detailed design only, committed as `a637266` and corrected after commit review**, 2026-11-02 JST, baseline `7970b9b`, commit-review correction baseline `a637266`. The [commit review correction](#c2c-b2-commit-review-correction) fixes three documentation points without changing any slice, cap or stop condition. This refines [parser selection and B1](NATIVE_BAR_ADMISSION_WORKER_PARSER_ACCEPTANCE_DESIGN.md), including its commit-review correction, not just `2d981f0`. The checkout was clean at the start of that design. B1's package identity refusal and corrected gate tests were preserved. That design step added no implementation, dependency, artifact, approval capability or executable connection.
 
@@ -211,6 +211,60 @@ Parent integration then reproduced an adjacent count case: three enumerated dire
 The stage reviewer found one further P2: the `metadata` versus `static` provenance label was not part of static readiness. The central static prerequisite now requires `observed.stage === "static"` for both packages, covering static/later event advancement and validation of an imported advanced predecessor. Metadata-only observations remain valid through the opaque archive stage but cannot stand in for static observations. Four regressions (each package, both event and predecessor paths) failed before the correction; these and its isolated gate removal bring the behavior count to **208**, mutations to **44**, boundary tests remain **15**. Eight distinct independent-review P2 findings have been corrected in total, plus the parent adjacent count case. Both assigned final delta reviews report no remaining findings in their reviewed scope.
 
 Final parent verification reran each of the four approved memory files: **208 + 15 + 391 + 10 = 624 passed**, zero failures/cancellations/skips. Local file links/anchors, whitespace, new-file ASCII and exact change scope were checked. The 245 protected source/native/script/shared-helper/package/lock/ignore files retain aggregate SHA-256 `69409cfa8b8f1c6f1380e3d85fe2f6f40c924cc8e50fde170918ece033b8414b`, and Dot remains PAUSED with the full configuration hash above. Commit hooks, signing and automatic Git maintenance are disabled for the separately authorized local commit; no push is authorized. No runtime/dependency/shared-helper/job/threshold change, actual operation, build, candidate parse, signing, fixture or production connection was introduced.
+
+## B2-A Commit Review Correction
+
+2026-11-02 JST, review of `85f7b75` against the code. In `git archive` copies the B2-A and B1 tests passed with 31 other related files (2328 tests) on Node 24 three times, linux/win32 platform spoofs, Node 26.12.1, isolation=none and CRLF, and the full unit suite passed 5853 of 5855 on Node 24 (no failures or cancellations, 2 existing skips). A probe reached every reachable refusal code, and each returned its intended code. The caps make `decoded_total_bound`, `received_total_bound` and `diagnostic_bound` unreachable. No helper defect was found.
+
+Findings, all in the tests:
+
+- P1: on Node 20.19.6 two tests failed, and the full suite passed 5851 of 5855. node:test starts the registered top-level tests whenever the module yields. Once every registered test has finished, it runs the root `after` hook, which restores every guard. The memory test registered tests and then imported the not-yet-loaded TypeScript helper at top level. On Node 20 that import waited on the event loop. The earlier tests finished, and the hook ran before the gate-removal trials and the required-sink and JSON-parse probes were registered. The two probes therefore met the real `JSON.parse` and `Date`, and the later trials ran unguarded. Node 24.18.0 and 26.12.1 apply the same root-hook rule: a top-level `setImmediate` wait reproduces it there. Their loader finished this import without yielding, so they passed. CI also runs Node 22 on ubuntu. Node 22 is not installed locally, so whether its loader yields here, and therefore whether CI would fail, is not established. The implementation step ran each file with `--test-isolation=none`, whose bootstrap waits until every file is imported before any test starts. That hides the problem.
+- P2: 11 reachable refusal codes and six duplicate checks had no test. Of 397 independent single-condition helper mutants, only 159 failed a behavioral test. Probes confirmed that removing one of sixteen gates lets an inconsistent summary advance:
+  - URL allowlist: a foreign host using the registry tarball path or a raw-source path, a non-default port, a fragment, the packument path, and a source URL at another commit. None of the six existing URL negatives reached these gates. The protocol, canonical-`href` (`:443`), query, username and path-shape checks refused them first;
+  - static readiness: a "complete" inventory hiding a non-regular member, a duplicate mapping hiding an unmapped file, a duplicate or null audit-row set, an entry pin not bound to the entry file (every fixture file had the same digest), and a mapping URL outside the approved set;
+  - an incomplete response body at the archive stage, a declaration hiding a missing lock entry behind a duplicate, and approvals that did not bind the URL set or the memory budget.
+
+  The other survivors were mostly checks on one pin side, the comparison of a single pin key, single memory floors, received-completeness conditions, archive-stage prerequisites, plan composition, and schema bounds, literals, enums and strict objects.
+- P3 (docs): on Node 20 the implementation record's statement that the required-sink probes verify the blocking did not hold for late-registered tests.
+
+Corrections, tests and this document only; the helper is unchanged:
+
+- The zod, TypeScript and helper-source reads now precede the first test registration. The boundary test parses the memory test with the parser it already loads. It then refuses any top-level `await` expression, `for await` loop or `await using` declaration in or after the first statement that registers a test, including inside a block. Five controls insert such an `await`, and each must fail with that message under LF and CRLF. Any import that waits on the event loop could trigger the early hook on every version, so this guard does not depend on the loader.
+- The fixture gives each package its own entry-file digest, so the entry pin and the package-scoped mapping lookup are exercised. A positive control still accepts identical entry digests.
+- The memory test grows from 208 to 400:
+  - URL allowlist negatives for each host, port, fragment, userinfo, path, tag and object form and for an unparseable URL; a positive control for every fixed metadata and source form; the URL count and duplicate gates; and source-commit, missing-path and member-path syntax;
+  - SRI and alias checks on one side at a time, the comparison of each pin key, the diff baseline, parser options and the package set;
+  - member classification (later prefix, directory digest, root file, missing file digest), enumerated and declared regular counts, complete-inventory counts, unenumerated logical floors, the per-package decoded ceiling and the archive-readiness blocker;
+  - per-kind response ceilings, the declared source-count floor, nine received-completeness conditions plus a required source count when no source is known, hash-pass multiplication, decode completeness, the mapping term of the inspection floor, every single memory floor (including the package index of the compressed floor), memory completeness, and positive controls at the exact memory floor, hash and step ceilings and metadata body ceiling;
+  - the 1 MiB receipt bound, on a consistent summary of 512 mapped files with long paths (about 1.3 MB). A smaller variant is accepted;
+  - duplicate audit rows, mappings and diff entries, mapping ownership and its exact approved URL, the parser entry as stream-json's own file, and the placement inventory and file count, with unknown expectations accepted;
+  - 29 more isolated stage prerequisites; imported-predecessor prerequisites and clock review; event result, approval shape and clock review; receipt binding of the whole event; and plan binding of the URL set, budgets, expected graph, diff, all three layout fields, predecessor clock, expected pins after their own stage, and the baseline after an observation-only event;
+  - 103 exact `cc4a_invalid_input` cases for schema bounds (upper and lower), decimal and digest formats, literals, enums and strict objects that had no case. The 257-member page is also caught by the shared 256-entry array bound, and its label says so.
+
+  104 new single-gate trials (148 in all) each remove or weaken exactly one gate. The control stays valid and the negative is accepted. The plan-binding trials build their events with the mutated helper. The mapping-owner and entry-package trials use their own valid controls: with distinct digests, a lookup that ignores the owner already refuses the shared-path fixture.
+
+Verification in `git archive` copies:
+
+- Failing first: the new boundary test fails on the old memory test with "top-level await after test registration". Both B2-A files pass on Node 20, where two memory tests failed before. The helper is unchanged, so the new behavioral tests pass on it; the sweep below shows what they now detect.
+- Of the same 397 independent mutants, behavioral detection rises from 159 to 373. All 17 further mutants written for the review findings recorded below are detected. The 24 that remain survive the behavioral tests:
+  - unreachable under the schema or the shared copy bounds (member and response page caps, the decoded and received totals implied by the per-kind caps);
+  - refused under the same code by another gate (the logical-versus-enumerated count, the row floor, the archive baseline, mapping length and path, entry existence, inventory readiness, source-byte presence, matched-pin equality and non-null);
+  - refused later under another code (the tuple presence check, the mapping count);
+  - literal or constant plan fields, the clock-domain comparison, and the duplicated predecessor-receipt binding in the plan and the seed;
+  - the diagnostic ceiling, which the static boundary test catches.
+- 33 related files (2520 tests) pass on Node 24 three times, linux/win32 platform spoofs, Node 20.19.6 and 26.12.1, isolation=none and CRLF. The full unit suite passes 6045 of 6047 on Node 24 and Node 20 (no failures or cancellations, 2 existing skips). After the last boundary-test change, that file passed again in every condition, and both full suites passed again.
+- Two read-only reviews split the scope.
+  - The test reviewer found three P2 gaps in the first draft:
+    - the per-package digest change had disarmed the entry-package check of an existing test;
+    - two of the three layout plan bindings were untested;
+    - the missing-path source URL was untested.
+
+    It also found P3 gaps: a narrow late-await detector, lower schema bounds and decimal formats, a source count with no known source, exact-boundary and unknown-expectation controls, the compressed-floor package index, the baseline plan binding after an observation, and a receipt negative that was not otherwise consistent. Its delta reviews confirmed each closed and added two optional P3 items (a statement that both registers and awaits, and single-field formats), now covered.
+  - The documentation reviewer found one P2: the first draft blamed the Node 20 harness, although Node 24 and 26 share its root-hook rule, and so predicted a Node 22 failure without basis. It also found P3 slips: the cause of the old URL negatives, six rather than four duplicate checks, the unreachable totals, three schema bounds without a case, and missing CRLF and `await using` coverage for the guard controls.
+  - In the last delta both reviewers independently found that the same-statement control was inserted after registration had begun, so it could not detect removal of that clause. It now runs at the first test, and reverting the clause fails the boundary test.
+  - Each finding was reproduced and corrected. Both final confirmations report no remaining findings.
+
+Diagnostics, limits, B1 and all seals are unchanged. Dot stays PAUSED. No dependency, parser, connection or operational action is added.
 
 ## Specification References And Today's Verification
 
