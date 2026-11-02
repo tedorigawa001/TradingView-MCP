@@ -14,6 +14,8 @@ The design separates **discovery batches** from a **final metadata batch**. Disc
 
 ## Approval Slices
 
+The M2a row is refined in [static tool qualification scope and approval boundaries](NATIVE_BAR_ADMISSION_WORKER_METADATA_TOOL_QUALIFICATION_DESIGN.md) (2026-11-02 JST, baseline `794aa94`). This is design only: the first proposed step is a bounded 21-file local text inventory and role-specific rejection/gap table, not another producer, import, parser test or connection adapter. Runtime/bootstrap, strict decoding, address/DNS/TLS, clocks, environment and authorization are separate roles; installed dependencies, static conformity and report hashes never grant execution. Missing decoder/source/closure evidence is a stop for a separate decision. M1's commit-review correction and all existing limits/seals remain unchanged.
+
 Each row needs a later explicit request covering its exact scope. Approving this design or one row does not authorize another.
 
 | Slice | Proposed permission after separate approval | Still excluded |
