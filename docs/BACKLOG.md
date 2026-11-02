@@ -4,11 +4,11 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 M2a-2B2 設計 (文書のみ)**: [範囲・予約](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md)。3件未読、保持上限不変。Dot停止・判定/通知不変、実操作/commitなし。
+M2a-2B2 [metadata report](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCREEN_REPORT.md): L01-L03 concordant; no decoder qualified.
 
 **M2a-2B2 文書限定レビュー**: [結果・commit境界](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md#document-only-independent-review-and-commit-boundary)。独立2名とも指摘なし、追記は既存2048枠へ計上。3文書のlocal commitのみ承認、追加source/実操作/pushなし。
 
-M2a-2B2 [metadata report](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCREEN_REPORT.md): L01-L03 concordant; no decoder qualified.
+**105-3 M2a-2B2 設計 (文書のみ)**: [範囲・予約](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md)。3件未読、保持上限不変。Dot停止・判定/通知不変、実操作/commitなし。
 
 **105-3 B4-C2c-B2-M2a-2B1 既存文書のみの独立レビュー (2026-11-02 JST、読取専用・local commit別承認)**: [レビューとcommit境界](NATIVE_BAR_ADMISSION_WORKER_METADATA_DECLARATION_SCREEN_REPORT.md#document-only-independent-review-and-commit-boundary)。Aがlocator/根拠/役割・承認境界、Bが文書identity/行番号/台帳・cap/privacy・親/backlogを確認し、両名とも文書範囲で修正を要する指摘なし (宣言値・元snapshot/coverageの独立再検証ではない)。Aはbdo22 command (Git5)、Bは18 (Git6)、各source/cache/config読取・新規予約0。Aの省略文書表示は限定再表示で補完、Bのchecker互換性失敗は再実行で解消。親の文書表検査のescape誤りも修正・再確認し、F01/F02を再読しない。既存disk3934729/retained606046/既知論理36326200/保守的予約50193232・消費済み枠を維持。初回調査と後のreview/local commit承認を区別、対象は報告・B設計・親・backlogの4文書のみ。hook/署名/自動Git保守を無効にしたlocal commitを別承認。Dot停止・判定/通知条件・全上限/seal不変、追加source/依存/実parse/接続・実port/時計/timer/build/test/運用子process/native/fixture/署名/実データ/MCP登録/本番有効化/pushなし。次のartifact読取・source予約は別承認。
 
