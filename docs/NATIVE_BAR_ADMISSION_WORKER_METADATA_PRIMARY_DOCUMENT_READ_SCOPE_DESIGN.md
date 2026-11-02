@@ -29,3 +29,5 @@ Before fetching, approve exact report destinations/retained caps within G1/G2 ba
 Distinguish declared support, not found in admitted text, and unknown; partial text never proves absence in an entire project. A page is not implementation/runtime proof. Inability to retain required facts, insufficient capacity, unsafe destination or unresolved bounds stops before further lookup; no truncation. G3-G6/M3+ stay blocked.
 
 Design complete may mean read blocked. No fetch/search, source/acquisition/code/parse, port/clock/timer/build/child/native/fixture/signature/data/MCP/activation, independent review/commit/push now. Dot PAUSED; judgment/notification/mail and all other limits/seals unchanged.
+
+[Separate exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_READ_EXCEPTION_DESIGN.md): documentation only; strict read remains blocked, no activation/read grant.
