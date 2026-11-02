@@ -23,3 +23,13 @@ The [D/B contracts](NATIVE_BAR_ADMISSION_WORKER_METADATA_DECODER_BOOTSTRAP_EVIDE
 Charge this document 2165 from planning2748; parent/BACKLOG 414 from integration3555. Other buckets/source ledger unchanged; source increment zero, no refund/slot reuse.
 
 Design may finish blocked. All inherited operational prohibitions apply: no source/acquisition/execution/MCP/activation, review/commit/push now. Dot PAUSED; judgment/notification and limits/seals unchanged.
+
+
+## Public Locator Proposal
+
+Design only; charge 528 planning bytes. Proposed queries:
+- site:github.com "JSON parser" "duplicate keys"
+- site:github.com "JSON parser" "streaming" "limits"
+- site:nodejs.org "release" "source code"
+
+Max3 searches, max2 new locators (G1<=1,G2<=1); no page opens/retry/pagination. Snippets locate, not prove. Before search, approve tool/byte/pass/work bounds under Gates2/3; unknown bounds STOP. Pages need separate exact URL approval and primary project/maintainer-origin checks. No search now.
