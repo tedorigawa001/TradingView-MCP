@@ -109,7 +109,7 @@ test("M1 empty plan never grants runtime authority", () => {
   assert.equal(p.execution_available, false); assert.equal(p.native_status, "NOT_RUN");
   assert.equal(p.metadata_parser_executed, false); assert.equal(p.actual_metadata_verified, false);
   assert.deepEqual(target.describeUnsignedMetadataAcquisitionCapacity(subject()), p);
-  assert.ok(p.blockers.includes("profiles_unavailable"));
+  assert.ok(p.blockers.includes("profiles_unavailable")); assert.equal(new Set(p.blockers).size, p.blockers.length);
 });
 test("M1 the initial request list is exact and cannot contain artifact or private endpoints", () => {
   refuses(edit(subject(), s => s.operations[0].url = "https://127.0.0.1/x"), "operation_url");
@@ -534,6 +534,224 @@ test("M1 reports are detached, frozen and retain all actual authority denials", 
   assert.throws(() => p.caps.attempts = 23, TypeError); assert.equal(plan().caps.attempts, 22);
   for (const [k, v] of Object.entries(data.flags())) assert.equal(p[k], k === "scope" ? "unsigned_metadata_acquisition_memory_only" : v);
 });
+// Commit-review coverage: each negative changes one fact of an otherwise valid summary and expects its own refusal, blocker or state.
+const zeroBody = r => Object.assign(r.http, { body_bytes: "0", wire_bytes: "80", content_length: "0", deliveries: 0 });
+const absentRef = r => { r.http.status = 404; zeroBody(r); r.json = r.data = null; };
+const ceilingFloor = (key, value) => edit(ready(), s => s.operations[0][key] = value);
+test("M1 operation ceilings must be positive", () => {
+  plan(ceilingFloor("body_ceiling", "1")); plan(ceilingFloor("header_ceiling", "1"));
+  refuses(ceilingFloor("body_ceiling", "0"), "body_ceiling"); refuses(ceilingFloor("header_ceiling", "0"), "header_ceiling");
+});
+const swappedInitial = () => edit(ready(), s => { [s.operations[2], s.operations[3]] = [s.operations[3], s.operations[2]]; });
+const objectInFirstSix = () => edit(finalSubject(), s => s.operations.splice(5, 0, s.operations.splice(6, 1)[0]));
+const objectAfterRechecks = () => edit(finalSubject(), s => s.operations.push(s.operations.splice(9, 1)[0]));
+const swappedRechecks = () => edit(finalSubject(), s => { const n = s.operations.length; [s.operations[n - 1], s.operations[n - 2]] = [s.operations[n - 2], s.operations[n - 1]]; });
+test("M1 batch manifests keep their exact phase layout", () => {
+  refuses(swappedInitial(), "initial_set"); refuses(edit(ready(), s => s.operations.push(operation(names[0], "tag", ids[0], "object"))), "initial_set");
+  refuses(edit(finalSubject(), s => s.operations[6].phase = "initial"), "operation_phase");
+  for (const make of [objectInFirstSix, objectAfterRechecks, swappedRechecks]) refuses(make(), "final_set");
+  refuses(edit(finalSubject(), s => s.operations = s.operations.slice(-6)), "final_set");
+  const extra = observed(); extra.records.push({ ...structuredClone(extra.records[5]), ordinal: 7, op_id: "op-unlisted" }); refuses(extra, "record_order");
+});
+const presentRef = change => edit(ready(), s => { s.graph[0].availability = "present"; change(s.graph[0]); });
+const refWithParent = () => edit(ready(), s => s.graph[0].parents = [{ kind: "tag", key: ids[0] }]);
+const unknownRefTarget = () => edit(ready(), s => Object.assign(s.graph[0], { expected_type: "tag", expected_target: ids[0] }));
+test("M1 reference nodes keep paired targets, no parents and present availability", () => {
+  plan(presentRef(n => Object.assign(n, { expected_type: "tag", expected_target: ids[0] })));
+  refuses(presentRef(n => n.expected_type = "tag"), "graph_target"); refuses(presentRef(n => n.expected_target = ids[0]), "graph_target");
+  refuses(refWithParent(), "graph_target"); refuses(unknownRefTarget(), "graph_target");
+});
+const finalNode = (kind, change) => edit(finalSubject(), s => change(s.graph.find(n => n.package === names[0] && n.kind === kind), s));
+const unavailableCommit = () => finalNode("commit", n => n.availability = "unavailable");
+const orphanObject = () => { const s = subject(); s.mode = "objects";
+  s.graph.push({ package: names[0], kind: "tag", key: "3".repeat(40), availability: "present", expected_type: null, expected_target: null, tree_id: null, parents: [] });
+  s.operations = [operation(names[0], "tag", "3".repeat(40), "object")]; return s; };
+const objectsBase = () => { const s = subject(); s.mode = "objects"; Object.assign(s.graph[0], { availability: "present", expected_type: "tag", expected_target: ids[0] });
+  s.graph.push({ package: names[0], kind: "tag", key: ids[0], availability: "present", expected_type: null, expected_target: null, tree_id: null, parents: [{ kind: "ref", key: versions[0] }] });
+  s.operations = [operation(names[0], "tag", ids[0], "object")]; return s; };
+const missingParent = () => edit(objectsBase(), s => s.graph[4].parents.push({ kind: "tag", key: "9".repeat(40) }));
+const unknownParent = () => finalNode("tag", n => n.availability = "unknown");
+const refExpectsCommit = () => finalNode("ref", n => n.expected_type = "commit");
+const foreignParentTarget = () => edit(objectsBase(), s => s.graph.push({ ...structuredClone(s.graph[4]), key: "3".repeat(40) }));
+const commitWithTarget = () => finalNode("commit", n => Object.assign(n, { expected_type: "tag", expected_target: "9".repeat(40) }));
+test("M1 object nodes are available children of an exact present parent", () => {
+  plan(objectsBase()); for (const make of [unavailableCommit, orphanObject, missingParent, unknownParent, refExpectsCommit, foreignParentTarget]) refuses(make(), "parent_binding");
+  refuses(commitWithTarget(), "graph_target");
+});
+test("M1 a final graph is preflight-ready only when every node is known and every target listed", () => {
+  assert.equal(plan(ready(finalSubject())).model_prerequisites_complete, true);
+  for (const change of [s => s.graph.find(n => n.kind === "commit").availability = "unknown",
+    s => Object.assign(s.graph.find(n => n.kind === "ref" && n.key.startsWith("v")), { availability: "present", expected_type: "tag", expected_target: "9".repeat(40) })]) {
+    const p = plan(ready(edit(finalSubject(), change))); assert.equal(p.model_prerequisites_complete, false); assert.ok(p.blockers.includes("graph_unavailable"));
+  }
+});
+const ambiguousPlan = () => { const s = subject(); s.mode = "objects";
+  for (const [i, c] of [commits[0], "f".repeat(40)].entries()) {
+    Object.assign(s.graph[i], { availability: "present", expected_type: "commit", expected_target: c });
+    s.graph.push({ package: names[0], kind: "commit", key: c, availability: "present", expected_type: null, expected_target: null, tree_id: null, parents: [{ kind: "ref", key: s.graph[i].key }] });
+  }
+  s.operations = [commits[0], "f".repeat(40)].map(c => operation(names[0], "commit", c, "object")); return s; };
+test("M1 planned aliases cannot expect different commits", () => { refuses(ambiguousPlan(), "ambiguous_commit"); });
+test("M1 the planned ambiguous-commit gate has an independent single-gate control", () => {
+  const gate = 'if (new Set(commits).size > 1) refuse("ambiguous_commit");', index = source.indexOf(gate);
+  assert.notEqual(index, source.lastIndexOf(gate));
+  const original = compile(source), changed = compile(source.slice(0, index) + source.slice(index + gate.length));
+  for (const fn of [original, changed]) assert.equal(fn(ready()).model_state, "PLAN_ONLY");
+  assert.throws(() => original(ambiguousPlan()), { message: "b2m1_ambiguous_commit" });
+  assert.equal(changed(ambiguousPlan()).model_state, "PREFLIGHT_BLOCKED");
+});
+const attemptedBelowRecords = () => edit(observed(subject(), 1), s => s.usage[0].attempted = 0);
+test("M1 usage counters cannot hide records and stay incomplete when unknown", () => {
+  const s = observed(subject(), 1); s.usage[0].attempted = null; assert.equal(plan(s).capacity.known_consumed_attempts, 1);
+  refuses(attemptedBelowRecords(), "usage_floor");
+  const extra = observed(subject(), 1); extra.usage[0].attempted = 2;
+  assert.equal(plan(extra).capacity.usage_complete, false); assert.equal(plan(extra).model_state, "STOPPED_UNKNOWN");
+  const p = plan(edit(ready(), q => q.usage[2].body_bytes = null)); assert.equal(p.capacity.usage_complete, false); assert.ok(p.blockers.includes("usage_unknown"));
+  const unknownRow = observed(subject(), 1); unknownRow.records[0].http.deliveries = null; unknownRow.usage[0].deliveries = "0";
+  assert.equal(plan(unknownRow).capacity.usage_complete, false);
+  const over = observed(subject(), 1); over.usage[0].body_bytes = "513";
+  assert.equal(plan(over).capacity.usage_complete, false); assert.equal(plan(over).model_state, "STOPPED_UNKNOWN");
+});
+test("M1 hash work multiplies passes and every work or budget field is needed", () => {
+  assert.equal(plan(edit(ready(), s => s.work.hash_passes = "2")).capacity.hash_work.known_reserved, "12288");
+  for (const change of [s => s.budget.hash_work_bytes = null, s => s.budget.decode_work_bytes = null, s => s.work.hash_passes = null, s => s.work.inspection_steps = null, s => s.work.wire_bytes = null,
+    s => s.budget.inspection_units = null, s => s.budget.wire_bytes = null]) {
+    const p = plan(edit(ready(), change)); assert.equal(p.model_prerequisites_complete, false); assert.ok(p.blockers.includes("work_unknown"));
+  }
+});
+const inspected = steps => { const s = authorize(edit(ready(), q => q.work.inspection_steps = steps)); append(s); return s; };
+test("M1 inspection floor counts operations, graph nodes, deliveries and JSON nodes", () => {
+  assert.equal(plan(inspected("31")).capacity.inspection.known, "31"); refuses(inspected("30"), "inspection_floor");
+});
+const floorCases = [["incoming", "1024"], ["text", "2047"], ["projection", "1"], ["receipts", "1"], ["parser", "4095"], ["transport", "4095"], ["bootstrap", "4095"]];
+const belowFloor = key => edit(ready(), s => s.memory[1].allocations[key] = floorCases.find(([k]) => k === key)[1]);
+const largerLaterRaw = () => edit(ready(), s => { s.operations[3].body_ceiling = "2048"; s.memory[1].allocations.raw = "1024"; });
+test("M1 every simultaneous buffer keeps its own memory floor", () => {
+  for (const [key] of floorCases) refuses(belowFloor(key), "memory_floor");
+  refuses(largerLaterRaw(), "memory_floor"); plan(edit(ready(), s => s.memory[1].allocations.text = "2048"));
+});
+test("M1 memory is modeled only with every allocation and joint floor", () => {
+  for (const change of [s => s.memory[1].allocations.parser = null, s => s.memory[2].joint_floor = null]) {
+    const p = plan(edit(ready(), change)); assert.equal(p.capacity.memory.modeled_peak, null); assert.ok(p.blockers.includes("memory_unknown"));
+  }
+});
+for (const [name, change] of [
+  ["grammar", r => r.json.grammar = "unknown"], ["root", r => r.json.root = "unknown"], ["BOM", r => r.json.bom = null],
+  ["duplicate keys", r => r.json.duplicate_keys = null], ["key count", r => r.json.keys = null], ["zero depth", r => r.json.depth = 0], ["zero nodes", r => r.json.nodes = 0],
+  ...["status", "body_bytes", "header_bytes", "pairs", "deliveries"].map(k => [k, r => r.http[k] = null]),
+  ["encoding", r => r.http.encoding = "unknown"], ["media", r => r.http.media = "unknown"], ["body digest", r => r.http.body_sha256 = null],
+  ...["scalar_bytes", "numeric_bytes", "parsed_bytes"].map(k => [k, r => r.json[k] = null]),
+]) test("M1 commit-review unknown " + name + " stops the batch", () => {
+  const s = authorize(ready()); append(s, change); assert.equal(plan(s).model_state, "STOPPED_UNKNOWN");
+  append(s); refuses(s, "terminal_progress");
+});
+const absentAt = change => { const s = authorize(ready()); for (let i = 0; i < 3; i++) append(s); append(s, change); return s; };
+for (const [name, change] of [["completion", r => r.http.complete = null], ["socket", r => r.http.socket = "open"], ["phase time", r => r.time.dns_tls_ns = null]])
+  test("M1 an unavailable-reference 404 with unknown " + name + " stops the batch", () => {
+    assert.equal(plan(absentAt(() => {})).model_state, "DISCOVERY_OBSERVED_PARTIAL");
+    const s = absentAt(change); assert.equal(plan(s).model_state, "STOPPED_UNKNOWN"); append(s); refuses(s, "terminal_progress");
+  });
+const shift = (r, start) => Object.assign(r.time, { start_ns: String(start), end_ns: String(start + 500000n), close_ns: String(start + 700000n) });
+const nextAt = offset => { const s = authorize(ready()); append(s); append(s, r => shift(r, BigInt(s.records[0].time.close_ns) + offset)); return s; };
+const endBeforeStart = () => { const s = authorize(ready()); append(s, r => Object.assign(r.time, { end_ns: String(BigInt(r.time.start_ns) - 1n), dns_tls_ns: null, inactivity_ns: null })); return s; };
+const closeBeforeEnd = () => { const s = authorize(ready()); append(s, r => r.time.close_ns = String(BigInt(r.time.end_ns) - 1n)); return s; };
+const endingAt = end => { const s = authorize(ready()); append(s, r => Object.assign(r.time, { start_ns: "240999000000", end_ns: end, close_ns: String(BigInt(end) + 1n) })); return s; };
+const longInactivity = () => { const s = authorize(ready()); append(s, r => { const start = BigInt(r.time.start_ns);
+  Object.assign(r.time, { end_ns: String(start + 6000000000n), close_ns: String(start + 6000000001n), inactivity_ns: "5000000001" }); }); return s; };
+test("M1 request times are ordered and inside the approved window and phase ceilings", () => {
+  assert.equal(plan(nextAt(0n)).model_state, "DISCOVERY_OBSERVED_PARTIAL"); refuses(nextAt(-1n), "clock_regression");
+  refuses(endBeforeStart(), "clock_regression"); refuses(closeBeforeEnd(), "clock_regression");
+  assert.equal(plan(endingAt("241000000000")).model_state, "DISCOVERY_OBSERVED_PARTIAL"); refuses(endingAt("241000000001"), "deadline");
+  refuses(longInactivity(), "phase_deadline");
+  const late = authorize(ready()); append(late, r => { r.outcome = "timeout"; r.time.end_ns = r.time.close_ns = String(BigInt(r.time.start_ns) + 15000000001n); });
+  assert.equal(plan(late).model_state, "STOPPED_UNKNOWN");
+});
+const npmAbsent = () => { const s = authorize(ready()); append(s, absentRef); return s; };
+const refAbsentWith = change => { const s = authorize(ready()); append(s); append(s); append(s, r => { r.http.status = 404; change(r); }); return s; };
+const absentJson = () => refAbsentWith(r => r.data = null);
+const presentAbsent = () => { const s = authorize(ready(finalSubject())); append(s); append(s); append(s, absentRef); return s; };
+test("M1 only an unpresent reference may answer 404, and without a body summary", () => {
+  refuses(npmAbsent(), "http_status"); refuses(absentJson(), "absent_data"); refuses(refAbsentWith(r => r.json = null), "absent_data");
+  refuses(presentAbsent(), "graph_observation");
+});
+const objectRecord = (index, change, input = finalSubject()) => { const s = authorize(ready(input)); for (let i = 0; i < index; i++) append(s); append(s, change); return s; };
+const kindMismatch = () => objectRecord(6, r => r.data.kind = "commit");
+const packageMismatch = () => objectRecord(8, r => r.data.package = names[1]);
+const commitTarget = () => objectRecord(8, r => { r.data.target_type = "tag"; r.data.target_id = ids[0]; });
+const tagTree = () => objectRecord(6, r => r.data.tree_id = "e".repeat(40));
+const treeTarget = () => objectRecord(2, r => r.data.target_type = "tree", subject());
+const halfTarget = () => objectRecord(2, r => r.data.target_id = null, subject());
+const typeMismatch = () => objectRecord(0, r => r.data.target_type = "tag", edit(objectsBase(), s => Object.assign(s.graph[4], { expected_type: "commit", expected_target: commits[0] })));
+const treeMismatch = () => objectRecord(8, () => {}, edit(finalSubject(), s => s.graph.find(n => n.kind === "commit").tree_id = "f".repeat(40)));
+test("M1 Git responses match their requested kind, package, target shape and reviewed graph", () => {
+  for (const make of [kindMismatch, packageMismatch]) refuses(make(), "response_identity");
+  for (const make of [commitTarget, tagTree, halfTarget, treeTarget]) refuses(make(), "object_target");
+  for (const make of [typeMismatch, treeMismatch]) refuses(make(), "graph_observation");
+});
+test("M1 only a full canonical SHA-512 declaration becomes a proposed integrity", () => {
+  const s = authorize(ready()); append(s, r => r.data.declared_integrity = "sha512-AAAA"); assert.equal(plan(s).pin_proposals[0].proposed_integrity, null);
+  const p = plan(observed(finalSubject())); assert.ok(p.pin_proposals.every(v => v.proposed_integrity !== null));
+  for (const b of ["integrity_unavailable", "git_head_unavailable"]) assert.equal(p.blockers.includes(b), false, b);
+  const missing = authorize(ready(finalSubject()));
+  for (const o of missing.operations) append(missing, r => { if (o.kind === "npm") r.data.declared_integrity = r.data.git_head = null; });
+  const q = plan(missing); for (const b of ["integrity_unavailable", "git_head_unavailable"]) assert.ok(q.blockers.includes(b), b);
+});
+test("M1 final or awaiting state needs every planned record and the commit tree", () => {
+  assert.equal(plan(observed(finalSubject(), 10)).model_state, "DISCOVERY_OBSERVED_PARTIAL");
+  assert.equal(plan(observed(subject(), 4)).model_state, "DISCOVERY_OBSERVED_PARTIAL");
+  const s = authorize(ready(finalSubject())); for (const o of s.operations) append(s, r => { if (o.kind === "commit") r.data.tree_id = null; });
+  assert.equal(plan(s).model_state, "DISCOVERY_OBSERVED_PARTIAL");
+});
+test("M1 each receipt binds its whole record", () => {
+  const [a, b] = ["cancelled", "timeout"].map(outcome => { const s = authorize(ready()); append(s, r => r.outcome = outcome); return plan(s); });
+  assert.equal(a.model_state, b.model_state); assert.notEqual(a.receipt_sha256, b.receipt_sha256);
+});
+const valid = observed(finalSubject()), withPrior = edit(subject(), s => s.prior_reports.push({ attempt: "older-attempt", report_sha256: h, observed_requests: 6, source: "planning_hint" }));
+const at = (s, i) => s.records[i];
+const invalidCases = [
+  ...[["root", s => s], ["baseline", s => s.baseline], ["observed baseline", s => s.observed_baseline], ["profiles", s => s.profiles], ["reservations", s => s.profiles.reservations],
+    ["clock", s => s.clock], ["budget", s => s.budget], ["work", s => s.work], ["memory phase", s => s.memory[0]], ["allocations", s => s.memory[0].allocations],
+    ["usage", s => s.usage[0]], ["approval", s => s.approval], ["operation", s => s.operations[0]], ["node", s => s.graph[0]],
+    ["parent", s => s.graph.find(n => n.kind === "tag").parents[0]], ["record", s => at(s, 0)], ["time", s => at(s, 0).time], ["http", s => at(s, 0).http],
+    ["JSON summary", s => at(s, 0).json], ["npm data", s => at(s, 0).data], ["Git data", s => at(s, 2).data]].map(([name, get]) => [name + " key", s => get(s).extra = 1]),
+  ["schema", s => s.schema = "other"], ["source", s => s.source = "actual_verified"], ["destination", s => s.destination = "disk"], ["clock domain", s => s.clock.domain = "other"],
+  ["record source", s => at(s, 0).source = "actual"], ["record time domain", s => at(s, 0).time.domain = "other"], ["npm kind", s => at(s, 0).data.kind = "other"],
+  ["approval source", s => s.approval.source = "other"], ["approval clock domain", s => s.approval.clock_domain = "other"],
+  ["mode", s => s.mode = "other"], ["operation package", s => s.operations[0].package = "other"], ["operation kind", s => s.operations[0].kind = "tree"],
+  ["operation phase", s => s.operations[0].phase = "other"], ["node kind", s => s.graph[0].kind = "npm"], ["availability", s => s.graph[0].availability = "other"],
+  ["expected type", s => s.graph[0].expected_type = "blob"], ["parent kind", s => s.graph.find(n => n.kind === "tag").parents[0].kind = "commit"],
+  ["Git kind", s => at(s, 2).data.kind = "npm"], ["target type", s => at(s, 2).data.target_type = "other"], ["UTF-8 state", s => at(s, 0).json.utf8 = "other"],
+  ["grammar state", s => at(s, 0).json.grammar = "other"], ["root kind", s => at(s, 0).json.root = "other"], ["outcome", s => at(s, 0).outcome = "other"],
+  ["encoding", s => at(s, 0).http.encoding = "gzip"], ["media", s => at(s, 0).http.media = "text"], ["socket", s => at(s, 0).http.socket = "half"],
+  ["timers", s => at(s, 0).http.timers = "paused"], ["memory phase name", s => s.memory[0].phase = "other"], ["decision", s => s.approval.decision = "other"],
+  ["usage kind", s => s.usage[0].kind = "other"], ["Git package", s => at(s, 2).data.package = "other"],
+  ["fractional delivery ceiling (the shared safe-integer bound)", s => s.operations[0].delivery_ceiling = 1.5], ["31-digit amount", s => s.budget.heap_bytes = "1" + "0".repeat(30)],
+  ["parent key length", s => s.graph.find(n => n.kind === "tag").parents[0].key = "a".repeat(49)], ["node key length", s => s.graph[0].key = "a".repeat(49)],
+  ["parents", s => s.graph.find(n => n.kind === "tag").parents.push(...Array(4).fill({ kind: "ref", key: "x" }))], ["operation URL", s => s.operations[0].url = "u".repeat(513)],
+  ["operation key length", s => s.operations[0].key = "a".repeat(49)], ["npm name", s => at(s, 0).data.name = "a".repeat(33)], ["npm version", s => at(s, 0).data.version = "a".repeat(17)],
+  ["tarball", s => at(s, 0).data.tarball = "a".repeat(129)], ["declared integrity", s => at(s, 0).data.declared_integrity = "a".repeat(257)],
+  ["repository", s => at(s, 2).data.repository = "a".repeat(65)], ["Git key", s => at(s, 2).data.key = "a".repeat(49)], ["record operation id", s => at(s, 0).op_id = "a".repeat(97)],
+  ["operations", s => s.operations.push(...Array(9).fill(s.operations[0]))], ["graph", s => s.graph.push(...Array(13).fill(s.graph[0]))],
+  ["records", s => s.records.push(...Array(9).fill(at(s, 0)))], ["no operations", s => s.operations = []],
+  ["zero delivery ceiling", s => s.operations[0].delivery_ceiling = 0], ["delivery ceiling", s => s.operations[0].delivery_ceiling = 2049],
+  ...["depth", "nodes", "keys"].flatMap((k, i) => [["negative " + k, s => at(s, 0).json[k] = -1], [k, s => at(s, 0).json[k] = [65, 32769, 513][i]]]),
+  ["zero ordinal", s => at(s, 0).ordinal = 0], ["ordinal", s => at(s, 0).ordinal = 33], ["low status", s => at(s, 0).http.status = 99], ["high status", s => at(s, 0).http.status = 600],
+  ...["pairs", "deliveries", "socket_peak", "timer_peak"].flatMap((k, i) => [["negative " + k, s => at(s, 0).http[k] = -1], [k, s => at(s, 0).http[k] = [129, 2049, 3, 5][i]]]),
+  ["negative attempts", s => s.usage[0].attempted = -1], ["attempts", s => s.usage[0].attempted = 33],
+  ["short object id", s => s.graph[0].expected_target = "1".repeat(39)], ["short gitHead", s => at(s, 0).data.git_head = "c".repeat(39)],
+  ["uppercase tree", s => at(s, 8).data.tree_id = "E".repeat(40)], ["operation id", s => s.operations[0].id = "Op-x"],
+  ["two memory phases", s => s.memory.pop()], ["four memory phases", s => s.memory.push(structuredClone(s.memory[0]))],
+  ["three usage kinds", s => s.usage.pop()], ["five usage kinds", s => s.usage.push(structuredClone(s.usage[0]))],
+  ["leading-zero amount", s => s.budget.heap_bytes = "01"], ["digest format", s => s.baseline.source = "x"], ["attempt label", s => s.attempt = "Attempt"],
+];
+const priorCases = [["prior key", s => s.prior_reports[0].extra = 1], ["prior source", s => s.prior_reports[0].source = "actual_evidence"],
+  ["negative prior requests", s => s.prior_reports[0].observed_requests = -1], ["prior requests", s => s.prior_reports[0].observed_requests = 23],
+  ["prior reports", s => s.prior_reports.push(...Array.from({ length: 16 }, (_, i) => ({ ...s.prior_reports[0], attempt: "older-" + i })))]];
+test("M1 schema bounds, formats, literals, enums and strict objects refuse as invalid input", () => {
+  assert.equal(plan(valid).model_state, "FINAL_METADATA_OBSERVED_UNREVIEWED"); assert.equal(plan(withPrior).model_state, "PREFLIGHT_BLOCKED");
+  for (const [name, change] of invalidCases) assert.throws(() => plan(edit(valid, change)), { message: "cc4a_invalid_input" }, name);
+  for (const [name, change] of priorCases) assert.throws(() => plan(edit(withPrior, change)), { message: "cc4a_invalid_input" }, name);
+});
 function compile(text, entry = "planUnsignedMetadataAcquisition") {
   const tree = ts.createSourceFile("mutant.mjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   assert.equal(tree.parseDiagnostics.length, 0); let body = text;
@@ -562,9 +780,52 @@ const gateMutations = [
   ['j.duplicate_keys === true', 'false', () => edit(observed(subject(), 1), s => s.records[0].json.duplicate_keys = true), "json_policy", "STOPPED_UNKNOWN"],
   ['prior.http.body_sha256 !== r.http.body_sha256', 'false', () => { const s = authorize(ready(finalSubject())); for (let i = 0; i < 10; i++) append(s);
     append(s, r => r.http.body_sha256 = other); return s; }, "recheck_binding"],
+  ['BigInt(o.body_ceiling) < 1n || ', '', () => ceilingFloor("body_ceiling", "0"), "body_ceiling"],
+  ['BigInt(o.header_ceiling) < 1n || ', '', () => ceilingFloor("header_ceiling", "0"), "header_ceiling"],
+  ['canonical(initial) !== canonical(expected) || d.operations.length !== 6', 'd.operations.length !== 6', swappedInitial, "initial_set"],
+  ['|| canonical(d.operations.slice(0, 6).map(nodeKey)) !== canonical(expected) || ', '|| ', objectInFirstSix, "final_set"],
+  [' || d.operations.slice(-6).some(o => o.phase !== "recheck"))) refuse("final_set");', ')) refuse("final_set");', objectAfterRechecks, "final_set"],
+  ['canonical(rechecks) !== canonical(expected)', 'false', swappedRechecks, "final_set"],
+  ['if ((n.expected_type === null) !== (n.expected_target === null)) refuse("graph_target");', '', () => presentRef(n => n.expected_type = "tag"), "graph_target"],
+  [' || n.kind === "commit" && n.expected_type !== null) refuse("graph_target");', ') refuse("graph_target");', commitWithTarget, "graph_target"],
+  ['n.parents.length !== 0 || ', '', refWithParent, "graph_target"],
+  [' || n.availability !== "present" && n.expected_type !== null) refuse("graph_target");', ') refuse("graph_target");', unknownRefTarget, "graph_target"],
+  ['n.availability === "unavailable" || !n.parents.length', '!n.parents.length', unavailableCommit, "parent_binding"],
+  ['n.availability === "unavailable" || !n.parents.length', 'n.availability === "unavailable"', orphanObject, "parent_binding"],
+  ['if (!p || p.availability !== "present" || p.expected_type !== n.kind || p.expected_target !== n.key) refuse("parent_binding");',
+    'if (p && (p.availability !== "present" || p.expected_type !== n.kind || p.expected_target !== n.key)) refuse("parent_binding");', missingParent, "parent_binding"],
+  ['!p || p.availability !== "present" || p.expected_type', '!p || p.expected_type', unknownParent, "parent_binding"],
+  [' || p.expected_type !== n.kind || p.expected_target', ' || p.expected_target', refExpectsCommit, "parent_binding"],
+  [' || p.expected_target !== n.key) refuse("parent_binding");', ') refuse("parent_binding");', foreignParentTarget, "parent_binding"],
+  ['if (usage.attempted !== null && usage.attempted < floor.attempted) refuse("usage_floor");', '', attemptedBelowRecords, "usage_floor"],
+  ['BigInt(d.operations.length + d.graph.length) + consumed.deliveries', 'BigInt(d.operations.length + d.graph.length)', () => inspected("30"), "inspection_floor"],
+  ['sum(d.records.map(r => r.json?.nodes == null ? null : String(r.json.nodes)))', '0n', () => inspected("30"), "inspection_floor"],
+  ...[['incoming: raw + 1n,', 'incoming: raw,'], ['text: 2n * raw,', 'text: raw,'], ['projection: BigInt(projectionBytes),', 'projection: 0n,'],
+    ['receipts: BigInt(receiptBytes),', 'receipts: 0n,'], ['parser: BigInt(d.profiles.reservations.parser ?? 0),', 'parser: 0n,'],
+    ['transport: BigInt(d.profiles.reservations.transport ?? 0),', 'transport: 0n,'], ['bootstrap: BigInt(d.profiles.reservations.bootstrap ?? 0) };', 'bootstrap: 0n };']]
+    .map(([from, to], i) => [from, to, () => belowFloor(floorCases[i][0]), "memory_floor"]),
+  ['const raw = d.operations.reduce((n, o) => max(n, BigInt(o.body_ceiling)), 0n);', 'const raw = BigInt(d.operations[0].body_ceiling);', largerLaterRaw, "memory_floor"],
+  [' || previousClose !== null && BigInt(t.start_ns) < previousClose)) refuse("clock_regression");', ')) refuse("clock_regression");', () => nextAt(-1n), "clock_regression"],
+  ['[[t.start_ns, t.end_ns], [t.end_ns, t.close_ns]]', '[[t.end_ns, t.close_ns]]', endBeforeStart, "clock_regression"],
+  ['[[t.start_ns, t.end_ns], [t.end_ns, t.close_ns]]', '[[t.start_ns, t.end_ns]]', closeBeforeEnd, "clock_regression"],
+  ['if (t.end_ns !== null && BigInt(t.end_ns) > BigInt(d.clock.expires_ns) || t.start_ns', 'if (t.start_ns', () => endingAt("241000000001"), "deadline"],
+  [' || BigInt(t.inactivity_ns ?? 0) > BigInt(caps.phase_ms) * 1000000n) refuse("phase_deadline");', ') refuse("phase_deadline");', longInactivity, "phase_deadline"],
+  ['!(o.kind === "ref" && b.status === 404)', '!(b.status === 404)', npmAbsent, "http_status"],
+  ['if (r.data !== null || r.json !== null) refuse("absent_data");', 'if (r.data !== null) refuse("absent_data");', absentJson, "absent_data"],
+  ['else if (graph.nodes.get(nodeKey(o))?.availability === "present") refuse("graph_observation");', '', presentAbsent, "graph_observation"],
+  ['if (value.kind !== o.kind) refuse("response_identity");', '', kindMismatch, "response_identity"],
+  ['if (value.package !== o.package || value.repository', 'if (value.repository', packageMismatch, "response_identity"],
+  ['o.kind === "commit" ? value.target_type !== null || value.target_id !== null : value.tree_id !== null', 'o.kind === "commit" ? false : value.tree_id !== null', commitTarget, "object_target"],
+  ['o.kind === "commit" ? value.target_type !== null || value.target_id !== null : value.tree_id !== null', 'o.kind === "commit" ? value.target_type !== null || value.target_id !== null : false', tagTree, "object_target"],
+  ['["tree", "blob"].includes(value.target_type)', '["blob"].includes(value.target_type)', treeTarget, "object_target"],
+  ['return completeTime && completeHttp;', 'return completeTime;', () => { const s = absentAt(r => r.http.socket = "open"); append(s); return s; }, "terminal_progress"],
+  ['return completeTime && completeHttp;', 'return completeHttp;', () => { const s = absentAt(r => r.time.dns_tls_ns = null); append(s); return s; }, "terminal_progress"],
+  [' || (value.target_type === null) !== (value.target_id === null)) refuse("object_target");', ') refuse("object_target");', halfTarget, "object_target"],
+  ['&& (value.target_type !== expected.expected_type || value.target_id', '&& (value.target_id', typeMismatch, "graph_observation"],
+  ['expected.tree_id !== null && value.tree_id !== expected.tree_id', 'false', treeMismatch, "graph_observation"],
 ];
 for (const [index, [from, to, make, reason, state]] of gateMutations.entries()) test("M1 own-gate removal " + index, () => {
-  assert.ok(source.includes(from), from);
+  assert.equal(source.split(from).length, 2, from); assert.doesNotMatch(from + to, /[\r\n]/);
   const changedSource = source.replace(from, to), original = compile(source), changed = compile(changedSource);
   for (const fn of [original, changed]) assert.equal(fn(ready()).model_state, "PLAN_ONLY");
   const s = make(); assert.throws(() => original(s), { message: "b2m1_" + reason });

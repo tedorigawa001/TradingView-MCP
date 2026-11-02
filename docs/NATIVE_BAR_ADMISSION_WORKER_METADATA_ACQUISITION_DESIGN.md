@@ -1,8 +1,8 @@
 # B2-M Metadata Acquisition Scope And Approval Boundaries
 
-Status: **M1 pure contracts implemented; independent review complete, local commit approved**, 2026-11-02 JST, baseline `f81c6bb`. This refines the [B2 acquisition design](NATIVE_BAR_ADMISSION_WORKER_PARSER_DEPENDENCY_AUDIT_DESIGN.md), including the B2-A commit-review correction. No collector, actual producer or execution permission is implemented.
+Status: **M1 pure contracts committed as `a21fc29`; tests and docs corrected after commit review (helper unchanged)**, 2026-11-02 JST, baseline `f81c6bb`, commit-review correction baseline `a21fc29`. The [commit review correction](#m1-commit-review-correction) supersedes the earlier M1 test counts. This refines the [B2 acquisition design](NATIVE_BAR_ADMISSION_WORKER_PARSER_DEPENDENCY_AUDIT_DESIGN.md), including the B2-A commit-review correction. No collector, actual producer or execution permission is implemented.
 
-The original design step used repository/source-text reads, public specification-document reads, three Markdown edits and read-only verification. The later M1 approval additionally permits the pure helper and memory-only synthetic tests described below. The following review request authorizes an independent review, scoped fixes/verification and a local commit after a clean review, not a push. No candidate registry metadata, GitHub repository metadata, tarball or immutable source endpoint is contacted. No dependency acquisition/addition, actual metadata/record/archive parse, connection code, real port/clock/timer, build/child/worker, native read, filesystem fixture, signature/key, market/store/account data, MCP registration or production activation is performed. Dot stays PAUSED; judgment, notification, mail, retention and existing resource/time rules are unchanged. Prior specification browsing is not an executed local transport test; M1 does not acquire further external information.
+The original design step used repository/source-text reads, public specification-document reads, three Markdown edits and read-only verification. The later M1 approval additionally permits the pure helper and memory-only synthetic tests described below. The following review request authorizes an independent review, scoped fixes/verification and a local commit after a clean review, not a push. No candidate registry metadata, GitHub repository metadata, tarball or immutable source endpoint is contacted. No dependency acquisition/addition, actual metadata/record/archive parse, connection code, real port/clock/timer, build/child/worker, native read, filesystem fixture, signature/key, market/store/account data, MCP registration or production activation is performed. The later [commit review correction](#m1-commit-review-correction) records the checks executed for these files: `build:package`, unit-suite and mutant runs in disposable `git archive` copies. Dot stays PAUSED; judgment, notification, mail, retention and existing resource/time rules are unchanged. Prior specification browsing is not an executed local transport test; M1 does not acquire further external information.
 
 ## Outcome And Non-Goals
 
@@ -208,6 +208,60 @@ For each kind, the final wire minimum starts from the sum of listed `max(wire, k
 After these fixes, new behavior tests are **228/228** and boundary tests **15/15**, with zero failures/cancelled/skipped. Forty-seven behavior tests were added; eight additional isolated gate/constraint-removal controls bring that count to **25**. Twenty-five small integer combinations are compared with an independent exhaustive allocation enumerator. Four targeted removals separately exercise body, header, joint and shared-space constraints with otherwise valid controls. The private pure wire function is exposed only inside the in-memory test compilation, not as an actual export or execution entry. Both read-only reviewers' final confirmations report no remaining findings; both independently ran 228 behavior tests and the accounting reviewer also ran all 15 boundary tests. The parent freshly reran these two files plus the four selected B2-A/B1 memory-only regression files: **1059/1059**, zero failures/cancelled/skipped. This is not a full suite or runtime qualification.
 
 The review and fixes do not add a producer, parser, transport, dependency, fixture, effectful entry or registration. The protected 558-file aggregate and Dot's PAUSED/full-configuration hash were checked again and match the initial values above. Only the same six M1 helper/test/design/backlog files are intended for commit. Hooks, commit signing and automatic Git maintenance will be disabled for the local commit. This does not authorize a build, native read, operational change, runtime restart or push. The next scope is separately approved M2a source/tool qualification, not metadata acquisition.
+
+## M1 Commit Review Correction
+
+2026-11-02 JST, review of `a21fc29` against the code. In `git archive` copies the M1 files passed with the B2-A and 31 other related files (2763 tests) on Node 24 three times, linux/win32 platform spoofs, Node 20.19.6 and 26.12.1, isolation=none (one process per file) and CRLF. The full unit suite passed 6288 of 6290 on Node 24 and Node 20 (no failures or cancellations, 2 existing skips). The root-after-hook layout from `f81c6bb` holds. No helper defect was found: every reachable refusal code returned its intended code. `report_bound`, `unapproved_followup` and `diagnostic_bound` are unreachable under the schema, the closed-graph preflight and the bounded output.
+
+Findings, all in the tests:
+
+- P2: of 365 independent single-condition helper mutants, only 164 failed a behavioral test. Probes confirmed that removing one of twelve gates lets an inconsistent summary through:
+  - timing: a request starting before the previous close, and a response ending after the approved expiry;
+  - strictness: a response with unknown JSON grammar or unknown media counted as usable, an npm 404 accepted, a present reference answering 404 accepted, and a mismatched response kind accepted;
+  - final batch: a final batch without its six rechecks reaching `FINAL_METADATA_OBSERVED_UNREVIEWED`, and an open final graph not preflight-blocked;
+  - pin proposal: a non-SHA-512-length `sha512-AAAA` proposed as an integrity;
+  - capacity and graph: the text-buffer floor, and an object node with no parent.
+
+  `absent_data` had no test. 20 of 22 strict objects (all but the root and `operation`) had no unknown-key case, and the provenance literals, enums and bounds lacked exact-code invalid cases.
+- P3 (docs): the status line and BACKLOG still read "local commit approved" without naming the commit, and acceptance item 6 claimed all strict schemas were checked.
+
+Corrections, tests and documentation only (this document, its parent and BACKLOG); the helper is unchanged:
+
+- The memory test grows from 228 to 313:
+  - positive operation ceilings, the exact initial and final phase layouts (first six, last six, recheck order) and the object phase;
+  - reference nodes (paired target, no parents, present when targeted), object nodes (available, with a parent that exists, is present, has the node's kind and targets the node) and closed-graph preflight;
+  - usage counters (records as attempt floors, unknown or extra counts kept incomplete), hash-pass multiplication, every work and budget field as a completeness blocker, all inspection terms, every single memory floor including the largest operation ceiling, and memory completeness;
+  - unknown JSON (including scalar, numeric and parsed byte counts), HTTP and media facts stopping the batch, an incomplete unavailable-reference 404 stopping it, request-time order, the approved window and the inactivity ceiling, non-reference 404, `absent_data`, a present reference answering 404, response kind, package and target shape, the reviewed target type and tree, `tree` as a refused target type, a planned ambiguous commit, an unlisted record operation, a timeout exempt from the request deadline, canonical SHA-512 length, integrity and gitHead blockers, final and awaiting states that need every record and the commit tree, receipt binding of the whole record, and blocker de-duplication;
+  - 108 exact-code `cc4a_invalid_input` cases for every strict object, literal, enum, length and count bound, object-ID, identifier, decimal and digest format. The fractional delivery ceiling is also caught by the shared safe-integer copy bound, and its label says so.
+
+  46 new single-gate trials (71 in all) each remove or weaken exactly one gate, and every `gateMutations` anchor must now occur exactly once on a single line. The control stays valid and the negative is no longer refused by that gate. Five of the new trials use object-discovery mode, because in final mode another rule could refuse those mutants first, or the setup would be larger. The planned ambiguous-commit and fifth-tag trials remove the first and the last, respectively, of two identical gate lines.
+
+Verification in `git archive` copies:
+
+- Of the same 365 independent mutants, behavioral detection rises from 164 to 338. All ten further mutants written for the review findings below are detected. The 27 that remain survive the behavioral tests:
+  - key and object-ID checks repeated by the exact request set and the schema;
+  - the recheck-ordering clause that the last-six rule already fixes;
+  - the closed-graph resolution and single-commit clauses that parent binding already forces;
+  - the consumed-body and consumed-header terms, which exceed their reservations only for records that replay refuses anyway, so removing them changes only the refusal code;
+  - the unreachable report and follow-up refusals;
+  - status and object-ID conditions repeated by the success and pair checks;
+  - the recheck prior check implied by the final layout, its status check implied by graph observation and the non-reference 404 rule, and its body-byte comparison forced by JSON-summary equality;
+  - the peeled-commit condition implied by a known commit tree;
+  - approval-clock null and domain checks implied by equality with literal clock fields;
+  - constant or separately bound plan fields;
+  - the diagnostic ceiling, which the boundary test catches.
+- After `build:package`, 35 related files (2848 tests) pass on Node 24 three times, linux/win32 platform spoofs, Node 20.19.6 and 26.12.1, isolation=none (one process per file) and CRLF. The full unit suite passes 6373 of 6375 on Node 24 and Node 20 (no failures or cancellations, 2 existing skips). After the last test change, a label only, both M1 files passed again in every condition and both full suites passed again.
+- Two read-only reviews split the scope.
+  - The test reviewer found nothing wrong in the added tests and three remaining live gaps (P2):
+    - an incomplete unavailable-reference 404;
+    - unknown JSON scalar, numeric and parsed byte counts;
+    - the planned ambiguous-commit check, which replay never repeats in object-discovery mode.
+
+    It also found P3 items: anchor uniqueness in the trial harness, a commit-branch trial that removed two branches, duplicate labels, the `tree` target type, a final plan of rechecks only, an unlisted record operation, the timeout deadline exemption and the Git package enum.
+  - The documentation reviewer independently found the planned ambiguous-commit gap (P2). It also found P3 slips: the parent sentence's single-gate claim, 22 rather than 21 strict objects, the object-discovery trial count, an incomplete list of remaining mutants, a scope paragraph that omitted the executed checks, two work and budget fields without a case, the anchor-uniqueness wording and the stated reason for the consumed-term survivors.
+  - Each finding was reproduced and corrected, and a targeted sweep detects every mutant written for them. Both final confirmations report no remaining findings.
+
+Limits, the helper, B2-A, B1 and all seals are unchanged. Dot stays PAUSED. No producer, parser, transport, dependency, fixture or effectful entry is added.
 
 ## Historical Verification Of The Design Step
 
