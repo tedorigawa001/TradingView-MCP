@@ -14,7 +14,7 @@ This is the smallest useful next step: C01 is the only candidate retained by M2a
 
 ## Exact Proposed Inspection Manifest
 
-Paths are relative to the inspected canonical workspace `/Users/bushidoyasu/Downloads/GitHub/TradingView-MCP`. The advertised Documents location was unavailable during prior work; do not follow or create an alias there. Reconfirm the approved canonical root before a later inspection; relocation needs an explicit scope decision, not automatic fallback.
+Paths are relative to the approved canonical local checkout of this repository (absolute path withheld; another clone, worktree or copy is not that root). The advertised Documents location was unavailable during prior work; do not follow or create an alias there. Reconfirm the approved canonical root before a later inspection; relocation needs an explicit scope decision, not automatic fallback.
 
 | ID | Exact Local Path | Proposed Purpose | Current Evidence |
 |---|---|---|---|

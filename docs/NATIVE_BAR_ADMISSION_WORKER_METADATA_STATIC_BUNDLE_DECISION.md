@@ -26,6 +26,8 @@ These exact UTF-8 document identities were captured at this step's start from ba
 | D2 | [M2a-2 scope/approval design](NATIVE_BAR_ADMISSION_WORKER_METADATA_CLOSURE_PROFILE_DESIGN.md) | 25688 | `82059933f87554498ddd75bf95526137dc236a2a5ce3ebb38c804fcdcb86f323` |
 | M | [Metadata acquisition design](NATIVE_BAR_ADMISSION_WORKER_METADATA_ACQUISITION_DESIGN.md) | 49821 | `d506113138f9489cddf70565e338a02e3e1be86f4d1ad203b2f92df22ab2febd` |
 
+After this decision was committed as `b3ec77e`, a separate privacy correction replaced the absolute local root path on line 17 of R2 and D2 with a description of the approved canonical checkout that withholds the path. The identities above remain the values captured at baseline `429ae7f`; a re-check compares them with that commit's blobs, and statements in this decision that the four inputs are unchanged or retained describe the M2a-3 step at that baseline. After the correction R2 is 32920 bytes with SHA-256 `6c56a977290c410ba68f442b8bbb3fa58a874651208edba129bbc4e60df6b36a`, and D2 is 25732 bytes with SHA-256 `ef9a70c5b4233f6407e8e7ca9b910a85a5add6044262b20eca1bc2df4de9f7f2`. No other content of R2, D2, R1 or M changed, and no evidence, role, blocker, limit or stop-condition changes follow.
+
 ### Historical Source Bindings, Not Fresh Qualification
 
 | Report | Approved Historical Scope | Reported Source-Set SHA-256 | Reported Full Identity-Snapshot SHA-256 |
