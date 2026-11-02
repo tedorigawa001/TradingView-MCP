@@ -46,3 +46,5 @@ Only this budget document and parent/BACKLOG links are approved now. No new cand
 A separately approved next planning slice may use only the remaining planning balance to specify exact G1 mechanism/version/entry and G2 executable/provenance/initialization evidence, bounded source/effect scope, retained output and acceptance/refusal criteria. Unknown artifacts stay unnamed. Capacity reservation itself grants no read, import, parse, dependency acquisition, port/clock/timer, build/child/native, fixture/signature/data operation, MCP registration or activation. Operational budgets and source-work ceilings do not increase.
 
 Independent review, commit and push of this reflection are not performed or implied. New source/effect work needs its own exact approval even if budget remains. Inspection of existing control documents is not qualification of a trusted runtime or producer.
+
+[Auxiliary allocation](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md): approved6144 from unallocated20480; remaining14336. No search grant.
