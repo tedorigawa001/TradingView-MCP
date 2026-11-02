@@ -4,7 +4,9 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 Primary-read exception**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_READ_EXCEPTION_DESIGN.md); documentation only, no reads.
+**105-3 G1/G2 review fixes (2026-11-03 JST)**: [parent note](NATIVE_BAR_ADMISSION_WORKER_METADATA_TOOL_QUALIFICATION_DESIGN.md#exit-criteria-and-next-request) on no-commit lines written before commit and the primary-read exception; BACKLOG date added. Review bucket 987; no read grant.
+
+**105-3 Primary-read exception (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_READ_EXCEPTION_DESIGN.md); documentation only, no reads.
 
 **105-3 Primary-document planning (2026-11-02 JST)**: [scope and allocation](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_DOCUMENT_READ_SCOPE_DESIGN.md). Documentation only; no URL open or search.
 

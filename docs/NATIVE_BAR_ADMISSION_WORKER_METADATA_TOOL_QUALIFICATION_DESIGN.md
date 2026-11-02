@@ -152,6 +152,8 @@ No finite static estimate proves V8 heap, OS/TLS/DNS work, synchronous interrupt
 
 ## Exit Criteria And Next Request
 
+[Primary-read exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_READ_EXCEPTION_DESIGN.md): documentation only; reads stay blocked until review, exact tool binding and separate read approval. Review fixes (user approved): the no-review/commit/push lines in the retention extension, scope gate, locator exception, locator results, primary scope and primary exception documents describe the steps in which they were written; those documents were later committed (`1198b31` through `f23e3ea`), and review status is only what each document records. This note, the BACKLOG date and the BACKLOG line charge 987 bytes to review23509, leaving 22522; consumed retention becomes 284971.
+
 [Primary-document read plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_DOCUMENT_READ_SCOPE_DESIGN.md): exact URLs only, bounded method unknown; read blocked. Locator exception does not extend.
 
 [Auxiliary exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PUBLIC_LOCATOR_AUXILIARY_EXCEPTION_DESIGN.md): documentation only; search approval separate.
