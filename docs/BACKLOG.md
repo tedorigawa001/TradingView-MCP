@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 G1/G2 retention extension (2026-11-02 JST)**: [allocation and authority](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_EXTENSION_DESIGN.md). Cap393216; old notes112/report12/guard352 preserved. Documentation only; no new source/effect approval.
+
 M2a-2B2 [metadata report](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCREEN_REPORT.md): L01-L03 concordant; no decoder qualified.
 
 **M2a-2B2 文書限定レビュー**: [結果・commit境界](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md#document-only-independent-review-and-commit-boundary)。独立2名とも指摘なし、追記は既存2048枠へ計上。3文書のlocal commitのみ承認、追加source/実操作/pushなし。

@@ -152,6 +152,8 @@ No finite static estimate proves V8 heap, OS/TLS/DNS work, synchronous interrupt
 
 ## Exit Criteria And Next Request
 
+The user-approved [G1/G2 retention extension](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_EXTENSION_DESIGN.md) sets the current audit-document ceiling to 393216 bytes; earlier 262144 figures are historical. Only documentation is approved; G1/G2 and L01-L03 remain held.
+
 See [M2a-2B2](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md) for the unexecuted three-manifest proposal and separate source/retention budgets.
 
 Its [document-only review](NATIVE_BAR_ADMISSION_WORKER_METADATA_LOCATOR_SCOPE_DESIGN.md#document-only-independent-review-and-commit-boundary) found no actionable issues; local commit is separately approved, not source access.
