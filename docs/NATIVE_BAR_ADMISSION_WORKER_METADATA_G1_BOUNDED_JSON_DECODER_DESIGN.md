@@ -27,3 +27,5 @@ Acceptance includes equal/unequal/escaped/nested duplicates; unknown fields; eve
 
 ## Approved Reservation
 Reserve design4608/review2048/integration512 using G1 unreserved2048 plus G2 unreserved5120; reserve stop512 inside terminal. Total7680; cap393216/guard352/unallocated512 unchanged. Existing reservations/evidence stay intact. Allocation/docs approved; no policy change.
+
+Review fix (user approved): this reflection charged design4566/integration466, giving consumed352011/unspent40341 at 977656e; the tag-read ledger (4a65529) then carried C352528/U39824. This note, the BACKLOG dates and the BACKLOG line charge 821 bytes to review unreserved1033, leaving 212; consumed 353349/unspent 39003.
