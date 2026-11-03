@@ -14,6 +14,7 @@ Baseline `148a73f`; existing documents only. Basis: [locator record](NATIVE_BAR_
 | D04 early key/token/depth/node/scalar/numeric limits | UNKNOWN | UNKNOWN; incremental label is not bounds proof |
 | D05 coexistence/copies/errors/cleanup/cancel/work | UNKNOWN | UNKNOWN |
 | D07/B03 dependencies/initializers | UNKNOWN | UNKNOWN |
+
 Both remain HELD, not qualified or ranked. Default-branch README/root is not a pin. Crawl ages and missing observation JST do not establish freshness. Missing evidence is not absent functionality. No merged claims or jstrict reopening.
 
 ## Conditional Identification-Only Read Proposal

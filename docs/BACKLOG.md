@@ -4,11 +4,13 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 Node identity scope**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md); allocation/docs only, no read.
+**105-3 Node review fixes (2026-11-03 JST)**: blank line after the [identity-read table](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md) so the HELD paragraph is not a table row; G1-I1 [identity report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_REPORT.md) and [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_REVIEW.md) linked; three entries dated. User-approved review charge 577 (unreserved 3658 to 3081); consumed 330844, allocated unspent 61508. No search/read grant.
 
-**105-3 G1 Node locator**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md); allocation/docs only, no search.
+**105-3 Node identity scope (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md); allocation/docs only, no read.
 
-**105-3 G1 selection**: [policy/intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md); allocation/docs only, no search.
+**105-3 G1 Node locator (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md); allocation/docs only, no search.
+
+**105-3 G1 selection (2026-11-03 JST)**: [policy/intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md); allocation/docs only, no search.
 
 **105-3 G1-I1 review fix (2026-11-03 JST)**: [possible Rust/runtime blocker](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md) recorded; G1-I1 entry dated. Review charge 1520 (unreserved 16378 to 14858); no search grant.
 
