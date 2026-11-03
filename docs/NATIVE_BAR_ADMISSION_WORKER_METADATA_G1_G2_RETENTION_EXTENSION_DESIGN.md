@@ -72,3 +72,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [tag433 read](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_TAG433_READ_DESIGN.md): approved G2 transfer8704; plan4608/results1536/review2048/integration512; no read.
 
 [custom decoder](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_DESIGN.md): G1/G2 transfer2048/5120; plan4608/review2048/integration512; stop512; design only.
+
+[input/state](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_DESIGN.md): G21536/review1/terminal3071 -> plan2048/review2048/links512; stop512; docs approved.
