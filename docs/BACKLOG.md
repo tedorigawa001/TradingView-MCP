@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 bounded JSON decoder proposal**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_DESIGN.md); design only, no policy/runtime grant.
+
 **105-3 lossless tag433 scope**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_TAG433_READ_DESIGN.md); allocation/docs only, no read.
 
 **105-3 lossless npm scope**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_NPM_READ_DESIGN.md); allocation/docs only, no read.

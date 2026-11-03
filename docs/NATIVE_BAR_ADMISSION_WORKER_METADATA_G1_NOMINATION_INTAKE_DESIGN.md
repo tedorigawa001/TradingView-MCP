@@ -48,3 +48,5 @@ Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No s
 [npm locator scope](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_NPM_READ_DESIGN.md): supplied URL/read proposal only; no receipt/read grant.
 
 [tag433 scope](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_TAG433_READ_DESIGN.md): supplied tag/read proposal only; no receipt/read grant.
+
+[custom decoder](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_DESIGN.md): proposal only; no policy/effect grant.
