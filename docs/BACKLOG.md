@@ -4,7 +4,9 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 decoder input/state**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_DESIGN.md); partial proposal only.
+**105-3 decoder input/state review fix (2026-11-03 JST)**: [acceptDelivery limit breach](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_DESIGN.md) refuses before retention; review record linked; npm review2048 reassigned. Review charge 1115. No parsing grant.
+
+**105-3 decoder input/state (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_DESIGN.md); partial proposal only.
 
 **105-3 G1 ledger and link fixes (2026-11-03 JST)**: [decoder charge record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_DESIGN.md); [identity-read report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_REPORT.md) and [tag433 report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_TAG433_READ_REPORT.md) linked; four entries dated. Review charge 821 (unreserved 1033 to 212). No search/read grant.
 
