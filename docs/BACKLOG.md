@@ -4,11 +4,13 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 decoder capacity/work model**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md); approved documentation/allocation only; model numbers inactive.
+**105-3 decoder contract reviews (2026-11-03 JST)**: [counter](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_REVIEW.md), [ownership](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_REVIEW.md) and [capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_REVIEW.md) review records; open P2s in all three designs; three entries dated. Records (4891) use their design review reserves; this line and the dates charge 643 to review unreserved 933, leaving 290; consumed 400971/unspent 47701. No implementation grant.
 
-**105-3 decoder ownership contract**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_DESIGN.md); approved ownership/copy design and recording only, no implementation/test grant.
+**105-3 decoder capacity/work model (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md); approved documentation/allocation only; model numbers inactive.
 
-**105-3 decoder counter contract**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_DESIGN.md); approved design/recording only, no implementation/test grant.
+**105-3 decoder ownership contract (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_DESIGN.md); approved ownership/copy design and recording only, no implementation/test grant.
+
+**105-3 decoder counter contract (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_DESIGN.md); approved design/recording only, no implementation/test grant.
 
 **105-3 G1/G2 retention512K**: [approved ceiling/reservation](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_512K_DESIGN.md); docs only; history/guard preserved, no source/effect grant.
 
