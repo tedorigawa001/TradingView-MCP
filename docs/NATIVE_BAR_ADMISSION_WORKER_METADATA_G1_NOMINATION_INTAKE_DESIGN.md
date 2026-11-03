@@ -36,3 +36,5 @@ Stop progression on ambiguous/conflicting identity, inseparable candidates, any 
 At reflection transfer3584 from unallocated4096 to planning11: planning3595/unallocated512. Integration uses the existing main integration2536, not the primary-exception balance28; reserve512 within it. Other buckets, guard352 and cap393216 stay unchanged. Charge new design 3467 and integration 439 bytes; planning remaining 128, main integration remaining 2097. Positive growth carries, no refunds/borrowing.
 
 Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No source/effect/MCP/activation authority. Review/commit/push require separate requests.
+
+[Locator search](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md): new auxiliary proposal only; no search/read grant.

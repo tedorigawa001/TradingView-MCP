@@ -54,3 +54,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [Primary-read exception](NATIVE_BAR_ADMISSION_WORKER_METADATA_PRIMARY_READ_EXCEPTION_DESIGN.md): approved6144 from unallocated10240; remaining4096. Documentation only.
 
 [G1 intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NOMINATION_INTAKE_DESIGN.md): approved3584 from unallocated4096 to planning11; remaining512. Documentation only.
+
+[G1 locator search](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md): approved transfer6144 from G1 unreserved to planning4096/results2048. Documentation only.
