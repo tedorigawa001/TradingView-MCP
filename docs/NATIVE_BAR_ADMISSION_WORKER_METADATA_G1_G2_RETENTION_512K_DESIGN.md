@@ -31,3 +31,5 @@ Measured design D3837/4096; integration L0756/1024; current C363402/U37142. Cons
 Dot remains PAUSED. Strategy/judgment/notification/mail, parser/resource/time rules and M1/B1/B2-A seals do not change. No new authority for search/page/source reads, dependency changes, parse/models/tests, ports/clocks/timers, build/child/native, fixture/signature/data work, MCP registration or activation.
 Implementation/adoption and an exception to the no-handwritten-parser policy remain separate approvals. Added capacity does not close D01-D08/B01-B08 or prove heap, backend work, origin, clocks or settlement.
 Independent document review, any review-record persistence, commit/push and future allocation each need their own approval. This increase is not permission to proceed with the pending counter contract.
+
+[counter contract](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_DESIGN.md): approved13312 from unallocated123392; remaining110080; design8192/review3072/integration1024/stop1024; docs only, no implementation/test grant.
