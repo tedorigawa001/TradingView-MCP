@@ -51,3 +51,9 @@ Independent document review, any review-record persistence, commit/push and futu
 ## Parameter/Evidence Reservation
 
 [inventory](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md): approved24576 from unallocated48128; remaining23552; design16384/review5120/integration2048/stop1024; docs applied only.
+
+## E03-A Reservation
+
+[proof plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_DESIGN.md): approved16384 from unallocated23552 ->7168; design10240/review4096/integration1024/stop1024; docs applied only.
+
+[E03-A review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_REVIEW.md) saved within existing review4096/integration1024; no reallocation.

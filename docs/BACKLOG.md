@@ -4,6 +4,10 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 E03-A re-review**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_REVIEW.md); E03-P2-01 addressed in docs; E03/E05/E06 OPEN; no runtime grant.
+
+**105-3 E03-A proof design (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_DESIGN.md); conditional logical bounds only; no E03/runtime closure or execution grant.
+
 **105-3 parameter inventory review fixes (2026-11-04 JST)**: Ulive/UkeysLive per response, earlier still-retained bytes in Oretained from next begin; blank lines end both tables; M11 cites S38 only; E12 names existing gates. Design charge 130 (133 to 3), integration 327 (528 to 201); consumed 442594/unspent 57790. No grant.
 
 **105-3 decoder parameter/evidence inventory (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md); parameter kinds and proof gaps only; existing limits/rules unchanged; no runtime grant.
