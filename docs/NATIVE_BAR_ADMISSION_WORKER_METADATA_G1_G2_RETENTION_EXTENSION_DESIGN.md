@@ -68,3 +68,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [lossless intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_IDENTITY_INTAKE_DESIGN.md): approved G2 transfer6656 to plan4096/receipt2048/integration512; no read.
 
 [npm locator read](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_NPM_READ_DESIGN.md): approved G2 transfer7680; plan3584/results1536/review2048/integration512; no read.
+
+[tag433 read](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_TAG433_READ_DESIGN.md): approved G2 transfer8704; plan4608/results1536/review2048/integration512; no read.
