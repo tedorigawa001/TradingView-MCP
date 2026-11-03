@@ -47,3 +47,7 @@ Charge D8158/L0619; current C372179/U41677; these include this record's bytes. N
 ## Reconciliation Link
 
 [revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.
+
+## Parameter/Evidence Inventory
+
+[inventory](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md): documentary parameter kinds, proof obligations and stop conditions; no runtime qualification or execution grant.

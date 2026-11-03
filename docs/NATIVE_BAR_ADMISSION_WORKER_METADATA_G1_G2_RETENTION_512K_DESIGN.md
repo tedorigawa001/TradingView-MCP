@@ -47,3 +47,7 @@ Independent document review, any review-record persistence, commit/push and futu
 ## Re-review Link Funding
 
 [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): approved integration1536 from unallocated49664 ->48128; record uses prior review6144; prior integration62 untouched; docs applied only.
+
+## Parameter/Evidence Reservation
+
+[inventory](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md): approved24576 from unallocated48128; remaining23552; design16384/review5120/integration2048/stop1024; docs applied only.

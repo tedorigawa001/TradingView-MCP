@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 decoder parameter/evidence inventory (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md); parameter kinds and proof gaps only; existing limits/rules unchanged; no runtime grant.
+
 **105-3 decoder entry dates (2026-11-03 JST)**: the reconciliation design and re-review entries are dated. Review charge 225 (unreserved 290 to 65); consumed 424366/unspent 51442. No grant.
 
 **105-3 decoder re-review record (2026-11-03 JST)**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md); mapped clauses addressed in design only; runtime gates open; historical reviews unchanged.

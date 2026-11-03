@@ -54,3 +54,7 @@ Charge D14694/L1986; current C417651/U56621; includes this line. Baseline2105200
 ## Re-review Record
 
 [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): prior independent review summary and source-entry mapping; design only, runtime gates open.
+
+## Parameter/Evidence Inventory
+
+[inventory](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_PARAMETER_EVIDENCE_DESIGN.md): documentary parameter kinds, proof obligations and stop conditions; no runtime qualification or execution grant.
