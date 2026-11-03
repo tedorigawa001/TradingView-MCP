@@ -15,3 +15,14 @@ Destinations: same docs/ prefix as this REPORT, suffix STOP/REVIEW with .md; res
 Backend work/storage/settlement UNKNOWN, not bounded by this record.
 Dot PAUSED; judging/notification/mail unchanged. No read/receipt/operation/MCP/activation.
 Report1001/1536; left535; consumed346979/unspent45373.
+
+## Attempt
+Grant/schema OK; calls1/1; JST UNKNOWN.
+R1452/1536; C347430/U44922.
+Result: isError=false; L0-168/169; crawl today; reportedURL=requested, authenticated finalURL UNKNOWN.
+L110-113: v4.3.3, short80f5369; fullID/API/entry/same-version mapping UNKNOWN in returned text, not proof of absence.
+Loading/action errors L118-168: partial/error; STOP. No retry/follow-up. Backend work/storage/settlement UNKNOWN; G1/G2 held.
+STOP; no qualification.
+
+## Ledger
+977656e+tag:C352462/U39890; +66=C352528/U39824; R1518.
