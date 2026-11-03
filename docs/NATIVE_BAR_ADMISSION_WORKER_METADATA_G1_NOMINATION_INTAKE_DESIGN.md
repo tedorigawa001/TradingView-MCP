@@ -44,3 +44,5 @@ Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No s
 [Selection gates](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md): current-role policy/template only; no candidate/read grant.
 
 [lossless request](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_IDENTITY_INTAKE_DESIGN.md): triage/input design only; no nomination or read grant.
+
+[npm locator scope](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_NPM_READ_DESIGN.md): supplied URL/read proposal only; no receipt/read grant.

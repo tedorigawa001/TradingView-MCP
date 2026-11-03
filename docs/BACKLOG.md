@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 lossless npm scope**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_NPM_READ_DESIGN.md); allocation/docs only, no read.
+
 **105-3 lossless intake**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_IDENTITY_INTAKE_DESIGN.md); allocation/docs only, no read.
 
 **105-3 Node review fixes (2026-11-03 JST)**: blank line after the [identity-read table](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md) so the HELD paragraph is not a table row; G1-I1 [identity report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_REPORT.md) and [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_REVIEW.md) linked; three entries dated. User-approved review charge 577 (unreserved 3658 to 3081); consumed 330844, allocated unspent 61508. No search/read grant.
