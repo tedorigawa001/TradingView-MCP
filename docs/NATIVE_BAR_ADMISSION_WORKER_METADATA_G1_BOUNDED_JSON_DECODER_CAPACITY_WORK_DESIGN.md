@@ -64,3 +64,7 @@ Next require the parameter/evidence manifest, then separately approved pure-mode
 Unallocated93696 ->design12288/review4096/integration1024/stop1024=18432; remainder75264. Review physical metadata1024/R1 1536/R2 1536 includes all headings/links. Cap524288/guard352/prior reservations stay; docs applied only.
 Old measured DESIGN prefixes stay frozen. New parent integration sections belong to this stage; no old report section is relabelled. All new parent bytes count toward integration1024.
 Charge D11486/L0901; current C395437/U53235; includes this record's bytes. The work/page numbers remain inactive model candidates, not execution authority.
+
+## Reconciliation Link
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.

@@ -15,3 +15,7 @@ PASS with P3.
 P3 L13/L24-25: tokens split across deliveries must move into carry before input release; views into private input are not banned and carry has no size (numeric128, UTF-8 3, escape state, key text up to 65536).
 P3 L31-32: coexisting source backings are counted but not bounded in number (see the capacity review).
 P3 L19: "pre-commit cancellation" should name the handoff commit.
+
+## Reconciliation Link
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.

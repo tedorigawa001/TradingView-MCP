@@ -17,3 +17,7 @@ P2 L30: with linear key lookup, one root object of 256 keys x 2042 bytes (524033
 P2 L7/L13-14: page() over totals assumes one pool per record type; per-allocation padding gives up to 16383 x 1024 = 16776192 bytes for strings and about 8.4 MB for per-object tables.
 P3 L18: producer-held source backings have no bound; 1024 deliveries x 8-64 KiB = 8-64 MiB.
 P3 L15: projection is UNSET here, but M caps it at 1048576 (2B) and UTF-16 strings can add 2B; link or exclude both.
+
+## Reconciliation Link
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.

@@ -57,3 +57,7 @@ Charge D10178/L0693; current C383050/U47190; includes this record's bytes. Count
 ## Capacity/Work Integration
 
 [capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md): new-stage integration, not prior DESIGN; approved model link only, no runtime grant.
+
+## Reconciliation Link
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.

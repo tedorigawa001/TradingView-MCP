@@ -14,3 +14,7 @@ P2 L25-26: scalar65536 and numeric128 are not stated as per-token or per-respons
 P3 L29: charge key comparisons per compared byte (one can scan 65536 bytes), as C does.
 P3 L7: checked arithmetic covers addition only; C's products and page rounding need it too, and the integer type/maximum is unstated.
 P3 L31: the guard order omits the B/C work, step, capacity, cleanup and ownership guards.
+
+## Reconciliation Link
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.

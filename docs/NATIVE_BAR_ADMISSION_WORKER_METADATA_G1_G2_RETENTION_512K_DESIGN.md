@@ -39,3 +39,7 @@ Independent document review, any review-record persistence, commit/push and futu
 ## Capacity/Work Allocation Link
 
 [capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md): approved18432 from unallocated93696; remaining75264; design12288/review4096/integration1024/stop1024; docs only.
+
+## Reconciliation Reservation
+
+[revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved25600 from unallocated75264; remaining49664; design16384/review6144/integration2048/stop1024; docs applied only.
