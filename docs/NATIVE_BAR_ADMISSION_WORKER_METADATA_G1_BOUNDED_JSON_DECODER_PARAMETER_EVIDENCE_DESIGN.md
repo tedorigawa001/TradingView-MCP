@@ -108,4 +108,4 @@ Next refine only the proof/layout obligations chosen by a separately approved sl
 ## Approved Retention
 Keep cap524288/guard352 and existing reservations/charges, including bd86c85's225-byte date charge and review-unreserved65. Approved from unallocated48128: design16384/review5120/integration2048/stop1024=24576; remainder23552. Documentation allocation applied; no runtime allowance adopted.
 Review physical metadata1024/R1 2048/R2 2048 includes all headings/links. This reflection creates DESIGN and six parent links only; REVIEW/STOP remain absent. Old measured prefixes and old review records stay frozen; every new parent byte belongs to this stage's integration2048. No old free/reserved pool is reused, no past consumption refunded and no historical failure repaired by relabelling.
-Charge D16251/L1520; current C442137/U58247; includes this record. Baselinebd86c85 C424366/U51442; no implementation or test grant.
+Charge D16381/L1847; current C442594/U57790; includes this record. Baselinebd86c85 C424366/U51442; no implementation or test grant.
