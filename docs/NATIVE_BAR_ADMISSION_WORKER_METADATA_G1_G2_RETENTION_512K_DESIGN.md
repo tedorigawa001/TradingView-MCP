@@ -33,3 +33,5 @@ Implementation/adoption and an exception to the no-handwritten-parser policy rem
 Independent document review, any review-record persistence, commit/push and future allocation each need their own approval. This increase is not permission to proceed with the pending counter contract.
 
 [counter contract](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_DESIGN.md): approved13312 from unallocated123392; remaining110080; design8192/review3072/integration1024/stop1024; docs only, no implementation/test grant.
+
+[ownership contract](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_DESIGN.md): approved16384 from unallocated110080; remaining93696; design10240/review4096/integration1024/stop1024; docs applied; no code/test grant.

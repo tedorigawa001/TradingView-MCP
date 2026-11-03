@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 decoder ownership contract**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_DESIGN.md); approved ownership/copy design and recording only, no implementation/test grant.
+
 **105-3 decoder counter contract**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_DESIGN.md); approved design/recording only, no implementation/test grant.
 
 **105-3 G1/G2 retention512K**: [approved ceiling/reservation](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_512K_DESIGN.md); docs only; history/guard preserved, no source/effect grant.

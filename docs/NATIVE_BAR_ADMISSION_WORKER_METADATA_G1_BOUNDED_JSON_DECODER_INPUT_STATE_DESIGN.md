@@ -25,3 +25,5 @@ Approved funding: G21536/review1/terminal3071 -> plan2048/review2048/links512; s
 Base74d2c2a; D2047/L474; C356081/U36271; free=0/0/0/1(G1/G2/review/terminal).
 
 Review fix (user approved): once line-7 preconditions pass, acceptDelivery checks delivery count and cumulative response body bytes before retaining or copying input; a breach moves to REFUSED, retains nothing and leaves the delivery with the caller. Reviewed SHA 8f06f425 covers the text above this note. Reviews: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_REVIEW.md). Funding: the npm read's unused review2048 (19bbc93) returns to review unreserved; this note, the npm pointer, the BACKLOG date and line charge 1115, leaving 933; C358809/U33543.
+
+[ownership phases](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_DESIGN.md): approved design for internal copy/release phases and handoff gates only; existing limits/protocol errors unchanged, no execution grant.
