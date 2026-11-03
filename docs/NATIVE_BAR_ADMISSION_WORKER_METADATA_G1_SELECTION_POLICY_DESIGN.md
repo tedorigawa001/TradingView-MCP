@@ -26,3 +26,5 @@ Transfer3584 from G1 unreserved8192 to planning481: planning4065; G1 ceiling8704
 Charge design3440/integration462; consumed317948/unspent74404. Dot PAUSED; judgment/notification/mail/resource rules unchanged. No effect/MCP/activation; review/commit/push separate.
 
 [Node locator](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md): allocation/design only; no candidate, search or read grant.
+
+[Node identity scope](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md): gaps/read proposal only; no selection or read grant.

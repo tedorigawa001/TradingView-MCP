@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Node identity scope**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md); allocation/docs only, no read.
+
 **105-3 G1 Node locator**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md); allocation/docs only, no search.
 
 **105-3 G1 selection**: [policy/intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md); allocation/docs only, no search.
