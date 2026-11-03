@@ -64,3 +64,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [Node locator](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md): approved G1 transfer2560/review transfer4544; new design4608/results2048; cap unchanged; no search.
 
 [Node identity scope](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_IDENTITY_READ_DESIGN.md): approved G2->planning5120/results2048; review->integration512; no read.
+
+[lossless intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_IDENTITY_INTAKE_DESIGN.md): approved G2 transfer6656 to plan4096/receipt2048/integration512; no read.

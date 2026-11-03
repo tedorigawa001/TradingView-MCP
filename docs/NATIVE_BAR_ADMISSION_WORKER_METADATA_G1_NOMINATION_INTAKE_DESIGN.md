@@ -42,3 +42,5 @@ Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No s
 [G1-I1](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md): identity-locator design only; no new search/read grant.
 
 [Selection gates](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md): current-role policy/template only; no candidate/read grant.
+
+[lossless request](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOSSLESS_IDENTITY_INTAKE_DESIGN.md): triage/input design only; no nomination or read grant.
