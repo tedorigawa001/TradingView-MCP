@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 G1 Node locator**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md); allocation/docs only, no search.
+
 **105-3 G1 selection**: [policy/intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md); allocation/docs only, no search.
 
 **105-3 G1-I1 review fix (2026-11-03 JST)**: [possible Rust/runtime blocker](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md) recorded; G1-I1 entry dated. Review charge 1520 (unreserved 16378 to 14858); no search grant.

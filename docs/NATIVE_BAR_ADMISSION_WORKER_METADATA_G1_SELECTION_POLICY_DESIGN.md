@@ -24,3 +24,5 @@ Retain prior rejections/holds. jstrict stays HELD: identity incomplete and possi
 ## Approved Retention
 Transfer3584 from G1 unreserved8192 to planning481: planning4065; G1 ceiling8704/unreserved4608, gap reservation4096 preserved. Reserve new design3584, terminal512 from unreserved7168, review2048 from unreserved14858, integration512 from unreserved576. Prior reservations/results untouched. Cap393216/guard352/unallocated512 unchanged; no refunds/reset/borrowing. Unknown accounting or retention insufficiency STOP.
 Charge design3440/integration462; consumed317948/unspent74404. Dot PAUSED; judgment/notification/mail/resource rules unchanged. No effect/MCP/activation; review/commit/push separate.
+
+[Node locator](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md): allocation/design only; no candidate, search or read grant.

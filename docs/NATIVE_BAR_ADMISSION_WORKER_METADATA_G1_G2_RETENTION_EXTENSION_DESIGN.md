@@ -60,3 +60,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [G1-I1 allocation](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md): approved G1->planning4096/results2048; cap/guard unchanged; no search.
 
 [G1 selection](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md): approved G1->planning3584; reserve stop512/review2048/integration512; no search/read.
+
+[Node locator](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NODE_LOCATOR_DESIGN.md): approved G1 transfer2560/review transfer4544; new design4608/results2048; cap unchanged; no search.
