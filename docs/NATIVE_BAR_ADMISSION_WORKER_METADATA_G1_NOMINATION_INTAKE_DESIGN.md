@@ -40,3 +40,5 @@ Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No s
 [Locator search](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md): new auxiliary proposal only; no search/read grant.
 
 [G1-I1](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md): identity-locator design only; no new search/read grant.
+
+[Selection gates](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_SELECTION_POLICY_DESIGN.md): current-role policy/template only; no candidate/read grant.
