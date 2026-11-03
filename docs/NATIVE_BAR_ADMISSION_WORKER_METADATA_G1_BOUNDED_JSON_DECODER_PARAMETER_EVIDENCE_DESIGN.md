@@ -61,20 +61,21 @@ Notation: B=response body cap, N=node cap, D=depth cap, K=keys/object. A referen
 | M03 | header/alignment/minimum allocation and pool bounds | U | S32-35; per-allocation E04 |
 | M04 | admitted delivery extent L; 0<=L<=B bytes | V | C12, W12; qualified extent E01 |
 | M05 | full source backing count Qsrc and capacity Ssrc | U | S37; producer pools/retention E09 |
-| M06 | Ulive / UkeysLive: current root-retained decoded payload/key bytes | V | W13, S32-39; E03/E04 |
+| M06 | Ulive / UkeysLive: per-response root-retained decoded payload/key bytes | V | W13, S32-39; E03/E04 |
 | M07 | Ulive<=B only for justified single-copy payload storage | F | W13 scoped below; not total copies/heap, E03/E04 |
 | M08 | sum_i page(ui) <=sum_i ui+1023*A for positive ui | F | S34; A real allocation count, E04 |
 | M09 | carry/text/codec fields and input-copy temporaries | U | S45, O13; representation/copy E04/E10 |
 | M10 | Rbase/Oretained bytes and root-retained identities | U | S36; disjoint finite manifests E04/E11 |
-| M11 | projection serialized cap and backing representation | U | S38/R45 cite1048576; primary M link E02/E10 |
+| M11 | projection serialized cap and backing representation | U | S38 cites1048576; primary M link E02/E10 |
 | M12 | root peak and separately approved capacity allowance | U | W16-19, S32-39; all live sets E04/E09/E11 |
 | C01 | Cfixed cleanup overhead including calls/final confirmation | U | W51-53, S11; E07/E08 |
 | C02 | Amax/Vmax/Lmax/Rmax coexisting releasable counts | U | W52, S32-39; E04/E07 |
 | C03 | cA/cV/cL/cR release/check/bookkeeping work per resource | U | W52, S9-11; E06/E07 |
 | C04 | CleanupNeed=Cfixed+Amax*cA+Vmax*cV+Lmax*cL+Rmax*cR | F | W51, S11; checked full sum<=Wc, E07 |
 | C05 | valid cleanup progress/cursor and dispatch-call bound | U | S7-12; 2048 quanta is not call cap, E08 |
+
 No inventory entry is assigned a measurement, implementation layout, primitive or runtime admission here.
-Key accounting clarification (PE-P3-01): UkeysSeenCum counts each decoded UTF-8 byte of every eligible key candidate once, including duplicates/later failures, before any comparison it funds. ExamCum counts all byte-pairs examined in that response. Both are monotone across yields, token resets, refusal, cancellation and cleanup; no credit repeats on resume/copy. S26's Ukeys means UkeysSeenCum; W13's U means Ulive. Ulive/UkeysLive are current retained decoded payload/key bytes, not backing capacity; reduce only on confirmed root-scope release, never merely on handoff. ExamCum<=8*UkeysSeenCum holds per response prefix only under E03/E06; live bytes never fund it.
+Key accounting clarification (PE-P3-01): UkeysSeenCum counts each decoded UTF-8 byte of every eligible key candidate once, including duplicates/later failures, before any comparison it funds. ExamCum counts all byte-pairs examined in that response. Both are monotone across yields, token resets, refusal, cancellation and cleanup; no credit repeats on resume/copy. S26's Ukeys means UkeysSeenCum; W13's U means Ulive. Ulive/UkeysLive are current retained decoded payload/key bytes, not backing capacity; reduce only on confirmed root-scope release, never merely on handoff. At the next begin, earlier responses' Ulive/UkeysLive bytes still root-retained count once, in Oretained (M10). ExamCum<=8*UkeysSeenCum holds per response prefix only under E03/E06; live bytes never fund it.
 
 ## Evidence Obligations And Stop Conditions
 | ID | Required proposition and dependencies | Present role / action while open |
@@ -90,7 +91,8 @@ Key accounting clarification (PE-P3-01): UkeysSeenCum counts each decoded UTF-8 
 | E09 | producer stable-read lease, full backing identities/counts/capacities and retention closure | proposed O8/O11/S37; one input/1024 deliveries is not a producer bound |
 | E10 | carry and projection representations, copies, UTF-8/UTF-16 distinction and receiver binding | proposed S38/S42/S45; no borrowed views or inferred heap cap |
 | E11 | acquisition-root budget/lifetime closure for old outputs, hashes, rows and current result | proposed W35/S36-39; decoder-only success is not root settlement |
-| E12 | independent host/bootstrap/transport/clock/GC and D01-D08/B01-B08/G2 qualification | still open in existing policies; no runtime/real-time/RSS claim |
+| E12 | independent host/bootstrap/transport/clock/GC and existing-gate D01-D08/B01-B08/G2 qualification | still open in existing policies; no runtime/real-time/RSS claim |
+
 These are obligations, not evidence newly obtained. Source/purpose/attempt/profile/generation and resource-owner/receiver identity must match across an obligation's references. A proposition can be a predicate, not a fake numeric byte count.
 
 ## Resolution And Documentary Acceptance
