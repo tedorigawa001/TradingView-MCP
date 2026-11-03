@@ -60,3 +60,6 @@ Independent document review, any review-record persistence, commit/push and futu
 
 ## A1-A4 Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PRESERVATION_DESIGN.md): approved6656 from unallocated7168 ->512; design3584/review2048/integration512/stop512; docs only.
+
+## Prospective Ceiling Extension: 640 KiB
+[design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_640K_DESIGN.md): approved ceiling655360 and reservation8192 from increase131072; unallocated123392 before charges; this document's prior limits/ledgers remain historical. No old-reserve transfer.
