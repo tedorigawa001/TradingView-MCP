@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 G1-I1**: [identity-locator design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md); allocation/docs only, no search.
+
 **105-3 G1/G2 link and date fixes (2026-11-03 JST)**: [G2 gap report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G2_GAP_REPORT.md) is now linked, and the G1 intake and locator-search entries are dated. User-approved integration charge 424, not a review addition: unreserved1512 to 1088, main integration remaining 1222; reserves 73/61 preserved; consumed retention 304024. No search/read grant.
 
 **105-3 G1 locator search (2026-11-03 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md); documentation only, no search.

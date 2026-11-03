@@ -38,3 +38,5 @@ At reflection transfer3584 from unallocated4096 to planning11: planning3595/unal
 Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No source/effect/MCP/activation authority. Review/commit/push require separate requests.
 
 [Locator search](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md): new auxiliary proposal only; no search/read grant.
+
+[G1-I1](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md): identity-locator design only; no new search/read grant.

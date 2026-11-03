@@ -56,3 +56,5 @@ Independent review, commit and push of this reflection are not performed or impl
 [G1 intake](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_NOMINATION_INTAKE_DESIGN.md): approved3584 from unallocated4096 to planning11; remaining512. Documentation only.
 
 [G1 locator search](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_LOCATOR_SEARCH_DESIGN.md): approved transfer6144 from G1 unreserved to planning4096/results2048. Documentation only.
+
+[G1-I1 allocation](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_IDENTITY_SEARCH_DESIGN.md): approved G1->planning4096/results2048; cap/guard unchanged; no search.
