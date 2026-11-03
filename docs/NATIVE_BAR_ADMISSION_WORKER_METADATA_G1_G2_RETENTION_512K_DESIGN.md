@@ -43,3 +43,7 @@ Independent document review, any review-record persistence, commit/push and futu
 ## Reconciliation Reservation
 
 [revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved25600 from unallocated75264; remaining49664; design16384/review6144/integration2048/stop1024; docs applied only.
+
+## Re-review Link Funding
+
+[record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): approved integration1536 from unallocated49664 ->48128; record uses prior review6144; prior integration62 untouched; docs applied only.

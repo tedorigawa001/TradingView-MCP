@@ -19,3 +19,7 @@ P3 L19: "pre-commit cancellation" should name the handoff commit.
 ## Reconciliation Link
 
 [revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.
+
+## Later Re-review Status
+
+[record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): later documentary assessment; mapped clauses addressed, runtime qualification open; original review preserved.

@@ -18,3 +18,7 @@ P3 L31: the guard order omits the B/C work, step, capacity, cleanup and ownershi
 ## Reconciliation Link
 
 [revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.
+
+## Later Re-review Status
+
+[record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): later documentary assessment; mapped clauses addressed, runtime qualification open; original review preserved.

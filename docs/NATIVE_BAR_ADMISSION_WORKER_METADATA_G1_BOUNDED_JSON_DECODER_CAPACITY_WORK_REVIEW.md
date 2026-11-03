@@ -21,3 +21,7 @@ P3 L15: projection is UNSET here, but M caps it at 1048576 (2B) and UTF-16 strin
 ## Reconciliation Link
 
 [revision](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md): approved design reconciliation; findings stay open pending re-review; no execution grant.
+
+## Later Re-review Status
+
+[record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): later documentary assessment; mapped clauses addressed, runtime qualification open; original review preserved.

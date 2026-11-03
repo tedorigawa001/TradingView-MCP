@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 decoder re-review record**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md); mapped clauses addressed in design only; runtime gates open; historical reviews unchanged.
+
 **105-3 decoder reconciliation design**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_DESIGN.md); counter, terminal cleanup, lookup and allocation revisions; pending re-review; no runtime grant.
 
 **105-3 decoder contract reviews (2026-11-03 JST)**: [counter](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_COUNTER_REVIEW.md), [ownership](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_OWNERSHIP_REVIEW.md) and [capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_REVIEW.md) review records; open P2s in all three designs; three entries dated. Records (4891) use their design review reserves; this line and the dates charge 643 to review unreserved 933, leaving 290; consumed 400971/unspent 47701. No implementation grant.

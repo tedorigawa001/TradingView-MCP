@@ -50,3 +50,7 @@ Approve a new documentation stage, not old-reserve reuse: design16384/review6144
 Keep this supplement separate. Append stage-attributed links to input/state, counter, ownership, capacity, retention and BACKLOG plus the three review records; preserve every old byte. New links do not close findings. Do not charge historical DESIGN/REPORT sections or reinterpret their caps; all positive parent growth belongs to integration2048.
 This reflection creates this supplement and the nine stage-attributed links only; existing text stays frozen. Independent re-review and any review/stop record persistence need separate approval. Refuse on any section/file shortage rather than truncate, borrow or silently expand.
 Charge D14694/L1986; current C417651/U56621; includes this line. Baseline2105200 C400971/U47701, plus this reflection's measured growth; no runtime grant.
+
+## Re-review Record
+
+[record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_RECONCILIATION_REVIEW.md): prior independent review summary and source-entry mapping; design only, runtime gates open.
