@@ -53,3 +53,7 @@ This is still a proposed ownership contract. Code, synthetic tests, registration
 ## Approved Recording
 Unallocated110080 ->design10240/review4096/integration1024/stop1024=16384; remainder93696. Review physical metadata1024/R1 1536/R2 1536 includes headings/links. Cap524288/guard352/prior reservations stay; docs applied only.
 Charge D10178/L0693; current C383050/U47190; includes this record's bytes. Counter-runtime, code and test grants remain absent.
+
+## Capacity/Work Integration
+
+[capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md): new-stage integration, not prior DESIGN; approved model link only, no runtime grant.

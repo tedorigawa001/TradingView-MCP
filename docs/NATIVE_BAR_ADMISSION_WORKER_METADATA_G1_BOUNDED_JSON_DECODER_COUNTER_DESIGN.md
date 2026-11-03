@@ -39,3 +39,7 @@ Next remain ownership/alias enforcement, allocation/copy formulas, work/cleanup 
 ## Approved Recording
 Unallocated123392 ->design8192/review3072/integration1024/stop1024=13312; remainder110080. Review physical metadata1024/R1 1024/R2 1024; all labels count. Cap524288/guard352/prior reservations stay; docs applied only.
 Charge D8158/L0619; current C372179/U41677; these include this record's bytes. No new counter-runtime or test grant.
+
+## Capacity/Work Integration
+
+[capacity/work](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_CAPACITY_WORK_DESIGN.md): new-stage integration, not prior DESIGN; inherited grammar/counters unchanged, no runtime grant.
