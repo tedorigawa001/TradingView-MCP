@@ -52,3 +52,5 @@ Dot PAUSED; judgment/notification/mail, resource rules and seals unchanged. No s
 [custom decoder](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_DESIGN.md): proposal only; no policy/effect grant.
 
 [input/state](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_INPUT_STATE_DESIGN.md): partial design; no policy/effect grant.
+
+[512 KiB retention](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_512K_DESIGN.md): approved ceiling524288/change-record reserve8192 only; no new candidate, counter-design or effect grant.

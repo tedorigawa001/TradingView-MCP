@@ -1,5 +1,9 @@
 # G1/G2 Audit Retention Extension
 
+## Latest Ceiling Authority
+
+Current ceiling: **524288 UTF-8 bytes**; [approved 512 KiB update](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_512K_DESIGN.md). The dated393216 authority below is historical. Guard352, prior charges/reservations and TAG433's recorded sub-cap breach remain. New8192 reservation only; unallocated123392 is not spending authority.
+
 ## Current Authority
 
 2026-11-02 JST, baseline `e7ff342`. The user explicitly approved documentation of the proposed ceiling/allocation only. The current whole-series audit-document ceiling is **393216 UTF-8 bytes**, replacing 262144 prospectively for this audit series. Older budgets and no-change statements remain historical observations, not rewritten evidence.
