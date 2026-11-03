@@ -27,3 +27,6 @@ Future REVIEW physical caps: metadata512/R1 768/R2 768, including headings, iden
 Independent review, saving its result, commit/push, future allocation and A1-A3 documentation need separate approval. No parser-policy waiver, implementation/adoption, source/dependency acquisition, parse/model/test, real port/clock/timer/build/child/native/fixture/signature/data operation, MCP registration or production activation.
 Dot stays PAUSED. Judgment/notification/mail and trading conditions do not change. Added document capacity proves no A1-A4, E03/E05/E06, D01-D08/B01-B08/G2 or host/runtime qualification.
 Charge D3387/L551; current C463368/U68248; cap655360/guard352/unallocated123392. Includes this line; prior charges unchanged.
+
+## A1-A3 Case-Table Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_A1_A3_CASE_DESIGN.md): approved11264 from unallocated123392 ->112128; design6144/review3072/integration1024/stop1024; old reservations unchanged; docs only.

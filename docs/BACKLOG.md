@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 A1-A3 preservation cases (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_A1_A3_CASE_DESIGN.md); case obligations only; no E03 closure or runtime grant.
+
 **105-3 retention ceiling 640 KiB (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_640K_DESIGN.md); ceiling655360/guard352, new reservation8192 only; old reservations unchanged; no A1-A3 allocation or runtime grant.
 
 **105-3 A1-A4 preservation design**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PRESERVATION_DESIGN.md); conditional invariants only; no runtime grant.
