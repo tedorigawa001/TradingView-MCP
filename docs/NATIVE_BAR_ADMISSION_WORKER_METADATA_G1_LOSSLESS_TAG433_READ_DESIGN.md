@@ -24,3 +24,5 @@ Move8704 from G2 unreserved15360: planning4608/results1536/review2048/integratio
 Add review2048 and reserve it separately, keeping unreserved1033/prior-reserved15893. Add integration512 separately from prior466. Reserve stop512 within terminal unreserved4608: remaining4096, prior3584 untouched. No guard352/unallocated512 use, refund/reset or implicit borrowing.
 Charge design4571/integration463; consumed345978/unspent46374. Cap393216 unchanged; allocated ceiling392352. Allocation/docs applied; no read executed. G2 future evidence headroom falls; neither qualification nor arbitrary-result fit is guaranteed funded. Retained capacity does not bound backend/source work.
 Dot PAUSED; judging/notification/mail/resource rules unchanged. No actual receipt/result, parse/build/native/fixture/signature/data/MCP/activation. Review/commit/push separate.
+
+Review note (user approved): REPORT@4a65529 1518/1536; no section split fits header384/read768/end384 (intro290 Request356 Status356 Attempt451 Ledger65); undisclosed. Unreserved review 212->1; C353560/U38792.
