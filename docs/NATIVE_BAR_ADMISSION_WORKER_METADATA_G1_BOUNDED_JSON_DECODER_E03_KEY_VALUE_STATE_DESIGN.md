@@ -55,5 +55,5 @@ Separate approval: independent review/result saving, proofs/models/tests, parser
 
 ## Approved Retention
 Baseline C482224/U74992/unallocated97792; cap655360/guard352. Reserve14336 only from unallocated ->83456: design8192/review4096/integration1024/stop1024; before charges U89328. Prior charges/reservations stay; no transfer/refund/spare reuse.
-Create DESIGN and BACKLOG/640K links only; parent growth uses this integration1024. REVIEW/STOP absent; review physical metadata1024/R1 1536/R2 1536 includes headings/links. Stop on section/file shortage; no truncation, borrowing, alternate log or expansion.
-Charge D8076/L523; current C490823/U80729; cap655360/guard352/unallocated83456. Includes this line; no runtime grant.
+First create DESIGN and BACKLOG/640K links only; parent growth uses this integration1024. REVIEW/STOP absent; review physical metadata1024/review1 1536/review2 1536 includes headings/links. Stop on section/file shortage; no truncation, borrowing, alternate log or expansion.
+Charge D8092/L813; current C491129/U80423; cap655360/guard352/unallocated83456. Includes this line; no runtime grant.
