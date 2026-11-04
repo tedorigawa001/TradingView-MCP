@@ -4,13 +4,15 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 A1-A3 review fixes (2026-11-04 JST)**: K2-K4 atomic note now covers K3; K2/K3 array starts pass depth; M/P/O/I1-I4 marked non-aliases; two entries dated. Design charge 83 (95 to 12), integration 297 (557 to 260); consumed 470264/unspent 72616. No grant.
+
 **105-3 A1-A3 preservation cases (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_A1_A3_CASE_DESIGN.md); case obligations only; no E03 closure or runtime grant.
 
 **105-3 retention ceiling 640 KiB (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_640K_DESIGN.md); ceiling655360/guard352, new reservation8192 only; old reservations unchanged; no A1-A3 allocation or runtime grant.
 
-**105-3 A1-A4 preservation design**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PRESERVATION_DESIGN.md); conditional invariants only; no runtime grant.
+**105-3 A1-A4 preservation design (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PRESERVATION_DESIGN.md); conditional invariants only; no runtime grant.
 
-**105-3 E03-A re-review**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_REVIEW.md); E03-P2-01 addressed in docs; E03/E05/E06 OPEN; no runtime grant.
+**105-3 E03-A re-review (2026-11-04 JST)**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_REVIEW.md); E03-P2-01 addressed in docs; E03/E05/E06 OPEN; no runtime grant.
 
 **105-3 E03-A proof design (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PROOF_DESIGN.md); conditional logical bounds only; no E03/runtime closure or execution grant.
 
