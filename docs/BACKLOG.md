@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 key/uniqueness/value states (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_KEY_VALUE_STATE_DESIGN.md); role transitions/commit points only; index dependencies and proof/runtime gates stay OPEN.
+
 **105-3 event/guard mapping review**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_REVIEW.md); two documentary reviews, no findings; proof/runtime gates stay OPEN.
 
 **105-3 legal-event/guard mapping (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_DESIGN.md); documentary K0-K9 mapping and open boundaries only; no proof/runtime closure.
