@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 write/progress design wording fix (2026-11-04 JST)**: lines 59/63 no longer imply value-admission sufficiency or required unconsumed bytes. Design charge 2 (61 to 59), integration 249 (418 to 169); consumed 563537/unspent 112463. No grant.
+
 **105-3 write/progress/index commit consistency (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WRITE_CURSOR_COMMIT_DESIGN.md); conditional effect/acknowledgement and final use-authority contract; no host primitive, driver route or B/runtime adoption.
 
 **105-3 768 KiB ceiling design fix (2026-11-04 JST)**: source pins scoped to the baseline commit, since the design's commit extended the prior ceiling document; boundary review named in full. Design charge 32 (200 to 168), integration 296 (452 to 156); consumed 552501/unspent 107115. No grant.

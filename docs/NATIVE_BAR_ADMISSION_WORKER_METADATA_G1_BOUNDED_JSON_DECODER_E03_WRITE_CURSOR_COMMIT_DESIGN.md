@@ -56,11 +56,11 @@ After qualified writes/order/correspondence/scratch retirement, stage k+1/new ge
 Final qualification needs known complete prefix, same mutation/content/rank/owner, S0->S1 once, coherent count/generation, retained ownership and finite boundary work/failure evidence.
 Prove final use-authority consistency/failure separately; count/epoch/validity/progress are not assumed one atomic word/non-failing assignment. Missing proof blocks qualification.
 Intermediate metadata reserves no q/n or IndexCommitQualified. Unknown final outcome is not resolved by membership/equal bytes/idempotency/retry; retain effects/liabilities.
-Known completion plus next-phase bridge alone allows later view use/CP-V. CP-V: n+1,P->M once,q unchanged; container node+depth guarded together. No speculative node/early property/next-key permission.
+Later view use/CP-V needs known final completion plus next-phase bridge. CP-V: n+1,P->M once,q unchanged; container node+depth guarded together. No speculative node/early property/next-key permission.
 Invalid value/CP-V refusal keeps key/index effects/costs; later value failure keeps committed witnesses. Result property order stays separate.
 
 ## Driver, Failure And Resource Boundaries
-No Idx in NEED_INPUT/invented calls. READY/YIELDED alone proves neither a legal index phase nor required unconsumed bytes. BR's zero-byte/exhaustion/held-delimiter/root-close routes remain OPEN.
+No Idx in NEED_INPUT/invented calls. READY/YIELDED alone proves neither a legal index phase nor that unconsumed bytes remain. BR's zero-byte/exhaustion/held-delimiter/root-close routes remain OPEN.
 No Idx interleaving in release-only phases or via terminal cleanup/finish. No route selected; consistency proves no driver reachability/root-close acceptance.
 Partial/unknown effects retain source/destination/scratch/control identities, legal-prefix witnesses and unknown ownership. Same-owner/original-budget cleanup releases only, no rollback/reconciliation/commit completion.
 Index/scratch/key release, result ownership, GC and transport settlement differ. Result keys/edges stay root-accounted after close/handoff; no refund/false free.
@@ -75,4 +75,4 @@ Separate approval: independent review/result saving, strategy/representation or 
 ## Approved Retention
 Baseline C552501/U107115/unallocated126464; cap786432/guard352. Reserve16384 only from unallocated ->110080: design10240/review4096/integration1024/stop1024; before charges U123499. Old reservations/charges stay, including CAP's later32/296-byte fix; no transfer/refund/spare reuse.
 Create DESIGN and BACKLOG/current768K links only; parent growth charges integration1024. REVIEW/STOP absent; metadata1024/review1 1536/review2 1536 include headings/links. Shortage stops, no truncation/borrowing/alternate log/expansion.
-Charge D10179/L606; current C563286/U112714; cap786432/guard352/unallocated110080. Includes this line; no runtime grant.
+Charge D10181/L855; current C563537/U112463; cap786432/guard352/unallocated110080. Includes this line; no runtime grant.
