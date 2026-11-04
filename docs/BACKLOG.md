@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 input route comparison fix (2026-11-04 JST)**: Route-Z ranked by single-route scope only; wait-plus-held-delimiter composite recorded as uncompared; no route selected. Design charge 266 (283 to 17), integration 280 (415 to 135); consumed 576697/unspent 119783. No grant.
+
 **105-3 input-exhaustion driver route comparison (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INPUT_EXHAUSTION_ROUTE_DESIGN.md); Z/H/W/F comparison and selection gates only; Z first qualification target, not route/phase/B adoption or runtime grant.
 
 **105-3 write/progress design wording fix (2026-11-04 JST)**: lines 59/63 no longer imply value-admission sufficiency or required unconsumed bytes. Design charge 2 (61 to 59), integration 249 (418 to 169); consumed 563537/unspent 112463. No grant.

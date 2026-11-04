@@ -11,11 +11,11 @@ Route-Z/H/W/F are route labels, not H/W source aliases, states/APIs or phase per
 
 ## Four Distinct Boundaries
 1. Byte exhaustion: exact consumed position equals admitted extent, not resource completion.
-2. Enabled normal work settled: required work needing no future byte is complete. Refusal follows terminal rules, not the normal sequence.
+2. Enabled normal work settled: route-enabled work needing no future byte is complete. Refusal follows terminal rules, not the normal sequence.
 3. Input resource boundary: fragments/keys/progress have stable owned lifetimes; private input release confirmed. Consumed is not released.
 4. State boundary: root/stack/token/carry/resources justify NEED_INPUT/WAIT_EOF. DONE needs legal finish/explicit EOF/handoff.
 
-Incomplete tokens need actual bytes, not fabricated runnable tasks: qualify carry/release and ordinary input waiting. Do not skip enabled comparison/commit/close release merely because no future input arrived.
+Incomplete tokens need actual bytes, not fabricated runnable tasks: qualify carry/release and ordinary input waiting. Do not skip route-enabled work merely because no future input arrived.
 Existing serial operations only. I8 state-gates advance; READY/YIELDED alone does not prove Idx permission or that bytes remain. OWN's zero-byte release grants no automatic Idx.
 
 ## Comparison
@@ -26,9 +26,9 @@ Existing serial operations only. I8 state-gates advance; READY/YIELDED alone doe
 | Route-W | Qualify release/exhaustion then await a genuine later numbered delivery | Incomplete grammar may wait. Not universal: no guaranteed delivery after root close. |
 | Route-F | Existing one-step finish preparation/temporary-release allowance | Ancillary: complete root/legal finish/drained resources/EOF/proved reserve-step fit. No normal lookup/Idx/unfinished-root completion. |
 
-Rank Z first for covering all three enabled-work boundaries without assuming another delivery. No acceptance/performance/memory-fit/time claim. Unproved Z stays OPEN, no H/W/F fallback.
+Rank Z first as the one listed route covering key lookup, post-colon Idx and close; scope only. No acceptance/performance/memory-fit/time claim. Unproved Z stays OPEN, no H/W/F fallback. Uncompared composite, not fallback: W for key-close/post-colon plus H for close; valid documents need a later byte there and H holds a real root-close byte, so no zero-byte lookup/Idx/S28, but pending phase/duplicate refusal cross waits (BND50/ORD45) and W/H need proof.
 H may be a close-only comparison, not an adopted hybrid with Z. Holding colon to insert first changes B's CP-U -> Colon -> Idx -> CP-V order; separate design/approval required.
-W preserves candidate/key/input lifetime and admission guards. Admission refreshes no pending-response budget; no parent/other-response borrowing or manufactured delivery for root close.
+W: keep admission guards and candidate/key lifetimes past input release. Admission refreshes no pending-response budget; no parent/other-response borrowing or manufactured delivery for root close.
 S29/CW finish reserve is inside normal work. OWN43/S42-44 release/readiness/handoff gates remain. F cannot turn pending S28 retirement into complete root or bypass illegal/refused finish.
 
 ## Route-Z: Conditional Phase Order
@@ -48,7 +48,7 @@ Retained consumed input needs full capacity/alias charges and stable source-inde
 Live failure follows existing refusal/resource rules; failed/unknown/exhausted release or lost owner/progress follows OWN27 REFUSED with liabilities. No replacement-owner mutation or terminal cleanup completing normal work.
 
 ## Close, Root And Parent Correspondence
-G5 needs valid close/no pending key. Bind classification, consumption, index retirement, stack/object pop, value completion and parent return. G47 timing remains OPEN, not proved by a route table.
+G30 needs valid close/no pending key. Bind classification, consumption, index retirement, stack/object pop, value completion and parent return. G47 timing remains OPEN, not proved by a route table.
 Z post-consumption needs proved pending-close representation/invariants, not assumed incomplete-object validity. H holds a real stable admitted byte at exact unconsumed offset, not replay/new reservation.
 Keep n/q/M/f witnesses; pop depth/open-object once at qualified close. No early parent property/element or pending-close masquerading as complete root for finish.
 S28 retirement precedes object completion. I16/G41 tail-only latches immediately at root completion across later input; no new root/sibling, delayed latch or future-byte error ranking.
@@ -71,7 +71,7 @@ Cover last-byte fuel before/after acknowledgement, nested return and trailing no
 ## Selection Gates And Later Refinement
 Per route/case record source clause, operation/pre-state/phase, input extent/position, enabled task, owner/view/cursor, guards, effects/charges, post-state and gaps.
 Require legal phases, split/fuel/root coverage, consumption/close/pop/tail semantics, once-only effects/current-view qualification, ownership/live-set overlap, finite unit/step/normal/finish/cleanup/dispatch costs and all failure branches.
-Required future clause mapping includes I8/15/17/19, OWN20-28, S28-29/S42-45, G30/41-47 and BND CB0/CB3/CB6/CB7/CB11 plus its reviewed real-input premise. Identify amendments/precedence explicitly; existing historical text/pins/charges stay frozen.
+Required future clause mapping includes I7-9/15-19, OWN20-28, S28-29/S42-45, G30/41-47 and BND CB0/CB3/CB6/CB7/CB11 plus its reviewed real-input premise. Identify amendments/precedence explicitly; existing historical text/pins/charges stay frozen.
 No closure from comparison. Route/refinement/source replacement, preservation/models, host evidence/execution need separate approval. No new operation/state/driver/controller/delivery budget/limit.
 
 ## Work, Capacity And Acceptance
@@ -84,4 +84,4 @@ Separate approval: independent review/result saving, route/strategy/B adoption, 
 ## Approved Retention
 Baseline C563537/U112463/unallocated110080; cap786432/guard352. Reserve20480 only from unallocated ->89600: design12288/review6144/integration1024/stop1024; before charges U132943. Old reservations/charges, including CONS's2/249-byte fix, stay; no transfer/refund/spare reuse.
 Create DESIGN and BACKLOG/current768K links only; parent growth uses this integration1024. REVIEW/STOP absent; review physical metadata1024/review1 2560/review2 2560 includes headings/links. Shortage stops; no truncation, borrowing, alternate log or expansion.
-Charge D12005/L609; current C576151/U120329; cap786432/guard352/unallocated89600. Includes this line; no runtime grant.
+Charge D12271/L889; current C576697/U119783; cap786432/guard352/unallocated89600. Includes this line; no runtime grant.
