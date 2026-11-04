@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 write/progress/index commit consistency (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WRITE_CURSOR_COMMIT_DESIGN.md); conditional effect/acknowledgement and final use-authority contract; no host primitive, driver route or B/runtime adoption.
+
 **105-3 768 KiB ceiling design fix (2026-11-04 JST)**: source pins scoped to the baseline commit, since the design's commit extended the prior ceiling document; boundary review named in full. Design charge 32 (200 to 168), integration 296 (452 to 156); consumed 552501/unspent 107115. No grant.
 
 **105-3 retention ceiling: 768 KiB (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_768K_DESIGN.md); approved cap786432/reservation8192; old3584 preserved, unallocated126464 before charges. No next-design allocation or runtime grant.

@@ -33,3 +33,6 @@ Dot stays PAUSED; judgment/notification/mail and trading conditions unchanged. N
 Implementation/adoption, policy waiver and host/resource/driver evidence remain separate gates. Added retained-document capacity closes no A1-A3/A4-A7/E03/E05/E06, D01-D08/B01-B08/G2 or input-boundary finding.
 Independent review, review-result saving, commit/push and future allocation/documentation need separate approval. This step applies only the ceiling and its8192 reservation.
 Charge D3928/L868; current C552501/U107115; cap786432/guard352/unallocated126464. Includes this line; prior charges unchanged.
+
+## Write/Progress/Index Commit Consistency Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WRITE_CURSOR_COMMIT_DESIGN.md): approved16384 from unallocated126464 ->110080; design10240/review4096/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
