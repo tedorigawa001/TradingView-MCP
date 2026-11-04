@@ -3,8 +3,8 @@ APPROVED documentation/allocation only, 2026-11-04 JST. Baselineb73ac179874370e4
 
 ## Baseline And Frozen History
 Baseline cap655360, consumed547705, allocated-unspent103719, unallocated3584, guard352 sum to655360.
-Sources: [prior ceiling](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_640K_DESIGN.md), 5806 bytes, SHA-256 3750d1bedfab0e0d5f98f99f50f34a6b8768858ec6e9014a728e64f9f26b718d; [latest charge](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REPRESENTATION_REFLECTION_DESIGN.md), 10198 bytes, SHA-256 ac9479e61c57b05d9db717a2d86466b632b9c8f03a1401c161794129945368c7.
-Carry the saved BND review and later representation line56 fix, not the earlier10109-byte body/charge. The real-input premise remains OPEN; no exhaustion route is selected.
+Sources at that commit: [prior ceiling](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_640K_DESIGN.md), 5806 bytes, SHA-256 3750d1bedfab0e0d5f98f99f50f34a6b8768858ec6e9014a728e64f9f26b718d; [latest charge](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REPRESENTATION_REFLECTION_DESIGN.md), 10198 bytes, SHA-256 ac9479e61c57b05d9db717a2d86466b632b9c8f03a1401c161794129945368c7.
+Carry the saved colon/input boundary review and later representation line56 fix, not the earlier10109-byte body/charge. The real-input premise remains OPEN; no exhaustion route is selected.
 Raise only the whole-series ceiling to786432 UTF-8 bytes (768 KiB), increase131072. Preserve prior section budgets, read limits, runtime/response-body limits, all charges/reservations and guard352. Old cap statements/ledgers and review pins stay historical, not rewritten.
 No shortening, deletion, relocation or splitting refunds consumption. TAG433's1518-byte report and recorded sub-cap breach stay; this increase neither authorizes nor cures them. npm read remains unexecuted with review funding unresolved; no old reservation is restored.
 
@@ -32,4 +32,4 @@ Measure actual UTF-8 bytes including source links and the charge line. Add desig
 Dot stays PAUSED; judgment/notification/mail and trading conditions unchanged. No source/page/dependency acquisition, implementation, parse/model/test, real port/clock/timer/build/child/native/fixture/signature/data work, MCP registration or production activation.
 Implementation/adoption, policy waiver and host/resource/driver evidence remain separate gates. Added retained-document capacity closes no A1-A3/A4-A7/E03/E05/E06, D01-D08/B01-B08/G2 or input-boundary finding.
 Independent review, review-result saving, commit/push and future allocation/documentation need separate approval. This step applies only the ceiling and its8192 reservation.
-Charge D3896/L572; current C552173/U107443; cap786432/guard352/unallocated126464. Includes this line; prior charges unchanged.
+Charge D3928/L868; current C552501/U107115; cap786432/guard352/unallocated126464. Includes this line; prior charges unchanged.

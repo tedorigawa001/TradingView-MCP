@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 768 KiB ceiling design fix (2026-11-04 JST)**: source pins scoped to the baseline commit, since the design's commit extended the prior ceiling document; boundary review named in full. Design charge 32 (200 to 168), integration 296 (452 to 156); consumed 552501/unspent 107115. No grant.
+
 **105-3 retention ceiling: 768 KiB (2026-11-04 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_768K_DESIGN.md); approved cap786432/reservation8192; old3584 preserved, unallocated126464 before charges. No next-design allocation or runtime grant.
 
 **105-3 representation design line 56 fix (2026-11-04 JST)**: that line now calls the boundary design's real-input premise OPEN, not a rule, per its review; boundary design unchanged; that record still pins the pre-fix text. Design charge 89 (131 to 42), integration 328 (443 to 115); consumed 547705/unspent 103719. No grant.
