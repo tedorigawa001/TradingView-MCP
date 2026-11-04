@@ -30,3 +30,8 @@ Charge D3387/L551; current C463368/U68248; cap655360/guard352/unallocated123392.
 
 ## A1-A3 Case-Table Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_A1_A3_CASE_DESIGN.md): approved11264 from unallocated123392 ->112128; design6144/review3072/integration1024/stop1024; old reservations unchanged; docs only.
+
+## Legal-Event/Guard Mapping Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_DESIGN.md): approved14336 from unallocated112128 ->97792; design8192/review4096/integration1024/stop1024; old reservations unchanged; docs only.
+
+[mapping review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_REVIEW.md) saved within existing review4096/integration1024; no reallocation.

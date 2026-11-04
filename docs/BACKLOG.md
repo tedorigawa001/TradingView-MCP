@@ -4,6 +4,10 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 event/guard mapping review**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_REVIEW.md); two documentary reviews, no findings; proof/runtime gates stay OPEN.
+
+**105-3 legal-event/guard mapping (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_EVENT_GUARD_MAPPING_DESIGN.md); documentary K0-K9 mapping and open boundaries only; no proof/runtime closure.
+
 **105-3 A1-A3 review fixes (2026-11-04 JST)**: K2-K4 atomic note now covers K3; K2/K3 array starts pass depth; M/P/O/I1-I4 marked non-aliases; two entries dated. Design charge 83 (95 to 12), integration 297 (557 to 260); consumed 470264/unspent 72616. No grant.
 
 **105-3 A1-A3 preservation cases (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_A1_A3_CASE_DESIGN.md); case obligations only; no E03 closure or runtime grant.
