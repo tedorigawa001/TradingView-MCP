@@ -36,3 +36,6 @@ Charge D3928/L868; current C552501/U107115; cap786432/guard352/unallocated126464
 
 ## Write/Progress/Index Commit Consistency Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WRITE_CURSOR_COMMIT_DESIGN.md): approved16384 from unallocated126464 ->110080; design10240/review4096/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
+
+## Input-Exhaustion Driver Route Comparison Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INPUT_EXHAUSTION_ROUTE_DESIGN.md): approved20480 from unallocated110080 ->89600; design12288/review6144/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
