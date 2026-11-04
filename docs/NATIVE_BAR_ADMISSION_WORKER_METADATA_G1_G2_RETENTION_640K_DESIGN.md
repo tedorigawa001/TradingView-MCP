@@ -41,3 +41,6 @@ Charge D3387/L551; current C463368/U68248; cap655360/guard352/unallocated123392.
 
 ## Uniqueness/Index Prerequisite Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_UNIQUENESS_INDEX_PREREQUISITE_DESIGN.md): approved14336 from unallocated83456 ->69120; design8192/review4096/integration1024/stop1024; old reservations unchanged; docs only.
+
+## Index-Order Comparison Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_ORDER_SELECTION_DESIGN.md): approved16384 from unallocated69120 ->52736; design10240/review4096/integration1024/stop1024; old reservations unchanged; docs only.
