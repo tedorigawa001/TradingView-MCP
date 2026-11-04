@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 colon/input boundary review (2026-11-04 JST)**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COLON_INPUT_BOUNDARY_REVIEW.md); P2: real-input premise not derived from sources, zero-byte READY/YIELDED and held-delimiter routes uncompared; representation design line 56 inherits it. Designs unchanged; no route selected. Review charge 3904 (4096 to 192), integration 461 (503 to 42); consumed 547288/unspent 104136. No grant.
+
 **105-3 index representation/reflection (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REPRESENTATION_REFLECTION_DESIGN.md); conditional vector/key-record/shift/commit design only; no layout/host qualification or B/runtime adoption.
 
 **105-3 index reference target (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REFERENCE_TARGET_DESIGN.md); KeyAnchor binding/birth obligations only; no layout, node pre-reservation or B/runtime adoption.
