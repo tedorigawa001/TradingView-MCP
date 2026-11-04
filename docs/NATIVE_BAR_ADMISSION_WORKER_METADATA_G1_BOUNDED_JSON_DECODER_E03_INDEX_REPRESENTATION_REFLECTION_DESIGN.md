@@ -53,7 +53,7 @@ Cursor cannot reset input/admission/receipt/CP-U credit/q/n/budgets. Known IR6 c
 After IR6, value refusal retains key/index costs without fictitious node/map; after CP-V retain committed witnesses. Sorting changes no result order or next-key grammar permission.
 
 ## Driver, Failure And Release
-BND governs input exhaustion: no Idx in NEED_INPUT or invented bytes/calls; READY/YIELDED needs real admitted unconsumed input. Empty delivery/EOF/finish supplies no hidden mutation work.
+No Idx in NEED_INPUT or invented bytes/calls (I:8, ORD:45). BND's input-exhaustion rows stay a candidate; its real-input premise stays OPEN (BND review; ownership design lines 24-27, S28). Empty delivery/EOF/finish supplies no hidden mutation work.
 Known progress continues only with same owner/legal state. Cancel/refusal freezes grammar/witnesses; same-owner cleanup releases qualified resources only. Owner loss/unknown write/commit/release blocks continuation/next acquisition.
 No rollback/reinsert/repair/new owner/journal/retry/allowance. Unknown resources remain charged until qualified release. Terminal cleanup cannot complete IR6/resume parsing.
 Close retires index with bounded normal work, no unbounded finish sweep/result-key release. Index/scratch/key backing/receiver release, GC and transport settlement differ.
@@ -73,4 +73,4 @@ Separate approval: independent review/result saving, algorithm/representation or
 ## Approved Retention
 Baseline C532233/U102807/unallocated19968; cap655360/guard352. Reserve16384 only from unallocated ->3584: design10240/review4096/integration1024/stop1024; before charges U119191. Old reservations/charges remain; no transfer/refund/spare reuse.
 Create DESIGN and BACKLOG/640K links only. REVIEW/STOP absent; review physical metadata1024/review1 1536/review2 1536 includes headings/links. Stop on section/file shortage; no truncation, borrowing, alternate log or expansion.
-Charge D10109/L581; current C542923/U108501; cap655360/guard352/unallocated3584. Includes this line; no runtime grant.
+Charge D10198/L909; with BND review R3904/L461, current C547705/U103719; cap655360/guard352/unallocated3584. Includes this line; no runtime grant.
