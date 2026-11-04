@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 B colon/input boundary (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COLON_INPUT_BOUNDARY_DESIGN.md); operation/pending-phase candidate only; no new operation, B adoption or runtime grant.
+
 **105-3 index-order review fixes (2026-11-04 JST)**: input-end gate now keyed to pending lookup/Idx work or object-close release, A/C boundaries named; post-colon whitespace placed in PB4; index-reference target/edge timing OPEN; S0/S1 marked labels. Design charge 159 (163 to 4), integration 353 (501 to 148); consumed 510820/unspent 91452. No grant.
 
 **105-3 index-order comparison (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_ORDER_SELECTION_DESIGN.md); B is first detailed-design candidate only; qualification and execution remain blocked.

@@ -44,3 +44,6 @@ Charge D3387/L551; current C463368/U68248; cap655360/guard352/unallocated123392.
 
 ## Index-Order Comparison Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_ORDER_SELECTION_DESIGN.md): approved16384 from unallocated69120 ->52736; design10240/review4096/integration1024/stop1024; old reservations unchanged; docs only.
+
+## B Colon/Input Boundary Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COLON_INPUT_BOUNDARY_DESIGN.md): approved16384 from unallocated52736 ->36352; design10240/review4096/integration1024/stop1024; old reservations unchanged; docs only.
