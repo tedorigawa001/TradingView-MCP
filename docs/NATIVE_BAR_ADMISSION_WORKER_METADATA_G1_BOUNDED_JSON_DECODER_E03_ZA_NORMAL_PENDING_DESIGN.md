@@ -52,12 +52,12 @@ Supplemental obligations only, not current executable permission.
 | ID / condition | Candidate action | Required restriction |
 |---|---|---|
 | ZA0: COPY_PENDING/RELEASE_SOURCE | Continue that operation under OWN | No grammar/Idx before copy/source-release/private-input qualification. |
-| ZA1: PARSE_READY, bytes remain | Bound normal task first where ordering requires; otherwise guarded grammar/tail | No general ban on legal growth, speculative next-byte event or repeated credit. |
-| ZA2: exact end, Z-enabled task | Keep consumed position/input ownership/pending binding; qualified advance | No invented bytes, premature release/NEED_INPUT or new fuel. |
+| ZA1: PARSE_READY, bytes remain | Bound normal task first where ordering requires; otherwise guarded grammar/tail | No general legal-growth ban; no speculative next-byte event or repeated credit. |
+| ZA2: exact end, Z-enabled task | Keep consumed position/input ownership/pending binding; qualified advance | No invented bytes, premature release/NEED_INPUT or extra fuel. |
 | ZA3: last-byte effect exhausts fuel | Preserve known effect/cursor/classification at justified YIELDED | No assumed follow-up completion, replay or inferred release. |
 | ZA4: exact end, known wait/settled context | Qualify owned carry/key/decision and release entry | Unknown is not this row; no forced future-byte completion/fictitious node. |
 | ZA5: RELEASE_INPUT pending | Same-owner normal-budget release/bookkeeping only | No Idx/grammar/repair or unconfirmed exit. |
-| ZA6: released, state commit pending | Finalize only the same release acknowledgement/control operation | No double release, freed-backing reads, normal work or early admission. |
+| ZA6: released, state commit pending | Finalize only the same release acknowledgement/control operation | No double release, freed-backing reads, other normal work or early admission. |
 | ZA7: qualified exit tuple | Known valid incomplete context -> NEED_INPUT; known complete root/all gates -> WAIT_EOF | No unknown-as-incomplete, implied EOF/DONE/root proof/publication. |
 | ZA8: error/failure/cancel/unknown | Original contract-error/refusal/cancel/owner-block distinction | No new parser state/retry/rollback/rebinding/budget/controller. |
 
@@ -72,7 +72,7 @@ Under S45/OWN, preserve needed fragments/keys/decisions/progress in independentl
 Qualify stable backing/aliases and every carry/copy/control cost before release; producer retention elsewhere remains root-accounted after lease release.
 Bind exact-once allocation/generation/release cursor, cleanup liability, control records, normal/step work and same owner. Preparation is not release and cannot reduce live gauges early.
 Yield entry preparation only with known progress/stable data under its qualified phase. Unknown outcomes follow refusal/resource blocks, not guessed promotion.
-After entering RELEASE_INPUT, continuations are release/acknowledgement only. No backtracking into normal work as repair; later input/phase requires legitimate admission.
+After entering RELEASE_INPUT, continuations are release/acknowledgement only. No backtracking into other normal work as repair; later input/phase requires legitimate admission.
 
 ## RELEASE_INPUT Exit And Public Transition
 Confirm the same input's logical release and required decoder input-view obligations. Dropping references/bits proves no GC/erasure/transport settlement.
@@ -95,7 +95,7 @@ Separate producer/result root retention, logical release, GC and transport settl
 ## Boundary Cases To Establish
 | Case | Required handling / evidence |
 |---|---|
-| Last-byte/fuel key quote | Preserve complete-key/CP-U phase; no colon/value before outcome or repeated credit. |
+| Last-byte/fuel key quote | Preserve complete-key/CP-U phase; no colon/value before outcome; no repeated credit. |
 | Last-byte/fuel B colon | Colon remains consumed; no CP-V without actual legal value/all guards. |
 | Partial token | Genuine input dependency, bounded owned carry; no synthetic completion or waiting for nonexistent work. |
 | Empty delivery | Normal receipt/admission/READY; bounded bookkeeping/release/exhaustion, no Idx pulse/direct shortcut. |
@@ -113,12 +113,12 @@ Per case retain source version, operation/pre-state/phase, byte/work cursor, eli
 ## Source-Clause Refinement Map
 | Source boundary | Conditional Z-A refinement / retained restriction |
 |---|---|
-| I7-9 | Keep admission/advance/finish names/state gates; qualify Z phase separately. No admission/finish with pending input/resource work. |
+| I7-9 | Keep admission/advance/finish names/state gates; qualify Z phase separately. No admission/finish with pending input or copy/release phase. |
 | I15-19 | For Z distinguish byte end, normal completion and release before exhaustion commit; immediate tail/terminal rules remain. |
 | OWN20-28 | Auxiliary evidence inside qualified PARSE_READY, not authority derived from zero-byte release. RELEASE_INPUT remains release-only. |
 | S6-12/24-29/42-45 | Original owner/budgets, normal-versus-cleanup separation; Z-B close and one-step finish gates stay open. |
 | G events/close/root/EOF; CONS | Keep guards/counts/known effects. State bookkeeping proves no close semantics or sufficient value admission. |
-| BND CB0/3/6/7/11; BR | Future no-byte phase/EOF-error/live-release post-state correction needs explicit scope; no blanket real-input rule/replacement now. |
+| BND CB0/3/6/7/11; BND56/ORD14; BR | Future no-byte phase/EOF-refusal/live-release post-state correction and "inputless" meaning need explicit scope; no blanket real-input rule/replacement now. |
 
 Future adoption must name superseded sentences, dependencies and approval. All source bodies stay unchanged here.
 W(key-close/post-colon)+H(close) remains uncompared. Z-A proves no composite failure and forces no other route's work before release; no automatic hybrid/fallback or B-order change.
@@ -135,4 +135,4 @@ Separate approval: independent review/result saving, route/strategy/B/source ado
 Baseline C576697/U119783/unallocated89600; cap786432/guard352. Reserve24576 only from unallocated ->65024: design16384/review6144/integration1024/stop1024; before charges U144359.
 Keep old reservations/charges, ROUTE's266/280 fix and design17/integration135. No transfer/refund/spare reuse.
 Create DESIGN and BACKLOG/current768K-ledger links only; positive parent growth charges this integration1024. REVIEW/STOP absent; physical review metadata1024/review1 2560/review2 2560 includes headings/links. Shortage stops; no truncation, borrowing, alternate log or expansion.
-Charge D16067/L621; current C593385/U127671; cap786432/guard352/unallocated65024. Includes this line; no runtime grant.
+Charge D16128/L883; current C593708/U127348; cap786432/guard352/unallocated65024. Includes this line; no runtime grant.
