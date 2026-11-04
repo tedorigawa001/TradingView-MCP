@@ -50,3 +50,6 @@ Charge D3387/L551; current C463368/U68248; cap655360/guard352/unallocated123392.
 
 ## Index Reference Target Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REFERENCE_TARGET_DESIGN.md): approved16384 from unallocated36352 ->19968; design10240/review4096/integration1024/stop1024; old reservations unchanged; docs only.
+
+## Index Representation/Reflection Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INDEX_REPRESENTATION_REFLECTION_DESIGN.md): approved16384 from unallocated19968 ->3584; design10240/review4096/integration1024/stop1024; old reservations unchanged; docs only.
