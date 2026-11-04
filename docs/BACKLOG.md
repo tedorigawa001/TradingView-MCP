@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Z-A normal-pending/exhaustion contract (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZA_NORMAL_PENDING_DESIGN.md); conditional Z-only PARSE_READY auxiliary/release-entry-exit contract; no route/source-clause adoption or runtime grant; W+H comparison stays open.
+
 **105-3 input route comparison fix (2026-11-04 JST)**: Route-Z ranked by single-route scope only; wait-plus-held-delimiter composite recorded as uncompared; no route selected. Design charge 266 (283 to 17), integration 280 (415 to 135); consumed 576697/unspent 119783. No grant.
 
 **105-3 input-exhaustion driver route comparison (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INPUT_EXHAUSTION_ROUTE_DESIGN.md); Z/H/W/F comparison and selection gates only; Z first qualification target, not route/phase/B adoption or runtime grant.

@@ -39,3 +39,6 @@ Charge D3928/L868; current C552501/U107115; cap786432/guard352/unallocated126464
 
 ## Input-Exhaustion Driver Route Comparison Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_INPUT_EXHAUSTION_ROUTE_DESIGN.md): approved20480 from unallocated110080 ->89600; design12288/review6144/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
+
+## Z-A Normal-Pending/Exhaustion Contract Reservation
+[plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZA_NORMAL_PENDING_DESIGN.md): approved24576 from unallocated89600 ->65024; design16384/review6144/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
