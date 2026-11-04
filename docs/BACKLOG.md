@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 uniqueness/index prerequisites (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_UNIQUENESS_INDEX_PREREQUISITE_DESIGN.md); binding/lifetime/dependency contracts only; no insertion algorithm or runtime grant.
+
 **105-3 key/value state review fixes (2026-11-04 JST)**: review caps renamed review1/review2 so role R1/R2 stay unique; first-create wording; mapping review entry dated. Design charge 16 (116 to 100), integration 290 (501 to 211); consumed 491129/unspent 80423. No grant.
 
 **105-3 key/uniqueness/value states (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_KEY_VALUE_STATE_DESIGN.md); role transitions/commit points only; index dependencies and proof/runtime gates stay OPEN.
