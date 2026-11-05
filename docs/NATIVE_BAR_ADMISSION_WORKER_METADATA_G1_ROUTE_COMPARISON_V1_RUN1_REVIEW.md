@@ -31,7 +31,7 @@ permission. Parent's pending reservation integration was not treated as borrowin
 
 ## Disposition
 Static preparation review complete; no model behavior or run output verified.
-User explicitly approved all8 premises=true as MODEL ASSUMPTIONS in this chat.
+User explicitly approved all8 premises=true as MODEL ASSUMPTIONS on 2026-11-05.
 Parent read/hashed all8 design files and matched model blob/worktree/review hash.
 One source/template/input set reconstructs Hp; no duplicate payload file retained.
 PREPARE is NOT_EXECUTED; own preparation/review digests stay outside themselves.

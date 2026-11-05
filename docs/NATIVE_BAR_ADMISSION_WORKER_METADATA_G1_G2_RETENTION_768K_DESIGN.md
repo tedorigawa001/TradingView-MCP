@@ -54,4 +54,4 @@ Charge M20387/R4735/L1663/T0; current C624198/U135770; unallocated26112. Result4
 
 ## Route Comparison RUN1 Preparation Reservation
 Approved12288 from unallocated26112 ->13824: wrapper1024/input2048/prepare3072/review4096/integration1024/stop1024. Baseline C624198/U135770; before charges U148058. [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN1_REVIEW.md). Prior reservations/charges, cap786432/guard352 and result4096 unchanged; no transfer/refund. Artifacts only; model runs0; no data/MCP/activation or Dot/judgment/notification/mail change.
-Charge W309/I949/P3001/R2476/L865/S0; current C631798/U140458; unallocated13824. Model unchanged; result4096/RUN1 stop1024 unused.
+Charge W309/I949/P3001/R2477/L865/S0; current C631799/U140457; unallocated13824. Model unchanged; result4096/RUN1 stop1024 unused.
