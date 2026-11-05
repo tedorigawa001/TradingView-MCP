@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 C4/C5 timing decision (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_C4_C5_TIMING_TRACE_DESIGN.md); policy B, next nonempty admission; EOF, limit, copy and cancel reasons accepted; no route; no premise closed.
+
 **105-3 route premise proof (2026-11-05 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ROUTE_PREMISE_PROOF_DESIGN.md); documentary; premises and C4/C5 timing OPEN; no route.
 
 **105-3 retention reallocation (2026-11-05 JST)**: [ledger](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_768K_DESIGN.md#unused-reservation-reallocation); unused review+stop34816 moved; unallocated ->37376; RUN2 C18 reason difference accepted; no route; no premise closed.

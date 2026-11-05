@@ -79,3 +79,8 @@ Charge L1024; current C646297/U102407/F37376.
 ## Route Premise Proof Reservation
 Approved24576 from F37376 ->12800: design16384/review6144/integration1024/stop1024. Four premises and C4/C5 timing documentary analysis; no route selection or execution. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ROUTE_PREMISE_PROOF_DESIGN.md). Existing stops/no-retry, allocations, cap786432/guard352 preserved.
 Charge D16381/L684; current C663362/U109918/F12800. Review/STOP absent; premises/timing OPEN.
+
+## C4/C5 Timing Trace Reservation
+Approved7680 from F12800 ->5120: design6656/integration1024; review/STOP not reserved; before charges U117598. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_C4_C5_TIMING_TRACE_DESIGN.md). Existing stops/no-retry, allocations, cap786432/guard352 preserved.
+User decision 2026-11-06: C4/C5 policy B; T4-T6 reasons accepted, suitability open. Prospective criterion; no route selected or premise closed.
+Charge D6652/L779; current C670793/U110167/F5120.
