@@ -1,0 +1,26 @@
+{
+  "head": "72098351797e33f04d8a30959653475e968f9f3d",
+  "pins": [
+    "ad1db1b5397e40b6f312d3205d6b408c1322784598667ed478f6ec318465a804",
+    "c5c4acca325d362072c9b7ed3a3b115a4f60ec419a0a1b8c8201ce344cbc2b8b",
+    "c4b29d6c8d1b6ca48cc673df461d7c2a37fbfa1df6506621cf00da53fcf715ff",
+    "5932f463539f906def32b57927980ecfbfdcb7eaacb9e6d102b2f26141df7601",
+    "c86285c490cb039907f182ea6c0b734b87664bbdfb94b0b9885a86fd0293f90a",
+    "7613f70b51e0cbd0ea43cbec7357601c3f35159993b34eae0ae3570b249e70cb",
+    "1ab693e4d1cd6fd08286279bbe5e498fb2238b574522a08a03e9a278f5889932",
+    "e5de4167c2a8fbef79175cf230d63b5a3a30b85093d3468c1836a35b0daae9c5"
+  ],
+  "sourceHash": "ec0527a2466ba71a6bca97d75d6a7374f045c5bef90dbe4e8ad35f7aa5cfee2b",
+  "invocationHash": "fb29e4556c846498511561e86152abfca11107e7c203879b1c23efd002200483",
+  "readbackVerified": true,
+  "premises": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ]
+}

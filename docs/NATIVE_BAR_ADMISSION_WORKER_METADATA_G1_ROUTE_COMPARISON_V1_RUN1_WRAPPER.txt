@@ -1,0 +1,8 @@
+// RUN1 template; no invocation until separate exact-payload approval.
+// Replace each slot once with retained UTF-8 bytes, without trimming.
+@@MODEL_SOURCE@@
+const receipt = @@RECEIPT_JSON@@;
+Object.freeze(receipt.pins);
+Object.freeze(receipt.premises);
+Object.freeze(receipt);
+text(compareRoutes(receipt));
