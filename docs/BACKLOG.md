@@ -4,6 +4,10 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Z/WH RUN2 result (2026-11-05 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN2_REPORT.md); no violation; assumed premises; no route.
+
+**105-3 Z/WH RUN2 preparation (2026-11-05 JST)**: [prepare](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN2_PREPARE.md); file-reading runner replaces retyped submission; approved6144, unallocated9728 ->3584; attempts0; execution unapproved.
+
 **105-3 Z/WH RUN1 preparation (2026-11-05 JST)**: [prepare](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN1_PREPARE.md); approved12288, unallocated26112 ->13824. Artifacts/static review only; model runs0; execution unapproved.
 
 **105-3 Z/WH model fix (2026-11-05 JST)**: report schema adds refusal reason/delivery differences, exhausted-input work and pending waits; duplicate key at EOF replaces an exact copy; same 1156 runs. Charges: source 752 (845 to 93), review 1183 (2592 to 1409), integration 386 (771 to 385); consumed 624198/unspent 135770. Static-only; model runs0; no route/runtime grant.

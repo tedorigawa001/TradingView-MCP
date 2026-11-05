@@ -55,3 +55,17 @@ Charge M20387/R4735/L1663/T0; current C624198/U135770; unallocated26112. Result4
 ## Route Comparison RUN1 Preparation Reservation
 Approved12288 from unallocated26112 ->13824: wrapper1024/input2048/prepare3072/review4096/integration1024/stop1024. Baseline C624198/U135770; before charges U148058. [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN1_REVIEW.md). Prior reservations/charges, cap786432/guard352 and result4096 unchanged; no transfer/refund. Artifacts only; model runs0; no data/MCP/activation or Dot/judgment/notification/mail change.
 Charge W309/I949/P3001/R2477/L865/S0; current C631799/U140457; unallocated13824. Model unchanged; result4096/RUN1 stop1024 unused.
+
+RUN1 REPORT=0/4096 STOP=851/1024 L=95 C=632745 U=139511 F=13824 status=NOT_EXECUTED no-retry.
+
+## RUN1_RESUME01 Preparation Reservation
+Approved4096 from F13824 ->9728: PREPARE2048/STOP1024/ledger-growth1024. Existing REPORT4096 applies to RUN1_RESUME01 (wire3648+frame448), no duplicate reservation. Old STOP851 and NOT_EXECUTED/no-retry history, all other reservations, cap786432 and guard352 preserved. Preparation/ledger saving only; model submissions0; new STOP/REPORT absent.
+Charge P1820/L519; current C635084/U141268/F9728; PREPARE SHA256 c4a3416da45b71a9b15fd9719f61e91b7a8f00f422edc42b22da8fb311dd68b5.
+
+RUN1_RESUME01 INVALID_SUBMISSION submissions1 runs0 eval0 stop=SOURCE_BINDING no-retry. Agent receipt-pin transcription/format mismatch; approved payload not fulfilled. REPORT=2531/4096 STOP=925/1024 L=300; C=638840 U=137512 F=9728 cap786432 guard352. Observed output only; original STOP unchanged.
+
+## Route Comparison RUN2 Preparation Reservation
+Approved6144 from F9728 ->3584: runner1152/prepare1536/report topup2048 (REPORT left 1565 ->3613)/integration896/stop512. Preparation only; RUN2 attempts0; execution needs exact-hash approval. No other transfer/refund; cap786432/guard352 and other reservations unchanged.
+Charge N1152/P1525/L640/S0; current C642157/U140339/F3584.
+
+RUN2 RECORD_VALID stop=NONE. REPORT=2867 L=249; C=645273 U=137223 F=3584.
