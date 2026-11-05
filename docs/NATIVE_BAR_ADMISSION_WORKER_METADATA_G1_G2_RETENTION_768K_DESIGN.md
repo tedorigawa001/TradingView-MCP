@@ -84,3 +84,4 @@ Charge D16381/L684; current C663362/U109918/F12800. Review/STOP absent; premises
 Approved7680 from F12800 ->5120: design6656/integration1024; review/STOP not reserved; before charges U117598. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_C4_C5_TIMING_TRACE_DESIGN.md). Existing stops/no-retry, allocations, cap786432/guard352 preserved.
 User decision 2026-11-06: C4/C5 policy B; T4-T6 reasons accepted, suitability open. Prospective criterion; no route selected or premise closed.
 Charge D6652/L779; current C670793/U110167/F5120.
+2026-11-06 T6 cancel split/copy reads fix: D+3/L+96; C670892/U110068/F5120; decision unchanged.
