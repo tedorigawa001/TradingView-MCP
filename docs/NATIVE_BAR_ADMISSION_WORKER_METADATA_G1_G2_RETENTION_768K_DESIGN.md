@@ -85,3 +85,10 @@ Approved7680 from F12800 ->5120: design6656/integration1024; review/STOP not res
 User decision 2026-11-06: C4/C5 policy B; T4-T6 reasons accepted, suitability open. Prospective criterion; no route selected or premise closed.
 Charge D6652/L779; current C670793/U110167/F5120.
 2026-11-06 T6 cancel split/copy reads fix: D+3/L+96; C670892/U110068/F5120; decision unchanged.
+
+## Second Unused Reservation Reallocation
+Approved24064, F5120 ->29184 from wholly unspent review18432 (768K2048, WRITE_CURSOR4096, INPUT_ROUTE/ZA 6144 each) and stop5632 (those four 1024 each, V1 corrective1024, RUN2 512). Later REVIEW (four)/STOP (six) need new allocation. Prospective exception to line23 again; history unrewritten. Measured before move: U110068 = before 640K 63994 + 640K era 4909 + 768K era 33504 + newest stages 7661. Others, cap786432/guard352 unchanged.
+
+## Zexit Proof Reservation
+Approved13824 from F29184 ->15360: design12288/integration1536; review/STOP not reserved; before charges U99828. Integration also records the reallocation above. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZEXIT_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; Zexit and all premises OPEN.
+Charge D12203/L1158; current C684253/U86467/F15360.
