@@ -69,3 +69,9 @@ Approved6144 from F9728 ->3584: runner1152/prepare1536/report topup2048 (REPORT 
 Charge N1152/P1525/L640/S0; current C642157/U140339/F3584.
 
 RUN2 RECORD_VALID stop=NONE. REPORT=2867 L=249; C=645273 U=137223 F=3584.
+
+## Unused Reservation Reallocation
+Approved34816, F3584 ->38400 from wholly unspent review25600 (640K2048, A1_A3 3072, KEY_VALUE/UNIQUENESS/INDEX_ORDER/REF_TARGET/REPRESENTATION 4096 each) and stop9216 (those seven, EVENT_GUARD, COLON, 1024 each). Later REVIEW (seven)/STOP (nine) need new allocation. Prospective exception to line23 here; history unrewritten.
+Record integration1024 from moved F ->37376; before charges U103431. EVENT_GUARD/COLON review1097/192, others, cap786432/guard352 unchanged; next stage unapproved.
+User decision 2026-11-05: RUN2 C18's refusal reason (Z duplicate, WH EOF) is acceptable. Reason only; C4/C5 delivery delay undecided; no route selected or premise closed.
+Charge L1024; current C646297/U102407/F37376.

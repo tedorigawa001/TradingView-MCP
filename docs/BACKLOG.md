@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 retention reallocation (2026-11-05 JST)**: [ledger](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_768K_DESIGN.md#unused-reservation-reallocation); unused review+stop34816 moved; unallocated ->37376; RUN2 C18 reason difference accepted; no route; no premise closed.
+
 **105-3 Z/WH RUN2 result (2026-11-05 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN2_REPORT.md); no violation; assumed premises; no route.
 
 **105-3 Z/WH RUN2 preparation (2026-11-05 JST)**: [prepare](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_RUN2_PREPARE.md); file-reading runner replaces retyped submission; approved6144, unallocated9728 ->3584; attempts0; execution unapproved.
