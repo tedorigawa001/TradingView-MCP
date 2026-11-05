@@ -75,3 +75,7 @@ Approved34816, F3584 ->38400 from wholly unspent review25600 (640K2048, A1_A3 30
 Record integration1024 from moved F ->37376; before charges U103431. EVENT_GUARD/COLON review1097/192, others, cap786432/guard352 unchanged; next stage unapproved.
 User decision 2026-11-05: RUN2 C18's refusal reason (Z duplicate, WH EOF) is acceptable. Reason only; C4/C5 delivery delay undecided; no route selected or premise closed.
 Charge L1024; current C646297/U102407/F37376.
+
+## Route Premise Proof Reservation
+Approved24576 from F37376 ->12800: design16384/review6144/integration1024/stop1024. Four premises and C4/C5 timing documentary analysis; no route selection or execution. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ROUTE_PREMISE_PROOF_DESIGN.md). Existing stops/no-retry, allocations, cap786432/guard352 preserved.
+Charge D16381/L684; current C663362/U109918/F12800. Review/STOP absent; premises/timing OPEN.
