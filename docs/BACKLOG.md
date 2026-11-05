@@ -4,6 +4,10 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Z/WH corrective model preparation (2026-11-05 JST)**: approved21504 more; unallocated47616 ->26112. Source cap20480; new review6144/integration2048/stop1024; old records/result4096 kept. [model](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1.mjs), [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_FIX_REVIEW.md). Static-only; model runs0; no route/runtime grant.
+
+**105-3 Z/WH model preparation (2026-11-05 JST)**: reserved17408 from unallocated65024 ->47616; source8192/result4096/review3072/integration1024/stop1024. Draft oversized; source/result absent; runs0. [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_REVIEW.md), [stop](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_STOP.md). No route/runtime grant.
+
 **105-3 Z-A design wording fix (2026-11-05 JST)**: source map now names the "inputless" bans that may catch zero-byte advance; restriction wording clarified. Design charge 61 (317 to 256), integration 262 (403 to 141); consumed 593708/unspent 127348. No grant.
 
 **105-3 Z-A normal-pending/exhaustion contract (2026-11-04 JST)**: [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZA_NORMAL_PENDING_DESIGN.md); conditional Z-only PARSE_READY auxiliary/release-entry-exit contract; no route/source-clause adoption or runtime grant; W+H comparison stays open.

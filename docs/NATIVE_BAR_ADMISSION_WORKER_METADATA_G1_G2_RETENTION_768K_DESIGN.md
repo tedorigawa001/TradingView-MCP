@@ -42,3 +42,12 @@ Charge D3928/L868; current C552501/U107115; cap786432/guard352/unallocated126464
 
 ## Z-A Normal-Pending/Exhaustion Contract Reservation
 [plan](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZA_NORMAL_PENDING_DESIGN.md): approved24576 from unallocated89600 ->65024; design16384/review6144/integration1024/stop1024; old reservations/guard/history unchanged; docs only.
+
+## Route Comparison V1 Reservation
+Approved17408: source8192/result4096/review3072/integration1024/stop1024; unallocated65024 ->47616. [stop](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_STOP.md) records preparation blocked; source/result unused. Old reservations, cap786432, guard352 and conditions unchanged.
+Charge M0/R2028/L821/T856; current C597413/U141051; unallocated47616. Model8192/result4096 unused; no refund.
+
+## Route Comparison V1 Corrective Preparation Reservation
+Approved21504 from unallocated47616 ->26112: source topup12288 (8192 ->20480), new review6144/integration2048/stop1024. Baseline C597413/U141051; before charges U162555. Preserve old review/stop and their unspent1415, result4096, all unrelated reservations, cap786432/guard352/history; no refund or transfer.
+[model](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1.mjs), [new review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_FIX_REVIEW.md). Fresh review sections: metadata1024/review1 2048/review2 2048/disposition1024. New STOP/RESULT absent; execution/result recording separately gated. No execution/data/MCP/activation or Dot/condition change.
+Charge M19635/R3552/L1277/T0; current C621877/U138091; unallocated26112. Result4096/new stop1024 unused; old charges/spares unchanged.
