@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Z/WH model fix (2026-11-05 JST)**: report schema adds refusal reason/delivery differences, exhausted-input work and pending waits; duplicate key at EOF replaces an exact copy; same 1156 runs. Charges: source 752 (845 to 93), review 1183 (2592 to 1409), integration 386 (771 to 385); consumed 624198/unspent 135770. Static-only; model runs0; no route/runtime grant.
+
 **105-3 Z/WH corrective model preparation (2026-11-05 JST)**: approved21504 more; unallocated47616 ->26112. Source cap20480; new review6144/integration2048/stop1024; old records/result4096 kept. [model](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1.mjs), [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_FIX_REVIEW.md). Static-only; model runs0; no route/runtime grant.
 
 **105-3 Z/WH model preparation (2026-11-05 JST)**: reserved17408 from unallocated65024 ->47616; source8192/result4096/review3072/integration1024/stop1024. Draft oversized; source/result absent; runs0. [review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_REVIEW.md), [stop](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_STOP.md). No route/runtime grant.

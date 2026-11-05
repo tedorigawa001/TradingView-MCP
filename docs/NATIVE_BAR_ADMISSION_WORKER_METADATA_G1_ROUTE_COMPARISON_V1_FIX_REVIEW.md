@@ -7,6 +7,7 @@ New review cap6144: metadata1024/review1 2048/review2 2048/disposition1024.
 Old REVIEW/STOP preserved. RESULT/new STOP absent; no execution/adoption grant.
 24 cases x4 deliveries x3 fuel x2 widths x2 routes plus4 controls; no added runs.
 Dot PAUSED; judgment/notification/mail unchanged.
+Source fix, user approved 2026-11-05: model now 20387 ASCII bytes, SHA-256 ec0527a2466ba71a6bca97d75d6a7374f045c5bef90dbe4e8ad35f7aa5cfee2b; line 5 and the first reviews below end at 19635 bytes/1bbca98e. Same1156 runs; model runs0.
 
 ## Review 1: Planck
 Independent text review; no execution or edits.
@@ -27,6 +28,11 @@ receive PASS_CONDITIONAL. Missing probe now returns NOT_COMPARABLE with its
 known checkpoint retained. Final static confirmation: missing READY hit or YIELDED probe remains
 NOT_COMPARABLE; pair matching cannot promote it to PASS_CONDITIONAL.
 No remaining blocker found in reviewed scope; not executed.
+Source-fix hand trace, separate reviewer, reading only: no P1/P2; three comment/label P3s adopted.
+Derived clean-run lines: C4 D=0,18; C18 D=24,0; maxZ=103,25,15,10,13,25,0; maxWH=103,25,15,10,13,0,5.
+On a clean run Z/WH columns stay equal on every case row. D and the last two maxima follow from route definitions and fixtures:
+they attribute reason/timing and are no selection evidence. D counts passing pairs only: C19/C22 D=0,0
+exclude NOT_COMPARABLE pairs, C9/C10 D=0,0 hide work WH abandons at EOF. Admission refusal is not modeled.
 
 ## Review 2: Aquinas
 Independent text review; no execution or edits.
@@ -41,6 +47,9 @@ or external mutation.
 External trusted readback and exact-source/invocation approval are separate,
 unverified gates. Final confirmation: the missing-probe return preserves hit/tail and records
 verdict4 without absent metrics. No new accounting/bounds issue; not executed.
+Source-fix mechanical check, separate reviewer, text only, not executed: scope, cap, hygiene, forbidden
+constructs, 24 cases with finish at index19, run literals, eight pins, untested list and worst-case
+envelope passed (header1274, row53, total3005, within3648).
 
 ## Disposition
 Prior REVIEW A1-A4: exhaustion states preserved; failed-control code/verdict
@@ -55,3 +64,4 @@ stop192 + diagnostic256), versus result4096. Probes/caps are logical bounds,
 not host heap/time/GC guarantees. No model behavior was tested; no winner or
 runtime qualification. Final source/receipt/wrapper must be frozen/read back
 and separately approved for any execution.
+Source fix: C18 duplicate-at-EOF; D columns; exhaustedWork/pendingWaits; premise names; untested detectors named. No winner; execution unapproved.

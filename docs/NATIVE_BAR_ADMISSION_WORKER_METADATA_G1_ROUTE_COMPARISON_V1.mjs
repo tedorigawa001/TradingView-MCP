@@ -48,12 +48,15 @@ function compareRoutes(receipt) {
     [one,"DONE"],[["{",K(2),":"," ","v","}"],"DONE"],
     [nested,"DONE"],[["{","}"],"DONE"],
     [[...one," "],"DONE"],[[...one,"!"],"REFUSED"],
-    [one,"DONE"],[one,"DONE",0,"finish"],
+    [["{",K(2),":","v",",",K(2)],"REFUSED"],[one,"DONE",0,"finish"],
     [one,"CANCELLED",0,"cancel"],[one,"BLOCKED",0,"owner"],
     [one,"BLOCKED",0,"write"],[one,"BLOCKED",0,"release"]];
   // BLOCKED is an outcome label only; unknown effects leave REFUSED/liabilities.
   const coverage=Array.from({length:24},()=>[Array(6).fill(0),Array(6).fill(0)]);
-  const maxima=[Array(5).fill(0),Array(5).fill(0)];
+  const maxima=[Array(7).fill(0),Array(7).fill(0)];
+  // Passing pairs whose refusal reason/delivery differ. why: 1 duplicate, 2 EOF,
+  // 3 other. Admission refusal (INPUT_STATE line 27) is not modeled.
+  const whyDiff=Array(24).fill(0),atDiff=Array(24).fill(0);
   const layouts=Array.from({length:24},()=>[]);
   const controlResults=Array(4).fill(0); // 0 not run, 1 detected, 2 failed.
   const controlVerdicts=Array(4).fill(6); // 6 not run; otherwise verdict index.
@@ -86,7 +89,7 @@ function compareRoutes(receipt) {
     let ticks=0,pos=0,end=0,start=0,owned=0,phase=0,state="NEED_INPUT";
     let delivery=0,left=0,q=0,n=0,root=false,eof=false,task=null,stack=[];
     let blocked=false,hit=null,calls=0,zero=0,input=0,live=0,handoffs=0;
-    let bytes=[],cuts=[],tail=[];
+    let bytes=[],cuts=[],tail=[],why=3,dry=0,waits=0;
     let observedQ=0,observedN=0,observed=[],closedRoot=false,seenRoot=false;
     let effect=null,closing=null,finishReady=false,finishYield=false,yieldPoint=null;
     const charge=()=>{
@@ -115,7 +118,7 @@ function compareRoutes(receipt) {
       if(!["NEED_INPUT","WAIT_EOF"].includes(state)) return false;
       eof=true;
       state=root&&!task&&!owned&&!stack.length?"DONE":"REFUSED";
-      if(state==="DONE") handoffs++;
+      if(state==="DONE") handoffs++;else why=2;
       return true;
     }
     function work() {
@@ -129,7 +132,7 @@ function compareRoutes(receipt) {
       if(a.kind==="lookup") {
         const duplicate=a.o.index.includes(a.id);
         effect=[duplicate?"duplicate":"unique",a.id];
-        if(duplicate) refuse();
+        if(duplicate) {why=1;refuse();}
         else {a.o.key=a.id;a.o.expect="colon";}
       } else if(a.kind==="insert") {
         a.o.index.splice(a.rank,0,a.o.key);
@@ -299,6 +302,7 @@ function compareRoutes(receipt) {
           if(f[3]==="cancel") state="CANCELLED";
           else {blocked=true;owned=2;refuse();}
         } else if(["NEED_INPUT","WAIT_EOF"].includes(state)) {
+          if(task) waits++;
           if(delivery===ends.length) finish();
           else {
             if(owned) fail("V_ADMISSION");
@@ -312,6 +316,7 @@ function compareRoutes(receipt) {
           }
           normal=step();left--;
           if(normal&&pos===old.pos) zero++;
+          if(normal&&old.pos===end) dry++;
           // Do not overwrite exhaustion/resource-boundary states with YIELDED.
           if(state==="READY"&&!blocked&&!left) state="YIELDED";
         }
@@ -326,8 +331,8 @@ function compareRoutes(receipt) {
       if(f[3]&&(!hit||(f[3]==="finish"&&!finishYield)))
         return {v:4,code:"NONE",tail,hit};
       if((blocked?"BLOCKED":state)!==f[1]) fail("V_ORACLE");
-      return {v:0,code:"NONE",tail,hit,metrics:[calls,zero,input,live,pos],
-        layout:ends.join(",")};
+      return {v:0,code:"NONE",tail,hit,metrics:[calls,zero,input,live,pos,dry,waits],
+        layout:ends.join(","),why,at:delivery};
     } catch(e) {
       const code=safeCode(e);
       return {v:classify(code),code,tail,hit};
@@ -385,6 +390,10 @@ function compareRoutes(receipt) {
         if(![0,4].includes(b.v)) {stopRun(b);break batch;}
         if(c>=19&&!equivalent(a.hit,b.hit))
           for(const r of pair) if(r.v===0) r.v=4;
+        if(a.v===0&&b.v===0) {
+          if(a.why!==b.why) whyDiff[c]++;
+          if(a.at!==b.at) atDiff[c]++;
+        }
         for(const r of pair) commit(r);
       }
   } catch(e) {
@@ -407,15 +416,18 @@ function compareRoutes(receipt) {
     "V1 qualification=NONE; all runtime gates OPEN; no route selected",
     "head="+head,"source="+source,"invocation="+invocation,
     "pins="+pins.map(p=>p[2]).join(","),
-    "premises="+vector(premises,2),
+    "premises="+assumptions.join(",")+"="+vector(premises,2),
     "runs="+number(started,1156)+" eval="+number(total,2367488)+
       " notRun="+number(1156-started,1156),
-    "controls="+vector(controlResults,2)+" observed="+vector(controlVerdicts,6),
-    "columns="+verdicts.join(","),
-    "maxColumns=calls,zeroWork,retainedInput,liveIDs,refusalOrEndPosition"];
+    "controls="+vector(controlResults,2)+" observed="+vector(controlVerdicts,6)+
+      " route=WH untested=V_LOOKUP,V_COLON,V_VALUE,V_POP,V_HANDOFF,V_ORACLE,V_ADMISSION,V_FINISH",
+    "columns="+verdicts.join(",")+" D=whyDiff,deliveryDiff",
+    "maxColumns=calls,zeroWork,retainedInput,liveIDs,refusalOrEndPosition,"+
+      "exhaustedWork(Z),pendingWaits(WH)"];
   for(let c=0;c<24;c++)
     lines.push("C"+c+" Z="+vector(coverage[c][0],24)+
-      " WH="+vector(coverage[c][1],24));
+      " WH="+vector(coverage[c][1],24)+
+      " D="+number(whyDiff[c],24)+","+number(atDiff[c],24));
   lines.push("maxZ="+vector(maxima[0],2048),"maxWH="+vector(maxima[1],2048),
     "uniqueLayouts="+vector(layouts.map(a=>a.length),4));
   const rowBounds=diagnostic.every(row=>row.length===4&&

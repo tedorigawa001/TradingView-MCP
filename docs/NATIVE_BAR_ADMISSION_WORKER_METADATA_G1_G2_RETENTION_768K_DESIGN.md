@@ -48,6 +48,6 @@ Approved17408: source8192/result4096/review3072/integration1024/stop1024; unallo
 Charge M0/R2028/L821/T856; current C597413/U141051; unallocated47616. Model8192/result4096 unused; no refund.
 
 ## Route Comparison V1 Corrective Preparation Reservation
-Approved21504 from unallocated47616 ->26112: source topup12288 (8192 ->20480), new review6144/integration2048/stop1024. Baseline C597413/U141051; before charges U162555. Preserve old review/stop and their unspent1415, result4096, all unrelated reservations, cap786432/guard352/history; no refund or transfer.
+Approved21504 from unallocated47616 ->26112: source topup12288 (8192 ->20480), new review6144/integration2048/stop1024. Baseline C597413/U141051; before charges U162555. Preserve old review/stop/integration and their unspent1415, result4096, all unrelated reservations, cap786432/guard352/history; no refund or transfer.
 [model](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1.mjs), [new review](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_ROUTE_COMPARISON_V1_FIX_REVIEW.md). Fresh review sections: metadata1024/review1 2048/review2 2048/disposition1024. New STOP/RESULT absent; execution/result recording separately gated. No execution/data/MCP/activation or Dot/condition change.
-Charge M19635/R3552/L1277/T0; current C621877/U138091; unallocated26112. Result4096/new stop1024 unused; old charges/spares unchanged.
+Charge M20387/R4735/L1663/T0; current C624198/U135770; unallocated26112. Result4096/new stop1024 unused; old charges/spares unchanged.
