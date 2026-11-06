@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Zphase proof (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZPHASE_PROOF_DESIGN.md); clause correspondence, exact-end traces and termination obligations; no route; Zphase OPEN.
+
 **105-3 Zexit proof (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZEXIT_PROOF_DESIGN.md); shared release and waiting-state exit table; unused review+stop24064 moved; unallocated ->15360; no route; Zexit OPEN.
 
 **105-3 C4/C5 timing decision (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_C4_C5_TIMING_TRACE_DESIGN.md); policy B, next nonempty admission; EOF, limit, copy and cancel reasons accepted; no route; no premise closed.

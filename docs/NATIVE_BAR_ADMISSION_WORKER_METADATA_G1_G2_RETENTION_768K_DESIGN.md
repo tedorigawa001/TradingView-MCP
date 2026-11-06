@@ -92,3 +92,7 @@ Approved24064, F5120 ->29184 from wholly unspent review18432 (768K2048, WRITE_CU
 ## Zexit Proof Reservation
 Approved13824 from F29184 ->15360: design12288/integration1536; review/STOP not reserved; before charges U99828. Integration also records the reallocation above. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZEXIT_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; Zexit and all premises OPEN.
 Charge D12203/L1158; current C684253/U86467/F15360.
+
+## Zphase Proof Reservation
+Approved13312 from F15360 ->2048: design12288/integration1024; review/STOP not reserved; before charges U99779. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZPHASE_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; Zphase and all premises OPEN.
+Charge D12257/L604; current C697114/U86918/F2048.
