@@ -96,3 +96,10 @@ Charge D12203/L1158; current C684253/U86467/F15360.
 ## Zphase Proof Reservation
 Approved13312 from F15360 ->2048: design12288/integration1024; review/STOP not reserved; before charges U99779. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZPHASE_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; Zphase and all premises OPEN.
 Charge D12257/L604; current C697114/U86918/F2048.
+
+## Third Unused Reservation Reallocation
+Approved20992, F2048 ->23040 from wholly unspent review13312 (PREMISE6144, PARAMETER_EVIDENCE5120, PRESERVATION2048) and stop7680 (PREMISE, COUNTER, OWNERSHIP, CAPACITY_WORK, RECONCILIATION, PARAMETER_EVIDENCE, E03_PROOF 1024 each, PRESERVATION512). Later REVIEW (three)/STOP (eight) need new allocation. Prospective exception to line23, 640K line21; history unrewritten.
+
+## Composite Route Reservation
+Approved9216 from F23040 ->13824: design8192/integration1024; review/STOP not reserved; before charges U75142. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_ROUTE_DESIGN.md). User decision 2026-11-06: composite direction: Z key/object close, W post-colon; nothing adopted, premises OPEN.
+Charge D8162/L1022; current C706298/U65958/F13824.

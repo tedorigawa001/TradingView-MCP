@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Composite route (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_ROUTE_DESIGN.md); user direction, nothing adopted; unused20992 moved.
+
 **105-3 Zphase proof (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZPHASE_PROOF_DESIGN.md); clause correspondence, exact-end traces and termination obligations; no route; Zphase OPEN.
 
 **105-3 Zexit proof (2026-11-06 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ZEXIT_PROOF_DESIGN.md); shared release and waiting-state exit table; unused review+stop24064 moved; unallocated ->15360; no route; Zexit OPEN.
