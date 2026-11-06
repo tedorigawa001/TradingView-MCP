@@ -31,7 +31,7 @@ Conditional; BND stays a candidate (BND7). WR3 has no rows.
 |---|---|---|---|
 | CB0 | E3 after B1-B7, with Car1-Car3 | E1 exit, no phase | N1; ZEXIT gap 3; gap 1 |
 | CB1 | Waits; no lifetime claim | Same | Gap 6 |
-| CB2 | Admit, then copy and source release, before Idx (OWN21-22) | Same, no phase | Capacity guard for Idx temporaries? (N3) |
+| CB2 | Admit, then copy and source release, before Idx (OWN21-22) | Same, no phase | N3 |
 | CB3 | Only Idx driver; input unconsumed, unclassified | None; bytes parse | Gaps 3, 5; BND41, BND54 |
 | CB4 | IdxDone, then classify | Colon: R3->R4, then CB3 or WP | Reference target (BND55) |
 | CB5 | Becomes WD | Whitespace stays R3 | None new |
@@ -47,11 +47,13 @@ Candidate text, not adopted: "Exact end, no bytes left, READY/YIELDED + IdxPendi
 It covers a final colon with or without fuel left and, after OWN21-22, the READY an empty leaves at WP (CB6). Zero-byte release is already OWN24-27's, so unlike Z's row OWN25's list need not grow for Idx, which stays out (BND19, CONS64); B1-B3 need this row (ZPHASE line33). It still needs amendments 2 (a broad "inputless" catches it, OWN27 and CB6) and 4, N2 and B6's phase (ZEXIT gap 3).
 
 ## N3: Idx failure at a later delivery
-Idx starts only after Dn is admitted and copied, so a known failure (work, capacity, write: RR25, RR65, CW43, CONS37) ends REFUSED with Dn charged and unparsed; an unknown effect blocks (CONS38). If EOF, cancel, rejection or no arrival comes first, Idx never runs and that outcome stands. No such path reaches DONE, so when Idx would fail on W and Z alike, status, reason and delivery number change, not acceptance: T4-T6's shape. Whether Idx fails can differ: its temporaries meet Dn's input, not Dc's (COMPOSITE line26), and resume checks add work; coefficients are UNSET. Policy B names CP-U only (TRACE43); no criterion covers this.
-IR0 precedes the colon (RR33-34) but only checks, and later admissions spend Wn. RR65 and CONS26 require reservation before effects, not before a wait. Candidates for budget failure, none selected:
-- (a) Reserve Idx's worst at IR0, held across WR3 and WP as CW34 holds Wf. Failure moves to IR0 or admission (OWN17). Every path to DONE passes Idx (CB4) and Wn only falls (C5), so an exact work reserve refuses only later failures; a capacity reserve meets IR0's input, not Dn's, so it or a conservative one can refuse a fitting document.
-- (b) Reserve at IR2. Failure surfaces where Idx runs, after admission and copy, and needs explicit acceptance as policy B had. No hold across a wait.
+Idx starts only after Dn is admitted and copied, so a known failure (work, capacity, write: RR25, RR65, CW43, CONS37) ends REFUSED with Dn charged and unparsed; an unknown effect blocks (CONS38). If EOF, cancel, rejection or no arrival comes first, Idx never runs and that outcome stands. No such path reaches DONE, so when Idx would fail on W and Z alike, status, reason and delivery number change, not acceptance: T4-T6's shape. Whether Idx fails can differ: its temporaries meet Dn's input, not Dc's (COMPOSITE line26), and resume checks add work; coefficients are UNSET. Policy B names CP-U only (TRACE43).
+IR0 precedes the colon (RR33-34) but only checks, and later admissions spend Wn. RR65 and CONS26 require reservation before effects, not before a wait. Candidates for budget failure:
+- (a) Reserve Idx's worst at IR0, held across WR3 and WP. Failure moves to IR0 or admission (OWN17). An exact work reserve refuses only later failures (CB4, C5); a capacity reserve meets IR0's input, not Dn's, and can refuse a fitting document.
+- (b) Reserve at IR2. Failure surfaces where Idx runs, after admission and copy. No hold across a wait.
 - (c) Add Idx's worst to WP's admission guard. Refuses before retention (OWN17), but must count Dn's own copy and release.
+
+User decision 2026-11-06: (b). A budget failure may surface where Idx runs, after Dn's admission and copy. Write failures, unknown effects and whether Idx fails stay uncovered. Prospective criterion: nothing adopted or closed.
 
 ## Boundary matrix
 | Event | WR3 | WP | Charged | Grounds |
@@ -88,7 +90,7 @@ WP's live set is WR3's plus IdxPending evidence, and WD's plus decision and rank
 ## Source-bridge gaps
 Named, not resolved (Z-A123).
 1. Decision lifetime: KVS36 defers it; BND17 and CB0 keep "decision"; RR26 requires rank and view; no clause carries them through a wait. Every route needs this.
-2. N1's row; N3's criterion.
+2. N1's row; N3's text.
 3. Resume check: BND43 says preserve and RR42 needs a bridge on change; no row says what is rechecked after a wait. Stale or unknown blocks, no rescan (RR26).
 4. Owner loss during a wait: nothing runs, so no clause says who notices or when (S7, G line13).
 5. CB3 is a row, not an exclusive rule (RR56, BND7); X1-X3 read it as exclusive.

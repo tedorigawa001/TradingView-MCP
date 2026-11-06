@@ -107,3 +107,5 @@ Charge D8162/L1022; current C706298/U65958/F13824.
 ## WcarryAcrossWait Proof Reservation
 Approved11264 from F13824 ->2560: design10240/integration1024; review/STOP not reserved; before charges U77222. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WCARRY_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; WcarryAcrossWait and all premises OPEN.
 Charge D10234/L650; current C717182/U66338/F2560.
+User decision 2026-11-06: later-delivery Idx budget failure: (b), reserve at IR2; it may surface where Idx runs, after admission and copy. Prospective criterion; nothing adopted, premises OPEN.
+Decision record D+3/L+264; current C717449/U66071/F2560.
