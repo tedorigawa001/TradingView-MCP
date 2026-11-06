@@ -103,3 +103,7 @@ Approved20992, F2048 ->23040 from wholly unspent review13312 (PREMISE6144, PARAM
 ## Composite Route Reservation
 Approved9216 from F23040 ->13824: design8192/integration1024; review/STOP not reserved; before charges U75142. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_ROUTE_DESIGN.md). User decision 2026-11-06: composite direction: Z key/object close, W post-colon; nothing adopted, premises OPEN.
 Charge D8162/L1022; current C706298/U65958/F13824.
+
+## WcarryAcrossWait Proof Reservation
+Approved11264 from F13824 ->2560: design10240/integration1024; review/STOP not reserved; before charges U77222. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_WCARRY_PROOF_DESIGN.md). Existing stops/no-retry and allocations preserved; WcarryAcrossWait and all premises OPEN.
+Charge D10234/L650; current C717182/U66338/F2560.
