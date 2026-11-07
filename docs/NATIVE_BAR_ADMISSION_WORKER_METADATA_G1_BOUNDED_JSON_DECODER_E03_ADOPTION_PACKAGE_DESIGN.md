@@ -36,7 +36,7 @@ AMEND lines 32-33 and 38, with OWN23's overlay replaced, since AMEND line31 omit
 I8's "no reread" and ZEXIT Inv1's "no re-read" bar grammar, not S45's promotion copy. G41 and BND13 take I17's reading. "Drained" in BND16 is byte position; I9 and OWN25 gate on state (ZEXIT gap 1): wording, no change.
 
 ### Part 5: Z-A scope
-Z-A is Z-path (Z-A23-24, Z-A124), so W was analogy (ZEXIT line6); "every exit" below reaches W by the act, under Part 2. "Narrowed" means adopted as narrowed.
+Z-A is Z-path (Z-A23-24, Z-A124), so W was analogy (ZEXIT line6); "every exit" or "row" reaches W by the act, under Part 2. "Narrowed" means adopted as narrowed.
 | Text | Placement |
 |---|---|
 | ZA0 | Restates OWN21-22; no new force |
@@ -45,7 +45,7 @@ Z-A is Z-path (Z-A23-24, Z-A124), so W was analogy (ZEXIT line6); "every exit" b
 | ZA4, Z-A70, Z-A82 | Narrowed (AMEND lines 22-23): every exit; IdxPending may stay bound |
 | ZA5, ZA7, ZA8; Z-A71-75, Z-A78-81, Z-A83-86 | Adopted, every exit; Z-A80's proof stays owed |
 | ZA6 | Replaced by RS (Part 6), every exit |
-| ZEXIT lines 21-30, 35-46; COMPOSITE lines 32-38 | Adopted, every exit, with RS for B6. COMPOSITE's E0, E3-E5 rows replace ZEXIT's but for its Not allowed cells |
+| ZEXIT lines 21-30, 35-46; COMPOSITE lines 32-38 | Adopted, every exit, with RS for B6. COMPOSITE's E0, E3-E5 rows replace ZEXIT's but for its Context and Not allowed cells |
 | Z-A30 | Reading, over AMEND line25: at WP it holds for grammar, which needs a value byte; Idx is N2's category |
 | Z-A31-32, Z-A34, Z-A36, Z-A65-67, Z-A89-93 | Adopted, every row |
 | Z-A40-48 | Adopted for KC and PC rows |
@@ -64,7 +64,7 @@ Z-A is Z-path (Z-A23-24, Z-A124), so W was analogy (ZEXIT line6); "every exit" b
 | Serial cancel at a yield | CANCELLED; cleanup does not re-release (S8) |
 | acceptDelivery, finish | Contract error, dispatch charged (I7, I9, OWN25, Z-A89) |
 
-OWN27's "that operation" and the release-only of ZA5, Z-A75 (over AMEND line25), Z-A118 and Route67 include this finalization, as Z-A85's "release/state finalization" does.
+OWN27's "that operation" and the release-only of ZA5 and Z-A75 (over AMEND line25), Z-A118 and Route67 include this finalization, as Z-A85's "release/state finalization" does.
 Conditional argument for Z-A80, given knownAck, serialDriver and ZEXIT's Inv1-6: RS's units change only commit control and charges, so witnesses and cursor hold. Known incomplete and complete are disjoint and anything else blocks, so at most one target commits (ZEXIT line18); only an acknowledged cursor is read, so no release repeats. If each unit fits a step (CW39-40), each legal advance completes one, ending at B7 or a terminal row, or YIELDED if the driver stops (Z-A67). Not shown: the commit unit's atomicity or fit; sizes UNSET. Atomic exit stays not chosen and not refuted; a release primitive's facts stay owed (ZEXIT lines 53, 78), so Zexit stays OPEN.
 
 ### Part 7: N1 and N3
@@ -85,7 +85,7 @@ Beyond the tables above.
 | Sentence | Change |
 |---|---|
 | BND56, ORD14 | Part 3; BND56's first sentence scopes BND, so it stays |
-| BND7, ORD7, RR6, RR56, Route10, IRT line7, UIP lines 6, 45, KVS15, KVS36, COMPOSITE lines 8, 53, WCARRY line29, ZEXIT lines 49, 51, AMEND line35 | Calling B, its order, BND's rows or B6's form a candidate, ranked, unselected, unadopted or OPEN yields to Part 3; "conditional" stays true (Part 1). Headings and IRT line11 naming a B candidate are labels |
+| BND7, ORD7, RR6, RR56, Route10, IRT line7, UIP lines 6, 45, KVS15, KVS36, COMPOSITE lines 8, 53, WCARRY line29, ZEXIT lines 49, 51, AMEND line35 | Calling B, its order, BND's rows or B6's form a candidate, ranked, unselected, unadopted or OPEN yields to Parts 3, 6; "conditional" stays true (Part 1). Headings and IRT line11 naming a B candidate are labels |
 | ORD29, ORD46, BND56's end | Stand: B's evidence stays owed |
 | BND6, RR6, RR56, IRT line7, Route51, COMPOSITE line53, ZPHASE lines 16-18, 39, TRACE line34, proof line45 | Their OPEN on key-close lookup, object-close release, S28 timing or Idx's real input yields to the rows; A/C, H and owner gates stay OPEN |
 | KVS36, KVS53, UIP line56 | "Decision lifetime" OPEN yields to CA |

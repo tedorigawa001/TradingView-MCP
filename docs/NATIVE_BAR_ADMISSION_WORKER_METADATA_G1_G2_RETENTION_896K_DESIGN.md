@@ -28,3 +28,4 @@ Charge D2574/L547; current C748313/U41479; cap917504/guard352/unallocated127360.
 ## Adoption Package Reservation
 Approved13312 from F127360 ->114048: design12288/integration1024; review/STOP not reserved; before charges U54791. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ADOPTION_PACKAGE_DESIGN.md). Nothing adopted; premises OPEN.
 Charge D12262/L559; current C761134/U41970/F114048.
+Act review fix: Parts 3, 6; Context cells; ZA5 marker; row reach. D+22/L+110; current C761266/U41838/F114048.
