@@ -53,6 +53,16 @@ test('the MCP SDK and the proxy-addr override keep their advisory floors (GHSA-6
     'the lockfile still installs a vulnerable @modelcontextprotocol/sdk');
 });
 
+test('the @hono/node-server override keeps its advisory floor (GHSA-rmxm-3fg6-px4f)', async () => {
+  // It reaches this tree through the MCP SDK, whose range (^1.19.9 || ^2.0.5) admits the versions the advisory applies
+  // to: >= 1.19.10, < 2.1.3, so no 1.x release is patched. serveStatic decoded the request path a second time, which let
+  // a crafted request skip middleware mounted on part of a static directory.
+  const { overrides } = await manifest();
+  assert.ok(overrides?.['@hono/node-server'], 'the @hono/node-server override was removed');
+  assert.ok(atLeast(floorOf(overrides['@hono/node-server']), [2, 1, 3]),
+    `@hono/node-server override floor ${overrides['@hono/node-server']} is below the first patched version 2.1.3`);
+});
+
 test('every override still resolves to something at or above its floor', async () => {
   const { overrides } = await manifest();
   const lock = JSON.parse(await readFile(new URL('../../package-lock.json', import.meta.url), 'utf8'));
