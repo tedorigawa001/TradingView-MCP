@@ -132,3 +132,6 @@ Approved6656, F0 ->6656 from wholly unspent receipt2048/review2048/stop512 (loss
 Approved5248 from F6656 ->1408: design4096/integration1152 (also records the move); review/STOP not reserved; before charges U44670. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PACKAGE_CRITERIA_DESIGN.md). Nothing adopted; premises OPEN.
 BACKLOG +2183 at 474435c, outside series and uncharged, stays uncounted; measure base 996441+2183, reading EXTENSION line17.
 Charge D4093/L1093, plus K5 line17 fix D+4; current C745192/U39480/F1408.
+
+## Prospective Ceiling Extension: 896 KiB
+[design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_896K_DESIGN.md): approved ceiling917504 and reservation5120 from increase131072; unallocated127360 before charges; old reservations/guard352/history stay. Later reservations and charges continue there. Nothing adopted.
