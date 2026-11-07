@@ -117,3 +117,10 @@ Approved10752, F2560 ->13312 from wholly unspent review8192 (512K, custom decode
 Approved13312 from F13312 ->0: design12288/integration1024 (also records the move); review/STOP not reserved; before charges U68631. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_AMENDMENTS_DESIGN.md). Stops/no-retry and allocations preserved; premises OPEN.
 Charge D12280/L1022; current C730751/U55329/F0.
 Wcarry design line88 fix: waits stay in root peak; D+0/L+101, that stage; current C730852/U55228/F0.
+
+## Fifth Unused Reservation Reallocation
+Approved9216, F0 ->9216 from wholly unspent review6144 (primary read, G1 locator, node identity 2048 each) and stop3072 (those three, aux locator, identity search, input/state 512 each). Later REVIEW/STOP need new allocation. Prospective exception as line114, plus prior-reservation wording in funding text and BACKLOG after each grant, for these donors only; history unrewritten.
+
+## K5 Close Span Reservation
+Approved9216 from F9216 ->0: design8192/integration1024 (also records the move); review/STOP not reserved; before charges U55228. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_K5_CLOSE_SPAN_DESIGN.md). Premises OPEN.
+Charge D8186/L964; current C740002/U46078/F0.
