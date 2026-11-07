@@ -36,11 +36,11 @@ No class fills another's gap by inference. Facts from different editions, releas
 Keys held as decoder-owned bytes need no string-retention fact (OWN13), a design choice, not a finding; projection, result and receiver still need string facts (S38, E10, D06). Admission and handoff atomicity (E07, OWN44-45) is owed outside the act.
 
 ## Order, not approved
-1. The user names one intended runtime release. It stays a label; EC waits for B01-B03 and EP for B01-B08 (BOOT lines 64-71, 85).
+1. The user names one intended runtime release. It stays a label; EC waits for B01-B03, and EP for B01-B08 and a change to OWN12 (BOOT lines 64-71, 85).
 2. Representation decisions: owned-byte keys; record and control layout.
 3. ES slice, per feature not per edition: each feature's correspondence to that release needs evidence, which ER may not give; without it the slice STOPs. One user-supplied locator per grant.
 4. ER slice for that release: buffer pooling, chunk ownership, EOF order, runtime hooks, termination.
-5. EC once B01-B03 allow and EP once B01-B08 do, each only for a gap that matters.
+5. EC once B01-B03 allow, EP once B01-B08 allow and OWN12 is changed, each only for a gap that matters.
 6. Cost model decision, recording what stays unproved.
 
 Any step may end the plan; a STOP or an unclosable gap is a valid outcome.
