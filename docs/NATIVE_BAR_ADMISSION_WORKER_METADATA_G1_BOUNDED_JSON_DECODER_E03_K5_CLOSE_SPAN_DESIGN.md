@@ -14,7 +14,7 @@ Assumed, not facts: closeWitness, knownAck, serialDriver, order B (ORD21), AMEND
 | C16, Route53 | "pop once on a valid close"; once "at qualified close" | How often; "at" needs a reading |
 | CS30, G36 | "combined atomic event": "invent no separate steps or observable intermediate states"; "combined event": "invent no separate observable steps" | G36 drops "atomic"; CS30's examples are K2-K4 |
 
-So "one event" is a fact about the row, not timing. No source read here calls K5 atomic and S28 makes its release incremental, so CS30, read as scoped to atomic events, does not reach it. G36 might; below assumes it does.
+So "one event" is a fact about the row, not timing. G46 lists an "atomic tuple", G47 leaves grouping OPEN, S28 makes release incremental: CS30, if scoped to atomic events, might not reach it. G36 might; below assumes it does.
 
 ## L1: the witnesses do not see the span
 Conditional on closeWitness and PC3, not knownAck. The closing object has no P key (row G5, CS24, PRES11) and no grammar event runs in the span. Retirement touches index records only (S28, PC5, RR59); n, q, M, P and f are proof witnesses, not runtime records (CS7, PRES10), and stay. So with the object in O or out:

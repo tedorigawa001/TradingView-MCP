@@ -124,3 +124,11 @@ Approved9216, F0 ->9216 from wholly unspent review6144 (primary read, G1 locator
 ## K5 Close Span Reservation
 Approved9216 from F9216 ->0: design8192/integration1024 (also records the move); review/STOP not reserved; before charges U55228. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_K5_CLOSE_SPAN_DESIGN.md). Premises OPEN.
 Charge D8186/L964; current C740002/U46078/F0.
+
+## Sixth Unused Reservation Reallocation
+Approved6656, F0 ->6656 from wholly unspent receipt2048/review2048/stop512 (lossless intake) and results1536/stop512 (npm read). Later saving needs new allocation; no route retired. Prospective exception as line122, for these donors too, plus intake lines23-25, npm lines2, 14-15, TAG433 lines23-24; history unrewritten.
+
+## Package Criteria Reservation
+Approved5248 from F6656 ->1408: design4096/integration1152 (also records the move); review/STOP not reserved; before charges U44670. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PACKAGE_CRITERIA_DESIGN.md). Nothing adopted; premises OPEN.
+BACKLOG +2183 at 474435c, outside series and uncharged, stays uncounted; measure base 996441+2183, reading EXTENSION line17.
+Charge D4093/L1093, plus K5 line17 fix D+4; current C745192/U39480/F1408.

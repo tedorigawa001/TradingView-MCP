@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Package criteria (2026-11-07 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_PACKAGE_CRITERIA_DESIGN.md); two user criteria; package not adoptable yet; unused6656 moved; nothing adopted.
+
 **105-3 Object close span (2026-11-07 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_K5_CLOSE_SPAN_DESIGN.md); candidate commit point across yields; unused9216 moved; nothing adopted.
 
 **105-3 Composite amendments (2026-11-07 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_AMENDMENTS_DESIGN.md); candidate text for remaining amendments and object close; unused10752 moved; nothing adopted.
