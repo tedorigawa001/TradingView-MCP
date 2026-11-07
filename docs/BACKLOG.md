@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 Release label and representation (2026-11-07 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_RELEASE_REPRESENTATION_DESIGN.md); label Node 24.18.0; owned-byte keys, one fixed arena per response, Float64 integer fields; nothing adopted.
+
 **105-3 Parser policy exception (2026-11-07 JST)**: [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_POLICY_EXCEPTION_DESIGN.md); self-written decoder only.
 
 **105-3 Host evidence plan (2026-11-07 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_HOST_EVIDENCE_PLAN_DESIGN.md); evidence classes, premise map, order and gates for host facts; no read or execution; nothing adopted.

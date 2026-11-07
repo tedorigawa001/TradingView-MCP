@@ -38,3 +38,7 @@ Charge D7809/L611; current C769686/U42634/F104832.
 Approved3584 from F104832 ->101248: design3072/integration512; review/STOP not reserved; before charges U46218. [record](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_POLICY_EXCEPTION_DESIGN.md). User decision; nothing run.
 Charge D3071/L509; current C773266/U42638/F101248.
 Plan review fix: EP also waits for OWN12. D+44/L+97, plan stage; current C773407/U42497/F101248.
+
+## Release Label And Representation Reservation
+Approved9216 from F101248 ->92032: design8192/integration1024; review/STOP not reserved; before charges U51713. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_RELEASE_REPRESENTATION_DESIGN.md). User decisions; no evidence read, nothing run.
+Charge D8172/L646; current C782225/U42895/F92032.
