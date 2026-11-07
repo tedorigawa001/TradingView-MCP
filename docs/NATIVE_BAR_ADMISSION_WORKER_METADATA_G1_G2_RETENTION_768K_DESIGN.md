@@ -109,3 +109,10 @@ Approved11264 from F13824 ->2560: design10240/integration1024; review/STOP not r
 Charge D10234/L650; current C717182/U66338/F2560.
 User decision 2026-11-06: later-delivery Idx budget failure: (b), reserve at IR2; it may surface where Idx runs, after admission and copy. Prospective criterion; nothing adopted, premises OPEN.
 Decision record D+3/L+264; current C717449/U66071/F2560.
+
+## Fourth Unused Reservation Reallocation
+Approved10752, F2560 ->13312 from wholly unspent review8192 (512K, custom decoder, G1 selection, Node locator 2048 each) and stop2560 (512K1024, those three 512 each). Later REVIEW (four)/STOP (four) need new allocation. Prospective exception to line23, line8, 640K lines21, 58, EXTENSION line5, 512K lines5, 27, 65; history unrewritten.
+
+## Composite Amendments And Z-B Reservation
+Approved13312 from F13312 ->0: design12288/integration1024 (also records the move); review/STOP not reserved; before charges U68631. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_AMENDMENTS_DESIGN.md). Stops/no-retry and allocations preserved; premises OPEN.
+Charge D12280/L1022; current C730751/U55329/F0.
