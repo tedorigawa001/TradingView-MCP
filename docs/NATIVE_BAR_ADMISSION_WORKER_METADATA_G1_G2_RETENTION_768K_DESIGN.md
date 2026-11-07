@@ -116,3 +116,4 @@ Approved10752, F2560 ->13312 from wholly unspent review8192 (512K, custom decode
 ## Composite Amendments And Z-B Reservation
 Approved13312 from F13312 ->0: design12288/integration1024 (also records the move); review/STOP not reserved; before charges U68631. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_AMENDMENTS_DESIGN.md). Stops/no-retry and allocations preserved; premises OPEN.
 Charge D12280/L1022; current C730751/U55329/F0.
+Wcarry design line88 fix: waits stay in root peak; D+0/L+101, that stage; current C730852/U55228/F0.

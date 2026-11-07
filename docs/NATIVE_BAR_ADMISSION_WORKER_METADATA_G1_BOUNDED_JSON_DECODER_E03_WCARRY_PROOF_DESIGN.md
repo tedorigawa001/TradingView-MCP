@@ -2,7 +2,7 @@
 2026-11-06 JST. DOCUMENTARY; no model run, test, implementation, adoption, route selection or host qualification. Baseline HEAD 4b427c8a51b02233fbacd0f82c7f743fd44069e3. RUN1/RESUME01 STOP and no-retry stay. WcarryAcrossWait stays OPEN; nothing here is adopted.
 
 ## Scope
-Item 3 of the proof procedure (proof line47), narrowed by [COMPOSITE](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_ROUTE_DESIGN.md). Aliases are as in the Scope of ZPHASE, plus C (counter) from TRACE's; "amendment n" is ZPHASE's list. S28 and model165 are line references; CB3/IR2 are IDs; X1-X4 and N1-N3 are COMPOSITE's. Dc is the delivery ending in the colon, Dn the next nonempty one; WR3, WP, WD and Car1-Car3 label rows here only.
+Item 3 of the proof procedure (proof line47), narrowed by [COMPOSITE](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_COMPOSITE_ROUTE_DESIGN.md). Aliases as in ZPHASE's Scope, plus C (counter) from TRACE's; "amendment n" is ZPHASE's list. S28 and model165 are line references; CB3/IR2 are IDs; X1-X4 and N1-N3 are COMPOSITE's. Dc is the delivery ending in the colon, Dn the next nonempty one; WR3, WP, WD and Car1-Car3 label rows here only.
 Assumed, not facts: ownedKeys, knownAck, serialDriver, order B (ORD21), CB3 as Idx's only driver; Zexit for every exit; Zphase for a settled decision.
 
 ## What is left of item 3
@@ -13,7 +13,7 @@ Under COMPOSITE lookup settles before release, so CP-U across a wait, W's T2-T6 
 | WP | R4 + IdxPending, colon just consumed (E3) | Idx, not begun (X2) | CB0 | W only |
 | WD | R4 + IdxDone | None | CB5 | Every |
 
-WP is this direction's only wait of its own.
+Only WP is this direction's own wait.
 
 ## Claim and conditional invariant
 Claim (OPEN): from the release commit, WR3 and WP hold through any number of legal empties and any wait; Dn resumes grammar from WR3 and runs Idx from WP before any byte is classified (CB3-4); other events end under existing terminal or block rules. No claim about arrival, duration or budget fit (S29, CW31).
@@ -85,11 +85,11 @@ Before Idx, copy reads bytes (OWN21) and nothing classifies them (BND38). No dec
 | Cleanup liability | Covers all | Covers all | Cleanup | CW51-53 |
 | Owner, driver, receiver | Outlive it | Outlive it | Release | Unproved (S7, BND50) |
 
-WP's live set is WR3's plus IdxPending evidence, and WD's plus decision and rank, phase labels aside. No wait is the peak: Dn's copy (CW22) and CB3 hold more (COMPOSITE line26). No token is open, so no token carry. Sizes UNSET (CW15, RR64).
+WP's rows are WR3's plus IdxPending evidence, and WD's plus decision and rank, phase labels aside. Other holdings fixed, Dn's copy (CW22) and CB3 add input. Root peak is unproved (CW18, CW23-24); waits stay in its max (CW16, CW27). No token is open, so no token carry. Sizes UNSET (CW15, RR64).
 
 ## Source-bridge gaps
 Named, not resolved (Z-A123).
-1. Decision lifetime: KVS36 defers it; BND17 and CB0 keep "decision"; RR26 requires rank and view; no clause carries them through a wait. Every route needs this.
+1. Decision lifetime: KVS36 defers it; BND17 and CB0 keep "decision"; RR26 requires rank and view; no clause carries them through a wait.
 2. N1's row; N3's text.
 3. Resume check: BND43 says preserve and RR42 needs a bridge on change; no row says what is rechecked after a wait. Stale or unknown blocks, no rescan (RR26).
 4. Owner loss during a wait: nothing runs, so no clause says who notices or when (S7, G line13).
@@ -97,10 +97,10 @@ Named, not resolved (Z-A123).
 6. Wait lifetime and parent bound: none on any route (CB1, BND50, TRACE43).
 
 Inherited: ZEXIT gaps except 4 (COMPOSITE line51); amendments 2, 4. TRACE43's suitability stays.
-Result on paper: WP's own obligations are N1-N3, CB3's exclusivity and IdxPending evidence; decision carry, the resume check, wait lifetime and owner questions exist on every route. Until storage, gaps 1-5, inherited items, costs and owner and parent bounds are bound, the claim stays OPEN; evidence adopts nothing (Z-A132).
+On paper, WP's own obligations are N1-N3, CB3's exclusivity and IdxPending evidence; decision carry, the resume check, wait lifetime and owner questions exist on every route. Until storage, gaps 1-5, inherited items, costs, owner and parent bounds are bound, the claim stays OPEN; evidence adopts nothing (Z-A132).
 
 ## Model and RUN2 cross-check
-Read by hand; shape only. V1 has no composite mode, so RUN2 is silent (COMPOSITE line60). Rank is computed at the colon (model187), so its R3 carry is unexercised. No layout has an empty right after a colon (model41-53, model288). Budgets, capacity, admission rejection and resume checks are not modeled.
+Read by hand; shape only. V1 has no composite mode, so RUN2 is silent (COMPOSITE line60). Rank is computed at the colon (model187), so R3 carry is unexercised. No layout has an empty right after a colon (model41-53, model288). Budgets, capacity, admission rejection and resume checks are not modeled.
 
 ## Retention
 Reserve11264 from F13824 ->2560: design10240/integration1024. Review and STOP are unreserved; saving either needs new allocation. Ledger and backlog growth charges integration1024. No truncation, borrowing, refund or transfer.
