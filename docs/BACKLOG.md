@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES3 read plan (2026-11-08 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES3_READ_DESIGN.md); TypedArray exotic objects clause of ECMA-262 16.0, one browser read, not executed; facts only under HES3, OPEN; nothing adopted.
+
 **105-3 ES2 read (2026-11-08 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES2_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES2, OPEN; nothing adopted.
 
 **105-3 ES2 read plan (2026-11-08 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES2_READ_DESIGN.md); TypedArray clause of ECMA-262 16.0 without its %TypedArray% parts, one browser read, not executed; facts only under HES2, OPEN; nothing adopted.
