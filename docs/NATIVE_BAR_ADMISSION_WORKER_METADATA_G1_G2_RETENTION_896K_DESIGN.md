@@ -76,3 +76,7 @@ Approved9984 from F50560 ->40576: design4608/report3584/stop512/integration1280;
 Charge D4601/L600; current C825596/U50980/F40576.
 REPORT prepared, unexecuted: R1706/3584, L+78; current C827380/U49196/F40576.
 ES5 read executed, closing CONDITIONAL: R+1858 to R3564/3584, L+322; current C829560/U47016/F40576.
+
+## ES6 Read Reservation
+Approved9984 from F40576 ->30592: design4608/report3584/stop512/integration1280; review not reserved; before charges U57000. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES6_READ_DESIGN.md). Plan only; nothing opened, read or run.
+Charge D4600/L588; current C834748/U51812/F30592.
