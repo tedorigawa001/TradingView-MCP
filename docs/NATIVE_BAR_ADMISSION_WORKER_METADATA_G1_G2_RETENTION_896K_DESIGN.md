@@ -48,3 +48,7 @@ Approved7680 from F92032 ->84352: design4096/report2048/stop512/integration1024;
 Charge D4084/L579; current C786888/U45912/F84352.
 REPORT prepared, unexecuted: R1263/2048, L+78; current C788229/U44571/F84352.
 ES1 read executed, closing STOP: R+784 to R2047/2048, L+327; current C789340/U43460/F84352.
+
+## ES1 Correspondence Reservation
+Approved5120 from F84352 ->79232: design4096/integration1024; review/STOP not reserved; before charges U48580. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES1_CORRESPONDENCE_DESIGN.md). User decision; no evidence read, nothing run.
+Charge D4040/L587; current C793967/U43953/F79232.

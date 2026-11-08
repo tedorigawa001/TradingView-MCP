@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES1 correspondence (2026-11-08 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES1_CORRESPONDENCE_DESIGN.md); conditional use: ES1 facts only under assumption HES1, OPEN; no read; nothing adopted.
+
 **105-3 ES1 read (2026-11-08 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES1_READ_REPORT.md); executed once, checks passed; edition facts only; STOP on correspondence to 24.18.0; nothing adopted.
 
 **105-3 ES1 read plan (2026-11-08 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES1_READ_DESIGN.md); ArrayBuffer clause of ECMA-262 16.0, one browser read, not executed; edition facts only; nothing adopted.
