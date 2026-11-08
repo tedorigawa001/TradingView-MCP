@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES5 read (2026-11-08 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES5_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES5, OPEN; nothing adopted.
+
 **105-3 ES5 read plan (2026-11-08 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES5_READ_DESIGN.md); mathematical operations clause of ECMA-262 16.0, one browser read, not executed; facts only under HES5, OPEN; nothing adopted.
 
 **105-3 ES4 read (2026-11-08 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES4_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES4, OPEN; nothing adopted.
