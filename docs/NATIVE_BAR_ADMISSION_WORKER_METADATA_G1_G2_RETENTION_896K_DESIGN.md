@@ -63,3 +63,4 @@ ES2 read executed, closing CONDITIONAL: R+1180 to R2554/2560, L+322; current C80
 Approved9472 from F70016 ->60544: design4608/report3072/stop512/integration1280; review not reserved; before charges U53986. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES3_READ_DESIGN.md). Plan only; nothing opened, read or run.
 Charge D4593/L602; current C807817/U48791/F60544.
 REPORT prepared, unexecuted: R1664/3072, L+78; current C809559/U47049/F60544.
+ES3 read executed, closing CONDITIONAL: R+1403 to R3067/3072, L+322; current C811284/U45324/F60544.

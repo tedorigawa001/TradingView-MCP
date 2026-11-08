@@ -9,3 +9,13 @@ No tabId or force; each call uses the then-fronted pane tab. Before call 1: desi
 
 ## Destinations
 Raw results: session transcript, no copy; pane keeps the page. Appended here, preparation kept: outcome, checks, Q1-Q6 answers, closing CONDITIONAL line, within 3072. Any stop before answers, retention shortage included: `..._ES3_READ_STOP.md` (this prefix, 512), no partial answers, here only a pointer; a stop after output arrives bars its use as answers, not its receipt. REVIEW unreserved (Z-A132). Charges: 896 KiB ledger.
+
+## Attempt
+EXECUTED 19:51 JST, gates met; calls 2/2; navigate claims reused false; checks pass, title claims ECMAScript 2025; n 14241 UTF-16 units; logged input matches T; mid-text loss UNKNOWN. Edition facts:
+Q1 10.4.5.5: a key CanonicalNumericIndexString maps to a Number returns TypedArrayGetElement directly, no prototype lookup; others OrdinaryGet. 10.4.5.17: invalid index gives undefined, else GetValueFromBuffer. That path has no ? step; CanonicalNumericIndexString's mapping, user code UNKNOWN.
+Q2 10.4.5.6: that key, Receiver O: ? TypedArraySetElement, true; other Receiver: true if invalid, else OrdinarySet. 10.4.5.18: ToNumber (ToBigInt if BIGINT) first, may throw; then IsValidIntegerIndex; valid: SetValueInBuffer; invalid: no write, no error (NOTE). User code, reentry in ToNumber UNKNOWN.
+Q3 10.4.5.2-7: only String keys; any CanonicalNumericIndexString result but undefined takes the element path, non-integral or -0 too, then invalid; others and Symbols go ordinary.
+Q4 10.4.5.16: invalid if detached, non-integral, -0 or negative, out of bounds, or not below length. 10.4.5.13-14: non-AUTO length is [[ArrayLength]]; out of bounds if detached or ByteOffset or ByteOffset+length*size exceeds the buffer byte length.
+Q5 10.4.5.17-18: byte index = index*size + ByteOffset; GetValueFromBuffer and SetValueInBuffer, UNORDERED, no byte order argument.
+Q6 None named.
+CONDITIONAL on HES3.
