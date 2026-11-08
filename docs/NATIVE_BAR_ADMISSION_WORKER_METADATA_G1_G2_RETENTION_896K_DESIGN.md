@@ -57,3 +57,4 @@ Charge D4040/L587; current C793967/U43953/F79232.
 Approved9216 from F79232 ->70016: design5120/report2560/stop512/integration1024; review not reserved; before charges U53169. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES2_READ_DESIGN.md). Plan only; nothing opened, read or run.
 Charge D5083/L618; current C799668/U47468/F70016.
 REPORT prepared, unexecuted: R1374/2560, L+78; current C801120/U46016/F70016.
+ES2 read executed, closing CONDITIONAL: R+1180 to R2554/2560, L+322; current C802622/U44514/F70016.
