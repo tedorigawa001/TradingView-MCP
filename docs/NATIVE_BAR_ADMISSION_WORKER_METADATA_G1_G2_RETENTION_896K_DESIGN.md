@@ -52,3 +52,7 @@ ES1 read executed, closing STOP: R+784 to R2047/2048, L+327; current C789340/U43
 ## ES1 Correspondence Reservation
 Approved5120 from F84352 ->79232: design4096/integration1024; review/STOP not reserved; before charges U48580. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES1_CORRESPONDENCE_DESIGN.md). User decision; no evidence read, nothing run.
 Charge D4040/L587; current C793967/U43953/F79232.
+
+## ES2 Read Reservation
+Approved9216 from F79232 ->70016: design5120/report2560/stop512/integration1024; review not reserved; before charges U53169. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES2_READ_DESIGN.md). Plan only; nothing opened, read or run.
+Charge D5083/L618; current C799668/U47468/F70016.
