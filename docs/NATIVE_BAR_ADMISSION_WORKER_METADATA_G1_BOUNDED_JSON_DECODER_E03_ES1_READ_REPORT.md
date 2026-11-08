@@ -9,3 +9,13 @@ No tabId or force; each call uses the then-fronted pane tab. Before call 1: desi
 
 ## Destinations
 Raw results: session transcript, no copy; pane keeps the page. Appended here, preparation kept: outcome, checks, Q1-Q6 answers, closing STOP, within 2048. Any stop before answers, retention shortage included: `..._ES1_READ_STOP.md` (this prefix, 512), no partial answers, here only a pointer. REVIEW unreserved (Z-A132). Charges: 896 KiB ledger.
+
+## Attempt
+EXECUTED 12:12-12:13 JST, gates met; calls 2/2; checks pass, title claims ECMAScript 2025; mid-text loss UNKNOWN. Edition facts:
+Q1 25.1.3.1/.7/.9: without maxByteLength, fixed-length.
+Q2 25.1.4.1: TypeError sans new; ToIndex on length and (25.1.3.7) maxByteLength. 25.1.3.1: RangeError over or unallocatable max; OrdinaryCreateFromConstructor, CreateByteDataBlock may throw.
+Q3 Not in text: UNKNOWN.
+Q4 DetachArrayBuffer (25.1.3.5): detach key must match, undefined unless embedder-set; transfer, transferToFixedLength detach keyless ones.
+Q5 25.1.3.14-18: binary64 or unsigned bytes, order as asked, else agent's; takes Number; no throw; Uint8 conversion outside.
+Q6 HostResizeArrayBuffer (25.1.3.8); must not detach.
+STOP: 24.18.0 correspondence UNKNOWN (PLAN line41).
