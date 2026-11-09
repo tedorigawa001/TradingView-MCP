@@ -46,3 +46,5 @@ Approved11008 from F96896 ->85888: design4608/report4608/stop512/integration1280
 Charge D4602/L645; current C897612/U64724/F85888.
 REPORT prepared, unexecuted: R1845/4608, L+78; current C899535/U62801/F85888.
 ES10 read executed, closing CONDITIONAL: R+2751 to R4596/4608, L+326; current C902612/U59724/F85888.
+
+G2 ES10 update (existing G2 reserve; no new read): D+470 to 7943/8192, L+123 to 714/1024; current C903205/U59131/F85888.
