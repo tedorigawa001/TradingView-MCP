@@ -40,3 +40,7 @@ ES9 read executed, closing CONDITIONAL: R+2212 to R3996/4096, L+323; current C88
 ## R3 G2 Chain Reservation
 Approved9216 from F106112 ->96896: design8192/integration1024; review/STOP not reserved; before charges U67027. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_G2_CHAIN_DESIGN.md). Documentary synthesis of ES1-ES9 records; no read; nothing adopted.
 Charge D7473/L591; current C892365/U58963/F96896.
+
+## ES10 Read Reservation
+Approved11008 from F96896 ->85888: design4608/report4608/stop512/integration1280; review not reserved; before charges U69971. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES10_READ_DESIGN.md). Plan only; nothing opened, read or run.
+Charge D4602/L645; current C897612/U64724/F85888.
