@@ -24,3 +24,7 @@ Create this DESIGN plus BACKLOG and prior 896K-ledger links only. All positive p
 ## Approval Boundaries
 Added capacity closes no premise, gate or finding and adopts nothing. Dot stays PAUSED; judgment/notification/mail and trading conditions unchanged. No implementation, parse/model/test, real port/clock/timer/build/child/native/fixture/signature/data work, MCP registration or production activation. Each later reservation, review saving, commit and push still needs its own approval.
 Charge D2732/L553; current C864668/U55940; cap1048576/guard352/unallocated127616. Includes this line; prior charges unchanged.
+
+## ES8 Read Reservation
+Approved11008 from F127616 ->116608: design4608/report4608/stop512/integration1280; review not reserved; before charges U66948. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES8_READ_DESIGN.md). Plan only; nothing opened, read or run.
+Charge D4605/L612; current C869885/U61731/F116608.
