@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES7 read plan (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES7_READ_DESIGN.md); type conversion clause of ECMA-262 16.0 without its BigInt parts, one browser read, not executed; facts only under HES7, OPEN; nothing adopted.
+
 **105-3 R3 integer proof draft (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_INTEGER_PROOF_DESIGN.md); CONDITIONAL_DERIVATION L0-L8 and candidate Z0, OPEN; no runtime proof; nothing adopted.
 
 **105-3 ES6 read (2026-11-09 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES6_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES6, OPEN; nothing adopted.
