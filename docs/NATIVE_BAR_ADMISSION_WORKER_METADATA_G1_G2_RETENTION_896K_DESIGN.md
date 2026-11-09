@@ -96,3 +96,6 @@ Approved10496 from F12160 ->1664: design4608/report4096/stop512/integration1280;
 Charge D4533/L616; current C856896/U58592/F1664.
 REPORT prepared, unexecuted: R1797/4096, L+77; current C858770/U56718/F1664.
 ES7 read executed, closing CONDITIONAL: R+2292 to R4089/4096, L+321; current C861383/U54105/F1664.
+
+## Prospective Ceiling Extension: 1024 KiB
+[design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_G2_RETENTION_1024K_DESIGN.md): approved ceiling1048576 and reservation5120 from increase131072; unallocated127616 before charges; old reservations/guard352/history stay. Later reservations and charges continue there. Nothing adopted.
