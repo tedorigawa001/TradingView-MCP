@@ -4,7 +4,7 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
-**105-3 ES11 read draft (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES11_READ_DESIGN.md); DRAFT_BLOCKED; locator, scope, route, exact request and correspondence decision UNSET; no external read or execution approved.
+**105-3 ES11 read plan (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES11_READ_DESIGN.md); Agents clause of ECMA-262 16.0, set from the draft (locator, scope, route, request, HES11); one browser read, not executed; facts only under HES11, OPEN; nothing adopted.
 
 **105-3 R3 G2 chain (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_G2_CHAIN_DESIGN.md); store and readback derived from ES1-ES10 records, CONDITIONAL_DERIVATION, OPEN; nothing adopted.
 
