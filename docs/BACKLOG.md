@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES10 read (2026-11-09 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES10_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES10, OPEN; nothing adopted.
+
 **105-3 ES10 read plan (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES10_READ_DESIGN.md); algorithm conventions clause of ECMA-262 16.0 without its Mathematical Operations part, one browser read, not executed; facts only under HES10, OPEN; nothing adopted.
 
 **105-3 R3 G2 chain (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_G2_CHAIN_DESIGN.md); store and readback derived from ES1-ES9 records, CONDITIONAL_DERIVATION, OPEN; nothing adopted.
