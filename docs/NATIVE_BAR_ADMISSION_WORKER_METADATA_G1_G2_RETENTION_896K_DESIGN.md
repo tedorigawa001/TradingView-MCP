@@ -82,3 +82,10 @@ Approved9984 from F40576 ->30592: design4608/report3584/stop512/integration1280;
 Charge D4600/L588; current C834748/U51812/F30592.
 REPORT prepared, unexecuted: R1752/3584, L+78; current C836578/U49982/F30592.
 ES6 read executed, closing CONDITIONAL: R+1823 to R3575/3584, L+322; current C838723/U47837/F30592.
+
+## R3 Integer Proof Reservation
+Approved18432 from F30592 ->12160: design12288/review4096/integration1024/stop1024; before charges U66269. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_INTEGER_PROOF_DESIGN.md). Candidate Z0 and documentary proof only; cap917504/guard352/STOPs/no-retry preserved.
+Charge D10196/L661; current C849580/U55412/F12160. REVIEW/STOP absent; HES4-6 and implementation bridges OPEN.
+
+2026-11-09 R3 L8 notation/zero-cost fix: D+169/L+97; current C849846/U55146/F12160; gates OPEN.
+2026-11-09 R3 review fix (L1 on recorded outcomes, citations, caps): D+1627/L+168; current C851641/U53351/F12160; REVIEW/STOP absent; gates OPEN.
