@@ -44,3 +44,4 @@ Charge D7473/L591; current C892365/U58963/F96896.
 ## ES10 Read Reservation
 Approved11008 from F96896 ->85888: design4608/report4608/stop512/integration1280; review not reserved; before charges U69971. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES10_READ_DESIGN.md). Plan only; nothing opened, read or run.
 Charge D4602/L645; current C897612/U64724/F85888.
+REPORT prepared, unexecuted: R1845/4608, L+78; current C899535/U62801/F85888.
