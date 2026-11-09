@@ -48,3 +48,8 @@ REPORT prepared, unexecuted: R1845/4608, L+78; current C899535/U62801/F85888.
 ES10 read executed, closing CONDITIONAL: R+2751 to R4596/4608, L+326; current C902612/U59724/F85888.
 
 G2 ES10 update (existing G2 reserve; no new read): D+470 to 7943/8192, L+123 to 714/1024; current C903205/U59131/F85888.
+2026-11-09 R3 G2 chain review fix for 3350453: D+248 to 8191/8192, L+117 to 831/1024; current C903570/U58766/F85888.
+
+## ES11 Draft Reservation
+Approved12032 from F85888 ->73856: design5120/report5120/stop512/integration1280; review unreserved; before charges U70798. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES11_READ_DESIGN.md). Draft only; locator and route UNSET; no external read or execution approved.
+Charge D4833/L642; current C909045/U65323/F73856.
