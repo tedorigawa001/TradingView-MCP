@@ -94,3 +94,4 @@ Charge D10196/L661; current C849580/U55412/F12160. REVIEW/STOP absent; HES4-6 an
 ## ES7 Read Reservation
 Approved10496 from F12160 ->1664: design4608/report4096/stop512/integration1280; review not reserved; before charges U63741. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES7_READ_DESIGN.md). Plan only; nothing opened, read or run.
 Charge D4533/L616; current C856896/U58592/F1664.
+REPORT prepared, unexecuted: R1797/4096, L+77; current C858770/U56718/F1664.
