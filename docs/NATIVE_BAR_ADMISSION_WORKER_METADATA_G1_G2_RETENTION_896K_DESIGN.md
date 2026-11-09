@@ -89,3 +89,4 @@ Charge D10196/L661; current C849580/U55412/F12160. REVIEW/STOP absent; HES4-6 an
 
 2026-11-09 R3 L8 notation/zero-cost fix: D+169/L+97; current C849846/U55146/F12160; gates OPEN.
 2026-11-09 R3 review fix (L1 on recorded outcomes, citations, caps): D+1627/L+168; current C851641/U53351/F12160; REVIEW/STOP absent; gates OPEN.
+2026-11-09 R3 state-commit wording fix: D+12/L+94; current C851747/U53245/F12160; gates OPEN.
