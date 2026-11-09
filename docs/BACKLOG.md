@@ -4,6 +4,8 @@
 
 ## #105 定期分析の取得・照合・配信証跡 (2026-10-21)
 
+**105-3 ES9 read plan (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES9_READ_DESIGN.md); Data Blocks clause of ECMA-262 16.0, one browser read, not executed; facts only under HES9, OPEN; nothing adopted.
+
 **105-3 ES8 read (2026-11-09 JST)**: [report](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES8_READ_REPORT.md); executed once, checks passed; edition facts, CONDITIONAL on HES8, OPEN; nothing adopted.
 
 **105-3 ES8 read plan (2026-11-09 JST)**: [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES8_READ_DESIGN.md); ArrayBuffer abstract operations clause of ECMA-262 16.0, one browser read, not executed; facts only under HES8, OPEN; nothing adopted.
