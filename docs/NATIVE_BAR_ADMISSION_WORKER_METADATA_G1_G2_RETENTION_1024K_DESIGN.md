@@ -54,3 +54,4 @@ G2 ES10 update (existing G2 reserve; no new read): D+470 to 7943/8192, L+123 to 
 Approved12032 from F85888 ->73856: design5120/report5120/stop512/integration1280; review unreserved; before charges U70798. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_ES11_READ_DESIGN.md). Draft only; locator and route UNSET; no external read or execution approved.
 Charge D4833/L642; current C909045/U65323/F73856.
 2026-11-10 ES11 plan from draft: D+257 to 5090/5120, L+146 to 788/1280; current C909448/U64920/F73856.
+REPORT prepared, unexecuted: R1954/5120, L+78; current C911480/U62888/F73856.
