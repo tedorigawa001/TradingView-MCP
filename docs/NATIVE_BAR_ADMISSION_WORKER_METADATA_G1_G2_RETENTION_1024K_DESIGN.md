@@ -56,3 +56,7 @@ Charge D4833/L642; current C909045/U65323/F73856.
 2026-11-10 ES11 plan from draft: D+257 to 5090/5120, L+146 to 788/1280; current C909448/U64920/F73856.
 REPORT prepared, unexecuted: R1954/5120, L+78; current C911480/U62888/F73856.
 ES11 read executed, closing CONDITIONAL: R+2841 to R4795/5120, L+326; current C914647/U59721/F73856.
+
+## R3 G2 Chain ES11 Update Reservation
+Approved2560 from F73856 ->71296: design1536/integration1024; review/STOP not reserved; before charges U62281. [design](NATIVE_BAR_ADMISSION_WORKER_METADATA_G1_BOUNDED_JSON_DECODER_E03_R3_G2_CHAIN_DESIGN.md). Documentary update of the chain from the ES11 record, 2026-11-11 JST; no read; nothing adopted.
+Charge D1458/L395; current C916500/U60428/F71296.
