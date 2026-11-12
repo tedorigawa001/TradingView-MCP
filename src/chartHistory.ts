@@ -1,4 +1,4 @@
-import type { TradingView } from "./tradingview.js";
+import type { HistoryLoadResult, TradingView } from "./tradingview.js";
 
 /**
  * A chart holds only a few hundred bars until it is paged backwards, so asking getOhlcv for five
@@ -9,9 +9,78 @@ import type { TradingView } from "./tradingview.js";
 // The window a forward study needs grows every day it runs, so the attempt budget has to be able to
 // outrun it rather than sit at the bar count that was enough on day one. Empty loads still stop the
 // loop as soon as the provider runs out of history.
-const MAX_HISTORY_LOAD_ATTEMPTS = 24;
+export const MAX_HISTORY_LOAD_ATTEMPTS = 24;
 const MAX_HISTORY_LOAD_CHUNK = 1000;
 const MAX_CONSECUTIVE_EMPTY_HISTORY_LOADS = 2;
+const MAX_ADDITIONAL_HISTORY_LOAD_CHUNK = 5000;
+
+export type HistoryLoadStopReason = "consecutive_empty" | "attempt_limit" | "requested_count_reached";
+
+/** Page additional history using actual growth, not requested counts or a transient availability flag. */
+export async function loadAdditionalHistory(
+  tv: Pick<TradingView, "loadMoreHistory">,
+  count: number,
+  chartIndex?: number,
+  { untilExhausted = false, maxAttempts = MAX_HISTORY_LOAD_ATTEMPTS }:
+    { untilExhausted?: boolean; maxAttempts?: number } = {},
+) {
+  if (!Number.isSafeInteger(count) || count < 0 || (untilExhausted && count === 0)) {
+    throw new Error("additional history count must be a nonnegative safe integer (positive until exhausted)");
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > MAX_HISTORY_LOAD_ATTEMPTS) {
+    throw new Error(`history maxAttempts must be between 1 and ${MAX_HISTORY_LOAD_ATTEMPTS}`);
+  }
+  const loads: HistoryLoadResult[] = [];
+  let addedBars = 0;
+  let initialBars: number | null = null;
+  let previousBars: number | null = null;
+  let consecutiveEmptyLoads = 0;
+  let stopReason: HistoryLoadStopReason = count === 0 ? "requested_count_reached" : "attempt_limit";
+  for (let attempt = 0; attempt < maxAttempts && (untilExhausted || addedBars < count); attempt += 1) {
+    const requested = Math.min(MAX_ADDITIONAL_HISTORY_LOAD_CHUNK, untilExhausted ? count : count - addedBars);
+    const loaded = await tv.loadMoreHistory({ count: requested, chartIndex });
+    loads.push(loaded);
+    if (![loaded.barsBefore, loaded.barsAfter, loaded.added].every(Number.isSafeInteger) ||
+        loaded.barsBefore < 0 || loaded.added < 0 || loaded.barsAfter - loaded.barsBefore !== loaded.added) {
+      throw new Error("history load returned invalid bar counts");
+    }
+    initialBars ??= loaded.barsBefore;
+    previousBars ??= initialBars;
+    if (loaded.barsBefore < previousBars) throw new Error("history shrank between load requests");
+    // A prior asynchronous request can finish after its reply but before this request starts.
+    // Include those bars, even when this request's own added field is zero.
+    const observedGrowth = loaded.barsAfter - previousBars;
+    addedBars = loaded.barsAfter - initialBars;
+    previousBars = loaded.barsAfter;
+    consecutiveEmptyLoads = observedGrowth > 0 ? 0 : consecutiveEmptyLoads + 1;
+    if (!untilExhausted && addedBars >= count) {
+      stopReason = "requested_count_reached";
+      break;
+    }
+    // moreAvailable may be false even on a transient empty response, or while bars are growing.
+    if (consecutiveEmptyLoads >= MAX_CONSECUTIVE_EMPTY_HISTORY_LOADS) {
+      stopReason = "consecutive_empty";
+      break;
+    }
+  }
+  return { loads, addedBars, stopReason, requestedBars: count,
+    requestedCountReached: untilExhausted ? null : addedBars >= count };
+}
+
+export type AdditionalHistoryLoad = Awaited<ReturnType<typeof loadAdditionalHistory>>;
+
+export function summarizeHistoryLoad(history?: AdditionalHistoryLoad | null) {
+  if (!history) return { requestedBars: 0, attempts: 0, addedBars: 0,
+    moreAvailable: null, stopReason: null, requestedCountReached: null };
+  return {
+    requestedBars: history.requestedBars,
+    attempts: history.loads.length,
+    addedBars: history.addedBars,
+    moreAvailable: history.loads.at(-1)?.moreAvailable ?? null,
+    stopReason: history.stopReason,
+    requestedCountReached: history.requestedCountReached,
+  };
+}
 
 export type HistoryCoverage = {
   chartIndex: number;

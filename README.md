@@ -166,6 +166,26 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_key_levels` | Aggregates sourced support and resistance within +/-N% of price |
 | `load_more_history` | Loads additional historical candles without moving the viewport |
 
+`load_more_history` makes one request by default. Set `until_exhausted:true` to continue
+until two consecutive requests add no bars; `count` is then the per-request size (1–5,000).
+`max_attempts` bounds the loop to 1–24 requests (default: 24 in that mode, otherwise 1).
+With `until_exhausted:false` and a larger attempt budget, `count` is the total additional
+bar target, and partial additions reduce the remaining request. The response retains the
+bar fields and adds `attempts`, `historyLoads`, and `stopReason`: `consecutive_empty`,
+`attempt_limit`, or `requested_count_reached`. An unavailable flag or one empty response
+does not prove exhaustion; the two-empty stop describes this observation window only.
+Growth is measured from observed bar counts, including bars arriving between requests;
+aggregate `added` (or a matrix summary's `addedBars`) can therefore exceed the sum of
+the per-request `added` fields. Shrinking or inconsistent counts fail instead of being accumulated. `requestedCountReached`
+reports the total-count target's outcome, or `null` in exhaustion mode. Loader errors are
+returned without retry. `run_strategy_regime_matrix` uses the same two-empty rule at all
+three history-loading sites, with at most 24 requests per site. Each history summary
+retains the stop reason and target outcome; an unmet job or reference request prevents a
+`complete` verdict (`partial` unless another failure blocks it). Shared reference loads
+are reported in `invariantHistoryLoad`
+separately from a reference's per-job `historyLoad`, so reusing a reference is not counted
+as another load. A null stop reason means no local load was performed, not exhaustion.
+
 **Operate charts**
 
 | Tool | Description |

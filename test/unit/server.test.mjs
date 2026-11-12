@@ -35,6 +35,7 @@ import {
 } from "../../build/priceActionContext.js";
 
 function makeDeps(overrides = {}) {
+  const historyBarCounts = new Map();
   return {
     chartOperationLock: overrides.chartOperationLock ?? { acquire: async () => async () => {} },
     cdp: {
@@ -169,14 +170,14 @@ function makeDeps(overrides = {}) {
           ],
         },
       ],
-      loadMoreHistory: async (options) => ({
-        requested: options.count,
-        barsBefore: 300,
-        barsAfter: 300 + options.count,
-        added: options.count,
-        earliestTime: 1,
-        moreAvailable: true,
-      }),
+      loadMoreHistory: async (options) => {
+        const index = options.chartIndex ?? 0;
+        const barsBefore = historyBarCounts.get(index) ?? 300;
+        const barsAfter = barsBefore + options.count;
+        historyBarCounts.set(index, barsAfter);
+        return { requested: options.count, barsBefore, barsAfter, added: options.count,
+          earliestTime: 1, moreAvailable: true };
+      },
       listPineScripts: async () => [
         {
           pineId: "USER;adc40b1dfee344f19412f1ae9af74f3f",
@@ -3024,11 +3025,158 @@ test("get_indicator_tables forwards options and returns grids", async () => {
 });
 
 test("load_more_history forwards count with default", async () => {
-  const client = await connectedClient(makeDeps());
+  const deps = makeDeps();
+  const load = deps.tv.loadMoreHistory;
+  const calls = [];
+  deps.tv.loadMoreHistory = async (options) => { calls.push(options); return load(options); };
+  const client = await connectedClient(deps);
   const res = await client.callTool({ name: "load_more_history", arguments: {} });
   assert.equal(JSON.parse(res.content[0].text).requested, 300);
+  assert.equal(JSON.parse(res.content[0].text).attempts, 1);
   const res2 = await client.callTool({ name: "load_more_history", arguments: { count: 42 } });
   assert.equal(JSON.parse(res2.content[0].text).added, 42);
+  assert.deepEqual(calls, [{ count: 300, chartIndex: undefined }, { count: 42, chartIndex: undefined }]);
+});
+
+test("load_more_history continues after one empty response and stops after two consecutive empty responses", async () => {
+  const additions = [0, 3000, 3294, 0, 0];
+  let calls = 0;
+  let bars = 300;
+  const client = await connectedClient(makeDeps({ tv: {
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      assert.equal(chartIndex, 1);
+      const barsBefore = bars;
+      const added = additions[calls++];
+      assert.notEqual(added, undefined, "must stop at the second consecutive empty response");
+      bars += added;
+      return { requested: count, barsBefore, barsAfter: bars, added,
+        earliestTime: 1, moreAvailable: added === 3000 };
+    },
+  } }));
+  const result = JSON.parse((await client.callTool({ name: "load_more_history", arguments: {
+    count: 5000, chart_index: 1, until_exhausted: true, max_attempts: 8,
+  } })).content[0].text);
+  assert.equal(result.added, 6294);
+  assert.equal(result.barsBefore, 300);
+  assert.equal(result.barsAfter, 6594);
+  assert.equal(result.attempts, 5);
+  assert.equal(result.stopReason, "consecutive_empty");
+  assert.equal(result.historyLoads.length, 5);
+});
+
+test("load_more_history reports the attempt limit while history is still growing", async () => {
+  for (const [maxAttempts, expectedCalls] of [[3, 3], [undefined, 24]]) {
+    let calls = 0;
+    const client = await connectedClient(makeDeps({ tv: {
+      loadMoreHistory: async ({ count }) => {
+        const barsBefore = 300 + calls++;
+        return { requested: count, barsBefore, barsAfter: barsBefore + 1, added: 1,
+          earliestTime: 1, moreAvailable: true };
+      },
+    } }));
+    const result = JSON.parse((await client.callTool({ name: "load_more_history", arguments: {
+      count: 100, until_exhausted: true, ...(maxAttempts === undefined ? {} : { max_attempts: maxAttempts }),
+    } })).content[0].text);
+    assert.equal(calls, expectedCalls);
+    assert.equal(result.added, expectedCalls);
+    assert.equal(result.stopReason, "attempt_limit");
+  }
+});
+
+test("load_more_history reaches the requested count using actual partial additions", async () => {
+  const requests = [];
+  const additions = [0, 4, 6];
+  let bars = 300;
+  const client = await connectedClient(makeDeps({ tv: {
+    loadMoreHistory: async ({ count }) => {
+      const added = additions[requests.length];
+      requests.push(count);
+      assert.notEqual(added, undefined, "must stop once the requested count is reached");
+      const barsBefore = bars;
+      bars += added;
+      return { requested: count, barsBefore, barsAfter: bars, added,
+        earliestTime: 1, moreAvailable: false };
+    },
+  } }));
+  const result = JSON.parse((await client.callTool({ name: "load_more_history", arguments: {
+    count: 10, max_attempts: 5,
+  } })).content[0].text);
+  assert.deepEqual(requests, [10, 10, 6]);
+  assert.equal(result.added, 10);
+  assert.equal(result.attempts, 3);
+  assert.equal(result.stopReason, "requested_count_reached");
+});
+
+test("load_more_history includes bars that arrive between requests in growth and completion", async () => {
+  for (const between of [5, 10]) {
+    const requests = [];
+    const snapshots = [[300, 300], [300 + between, 300 + between], [300 + between, 310]];
+    const client = await connectedClient(makeDeps({ tv: {
+      loadMoreHistory: async ({ count }) => {
+        const [barsBefore, barsAfter] = snapshots[requests.length];
+        requests.push(count);
+        return { requested: count, barsBefore, barsAfter, added: barsAfter - barsBefore,
+          earliestTime: 1, moreAvailable: false };
+      },
+    } }));
+    const result = JSON.parse((await client.callTool({ name: "load_more_history", arguments: {
+      count: 10, max_attempts: 5,
+    } })).content[0].text);
+    assert.deepEqual(requests, between === 10 ? [10, 10] : [10, 10, 5]);
+    assert.equal(result.added, 10);
+    assert.equal(result.barsBefore, 300);
+    assert.equal(result.barsAfter, 310);
+    assert.equal(result.stopReason, "requested_count_reached");
+    assert.equal(result.requestedCountReached, true);
+  }
+});
+
+test("load_more_history resets exhaustion counting for growth between requests", async () => {
+  const snapshots = [[300, 300], [305, 305], [305, 305], [305, 305]];
+  let calls = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    loadMoreHistory: async ({ count }) => {
+      const [barsBefore, barsAfter] = snapshots[calls++];
+      return { requested: count, barsBefore, barsAfter, added: 0, earliestTime: 1, moreAvailable: false };
+    },
+  } }));
+  const result = JSON.parse((await client.callTool({ name: "load_more_history", arguments: {
+    count: 10, until_exhausted: true, max_attempts: 8,
+  } })).content[0].text);
+  assert.equal(calls, 4);
+  assert.equal(result.added, 5);
+  assert.equal(result.barsAfter - result.barsBefore, 5);
+  assert.equal(result.stopReason, "consecutive_empty");
+  assert.equal(result.requestedCountReached, null, "exhaustion mode has no total-count target");
+});
+
+test("load_more_history refuses a history that shrinks between requests without retry", async () => {
+  const snapshots = [[300, 305], [304, 304]];
+  let calls = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    loadMoreHistory: async ({ count }) => {
+      const [barsBefore, barsAfter] = snapshots[calls++];
+      return { requested: count, barsBefore, barsAfter, added: barsAfter - barsBefore,
+        earliestTime: 1, moreAvailable: true };
+    },
+  } }));
+  const result = await client.callTool({ name: "load_more_history", arguments: { count: 10, max_attempts: 5 } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /history shrank between load requests/);
+  assert.equal(calls, 2);
+});
+
+test("load_more_history does not retry a loader exception", async () => {
+  let calls = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    loadMoreHistory: async () => { calls += 1; throw new Error("history loader unavailable"); },
+  } }));
+  const result = await client.callTool({ name: "load_more_history", arguments: {
+    until_exhausted: true, max_attempts: 24,
+  } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /history loader unavailable/);
+  assert.equal(calls, 1);
 });
 
 test("list_pine_scripts and get_pine_source expose own Pine sources", async () => {
@@ -8893,7 +9041,8 @@ test("run_strategy_regime_analysis joins a complete temporary ledger and restore
   assert.equal(requestedOhlcvCount, 200);
 });
 
-test("run_strategy_regime_matrix evaluates serial jobs and restores the original chart", async () => {
+for (const pagingMode of ["normal", "transient", "empty", "partial", "between", "job_limit", "invariant_limit", "switched_limit"]) {
+test(`run_strategy_regime_matrix evaluates serial jobs and restores the original chart (${pagingMode} history)`, async () => {
   const pineId = "USER;regimematrix123";
   const chart = { symbol: "OANDA:USDJPY", resolution: "60" };
   const referenceChart = { symbol: "TVC:DXY", resolution: "60" };
@@ -8902,6 +9051,29 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   let runs = 0;
   let removed = 0;
   const historyLoadsByChart = [];
+  const loadAttempts = new Map();
+  const loadedBars = new Map();
+  const modeFor = (chartIndex, resolution) => {
+    if (pagingMode === "job_limit") return chartIndex === 0 ? "limit" : "normal";
+    if (pagingMode === "invariant_limit") return chartIndex === 1 && resolution === "60" ? "limit" : "normal";
+    if (pagingMode === "switched_limit") return chartIndex === 1 && resolution === "240" ? "limit" : "normal";
+    return pagingMode;
+  };
+  const requestsFor = (mode) => ({
+    normal: [5000, 1000], transient: [5000, 5000, 1000], empty: [5000, 5000],
+    partial: [5000, 5000, 4000, 3000, 2000, 1000], between: [5000, 5000, 3000],
+    limit: Array(24).fill(5000),
+  })[mode];
+  const summaryFor = (mode) => ({
+    requestedBars: 6000, attempts: requestsFor(mode).length,
+    addedBars: mode === "empty" ? 0 : mode === "limit" ? 24 : 6000,
+    moreAvailable: mode !== "empty",
+    stopReason: mode === "empty" ? "consecutive_empty" : mode === "limit" ? "attempt_limit" : "requested_count_reached",
+    requestedCountReached: mode !== "empty" && mode !== "limit",
+  });
+  const primarySummary = summaryFor(modeFor(0, "60"));
+  const invariantSummary = summaryFor(modeFor(1, "60"));
+  const switchedSummary = summaryFor(modeFor(1, "240"));
   const operations = [];
   const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2,
     charts: [{ index: 0, symbol: chart.symbol, resolution: chart.resolution,
@@ -8941,7 +9113,19 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
     },
     loadMoreHistory: async ({ count, chartIndex }) => {
       historyLoadsByChart.push({ count, chartIndex });
-      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+      const source = chartIndex === 0 ? chart : referenceChart;
+      const key = `${chartIndex}:${source.symbol}:${source.resolution}`;
+      const prior = loadAttempts.get(key) ?? 0;
+      loadAttempts.set(key, prior + 1);
+      const mode = modeFor(chartIndex, source.resolution);
+      const barsBefore = (loadedBars.get(key) ?? 300) + (mode === "between" && prior === 1 ? 3000 : 0);
+      const added = mode === "empty" || (mode === "transient" && prior === 0) ? 0
+        : mode === "between" ? (prior === 2 ? 3000 : 0)
+        : mode === "partial" ? Math.min(1000, count) : mode === "limit" ? 1 : count;
+      const barsAfter = barsBefore + added;
+      loadedBars.set(key, barsAfter);
+      return { requested: count, barsBefore, barsAfter, added,
+        moreAvailable: added > 0 && (mode !== "partial" || prior > 0), earliestTime: 1 };
     },
     runBacktest: async () => ((runs += 1), (activePine = pineId), operations.push(`run:${runs}`),
       { studyId: `temporary-${runs}`, pineId, keptOnChart: true, removedFromChart: false,
@@ -9014,20 +9198,25 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   const result = JSON.parse((await client.callTool({
     name: "run_strategy_regime_matrix", arguments: { ...args, confirm: true },
   })).content[0].text);
-  assert.equal(result.status, "complete");
-  assert.deepEqual(result.results.map((row) => row.status), ["complete", "complete"]);
+  const expectedStatus = primarySummary.requestedCountReached && invariantSummary.requestedCountReached ? "complete" : "partial";
+  assert.equal(result.status, expectedStatus);
+  assert.deepEqual(result.results.map((row) => row.status), [expectedStatus, expectedStatus]);
+  for (const row of result.results) {
+    assert.deepEqual(row.regimeEvidence.source.historyLoad, primarySummary);
+    assert.deepEqual(row.correlationEvidence.source.invariantHistoryLoad, invariantSummary);
+    assert.equal(row.qualityIssues.includes("job_history_request_unmet"), !primarySummary.requestedCountReached);
+    assert.equal(row.qualityIssues.includes("reference_history_request_unmet"), !invariantSummary.requestedCountReached);
+  }
   assert.deepEqual(result.results.map((row) => row.evaluation.coverage.joinedTrades), [4, 4]);
   assert.equal(result.results[0].evaluation.overall.profitFactor, 7 / 3);
   assert.equal(result.results[1].evaluation.overall.profitFactor, 11 / 3);
   assert.deepEqual(result.results.map((row) => row.evaluation.bySession.london.trades), [2, 2]);
-  assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.attempts), [2, 2]);
-  assert.deepEqual(result.results.map((row) => row.regimeEvidence.source.historyLoad.addedBars), [6000, 6000]);
   assert.deepEqual(result.correlationReferenceHistoryLoad, {
-    chartIndex: 1, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
+    chartIndex: 1, ...invariantSummary,
   });
-  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1), [
-    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
-  ]);
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1),
+    requestsFor(modeFor(1, "60")).map((count) => ({ count, chartIndex: 1 })));
+  assert.deepEqual(result.invariantReferenceHistoryLoads, [{ chartIndex: 1, ...invariantSummary }]);
   assert.equal(preview.definition.join.sessionMatchPolicy, "first_match_exclusive");
   assert.equal(result.results[0].evaluation.joinContract.sessionMatchPolicy, "first_match_exclusive");
   assert.deepEqual(result.results[0].evaluation.joinContract.sessionPriority, ["london"]);
@@ -9050,15 +9239,17 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
       confirm: true,
     },
   })).content[0].text);
-  assert.equal(mixedTimeframe.status, "complete");
+  const mixedStatus = primarySummary.requestedCountReached && switchedSummary.requestedCountReached ? "complete" : "partial";
+  assert.equal(mixedTimeframe.status, mixedStatus);
+  assert.equal(mixedTimeframe.results[0].status, mixedStatus);
   assert.equal(mixedTimeframe.definition.join.correlationRegime.allowReferenceTimeframeSwitch, true);
   assert.deepEqual(mixedTimeframe.execution.correlationReferenceHistoryLoad, {
     chartIndex: 1, requestedBars: 6000, onceBeforeJobs: false, perJobBeforeCapture: true,
   });
   assert.equal(mixedTimeframe.results[0].correlationEvidence.referenceTimeframeSwitched, true);
-  assert.deepEqual(mixedTimeframe.results[0].correlationEvidence.source.historyLoad, {
-    requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
-  });
+  assert.deepEqual(mixedTimeframe.results[0].correlationEvidence.source.historyLoad, switchedSummary);
+  assert.equal(mixedTimeframe.results[0].correlationEvidence.source.invariantHistoryLoad, null);
+  assert.equal(mixedTimeframe.results[0].qualityIssues.includes("reference_history_request_unmet"), !switchedSummary.requestedCountReached);
   assert.equal(mixedTimeframe.results[0].referenceChartRestored, true);
   assert.equal(mixedTimeframe.chartStateAfter.referenceRestored, true);
   const mixedOperations = operations.slice(operationCountBeforeMixed);
@@ -9067,13 +9258,29 @@ test("run_strategy_regime_matrix evaluates serial jobs and restores the original
   assert.equal(result.chartStateAfter.restored, true);
   assert.equal(runs, 3);
   assert.equal(removed, 3);
-  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1), [
-    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
-    { count: 5000, chartIndex: 1 }, { count: 1000, chartIndex: 1 },
-  ]);
+  assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 1),
+    [...requestsFor(modeFor(1, "60")), ...requestsFor(modeFor(1, "240"))].map((count) => ({ count, chartIndex: 1 })));
   assert.deepEqual(chart, { symbol: "OANDA:USDJPY", resolution: "60" });
   assert.deepEqual(referenceChart, { symbol: "TVC:DXY", resolution: "60" });
+  if (pagingMode === "normal") {
+    const sharedPane = JSON.parse((await client.callTool({ name: "run_strategy_regime_matrix", arguments: {
+      ...args,
+      correlation_regime: { ...args.correlation_regime, allow_reference_timeframe_switch: true },
+      jobs: [{ symbol: "OANDA:EURUSD", timeframe: "60", pine_id: pineId },
+        { symbol: "OANDA:XAUUSD", timeframe: "240", pine_id: pineId }],
+      confirm: true,
+    } })).content[0].text);
+    assert.equal(sharedPane.status, "partial");
+    assert.equal(sharedPane.results[0].status, "partial");
+    assert.ok(sharedPane.results[0].qualityIssues.includes("reference_history_not_loaded"));
+    assert.equal(sharedPane.results[0].correlationEvidence.source.historyLoad.stopReason, null);
+    assert.equal(sharedPane.results[0].correlationEvidence.source.invariantHistoryLoad, null);
+    assert.equal(sharedPane.results[1].status, "complete");
+    assert.equal(sharedPane.results[1].correlationEvidence.source.historyLoad.requestedCountReached, true);
+    assert.equal(sharedPane.chartStateAfter.restored, true);
+  }
 });
+}
 
 test("run_strategy_regime_matrix stops remaining jobs after a chart restore failure", async () => {
   const pineId = "USER;regimerestore123";
@@ -9201,6 +9408,10 @@ test("input validation rejects out-of-range or wrong-typed arguments before the 
     { name: "get_indicator_graphics", arguments: { limit_per_kind: 501 } },
     { name: "load_more_history", arguments: { count: 5001 } },
     { name: "load_more_history", arguments: { count: "many" } },
+    { name: "load_more_history", arguments: { until_exhausted: "yes" } },
+    { name: "load_more_history", arguments: { max_attempts: 0 } },
+    { name: "load_more_history", arguments: { max_attempts: 25 } },
+    { name: "load_more_history", arguments: { max_attempts: 1.5 } },
     { name: "get_indicator_tables", arguments: { study_id: "has space" } },
     { name: "get_indicator_tables", arguments: { chart_index: -1 } },
     { name: "get_key_levels", arguments: { range_percent: 0 } },
@@ -9462,6 +9673,7 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
   let removed = 0;
   let activePine = null;
   const historyLoadsByChart = [];
+  const loadedBarsByChart = new Map();
   const paneFor = (chartIndex) => (chartIndex === 0 ? chart : referencePanes.get(chartIndex));
   const context = () => ({
     layoutName: "test", activeChartIndex: 0, chartsCount: 3,
@@ -9499,7 +9711,10 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
     },
     loadMoreHistory: async ({ count, chartIndex }) => {
       historyLoadsByChart.push({ count, chartIndex });
-      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+      const barsBefore = loadedBarsByChart.get(chartIndex) ?? 300;
+      const barsAfter = barsBefore + count;
+      loadedBarsByChart.set(chartIndex, barsAfter);
+      return { requested: count, barsBefore, barsAfter, added: count, moreAvailable: true };
     },
     runBacktest: async () => ((runs += 1), (activePine = pineId),
       { studyId: `temporary-${runs}`, pineId, keptOnChart: true, removedFromChart: false,
@@ -9570,8 +9785,10 @@ test("run_strategy_regime_matrix loads history once for every invariant referenc
   assert.deepEqual(historyLoadsByChart.filter((load) => load.chartIndex === 2),
     [{ count: 5000, chartIndex: 2 }, { count: 1000, chartIndex: 2 }]);
   assert.deepEqual(result.invariantReferenceHistoryLoads, [
-    { chartIndex: 1, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true },
-    { chartIndex: 2, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true },
+    { chartIndex: 1, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
+      stopReason: "requested_count_reached", requestedCountReached: true },
+    { chartIndex: 2, requestedBars: 6000, attempts: 2, addedBars: 6000, moreAvailable: true,
+      stopReason: "requested_count_reached", requestedCountReached: true },
   ]);
 
   assert.deepEqual(result.results.map((row) => row.correlationEvidence.referenceSymbol),

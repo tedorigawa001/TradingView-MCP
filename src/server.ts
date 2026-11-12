@@ -142,7 +142,8 @@ import {
   validateAnalysisPayload,
 } from "./analysisOverlay.js";
 import { computeAnalysisPathMetrics, evaluateAnalysisOverlayOutcome } from "./analysisOutcome.js";
-import { loadRequiredHistory } from "./chartHistory.js";
+import { loadAdditionalHistory, loadRequiredHistory, MAX_HISTORY_LOAD_ATTEMPTS,
+  summarizeHistoryLoad, type AdditionalHistoryLoad } from "./chartHistory.js";
 import {
   VOLUME_PROFILE_CONTEXT_INPUTS,
   VOLUME_PROFILE_CONTEXT_NAME,
@@ -2702,23 +2703,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const deadline = startedAt + maxRuntimeSeconds * 1000;
         let abortReason: string | null = null;
         const results: Array<Record<string, unknown>> = [];
-        const correlationReferenceHistoryLoads = [];
-
-        const invariantReferenceHistoryLoadsByChart = new Map<number, Awaited<ReturnType<typeof tv.loadMoreHistory>>[]>();
+        const invariantReferenceHistoryLoadsByChart = new Map<number, AdditionalHistoryLoad>();
         for (const refIdx of invariantReferenceChartIndices) {
-          const loads: Awaited<ReturnType<typeof tv.loadMoreHistory>>[] = [];
-          let remainingReferenceHistoryBars = loadMoreBars;
-          while (remainingReferenceHistoryBars > 0) {
-            const requested = Math.min(5_000, remainingReferenceHistoryBars);
-            const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: refIdx });
-            loads.push(loaded);
-            remainingReferenceHistoryBars -= requested;
-            if (loaded.moreAvailable === false || loaded.added === 0) break;
-          }
-          invariantReferenceHistoryLoadsByChart.set(refIdx, loads);
-          if (correlation_regime !== undefined && refIdx === correlation_regime.reference_chart_index) {
-            correlationReferenceHistoryLoads.push(...loads);
-          }
+          const historyLoad = await loadAdditionalHistory(tv, loadMoreBars, refIdx);
+          invariantReferenceHistoryLoadsByChart.set(refIdx, historyLoad);
         }
 
         for (const job of resolvedJobs) {
@@ -2749,15 +2737,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             initialChart.index,
             { symbol: job.symbol, resolution: job.timeframe },
             async () => {
-              const historyLoads = [];
-              let remainingHistoryBars = loadMoreBars;
-              while (remainingHistoryBars > 0) {
-                const requested = Math.min(5_000, remainingHistoryBars);
-                const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: initialChart.index });
-                historyLoads.push(loaded);
-                remainingHistoryBars -= requested;
-                if (loaded.moreAvailable === false || loaded.added === 0) break;
-              }
+              const historyLoad = await loadAdditionalHistory(tv, loadMoreBars, initialChart.index);
               const history = await tv.getOhlcv(regimeDefinition.count, initialChart.index);
               if (history.symbol.toUpperCase() !== job.symbol ||
                   normalizeResolution(history.resolution) !== job.timeframe) {
@@ -2777,7 +2757,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               );
               let correlationCapture: {
                 evidence: Awaited<ReturnType<typeof readStrategyCorrelationRegime>>;
-                historyLoads: Awaited<ReturnType<typeof tv.loadMoreHistory>>[];
+                historyLoad: AdditionalHistoryLoad | null;
                 referenceTimeframeSwitched: boolean;
                 referenceSymbolSwitched: boolean;
               } | null = null;
@@ -2802,15 +2782,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                     corr.referenceChartIndex,
                     { symbol: targetRefSymbol, resolution: targetRefResolution },
                     async () => {
-                      const referenceHistoryLoads = [];
-                      let remainingReferenceHistoryBars = loadMoreBars;
-                      while (remainingReferenceHistoryBars > 0) {
-                        const requested = Math.min(5_000, remainingReferenceHistoryBars);
-                        const loaded = await tv.loadMoreHistory({ count: requested, chartIndex: corr.referenceChartIndex });
-                        referenceHistoryLoads.push(loaded);
-                        remainingReferenceHistoryBars -= requested;
-                        if (loaded.moreAvailable === false || loaded.added === 0) break;
-                      }
+                      const historyLoad = await loadAdditionalHistory(tv, loadMoreBars, corr.referenceChartIndex);
                       const evidence = await readStrategyCorrelationRegime(
                         {
                           reference_chart_index: corr.referenceChartIndex,
@@ -2823,7 +2795,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                         },
                         primaryBinding,
                       );
-                      return { evidence, historyLoads: referenceHistoryLoads };
+                      return { evidence, historyLoad };
                     },
                   );
                   if (referenceTransaction.operationError || !referenceTransaction.restored || !referenceTransaction.value) {
@@ -2844,7 +2816,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                   }
                   correlationCapture = {
                     evidence: referenceTransaction.value.evidence,
-                    historyLoads: referenceTransaction.value.historyLoads,
+                    historyLoad: referenceTransaction.value.historyLoad,
                     referenceTimeframeSwitched: needsTimeframeSwitch,
                     referenceSymbolSwitched: needsSymbolSwitch,
                   };
@@ -2865,7 +2837,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                       },
                       primaryBinding,
                     ),
-                    historyLoads: [],
+                    historyLoad: null,
                     referenceTimeframeSwitched: false,
                     referenceSymbolSwitched: false,
                   };
@@ -2885,7 +2857,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                   neutralThreshold: correlationCapture.evidence.definition.neutralThreshold,
                 },
               }) : null;
-              return { historyLoads, history, regimes, correlationCapture, run, evaluation };
+              return { historyLoad, history, regimes, correlationCapture, run, evaluation };
             },
           );
           let afterJob: ReturnType<typeof chartFingerprint> | null = null;
@@ -2921,10 +2893,17 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               : String(transaction.operationError))
             : null;
           const value = transaction.value;
+          const referenceHistoryLoad = value?.correlationCapture
+            ? value.correlationCapture.historyLoad ?? invariantReferenceHistoryLoadsByChart.get(
+              value.correlationCapture.evidence.definition.referenceChartIndex)
+            : undefined;
           const qualityIssues = [...new Set([
             ...(value?.regimes.qualityIssues ?? []),
             ...(value?.correlationCapture?.evidence.correlation.qualityIssues ?? []),
             ...(value?.evaluation?.qualityIssues ?? []),
+            ...(value && !value.historyLoad.requestedCountReached ? ["job_history_request_unmet"] : []),
+            ...(referenceHistoryLoad && !referenceHistoryLoad.requestedCountReached ? ["reference_history_request_unmet"] : []),
+            ...(value?.correlationCapture && loadMoreBars > 0 && !referenceHistoryLoad ? ["reference_history_not_loaded"] : []),
             ...(operationError || value?.run.error || !value?.run.evidence ? ["strategy_or_regime_evidence_unavailable"] : []),
             ...(value?.run.cleanupError ? ["strategy_cleanup_failed"] : []),
             ...(chartRestored ? [] : ["chart_state_restore_failed"]),
@@ -2969,12 +2948,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               distribution: value.regimes.distribution,
               source: {
                 requestedBars: regimeDefinition.count,
-                historyLoad: {
-                  requestedBars: loadMoreBars,
-                  attempts: value.historyLoads.length,
-                  addedBars: value.historyLoads.reduce((sum, load) => sum + load.added, 0),
-                  moreAvailable: value.historyLoads.at(-1)?.moreAvailable ?? null,
-                },
+                historyLoad: summarizeHistoryLoad(value.historyLoad),
                 returnedBars: value.history.bars.length,
                 from: value.history.bars[0]?.timeIso ?? null,
                 to: value.history.bars.at(-1)?.timeIso ?? null,
@@ -2990,12 +2964,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               qualityIssues: value.correlationCapture.evidence.correlation.qualityIssues,
               referenceTimeframeSwitched: value.correlationCapture.referenceTimeframeSwitched,
               source: {
-                historyLoad: {
-                  requestedBars: value.correlationCapture.referenceTimeframeSwitched ? loadMoreBars : 0,
-                  attempts: value.correlationCapture.historyLoads.length,
-                  addedBars: value.correlationCapture.historyLoads.reduce((sum, load) => sum + load.added, 0),
-                  moreAvailable: value.correlationCapture.historyLoads.at(-1)?.moreAvailable ?? null,
-                },
+                historyLoad: summarizeHistoryLoad(value.correlationCapture.historyLoad),
+                invariantHistoryLoad: invariantReferenceHistoryLoadsByChart.has(
+                  value.correlationCapture.evidence.definition.referenceChartIndex)
+                  ? summarizeHistoryLoad(invariantReferenceHistoryLoadsByChart.get(
+                    value.correlationCapture.evidence.definition.referenceChartIndex)) : null,
               },
             },
             evaluation: value?.evaluation ?? null,
@@ -3048,21 +3021,16 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             ...(correlation_regime !== undefined ? { chartIndex: correlation_regime.reference_chart_index } : { referenceChartIndices: [...initialReferenceCharts.keys()] }),
             requestedBars: loadMoreBars,
             ...(onceBeforeJobs ? {
-              attempts: correlationReferenceHistoryLoads.length,
-              addedBars: correlationReferenceHistoryLoads.reduce((sum, load) => sum + load.added, 0),
-              moreAvailable: correlationReferenceHistoryLoads.at(-1)?.moreAvailable ?? null,
+              ...summarizeHistoryLoad(invariantReferenceHistoryLoadsByChart.get(
+                correlation_regime!.reference_chart_index)),
             } : {
               perJobBeforeCapture,
             }),
           },
           invariantReferenceHistoryLoads: invariantReferenceChartIndices.map((chartIndex) => {
-            const loads = invariantReferenceHistoryLoadsByChart.get(chartIndex) ?? [];
             return {
               chartIndex,
-              requestedBars: loadMoreBars,
-              attempts: loads.length,
-              addedBars: loads.reduce((sum, load) => sum + load.added, 0),
-              moreAvailable: loads.at(-1)?.moreAvailable ?? null,
+              ...summarizeHistoryLoad(invariantReferenceHistoryLoadsByChart.get(chartIndex)),
             };
           }),
           chartStateAfter: {
@@ -3311,7 +3279,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Load more historical bars into a TradingView chart (like scrolling left), so that " +
         "get_ohlcv and get_indicator_values can see further back. The visible chart view is " +
-        "not changed. Returns how many bars were added and the new earliest bar time.",
+        "not changed. By default makes one request. until_exhausted=true continues until two consecutive " +
+        "requests add no bars, bounded by max_attempts. Returns aggregate growth, each load and stopReason " +
+        "(consecutive_empty, attempt_limit, requested_count_reached); exhaustion is local to these attempts.",
       inputSchema: {
         count: z
           .number()
@@ -3326,14 +3296,30 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .min(0)
           .optional()
           .describe("Chart index in a multi-chart layout. Default: the active chart"),
+        until_exhausted: z.boolean().optional()
+          .describe("Repeat count-sized requests until two consecutive loads add no bars. Default: false"),
+        max_attempts: z.number().int().min(1).max(MAX_HISTORY_LOAD_ATTEMPTS).optional()
+          .describe("Default: 24 with until_exhausted, otherwise 1. With until_exhausted=false, repeat only until count bars have been added"),
       },
     },
-    async ({ count, chart_index }) =>
+    async ({ count, chart_index, until_exhausted, max_attempts }) =>
       chartOperations.run(async () => {
         try {
-        return jsonResult(
-          await tv.loadMoreHistory({ count: count ?? 300, chartIndex: chart_index }),
-        );
+        const requested = count ?? 300;
+        const history = await loadAdditionalHistory(tv, requested, chart_index, {
+          untilExhausted: until_exhausted,
+          maxAttempts: max_attempts ?? (until_exhausted ? MAX_HISTORY_LOAD_ATTEMPTS : 1),
+        });
+        return jsonResult({
+          ...history.loads.at(-1)!,
+          requested,
+          barsBefore: history.loads[0].barsBefore,
+          added: history.addedBars,
+          attempts: history.loads.length,
+          stopReason: history.stopReason,
+          requestedCountReached: history.requestedCountReached,
+          historyLoads: history.loads,
+        });
         } catch (err) {
           return errorResult(err);
         }
