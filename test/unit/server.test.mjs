@@ -3,6 +3,7 @@ import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -414,6 +415,10 @@ function makeDeps(overrides = {}) {
       compare: async (references) => ({ comparable: true, incompatibilities: [], experiments: references }),
       findHypothesis: async () => { throw new Error('unexpected research journal hypothesis lookup'); },
       ...overrides.researchJournal,
+    },
+    measurementJournal: overrides.measurementJournal ?? {
+      registerMeasurementHypothesis: async () => { throw new Error("unexpected measurement registration"); },
+      getMeasurementHypothesis: async () => { throw new Error("unexpected measurement lookup"); },
     },
     // Collecting first-seen open interest is optional, so it is only present when a test asks for it.
     ...(overrides.futuresOpenInterestHistory
@@ -1243,7 +1248,7 @@ test('OOS preflight returns refusal or review without accessing charts, and prop
   assert.equal(chartCalls,0);
 });
 
-test("exposes exactly the one hundred twenty-three expected tools", async () => {
+test("exposes exactly the expected tools including the indicator table study", async () => {
   const client = await connectedClient(makeDeps());
   const { tools } = await client.listTools();
   assert.deepEqual(
@@ -1308,6 +1313,7 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "get_indicator_values",
       "get_key_levels",
       "get_market_snapshot",
+      "get_measurement_hypothesis",
       "get_moving_average_context",
       "get_mtf_overview",
       "get_native_bar_history",
@@ -1349,6 +1355,7 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "record_strategy_experiment",
       "recover_native_bar_clock_ahead",
       "register_event_study_hypothesis",
+      "register_measurement_hypothesis",
       "register_strategy_hypothesis",
       "remove_owned_study",
       "run_backtest",
@@ -1358,6 +1365,7 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "run_external_label_study",
       "run_feature_outcome_falsification_audit",
       "run_feature_outcome_power_audit",
+      "run_indicator_table_study",
       "run_lead_lag_falsification_audit",
       "run_market_event_study",
       "run_price_action_pattern_study",
@@ -1383,6 +1391,60 @@ test("exposes exactly the one hundred twenty-three expected tools", async () => 
       "validate_trade_plan",
     ],
   );
+});
+
+test("run_indicator_table_study validates scope, previews by default and captures under one lock through cleanup", async () => {
+  const pineId = "USER;abcdefgh12345678";
+  const charts = [
+    { index: 0, symbol: "TVC:DXY", resolution: "1D", studies: [] },
+    { index: 1, symbol: "OANDA:USDJPY", resolution: "240", studies: [{ id: "keep", name: "Existing" }] },
+  ];
+  const original = structuredClone(charts);
+  const operations = [];
+  let held = false;
+  let locks = 0;
+  const assertScope = (index) => { assert.equal(index, 1); assert.equal(held, true); };
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { assert.equal(held, false); held = true; locks++; return async () => { held = false; }; } },
+    tv: {
+      getChartContext: async () => { assert.equal(held, true); return structuredClone({ layoutName: "study", activeChartIndex: 0, chartsCount: 2, charts }); },
+      listPineScripts: async () => [{ pineId, name: "Measure", kind: "study", version: "8.0", usedBy: [] }],
+      getPineSource: async (id, version) => ({ pineId: id, name: "Measure", kind: "study", version, source: "//@version=6\nindicator('Measure')" }),
+      setSymbol: async (symbol, index) => { assertScope(index); charts[index].symbol = symbol; operations.push("symbol"); return { ...charts[index] }; },
+      setResolution: async (resolution, index) => { assertScope(index); charts[index].resolution = resolution; operations.push("timeframe"); return { ...charts[index] }; },
+      loadMoreHistory: async ({ count, chartIndex }) => { assertScope(chartIndex); operations.push("load");
+        return { requested: count, barsBefore: 300, barsAfter: 300, added: 0, earliestTime: 100, moreAvailable: false }; },
+      addPineToChart: async (id, index, version) => { assertScope(index); assert.equal(id, pineId); assert.equal(version, "7.0");
+        operations.push("add"); charts[index].studies.push({ id: "new", name: "Measure" });
+        return { studyId: "new", isStrategy: false, chartIndex: index, version }; },
+      getPineStudyStatus: async (id, index) => { assertScope(index); return { studyId: id, pineId, pineVersion: "7.0", loading: false,
+        chartIndex: index, symbol: charts[index].symbol, resolution: charts[index].resolution, barsCount: 300, earliestTime: 100, latestTime: 200 }; },
+      getIndicatorInputs: async ({ studyId, chartIndex }) => { assertScope(chartIndex); return [{ id: studyId, name: "Measure", title: "Measure", inputs: [] }]; },
+      getIndicatorTables: async ({ studyId, chartIndex }) => { assertScope(chartIndex); operations.push("table");
+        return [{ id: studyId, name: "Measure", tables: [{ id: 1, position: "top_right", rows: 1, columns: 1, cellCount: 1, grid: [["OK"]] }] }]; },
+      removePineFromChart: async (id, studyId, index) => { assertScope(index); assert.equal(id, pineId); assert.equal(studyId, "new");
+        operations.push("remove"); charts[index].studies = charts[index].studies.filter(study => study.id !== studyId);
+        return { removed: true, studyId, pineId: id, pineVersion: "7.0", name: "Measure", chartIndex: index }; },
+    },
+  }));
+  const args = { pine_id: pineId, pine_version: "7.0", chart_index: 1,
+    expected_symbol: "OANDA:USDJPY", expected_timeframe: "240", timeframe: "61",
+    symbols: [{ symbol: "OANDA:EURUSD", expected_cells: [{ table_index: 0, row: 0, column: 0, text: "OK" }] }] };
+  const preview = JSON.parse((await client.callTool({ name: "run_indicator_table_study", arguments: args })).content[0].text);
+  assert.equal(preview.status, "preview"); assert.deepEqual(operations, []); assert.equal(held, false);
+  const response = await client.callTool({ name: "run_indicator_table_study", arguments: { ...args, confirm: true } });
+  assert.notEqual(response.isError, true, response.content[0].text);
+  const captured = JSON.parse(response.content[0].text);
+  assert.equal(captured.status, "complete"); assert.equal(captured.jobs[0].markerChecks[0].matched, true);
+  assert.match(captured.jobs[0].tables[0].sha256, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(operations.filter(op => op === "table").length, 1);
+  assert.equal(operations.filter(op => op === "remove").length, 1);
+  assert.deepEqual(charts, original); assert.equal(held, false); assert.equal(locks, 2);
+  for (const patch of [{ chart_index: undefined }, { pine_version: "last" }, { keep_on_chart: true }]) {
+    const refused = await client.callTool({ name: "run_indicator_table_study", arguments: { ...args, ...patch, confirm: true } });
+    assert.equal(refused.isError, true);
+  }
+  assert.equal(locks, 2, "invalid requests must be rejected before the handler or lock runs");
 });
 
 test("Bookmap flow price preflight binds EURUSD M1 and reads only the configured local evidence session", async () => {
@@ -1695,7 +1757,7 @@ async function nativeMcpFixture(t, hooks = {}) {
 test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
   const client = await connectedClient(makeDeps()); t.after(() => client.close());
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 132);
+  assert.equal(tools.length, 135);
   for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
     "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
     assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
@@ -3088,7 +3150,11 @@ test("get_indicator_graphics forwards options with defaults applied", async () =
 });
 
 test("get_indicator_tables forwards options and returns grids", async () => {
-  const client = await connectedClient(makeDeps());
+  const deps = makeDeps();
+  const read = deps.tv.getIndicatorTables;
+  let reads = 0;
+  deps.tv.getIndicatorTables = async (options) => { reads++; return read(options); };
+  const client = await connectedClient(deps);
   const res = await client.callTool({
     name: "get_indicator_tables",
     arguments: { study_id: "st1", chart_index: 1 },
@@ -3096,6 +3162,32 @@ test("get_indicator_tables forwards options and returns grids", async () => {
   const [study] = JSON.parse(res.content[0].text);
   assert.deepEqual(study.options, { studyId: "st1", chartIndex: 1 });
   assert.deepEqual(study.tables[0].grid[1], ["Predict", "UP"]);
+  assert.equal(reads, 1);
+  const table = study.tables[0];
+  assert.equal(table.hashSchema, "indicator_table_v1");
+  const canonical = JSON.stringify({ id: table.id, position: table.position, rows: table.rows,
+    columns: table.columns, cellCount: table.cellCount, grid: table.grid, tooltips: [] });
+  assert.equal(table.sha256, `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`);
+});
+
+test("get_indicator_tables retains incomplete-table details with null hashes and does not reread", async () => {
+  let reads = 0;
+  const table = { id: 1, position: "top_right", rows: 1, columns: 1, cellCount: 1, grid: [["OK"]] };
+  const client = await connectedClient(makeDeps({ tv: {
+    getIndicatorTables: async () => { reads++; return [
+      { id: "st1", name: "Mixed", tables: [table, { ...table, id: 2, error: "unreadable" },
+        { ...table, id: 3, grid: [["x".repeat(200) + "…(truncated)"]] }] },
+      { id: "st2", name: "Error", error: "graphics unavailable", tables: [table] },
+    ]; },
+  } }));
+  const response = await client.callTool({ name: "get_indicator_tables", arguments: {} });
+  assert.notEqual(response.isError, true, response.content[0].text);
+  const result = JSON.parse(response.content[0].text);
+  assert.equal(reads, 1); assert.equal(result.length, 2);
+  assert.match(result[0].tables[0].sha256, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(result[0].tables[1].sha256, null); assert.equal(result[0].tables[1].error, "unreadable");
+  assert.equal(result[0].tables[2].sha256, null);
+  assert.equal(result[1].tables[0].sha256, null); assert.equal(result[1].error, "graphics unavailable");
 });
 
 test("load_more_history forwards count with default", async () => {
@@ -3267,6 +3359,22 @@ test("list_pine_scripts and get_pine_source expose own Pine sources", async () =
   const parsed = JSON.parse(res2.content[0].text);
   assert.equal(parsed.pineId, script.pineId);
   assert.match(parsed.source, /^\/\/@version=5/);
+  assert.equal(parsed.sourceHashSchema, "pine_source_lf_v1");
+  assert.equal(parsed.sourceSha256, `sha256:${createHash("sha256").update(parsed.source.replace(/\r\n/g, "\n"), "utf8").digest("hex")}`);
+});
+
+test("get_pine_source hashes one returned snapshot and preserves its original CRLF, Unicode and version", async () => {
+  const source = '\uFEFF//@version=6\r\nindicator("測定")\r\n// keep spaces  \r\n';
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getPineSource: async (pineId, version) => { reads++; assert.equal(version, "last");
+      return { pineId, version: "7.0", name: "測定", kind: "study", sourceLength: source.length, source, updated: null }; },
+  } }));
+  const response = await client.callTool({ name: "get_pine_source", arguments: { pine_id: "USER;abcdefgh12345678" } });
+  const value = JSON.parse(response.content[0].text);
+  assert.equal(value.source, source); assert.equal(value.version, "7.0"); assert.equal(reads, 1);
+  assert.equal(value.sourceHashSchema, "pine_source_lf_v1");
+  assert.equal(value.sourceSha256, `sha256:${createHash("sha256").update(source.replace(/\r\n/g, "\n"), "utf8").digest("hex")}`);
 });
 
 test("save_pine_script defaults to a dry run; confirm must be explicit", async () => {
@@ -3278,6 +3386,10 @@ test("save_pine_script defaults to a dry run; confirm must be explicit", async (
   const dry = JSON.parse(res.content[0].text);
   assert.equal(dry.dryRun, true, "omitting confirm must not write");
   assert.equal(dry.options.confirm, false);
+  const expectedHash = `sha256:${createHash("sha256").update("//@version=5\nplot(close)", "utf8").digest("hex")}`;
+  assert.equal(dry.sourceHashSchema, "pine_source_lf_v1");
+  assert.equal(dry.submittedSourceSha256, expectedHash);
+  assert.equal(dry.sourceSha256, null, "a preview must never claim a persisted source hash");
 
   const res2 = await client.callTool({
     name: "save_pine_script",
@@ -3291,6 +3403,39 @@ test("save_pine_script defaults to a dry run; confirm must be explicit", async (
   assert.equal(saved.saved, true);
   assert.equal(saved.action, "new_version");
   assert.equal(saved.options.pineId, "USER;adc40b1dfee344f19412f1ae9af74f3f");
+  assert.equal(saved.sourceHashSchema, "pine_source_lf_v1");
+  assert.equal(saved.submittedSourceSha256, expectedHash);
+  assert.equal(saved.sourceSha256, expectedHash);
+});
+
+test("save_pine_script publishes a saved-source hash only for a verified persisted readback", async () => {
+  const source = '//@version=6\r\nindicator("測定")\r\n';
+  let saves = 0;
+  let reads = 0;
+  const states = [
+    { dryRun: false, saved: false, verified: false, compileOk: true },
+    { dryRun: false, saved: true, verified: false, compileOk: true },
+    { dryRun: false, saved: false, verified: true, compileOk: true },
+    { dryRun: false, saved: true, verified: true, compileOk: false },
+  ];
+  const client = await connectedClient(makeDeps({ tv: {
+    savePineScript: async (options) => { assert.equal(options.source, source); assert.equal(options.confirm, true);
+      return { ...states[saves++], action: "new_version", pineId: "USER;abcdefgh12345678", version: "7.0",
+        name: "測定", compileErrors: [], compileWarnings: [] }; },
+    getPineSource: async () => { reads++; throw new Error("no additional source retrieval permitted"); },
+  } }));
+  const expected = `sha256:${createHash("sha256").update(source.replace(/\r\n/g, "\n"), "utf8").digest("hex")}`;
+  for (const state of states) {
+    const response = await client.callTool({ name: "save_pine_script", arguments: {
+      source, pine_id: "USER;abcdefgh12345678", confirm: true,
+    } });
+    assert.notEqual(response.isError, true, response.content[0].text);
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.submittedSourceSha256, expected);
+    assert.equal(result.sourceSha256, state.saved && state.verified ? expected : null);
+    assert.equal(result.compileOk, state.compileOk); assert.equal(result.verified, state.verified);
+  }
+  assert.equal(saves, states.length); assert.equal(reads, 0);
 });
 
 test("add_pine_to_chart and get_pine_source version forward correctly", async () => {
@@ -6281,6 +6426,104 @@ test("strategy research journal tools map immutable records without chart access
   assert.equal(JSON.parse(eventCompared.content[0].text).comparable, true);
   assert.equal(calls[3][0], "event-hypothesis");
   assert.equal(calls[5][0], "event-compare");
+});
+
+test("106-4 measurement tools register and read definitions without trading fields or chart access", async (t) => {
+  const { StrategyResearchJournalStore } = await import("../../build/strategyResearchJournal.js");
+  const directory = await mkdtemp(join(tmpdir(), "measurement-tools-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const measurementFile = join(directory, "measurement.jsonl");
+  const legacyFile = join(directory, "legacy.jsonl");
+  const legacyBytes = await readFile(new URL("../fixtures/research-journal-pre1064.jsonl", import.meta.url));
+  await writeFile(legacyFile, legacyBytes, { mode: 0o600 });
+  const untouched = () => { throw new Error("measurement must not touch chart, network, chart lock or strategy journal"); };
+  const measurementJournal = new StrategyResearchJournalStore(measurementFile);
+  const client = await connectedClient(makeDeps({
+    measurementJournal,
+    researchJournal: { registerHypothesis: untouched, registerEventHypothesis: untouched, recordExperiment: untouched, recordEventStudy: untouched },
+    tv: { getChartContext: untouched, getOhlcv: untouched, getPineSource: untouched, getIndicatorTables: untouched },
+    cdp: { evaluate: untouched }, chartOperationLock: { acquire: untouched },
+  }));
+  t.after(() => client.close());
+  const args = {
+    hypothesis_id: "measurement-only", title: "No trading rules", thesis: "Measure a predeclared statistical family.",
+    evaluation_contract: {
+      population: "in_sample", primary_metric: "t_statistic", minimum_observations: 30,
+      observation_unit: "One non-overlapping quarter per symbol.",
+      family_definition: "Two symbol tests, two-sided, Holm adjustment.",
+      decision_rule: "Family-wise alpha 0.05; insufficient observations are inconclusive.",
+      symbols: ["oanda:xauusd", "OANDA:EURUSD"], timeframes: ["61"],
+    },
+  };
+  const call = async (name, arguments_) => {
+    const result = await client.callTool({ name, arguments: arguments_ });
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return JSON.parse(result.content[0].text);
+  };
+  const first = await call("register_measurement_hypothesis", args);
+  assert.equal(first.recorded, true);
+  assert.equal(first.entry.kind, "measurement_hypothesis_registered");
+  assert.equal(first.entry.payload.definitionSchema, "measurement_hypothesis_v1");
+  assert.equal(first.entry.payload.evaluationContract.primaryMetric, "t_statistic");
+  assert.equal(first.entry.payload.evaluationContract.minimumObservations, 30);
+  assert.deepEqual(first.entry.payload.evaluationContract.symbols, ["OANDA:EURUSD", "OANDA:XAUUSD"]);
+  assert.equal(Object.hasOwn(first.entry.payload.evaluationContract, "minimumTrades"), false);
+  assert.equal((await call("register_measurement_hypothesis", args)).idempotent, true);
+  assert.deepEqual(await call("get_measurement_hypothesis", { hypothesis_id: args.hypothesis_id }), first.entry);
+  assert.equal(await call("get_measurement_hypothesis", { hypothesis_id: "missing" }), null);
+  const conflict = await client.callTool({ name: "register_measurement_hypothesis", arguments: { ...args, thesis: "Different" } });
+  assert.equal(conflict.isError, true);
+  assert.match(conflict.content[0].text, /different definition/);
+  const before = await readFile(measurementFile);
+  for (const invalid of [
+    { ...args, parent_experiment_id: "sha256:" + "a".repeat(64) },
+    ...[ ["minimum_trades", 30], ["primary_metric", "profitFactor"], ["decision_rule", " "],
+      ["minimum_observations", 0], ["minimum_observations", "30"] ].map(([key, value]) =>
+      ({ ...args, evaluation_contract: { ...args.evaluation_contract, [key]: value } })),
+    { ...args, evaluation_contract: { ...args.evaluation_contract, observation_unit: undefined } },
+  ]) {
+    const rejected = await client.callTool({ name: "register_measurement_hypothesis", arguments: invalid });
+    assert.equal(rejected.isError, true, JSON.stringify(invalid));
+  }
+  assert.deepEqual(await readFile(measurementFile), before);
+  assert.deepEqual(await readFile(legacyFile), legacyBytes);
+  assert.equal((await measurementJournal.findHypothesis("strategy", args.hypothesis_id)), null);
+  const tools = (await client.listTools()).tools;
+  const registerTool = tools.find(({ name }) => name === "register_measurement_hypothesis");
+  assert.equal(registerTool.inputSchema.additionalProperties, false);
+  assert.equal(registerTool.inputSchema.properties.evaluation_contract.additionalProperties, false);
+  assert.equal(tools.find(({ name }) => name === "get_measurement_hypothesis").annotations.readOnlyHint, true);
+});
+
+test("106-4 default measurement routing leaves the configured legacy journal unchanged", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "measurement-default-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const legacyPath = join(directory, "strategy.jsonl");
+  const measurementPath = join(directory, "measurement.jsonl");
+  const bytes = await readFile(new URL("../fixtures/research-journal-pre1064.jsonl", import.meta.url));
+  await writeFile(legacyPath, bytes, { mode: 0o600 });
+  const variables = {
+    TRADINGVIEW_MCP_STRATEGY_RESEARCH_JOURNAL_PATH: legacyPath,
+    TRADINGVIEW_MCP_MEASUREMENT_RESEARCH_JOURNAL_PATH: measurementPath,
+  };
+  for (const [name, value] of Object.entries(variables)) {
+    const previous = process.env[name];
+    process.env[name] = value;
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+  }
+  const deps = makeDeps();
+  delete deps.measurementJournal;
+  const client = await connectedClient(deps);
+  t.after(() => client.close());
+  const result = await client.callTool({ name: "register_measurement_hypothesis", arguments: {
+    hypothesis_id: "routing", title: "Routing", thesis: "Isolate measurement definitions.",
+    evaluation_contract: { population: "stress", primary_metric: "t_statistic", minimum_observations: 10,
+      observation_unit: "One week.", family_definition: "One predeclared two-sided test.", decision_rule: "Alpha 0.05.",
+      symbols: ["OANDA:EURUSD"], timeframes: ["61"] },
+  } });
+  assert.notEqual(result.isError, true, result.content[0].text);
+  assert.equal(JSON.parse((await readFile(measurementPath, "utf8")).trim()).kind, "measurement_hypothesis_registered");
+  assert.deepEqual(await readFile(legacyPath), bytes);
 });
 
 test("get_dxy_context_gate_template returns the fixed Pine and plot contract", async () => {

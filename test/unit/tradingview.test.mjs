@@ -826,6 +826,41 @@ test("addPineToChart validates and only ever adds studies", async () => {
   assert.ok(!expr.includes("removeEntity"), "must never remove studies");
 });
 
+test("addPineToChart can pin a saved version without changing the latest-version default", async () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  await tv.addPineToChart("USER;adc40b1dfee344f19412f1ae9af74f3f", 1, "7.0");
+  assert.ok(cdp.calls[0].includes('version: "7.0"'));
+  assert.ok(!cdp.calls[0].includes('version: "last"'));
+  assert.throws(() => tv.addPineToChart("USER;adc40b1dfee344f19412f1ae9af74f3f", 1, '7";evil()'), /version/);
+  assert.equal(cdp.calls.length, 1);
+});
+
+test("getPineStudyStatus reads identity, loading and history bounds on one explicit chart", async () => {
+  const cdp = fakeCdp();
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getPineStudyStatus('bad id', 1), /studyId/);
+  assert.throws(() => tv.getPineStudyStatus('new1', -1), /chartIndex/);
+  assert.throws(() => tv.getPineStudyStatus('new1', undefined), /chartIndex/);
+  await tv.getPineStudyStatus('new1', 1);
+  assert.equal(cdp.calls.length, 1);
+  const expression = cdp.calls[0];
+  const chart = {
+    symbol: () => 'OANDA:EURUSD', resolution: () => '61',
+    getAllStudies: () => [{id:'new1',name:'Measure'}],
+    getStudyById: () => ({isLoading:()=>false,getInputValues:()=>[
+      {id:'pineId',value:'USER;abcdefgh'}, {id:'pineVersion',value:'7.0'}, {id:'text',value:'PRIVATE SOURCE'},
+    ]}),
+    chartModel: () => ({mainSeries:()=>({bars:()=>({_items:[{value:[100,1]},{value:[200,2]}]})})}),
+  };
+  const result = vm.runInNewContext(expression, {window:{TradingViewApi:{chart:(index)=>{assert.equal(index,1);return chart;}}}});
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { studyId:'new1',pineId:'USER;abcdefgh',pineVersion:'7.0',loading:false,
+    chartIndex:1,symbol:'OANDA:EURUSD',resolution:'61',barsCount:2,earliestTime:100,latestTime:200 });
+  assert.equal(JSON.stringify(result).includes('PRIVATE SOURCE'), false);
+  assert.ok(!expression.includes('activeChart()'));
+  assert.ok(!expression.includes('getIndicatorTables'));
+});
+
 test("removePineFromChart validates ownership before removing one exact study", async () => {
   const cdp = fakeCdp({ removed: true });
   const tv = new TradingView(cdp);

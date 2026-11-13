@@ -182,6 +182,19 @@ export interface IndicatorTables {
   error?: string;
 }
 
+export interface PineStudyStatus {
+  studyId: string;
+  pineId: string | null;
+  pineVersion: string | null;
+  loading: boolean | null;
+  chartIndex: number;
+  symbol: string;
+  resolution: string;
+  barsCount: number;
+  earliestTime: number | null;
+  latestTime: number | null;
+}
+
 export interface HistoryLoadResult {
   requested: number;
   barsBefore: number;
@@ -427,7 +440,7 @@ export interface PineCompileMessage {
 export interface PineSaveResult {
   dryRun: false;
   action: "create_new" | "new_version";
-  /** Whether a version was persisted (happens even when compilation fails). */
+  /** Readback matched the submitted source; a version may persist even when this is false. */
   saved: boolean;
   pineId: string | null;
   name: string | null;
@@ -2116,7 +2129,8 @@ export class TradingView {
         let version = null;
         let verified = false;
         let savedName = mi.description || name || null;
-        if (newPineId) {
+        if (typeof newPineId === "string" && new RegExp(${JSON.stringify(PINE_ID_PATTERN.source)}).test(newPineId) &&
+            (!pineId || newPineId === pineId)) {
           try {
             const g = await fetch(
               "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(newPineId) + "/last",
@@ -2124,10 +2138,12 @@ export class TradingView {
             );
             if (g.ok) {
               const d = await g.json();
-              version = d.version ?? null;
+              const fixedVersion = typeof d.version === "string" && d.version !== "last" &&
+                new RegExp(${JSON.stringify(PINE_VERSION_PATTERN.source)}).test(d.version);
+              version = fixedVersion ? d.version : null;
               // pine-facade normalizes line endings to CRLF on save
               const norm = (s) => String(s).replace(/\\r\\n/g, "\\n");
-              verified = norm(d.source) === norm(source);
+              verified = fixedVersion && typeof d.source === "string" && norm(d.source) === norm(source);
               if (!savedName && d.scriptName) savedName = d.scriptName;
             }
           } catch (e) {}
@@ -2170,6 +2186,7 @@ export class TradingView {
   addPineToChart(
     pineId: string,
     chartIndex?: number,
+    version: string = "last",
   ): Promise<{
     studyId: string;
     name: string | null;
@@ -2181,6 +2198,9 @@ export class TradingView {
       throw new Error(
         `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
       );
+    }
+    if (typeof version !== "string" || !PINE_VERSION_PATTERN.test(version)) {
+      throw new Error("version must be last or a saved Pine version number");
     }
     assertChartIndex(chartIndex);
     const chartExpr =
@@ -2195,11 +2215,11 @@ export class TradingView {
         const repo = api.studyMetaIntoRepository();
         let meta = null;
         try {
-          meta = await repo.findById({ type: "pine", pineId, version: "last" });
+          meta = await repo.findById({ type: "pine", pineId, version: ${JSON.stringify(version)} });
         } catch (e) {}
         let studyId;
         try {
-          studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
+          studyId = await chart.createStudy({ type: "pine", pineId, version: ${JSON.stringify(version)} });
         } catch (e) {
           throw new Error("could not add " + pineId + " to the chart: " +
             (typeof e === "string" ? e : (e && e.message) || e) + " — check list_pine_scripts");
@@ -2211,6 +2231,32 @@ export class TradingView {
           version: meta && meta.pine ? meta.pine.version ?? null : null,
           chartIndex: ${chartIndex === undefined ? "null" : chartIndex},
         };
+      })()
+    `);
+  }
+
+  /** Bounded metadata-only read; never reads tables or Pine source. */
+  getPineStudyStatus(studyId: string, chartIndex: number): Promise<PineStudyStatus> {
+    assertStudyId(studyId);
+    if (chartIndex === undefined) throw new Error("chartIndex must be explicit");
+    assertChartIndex(chartIndex);
+    return this.cdp.evaluate<PineStudyStatus>(`
+      (() => {
+        const chart = window.TradingViewApi.chart(${chartIndex});
+        const studyId = ${JSON.stringify(studyId)};
+        if (!chart.getAllStudies().some((study) => study.id === studyId)) throw new Error("study not found: " + studyId);
+        const study = chart.getStudyById(studyId);
+        const inputs = study.getInputValues();
+        const pineId = inputs.find((input) => input.id === "pineId")?.value;
+        const pineVersion = inputs.find((input) => input.id === "pineVersion")?.value;
+        const loading = typeof study.isLoading === "function" ? study.isLoading() : null;
+        const bars = chart.chartModel().mainSeries().bars()._items || [];
+        return { studyId, pineId: typeof pineId === "string" ? pineId : null,
+          pineVersion: typeof pineVersion === "string" ? pineVersion : null,
+          loading: typeof loading === "boolean" ? loading : null, chartIndex: ${chartIndex},
+          symbol: chart.symbol(), resolution: chart.resolution(), barsCount: bars.length,
+          earliestTime: bars.length ? bars[0].value[0] : null,
+          latestTime: bars.length ? bars[bars.length - 1].value[0] : null };
       })()
     `);
   }

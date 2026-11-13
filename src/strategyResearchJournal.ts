@@ -30,7 +30,29 @@ export const resolveStrategyResearchJournalPath = (
   configuredPath = process.env.TRADINGVIEW_MCP_STRATEGY_RESEARCH_JOURNAL_PATH,
 ): string => configuredPath?.trim() || join(homedir(), ".tradingview-mcp", "strategy-research-journal.jsonl");
 
+// Keep measurement-only rows out of the legacy default file, including for older readers.
+export const resolveMeasurementResearchJournalPath = (
+  configuredPath = process.env.TRADINGVIEW_MCP_MEASUREMENT_RESEARCH_JOURNAL_PATH,
+): string => configuredPath?.trim() || join(homedir(), ".tradingview-mcp", "measurement-research-journal.jsonl");
+
 export type ResearchPopulation = "in_sample" | "out_of_sample" | "walk_forward" | "stress" | "live";
+
+export type MeasurementHypothesis = {
+  definitionSchema: "measurement_hypothesis_v1";
+  hypothesisId: string;
+  title: string;
+  thesis: string;
+  evaluationContract: {
+    population: ResearchPopulation;
+    primaryMetric: "t_statistic";
+    minimumObservations: number;
+    observationUnit: string;
+    familyDefinition: string;
+    decisionRule: string;
+    symbols: string[];
+    timeframes: string[];
+  };
+};
 
 export type StrategyHypothesis = {
   hypothesisId: string;
@@ -160,11 +182,11 @@ export type ResearchJournalEntry = {
   event_id: string;
   sequence: number;
   recorded_at: string;
-  kind: "hypothesis_registered" | "experiment_recorded" | "event_hypothesis_registered" | "event_study_recorded";
+  kind: "hypothesis_registered" | "experiment_recorded" | "event_hypothesis_registered" | "event_study_recorded" | "measurement_hypothesis_registered";
   entity_id: string;
   definition_hash: string;
   evidence_hash: string | null;
-  payload: StrategyHypothesis | StrategyExperimentRecord | EventStudyHypothesis | EventStudyRecord;
+  payload: StrategyHypothesis | StrategyExperimentRecord | EventStudyHypothesis | EventStudyRecord | MeasurementHypothesis;
 };
 
 const canonicalHash = (value: unknown): string =>
@@ -220,6 +242,49 @@ function validateHypothesis(value: StrategyHypothesis): StrategyHypothesis {
     ...value,
     evaluationContract: {
       ...contract,
+      symbols: [...new Set(contract.symbols.map((item) => item.toUpperCase()))].sort(),
+      timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort(),
+    },
+  };
+}
+
+function validateMeasurementHypothesis(value: MeasurementHypothesis): MeasurementHypothesis {
+  const onlyKeys = (object: unknown, keys: string[]): object is Record<string, unknown> =>
+    !!object && typeof object === "object" && !Array.isArray(object) &&
+    Object.keys(object).length === keys.length && keys.every((key) => Object.hasOwn(object, key));
+  const text = (item: unknown, maximum: number): item is string =>
+    typeof item === "string" && item.trim().length > 0 && item.length <= maximum;
+  const marketList = (items: unknown, pattern: RegExp): items is string[] => {
+    if (!Array.isArray(items) || items.length < 1 || items.length > 20) return false;
+    // Array.some/map skip holes; reject them before normalization can turn them into JSON nulls.
+    for (let index = 0; index < items.length; index++) {
+      if (!Object.hasOwn(items, index) || typeof items[index] !== "string" || !pattern.test(items[index])) return false;
+    }
+    return true;
+  };
+  if (!onlyKeys(value, ["definitionSchema", "hypothesisId", "title", "thesis", "evaluationContract"]) ||
+      value.definitionSchema !== "measurement_hypothesis_v1") throw new Error("invalid measurement hypothesis definition");
+  if (typeof value.hypothesisId !== "string" || !ID_PATTERN.test(value.hypothesisId)) throw new Error("invalid measurement hypothesis_id");
+  if (!text(value.title, 120) || !text(value.thesis, 2000)) throw new Error("invalid measurement title or thesis");
+  const contract = value.evaluationContract;
+  if (!onlyKeys(contract, ["population", "primaryMetric", "minimumObservations", "observationUnit", "familyDefinition", "decisionRule", "symbols", "timeframes"])) {
+    throw new Error("invalid measurement evaluation contract");
+  }
+  if (!(new Set<ResearchPopulation>(["in_sample", "out_of_sample", "walk_forward", "stress", "live"])).has(contract.population)) throw new Error("invalid measurement research population");
+  if (contract.primaryMetric !== "t_statistic") throw new Error("invalid measurement primary metric");
+  if (!Number.isInteger(contract.minimumObservations) || contract.minimumObservations < 1 || contract.minimumObservations > 100_000) throw new Error("invalid minimum observations");
+  if (!text(contract.observationUnit, 500) || !text(contract.familyDefinition, 2000) || !text(contract.decisionRule, 2000)) throw new Error("invalid measurement sampling, family or decision definition");
+  if (!marketList(contract.symbols, SYMBOL_PATTERN)) throw new Error("invalid measurement symbols");
+  if (!marketList(contract.timeframes, TIMEFRAME_PATTERN)) throw new Error("invalid measurement timeframes");
+  // This fixed key order applies ONLY to the new schema. Do not canonicalize old payloads:
+  // their hashes bind the insertion order produced by their existing validators.
+  return {
+    definitionSchema: "measurement_hypothesis_v1", hypothesisId: value.hypothesisId,
+    title: value.title, thesis: value.thesis,
+    evaluationContract: {
+      population: contract.population, primaryMetric: contract.primaryMetric,
+      minimumObservations: contract.minimumObservations, observationUnit: contract.observationUnit,
+      familyDefinition: contract.familyDefinition, decisionRule: contract.decisionRule,
       symbols: [...new Set(contract.symbols.map((item) => item.toUpperCase()))].sort(),
       timeframes: [...new Set(contract.timeframes.map((item) => item.toUpperCase()))].sort(),
     },
@@ -503,6 +568,10 @@ export class StrategyResearchJournalStore {
         } else if (parsed.kind === "event_hypothesis_registered") {
           const payload = validateEventHypothesis(parsed.payload as EventStudyHypothesis);
           if (parsed.entity_id !== payload.hypothesisId || parsed.evidence_hash !== null || parsed.definition_hash !== canonicalHash(payload)) throw new Error(`event hypothesis identity mismatch at line ${index + 1}`);
+        } else if (parsed.kind === "measurement_hypothesis_registered") {
+          const payload = validateMeasurementHypothesis(parsed.payload as MeasurementHypothesis);
+          if (parsed.entity_id !== payload.hypothesisId || parsed.evidence_hash !== null || parsed.definition_hash !== canonicalHash(payload)) throw new Error(`measurement hypothesis identity mismatch at line ${index + 1}`);
+          parsed.payload = payload;
         } else if (parsed.kind === "event_study_recorded") {
           const payload = validateEventStudy(parsed.payload as EventStudyRecord);
           if (parsed.entity_id !== payload.studyId || parsed.evidence_hash !== eventStudyEvidenceHash(payload) || parsed.definition_hash !== eventStudyDefinitionHash(payload)) throw new Error(`event study identity mismatch at line ${index + 1}`);
@@ -512,6 +581,7 @@ export class StrategyResearchJournalStore {
       if (new Set(entries.map((entry) => entry.event_id)).size !== entries.length) throw new Error("duplicate strategy research journal event id");
       const hypotheses = new Set<string>();
       const eventHypotheses = new Set<string>();
+      const measurementHypotheses = new Set<string>();
       const experiments = new Set<string>();
       const evidence = new Set<string>();
       for (const [index, entry] of entries.entries()) {
@@ -531,6 +601,9 @@ export class StrategyResearchJournalStore {
         } else if (entry.kind === "event_hypothesis_registered") {
           if (eventHypotheses.has(entry.entity_id)) throw new Error(`duplicate event hypothesis at line ${index + 1}`);
           eventHypotheses.add(entry.entity_id);
+        } else if (entry.kind === "measurement_hypothesis_registered") {
+          if (measurementHypotheses.has(entry.entity_id)) throw new Error(`duplicate measurement hypothesis at line ${index + 1}`);
+          measurementHypotheses.add(entry.entity_id);
         } else {
           const payload = entry.payload as EventStudyRecord;
           if (!eventHypotheses.has(payload.hypothesisId)) throw new Error(`orphaned event study at line ${index + 1}`);
@@ -615,6 +688,32 @@ export class StrategyResearchJournalStore {
       const entry: ResearchJournalEntry = { schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1, recorded_at: new Date().toISOString(), kind: "event_hypothesis_registered", entity_id: payload.hypothesisId, definition_hash: hash, evidence_hash: null, payload };
       await this.appendUnlocked(entry); return { recorded: true, idempotent: false, entry };
     });
+  }
+
+  async registerMeasurementHypothesis(value: MeasurementHypothesis) {
+    const payload = validateMeasurementHypothesis(value);
+    const hash = canonicalHash(payload);
+    return this.serialize(async () => {
+      const entries = await this.readUnlocked();
+      const existing = entries.find((entry) => entry.kind === "measurement_hypothesis_registered" && entry.entity_id === payload.hypothesisId);
+      if (existing) {
+        if (existing.definition_hash !== hash) throw new Error(`measurement hypothesis_id ${payload.hypothesisId} is already bound to a different definition`);
+        return { recorded: false, idempotent: true, entry: existing };
+      }
+      const entry: ResearchJournalEntry = {
+        schema_version: "1.0", event_id: randomUUID(), sequence: entries.length + 1,
+        recorded_at: new Date().toISOString(), kind: "measurement_hypothesis_registered",
+        entity_id: payload.hypothesisId, definition_hash: hash, evidence_hash: null, payload,
+      };
+      await this.appendUnlocked(entry);
+      return { recorded: true, idempotent: false, entry };
+    });
+  }
+
+  async getMeasurementHypothesis(hypothesisId: string): Promise<ResearchJournalEntry | null> {
+    if (typeof hypothesisId !== "string" || !ID_PATTERN.test(hypothesisId)) throw new Error("invalid measurement hypothesis_id");
+    return this.serialize(async () => (await this.readUnlocked()).find((entry) =>
+      entry.kind === "measurement_hypothesis_registered" && entry.entity_id === hypothesisId) ?? null);
   }
 
   /**

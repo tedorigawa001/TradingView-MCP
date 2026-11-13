@@ -162,7 +162,8 @@ The AI selects the appropriate tools automatically; you do not need to memorize 
 | `get_indicator_values` | Indicator plot values such as signals and bands |
 | `get_indicator_inputs` | Indicator input names, current values, and defaults |
 | `get_indicator_graphics` | Indicator labels, lines, and boxes, including Elliott Wave counts |
-| `get_indicator_tables` | Indicator tables, such as MTF trend grids, reconstructed as cell matrices |
+| `get_indicator_tables` | Indicator tables reconstructed as cell matrices, with per-table canonical SHA-256; incomplete snapshots retain their details with a null hash. [Hash contract](docs/PINE_HASHES.md) |
+| `run_indicator_table_study` | Dry-run by default: serial table capture for up to 12 symbols on one explicit chart using an exact own Pine indicator version. Pages history with 106-1 bounds, reads tables once per job, returns SHA-256 and marker-cell checks, removes its own study and verifies restoration. [Contract and example](docs/INDICATOR_TABLE_STUDY.md) |
 | `get_key_levels` | Aggregates sourced support and resistance within +/-N% of price |
 | `load_more_history` | Loads additional historical candles without moving the viewport |
 
@@ -409,8 +410,8 @@ Use `--real-yield-history PATH` for an isolated store. If the snapshot has no co
 | Tool | Description |
 |---|---|
 | `list_pine_scripts` | Lists saved user-owned Pine scripts and the chart indicators that use them |
-| `get_pine_source` | Retrieves full source for a user-owned script, optionally by version for recovery |
-| `save_pine_script` | Saves AI-modified source; **dry-run without confirmation**, creates only a new script or version, never overwrites history |
+| `get_pine_source` | Retrieves full source for a user-owned script, optionally by version, with a CRLF-to-LF canonical source SHA-256. [Hash contract](docs/PINE_HASHES.md) |
+| `save_pine_script` | **Dry-run without confirmation**; creates only a new script or version. Returns separate submitted-source and verified-readback hashes; unverified saved-source hashes are null. [Hash contract](docs/PINE_HASHES.md) |
 | `add_pine_to_chart` | Adds a user-owned script to the chart; removal is separate |
 | `remove_owned_study` | Verifies `USER;` Pine ID, chart, and internal study ID before removing one instance; **dry-run without confirmation** |
 | `evaluate_analysis_overlay_outcome` | Evaluates an audited analysis on later closed bars, optionally using a temporary evidence timeframe; appends to the journal only with `record:true` |
@@ -461,6 +462,8 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `validate_research_protocol` | Validates an exact Pine version and frozen protocol, classifying IS/OOS overlap, future windows, forming bars, trial count, minimum trades, missing costs, static Pine risks, and post-OOS changes as blocked or warning |
 | `stress_test_strategy` | Binds to a frozen protocol and stress-tests full ledgers under cost/time/bootstrap models plus up to eight explicit Pine input reruns, evaluating delays, Stop/Target, and nearby parameters through the strategy itself with cleanup, restoration, failures, and degradation rates |
 | `register_strategy_hypothesis` | Registers a hypothesis and prospective evaluation contract in a local append-only research journal separate from live analysis |
+| `register_measurement_hypothesis` | Registers an immutable measurement-only `t_statistic` hypothesis with observation unit, test family and decision rule; uses a separate local journal and requires no trading metrics. See [measurement registration](docs/MEASUREMENT_RESEARCH.md) |
+| `get_measurement_hypothesis` | Reads one measurement definition and its hash by ID, or null if absent; no chart access or computation |
 | `record_strategy_experiment` | Binds experiment ID, Pine version, ledger ID, known metrics, guardrails, and decision to the hypothesis |
 | `compare_strategy_experiments` | Compares exact experiment IDs and evidence hashes and rejects population, symbol, timeframe, or methodology mismatches |
 

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { indicatorTableStudySchema, runIndicatorTableStudy } from "./indicatorTableStudy.js";
+import { withIndicatorTableHashes, withPineSourceHash, withPineSaveHashes } from "./pineHashes.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
 import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
@@ -68,7 +70,7 @@ import {
   compareStrategyMetrics,
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
-import { resolveStrategyResearchJournalPath, type EventStudyRecord, type StrategyResearchJournalStore } from "./strategyResearchJournal.js";
+import { resolveStrategyResearchJournalPath, resolveMeasurementResearchJournalPath, StrategyResearchJournalStore, type EventStudyRecord } from "./strategyResearchJournal.js";
 import {
   evaluateStrategyWalkForward,
   validateStrategyWalkForwardFolds,
@@ -203,6 +205,7 @@ export interface ServerDeps {
     | "setIndicatorInput"
     | "getIndicatorGraphics"
     | "getIndicatorTables"
+    | "getPineStudyStatus"
     | "loadMoreHistory"
     | "listPineScripts"
     | "getPineSource"
@@ -227,6 +230,7 @@ export interface ServerDeps {
   realYield: Pick<TreasuryRealYieldClient, "getLatest" | "getAsOf">;
   journal: Pick<AnalysisJournalStore, "recordAnalysis" | "recordOutcome" | "recordAlertSet" | "list" | "calibration" | "recordAttempt" | "lastAttempts">;
   researchJournal: Pick<StrategyResearchJournalStore, "registerHypothesis" | "recordExperiment" | "compare" | "registerEventHypothesis" | "recordEventStudy" | "listEventStudies" | "compareEventStudies" | "findHypothesis">;
+  measurementJournal?: Pick<StrategyResearchJournalStore, "registerMeasurementHypothesis" | "getMeasurementHypothesis">;
   futuresOpenInterestHistory?: Pick<FuturesOpenInterestFirstSeenStore, "observeMany" | "getSeriesAsOf" | "coverage">;
   policyRateHistory?: Pick<PolicyRateFirstSeenStore, "getAsOf" | "getVersionsAsOf">;
   policyRateHeartbeats?: Pick<PolicyRateCollectionHeartbeatStore, "getRunsAsOf">;
@@ -440,7 +444,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -3265,12 +3269,28 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       chartOperations.run(async () => {
         try {
         return jsonResult(
-          await tv.getIndicatorTables({ studyId: study_id, chartIndex: chart_index }),
+          withIndicatorTableHashes(await tv.getIndicatorTables({ studyId: study_id, chartIndex: chart_index })),
         );
         } catch (err) {
           return errorResult(err);
         }
       }),
+  );
+
+  server.registerTool(
+    "run_indicator_table_study",
+    {
+      description: "Preview or run a bounded serial table measurement using one exact own saved Pine indicator version on an explicit chart. " +
+        "Pages history until two consecutive empty observations (maximum 24 calls per symbol), waits for readiness, reads tables once, " +
+        "returns table SHA-256 and explicit marker-cell comparisons, removes only its added study, and verifies symbol/timeframe/study-list restoration. " +
+        "Dry-run by default; confirm=true is required. No Strategy Tester, orders, alerts, saved-source writes, or automatic adoption.",
+      inputSchema: indicatorTableStudySchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (input, extra) => chartOperations.run(async () => {
+      try { return jsonResult(await runIndicatorTableStudy(tv, input, { signal: extra.signal })); }
+      catch (error) { return errorResult(error); }
+    }),
   );
 
   server.registerTool(
@@ -3368,7 +3388,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     },
     async ({ pine_id, version }) => {
       try {
-        return jsonResult(await tv.getPineSource(pine_id, version ?? "last"));
+        return jsonResult(withPineSourceHash(await tv.getPineSource(pine_id, version ?? "last")));
       } catch (err) {
         return errorResult(err);
       }
@@ -3885,7 +3905,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     async ({ source, pine_id, name, confirm }) => {
       try {
         return jsonResult(
-          await tv.savePineScript({ source, pineId: pine_id, name, confirm: confirm ?? false }),
+          withPineSaveHashes(await tv.savePineScript({ source, pineId: pine_id, name, confirm: confirm ?? false }), source),
         );
       } catch (err) {
         return errorResult(err);
@@ -7097,6 +7117,62 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       }),
+  );
+
+  const measurementText = (maximum: number) => z.string().min(1).max(maximum)
+    .refine((value) => value.trim().length > 0, "must not be blank");
+
+  server.registerTool(
+    "register_measurement_hypothesis",
+    {
+      description:
+        "Register an immutable measurement-only hypothesis (t_statistic) with its observation unit, test family and decision rule. " +
+        "Uses a separate local append-only measurement journal; no trading rules, chart access, computation or adoption. " +
+        "Same ID and definition is idempotent; a different definition requires a new ID. See docs/MEASUREMENT_RESEARCH.md for hash and storage contracts.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: z.object({
+        hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/),
+        title: measurementText(120),
+        thesis: measurementText(2000),
+        evaluation_contract: z.object({
+          population: RESEARCH_POPULATION_SCHEMA,
+          primary_metric: z.literal("t_statistic"),
+          minimum_observations: z.number().int().min(1).max(100_000),
+          observation_unit: measurementText(500).describe("Sampling unit, aggregation and overlap treatment; not a trade count."),
+          family_definition: measurementText(2000).describe("Exact predeclared family of tests, hypotheses, variants and multiplicity treatment."),
+          decision_rule: measurementText(2000).describe("Thresholds, directionality and treatment of insufficient or unevaluable observations."),
+          symbols: z.array(SYMBOL_SCHEMA).min(1).max(20),
+          timeframes: z.array(z.string().regex(/^(?:[1-9]\d*|[1-9]\d*[SDWM]|[SDWM])$/i)).min(1).max(20),
+        }).strict(),
+      }).strict(),
+    },
+    async ({ hypothesis_id, title, thesis, evaluation_contract }) => {
+      try {
+        return jsonResult(await measurementJournal.registerMeasurementHypothesis({
+          definitionSchema: "measurement_hypothesis_v1", hypothesisId: hypothesis_id, title, thesis,
+          evaluationContract: {
+            population: evaluation_contract.population, primaryMetric: evaluation_contract.primary_metric,
+            minimumObservations: evaluation_contract.minimum_observations,
+            observationUnit: evaluation_contract.observation_unit,
+            familyDefinition: evaluation_contract.family_definition, decisionRule: evaluation_contract.decision_rule,
+            symbols: evaluation_contract.symbols, timeframes: evaluation_contract.timeframes,
+          },
+        }));
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  server.registerTool(
+    "get_measurement_hypothesis",
+    {
+      description: "Read one measurement hypothesis including its immutable definition hash; returns null for an unknown ID. No chart or network access. The local journal reader uses the existing file lock.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: z.object({ hypothesis_id: z.string().regex(/^[\w.:-]{1,80}$/) }).strict(),
+    },
+    async ({ hypothesis_id }) => {
+      try { return jsonResult(await measurementJournal.getMeasurementHypothesis(hypothesis_id)); }
+      catch (err) { return errorResult(err); }
+    },
   );
 
   server.registerTool(
