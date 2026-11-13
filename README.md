@@ -186,6 +186,31 @@ are reported in `invariantHistoryLoad`
 separately from a reference's per-job `historyLoad`, so reusing a reference is not counted
 as another load. A null stop reason means no local load was performed, not exhaustion.
 
+The same bounded paging applies to the shared cross-asset shock collector (preflight,
+classification, and outcomes) and `evaluate_due_analyses` when `load_more_bars` is positive.
+That option requests **additional** bars per series/analysis; its default of zero performs
+no load. Unmet requests add `history_request_unmet` and prevent an overall `complete`
+result; due-analysis outcome classifications themselves still describe the returned evidence.
+Cross-asset details use `execution.history_load` (snake-case fields); due analyses expose
+`source.historyLoad` and retain individual calls in `chartState.changes`.
+
+`measure_carry_panel_dependence`, `run_carry_core_primary_test`, and the 60-minute source
+collector in lead/lag's `resample_closed_60m_to_utc_grid` mode instead page toward a
+**total** bar target. They make no load when it is already met, use chunks of at most
+1,000, and stop at the target, two consecutive reads without bar-count growth, or 24
+requests per series. `history_loads` (carry) and `resampling.primary/reference` (lead/lag)
+retain `coverage` plus `historyLoad`: target kind, requested total, attempts, observed
+window growth, stop reason, and target outcome. Growth describes the returned OHLC window,
+not all bars held by the chart. An unmet target adds `price_history_request_unmet` and
+prevents `complete`; the carry primary test reports `not_evaluable` with no model or
+bootstrap. Lead/lag's default exact-UTC mode does not load history. The existing chart
+restoration and statistical definitions remain in place; errors are not retried.
+If carry dependence statistics cannot be computed after collection and restoration succeed,
+the tool still returns `history_loads`, including stop reasons and target outcomes, with
+`status:"partial"`, `result:null`, `carry_dependence_not_evaluable`, and a redacted
+`calculation_error`. A history shortfall remains a separate `price_history_request_unmet`
+issue. Collection or restoration failures continue to fail as errors.
+
 **Operate charts**
 
 | Tool | Description |

@@ -5005,11 +5005,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             { symbol: candidate.definition.symbol, resolution: evidenceTimeframe },
             async () => {
               const operationChanges: Array<Record<string, unknown>> = [];
-              let historyLoadResult: unknown = null;
-            if (historyLoad > 0) {
-                historyLoadResult = await tv.loadMoreHistory({ count: historyLoad, chartIndex: selectedIndex });
-                operationChanges.push({ kind: "history_load", result: historyLoadResult });
-            }
+              const historyLoadResult = historyLoad > 0
+                ? await loadAdditionalHistory(tv, historyLoad, selectedIndex) : null;
+              if (historyLoadResult !== null) {
+                operationChanges.push({ kind: "history_load", result: {
+                  ...historyLoadResult.loads.at(-1),
+                  requested: historyLoadResult.requestedBars,
+                  barsBefore: historyLoadResult.loads[0]?.barsBefore ?? null,
+                  added: historyLoadResult.addedBars,
+                  ...summarizeHistoryLoad(historyLoadResult),
+                  calls: historyLoadResult.loads,
+                } });
+              }
               const history = await tv.getOhlcv(requestedBars, selectedIndex);
             if (history.symbol.toUpperCase() !== candidate.definition.symbol.toUpperCase()) {
               throw new Error(`OHLCV symbol ${history.symbol} does not match ${candidate.definition.symbol}`);
@@ -5023,7 +5030,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               history.bars,
               history.resolution,
             );
-              return { history, evaluation, operationChanges };
+              return { history, evaluation, operationChanges, historyLoadResult };
             },
           );
           const operationError = transaction.operationError === null
@@ -5071,6 +5078,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 requestedBars,
                 returnedBars: history.bars.length,
                 loadMoreBars: historyLoad,
+                historyLoad: transaction.value?.historyLoadResult
+                  ? summarizeHistoryLoad(transaction.value.historyLoadResult) : null,
               },
               chartState: {
                 chartIndex: selectedIndex,
@@ -5080,6 +5089,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               },
               qualityIssues: [
                 ...evaluation.qualityIssues,
+                ...(transaction.value?.historyLoadResult?.requestedCountReached === false ? ["history_request_unmet"] : []),
                 ...(restoreError === null ? [] : ["chart_state_restore_failed"]),
               ],
             };
@@ -5142,6 +5152,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           status: aborted
             ? "aborted"
             : results.some((result) => result.status === "failed" ||
+                (result.result as { qualityIssues?: string[] } | undefined)?.qualityIssues?.includes("history_request_unmet") ||
                 (result.journal as { error?: string } | undefined)?.error !== undefined)
               ? "partial"
               : "complete",
@@ -8262,20 +8273,19 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const replay = await tv.getReplayStatus();
         if (replay.started || replay.toolbarVisible) throw new Error("carry panel dependence is blocked while Bar Replay is active");
         const series = [] as Array<{ pair_id: string; return_sign: 1 | -1; return_sign_by_date?: Record<string, 1 | -1>; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
+        const historyLoads: Array<{ pair_id: string } & Omit<Awaited<ReturnType<typeof loadRequiredHistory>>, "history">> = [];
         for (const pair of pairs) {
           const transaction = await withTemporaryChartState(tv, pair.chart_index, { symbol: pair.expected_symbol, resolution: "1D" }, async () => {
-            let history = await tv.getOhlcv(count, pair.chart_index);
-            if (history.bars.length < count) {
-              await tv.loadMoreHistory({ count: count - history.bars.length, chartIndex: pair.chart_index });
-              history = await tv.getOhlcv(count, pair.chart_index);
-            }
+            const loaded = await loadRequiredHistory(tv, pair.chart_index, count);
+            const { history } = loaded;
             if (history.symbol.toUpperCase() !== pair.expected_symbol.toUpperCase() || normalizeResolution(history.resolution) !== "1D") throw new Error(`price history does not match ${pair.pair_id}`);
-            return history;
+            return loaded;
           });
           if (!transaction.restored) throw new Error(`chart ${pair.chart_index} could not be restored after ${pair.pair_id}: ${transaction.restoreError instanceof Error ? transaction.restoreError.message : String(transaction.restoreError)}`);
           if (transaction.operationError !== null) throw transaction.operationError;
           if (transaction.value === null) throw new Error(`price history collection returned no value for ${pair.pair_id}`);
-          series.push({ pair_id: pair.pair_id, return_sign: pair.return_sign, bars: transaction.value.bars });
+          series.push({ pair_id: pair.pair_id, return_sign: pair.return_sign, bars: transaction.value.history.bars });
+          historyLoads.push({ pair_id: pair.pair_id, coverage: transaction.value.coverage, historyLoad: transaction.value.historyLoad });
         }
         let exploratorySigns: ReturnType<typeof buildExploratoryCarrySigns> | null = null;
         if (use_exploratory_official_rate_signs) {
@@ -8289,8 +8299,20 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           exploratorySigns = buildExploratoryCarrySigns({ pairs: pairsWithCurrencies, dates, histories });
           for (const item of series) item.return_sign_by_date = exploratorySigns.signs[item.pair_id];
         }
-        const result = measureCarryPanelDependence({ series, horizonBusinessDays: horizon_business_days, blockLengthAnchors: block_length_anchors, iterations, seed });
-        return jsonResult({ dry_run: false, changed: true, sign_source: exploratorySigns === null ? "fixed_input" : exploratorySigns.evidence_tier, exploratory_signs: exploratorySigns === null ? null : { point_in_time_status: exploratorySigns.point_in_time_status, unavailable_dates_by_pair: exploratorySigns.unavailable_dates_by_pair }, result });
+        const qualityIssues = historyLoads.some((load) => !load.coverage.sufficient) ? ["price_history_request_unmet"] : [];
+        let result: ReturnType<typeof measureCarryPanelDependence> | null = null;
+        let calculationError: string | null = null;
+        try {
+          result = measureCarryPanelDependence({ series, horizonBusinessDays: horizon_business_days, blockLengthAnchors: block_length_anchors, iterations, seed });
+        } catch (err) {
+          // Collection and restoration succeeded; keep their evidence even if statistics cannot be computed.
+          calculationError = redactSecrets(err instanceof Error ? err.message : String(err));
+          qualityIssues.push("carry_dependence_not_evaluable");
+        }
+        return jsonResult({ dry_run: false, changed: true, status: qualityIssues.length > 0 ? "partial" : "complete",
+          history_loads: historyLoads, quality_issues: qualityIssues,
+          ...(calculationError === null ? {} : { calculation_error: calculationError }),
+          sign_source: exploratorySigns === null ? "fixed_input" : exploratorySigns.evidence_tier, exploratory_signs: exploratorySigns === null ? null : { point_in_time_status: exploratorySigns.point_in_time_status, unavailable_dates_by_pair: exploratorySigns.unavailable_dates_by_pair }, result });
       } catch (err) {
         return errorResult(err);
       }
@@ -8371,31 +8393,35 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const replay = await tv.getReplayStatus();
         if (replay.started || replay.toolbarVisible) throw new Error("carry primary test is blocked while Bar Replay is active");
         const pairs = [] as Array<{ pair_id: string; base_currency: PolicyRateCurrency; quote_currency: PolicyRateCurrency; bars: Array<{ timeIso: string; close: number; forming?: boolean }> }>;
+        const historyLoads: Array<{ pair_id: string } & Omit<Awaited<ReturnType<typeof loadRequiredHistory>>, "history">> = [];
         for (const definition of CARRY_CORE_PRIMARY_PAIRS) {
           const transaction = await withTemporaryChartState(tv, chart_index, { symbol: definition.expected_symbol, resolution: "1D" }, async () => {
-            let history = await tv.getOhlcv(count, chart_index);
-            if (history.bars.length < count) {
-              await tv.loadMoreHistory({ count: count - history.bars.length, chartIndex: chart_index });
-              history = await tv.getOhlcv(count, chart_index);
-            }
+            const loaded = await loadRequiredHistory(tv, chart_index, count);
+            const { history } = loaded;
             if (history.symbol.toUpperCase() !== definition.expected_symbol || normalizeResolution(history.resolution) !== "1D") throw new Error(`price history does not match ${definition.pair_id}`);
-            return history.bars;
+            return loaded;
           });
           if (!transaction.restored) throw new Error(`chart ${chart_index} could not be restored after ${definition.pair_id}: ${transaction.restoreError instanceof Error ? transaction.restoreError.message : String(transaction.restoreError)}`);
           if (transaction.operationError !== null) throw transaction.operationError;
           if (transaction.value === null) throw new Error(`price history collection returned no value for ${definition.pair_id}`);
-          pairs.push({ pair_id: definition.pair_id, base_currency: definition.base_currency, quote_currency: definition.quote_currency, bars: transaction.value });
+          pairs.push({ pair_id: definition.pair_id, base_currency: definition.base_currency, quote_currency: definition.quote_currency, bars: transaction.value.history.bars });
+          historyLoads.push({ pair_id: definition.pair_id, coverage: transaction.value.coverage, historyLoad: transaction.value.historyLoad });
         }
         const currencies = [...new Set(CARRY_CORE_PRIMARY_PAIRS.flatMap((pair) => [pair.base_currency, pair.quote_currency]))] as PolicyRateCurrency[];
         const policyRateVersions = Object.fromEntries(await Promise.all(currencies.map(async (currency) => [currency, await policyRateHistory.getVersionsAsOf(currency, cutoff)]))) as Partial<Record<PolicyRateCurrency, Awaited<ReturnType<PolicyRateFirstSeenStore["getVersionsAsOf"]>>>>;
-        return jsonResult(runCarryPanelPrimaryTest({
+        const result = runCarryPanelPrimaryTest({
           pairs,
           policyRateVersions,
           collectionHeartbeats: await policyRateHeartbeats.getRunsAsOf(cutoff),
           from: CARRY_CORE_PRIMARY_TEST_V1.sample_start,
           to: cutoff.toISOString().slice(0, 10),
           seed: `${CARRY_CORE_PRIMARY_TEST_V1.id}:${cutoff.toISOString()}`,
-        }));
+        });
+        const historyIssues = historyLoads.some((load) => !load.coverage.sufficient) ? ["price_history_request_unmet"] : [];
+        return jsonResult({ ...result, history_loads: historyLoads,
+          ...(historyIssues.length > 0 ? { status: "not_evaluable", model: null, bootstrap: null } : {}),
+          quality_issues: [...result.quality_issues, ...historyIssues],
+        });
       } catch (err) {
         return errorResult(err);
       }
@@ -9003,25 +9029,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       throw new Error("cross-asset shock target chart does not match the requested binding");
     }
     const loadHistory = async (chartIndex: number) => {
-      const calls = [];
-      let remaining = input.loadMoreBars;
-      while (remaining > 0) {
-        const requested = Math.min(remaining, 5_000);
-        const loaded = await tv.loadMoreHistory({ count: requested, chartIndex });
-        calls.push(loaded);
-        remaining -= requested;
-        if (loaded.moreAvailable === false) break;
-      }
+      const loaded = await loadAdditionalHistory(tv, input.loadMoreBars, chartIndex);
+      const calls = loaded.loads;
       return {
         requested_additional_bars: input.loadMoreBars,
         calls,
-        added: calls.reduce((sum, loaded) => sum + loaded.added, 0),
+        added: loaded.addedBars,
         bars_before: calls[0]?.barsBefore ?? null,
         bars_after: calls.at(-1)?.barsAfter ?? null,
         more_available: calls.at(-1)?.moreAvailable ?? null,
+        attempts: calls.length,
+        stop_reason: loaded.stopReason,
+        requested_count_reached: loaded.requestedCountReached,
       };
     };
-    const historyLoadResults: Partial<Record<CrossAssetShockRole, unknown>> = {};
+    const historyLoadResults: Partial<Record<CrossAssetShockRole, Awaited<ReturnType<typeof loadHistory>>>> = {};
     if (input.loadMoreBars > 0) {
       historyLoadResults.target_fx = await loadHistory(input.targetChartIndex);
     }
@@ -9057,15 +9079,18 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       if (transaction.operationError !== null || transaction.value === null) throw transaction.operationError ?? new Error(`cross-asset shock ${item.role} read returned no bars`);
       temporaryReads.push({ role: item.role, symbol: item.symbol, bars: transaction.value });
     }
+    const historyRequestMet = Object.values(historyLoadResults).every((load) => load.requested_count_reached);
     return {
       target,
       temporaryReads,
+      historyQualityIssues: historyRequestMet ? [] : ["history_request_unmet"],
       execution: {
         target_chart_index: input.targetChartIndex,
         auxiliary_chart_index: input.auxiliaryChartIndex,
         requested_count: input.count,
         history_load: input.loadMoreBars === 0 ? null : {
           requested_additional_bars_per_series: input.loadMoreBars,
+          requested_count_reached: historyRequestMet,
           results: historyLoadResults,
         },
         auxiliary_original: { symbol: auxiliaryChart.symbol, timeframe: normalizeResolution(auxiliaryChart.resolution) },
@@ -9124,6 +9149,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         });
         return jsonResult({
           ...result,
+          status: evidence.historyQualityIssues.length > 0 ? "partial" : result.status,
+          quality_issues: [...result.quality_issues, ...evidence.historyQualityIssues],
           execution: evidence.execution,
         });
       } catch (err) { return errorResult(err); }
@@ -9184,12 +9211,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         ].includes(state.state));
         const requiredStates = minimum_classified_states ?? 20;
         const qualityIssues = [
+          ...evidence.historyQualityIssues,
           ...(classifiedStates.length < requiredStates ? ["minimum_classified_states_not_met"] : []),
           ...(result.quality.non_contiguous_input_intervals > 0 ? ["non_contiguous_common_intervals_excluded_from_returns"] : []),
         ];
         return jsonResult({
           ...result,
-          status: classifiedStates.length >= requiredStates ? "complete" : "partial",
+          status: classifiedStates.length >= requiredStates && evidence.historyQualityIssues.length === 0 ? "complete" : "partial",
           evidence: {
             sources: preflight.sources, alignment: preflight.alignment,
             forming_bars_excluded: preflight.quality.forming_bars_excluded,
@@ -9225,7 +9253,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           state: state.state as "cross_asset_confirmed" | "partial_confirmation" | "target_only" | "cross_asset_conflict",
         }));
         const result = evaluateCrossAssetShockOutcomes({ timeframe: expected_timeframe, targetSymbol: expected_target_symbol, bars: aligned.bars, states, minimumEventsPerState: minimum_events_per_state ?? 20, eventLimit: event_limit ?? 200 });
-        return jsonResult({ ...result, classification: { state_counts: classified.state_counts, quality: classified.quality }, evidence: { sources: aligned.preflight.sources, alignment: aligned.preflight.alignment }, execution: evidence.execution });
+        return jsonResult({ ...result,
+          status: evidence.historyQualityIssues.length > 0 ? "partial" : result.status,
+          quality_issues: [...result.quality_issues, ...evidence.historyQualityIssues],
+          classification: { state_counts: classified.state_counts, quality: classified.quality }, evidence: { sources: aligned.preflight.sources, alignment: aligned.preflight.alignment }, execution: evidence.execution });
       } catch (err) { return errorResult(err); }
     }),
   );
@@ -9476,6 +9507,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         let primary: Awaited<ReturnType<typeof tv.getOhlcv>>;
         let reference: Awaited<ReturnType<typeof tv.getOhlcv>>;
         let resampling: Record<string, unknown> | null = null;
+        const historyIssues: string[] = [];
         if (!resampleToUtcGrid) {
           [primary, reference] = await Promise.all([
             tv.getOhlcv(requestedBars, primary_chart_index), tv.getOhlcv(requestedBars, reference_chart_index),
@@ -9489,15 +9521,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           const intervalsPerBucket = targetMs / sourceMs;
           const sourceRequestedBars = Math.min(5_000, requestedBars * intervalsPerBucket + intervalsPerBucket);
           const collectSourceHistory = async (chartIndex: number, expectedSymbol: string) => {
-            let history = await tv.getOhlcv(sourceRequestedBars, chartIndex);
-            if (history.bars.length < sourceRequestedBars) {
-              await tv.loadMoreHistory({ count: sourceRequestedBars - history.bars.length, chartIndex });
-              history = await tv.getOhlcv(sourceRequestedBars, chartIndex);
-            }
+            const loaded = await loadRequiredHistory(tv, chartIndex, sourceRequestedBars);
+            const { history } = loaded;
             if (history.symbol.toUpperCase() !== expectedSymbol.toUpperCase() || normalizeResolution(history.resolution) !== "60") {
               throw new Error(`60-minute source history does not match ${expectedSymbol}`);
             }
-            return history;
+            return loaded;
           };
           const primaryTransaction = await withTemporaryChartState(tv, primary_chart_index, { resolution: "60" }, async () => {
             const referenceTransaction = await withTemporaryChartState(tv, reference_chart_index, { resolution: "60" }, async () => ({
@@ -9517,19 +9546,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           if (primaryTransaction.operationError !== null) throw primaryTransaction.operationError;
           if (primaryTransaction.value === null) throw new Error("UTC-grid primary collection returned no history");
           const primaryGrid = resampleClosedBarsToUtcGrid({
-            bars: primaryTransaction.value.primary.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
+            bars: primaryTransaction.value.primary.history.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
           });
           const referenceGrid = resampleClosedBarsToUtcGrid({
-            bars: primaryTransaction.value.reference.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
+            bars: primaryTransaction.value.reference.history.bars, sourceTimeframe: "60", targetTimeframe: expected_timeframe,
           });
-          primary = { ...primaryTransaction.value.primary, resolution: expected_timeframe, count: primaryGrid.bars.length, bars: primaryGrid.bars };
-          reference = { ...primaryTransaction.value.reference, resolution: expected_timeframe, count: referenceGrid.bars.length, bars: referenceGrid.bars };
+          primary = { ...primaryTransaction.value.primary.history, resolution: expected_timeframe, count: primaryGrid.bars.length, bars: primaryGrid.bars };
+          reference = { ...primaryTransaction.value.reference.history, resolution: expected_timeframe, count: referenceGrid.bars.length, bars: referenceGrid.bars };
+          if (!primaryTransaction.value.primary.coverage.sufficient || !primaryTransaction.value.reference.coverage.sufficient) {
+            historyIssues.push("price_history_request_unmet");
+          }
           resampling = {
             mode: "resample_closed_60m_to_utc_grid",
             sourceTimeframe: "60",
             targetTimeframe: expected_timeframe,
             sourceRequestedBars,
             primary: {
+              coverage: primaryTransaction.value.primary.coverage,
+              historyLoad: primaryTransaction.value.primary.historyLoad,
               sourceClosedBars: primaryGrid.sourceClosedBars,
               sourceFormingBarsExcluded: primaryGrid.sourceFormingBarsExcluded,
               outputBars: primaryGrid.bars.length,
@@ -9537,6 +9571,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               incompleteBucketsExcluded: primaryGrid.incompleteBucketsExcluded,
             },
             reference: {
+              coverage: primaryTransaction.value.reference.coverage,
+              historyLoad: primaryTransaction.value.reference.historyLoad,
               sourceClosedBars: referenceGrid.sourceClosedBars,
               sourceFormingBarsExcluded: referenceGrid.sourceFormingBarsExcluded,
               outputBars: referenceGrid.bars.length,
@@ -9568,6 +9604,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             : "exact_utc_timestamp_no_forward_fill",
           folds: (folds ?? []).map((fold) => ({ foldId: fold.fold_id, from: fold.from, to: fold.to })),
         });
+        const qualityIssues = [...result.qualityIssues, ...historyIssues];
         const closedPrimary = primary.bars.filter((bar) => bar.forming !== true);
         const source = {
           chartIndex: primary_chart_index,
@@ -9621,7 +9658,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 correlationIntervalLower: lag.confidenceInterval.status === "available" ? lag.confidenceInterval.lower : null,
                 correlationIntervalUpper: lag.confidenceInterval.status === "available" ? lag.confidenceInterval.upper : null,
               })),
-              qualityIssues: result.qualityIssues,
+              qualityIssues,
               minimumEventsMet: result.sample.returnObservations >= (minimum_observations ?? 30),
               decision: journal.decision,
               note: journal.note ?? "",
@@ -9640,6 +9677,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           studyId,
           definitionHash,
           ...result,
+          status: historyIssues.length > 0 && result.status === "complete" ? "partial" : result.status,
+          qualityIssues,
           ...(journal ? { journal: journalResult } : {}),
         });
       } catch (err) { return errorResult(err); }

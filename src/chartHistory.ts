@@ -126,6 +126,8 @@ export async function loadRequiredHistory(
   let moreAvailable: boolean | null = null;
   let consecutiveEmptyLoads = 0;
   let requested = requiredBars;
+  let attempts = 0;
+  let stopReason: HistoryLoadStopReason = "requested_count_reached";
   for (let attempt = 0; attempt < MAX_HISTORY_LOAD_ATTEMPTS && !done(history); attempt += 1) {
     const barsBefore = history.bars.length;
     // Ask for the shortfall while the bar count is unmet, exactly as before. Only when the count is
@@ -134,22 +136,38 @@ export async function loadRequiredHistory(
     const barsShort = requiredBars - barsBefore;
     const chunk = barsShort > 0 ? Math.min(barsShort, MAX_HISTORY_LOAD_CHUNK) : MAX_HISTORY_LOAD_CHUNK;
     const loaded = await tv.loadMoreHistory({ count: chunk, chartIndex });
+    attempts += 1;
     // The read stays pinned to requiredBars unless a reach-back is being chased, so a caller that
     // named no start gets the same bars it always did.
     if (reachBackMs !== null) requested = Math.max(requested, barsBefore + chunk);
     history = await tv.getOhlcv(requested, chartIndex);
     moreAvailable = loaded.moreAvailable;
+    stopReason = done(history) ? "requested_count_reached" : "attempt_limit";
     if (history.bars.length > barsBefore) {
       consecutiveEmptyLoads = 0;
       continue;
     }
     consecutiveEmptyLoads += 1;
     // TradingView may briefly report no pagination immediately after a chart change.
-    if (consecutiveEmptyLoads >= MAX_CONSECUTIVE_EMPTY_HISTORY_LOADS) break;
+    if (consecutiveEmptyLoads >= MAX_CONSECUTIVE_EMPTY_HISTORY_LOADS && !done(history)) {
+      stopReason = "consecutive_empty";
+      break;
+    }
   }
   const reachesBack = reaches(history);
   return {
     history,
+    historyLoad: {
+      targetKind: "total_bars" as const,
+      requestedBars: requiredBars,
+      attempts,
+      // Growth in the returned OHLC window, which is capped at requiredBars without reach-back.
+      addedBars: Math.max(0, history.bars.length - initial.bars.length),
+      moreAvailable,
+      stopReason,
+      requestedCountReached: history.bars.length >= requiredBars,
+      sufficient: done(history),
+    },
     coverage: {
       chartIndex, requiredBars, initialBars: initial.bars.length,
       loadedBars: Math.max(0, history.bars.length - initial.bars.length),

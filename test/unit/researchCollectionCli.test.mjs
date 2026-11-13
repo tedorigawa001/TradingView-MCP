@@ -43,6 +43,9 @@ test("research collection retries a transient empty history request before decla
   };
   const result = await loadRequiredHistory(tv, 0, 500);
   assert.equal(calls, 2);
+  assert.equal(result.historyLoad.attempts, 2);
+  assert.equal(result.historyLoad.stopReason, "requested_count_reached");
+  assert.equal(result.historyLoad.requestedCountReached, true);
   assert.deepEqual(result.coverage, { chartIndex: 0, requiredBars: 500, initialBars: 300, loadedBars: 200, finalBars: 500, sufficient: true, reachBackTo: null, earliestBarAt: "2026-01-01T00:00:00.000Z", reachesBack: null, moreAvailable: true });
 });
 
@@ -69,7 +72,23 @@ test("research collection reports an already sufficient chart without loading mo
   const result = await loadRequiredHistory(tv, 0, 500);
   assert.equal(result.coverage.sufficient, true);
   assert.equal(result.coverage.loadedBars, 0);
+  assert.equal(result.historyLoad.attempts, 0);
+  assert.equal(result.historyLoad.stopReason, "requested_count_reached");
 });
+
+for (const mode of ["empty", "limit"]) {
+  test(`required history records ${mode} termination without claiming the target`, async () => {
+    let available = 300;
+    const result = await loadRequiredHistory({
+      getOhlcv: async (count) => ({ bars: Array.from({ length: Math.min(count, available) }, () => ({ timeIso: "2026-01-01T00:00:00.000Z" })) }),
+      loadMoreHistory: async () => { if (mode === "limit") available += 1; return { moreAvailable: false }; },
+    }, 0, 500);
+    assert.equal(result.historyLoad.attempts, mode === "empty" ? 2 : 24);
+    assert.equal(result.historyLoad.stopReason, mode === "empty" ? "consecutive_empty" : "attempt_limit");
+    assert.equal(result.historyLoad.requestedCountReached, false);
+    assert.equal(result.coverage.sufficient, false);
+  });
+}
 
 test("research collection source evidence retains each collector's requested bar count", () => {
   const history = { bars: [

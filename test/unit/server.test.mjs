@@ -2323,11 +2323,14 @@ test("compute_correlation_regimes binds two exact-time chart histories", async (
   assert.equal(parsed.observations.at(-1).regime, "strong_negative");
 });
 
-test("preflight_cross_asset_shock reads exact-time contexts and restores the auxiliary chart", async () => {
+for (const pagingMode of ["normal", "transient", "empty", "partial", "between", "limit"]) {
+test(`preflight_cross_asset_shock reads exact-time contexts and restores the auxiliary chart (${pagingMode} history)`, async () => {
   const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
   const auxiliaryChart = { symbol: "OANDA:GBPUSD", resolution: "60" };
   const operations = [];
   const historyLoads = [];
+  const loadedBars = new Map();
+  const loadAttempts = new Map();
   const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
     { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
     { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
@@ -2358,7 +2361,18 @@ test("preflight_cross_asset_shock reads exact-time contexts and restores the aux
     },
     loadMoreHistory: async ({ count, chartIndex }) => {
       historyLoads.push({ count, chartIndex });
-      return { requested: count, barsBefore: 300, barsAfter: 400, added: 100, moreAvailable: true };
+      const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
+      const key = `${chartIndex}:${chart.symbol}`;
+      const attempt = loadAttempts.get(key) ?? 0;
+      loadAttempts.set(key, attempt + 1);
+      const barsBefore = (loadedBars.get(key) ?? 300) + (pagingMode === "between" && attempt === 1 ? 50 : 0);
+      const added = pagingMode === "empty" || (pagingMode === "transient" && attempt === 0) ? 0
+        : pagingMode === "between" ? (attempt === 2 ? 50 : 0)
+        : pagingMode === "partial" ? Math.min(25, count) : pagingMode === "limit" ? 1 : count;
+      const barsAfter = barsBefore + added;
+      loadedBars.set(key, barsAfter);
+      return { requested: count, barsBefore, barsAfter, added,
+        moreAvailable: added > 0 && attempt > 0, earliestTime: 1 };
     },
   }}));
 
@@ -2367,16 +2381,26 @@ test("preflight_cross_asset_shock reads exact-time contexts and restores the aux
     expected_timeframe: "15", count: 120, minimum_aligned_bars: 100, load_more_bars: 100,
   } });
   const parsed = JSON.parse(response.content[0].text);
-  assert.equal(parsed.status, "complete");
+  const reached = !["empty", "limit"].includes(pagingMode);
+  assert.equal(parsed.status, reached ? "complete" : "partial");
   assert.equal(parsed.alignment.common_closed_bars, 120);
   assert.deepEqual(parsed.execution.auxiliary_original, { symbol: "OANDA:GBPUSD", timeframe: "60" });
   assert.equal(parsed.execution.auxiliary_restored_after_each_context_read, true);
-  assert.deepEqual(historyLoads, [
-    { count: 100, chartIndex: 0 }, { count: 100, chartIndex: 1 },
-    { count: 100, chartIndex: 1 }, { count: 100, chartIndex: 1 },
-  ]);
+  const requests = pagingMode === "transient" ? [100, 100]
+    : pagingMode === "empty" ? [100, 100]
+    : pagingMode === "partial" ? [100, 75, 50, 25]
+    : pagingMode === "between" ? [100, 100, 50]
+    : pagingMode === "limit" ? Array.from({ length: 24 }, (_, i) => 100 - i) : [100];
+  assert.deepEqual(historyLoads, [0, 1, 1, 1].flatMap((chartIndex) => requests.map((count) => ({ count, chartIndex }))));
   assert.equal(parsed.execution.history_load.requested_additional_bars_per_series, 100);
-  assert.equal(parsed.execution.history_load.results.us_yield.added, 100);
+  assert.equal(parsed.execution.history_load.requested_count_reached, reached);
+  assert.equal(parsed.quality_issues.includes("history_request_unmet"), !reached);
+  for (const load of Object.values(parsed.execution.history_load.results)) {
+    assert.equal(load.added, pagingMode === "empty" ? 0 : pagingMode === "limit" ? 24 : 100);
+    assert.equal(load.requested_count_reached, reached);
+    assert.equal(load.stop_reason, pagingMode === "empty" ? "consecutive_empty"
+      : pagingMode === "limit" ? "attempt_limit" : "requested_count_reached");
+  }
   assert.deepEqual(auxiliaryChart, { symbol: "OANDA:GBPUSD", resolution: "60" });
   assert.deepEqual(operations, [
     "resolution:15", "symbol:TVC:DXY", "symbol:OANDA:GBPUSD", "resolution:60",
@@ -2384,6 +2408,7 @@ test("preflight_cross_asset_shock reads exact-time contexts and restores the aux
     "resolution:15", "symbol:OANDA:XAUUSD", "symbol:OANDA:GBPUSD", "resolution:60",
   ]);
 });
+}
 
 test("preflight_cross_asset_shock restores the auxiliary chart when a temporary history is misbound", async () => {
   const targetChart = { symbol: "OANDA:USDJPY", resolution: "5" };
@@ -2420,10 +2445,13 @@ test("preflight_cross_asset_shock restores the auxiliary chart when a temporary 
   assert.deepEqual(auxiliaryChart, { symbol: "OANDA:EURUSD", resolution: "15" });
 });
 
-test("classify_cross_asset_shocks classifies a frozen observed state and restores the auxiliary chart", async () => {
+for (const mode of ["normal", "transient", "empty", "limit"]) {
+test(`classify_cross_asset_shocks classifies a frozen observed state and restores the auxiliary chart (${mode} history)`, async () => {
   const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
   const auxiliaryChart = { symbol: "OANDA:XAUUSD", resolution: "1D" };
   const historyLoads = [];
+  const loadedCounts = new Map();
+  const attempts = new Map();
   const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
     { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
     { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
@@ -2459,7 +2487,13 @@ test("classify_cross_asset_shocks classifies a frozen observed state and restore
     },
     loadMoreHistory: async ({ count, chartIndex }) => {
       historyLoads.push({ count, chartIndex });
-      return { requested: count, barsBefore: 300, barsAfter: 300 + count, added: count, moreAvailable: true };
+      const key = `${chartIndex}:${chartIndex === 0 ? targetChart.symbol : auxiliaryChart.symbol}`;
+      const attempt = attempts.get(key) ?? 0;
+      attempts.set(key, attempt + 1);
+      const barsBefore = loadedCounts.get(key) ?? 300;
+      const added = mode === "empty" || (mode === "transient" && attempt === 0) ? 0 : mode === "limit" ? 1 : count;
+      loadedCounts.set(key, barsBefore + added);
+      return { requested: count, barsBefore, barsAfter: barsBefore + added, added, moreAvailable: false };
     },
   }}));
 
@@ -2468,19 +2502,28 @@ test("classify_cross_asset_shocks classifies a frozen observed state and restore
     expected_timeframe: "15", count: 100, minimum_classified_states: 1, load_more_bars: 6000,
   } });
   const parsed = JSON.parse(response.content[0].text);
-  assert.equal(parsed.status, "complete");
+  const reached = ["normal", "transient"].includes(mode);
+  assert.equal(parsed.status, reached ? "complete" : "partial");
   assert.equal(parsed.classified_states, 1);
   assert.equal(parsed.states[0].state, "cross_asset_confirmed");
   assert.equal(parsed.states[0].context.us_yield.direction, "confirming");
-  assert.deepEqual(historyLoads.map((item) => item.count), [5000, 1000, 5000, 1000, 5000, 1000, 5000, 1000]);
-  assert.equal(parsed.execution.history_load.results.dxy.calls.length, 2);
-  assert.equal(parsed.execution.history_load.results.dxy.added, 6000);
+  const requests = mode === "normal" ? [5000, 1000] : mode === "transient" ? [5000, 5000, 1000]
+    : Array(mode === "empty" ? 2 : 24).fill(5000);
+  assert.deepEqual(historyLoads.map((item) => item.count), Array.from({ length: 4 }, () => requests).flat());
+  assert.equal(parsed.execution.history_load.results.dxy.calls.length, requests.length);
+  assert.equal(parsed.execution.history_load.results.dxy.added, reached ? 6000 : mode === "empty" ? 0 : 24);
+  assert.equal(parsed.execution.history_load.requested_count_reached, reached);
+  assert.equal(parsed.quality_issues.includes("history_request_unmet"), !reached);
   assert.deepEqual(auxiliaryChart, { symbol: "OANDA:XAUUSD", resolution: "1D" });
 });
+}
 
-test("evaluate_cross_asset_shock_outcomes wires frozen states to outcomes and restores the auxiliary chart", async () => {
+for (const mode of ["default", "transient", "empty", "limit", "error"]) {
+test(`evaluate_cross_asset_shock_outcomes wires frozen states to outcomes and restores the auxiliary chart (${mode} history)`, async () => {
   const targetChart = { symbol: "OANDA:EURUSD", resolution: "15" };
   const auxiliaryChart = { symbol: "OANDA:XAUUSD", resolution: "1D" };
+  const loads = new Map();
+  const available = new Map();
   const context = () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 2, charts: [
     { index: 0, symbol: targetChart.symbol, resolution: targetChart.resolution, studies: [] },
     { index: 1, symbol: auxiliaryChart.symbol, resolution: auxiliaryChart.resolution, studies: [] },
@@ -2504,6 +2547,16 @@ test("evaluate_cross_asset_shock_outcomes wires frozen states to outcomes and re
       const chart = chartIndex === 0 ? targetChart : auxiliaryChart;
       return { symbol: chart.symbol, resolution: chart.resolution, count, bars: barsFor(chart.symbol) };
     },
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      const key = `${chartIndex}:${chartIndex === 0 ? targetChart.symbol : auxiliaryChart.symbol}`;
+      const attempt = loads.get(key) ?? 0;
+      loads.set(key, attempt + 1);
+      if (mode === "error" && chartIndex === 1) throw new Error("context history failed");
+      const barsBefore = available.get(key) ?? 300;
+      const added = mode === "empty" || (mode === "transient" && attempt === 0) ? 0 : mode === "limit" ? 1 : count;
+      available.set(key, barsBefore + added);
+      return { requested: count, barsBefore, barsAfter: barsBefore + added, added, moreAvailable: false };
+    },
     setSymbol: async (symbol, chartIndex) => {
       assert.equal(chartIndex, 1);
       auxiliaryChart.symbol = symbol;
@@ -2519,14 +2572,35 @@ test("evaluate_cross_asset_shock_outcomes wires frozen states to outcomes and re
   const response = await client.callTool({ name: "evaluate_cross_asset_shock_outcomes", arguments: {
     target_chart_index: 0, auxiliary_chart_index: 1, expected_target_symbol: "OANDA:EURUSD",
     expected_timeframe: "15", count: 100, minimum_events_per_state: 1,
+    ...(mode === "default" ? {} : { load_more_bars: 100 }),
   } });
+  assert.deepEqual(auxiliaryChart, { symbol: "OANDA:XAUUSD", resolution: "1D" });
+  if (mode === "error") {
+    assert.equal(response.isError, true);
+    assert.match(response.content[0].text, /context history failed/);
+    assert.equal(loads.get("1:TVC:DXY"), 1);
+    assert.equal(loads.size, 2, "the failing context must stop the remaining reads");
+    return;
+  }
+  assert.notEqual(response.isError, true, response.content[0].text);
   const parsed = JSON.parse(response.content[0].text);
   assert.equal(parsed.contract.contract_id, "cross_asset_shock_outcome_v1");
   assert.equal(parsed.classification.state_counts.cross_asset_confirmed, 1);
   assert.equal(parsed.by_state.cross_asset_confirmed.events, 1);
   assert.equal(parsed.quality.overlapping_states_excluded, 0);
+  const unmet = ["empty", "limit"].includes(mode);
+  assert.equal(parsed.quality_issues.includes("history_request_unmet"), unmet);
+  if (mode === "default") {
+    assert.equal(loads.size, 0);
+    assert.equal(parsed.execution.history_load, null);
+  } else {
+    assert.equal(parsed.execution.history_load.requested_count_reached, !unmet);
+    assert.deepEqual([...loads.values()], Array(4).fill(mode === "limit" ? 24 : 2));
+  }
+  if (unmet) assert.equal(parsed.status, "partial");
   assert.deepEqual(auxiliaryChart, { symbol: "OANDA:XAUUSD", resolution: "1D" });
 });
+}
 
 test("compute_correlation_regimes with confirm:true performs multi-ref symbol verification and restores chart state", async () => {
   const symbolLog = [];
@@ -4660,12 +4734,17 @@ test("temporary outcome evaluation serializes a concurrent set_timeframe operati
   assert.deepEqual(state.calls, ["15", "240", "60"]);
 });
 
-test("evaluate_due_analyses previews, restores multiple symbols, records non-guessed outcomes, and retries idempotently", async () => {
+for (const mode of ["default", "transient", "empty", "partial", "between", "limit", "error"]) {
+test(`evaluate_due_analyses previews, restores multiple symbols, records non-guessed outcomes, and retries idempotently (${mode} history)`, async () => {
   const records = [
     dueAnalysisRecord("EURUSD-due", "OANDA:EURUSD", "15", "2026-07-01T01:00:00.000Z"),
     dueAnalysisRecord("XAUUSD-month", "OANDA:XAUUSD", "M", "2026-07-01T02:00:00.000Z"),
   ];
   const state = { symbol: "OANDA:USDJPY", resolution: "240", changes: [], recorded: new Set() };
+  let calls = 0;
+  let seriesAttempt = 0;
+  let available = 300;
+  const requests = [];
   const context = async () => ({
     layoutName: "batch",
     activeChartIndex: 0,
@@ -4679,6 +4758,8 @@ test("evaluate_due_analyses previews, restores multiple symbols, records non-gue
         assert.equal(chartIndex, 0);
         state.changes.push(["symbol", symbol]);
         state.symbol = symbol;
+        seriesAttempt = 0;
+        available = 300;
         return { symbol, resolution: state.resolution, changed: true, bars: 10 };
       },
       setResolution: async (resolution, chartIndex) => {
@@ -4693,6 +4774,18 @@ test("evaluate_due_analyses previews, restores multiple symbols, records non-gue
         count: 3,
         bars: state.symbol === "OANDA:EURUSD" ? dueBars({ incomplete: true }) : dueBars(),
       }),
+      loadMoreHistory: async ({ count }) => {
+        requests.push(count);
+        calls += 1;
+        const attempt = seriesAttempt++;
+        if (mode === "error") throw new Error("history transport failed");
+        const barsBefore = available + (mode === "between" && attempt === 1 ? 50 : 0);
+        const added = mode === "empty" || (mode === "transient" && attempt === 0) ? 0
+          : mode === "partial" ? Math.min(25, count) : mode === "limit" ? 1
+          : mode === "between" ? (attempt === 2 ? 50 : 0) : count;
+        available = barsBefore + added;
+        return { requested: count, barsBefore, barsAfter: available, added, moreAvailable: false };
+      },
     },
     journal: {
       list: async () => ({ total: records.length, returned: records.length, analyses: records }),
@@ -4708,30 +4801,54 @@ test("evaluate_due_analyses previews, restores multiple symbols, records non-gue
       },
     },
   }));
-  const args = { chart_index: 0 };
+  const args = { chart_index: 0, ...(mode === "default" ? {} : { load_more_bars: 100 }) };
   const dry = JSON.parse((await client.callTool({ name: "evaluate_due_analyses", arguments: args })).content[0].text);
   assert.equal(dry.status, "preview");
   assert.equal(dry.preview.selected, 2);
   assert.deepEqual(state.changes, []);
+  assert.equal(calls, 0);
 
   const first = JSON.parse((await client.callTool({
     name: "evaluate_due_analyses",
     arguments: { ...args, confirm: true },
   })).content[0].text);
-  assert.equal(first.status, "complete");
+  const unmet = ["empty", "limit"].includes(mode);
+  assert.equal(first.status, unmet || mode === "error" ? "partial" : "complete");
   assert.equal(first.processed, 2);
+  if (mode === "error") {
+    assert.equal(calls, 2, "one failed request per analysis; errors are never retried");
+    assert.ok(first.results.every((item) => item.status === "failed"));
+    assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+    return;
+  }
   assert.equal(first.results[0].result.status, "incomplete");
   assert.equal(first.results[1].result.outcome, "calendar_month_resolution_unsupported");
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
+  const history = first.results[0].result.source.historyLoad;
+  assert.equal(first.results[0].result.qualityIssues.includes("history_request_unmet"), unmet);
+  if (mode === "default") assert.equal(history, null);
+  else {
+    assert.equal(history.requestedCountReached, !unmet);
+    const change = first.results[0].result.chartState.changes.find((change) => change.kind === "history_load");
+    assert.equal(change.result.requested, 100);
+    assert.equal(change.result.added, history.addedBars);
+    assert.equal(change.result.calls.length, history.attempts);
+    assert.equal(history.stopReason, mode === "empty" ? "consecutive_empty" : mode === "limit" ? "attempt_limit" : "requested_count_reached");
+    const expected = mode === "empty" || mode === "transient" ? [100, 100]
+      : mode === "partial" ? [100, 75, 50, 25] : mode === "between" ? [100, 100, 50]
+      : Array.from({ length: 24 }, (_, index) => 100 - index);
+    assert.deepEqual(requests.slice(0, expected.length), expected);
+  }
 
   const repeated = JSON.parse((await client.callTool({
     name: "evaluate_due_analyses",
     arguments: { ...args, confirm: true },
   })).content[0].text);
-  assert.equal(repeated.status, "complete");
+  assert.equal(repeated.status, unmet ? "partial" : "complete");
   assert.equal(repeated.results[0].journal.idempotent, true);
   assert.deepEqual([state.symbol, state.resolution], ["OANDA:USDJPY", "240"]);
 });
+}
 
 test("evaluate_due_analyses names a gapped result with history through the expiry unless rechecked otherwise (102-04)", async () => {
   const gapped = {
@@ -9967,6 +10084,150 @@ test("compute_lead_lag_relationships binds both charts and returns every scanned
   assert.match(adopted.journal.error, /empirical-null candidate eligibility/);
   assert.equal(journalRecords.length, 0, "a refused decision must not reach the journal");
 });
+
+test("measure_carry_panel_dependence retains history evidence when initial 50 of 500 bars cannot produce dependence statistics", async () => {
+  const chart = { index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] };
+  const original = structuredClone(chart);
+  const requests = [];
+  const bars = Array.from({ length: 50 }, (_, i) => {
+    const time = Date.UTC(2026, 0, 1) / 1000 + i * 86400;
+    const close = 100 + i * 0.01 + Math.sin(i) * 0.1;
+    return { time, timeIso: new Date(time * 1000).toISOString(), open: close,
+      high: close + 1, low: close - 1, close, volume: 1 };
+  });
+  const client = await connectedClient(makeDeps({ tv: {
+    getChartContext: async () => ({ layoutName: "short-history", activeChartIndex: 0, chartsCount: 1, charts: [{ ...chart }] }),
+    setSymbol: async (symbol) => { chart.symbol = symbol; return { ...chart }; },
+    setResolution: async (resolution) => { chart.resolution = resolution; return { ...chart }; },
+    getOhlcv: async () => ({ symbol: chart.symbol, resolution: chart.resolution, count: bars.length, bars }),
+    loadMoreHistory: async ({ count, chartIndex }) => {
+      requests.push({ symbol: chart.symbol, count, chartIndex });
+      return { requested: count, barsBefore: 50, barsAfter: 50, added: 0, moreAvailable: false };
+    },
+  } }));
+  const pairs = ["EURUSD", "AUDUSD"].map((pair_id) => ({ pair_id, chart_index: 0, expected_symbol: `OANDA:${pair_id}` }));
+  const response = await client.callTool({ name: "measure_carry_panel_dependence", arguments: {
+    pairs, count: 500, seed: "short-history", iterations: 100, confirm: true,
+  } });
+  assert.deepEqual(chart, original);
+  assert.deepEqual(requests, pairs.flatMap((pair) => Array.from({ length: 2 }, () => ({
+    symbol: pair.expected_symbol, count: 450, chartIndex: 0,
+  }))));
+  assert.notEqual(response.isError, true, response.content[0].text);
+  const parsed = JSON.parse(response.content[0].text);
+  assert.equal(parsed.status, "partial");
+  assert.equal(parsed.result, null, "no dependence statistics may be fabricated for an unevaluable panel");
+  assert.match(parsed.calculation_error, /at least 6 non-overlapping anchors/);
+  assert.ok(parsed.quality_issues.includes("price_history_request_unmet"));
+  assert.ok(parsed.quality_issues.includes("carry_dependence_not_evaluable"));
+  assert.deepEqual(parsed.history_loads.map((load) => load.pair_id), ["EURUSD", "AUDUSD"]);
+  for (const { coverage, historyLoad } of parsed.history_loads) {
+    assert.equal(coverage.requiredBars, 500);
+    assert.equal(coverage.initialBars, 50);
+    assert.equal(coverage.finalBars, 50);
+    assert.equal(coverage.loadedBars, 0);
+    assert.equal(coverage.sufficient, false);
+    assert.equal(historyLoad.attempts, 2);
+    assert.equal(historyLoad.stopReason, "consecutive_empty");
+    assert.equal(historyLoad.requestedCountReached, false);
+    assert.equal(historyLoad.addedBars, 0);
+  }
+  assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+});
+
+for (const tool of ["measure_carry_panel_dependence", "run_carry_core_primary_test", "compute_lead_lag_relationships"]) {
+  for (const mode of ["already", "transient", "empty", "partial", "limit", "error"]) {
+    test(`${tool} bounds total history collection and restores charts (${mode} history)`, async () => {
+      const isLeadLag = tool === "compute_lead_lag_relationships";
+      const charts = [
+        { index: 0, symbol: "OANDA:USDJPY", resolution: "240", studies: [] },
+        { index: 1, symbol: "TVC:DXY", resolution: "240", studies: [] },
+      ];
+      const original = structuredClone(charts);
+      const available = new Map();
+      const requests = new Map();
+      const keyFor = (index) => `${index}:${charts[index].symbol}`;
+      const client = await connectedClient(makeDeps({
+        tv: {
+          getChartContext: async () => ({ layoutName: "paging", activeChartIndex: 0, chartsCount: 2, charts }),
+          setSymbol: async (symbol, index) => { charts[index].symbol = symbol; return { symbol, resolution: charts[index].resolution }; },
+          setResolution: async (resolution, index) => { charts[index].resolution = resolution; return { symbol: charts[index].symbol, resolution }; },
+          getOhlcv: async (count, index) => {
+            const size = Math.min(count, available.get(keyFor(index)) ?? (mode === "already" ? 600 : 200));
+            const bars = Array.from({ length: size }, (_, i) => {
+              const time = Date.UTC(2025, 0, 1) / 1000 + i * (isLeadLag ? 3600 : 86400);
+              const close = 100 + i * 0.01 + Math.sin(i * 0.4) * 0.2;
+              return { time, timeIso: new Date(time * 1000).toISOString(), open: close, high: close + 1, low: close - 1, close, volume: 1 };
+            });
+            return { symbol: charts[index].symbol, resolution: charts[index].resolution, count: size, bars };
+          },
+          loadMoreHistory: async ({ count, chartIndex }) => {
+            const key = keyFor(chartIndex);
+            const calls = requests.get(key) ?? [];
+            calls.push(count);
+            requests.set(key, calls);
+            if (mode === "error") throw new Error("history transport failed");
+            const before = available.get(key) ?? 200;
+            const added = mode === "empty" || (mode === "transient" && calls.length === 1) ? 0
+              : mode === "partial" ? Math.min(75, count) : mode === "limit" ? 1 : count;
+            available.set(key, before + added);
+            return { requested: count, barsBefore: before, barsAfter: before + added, added, moreAvailable: false };
+          },
+        },
+        policyRateHistory: { getVersionsAsOf: async () => [] },
+        policyRateHeartbeats: { getRunsAsOf: async () => [] },
+      }));
+      const args = tool === "measure_carry_panel_dependence" ? {
+        pairs: [
+          { pair_id: "EURUSD", chart_index: 0, expected_symbol: "OANDA:EURUSD" },
+          { pair_id: "AUDUSD", chart_index: 0, expected_symbol: "OANDA:AUDUSD" },
+        ], count: 500, seed: "paging", iterations: 100, confirm: true,
+      } : tool === "run_carry_core_primary_test" ? {
+        chart_index: 0, count: 500, as_of: "2026-11-13T00:00:00.000Z", confirm: true,
+      } : {
+        primary_chart_index: 0, reference_chart_index: 1,
+        expected_primary_symbol: "OANDA:USDJPY", expected_reference_symbol: "TVC:DXY",
+        expected_timeframe: "240", count: 100, max_lag_bars: 2, minimum_observations: 4,
+        alignment_mode: "resample_closed_60m_to_utc_grid",
+      };
+      const response = await client.callTool({ name: tool, arguments: args });
+      assert.deepEqual(charts, original, "every exit must restore the original chart binding");
+      if (mode === "error") {
+        assert.equal(response.isError, true);
+        assert.match(response.content[0].text, /history transport failed/);
+        assert.deepEqual([...requests.values()], [[isLeadLag ? 204 : 300]], "errors are not retried");
+        return;
+      }
+      assert.notEqual(response.isError, true, response.content[0].text);
+      const parsed = JSON.parse(response.content[0].text);
+      const loads = isLeadLag ? [parsed.resampling.primary, parsed.resampling.reference] : parsed.history_loads;
+      const reached = !["empty", "limit"].includes(mode);
+      assert.equal(loads.length, tool === "run_carry_core_primary_test" ? 5 : 2);
+      for (const load of loads) {
+        assert.equal(load.coverage.sufficient, reached);
+        assert.equal(load.historyLoad.requestedCountReached, reached);
+        assert.equal(load.historyLoad.stopReason, mode === "empty" ? "consecutive_empty" : mode === "limit" ? "attempt_limit" : "requested_count_reached");
+        assert.equal(load.historyLoad.attempts, mode === "already" ? 0 : mode === "limit" ? 24
+          : mode === "partial" ? Math.ceil((isLeadLag ? 204 : 300) / 75) : 2);
+      }
+      const issues = isLeadLag ? parsed.qualityIssues : parsed.quality_issues;
+      assert.equal(issues.includes("price_history_request_unmet"), !reached);
+      if (tool === "measure_carry_panel_dependence") {
+        assert.notEqual(parsed.result, null, "a calculable panel retains its statistics even when the requested history is unmet");
+        assert.equal(parsed.calculation_error, undefined);
+        assert.equal(issues.includes("carry_dependence_not_evaluable"), false);
+      }
+      if (!reached) assert.notEqual(parsed.status, "complete");
+      if (tool === "run_carry_core_primary_test") {
+        assert.equal(parsed.status, "not_evaluable");
+        assert.equal(parsed.model, null);
+        assert.equal(parsed.bootstrap, null);
+      }
+      if (mode === "already") assert.equal(requests.size, 0);
+      if (isLeadLag) assert.equal(JSON.stringify(parsed).includes('"bars"'), false);
+    });
+  }
+}
 
 test("compute_lead_lag_relationships rebuilds a shared 4H UTC grid from closed 60-minute bars and restores both charts", async () => {
   const charts = [
