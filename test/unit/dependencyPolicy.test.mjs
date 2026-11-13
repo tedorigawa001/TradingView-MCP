@@ -18,11 +18,24 @@ test('the hono override keeps its advisory floor', async () => {
   // versions GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc and GHSA-crvj-82cr-hjcx apply to.
   // The override exists so a fresh resolution cannot land on one. Nothing else would notice
   // it going: npm picks the newest match today, so audit stays clean either way, and the
-  // guarantee would be gone without a single failure.
+  // guarantee would be gone without a single failure. Since 2026-11-14 the floor is 4.13.16, the first release patched
+  // for GHSA-46wx-v44x-9hh2, GHSA-4h7h-rv7c-7m2v, GHSA-4m76-xfj5-7975, GHSA-h7mg-cq63-vhpq and GHSA-3gg2-335m-rxc6
+  // (csrf, form validator, mount, RegExpRouter and css helper).
   const { overrides } = await manifest();
   assert.ok(overrides?.hono, 'the hono override was removed');
-  assert.ok(atLeast(floorOf(overrides.hono), [4, 13, 5]),
-    `hono override floor ${overrides.hono} is below the first patched version 4.13.5`);
+  assert.ok(atLeast(floorOf(overrides.hono), [4, 13, 16]),
+    `hono override floor ${overrides.hono} is below the first patched version 4.13.16`);
+});
+
+test('fast-xml-parser keeps its advisory floor (GHSA-474x-hrwr-fgx4)', async () => {
+  // A direct dependency (realYield.ts). Before 5.12.0, scanning an unterminated stop-node tag took quadratic CPU.
+  // The server sets no stopNodes, but the published range should not admit the affected versions.
+  const { dependencies } = await manifest();
+  assert.ok(atLeast(floorOf(dependencies['fast-xml-parser']), [5, 12, 0]),
+    `fast-xml-parser floor ${dependencies['fast-xml-parser']} is below the first patched version 5.12.0`);
+  const lock = JSON.parse(await readFile(new URL('../../package-lock.json', import.meta.url), 'utf8'));
+  assert.ok(atLeast(floorOf(lock.packages['node_modules/fast-xml-parser'].version), [5, 12, 0]),
+    'the lockfile still installs a vulnerable fast-xml-parser');
 });
 
 test('the fast-uri and ip-address overrides keep their advisory floors', async () => {
