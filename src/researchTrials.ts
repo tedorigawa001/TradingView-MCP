@@ -4,6 +4,7 @@ import { z } from "zod";
 import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { syncJournalForRetry } from "./fsDurability.js";
+import { assertRelationJournalDistinct, readRelationJournalText, relationSnapshot, type RelationSnapshotAnchor, type RelationJournalSnapshot } from "./researchRelationSnapshot.js";
 
 /**
  * The research trial journal (docs/RESEARCH_TRIALS.md, BACKLOG 103-4): how many configurations each study tried on
@@ -228,6 +229,7 @@ export interface ResearchTrialStoreOptions {
 export class ResearchTrialStore {
   private readonly log: AppendOnlyFirstSeenLog<ResearchTrialRecord>;
   private readonly clock: () => Date;
+  get relationJournalPath(): string { return this.filePath; }
 
   constructor(private readonly filePath = resolveResearchTrialsPath(),
     private readonly limits = { maxFileBytes: 32 * 1024 * 1024, maxRecordBytes: 16 * 1024 },
@@ -305,5 +307,17 @@ export class ResearchTrialStore {
   async check(input: unknown): Promise<ResearchTrialsAssessment> {
     const query = researchTrialsCheckSchema.parse(input);
     return this.log.serialize(async () => assess(await this.readUnlocked(this.clock().toISOString()), query));
+  }
+
+  /** Fixed-prefix adapter for the explicit relation check; native reuses validation stays unchanged. */
+  async withRelationSnapshot<T>(registryPath: string | null, selection: RelationSnapshotAnchor | undefined,
+    operation: (s: RelationJournalSnapshot<ResearchTrialRecord>) => Promise<T>): Promise<T> {
+    if (registryPath !== null) assertRelationJournalDistinct(this.filePath, registryPath);
+    return this.log.serializeWithin(2000, async () => {
+      const now = this.clock().toISOString();
+      const raw = await readRelationJournalText(this.filePath);
+      if (raw && raw.split("\n").length - 1 > 4096) throw new Error("relation target record limit exceeded");
+      return operation(relationSnapshot(RESEARCH_TRIALS_NAMESPACE, await this.readUnlocked(now), raw, now, selection));
+    });
   }
 }

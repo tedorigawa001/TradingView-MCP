@@ -420,6 +420,7 @@ function makeDeps(overrides = {}) {
       registerMeasurementHypothesis: async () => { throw new Error("unexpected measurement registration"); },
       getMeasurementHypothesis: async () => { throw new Error("unexpected measurement lookup"); },
     },
+    researchSeriesRelations: overrides.researchSeriesRelations,
     // Collecting first-seen open interest is optional, so it is only present when a test asks for it.
     ...(overrides.futuresOpenInterestHistory
       ? { futuresOpenInterestHistory: overrides.futuresOpenInterestHistory }
@@ -1260,6 +1261,7 @@ test("exposes exactly the expected tools including the indicator table study", a
       "backtest_risk_forecast",
       "carry_panel_preflight",
       "check_research_period_usage",
+      "check_research_series_history",
       "check_research_trials",
       "classify_cross_asset_shocks",
       "compare_forecast_losses",
@@ -1351,6 +1353,7 @@ test("exposes exactly the expected tools including the indicator table study", a
       "record_native_bar_snapshot",
       "record_research_period_usage",
       "record_research_period_usage_batch",
+      "record_research_series_relations",
       "record_research_trials",
       "record_strategy_experiment",
       "recover_native_bar_clock_ahead",
@@ -1757,7 +1760,7 @@ async function nativeMcpFixture(t, hooks = {}) {
 test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
   const client = await connectedClient(makeDeps()); t.after(() => client.close());
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 135);
+  assert.equal(tools.length, 137);
   for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
     "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
     assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
@@ -6524,6 +6527,47 @@ test("106-4 default measurement routing leaves the configured legacy journal unc
   assert.notEqual(result.isError, true, result.content[0].text);
   assert.equal(JSON.parse((await readFile(measurementPath, "utf8")).trim()).kind, "measurement_hypothesis_registered");
   assert.deepEqual(await readFile(legacyPath), bytes);
+});
+
+test("106-5 explicit relation tools keep old checks and retries intact without chart access", async t => {
+  const { ResearchSeriesRelationStore } = await import('../../build/researchSeriesRelations.js');
+  const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+  const dir = await mkdtemp(join(tmpdir(), 'relation-tools-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const usagePath = join(dir, 'usage.jsonl'), registryPath = join(dir, 'relations.jsonl');
+  const usage = new ResearchPeriodUsageStore(usagePath);
+  const relations = new ResearchSeriesRelationStore(registryPath);
+  const untouched = () => { throw new Error('unexpected chart/network/forward access'); };
+  const client = await connectedClient(makeDeps({ researchPeriodUsage: usage, researchSeriesRelations: relations,
+    chartOperationLock: { acquire: untouched }, tv: { getChartContext: untouched, getOhlcv: untouched }, cdp: { evaluate: untouched } }));
+  t.after(() => client.close());
+  const hash = 'sha256:' + 'a'.repeat(64);
+  const record = { access_id: 'usage', research_id: 'study', series_id: 'b', data_version: hash,
+    from: '2024-01-01T00:00:00.000Z', to: '2024-01-02T00:00:00.000Z', accessed_at: '2024-01-03T00:00:00.000Z', purpose: 'exploration' };
+  const first = await usage.record(record);
+  const bytes = await readFile(usagePath);
+  const def = (id) => ({ entry_id: id, kind: 'series', series_id: id, data_version: hash,
+    role: 'root', root_id: id, from: record.from, to: record.to, evidence_sha256: hash,
+    identity: { provider: 'synthetic', feed: 'test', instrument: 'X', price_basis: 'mid', unit: 'test', timestamp_semantics: 'open', formation_sha256: hash } });
+  const records = [def('a'), def('b'), { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: record.from, to: record.to, evidence_sha256: hash }];
+  const call = async (name, args) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.notEqual(result.isError, true, result.content[0].text);
+    return JSON.parse(result.content[0].text);
+  };
+  const refused = await client.callTool({ name: 'record_research_series_relations', arguments: { records } });
+  assert.equal(refused.isError, true);
+  await assert.rejects(readFile(registryPath), { code: 'ENOENT' });
+  assert.equal((await call('record_research_series_relations', { records, confirm: true })).recorded, 3);
+  const args = { target: 'usage', mode: 'aliases', series: [{ series_id: 'a', data_version: hash }], from: record.from, to: record.to };
+  const found = await call('check_research_series_history', args);
+  assert.equal(found.matching_records, 1);
+  assert.equal(found.execution_allowed, false);
+  assert.equal((await call('check_research_series_history', { ...args, mode: 'exact' })).matching_records, 0);
+  assert.deepEqual((await usage.record(record)).prior_overlap, first.prior_overlap);
+  assert.deepEqual(await readFile(usagePath), bytes);
+  const strict = await client.callTool({ name: 'check_research_series_history', arguments: { ...args, approve: true } });
+  assert.equal(strict.isError, true);
 });
 
 test("get_dxy_context_gate_template returns the fixed Pine and plot contract", async () => {

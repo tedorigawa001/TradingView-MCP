@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readJournalForFraming } from "./backtestLedger.js";
 import { AppendOnlyFirstSeenLog, isCalendarDate, isCanonicalTimestamp } from "./firstSeenStore.js";
 import { syncJournalForRetry } from "./fsDurability.js";
+import { assertRelationJournalDistinct, readRelationJournalText, relationSnapshot, type RelationSnapshotAnchor, type RelationJournalSnapshot } from "./researchRelationSnapshot.js";
 import {
   FORWARD_PERIOD_CONFLICTS_NAMED_CAP, FORWARD_PERIOD_LEAD_MS, FORWARD_PERIOD_LIMITATIONS, FORWARD_PERIOD_LISTED_CAP, FORWARD_PERIOD_MAX_LENGTH_MS,
   FORWARD_PERIOD_MIN_LENGTH_MS, FORWARD_PERIOD_NAMESPACE, AccessIndex, ForwardPeriodError, ForwardPeriodJournal, assertClockNotBehind,
@@ -285,6 +286,8 @@ export class ResearchPeriodUsageStore {
   private readonly forwardPeriods: ForwardPeriodJournal;
   private readonly journalKey: string;
   private readonly monotonic: () => number;
+  get relationJournalPath(): string { return this.filePath; }
+  get relationDeclarationPath(): string { return this.journalKey; }
 
   /**
    * Home defaults are resolved only when the ledger path is omitted (createServer's default). With an explicit
@@ -434,6 +437,19 @@ export class ResearchPeriodUsageStore {
   async check(input: unknown): Promise<ResearchPeriodUsageAssessment> {
     const query = researchPeriodUsageCheckSchema.parse(input);
     return this.withBothLocks(async ({ now, ledger, lines }) => withForward(assess(ledger, query), describeForQuery(lines, ledger, query, now)));
+  }
+
+  /** Separate opt-in reader; old checks/record retries never load the relation registry or this snapshot. */
+  async withRelationSnapshot<T>(registryPath: string | null, selection: RelationSnapshotAnchor | undefined,
+    operation: (s: RelationJournalSnapshot<ResearchPeriodUsageRecord>) => Promise<T>): Promise<T> {
+    if (registryPath !== null) assertRelationJournalDistinct(this.filePath, registryPath);
+    return this.log.serializeWithin(2000, async () => {
+      const now = this.clock().toISOString();
+      const raw = await readRelationJournalText(this.filePath);
+      if (raw && raw.split("\n").length - 1 > 4096) throw new Error("relation target record limit exceeded");
+      const records = await this.readUnlocked(now);
+      return operation(relationSnapshot("research_period_usage", records, raw, now, selection));
+    });
   }
 
   /**

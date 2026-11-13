@@ -21,6 +21,9 @@ import { ResearchPeriodUsageStore, researchPeriodUsageRecordInputSchema, researc
 import { compareResearchEvidence, researchEvidenceComparisonSchema } from "./researchEvidenceComparison.js";
 import { RESEARCH_TRIALS_BATCH_MAX, ResearchTrialStore, researchTrialsBatchSchema, researchTrialsCheckSchema,
   summarizeTrialsAssessment } from "./researchTrials.js";
+import { ResearchSeriesRelationStore, seriesRelationBatchSchema } from "./researchSeriesRelations.js";
+import { checkRelatedResearchHistory, relatedHistoryQuerySchema } from "./researchRelatedHistory.js";
+import { assertRelationJournalDistinct } from "./researchRelationSnapshot.js";
 import { BarSeriesStore, type BarSeries } from "./barSeries.js";
 import { ProxySetStore, normalizeProxySet, verifyForecastSetAgainstProxySet } from "./proxySet.js";
 import { REALIZED_COVARIANCE_SEARCH_LIMITATIONS, RealizedCovarianceJournalStore } from "./realizedCovarianceJournal.js";
@@ -240,14 +243,15 @@ export interface ServerDeps {
   bookmapFlowDirectory?: string;
   backtestLedgers?: Pick<BacktestLedgerStore, "get">;
   backtestSliceJournal?: Pick<BacktestSliceJournalStore, "recordSummary">;
-  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos" | "declareForwardPeriod" | "shortenForwardPeriod">;
+  researchPeriodUsage?: Pick<ResearchPeriodUsageStore, "record" | "recordBatch" | "check" | "recordToolAccess" | "recordToolAccessBatch" | "preflightOos" | "declareForwardPeriod" | "shortenForwardPeriod"> & Partial<Pick<ResearchPeriodUsageStore, "withRelationSnapshot" | "relationJournalPath" | "relationDeclarationPath">>;
   forecastSets?: Pick<ForecastSetStore, "get">;
   forecastLossJournal?: Pick<ForecastLossJournalStore, "record">;
   barSeries?: Pick<BarSeriesStore, "get">;
   proxySets?: Pick<ProxySetStore, "get" | "register">;
   realizedCovarianceJournal?: Pick<RealizedCovarianceJournalStore, "record" | "findByProxySetId" | "search">;
   riskBacktestJournal?: Pick<RiskBacktestJournalStore, "record">;
-  researchTrials?: Pick<ResearchTrialStore, "recordBatch" | "check">;
+  researchTrials?: Pick<ResearchTrialStore, "recordBatch" | "check"> & Partial<Pick<ResearchTrialStore, "withRelationSnapshot" | "relationJournalPath">>;
+  researchSeriesRelations?: Pick<ResearchSeriesRelationStore, "recordBatch" | "withSnapshot" | "filePath">;
   /** Test seam for tzdata drift (design H6); production uses the runtime's Intl data. */
   zoneResolver?: ZoneResolver;
   /** Test seam; production uses the process-wide file lock by default. */
@@ -444,7 +448,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), researchSeriesRelations, zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
@@ -5690,6 +5694,47 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         const {summary_only, ...query} = request;
         const result = await researchPeriodUsage.check(researchPeriodUsageCheckSchema.parse(query));
         return jsonResult(summary_only ? summarizeAssessment(result) : result);
+      } catch (err) { return errorResult(err); }
+    },
+  );
+
+  // Lazy: existing tools, including their retries, never construct or read the registry.
+  let seriesRelationStore = researchSeriesRelations;
+  const getSeriesRelationStore = () => {
+    const protectedPaths = [researchPeriodUsage.relationJournalPath, researchPeriodUsage.relationDeclarationPath,
+      researchTrials.relationJournalPath].filter((p): p is string => p !== undefined);
+    seriesRelationStore ??= new ResearchSeriesRelationStore(undefined, { protectedPaths });
+    for (const path of protectedPaths) assertRelationJournalDistinct(seriesRelationStore.filePath, path);
+    return seriesRelationStore;
+  };
+  server.registerTool(
+    "record_research_series_relations",
+    {
+      description: "Append caller-declared version-specific series definitions, aliases, declared parent support windows, related pairs or revocations to a separate local registry. Requires explicit confirmation. No market data, chart operation or computation. Evidence hashes are integrity references, not authenticated provenance. See docs/RESEARCH_SERIES_RELATIONS.md.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: z.object({ records: seriesRelationBatchSchema, confirm: z.literal(true) }).strict(),
+    },
+    async ({ records }) => {
+      try { return jsonResult(await getSeriesRelationStore().recordBatch(records)); }
+      catch (err) { return errorResult(err); }
+    },
+  );
+  server.registerTool(
+    "check_research_series_history",
+    {
+      description: "Explicit diagnostic over usage or trial history: exact IDs, version-bound aliases or shared declared source support. Captures target then registry under their locks; supports pinned prefix snapshots. Does not change old records/retries/reuses or resolve forward declarations; never grants execution or unused-data proof. Local locks may create directories and temporary lock files.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: relatedHistoryQuerySchema,
+    },
+    async (input) => {
+      try {
+        const relations = input.mode === "exact" ? { filePath: "", withSnapshot: async () => { throw new Error("exact mode must not read registry"); } }
+          : getSeriesRelationStore();
+        return jsonResult(await checkRelatedResearchHistory(input, {
+          relations,
+          usage: researchPeriodUsage.withRelationSnapshot ? { withRelationSnapshot: researchPeriodUsage.withRelationSnapshot.bind(researchPeriodUsage) } : undefined,
+          trials: researchTrials.withRelationSnapshot ? { withRelationSnapshot: researchTrials.withRelationSnapshot.bind(researchTrials) } : undefined,
+        }));
       } catch (err) { return errorResult(err); }
     },
   );
