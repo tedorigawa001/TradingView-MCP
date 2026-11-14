@@ -130,6 +130,86 @@ test('106-5 shared_source retains derived alias trial matches and net when paren
   assert.deepEqual(await readFile(registryPath), registryBytes);
 });
 
+for (const completeSide of ['query', 'record']) for (const count of [600, 800, 1200]) {
+  test(`106-5 shared_source stays within the work limit for ${count} nonmatches when ${completeSide} resolution is complete`, async t => {
+    const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+    const { relationSnapshot } = await import('../../build/researchRelationSnapshot.js');
+    const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+    const { store, directory } = await setup(t);
+    const incompleteId = completeSide === 'query' ? 'r' : 'q';
+    await store.recordBatch([definition('q', { root_id: 'q' }), definition('r', { root_id: 'r' }), definition('other', { root_id: 'other' }),
+      ...Array.from({ length: 10 }, (_, i) => ({ entry_id: `related-${i}`, kind: 'related', left: incompleteId, right: 'other',
+        from: ts(1), to: ts(30), evidence_sha256: hash('e'), reason: 'Unresolved source relation' }))]);
+    // Capture-shaped synthetic metadata isolates resolver work from filesystem timing. Use a
+    // native saved row as the template; every cloned access has a distinct ID and sequence.
+    const path = join(directory, 'usage.jsonl');
+    const native = new ResearchPeriodUsageStore(path, undefined, { now: () => new Date(NOW) });
+    await native.record({ access_id: 'sample', research_id: 'study', series_id: 'r', data_version: hash('a'),
+      from: ts(10), to: ts(20), accessed_at: ts(25), purpose: 'exploration' });
+    const template = JSON.parse((await readFile(path, 'utf8')).trim());
+    const records = Array.from({ length: count }, (_, i) => ({ ...template, access_id: `access-${i}`, sequence: i + 1 }));
+    const raw = records.map(r => JSON.stringify(r)).join('\n') + '\n';
+    const usage = { withRelationSnapshot: async (_registryPath, selection, operation) =>
+      operation(relationSnapshot('research_period_usage', records, raw, NOW, selection)) };
+    const q = { target: 'usage', mode: 'aliases', series: [{ series_id: 'q', data_version: hash('a') }], from: ts(10), to: ts(20) };
+    const aliases = await checkRelatedResearchHistory(q, { usage, relations: store });
+    const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { usage, relations: store });
+    assert.equal(shared.matching_records, 0);
+    assert.equal(shared.matching_records, aliases.matching_records);
+    assert.equal(shared.status, 'inconclusive');
+    assert.equal(shared.resolution_complete, false, 'skip only redundant matching, not unresolved reporting');
+    assert.ok(shared.unresolved.includes(`related_relation_unresolved:related-0`));
+    assert.equal(shared.execution_allowed, false);
+    assert.equal(shared.candidateEligible, false);
+  });
+}
+
+test('106-5 shared_source still checks incomplete pairs when other query and record series resolve completely', async t => {
+  const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+  const { ResearchTrialStore } = await import('../../build/researchTrials.js');
+  const { store, directory } = await setup(t);
+  await store.recordBatch([definition('q-root', { root_id: 'q-root' }), definition('r-root', { root_id: 'r-root' }),
+    definition('a', { role: 'derived', root_id: undefined }), definition('b', { role: 'derived', root_id: undefined }),
+    { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: ts(1), to: ts(30), evidence_sha256: hash('e') }]);
+  const trials = new ResearchTrialStore(join(directory, 'trials.jsonl'), undefined, { now: () => new Date(NOW) });
+  await trials.recordBatch([{ trial_set_id: 'mixed', research_id: 'study', series_ids: ['r-root', 'b'], data_version: hash('a'),
+    from: ts(10), to: ts(20), tried_at: ts(25), configuration_count: 10, count_basis: 'enumerated', outcome_seen: 'none' }]);
+  const q = { target: 'trials', mode: 'aliases', series: [{ series_id: 'q-root', data_version: hash('a') }, { series_id: 'a', data_version: hash('a') }],
+    from: ts(10), to: ts(20) };
+  const aliases = await checkRelatedResearchHistory(q, { trials, relations: store });
+  const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { trials, relations: store });
+  assert.deepEqual([shared.matching_records, shared.counts.configurations_net], [1, 10]);
+  assert.equal(shared.matching_records, aliases.matching_records);
+  assert.equal(shared.matches[0].match_basis, 'aliases');
+  assert.equal(shared.resolution_complete, false);
+});
+
+for (const completeSide of ['query', 'record']) {
+  test(`106-5 root comparison retains an alias overlap when only ${completeSide} resolution is complete`, async t => {
+    const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+    const { ResearchTrialStore } = await import('../../build/researchTrials.js');
+    const { store, directory } = await setup(t);
+    await store.recordBatch([definition('raw'), definition('a', { role: 'derived', root_id: undefined }),
+      definition('b', { role: 'derived', root_id: undefined }),
+      { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: ts(1), to: ts(30), evidence_sha256: hash('e') },
+      { entry_id: 'mapping', kind: 'derivation', child: 'a', recipe_sha256: hash('f'), evidence_sha256: hash('e'), mapping_schema: 'declared_support_windows_v1',
+        windows: [{ from: ts(10), to: ts(20), supports: [{ parent: 'raw', from: ts(1), to: ts(2) }] }] }]);
+    const trials = new ResearchTrialStore(join(directory, 'trials.jsonl'), undefined, { now: () => new Date(NOW) });
+    const recordSpan = completeSide === 'record' ? { from: ts(10), to: ts(20) } : { from: ts(1), to: ts(30) };
+    const querySpan = completeSide === 'query' ? { from: ts(10), to: ts(20) } : { from: ts(1), to: ts(30) };
+    await trials.recordBatch([{ trial_set_id: 'one', research_id: 'study', series_ids: ['b'], data_version: hash('a'), ...recordSpan,
+      tried_at: '2024-02-01T00:00:00.000Z', configuration_count: 10, count_basis: 'enumerated', outcome_seen: 'none' }]);
+    const q = { target: 'trials', mode: 'aliases', series: [{ series_id: 'a', data_version: hash('a') }], ...querySpan };
+    const aliases = await checkRelatedResearchHistory(q, { trials, relations: store });
+    const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { trials, relations: store });
+    assert.deepEqual([shared.matching_records, shared.counts.configurations_net], [1, 10]);
+    assert.equal(shared.matching_records, aliases.matching_records);
+    assert.equal(shared.matches[0].match_basis, 'shared_source');
+    assert.equal(shared.resolution_complete, false);
+    assert.ok(shared.unresolved_count > 0);
+  });
+}
+
 test('106-5 shared_source keeps alias usage counts and witnesses unresolved, with pinned replay after revocation', async t => {
   const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
   const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');

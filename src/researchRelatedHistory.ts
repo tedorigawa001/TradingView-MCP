@@ -137,8 +137,10 @@ export async function checkRelatedResearchHistory(input: unknown, sources: Histo
   const spend = () => { if (++steps > SERIES_RELATION_LIMITS.steps) throw new Error("relation work limit exceeded"); };
   const resolve = expanded ? makeResolver(captured.registry!.records, q.mode as "aliases" | "shared_source", spend) : null;
   const querySupports = q.series.map(s => resolve?.(s, q));
-  // Only needed when root resolution cannot establish a match. Reuse the captured view and
-  // its state/support/work counters: alias retention must not create a second resource budget.
+  // If either endpoint resolves completely, any alias overlap is already represented in the
+  // root comparison. Only incomplete/incomplete pairs need an additional alias check.
+  const incompleteQuerySeries = q.mode === "shared_source" ? q.series.filter((_, i) => !querySupports[i]!.complete) : [];
+  // Reuse the captured view and its counters; no second resource budget for alias retention.
   let queryAliasSupports: Support[] | undefined;
   const compareSupports = (queries: (Support | undefined)[], support: Support, witnesses: unknown[]): boolean => {
     let found = false;
@@ -162,15 +164,17 @@ export async function checkRelatedResearchHistory(input: unknown, sources: Histo
     let found = exact;
     let matchBasis: string = exact ? "exact" : q.mode;
     const witnesses: unknown[] = [];
+    const incompleteRecordIds: string[] = [];
     if (resolve) for (const id of ids) {
       const support = resolve({ series_id: id, data_version: record.data_version }, record);
       allComplete = allComplete && support.complete;
+      if (!support.complete) incompleteRecordIds.push(id);
       for (const issue of support.issues) issues.add(issue);
       if (compareSupports(querySupports, support, witnesses)) found = true;
     }
-    if (!found && q.mode === "shared_source") {
-      queryAliasSupports ??= q.series.map(s => resolve!(s, q, "aliases"));
-      for (const id of ids) {
+    if (!found && q.mode === "shared_source" && incompleteQuerySeries.length && incompleteRecordIds.length) {
+      queryAliasSupports ??= incompleteQuerySeries.map(s => resolve!(s, q, "aliases"));
+      for (const id of incompleteRecordIds) {
         const aliasSupport = resolve!({ series_id: id, data_version: record.data_version }, record, "aliases");
         if (compareSupports(queryAliasSupports, aliasSupport, witnesses)) {
           found = true; matchBasis = "aliases"; break;
