@@ -87,10 +87,109 @@ test('106-5 alias expansion recomputes net over the unique match union and never
   assert.deepEqual([expanded.matching_records, expanded.counts.configurations_reported, expanded.counts.configurations_net], [2, 20, 10]);
   assert.equal(expanded.resolution_complete, false, 'unregistered shared endpoint remains unresolved');
   assert.equal(expanded.counts.total_is_lower_bound, true);
+  const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: expanded.snapshots }, { trials, relations: store });
+  assert.deepEqual([shared.matching_records, shared.counts.configurations_reported, shared.counts.configurations_net], [2, 20, 10]);
   await assert.rejects(trials.recordBatch([{ ...base, trial_set_id: 'invalid-alias-reuse', series_ids: ['new'],
     reuses: [{ trial_set_id: 'origin', configuration_count: 10 }] }]), /shares no series/);
   assert.deepEqual((await trials.recordBatch(inputs)).map(r => r.prior_trials), first.map(r => r.prior_trials));
   assert.deepEqual(await readFile(path), bytes);
+});
+
+test('106-5 shared_source retains derived alias trial matches and net when parent mappings are missing', async t => {
+  const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+  const { ResearchTrialStore } = await import('../../build/researchTrials.js');
+  const { store, directory, path: registryPath } = await setup(t);
+  const path = join(directory, 'trials.jsonl');
+  const trials = new ResearchTrialStore(path, undefined, { now: () => new Date(NOW) });
+  await store.recordBatch([definition('a', { role: 'derived', root_id: undefined }),
+    definition('b', { role: 'derived', root_id: undefined }),
+    { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: ts(1), to: ts(30), evidence_sha256: hash('e') }]);
+  const base = { research_id: 'study', series_ids: ['b'], data_version: hash('a'), from: ts(10), to: ts(20),
+    tried_at: ts(25), configuration_count: 10, count_basis: 'enumerated', outcome_seen: 'none' };
+  const input = [{ ...base, trial_set_id: 'origin' },
+    { ...base, trial_set_id: 'reuse', reuses: [{ trial_set_id: 'origin', configuration_count: 10 }] }];
+  const first = await trials.recordBatch(input);
+  const bytes = await readFile(path), registryBytes = await readFile(registryPath);
+  const q = { target: 'trials', mode: 'aliases', series: [{ series_id: 'a', data_version: hash('a') }], from: ts(10), to: ts(20) };
+  const aliases = await checkRelatedResearchHistory(q, { trials, relations: store });
+  const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { trials, relations: store });
+  assert.deepEqual([aliases.matching_records, aliases.counts.configurations_reported, aliases.counts.configurations_net], [2, 20, 10]);
+  assert.deepEqual([shared.matching_records, shared.counts.configurations_reported, shared.counts.configurations_net], [2, 20, 10]);
+  assert.equal(shared.has_known_overlap, true);
+  assert.equal(shared.status, 'known_overlap');
+  assert.equal(shared.resolution_complete, false);
+  assert.ok(shared.unresolved.includes('support_coverage_missing:a'));
+  assert.ok(shared.unresolved.includes('support_coverage_missing:b'));
+  assert.ok(shared.matches.every(m => m.match_basis === 'aliases' && m.witnesses.length > 0));
+  assert.deepEqual(shared.matches.map(m => m.record_id), aliases.matches.map(m => m.record_id));
+  assert.equal(shared.execution_allowed, false);
+  assert.equal(shared.unused_proven, false);
+  assert.equal(shared.candidateEligible, false);
+  assert.deepEqual((await trials.recordBatch(input)).map(r => r.prior_trials), first.map(r => r.prior_trials));
+  assert.deepEqual(await readFile(path), bytes);
+  assert.deepEqual(await readFile(registryPath), registryBytes);
+});
+
+test('106-5 shared_source keeps alias usage counts and witnesses unresolved, with pinned replay after revocation', async t => {
+  const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+  const { ResearchPeriodUsageStore } = await import('../../build/researchPeriodUsage.js');
+  const { store, directory } = await setup(t);
+  const path = join(directory, 'usage.jsonl');
+  const usage = new ResearchPeriodUsageStore(path, undefined, { now: () => new Date(NOW) });
+  await store.recordBatch([definition('a', { role: 'derived', root_id: undefined }),
+    definition('b', { role: 'derived', root_id: undefined }),
+    { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: ts(10), to: ts(20), evidence_sha256: hash('e') }]);
+  const input = { access_id: 'one', research_id: 'study', series_id: 'b', data_version: hash('a'),
+    from: ts(5), to: ts(25), accessed_at: ts(25), purpose: 'exploration' };
+  const first = await usage.record(input);
+  await usage.record({ ...input, access_id: 'two', purpose: 'validation' });
+  const bytes = await readFile(path);
+  const q = { target: 'usage', mode: 'aliases', series: [{ series_id: 'a', data_version: hash('a') }], from: ts(5), to: ts(25) };
+  const aliases = await checkRelatedResearchHistory(q, { usage, relations: store });
+  const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { usage, relations: store });
+  assert.deepEqual([shared.matching_records, shared.counts.exploration_records, shared.counts.validation_records], [2, 1, 1]);
+  assert.equal(shared.matching_records, aliases.matching_records);
+  assert.equal(shared.resolution_complete, false);
+  assert.equal(shared.status, 'known_overlap');
+  assert.ok(shared.unresolved_count > 0);
+  for (const match of shared.matches) {
+    assert.equal(match.match_basis, 'aliases');
+    assert.ok(match.witnesses.length > 0);
+    assert.ok(match.witnesses.every(w => w.overlap.from === ts(10) && w.overlap.to === ts(20)));
+  }
+  await store.recordBatch([{ entry_id: 'withdraw', kind: 'revoke', target: 'ab', reason: 'Correction' }]);
+  assert.equal((await checkRelatedResearchHistory({ ...q, mode: 'shared_source' }, { usage, relations: store })).matching_records, 0);
+  assert.deepEqual(await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: shared.snapshots }, { usage, relations: store }), shared);
+  assert.deepEqual((await usage.record(input)).prior_overlap, first.prior_overlap);
+  assert.deepEqual(await readFile(path), bytes);
+});
+
+test('106-5 shared_source adds root matches to retained aliases without double-counting trial sets', async t => {
+  const { checkRelatedResearchHistory } = await import('../../build/researchRelatedHistory.js');
+  const { ResearchTrialStore } = await import('../../build/researchTrials.js');
+  const { store, directory } = await setup(t);
+  const trials = new ResearchTrialStore(join(directory, 'trials.jsonl'), undefined, { now: () => new Date(NOW) });
+  await store.recordBatch([definition('raw'), definition('a', { role: 'derived', root_id: undefined }),
+    definition('b', { role: 'derived', root_id: undefined }),
+    { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: ts(1), to: ts(30), evidence_sha256: hash('e') }]);
+  const base = { research_id: 'study', series_ids: ['b'], data_version: hash('a'), from: ts(10), to: ts(20),
+    tried_at: ts(25), configuration_count: 10, count_basis: 'enumerated', outcome_seen: 'none' };
+  await trials.recordBatch([{ ...base, trial_set_id: 'origin' },
+    { ...base, trial_set_id: 'reuse', reuses: [{ trial_set_id: 'origin', configuration_count: 10 }] },
+    { ...base, trial_set_id: 'root-only', series_ids: ['raw'], configuration_count: 5 }]);
+  const q = { target: 'trials', mode: 'aliases', series: [{ series_id: 'a', data_version: hash('a') }], from: ts(10), to: ts(20) };
+  const before = await checkRelatedResearchHistory({ ...q, mode: 'shared_source' }, { trials, relations: store });
+  assert.deepEqual([before.matching_records, before.counts.configurations_net], [2, 10]);
+  await store.recordBatch([{ entry_id: 'mapping', kind: 'derivation', child: 'a', recipe_sha256: hash('f'), evidence_sha256: hash('e'),
+    mapping_schema: 'declared_support_windows_v1', windows: [{ from: ts(1), to: ts(30), supports: [{ parent: 'raw', from: ts(1), to: ts(30) }] }] }]);
+  const aliases = await checkRelatedResearchHistory(q, { trials, relations: store });
+  const shared = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: aliases.snapshots }, { trials, relations: store });
+  assert.deepEqual([aliases.matching_records, aliases.counts.configurations_reported, aliases.counts.configurations_net], [2, 20, 10]);
+  assert.deepEqual([shared.matching_records, shared.counts.configurations_reported, shared.counts.configurations_net], [3, 25, 15]);
+  assert.equal(shared.resolution_complete, true);
+  assert.deepEqual(shared.matches.map(m => m.record_id), ['origin', 'reuse', 'root-only']);
+  const replay = await checkRelatedResearchHistory({ ...q, mode: 'shared_source', snapshots: before.snapshots }, { trials, relations: store });
+  assert.deepEqual([replay.matching_records, replay.counts.configurations_net], [before.matching_records, before.counts.configurations_net]);
 });
 
 test('106-5 snapshot replay survives append and revocation; missing or changed prefixes fail closed', async t => {
@@ -178,6 +277,10 @@ test('106-5 alias composition clips every edge and does not link disjoint validi
   const r = await checkRelatedResearchHistory({ target: 'usage', mode: 'aliases', series: [{ series_id: 'a', data_version: hash('a') }], from: ts(1), to: ts(20) }, { usage, relations: store });
   assert.equal(r.matching_records, 0);
   assert.equal(r.resolution_complete, true);
+  const shared = await checkRelatedResearchHistory({ target: 'usage', mode: 'shared_source', series: [{ series_id: 'a', data_version: hash('a') }],
+    from: ts(1), to: ts(20), snapshots: r.snapshots }, { usage, relations: store });
+  assert.equal(shared.matching_records, 0);
+  assert.equal(shared.resolution_complete, true);
 });
 
 test('106-5 a missing multi-input dependency retains known overlap but never claims complete resolution', async t => {

@@ -6547,7 +6547,7 @@ test("106-5 explicit relation tools keep old checks and retries intact without c
   const first = await usage.record(record);
   const bytes = await readFile(usagePath);
   const def = (id) => ({ entry_id: id, kind: 'series', series_id: id, data_version: hash,
-    role: 'root', root_id: id, from: record.from, to: record.to, evidence_sha256: hash,
+    role: 'derived', from: record.from, to: record.to, evidence_sha256: hash,
     identity: { provider: 'synthetic', feed: 'test', instrument: 'X', price_basis: 'mid', unit: 'test', timestamp_semantics: 'open', formation_sha256: hash } });
   const records = [def('a'), def('b'), { entry_id: 'ab', kind: 'alias', left: 'a', right: 'b', from: record.from, to: record.to, evidence_sha256: hash }];
   const call = async (name, args) => {
@@ -6563,6 +6563,15 @@ test("106-5 explicit relation tools keep old checks and retries intact without c
   const found = await call('check_research_series_history', args);
   assert.equal(found.matching_records, 1);
   assert.equal(found.execution_allowed, false);
+  const shared = await call('check_research_series_history', { ...args, mode: 'shared_source', snapshots: found.snapshots });
+  assert.equal(shared.matching_records, 1);
+  assert.equal(shared.has_known_overlap, true);
+  assert.equal(shared.resolution_complete, false);
+  assert.ok(shared.unresolved_count > 0);
+  assert.equal(shared.matches[0].match_basis, 'aliases');
+  assert.equal(shared.execution_allowed, false);
+  assert.equal(shared.unused_proven, false);
+  assert.equal(shared.candidateEligible, false);
   assert.equal((await call('check_research_series_history', { ...args, mode: 'exact' })).matching_records, 0);
   assert.deepEqual((await usage.record(record)).prior_overlap, first.prior_overlap);
   assert.deepEqual(await readFile(usagePath), bytes);

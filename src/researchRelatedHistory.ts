@@ -45,7 +45,7 @@ function makeResolver(records: SeriesRelationRecord[], mode: "aliases" | "shared
     if (++producedRoots > SERIES_RELATION_LIMITS.roots || r.path.length > SERIES_RELATION_LIMITS.pathEntries) throw new Error("relation support/path limit exceeded");
     roots.push(r);
   };
-  function resolveDefinition(definitionId: string, span: Span, stack: string[]): Support {
+  function resolveDefinition(definitionId: string, span: Span, stack: string[], resolutionMode = mode): Support {
     spend();
     if (stack.includes(definitionId)) throw new Error("derived relation cycle during resolution");
     const queue = [{ id: definitionId, span, path: [definitionId] }], visited = new Set<string>();
@@ -78,8 +78,8 @@ function makeResolver(records: SeriesRelationRecord[], mode: "aliases" | "shared
           relatedUnresolved = true; issues.push(`related_relation_unresolved:${related.entry_id}`);
         }
       }
-      if (mode === "aliases" || d.role === "root") {
-        addRoot(roots, { ...node.span, root: mode === "aliases" ? d.entry_id : d.root_id!, path: node.path });
+      if (resolutionMode === "aliases" || d.role === "root") {
+        addRoot(roots, { ...node.span, root: resolutionMode === "aliases" ? d.entry_id : d.root_id!, path: node.path });
         completeIntervals.push(node.span);
         continue;
       }
@@ -90,7 +90,7 @@ function makeResolver(records: SeriesRelationRecord[], mode: "aliases" | "shared
         if (!overlaps(node.span, w)) continue;
         let complete = true;
         for (const s of w.supports) {
-          const parent = resolveDefinition(s.parent, s, [...stack, definitionId, ...node.path.filter(p => view.definitions.has(p))]);
+          const parent = resolveDefinition(s.parent, s, [...stack, definitionId, ...node.path.filter(p => view.definitions.has(p))], resolutionMode);
           complete = complete && parent.complete;
           issues.push(...parent.issues);
           for (const r of parent.roots) addRoot(roots, { ...r, path: [...node.path, derivation.entry_id, ...r.path] });
@@ -101,9 +101,9 @@ function makeResolver(records: SeriesRelationRecord[], mode: "aliases" | "shared
     const complete = covered(span, completeIntervals) && !relatedUnresolved;
     return { roots, complete, issues: complete ? [] : [...new Set([...issues, `support_coverage_missing:${definitionId}`])] };
   }
-  return (endpoint: { series_id: string; data_version: string }, span: Span): Support => {
+  return (endpoint: { series_id: string; data_version: string }, span: Span, resolutionMode = mode): Support => {
     const d = view.endpoints.get(`${endpoint.series_id}|${endpoint.data_version}`);
-    return d ? resolveDefinition(d.entry_id, span, [])
+    return d ? resolveDefinition(d.entry_id, span, [], resolutionMode)
       : { roots: [], complete: false, issues: [`definition_missing:${endpoint.series_id}:${endpoint.data_version}`] };
   };
 }
@@ -137,6 +137,20 @@ export async function checkRelatedResearchHistory(input: unknown, sources: Histo
   const spend = () => { if (++steps > SERIES_RELATION_LIMITS.steps) throw new Error("relation work limit exceeded"); };
   const resolve = expanded ? makeResolver(captured.registry!.records, q.mode as "aliases" | "shared_source", spend) : null;
   const querySupports = q.series.map(s => resolve?.(s, q));
+  // Only needed when root resolution cannot establish a match. Reuse the captured view and
+  // its state/support/work counters: alias retention must not create a second resource budget.
+  let queryAliasSupports: Support[] | undefined;
+  const compareSupports = (queries: (Support | undefined)[], support: Support, witnesses: unknown[]): boolean => {
+    let found = false;
+    for (const qs of queries) for (const a of qs!.roots) for (const b of support.roots) {
+      spend();
+      if (a.root !== b.root || !overlaps(a, b)) continue;
+      found = true;
+      if (witnesses.length < 5) witnesses.push({ root_id: a.root, overlap: intersection(a, b),
+        query_path: a.path.slice(0, 32), record_path: b.path.slice(0, 32), path_truncated: a.path.length > 32 || b.path.length > 32 });
+    }
+    return found;
+  };
   const issues = new Set(querySupports.flatMap(s => s?.issues ?? []));
   const matched: HistoryRecord[] = [];
   const detail: Array<{ record_id: string; match_basis: string; witnesses: unknown[]; record: HistoryRecord }> = [];
@@ -146,23 +160,27 @@ export async function checkRelatedResearchHistory(input: unknown, sources: Histo
     const ids = seriesOf(record);
     const exact = overlaps(record, q) && ids.some(id => q.series.some(s => s.series_id === id));
     let found = exact;
+    let matchBasis: string = exact ? "exact" : q.mode;
     const witnesses: unknown[] = [];
     if (resolve) for (const id of ids) {
       const support = resolve({ series_id: id, data_version: record.data_version }, record);
       allComplete = allComplete && support.complete;
       for (const issue of support.issues) issues.add(issue);
-      for (const qs of querySupports) for (const a of qs!.roots) for (const b of support.roots) {
-        spend();
-        if (a.root !== b.root || !overlaps(a, b)) continue;
-        found = true;
-        if (witnesses.length < 5) witnesses.push({ root_id: a.root, overlap: intersection(a, b),
-          query_path: a.path.slice(0, 32), record_path: b.path.slice(0, 32), path_truncated: a.path.length > 32 || b.path.length > 32 });
+      if (compareSupports(querySupports, support, witnesses)) found = true;
+    }
+    if (!found && q.mode === "shared_source") {
+      queryAliasSupports ??= q.series.map(s => resolve!(s, q, "aliases"));
+      for (const id of ids) {
+        const aliasSupport = resolve!({ series_id: id, data_version: record.data_version }, record, "aliases");
+        if (compareSupports(queryAliasSupports, aliasSupport, witnesses)) {
+          found = true; matchBasis = "aliases"; break;
+        }
       }
     }
     if (found) {
       matched.push(record);
       if (detail.length < SERIES_RELATION_LIMITS.listed) detail.push({ record_id: "access_id" in record ? record.access_id : record.trial_set_id,
-        match_basis: exact ? "exact" : q.mode, witnesses, record });
+        match_basis: matchBasis, witnesses, record });
     }
   }
   let counts: Record<string, unknown>;
