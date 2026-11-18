@@ -9,3 +9,4 @@ qiita/
 /playbook
 /fxdata
 bookmap-addon/dist/
+/.release-work/

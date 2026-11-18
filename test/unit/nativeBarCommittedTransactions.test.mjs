@@ -38,18 +38,33 @@ function payload() {
       provenance: { session_holidays: null, corrections: null }, bars: [{ bar_open_at: "2025-12-31T23:00:00.000Z",
         confirmed_by_next_bar_at: AT, open: 1, high: 2, low: 1, close: 2, volume: null }] }))) };
 }
-function pack(records, evaluation_at = "2026-05-01T00:00:00.000Z", override = {}) {
+function pack(records, evaluation_at = "2026-05-01T00:00:00.000Z", override = {}, options = {}) {
   const bodies = records.map(r => canonical(r.value));
   const journal = records.filter(r => !["receipt_v1", "payload_v1"].includes(r.role));
-  const inventory = records.filter(r => ["receipt_v1", "payload_v1"].includes(r.role)).map(r => ({ role: r.role, hash: hash(canonical(r.value)) }))
+  const evidence = records.filter(r => ["receipt_v1", "payload_v1"].includes(r.role)).map(r => ({ role: r.role, hash: hash(canonical(r.value)) }))
     .sort((a,b) => canonical(a) < canonical(b) ? -1 : canonical(a) > canonical(b) ? 1 : 0);
+  const known = new Map();
+  for(const r of records.filter(r=>r.role==="manifest"))for(const p of r.value.pairs)known.set(p.recording_id,{value:p.receipt_fields,receipt_hash:p.receipt_hash});
+  for(const r of records.filter(r=>r.role==="receipt_v1"))known.set(r.value.recording_id,{value:r.value,receipt_hash:hash(canonical(r.value))});
+  const completedLegacy=new Set(records.filter(r=>r.role==="legacy_completion_v1").map(r=>r.value.id));
+  const retired=new Set(records.filter(r=>r.role==="legacy_v1"&&completedLegacy.has(r.value.id)).flatMap(r=>r.value.pairs.map(p=>p.recording_id)));
+  let inventory=[];
+  for(const [id,r] of known)for(const role of ["receipt","payload"]){
+    if(retired.has(id))continue;
+    const last=records.filter(r=>r.role==="event"&&r.value.recording_id===id&&r.value.role===role&&!['conflict','durability_unknown'].includes(r.value.type)).at(-1)?.value.type;
+    if(["purged_verified","quarantined_verified"].includes(last))continue;
+    const location=["held_verified","reconciled_held","unlink_pending","quarantine_move_pending"].includes(last)?"holding":"source";
+    inventory.push({recording_id:id,role,location,hash:role==="receipt"?r.receipt_hash:r.value.payload_hash});
+  }
+  inventory=options.inventory??inventory;const policy_hash=options.policy_hash??H(2);
+  const orderedInventory=[...inventory].sort((a,b)=>canonical(a)<canonical(b)?-1:canonical(a)>canonical(b)?1:0);
   const intent = records.find(r => r.role === "intent"), attempt = records.filter(r => r.role === "attempt").at(-1);
   const ticks = attempt ? records.filter(r => ["event", "completion"].includes(r.role) && r.value.attempt_id === attempt.value.attempt_id)
     .map(r => /^\d+$/.test(r.value.monotonic_ns) ? BigInt(r.value.monotonic_ns) : 0n)
     .concat(/^\d+$/.test(attempt.value.monotonic.observed_ns) ? BigInt(attempt.value.monotonic.observed_ns) : 0n) : [];
-  const header = { schema: "native-bar-committed-input-v2", evaluation: { evaluation_id: ID(9000), at: evaluation_at,
+  const header = { schema: "native-bar-committed-input-v3", policy_hash, inventory, evaluation: { evaluation_id: ID(9000), at: evaluation_at,
     journal_hash: hash(canonical(journal.map(r => ({ role: r.role, hash: hash(canonical(r.value)) })))),
-    inventory_hash: hash(canonical(inventory)), intent_hash: intent ? hash(canonical(intent.value)) : null,
+    inventory_hash: hash(canonical({policy_hash,entries:orderedInventory})), evidence_hash:hash(canonical(evidence)), intent_hash: intent ? hash(canonical(intent.value)) : null,
     attempt_hash: attempt ? hash(canonical(attempt.value)) : null,
     clock: attempt ? { clock_id: attempt.value.monotonic.clock_id, monotonic_ns: String(ticks.reduce((a,b) => a > b ? a : b,0n)+1n) } : null, ...override },
     records: records.map((r, i) => ({ index: i + 1, role: r.role, hash: hash(bodies[i]) })) };
@@ -74,7 +89,7 @@ function fixture(kind = "prune", evaluationAt = "2026-05-01T00:00:00.000Z") {
     manifests: [{ chunk_id: ID(102), hash: hash(canonical(manifest)) }], pair_count: 1 };
   records.push({ role: "manifest", value: manifest }, { role: "intent", value: intent });
   return { records, manifest, intent, evaluationAt,
-    run() { return inspectCommittedMaintenance(pack(this.records, this.evaluationAt, this.evaluationOverride)); } };
+    run() { return inspectCommittedMaintenance(pack(this.records, this.evaluationAt, this.evaluationOverride,{inventory:this.inventoryOverride,policy_hash:this.policyOverride})); } };
 }
 function begin(f, actions) {
   const a = { schema: "native-bar-committed-attempt-v2", maintenance_id: f.intent.maintenance_id, attempt_id: ID(103),
@@ -144,12 +159,25 @@ function resume(f, actions) {
     resume_after_event_hash: hash(canonical(f.records.filter(r => r.role === "event").at(-1).value)), actions };
   f.records.push({ role: "attempt", value: a }); return a;
 }
+function resequenceSingleFixture(f, sequence=1000) {
+  const r=f.records.find(r=>r.role==="receipt_v1"&&r.value.recording_id===ID(1)).value;
+  if(r.sequence===sequence)return f;
+  r.sequence=sequence;const p=f.manifest.pairs[0];p.sequence=sequence;p.receipt_fields=structuredClone(r);
+  p.receipt_hash=hash(canonical(r));p.receipt_proof.size=String(Buffer.byteLength(canonical(r)));
+  f.intent.binding.baseline.receipts=f.intent.binding.baseline.receipts.map(old=>old.recording_id===r.recording_id?structuredClone(r):old);
+  f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));reseal(f);return f;
+}
 function attachLegacy(f, kind = "prune", unknown = false) {
+  resequenceSingleFixture(f);
   const old = JSON.parse(LEGACY_BYTES); old.id = ID(500 + f.records.filter(r => r.role === "legacy_v1").length);
   old.kind = kind; old.created_at = "2025-12-30T00:00:00.000Z";
   old.pairs[0].recording_id = ID(700 + f.records.filter(r => r.role === "legacy_v1").length);
-  old.pairs[0].recorded_at = "2025-08-01T00:00:00.000Z";
+  old.pairs[0].sequence = 1 + f.records.filter(r => r.role === "legacy_v1").length;
+  old.pairs[0].receipt_hash = kind === "prune" ? H(6) : H(7);
+  old.pairs[0].payload_hash = kind === "prune" ? H(8) : H(9);
+  old.pairs[0].recorded_at = kind === "prune" ? "2025-08-01T00:00:00.000Z" : AT;
   old.pairs[0].last_observed_at = old.pairs[0].recorded_at;
+  old.pairs[0].day = old.pairs[0].recorded_at.slice(0,10);
   if (unknown) { delete old.pairs[0].recorded_at; delete old.pairs[0].last_observed_at; }
   f.records.unshift({ role: "legacy_v1", value: old }, { role: "legacy_completion_v1", value: { id: old.id, intent_hash: hash(canonical(old)) } });
   f.intent.binding.baseline.maintenance.push({ id: old.id, hash: hash(canonical(old)) });
@@ -548,7 +576,10 @@ test("both old effects survive without a new transaction; retired targets cannot
   const old=f.records.filter(r=>r.role.startsWith("legacy"));const r=inspectCommittedMaintenance(pack(old));
   assert.equal(r.read_effect,"combined_conditionally");assert.equal(r.effects.prune.boundary_state,"known");
   assert.deepEqual(r.effects.clock.isolated_ids,[c.pairs[0].recording_id]);assert.equal(r.effects.retired_ids.length,2);
-  a.pairs[0].recording_id=ID(1);const done=f.records.find(r=>r.role==="legacy_completion_v1"&&r.value.id===a.id);done.value.intent_hash=hash(canonical(a));
+  const selected=f.manifest.pairs[0];a.created_at=f.intent.approval.approved_at;
+  a.pairs=[{recording_id:selected.recording_id,sequence:selected.sequence,day:selected.day,receipt_hash:selected.receipt_hash,payload_hash:selected.payload_hash,
+    recorded_at:selected.recorded_at,last_observed_at:selected.last_observed_at,bytes:Number(selected.receipt_proof.size)+Number(selected.payload_proof.size)}];
+  const done=f.records.find(r=>r.role==="legacy_completion_v1"&&r.value.id===a.id);done.value.intent_hash=hash(canonical(a));
   f.intent.binding.baseline.maintenance.find(m=>m.id===a.id).hash=hash(canonical(a));
   f.intent.binding.baseline.maintenance=f.intent.binding.baseline.maintenance.filter(m=>m.id!==a.id);
   f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));reseal(f);
@@ -707,4 +738,868 @@ test("unresolved claim diagnostics stay frozen and cannot mask a later structura
   assert.deepEqual(bad.unconfirmed_completions,[]);assert.equal(bad.effects_status,"partial");assert.equal(bad.remaining_effects_unknown,true);
   assert.deepEqual(bad.effects.clock.isolated_ids,[ID(700)]);
   const done=finish(fixture()).run();assert.deepEqual(done.unconfirmed_completions,[]);assert.equal(done.remaining_effects_unknown,false);
+});
+
+function correctedClockRecord(f){
+ const p=payload(),at="2025-12-31T23:01:00.000Z";
+ p.capture_as_of=at;p.series.forEach(s=>{s.observed_at=at;s.bars.forEach(b=>{b.bar_open_at="2025-12-31T22:00:00.000Z";b.confirmed_by_next_bar_at=at;});});
+ const r=JSON.parse(RECEIPT_BYTES);r.recording_id=ID(88);r.sequence=2;r.recorded_at=at;r.day="2025-12-31";r.payload_hash=hash(canonical(p));
+ f.records.push({role:"receipt_v1",value:r},{role:"payload_v1",value:p});return r;
+}
+test("clock isolation permits corrected-clock recording without rereading quarantined bytes",()=>{
+ const f=finish(fixture("clock_recovery"));f.records=f.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role));
+ assert.equal(f.run().adoption.state,"conditional");correctedClockRecord(f);
+ const r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+ assert.deepEqual(r.effects.clock.isolated_ids,[ID(1)]);assert.equal(r.execution_available,false);
+});
+
+// Reconstructed from the 24 surviving conditions listed by the reviewer;
+// the original 25 mutation diffs/fixtures were not available.
+function guardC(name,make,change,expected,post=()=>{}){
+ test(name,()=>{const f=make();const before=f.run();assert.equal(before.status,"consistent",before.reason);
+ change(f);reseal(f);post(f);const r=f.run();
+ if(expected.startsWith("held:")){assert.equal(r.status,"held");assert.equal(r.reason,expected.slice(5));assert.equal(r.adoption.state,"blocked");}
+ else blocked(r,expected);
+ });
+}
+guardC("guardC01 partial completion targets",()=>finish(manyPairs(2)),()=>{},"incomplete_completion",f=>f.records.at(-1).value.targets.pop());
+test("guardC02 old completion hash is bound",()=>{const f=fixture();attachLegacy(f);const rows=f.records.filter(r=>r.role.startsWith("legacy"));
+ assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");rows.find(r=>r.role==="legacy_completion_v1").value.intent_hash=H(0);
+ blocked(inspectCommittedMaintenance(pack(rows)),"legacy_completion_binding");});
+test("guardC03 live receipt without payload holds",()=>{const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ rows.pop();const r=inspectCommittedMaintenance(pack(rows));assert.equal(r.status,"held");assert.equal(r.reason,"source_evidence_missing");assert.equal(r.adoption.state,"blocked");});
+test("guardC04 orphan payload refuses",()=>{const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ blocked(inspectCommittedMaintenance(pack(rows.slice(1))),"unreferenced_payload");});
+test("guardC05 observations cannot follow logical receipt time",()=>{const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ rows[1].value.series.forEach(s=>s.observed_at="2026-01-01T00:00:00.001Z");rows[0].value.payload_hash=hash(canonical(rows[1].value));blocked(inspectCommittedMaintenance(pack(rows)),"v1_binding");});
+guardC("guardC06 non-target baseline receipt disappearance",()=>{const f=manyPairs(2),p=f.allPairs[0];f.allPairs=[p];f.manifest.pairs=[p];f.intent.pair_count=1;reseal(f);return finish(f);},
+ f=>f.records=f.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role)),"held:baseline_source_missing");
+guardC("guardC07 deleted receipt time cannot be rewritten",()=>{const f=finish(fixture());f.records=f.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role));return f;},
+ f=>f.manifest.pairs[0].recorded_at="2026-01-01T00:00:00.001Z","pair_evidence_binding");
+test("guardC08 legacy maintenance scopes cannot overlap",()=>{const f=fixture();const a=attachLegacy(f),b=attachLegacy(f);const rows=f.records.filter(r=>r.role.startsWith("legacy"));
+ assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");b.pairs[0].recording_id=a.pairs[0].recording_id;
+ rows.find(r=>r.role==="legacy_completion_v1"&&r.value.id===b.id).value.intent_hash=hash(canonical(b));blocked(inspectCommittedMaintenance(pack(rows)),"maintenance_target_overlap");});
+guardC("guardC09 unlink pending cannot be skipped",heldPair,f=>event(f,"purged_verified"),"invalid_transition");
+guardC("guardC10 manifest hash cannot be stale",fixture,()=>{},"manifest_binding",f=>f.intent.manifests[0].hash=H(0));
+guardC("guardC11 event intent hash is bound",()=>{const f=fixture();begin(f);event(f,"move_pending");return f;},()=>{},"transaction_binding",f=>f.records.at(-1).value.intent_hash=H(0));
+guardC("guardC12 event attempt hash is bound",()=>{const f=fixture();begin(f);event(f,"move_pending");return f;},()=>{},"attempt_binding",f=>f.records.at(-1).value.attempt_hash=H(0));
+guardC("guardC13 first approval plan is exact",()=>{const f=fixture();begin(f);return f;},f=>f.records.at(-1).value.approval.plan_hash=H(7),"approval_binding");
+guardC("guardC14 first approval timestamp is exact",()=>{const f=fixture();begin(f);f.evaluationAt="2026-05-01T00:00:00.002Z";return f;},
+ f=>f.records.at(-1).value.approval.approved_at="2026-05-01T00:00:00.001Z","approval_binding");
+guardC("guardC15 wall duration is at most ten minutes",()=>{const f=fixture();begin(f);return f;},f=>f.records.at(-1).value.expires_at="2026-05-01T00:10:00.001Z","attempt_window");
+guardC("guardC16 monotonic duration is at most ten minutes",()=>{const f=fixture();begin(f);return f;},f=>f.records.at(-1).value.monotonic.deadline_ns="600000000001","attempt_window");
+guardC("guardC17 pair count must match",fixture,f=>f.intent.pair_count=2,"target_scope_binding");
+guardC("guardC18 unlisted manifest refuses",fixture,()=>{},"manifest_set",f=>{const m=structuredClone(f.manifest);m.chunk_id=ID(999);f.records.push({role:"manifest",value:m});});
+guardC("guardC19 holding presence is required",()=>{const f=fixture();begin(f);event(f,"move_pending");event(f,"held_verified");return f;},
+ f=>f.records.at(-1).value.evidence.holding_present=false,"event_proof");
+guardC("guardC20 ctime must be inside its observation bracket",()=>{const f=fixture();begin(f);event(f,"move_pending");event(f,"held_verified");return f;},
+ f=>f.records.at(-1).value.evidence.from_ns="3","event_proof");
+guardC("guardC21 prior maintenance hash is bound",()=>{const f=fixture();attachLegacy(f);return f;},
+ f=>{f.intent.binding.baseline.maintenance[0].hash=H(0);f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));},"baseline_maintenance_binding");
+guardC("guardC22 adding a live receipt invalidates an unfinished baseline",()=>{const f=fixture();begin(f);return f;},
+ f=>f.records.push(...manyPairs(2).records.filter(r=>r.role==="receipt_v1"&&r.value.sequence===2||r.role==="payload_v1"&&r.value.capture_as_of!==AT)),"held:current_baseline_changed");
+test("guardC23 unknown prune boundary cannot become known again",()=>{const f=fixture();const unknown=attachLegacy(f,"prune",true),known=attachLegacy(f,"prune");
+ const rows=[unknown,known].flatMap(value=>[{role:"legacy_v1",value},{role:"legacy_completion_v1",value:{id:value.id,intent_hash:hash(canonical(value))}}]);
+ const r=inspectCommittedMaintenance(pack(rows));assert.equal(r.status,"consistent");assert.equal(r.adoption.state,"conditional");assert.equal(r.effects.prune.boundary_state,"unknown");
+ assert.equal(r.prune_boundary,null);assert.equal(r.effects.prune.greatest_known_recorded_at,known.pairs[0].recorded_at);});
+guardC("guardC24 events after completion refuse even when they report uncertainty",()=>finish(fixture()),f=>event(f,"durability_unknown","receipt",{sync:"unknown"}),"after_completion");
+
+test("clock resumption is independent of retaining quarantine proof bytes",()=>{
+ for(const keepProof of [false,true]){
+  const f=finish(fixture("clock_recovery"));if(!keepProof)f.records=f.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role));
+  correctedClockRecord(f);const r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.deepEqual(r.unconfirmed_completions,[]);
+ }
+});
+test("retained ahead records still prevent corrected-clock resumption",()=>{
+ const f=manyPairs(2);f.intent.kind="clock_recovery";f.intent.approval.approved_at="2025-12-31T23:00:00.000Z";
+ const p=f.allPairs[0];f.allPairs=[p];f.manifest.pairs=[p];f.intent.pair_count=1;reseal(f);finish(f);
+ correctedClockRecord(f);f.records.find(r=>r.role==="receipt_v1"&&r.value.recording_id===ID(88)).value.sequence=3;
+ blocked(f.run(),"v1_binding");
+});
+test("proof bytes and active inventory have distinct meanings after terminal operations",()=>{
+ for(const kind of ["prune","clock_recovery"]){
+  const f=finish(fixture(kind));assert.equal(f.run().adoption.state,"conditional");
+  f.inventoryOverride=[{recording_id:ID(1),role:"receipt",location:"source",hash:f.manifest.pairs[0].receipt_hash}];
+  blocked(f.run(),"terminal_inventory_conflict");
+ }
+});
+test("retired receipts are checked against store policy before exclusion",()=>{
+ const f=fixture();const old=JSON.parse(LEGACY_BYTES);old.kind="clock_recovery";old.created_at="2025-12-31T23:00:00.000Z";
+ const rows=[...legacySource(),{role:"legacy_v1",value:old},{role:"legacy_completion_v1",value:{id:old.id,intent_hash:hash(canonical(old))}}];
+ assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");rows[0].value.policy_hash=H(9);
+ blocked(inspectCommittedMaintenance(pack(rows)),"v1_policy_binding");
+});
+test("live inventory binds locations and evidence separately",()=>{
+ const f=fixture();assert.equal(f.run().status,"consistent");
+ f.inventoryOverride=[{recording_id:ID(1),role:"receipt",location:"source",hash:H(0)}];blocked(f.run(),"inventory_binding");
+ const one={recording_id:ID(1),role:"receipt",location:"source",hash:f.manifest.pairs[0].receipt_hash};
+ f.inventoryOverride=[one,{...one,location:"holding"}];blocked(f.run(),"inventory_duplicate");
+ f.inventoryOverride=undefined;f.evaluationOverride={evidence_hash:H(0)};blocked(f.run(),"evaluation_snapshot_binding");
+ const rows=legacySource();const inventory=[{recording_id:ID(1),role:"receipt",location:"holding",hash:hash(canonical(rows[0].value))}];
+ blocked(inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory})),"inventory_unowned_holding");
+ const missing=inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory:[]}));
+ blocked(missing,"unreferenced_receipt"); // saved copies need a recorded origin, not just valid syntax
+});
+test("old v2 envelopes cannot acquire an implicit active-inventory meaning",()=>{
+ const input=pack(legacySource()),head=JSON.parse(Buffer.from(input[0]).toString());head.schema="native-bar-committed-input-v2";input[0]=buffer(canonical(head));
+ blocked(inspectCommittedMaintenance(input),"unsupported_input_version");
+});
+
+test("completed legacy targets cannot reappear in active source inventory",()=>{
+ const rows=legacySource(),old=JSON.parse(LEGACY_BYTES);rows.push({role:"legacy_v1",value:old},{role:"legacy_completion_v1",value:{id:old.id,intent_hash:hash(canonical(old))}});
+ assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ const inventory=[{recording_id:ID(1),role:"receipt",location:"source",hash:hash(canonical(rows[0].value))}];
+ blocked(inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory})),"terminal_inventory_conflict");
+});
+function fullBarStore(n,largeText=false){
+ const rows=[];for(let i=0;i<n;i++){
+  const p=payload(),stamp=new Date(Date.parse(AT)+i).toISOString();p.capture_as_of=stamp;
+  p.series.forEach(s=>{s.observed_at=stamp;s.bars=Array.from({length:40},(_,j)=>({bar_open_at:new Date(Date.parse(AT)-(40-j)*3600000).toISOString(),confirmed_by_next_bar_at:new Date(Date.parse(AT)-(39-j)*3600000).toISOString(),open:1,high:2,low:1,close:2,volume:null}));if(largeText)s.provenance={session_holidays:"x".repeat(65536),corrections:"x".repeat(65536)};});
+  const r=JSON.parse(RECEIPT_BYTES);r.recording_id=ID(30000+i);r.sequence=i+1;r.recorded_at=stamp;r.payload_hash=hash(canonical(p));rows.push({role:"receipt_v1",value:r},{role:"payload_v1",value:p});
+ }return rows;
+}
+test("store-wide profiling includes ordinary reads without a transaction",t=>{
+ for(const n of [1,97,98,99,128]){const input=pack(fullBarStore(n)),r=inspectCommittedMaintenance(input);t.diagnostic(JSON.stringify({profile:"40_bars_per_series",receipts:n,bytes:input.reduce((n,b)=>n+b.byteLength,0),status:r.status,reason:r.reason,work:r.work_charged}));
+  if(n===1)assert.equal(r.adoption.state,"conditional");else if(r.status!=="consistent"){assert.ok(["work_limit","input_bytes_limit","record_bytes_limit"].includes(r.reason));assert.equal(r.adoption.state,"blocked");}
+ }
+});
+test("store-wide profiling accounts for schema-valid long provenance text",t=>{
+ for(const n of [1,8,32]){const input=pack(fullBarStore(n,true)),r=inspectCommittedMaintenance(input);t.diagnostic(JSON.stringify({profile:"40_bars_and_65536_char_provenance",receipts:n,bytes:input.reduce((n,b)=>n+b.byteLength,0),status:r.status,reason:r.reason,work:r.work_charged}));
+  if(n===1)assert.equal(r.adoption.state,"conditional");else if(r.status!=="consistent")assert.ok(["work_limit","input_bytes_limit","record_bytes_limit"].includes(r.reason));
+ }
+});
+
+function pruneThenLegacyClock({keepProof=false,done=true,kind="clock_recovery",keepAhead=false}={}){
+ const f=fixture(),addCapture=(id,sequence,stamp)=>{
+  const p=payload();p.capture_as_of=stamp;p.series.forEach(s=>s.observed_at=stamp);
+  const r=JSON.parse(RECEIPT_BYTES);r.recording_id=id;r.sequence=sequence;r.recorded_at=stamp;r.day=stamp.slice(0,10);r.payload_hash=hash(canonical(p));
+  f.records.push({role:"receipt_v1",value:r},{role:"payload_v1",value:p});return {r,p};
+ };
+ const ahead=addCapture(ID(77),2,"2026-06-01T00:00:00.000Z");
+ f.intent.binding.baseline.receipts.push(structuredClone(ahead.r));
+ if(keepAhead)f.intent.binding.baseline.receipts.push(structuredClone(addCapture(ID(78),3,"2026-06-02T00:00:00.000Z").r));
+ f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));
+ const prune=JSON.parse(LEGACY_BYTES);prune.id=f.intent.maintenance_id;
+ prune.generation=hash(canonical({receipts:f.intent.binding.baseline.receipts.map(r=>hash(canonical(r))),maintenance:[]}));
+ finish(f);
+ const clock=JSON.parse(LEGACY_BYTES);clock.id=ID(501);clock.kind=kind;
+ clock.created_at=kind==="clock_recovery"?"2026-05-02T00:00:00.000Z":"2026-09-01T00:00:00.000Z";
+ clock.generation=hash(canonical({receipts:f.intent.binding.baseline.receipts.slice(1).map(r=>hash(canonical(r))),maintenance:[prune]}));
+ clock.pairs=[{recording_id:ahead.r.recording_id,sequence:2,day:ahead.r.day,receipt_hash:hash(canonical(ahead.r)),payload_hash:ahead.r.payload_hash,
+  bytes:Buffer.byteLength(canonical(ahead.r))+Buffer.byteLength(canonical(ahead.p)),recorded_at:ahead.r.recorded_at,last_observed_at:ahead.r.recorded_at}];
+ f.records.push({role:"legacy_v1",value:clock});
+ if(done)f.records.push({role:"legacy_completion_v1",value:{id:clock.id,intent_hash:hash(canonical(clock))}});
+ if(!keepProof){
+  const retiredIds=new Set([ID(1),ID(77)]),retiredPayloads=new Set([f.manifest.pairs[0].payload_hash,ahead.r.payload_hash]);
+  f.records=f.records.filter(r=>!(r.role==="receipt_v1"&&retiredIds.has(r.value.recording_id))&&!(r.role==="payload_v1"&&retiredPayloads.has(hash(canonical(r.value)))));
+ }
+ f.evaluationAt=clock.created_at;
+ const resumed=addCapture(ID(88),keepAhead?4:3,"2026-05-02T00:00:00.000Z");
+ return {f,resumed,legacyRun:()=>inspectCommittedMaintenance(pack([
+  ...f.records.filter(r=>["receipt_v1","payload_v1","legacy_v1","legacy_completion_v1"].includes(r.role)),
+  {role:"legacy_v1",value:prune},{role:"legacy_completion_v1",value:{id:prune.id,intent_hash:hash(canonical(prune))}}
+ ],f.evaluationAt))};
+}
+test("completed prune honors later v1 clock isolation when corrected recording resumes",()=>{
+ for(const keepProof of [false,true]){
+  const {f,legacyRun}=pruneThenLegacyClock({keepProof}),original=canonical(f.intent.binding.baseline),v1=legacyRun();
+  assert.equal(v1.status,"consistent",v1.reason);assert.equal(v1.adoption.state,"conditional");
+  const r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+  assert.equal(r.read_effect,"combined_conditionally");assert.equal(r.read_effect,v1.read_effect);
+  assert.equal(r.prune_boundary,AT);assert.equal(r.prune_boundary,v1.prune_boundary);assert.deepEqual(r.effects,v1.effects);
+  assert.deepEqual(r.unconfirmed_completions,[]);assert.equal(canonical(f.intent.binding.baseline),original);
+  for(const key of ["execution_available","recovery_execution_available","production_qualified","host_approval_authenticated","native_bytes_verified","history_read_available"])assert.equal(r[key],false);
+  assert.equal(r.original_acknowledgement,"not_proven");
+ }
+});
+test("unfinished later v1 clock isolation cannot reset a completed prune floor",()=>{
+ const {f,legacyRun}=pruneThenLegacyClock({done:false});
+ const v1=legacyRun();assert.equal(v1.adoption.state,"blocked");assert.deepEqual(v1.effects.clock.isolated_ids,[]);
+ const r=f.run();blocked(r,"post_completion_order");assert.deepEqual(r.effects.clock.isolated_ids,[]);
+});
+test("later v1 prune alone cannot reset a completed prune floor",()=>{
+ const {f}=pruneThenLegacyClock({kind:"prune"});
+ const r=f.run();blocked(r,"post_completion_order");assert.deepEqual(r.effects.clock.isolated_ids,[]);
+});
+test("later v1 clock isolation preserves the nonisolated original prune boundary",()=>{
+ const {f,resumed}=pruneThenLegacyClock();assert.equal(f.run().adoption.state,"conditional");
+ const at="2025-12-31T23:00:00.000Z";resumed.p.capture_as_of=at;
+ resumed.p.series.forEach(s=>{s.observed_at=at;s.bars.forEach(b=>{b.bar_open_at="2025-12-31T22:00:00.000Z";b.confirmed_by_next_bar_at=at;});});
+ resumed.r.recorded_at=at;resumed.r.day=at.slice(0,10);resumed.r.payload_hash=hash(canonical(resumed.p));
+ blocked(f.run(),"post_completion_order");
+});
+test("a remaining ahead capture still prevents resumption after later v1 clock isolation",()=>{
+ const {f,resumed}=pruneThenLegacyClock({keepAhead:true});
+ f.records=f.records.filter(r=>r.value!==resumed.r&&r.value!==resumed.p);
+ const before=f.run();assert.equal(before.status,"consistent",before.reason);assert.equal(before.adoption.state,"conditional");
+ f.records.push({role:"receipt_v1",value:resumed.r},{role:"payload_v1",value:resumed.p});
+ blocked(f.run(),"v1_binding");
+});
+for(const field of ["sequence","policy"])test(`later v1 clock isolation does not relax resumed ${field} binding`,()=>{
+ const {f,resumed}=pruneThenLegacyClock();assert.equal(f.run().adoption.state,"conditional");
+ if(field==="sequence")resumed.r.sequence=2;else resumed.r.policy_hash=H(9);
+ blocked(f.run(),field==="sequence"?"baseline_sequence_binding":"v1_policy_binding");
+});
+
+function changeLegacyClock(f,change){
+ const clock=f.records.find(r=>r.role==="legacy_v1").value;
+ change(clock.pairs[0],clock);
+ const done=f.records.find(r=>r.role==="legacy_completion_v1"&&r.value.id===clock.id);
+ if(done)done.value.intent_hash=hash(canonical(clock));
+}
+test("later v1 clock receipt hash must match the frozen baseline with or without proof copies",()=>{
+ for(const keepProof of [false,true]){
+  const {f}=pruneThenLegacyClock({keepProof});assert.equal(f.run().adoption.state,"conditional");
+  changeLegacyClock(f,p=>p.receipt_hash=H(9));const r=f.run();blocked(r,"legacy_clock_baseline_binding");
+  assert.equal(r.effects_status,keepProof?"not_evaluated":"partial");assert.equal(r.remaining_effects_unknown,true);
+  if(keepProof)assert.equal(r.effects,null);
+ }
+});
+for(const [field,value] of [["payload_hash",H(9)],["sequence",99],["day","2026-06-02"],["recorded_at","2026-06-02T00:00:00.000Z"]])
+ test(`later v1 clock ${field} must match the frozen baseline`,()=>{
+  for(const keepProof of [false,true]){
+   const {f}=pruneThenLegacyClock({keepProof});assert.equal(f.run().adoption.state,"conditional");
+   changeLegacyClock(f,p=>p[field]=value);blocked(f.run(),"legacy_clock_baseline_binding");
+  }
+ });
+test("later v1 clock payload size and latest observation match retained proof bytes",()=>{
+ for(const field of ["bytes","last_observed_at"]){
+  const {f}=pruneThenLegacyClock({keepProof:true});assert.equal(f.run().adoption.state,"conditional");
+  changeLegacyClock(f,p=>{if(field==="bytes")p.bytes++;else p.last_observed_at="2026-05-31T23:59:59.999Z";});
+  blocked(f.run(),"legacy_clock_baseline_binding");
+ }
+});
+test("later v1 clock keeps optional legacy timestamps compatible with the fixed receipt",()=>{
+ for(const keepProof of [false,true]){
+  const {f}=pruneThenLegacyClock({keepProof}),baseline=canonical(f.intent.binding.baseline);
+  changeLegacyClock(f,p=>{delete p.recorded_at;delete p.last_observed_at;});
+  const r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+  assert.equal(r.read_effect,"combined_conditionally");assert.equal(r.prune_boundary,AT);
+  assert.deepEqual(r.effects.clock.isolated_ids,[ID(77)]);assert.equal(canonical(f.intent.binding.baseline),baseline);
+  assert.equal(r.native_bytes_verified,false);assert.equal(r.history_read_available,false);
+ }
+});
+for(const kind of ["last observation after receipt","last observation before predecessor","empty payload size","oversize payload"])
+ test(`later v1 clock absent payload still enforces ${kind}`,()=>{
+  const {f}=pruneThenLegacyClock();assert.equal(f.run().adoption.state,"conditional");
+  const original=f.intent.binding.baseline.receipts.find(r=>r.recording_id===ID(77)),receiptBytes=Buffer.byteLength(canonical(original));
+  changeLegacyClock(f,p=>{
+   if(kind==="last observation after receipt")p.last_observed_at="2026-06-01T00:00:00.001Z";
+   else if(kind==="last observation before predecessor")p.last_observed_at="2025-12-31T23:59:59.999Z";
+   else p.bytes=receiptBytes+(kind==="empty payload size"?0:LIMITS.record_bytes+1);
+  });
+  blocked(f.run(),"legacy_clock_baseline_binding");
+ });
+test("absent payload metadata remains a bounded claim without pretending to verify exact content",()=>{
+ const {f}=pruneThenLegacyClock();changeLegacyClock(f,p=>{p.bytes++;p.last_observed_at="2026-05-31T23:59:59.999Z";});
+ const r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+ assert.equal(r.native_bytes_verified,false);assert.equal(r.production_qualified,false);assert.equal(r.execution_available,false);
+ assert.equal(r.history_read_available,false);assert.equal(r.original_acknowledgement,"not_proven");
+});
+test("a pending v1 clock claim cannot hide its baseline contradiction behind a quality hold",()=>{
+ const {f}=pruneThenLegacyClock({done:false});assert.equal(f.run().adoption.state,"blocked");
+ changeLegacyClock(f,p=>p.receipt_hash=H(9));blocked(f.run(),"legacy_clock_baseline_binding");
+});
+test("later v1 clock eligibility uses the known receipt even when legacy timestamps are absent",()=>{
+ const {f}=pruneThenLegacyClock();assert.equal(f.run().adoption.state,"conditional");
+ changeLegacyClock(f,(p,m)=>{delete p.recorded_at;delete p.last_observed_at;m.created_at="2026-05-31T23:59:00.000Z";});
+ blocked(f.run(),"legacy_clock_baseline_binding");
+});
+test("later v1 clock retained payload cannot observe after its frozen receipt",()=>{
+ const {f}=pruneThenLegacyClock({keepProof:true});assert.equal(f.run().adoption.state,"conditional");
+ const receipt=f.records.find(r=>r.role==="receipt_v1"&&r.value.recording_id===ID(77)).value;
+ const body=f.records.find(r=>r.role==="payload_v1"&&hash(canonical(r.value))===receipt.payload_hash).value;
+ body.series.forEach(s=>s.observed_at="2026-06-01T00:00:00.001Z");receipt.payload_hash=hash(canonical(body));
+ f.intent.binding.baseline.receipts.find(r=>r.recording_id===ID(77)).payload_hash=receipt.payload_hash;
+ f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));
+ changeLegacyClock(f,p=>{p.receipt_hash=hash(canonical(receipt));p.payload_hash=receipt.payload_hash;
+  p.bytes=Buffer.byteLength(canonical(receipt))+Buffer.byteLength(canonical(body));delete p.last_observed_at;});
+ reseal(f);blocked(f.run(),"legacy_clock_baseline_binding");
+});
+
+function completedWithLaterPrune({kind="clock_recovery",keepProof=true,createdAt="2026-05-01T00:00:00.000Z"}={}){
+ const f=fixture(kind),p=payload(),stamp="2026-01-01T00:00:01.000Z";
+ p.capture_as_of=stamp;p.series.forEach(s=>s.observed_at=stamp);
+ const r=JSON.parse(RECEIPT_BYTES);r.recording_id=ID(30);r.sequence=2;r.recorded_at=stamp;r.payload_hash=hash(canonical(p));
+ f.records.push({role:"receipt_v1",value:r},{role:"payload_v1",value:p});
+ f.intent.binding.baseline.receipts.push(structuredClone(r));f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));
+ finish(f);f.evaluationAt="2026-05-01T00:00:00.000Z";
+ const old=JSON.parse(LEGACY_BYTES);old.id=ID(500);old.created_at=createdAt;
+ old.pairs=[{recording_id:r.recording_id,sequence:r.sequence,day:r.day,receipt_hash:hash(canonical(r)),payload_hash:r.payload_hash,
+  recorded_at:r.recorded_at,last_observed_at:stamp,bytes:Buffer.byteLength(canonical(r))+Buffer.byteLength(canonical(p))}];
+ f.records.push({role:"legacy_v1",value:old},{role:"legacy_completion_v1",value:{id:old.id,intent_hash:hash(canonical(old))}});
+ if(!keepProof)f.records=f.records.filter(x=>!(x.role==="receipt_v1"&&x.value.recording_id===r.recording_id)&&!(x.role==="payload_v1"&&hash(canonical(x.value))===r.payload_hash));
+ if(kind==="clock_recovery")correctedClockRecord(f).sequence=3;
+ return {f,old};
+}
+test("later v1 prune receipt hash must bind the frozen baseline before clock resumption",()=>{
+ for(const keepProof of [false,true]){
+  const {f}=completedWithLaterPrune({keepProof});const control=f.run();
+  assert.equal(control.status,"consistent",control.reason);assert.equal(control.adoption.state,"conditional");
+  changeLegacyClock(f,p=>p.receipt_hash=H(9));blocked(f.run(),"legacy_prune_baseline_binding");
+ }
+});
+test("guardV310 valid completed v1 prune relaxes a clock recovery floor while preserving its known boundary",()=>{
+ for(const keepProof of [false,true]){
+  const {f}=completedWithLaterPrune({keepProof}),r=f.run();
+  assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+  assert.equal(r.read_effect,"combined_conditionally");assert.equal(r.prune_boundary,"2026-01-01T00:00:01.000Z");
+  assert.deepEqual(r.effects.clock.isolated_ids,[ID(1)]);assert.deepEqual(r.unconfirmed_completions,[]);
+  assert.equal(r.history_read_available,false);assert.equal(r.execution_available,false);
+  f.records=f.records.filter(x=>x.role!=="legacy_completion_v1");blocked(f.run(),"post_completion_order");
+ }
+});
+for(const [field,value] of [["payload_hash",H(9)],["sequence",77],["day","2026-01-02"],["recorded_at","2020-01-01T00:00:00.000Z"]])
+ test(`later v1 prune ${field} must bind the frozen baseline`,()=>{
+  for(const keepProof of [false,true]){
+   const {f}=completedWithLaterPrune({keepProof});assert.equal(f.run().adoption.state,"conditional");
+   changeLegacyClock(f,p=>p[field]=value);blocked(f.run(),"legacy_prune_baseline_binding");
+  }
+ });
+test("later v1 prune cannot invent a newer boundary alongside a completed prune transaction",()=>{
+ for(const keepProof of [false,true]){
+  const {f}=completedWithLaterPrune({kind:"prune",keepProof});assert.equal(f.run().adoption.state,"conditional");
+  changeLegacyClock(f,p=>p.recorded_at="2026-04-30T00:00:00.000Z");const r=f.run();blocked(r,"legacy_prune_baseline_binding");
+  assert.equal(r.prune_boundary,undefined);assert.equal(r.remaining_effects_unknown,true);
+ }
+});
+test("later v1 prune requires strictly more than ninety days even without optional legacy times",()=>{
+ const cutoff=Date.parse("2026-01-01T00:00:01.000Z")+90*86400000;
+ for(const keepProof of [false,true]){
+  const {f}=completedWithLaterPrune({keepProof,createdAt:new Date(cutoff+1).toISOString()});
+  changeLegacyClock(f,p=>{delete p.recorded_at;delete p.last_observed_at;});assert.equal(f.run().adoption.state,"conditional");
+  changeLegacyClock(f,(_,m)=>m.created_at=new Date(cutoff).toISOString());blocked(f.run(),"legacy_prune_baseline_binding");
+  changeLegacyClock(f,(_,m)=>m.created_at="2026-01-02T00:00:00.000Z");blocked(f.run(),"legacy_prune_baseline_binding");
+ }
+});
+test("later v1 prune byte size and observation summaries bind available proof",()=>{
+ for(const field of ["bytes","last_observed_at"]){
+  const {f}=completedWithLaterPrune();assert.equal(f.run().adoption.state,"conditional");
+  changeLegacyClock(f,p=>{if(field==="bytes")p.bytes++;else p.last_observed_at=AT;});
+  blocked(f.run(),"legacy_prune_baseline_binding");
+ }
+});
+function pendingPair(kind){
+ const f=fixture(kind);f.evaluationAt=f.intent.approval.approved_at;begin(f);
+ for(const role of ["receipt","payload"]){event(f,"move_pending",role);event(f,"held_verified",role);}
+ event(f,kind==="prune"?"unlink_pending":"quarantine_move_pending");return f;
+}
+test("both pending operation kinds reject a source inventory claim for the held object",()=>{
+ for(const kind of ["prune","clock_recovery"]){
+  const f=pendingPair(kind);assert.equal(f.run().status,"consistent");
+  const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());
+  f.inventoryOverride=head.inventory.map(e=>e.role==="receipt"?{...e,location:"source"}:e);
+  blocked(f.run(),"inventory_state_binding");
+ }
+});
+test("receipt and payload copies outside inventory and recorded scopes are refused",()=>{
+ const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ blocked(inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory:[]})),"unreferenced_receipt");
+});
+test("all unexplained non-target baseline body losses keep completion unconfirmed",()=>{
+ for(const loss of ["receipt","payload","both"]){
+  const f=manyPairs(2),target=f.allPairs[0],other=f.allPairs[1];f.allPairs=[target];f.manifest.pairs=[target];f.intent.pair_count=1;reseal(f);finish(f);
+  assert.equal(f.run().adoption.state,"conditional");
+  f.records=f.records.filter(r=>!(loss!=="payload"&&r.role==="receipt_v1"&&r.value.recording_id===other.recording_id)&&
+   !(loss!=="receipt"&&r.role==="payload_v1"&&hash(canonical(r.value))===other.payload_hash));
+  const r=f.run();assert.equal(r.status,"held",r.reason);assert.equal(r.adoption.state,"blocked");
+  assert.equal(r.unconfirmed_completions.length,1);assert.deepEqual(r.unconfirmed_completions[0].blockers,["baseline_source_missing"]);
+  assert.equal(r.effects.prune.present,false);assert.deepEqual(r.effects.retired_ids,[]);
+ }
+});
+
+test("guardV301 intent policy still binds the header after all target bodies are gone",()=>{
+ const f=finish(fixture());f.records=f.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role));
+ assert.equal(f.run().adoption.state,"conditional");f.policyOverride=H(9);blocked(f.run(),"v1_policy_binding");
+});
+test("guardV302 active receipt requires its payload source-inventory membership even with body evidence",()=>{
+ const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ const inventory=[{recording_id:ID(1),role:"receipt",location:"source",hash:hash(canonical(rows[0].value))}];
+ const r=inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory}));
+ assert.equal(r.status,"held");assert.equal(r.reason,"source_evidence_missing");assert.equal(r.adoption.state,"blocked");
+});
+test("guardV303 a source payload requires an active receipt rather than only its proof copy",()=>{
+ const rows=legacySource();assert.equal(inspectCommittedMaintenance(pack(rows)).adoption.state,"conditional");
+ const inventory=[{recording_id:ID(1),role:"payload",location:"source",hash:rows[0].value.payload_hash}];
+ const r=inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory}));
+ assert.equal(r.status,"held");assert.equal(r.reason,"source_evidence_missing");assert.equal(r.adoption.state,"blocked");
+});
+test("guardV304 non-target baseline proof does not replace missing receipt or payload inventory",()=>{
+ for(const keepRole of ["receipt","payload",null]){
+  const f=manyPairs(2),target=f.allPairs[0];f.allPairs=[target];f.manifest.pairs=[target];f.intent.pair_count=1;reseal(f);finish(f);
+  assert.equal(f.run().adoption.state,"conditional");
+  const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());
+  f.inventoryOverride=head.inventory.filter(e=>e.role===keepRole);
+  const r=f.run();assert.equal(r.status,"held");assert.equal(r.adoption.state,"blocked");assert.equal(r.unconfirmed_completions.length,1);
+  assert.deepEqual(r.unconfirmed_completions[0].blockers,["baseline_source_missing"]);assert.equal(r.effects.prune.present,false);
+ }
+});
+function locationFixture(state,role="receipt"){
+ const f=fixture();
+ if(state!=="source"){begin(f);for(const r of ["receipt","payload"]){event(f,"move_pending",r);event(f,"held_verified",r);}}
+ if(state==="unlink_pending")event(f,"unlink_pending",role);
+ return f;
+}
+test("guardV305 the whole inventory-location check rejects a contradictory payload location",()=>{
+ const f=locationFixture("source","payload");assert.equal(f.run().status,"consistent");
+ const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());
+ f.inventoryOverride=head.inventory.map(e=>e.role==="payload"?{...e,location:"holding"}:e);
+ blocked(f.run(),"inventory_state_binding");
+});
+for(const [tag,state] of [["guardV306","source"],["guardV307","held_verified"],["guardV308","unlink_pending"]])
+ test(`${tag} ${state} requires its exact inventory location`,()=>{
+  const f=locationFixture(state);assert.equal(f.run().status,"consistent");
+  const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());
+  f.inventoryOverride=head.inventory.map(e=>e.role==="receipt"?{...e,location:state==="source"?"holding":"source"}:e);
+  blocked(f.run(),"inventory_state_binding");
+ });
+test("guardV309 target body evidence does not replace missing inventory membership",()=>{
+ const f=fixture();assert.equal(f.run().status,"consistent");
+ const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());f.inventoryOverride=head.inventory.filter(e=>e.role!=="receipt");
+ const r=f.run();assert.equal(r.status,"held");assert.equal(r.reason,"source_evidence_missing");
+ assert.equal(r.adoption.state,"blocked");assert.ok(r.adoption.blockers.includes("transaction_incomplete"));
+});
+test("pending missing evidence or inventory has operation-specific unknown-outcome diagnostics",()=>{
+ for(const kind of ["prune","clock_recovery"])for(const missing of ["body","inventory"]){
+  const f=fixture(kind);f.evaluationAt=f.intent.approval.approved_at;begin(f);
+  for(const role of ["receipt","payload"]){event(f,"move_pending",role);event(f,"held_verified",role);}
+  event(f,kind==="prune"?"unlink_pending":"quarantine_move_pending");assert.equal(f.run().status,"consistent");
+  if(missing==="body")f.records=f.records.filter(r=>r.role!=="receipt_v1");
+  else {const head=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString());f.inventoryOverride=head.inventory.filter(e=>e.role!=="receipt");}
+  const r=f.run();assert.equal(r.status,"held");assert.equal(r.reason,kind==="prune"?"unlink_outcome_unknown":"quarantine_outcome_unknown");
+  assert.equal(r.adoption.state,"blocked");assert.equal(r.history_read_available,false);
+ }
+});
+test("unexplained proof copies cannot bypass ordinary v1 observation ordering",()=>{
+ const f=manyPairs(2),rows=f.records.filter(r=>["receipt_v1","payload_v1"].includes(r.role));
+ const p=rows.find(r=>r.role==="payload_v1"&&r.value.capture_as_of!==AT).value,r=rows.find(r=>r.role==="receipt_v1"&&r.value.sequence===2).value;
+ p.capture_as_of="2025-12-31T23:59:59.999Z";p.series.forEach(s=>s.bars.forEach(b=>b.confirmed_by_next_bar_at=p.capture_as_of));r.payload_hash=hash(canonical(p));
+ blocked(inspectCommittedMaintenance(pack(rows)),"v1_binding");
+ blocked(inspectCommittedMaintenance(pack(rows,undefined,{}, {inventory:[]})),"unreferenced_receipt");
+});
+test("completed legacy metadata explains valid archived receipt and payload copies without live inventory",()=>{
+ const {f,old}=completedWithLaterPrune(),ref=old.pairs[0];
+ const rows=f.records.filter(r=>r.role.startsWith("legacy")||r.role==="receipt_v1"&&r.value.recording_id===ref.recording_id||
+  r.role==="payload_v1"&&hash(canonical(r.value))===ref.payload_hash);
+ const r=inspectCommittedMaintenance(pack(rows));assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+ assert.equal(r.read_effect,"apply_prune_boundary_conditionally");assert.equal(r.execution_available,false);
+ rows.find(r=>r.role==="receipt_v1").value.plan_hash=H(9);blocked(inspectCommittedMaintenance(pack(rows)),"legacy_prune_baseline_binding");
+});
+
+function legacyBatchFixture({kind="prune",badCutoff=false,backwardReceipt=false,reverse=false,omitPayload=false,count=2}={}){
+ const f=manyPairs(count),rows=f.records.filter(r=>["receipt_v1","payload_v1"].includes(r.role));
+ const second=rows.find(r=>r.role==="receipt_v1"&&r.value.sequence===count).value;
+ const body=rows.find(r=>r.role==="payload_v1"&&hash(canonical(r.value))===second.payload_hash).value;
+ if(badCutoff||backwardReceipt){
+  const at="2025-12-31T23:59:59.999Z";body.capture_as_of=at;body.series.forEach(s=>s.bars.forEach(b=>b.confirmed_by_next_bar_at=at));
+  if(backwardReceipt){second.recorded_at=at;second.day=at.slice(0,10);body.series.forEach(s=>s.observed_at=at);}
+  second.payload_hash=hash(canonical(body));
+ }
+ const m=JSON.parse(LEGACY_BYTES);m.id=ID(80000);m.kind=kind;
+ m.created_at=kind==="prune"?"2026-05-01T00:00:00.000Z":"2025-12-31T23:00:00.000Z";
+ const receipts=rows.filter(r=>r.role==="receipt_v1");
+ m.generation=hash(canonical({receipts:receipts.map(r=>hash(canonical(r.value))),maintenance:[]}));
+ m.pairs=receipts.map(x=>{const r=x.value,p=rows.find(y=>y.role==="payload_v1"&&hash(canonical(y.value))===r.payload_hash).value;
+  return {recording_id:r.recording_id,sequence:r.sequence,day:r.day,receipt_hash:hash(canonical(r)),payload_hash:r.payload_hash,
+   recorded_at:r.recorded_at,last_observed_at:p.series.reduce((at,s)=>s.observed_at>at?s.observed_at:at,""),
+   bytes:Buffer.byteLength(canonical(r))+Buffer.byteLength(canonical(p))};});
+ if(reverse){rows.reverse();m.pairs.reverse();}
+ const evidence=omitPayload?rows.filter(r=>r.role!=="payload_v1"||r.value!==body):rows;
+ return {rows:[...evidence,{role:"legacy_v1",value:m},{role:"legacy_completion_v1",value:{id:m.id,intent_hash:hash(canonical(m))}}],m};
+}
+test("same legacy batch rejects archived payload cutoff before an earlier known receipt",()=>{
+ const good=legacyBatchFixture();assert.equal(inspectCommittedMaintenance(pack(good.rows)).adoption.state,"conditional");
+ const bad=legacyBatchFixture({badCutoff:true});blocked(inspectCommittedMaintenance(pack(bad.rows)),"legacy_batch_observation_order");
+});
+
+for(const kind of ["prune","clock_recovery"]){
+ test(`legacy batch ${kind} compares cutoffs in sequence order despite reversed input`,()=>{
+  const good=legacyBatchFixture({kind,reverse:true});const r=inspectCommittedMaintenance(pack(good.rows));
+  assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+  blocked(inspectCommittedMaintenance(pack(legacyBatchFixture({kind,badCutoff:true,reverse:true}).rows)),"legacy_batch_observation_order");
+ });
+ test(`legacy batch ${kind} checks receipt chronology without the later payload`,()=>{
+  const f=legacyBatchFixture({kind,backwardReceipt:true,omitPayload:true});
+  delete f.m.pairs[1].last_observed_at;
+  f.rows.find(r=>r.role==="legacy_completion_v1").value.intent_hash=hash(canonical(f.m));
+  blocked(inspectCommittedMaintenance(pack(f.rows)),"legacy_batch_observation_order");
+ });
+}
+test("legacy batch missing earlier payload does not erase its known receipt time",()=>{
+ const f=legacyBatchFixture({badCutoff:true});const first=f.rows.find(r=>r.role==="receipt_v1"&&r.value.sequence===1).value;
+ f.rows=f.rows.filter(r=>r.role!=="payload_v1"||hash(canonical(r.value))!==first.payload_hash);
+ blocked(inspectCommittedMaintenance(pack(f.rows)),"legacy_batch_observation_order");
+});
+test("legacy batch ordering does not impose one chronology across separate clock epochs",()=>{
+ const f=legacyBatchFixture({kind:"clock_recovery",backwardReceipt:true}),m=f.m;
+ // Each batch has one receipt: the old future clock and a later corrected clock.
+ const later={...structuredClone(m),id:ID(80001),kind:"prune",created_at:"2026-05-01T00:00:00.000Z",pairs:[m.pairs[1]]};
+ m.pairs=[m.pairs[0]];
+ f.rows=f.rows.filter(r=>!r.role.startsWith("legacy"));
+ for(const old of [m,later])f.rows.push({role:"legacy_v1",value:old},{role:"legacy_completion_v1",value:{id:old.id,intent_hash:hash(canonical(old))}});
+ const r=inspectCommittedMaintenance(pack(f.rows));assert.equal(r.status,"consistent",r.reason);
+ assert.equal(r.adoption.state,"conditional");assert.equal(r.read_effect,"combined_conditionally");
+ assert.equal(r.execution_available,false);assert.equal(r.original_acknowledgement,"not_proven");
+});
+test("legacy batch combines frozen originals with supplied archived copies",()=>{
+ const f=manyPairs(3),target=f.allPairs[0];f.allPairs=[target];f.manifest.pairs=[target];f.intent.pair_count=1;
+ const receipts=f.records.filter(r=>r.role==="receipt_v1").map(r=>r.value),third=receipts[2];
+ const body=f.records.find(r=>r.role==="payload_v1"&&hash(canonical(r.value))===third.payload_hash).value;
+ // Valid relative to baseline seq1, invalid relative to the missing seq2 in this same old batch.
+ body.capture_as_of=AT;body.series.forEach(s=>s.bars.forEach(b=>b.confirmed_by_next_bar_at=AT));third.payload_hash=hash(canonical(body));
+ f.intent.binding.baseline.receipts=f.intent.binding.baseline.receipts.slice(0,2);
+ f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));reseal(f);finish(f);
+ const old=JSON.parse(LEGACY_BYTES);old.id=ID(80002);
+ old.pairs=receipts.slice(1).map(r=>{const p=f.records.find(x=>x.role==="payload_v1"&&hash(canonical(x.value))===r.payload_hash).value;
+  return {recording_id:r.recording_id,sequence:r.sequence,day:r.day,receipt_hash:hash(canonical(r)),payload_hash:r.payload_hash,
+   recorded_at:r.recorded_at,last_observed_at:r.recorded_at,bytes:Buffer.byteLength(canonical(r))+Buffer.byteLength(canonical(p))};});
+ f.records=f.records.filter(r=>r.role!=="receipt_v1"||r.value!==receipts[1]);
+ f.records.push({role:"legacy_v1",value:old},{role:"legacy_completion_v1",value:{id:old.id,intent_hash:hash(canonical(old))}});
+ blocked(f.run(),"legacy_batch_observation_order");
+});
+function fixedInventoryMissingBody(missing){
+ const f=manyPairs(2),target=f.allPairs[0];f.allPairs=[target];f.manifest.pairs=[target];f.intent.pair_count=1;reseal(f);finish(f);
+ const other=f.intent.binding.baseline.receipts[1];
+ assert.equal(f.run().adoption.state,"conditional");
+ f.inventoryOverride=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString()).inventory;
+ f.records=f.records.filter(r=>!(missing!=="payload"&&r.role==="receipt_v1"&&r.value.recording_id===other.recording_id)&&
+  !(missing!=="receipt"&&r.role==="payload_v1"&&hash(canonical(r.value))===other.payload_hash));
+ return f;
+}
+for(const missing of ["receipt","payload","both"])
+ test(`frozen baseline resolves retained inventory after ${missing} body loss without confirming completion`,()=>{
+  const f=fixedInventoryMissingBody(missing),r=f.run();assert.equal(r.status,"held",r.reason);
+  assert.equal(r.adoption.state,"blocked");assert.equal(r.unconfirmed_completions.length,1);
+  assert.deepEqual(r.unconfirmed_completions[0].blockers,["baseline_source_missing"]);
+  assert.equal(r.effects.prune.present,false);assert.equal(r.history_read_available,false);
+  assert.equal(r.original_acknowledgement,"not_proven");
+ });
+for(const role of ["receipt","payload"])
+ test(`frozen inventory fallback still rejects a false ${role} hash`,()=>{
+  const f=fixedInventoryMissingBody("both");f.inventoryOverride.find(e=>e.role===role).hash=H(9);
+  blocked(f.run(),"inventory_binding");
+ });
+test("frozen inventory fallback does not resolve an unknown recording ID",()=>{
+ const f=fixedInventoryMissingBody("both");f.inventoryOverride.forEach(e=>e.recording_id=ID(88888));
+ blocked(f.run(),"inventory_binding");
+});
+test("frozen inventory fallback does not bypass baseline generation validation",()=>{
+ const f=fixedInventoryMissingBody("both");f.intent.binding.baseline_generation=H(9);reseal(f);
+ blocked(f.run(),"baseline_generation");
+});
+
+test("unknown middle receipt does not reset known ordering inside one legacy batch",()=>{
+ const f=legacyBatchFixture({badCutoff:true,count:3}),middle=f.rows.find(r=>r.role==="receipt_v1"&&r.value.sequence===2).value;
+ f.rows=f.rows.filter(r=>!(r.role==="receipt_v1"&&r.value===middle)&&!(r.role==="payload_v1"&&hash(canonical(r.value))===middle.payload_hash));
+ blocked(inspectCommittedMaintenance(pack(f.rows)),"legacy_batch_observation_order");
+});
+test("frozen inventory fallback cannot bless a receipt with a foreign policy",()=>{
+ const f=fixedInventoryMissingBody("both"),r=f.intent.binding.baseline.receipts[1];r.policy_hash=H(9);
+ f.inventoryOverride.find(e=>e.role==="receipt").hash=hash(canonical(r));
+ f.intent.binding.baseline_generation=hash(canonical(f.intent.binding.baseline));reseal(f);
+ blocked(f.run(),"baseline_receipt_binding");
+});
+
+test("known legacy receipt bounds the next summary even without its payload body",()=>{
+ const f=legacyBatchFixture({omitPayload:true});assert.equal(inspectCommittedMaintenance(pack(f.rows)).adoption.state,"conditional");
+ f.m.pairs[1].last_observed_at="2025-12-31T23:59:59.999Z";
+ f.rows.find(r=>r.role==="legacy_completion_v1").value.intent_hash=hash(canonical(f.m));
+ blocked(inspectCommittedMaintenance(pack(f.rows)),"legacy_batch_observation_order");
+});
+
+test("transaction receipt provenance rejects a copy outside inventory, baseline and legacy scopes",()=>{
+ const f=finish(fixture());assert.equal(f.run().adoption.state,"conditional");
+ f.inventoryOverride=JSON.parse(Buffer.from(pack(f.records,f.evaluationAt)[0]).toString()).inventory;
+ const copy=JSON.parse(RECEIPT_BYTES);copy.recording_id=ID(88000);copy.sequence=2;
+ f.records.push({role:"receipt_v1",value:copy});blocked(f.run(),"unreferenced_receipt");
+});
+function declaredLegacyFixture({kind="prune",recordedAt,lastObservedAt,transaction=false}={}){
+ const m=JSON.parse(LEGACY_BYTES);m.id=ID(90000);m.kind=kind;
+ const stamp=kind==="prune"?AT:"2026-05-01T00:01:00.001Z";
+ const p=m.pairs[0];p.recording_id=ID(90001);p.receipt_hash=H(7);p.payload_hash=H(8);
+ p.recorded_at=recordedAt===undefined?stamp:recordedAt;p.last_observed_at=lastObservedAt===undefined?stamp:lastObservedAt;
+ if(p.recorded_at===null)delete p.recorded_at;
+ if(p.last_observed_at===null)delete p.last_observed_at;
+ p.day=(p.recorded_at??p.last_observed_at??AT).slice(0,10);
+ const f=transaction?finish(resequenceSingleFixture(fixture())):{records:[],evaluationAt:"2026-05-01T00:00:00.000Z",run(){return inspectCommittedMaintenance(pack(this.records,this.evaluationAt));}};
+ f.records.push({role:"legacy_v1",value:m},{role:"legacy_completion_v1",value:{id:m.id,intent_hash:hash(canonical(m))}});
+ return {f,m};
+}
+function resealLegacyClaim(f,m){f.records.find(r=>r.role==="legacy_completion_v1"&&r.value.id===m.id).value.intent_hash=hash(canonical(m));}
+test("bodyless legacy prune rejects a self-declared one-day-old target with or without a transaction",()=>{
+ for(const transaction of [false,true]){
+  const {f}=declaredLegacyFixture({transaction});assert.equal(f.run().adoption.state,"conditional");
+  const bad=declaredLegacyFixture({transaction,recordedAt:"2026-04-30T00:00:00.000Z",lastObservedAt:"2026-04-30T00:00:00.000Z"});
+  blocked(bad.f.run(),"legacy_claim_eligibility");
+ }
+});
+
+test("bodyless legacy summaries cannot observe after their declared receipt time",()=>{
+ for(const transaction of [false,true]){
+  const {f}=declaredLegacyFixture({transaction,lastObservedAt:"2026-01-02T00:00:00.000Z"});
+  blocked(f.run(),"legacy_claim_observation_order");
+ }
+});
+
+function appendDeclaredPair(m,sequence,recordedAt,lastObservedAt=recordedAt){
+ const p={...structuredClone(m.pairs[0]),recording_id:ID(90000+sequence),sequence,receipt_hash:H(sequence),payload_hash:H(sequence+1)};
+ if(recordedAt===null)delete p.recorded_at;else p.recorded_at=recordedAt;
+ if(lastObservedAt===null)delete p.last_observed_at;else p.last_observed_at=lastObservedAt;
+ p.day=(p.recorded_at??p.last_observed_at??AT).slice(0,10);m.pairs.push(p);return p;
+}
+test("bodyless legacy batch rejects a later sequence with an earlier declared recorded time",()=>{
+ for(const transaction of [false,true]){
+  const {f,m}=declaredLegacyFixture({transaction,recordedAt:"2026-01-02T00:00:00.000Z",lastObservedAt:null});
+  appendDeclaredPair(m,2,AT,null);resealLegacyClaim(f,m);blocked(f.run(),"legacy_batch_observation_order");
+ }
+});
+
+test("bodyless legacy observation-only predecessor constrains later claims without filling its missing receipt time",()=>{
+ const {f,m}=declaredLegacyFixture({recordedAt:null,lastObservedAt:"2026-01-02T00:00:00.000Z"});
+ appendDeclaredPair(m,2,AT,null);resealLegacyClaim(f,m);blocked(f.run(),"legacy_batch_observation_order");
+ assert.equal(Object.hasOwn(m.pairs[0],"recorded_at"),false);
+});
+
+for(const kind of ["prune","clock_recovery"])for(const fields of ["both","receipt_only","observation_only"])
+ test(`bodyless legacy ${kind} strict time boundary with ${fields}`,()=>{
+  const created=Date.parse("2026-05-01T00:00:00.000Z"),cutoff=created+(kind==="prune"?-90*86400000:60000);
+  for(const transaction of [false,true])for(const offset of [-1,0,1]){
+   const stamp=new Date(cutoff+offset).toISOString();
+   const {f,m}=declaredLegacyFixture({kind,transaction,recordedAt:fields==="observation_only"?null:stamp,lastObservedAt:fields==="receipt_only"?null:stamp});
+   const before=canonical(m),r=f.run(),eligible=kind==="prune"?offset<0:offset>0;
+   if(!eligible)blocked(r,"legacy_claim_eligibility");
+   else {assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+    if(kind==="prune")assert.equal(r.prune_boundary,fields==="observation_only"?null:stamp);
+    assert.equal(r.native_bytes_verified,false);assert.equal(r.original_acknowledgement,"not_proven");}
+   assert.equal(canonical(m),before);
+  }
+ });
+for(const kind of ["prune","clock_recovery"])
+ test(`bodyless legacy ${kind} omitted timestamps stay absent and unverified`,()=>{
+  for(const transaction of [false,true]){
+   const {f,m}=declaredLegacyFixture({kind,transaction,recordedAt:null,lastObservedAt:null}),before=canonical(m),r=f.run();
+   assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+   assert.equal(r.prune_boundary,transaction&&kind==="clock_recovery"?AT:null);assert.equal(r.native_bytes_verified,false);assert.equal(r.execution_available,false);
+   assert.equal(r.original_acknowledgement,"not_proven");assert.equal(canonical(m),before);
+   assert.equal(Object.hasOwn(m.pairs[0],"recorded_at"),false);assert.equal(Object.hasOwn(m.pairs[0],"last_observed_at"),false);
+  }
+ });
+test("bodyless legacy clock with no ahead claim is rejected",()=>{
+ const {f}=declaredLegacyFixture({kind:"clock_recovery",recordedAt:"2026-05-01T00:00:00.000Z",lastObservedAt:"2026-05-01T00:00:00.000Z"});
+ blocked(f.run(),"legacy_claim_eligibility");
+});
+test("bodyless legacy order follows sequence rather than reference-array order and permits equality",()=>{
+ for(const stamp of [AT,"2026-01-01T00:00:00.001Z"]){
+  const {f,m}=declaredLegacyFixture();appendDeclaredPair(m,2,stamp);m.pairs.reverse();resealLegacyClaim(f,m);
+  const before=canonical(m),r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.equal(canonical(m),before);
+ }
+});
+test("bodyless legacy missing middle timestamps do not erase an earlier bound",()=>{
+ const {f,m}=declaredLegacyFixture({recordedAt:"2026-01-02T00:00:00.000Z",lastObservedAt:null});
+ appendDeclaredPair(m,2,null,null);appendDeclaredPair(m,3,AT,null);resealLegacyClaim(f,m);blocked(f.run(),"legacy_batch_observation_order");
+});
+test("bodyless legacy later observation must respect its predecessor even when its own receipt is later",()=>{
+ const {f,m}=declaredLegacyFixture({recordedAt:"2026-01-02T00:00:00.000Z",lastObservedAt:null});
+ appendDeclaredPair(m,2,"2026-01-03T00:00:00.000Z",AT);resealLegacyClaim(f,m);blocked(f.run(),"legacy_batch_observation_order");
+});
+test("bodyless legacy member is checked against a supplied original in the same batch",()=>{
+ const {rows,m}=legacyBatchFixture(),missing=m.pairs[1];
+ const kept=rows.filter(r=>!(r.role==="receipt_v1"&&r.value.recording_id===missing.recording_id)&&!(r.role==="payload_v1"&&hash(canonical(r.value))===missing.payload_hash));
+ missing.recorded_at="2025-12-31T23:59:59.999Z";missing.day="2025-12-31";delete missing.last_observed_at;
+ kept.find(r=>r.role==="legacy_completion_v1").value.intent_hash=hash(canonical(m));
+ blocked(inspectCommittedMaintenance(pack(kept)),"legacy_batch_observation_order");
+});
+test("bodyless legacy member is checked against a frozen original in the same batch",()=>{
+ const {f,old}=completedWithLaterPrune({kind:"prune",keepProof:false});
+ appendDeclaredPair(old,3,AT,null);resealLegacyClaim(f,old);blocked(f.run(),"legacy_batch_observation_order");
+});
+test("bodyless legacy contradictions cannot hide behind an incomplete-maintenance hold",()=>{
+ const {f,m}=declaredLegacyFixture({recordedAt:"2026-04-30T00:00:00.000Z",lastObservedAt:null});
+ f.records=f.records.filter(r=>r.role!=="legacy_completion_v1");blocked(f.run(),"legacy_claim_eligibility");
+});
+test("bodyless legacy lower bounds do not cross maintenance records or clock epochs",()=>{
+ for(const reverse of [false,true]){
+  const {f,m}=declaredLegacyFixture({kind:"clock_recovery",recordedAt:AT,lastObservedAt:AT});m.created_at="2025-12-31T23:00:00.000Z";resealLegacyClaim(f,m);
+  const other=JSON.parse(LEGACY_BYTES);other.id=ID(90002);const ref=other.pairs[0];
+  Object.assign(ref,{recording_id:ID(90003),sequence:2,recorded_at:"2025-12-31T23:01:00.000Z",last_observed_at:"2025-12-31T23:01:00.000Z",day:"2025-12-31",receipt_hash:H(3),payload_hash:H(4)});
+  f.records.push({role:"legacy_v1",value:other},{role:"legacy_completion_v1",value:{id:other.id,intent_hash:hash(canonical(other))}});
+  if(reverse)f.records.reverse();const before=canonical(f.records),r=f.run();
+  assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.equal(r.read_effect,"combined_conditionally");
+  assert.equal(r.original_acknowledgement,"not_proven");assert.equal(r.execution_available,false);assert.equal(canonical(f.records),before);
+ }
+});
+
+test("bodyless legacy fully omitted predecessor supplies no invented time bound",()=>{
+ const {f,m}=declaredLegacyFixture({recordedAt:null,lastObservedAt:null});appendDeclaredPair(m,2,AT);resealLegacyClaim(f,m);
+ const before=canonical(m),r=f.run();assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+ assert.equal(r.prune_boundary,null);assert.equal(canonical(m),before);
+});
+
+function residualLegacyPayload({transaction=false,kind="prune",recordedAt=AT,lastObservedAt=null,observedAt=AT,captureAt=observedAt}={}){
+ const {f,m}=declaredLegacyFixture({transaction,kind,recordedAt,lastObservedAt}),p=payload();p.restoration_hash=H(9);
+ p.capture_as_of=captureAt;p.series.forEach(s=>s.observed_at=observedAt);
+ m.pairs[0].payload_hash=hash(canonical(p));f.records.push({role:"payload_v1",value:p});resealLegacyClaim(f,m);
+ return {f,m,p};
+}
+test("residual payload cannot observe after an original-less declared receipt with or without a transaction",()=>{
+ for(const transaction of [false,true]){
+  const control=residualLegacyPayload({transaction});assert.equal(control.f.run().adoption.state,"conditional");
+  for(const observedAt of ["2026-01-02T00:00:00.000Z","2026-04-30T00:00:00.000Z"]){
+   const {f}=residualLegacyPayload({transaction,observedAt});blocked(f.run(),"legacy_claim_payload_binding");
+  }
+ }
+});
+
+test("residual payload supplies prune eligibility when both declared timestamps are omitted",()=>{
+ for(const transaction of [false,true]){
+  const control=residualLegacyPayload({transaction,recordedAt:null,lastObservedAt:null});
+  assert.equal(control.f.run().adoption.state,"conditional");assert.equal(control.f.run().prune_boundary,null);
+  const {f,m}=residualLegacyPayload({transaction,recordedAt:null,lastObservedAt:null,observedAt:"2026-04-30T00:00:00.000Z"});
+  const before=canonical(m);blocked(f.run(),"legacy_claim_eligibility");assert.equal(canonical(m),before);
+ }
+});
+
+test("legacy duplicate sequence is rejected with or without a transaction in both reference orders",()=>{
+ for(const transaction of [false,true])for(const reverse of [false,true])for(const kind of ["prune","clock_recovery"])for(const equalTimes of [false,true]){
+  const {f,m}=declaredLegacyFixture({transaction,kind});
+  const stamp=equalTimes?m.pairs[0].recorded_at:kind==="prune"?"2026-01-02T00:00:00.000Z":"2026-05-01T00:01:00.002Z";
+  const second=appendDeclaredPair(m,2,stamp);second.sequence=1;if(reverse)m.pairs.reverse();resealLegacyClaim(f,m);
+  blocked(f.run(),"legacy_sequence_alias");
+ }
+});
+
+test("residual payload observation constrains later claims without filling omitted receipt timestamps",()=>{
+ for(const transaction of [false,true]){
+  const {f,m}=residualLegacyPayload({transaction,recordedAt:null,lastObservedAt:null,observedAt:"2026-01-02T00:00:00.000Z"});
+  appendDeclaredPair(m,2,AT,null);resealLegacyClaim(f,m);const before=canonical(m);
+  blocked(f.run(),"legacy_batch_observation_order");assert.equal(canonical(m),before);
+ }
+});
+
+test("residual payload latest observation must match a declared summary",()=>{
+ for(const transaction of [false,true]){
+  const {f,m}=residualLegacyPayload({transaction,recordedAt:"2026-01-03T00:00:00.000Z",lastObservedAt:"2026-01-02T00:00:00.000Z",observedAt:"2026-01-02T00:00:00.000Z"});
+  assert.equal(f.run().adoption.state,"conditional");m.pairs[0].last_observed_at=AT;resealLegacyClaim(f,m);
+  blocked(f.run(),"legacy_claim_payload_binding");
+ }
+});
+test("residual payload summary uses the latest of all four series",()=>{
+ for(const transaction of [false,true]){
+  const {f,m,p}=residualLegacyPayload({transaction,recordedAt:"2026-01-03T00:00:00.000Z",lastObservedAt:"2026-01-02T00:00:00.000Z"});
+  p.series[3].observed_at="2026-01-02T00:00:00.000Z";m.pairs[0].payload_hash=hash(canonical(p));resealLegacyClaim(f,m);
+  assert.equal(f.run().adoption.state,"conditional");m.pairs[0].last_observed_at=AT;resealLegacyClaim(f,m);
+  blocked(f.run(),"legacy_claim_payload_binding");
+ }
+});
+for(const kind of ["prune","clock_recovery"])
+ test(`residual payload ${kind} eligibility is strict at the observation boundary`,()=>{
+  const cutoff=Date.parse("2026-05-01T00:00:00.000Z")+(kind==="prune"?-90*86400000:60000);
+  for(const transaction of [false,true])for(const offset of [-1,0,1]){
+   const {f,m}=residualLegacyPayload({kind,transaction,recordedAt:null,lastObservedAt:null,observedAt:new Date(cutoff+offset).toISOString()});
+   const before=canonical(m),r=f.run(),eligible=kind==="prune"?offset<0:offset>0;
+   if(!eligible)blocked(r,"legacy_claim_eligibility");
+   else {assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");
+    assert.equal(r.prune_boundary,transaction&&kind==="clock_recovery"?AT:null);assert.equal(r.native_bytes_verified,false);assert.equal(r.original_acknowledgement,"not_proven");}
+   assert.equal(canonical(m),before);assert.equal(Object.hasOwn(m.pairs[0],"recorded_at"),false);assert.equal(Object.hasOwn(m.pairs[0],"last_observed_at"),false);
+  }
+ });
+test("residual payload permits optional timestamps without replacing them",()=>{
+ for(const transaction of [false,true])for(const mode of ["receipt_only","observation_only"]){
+  const recordedAt=mode==="receipt_only"?"2026-01-03T00:00:00.000Z":null,lastObservedAt=mode==="observation_only"?AT:null;
+  const {f,m}=residualLegacyPayload({transaction,recordedAt,lastObservedAt}),before=canonical(m),r=f.run();
+  assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.equal(canonical(m),before);
+  assert.equal(r.prune_boundary,recordedAt);assert.equal(r.native_bytes_verified,false);assert.equal(r.execution_available,false);
+ }
+});
+test("residual payload contradictions cannot hide behind a pending legacy hold",()=>{
+ for(const transaction of [false,true]){
+  const {f}=residualLegacyPayload({transaction,observedAt:"2026-04-30T00:00:00.000Z"});
+  f.records=f.records.filter(r=>r.role!=="legacy_completion_v1");blocked(f.run(),"legacy_claim_payload_binding");
+ }
+});
+test("legacy duplicate sequence is rejected for mixed supplied and declared members in both orders",()=>{
+ for(const reverse of [false,true]){
+  const {rows,m}=legacyBatchFixture(),missing=m.pairs[1];
+  const kept=rows.filter(r=>!(r.role==="receipt_v1"&&r.value.recording_id===missing.recording_id)&&!(r.role==="payload_v1"&&hash(canonical(r.value))===missing.payload_hash));
+  missing.sequence=m.pairs[0].sequence;if(reverse)m.pairs.reverse();kept.find(r=>r.role==="legacy_completion_v1").value.intent_hash=hash(canonical(m));
+  blocked(inspectCommittedMaintenance(pack(kept)),"legacy_sequence_alias");
+ }
+});
+test("residual payload time bounds reset across legacy clock epochs with distinct store sequences",()=>{
+ for(const transaction of [false,true])for(const reverse of [false,true]){
+  const {f,m}=residualLegacyPayload({transaction,kind:"clock_recovery",recordedAt:null,lastObservedAt:null});m.created_at="2025-12-31T23:00:00.000Z";resealLegacyClaim(f,m);
+  const other=JSON.parse(LEGACY_BYTES);other.id=ID(90002);const ref=other.pairs[0],body=payload(),at="2025-12-31T23:01:00.000Z";
+  body.restoration_hash=H(6);body.capture_as_of=at;body.series.forEach(s=>{s.observed_at=at;s.bars.forEach(b=>{b.bar_open_at="2025-12-31T22:00:00.000Z";b.confirmed_by_next_bar_at=at;});});
+  Object.assign(ref,{recording_id:ID(90003),sequence:m.pairs[0].sequence+1,day:"2025-12-31",receipt_hash:H(3),payload_hash:hash(canonical(body))});delete ref.recorded_at;delete ref.last_observed_at;
+  f.records.push({role:"payload_v1",value:body},{role:"legacy_v1",value:other},{role:"legacy_completion_v1",value:{id:other.id,intent_hash:hash(canonical(other))}});
+  if(reverse){const oldRows=f.records.filter(r=>r.role.startsWith("legacy"));f.records=f.records.filter(r=>!r.role.startsWith("legacy"));f.records.push(...oldRows.reverse());}
+  const before=canonical(f.records),r=f.run();
+  assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.equal(r.read_effect,"combined_conditionally");assert.equal(r.prune_boundary,null);
+  assert.equal(r.original_acknowledgement,"not_proven");assert.equal(r.execution_available,false);assert.equal(canonical(f.records),before);
+ }
+});
+
+function storeSequenceFixture(mode,sequence){
+ const {f,m}=declaredLegacyFixture();m.pairs[0].sequence=sequence;resealLegacyClaim(f,m);
+ if(mode==="legacy_legacy"){
+  const other=structuredClone(m);other.id=ID(90002);other.pairs[0].recording_id=ID(90003);other.pairs[0].sequence=1;
+  f.records.push({role:"legacy_v1",value:other},{role:"legacy_completion_v1",value:{id:other.id,intent_hash:hash(canonical(other))}});
+ }else if(mode==="legacy_live")f.records.push(...legacySource());
+ else {
+  const transaction=finish(fixture());transaction.records=transaction.records.filter(r=>!["receipt_v1","payload_v1"].includes(r.role));
+  transaction.records.push(...f.records);return transaction;
+ }
+ return f;
+}
+for(const mode of ["legacy_legacy","legacy_live","legacy_baseline"])
+ test(`store-wide sequence rejects different IDs across ${mode}`,()=>{
+  for(const reverse of [false,true]){
+   const good=storeSequenceFixture(mode,2);assert.equal(good.run().adoption.state,"conditional");
+   const bad=storeSequenceFixture(mode,1);
+   if(reverse){const rows=bad.records.filter(r=>r.role.startsWith("legacy"));bad.records=bad.records.filter(r=>!r.role.startsWith("legacy"));bad.records.push(...rows.reverse());}
+   blocked(bad.run(),"store_sequence_alias");
+  }
+ });
+
+function suppliedCopyOrderFixture(laterAt){
+ const f=finish(fixture()),m=JSON.parse(LEGACY_BYTES),p=payload();m.id=ID(90000);p.restoration_hash=H(9);
+ const r=JSON.parse(RECEIPT_BYTES);r.recording_id=ID(90001);r.sequence=2;r.recorded_at="2026-01-02T00:00:00.000Z";r.day="2026-01-02";r.payload_hash=hash(canonical(p));
+ Object.assign(m.pairs[0],{recording_id:r.recording_id,sequence:r.sequence,day:r.day,receipt_hash:hash(canonical(r)),payload_hash:r.payload_hash,bytes:Buffer.byteLength(canonical(r))+Buffer.byteLength(canonical(p))});
+ delete m.pairs[0].recorded_at;delete m.pairs[0].last_observed_at;appendDeclaredPair(m,3,laterAt,null);
+ f.records.push({role:"receipt_v1",value:r},{role:"payload_v1",value:p},{role:"legacy_v1",value:m},{role:"legacy_completion_v1",value:{id:m.id,intent_hash:hash(canonical(m))}});return f;
+}
+test("supplied receipt fallback preserves its exact recorded-time bound when v1 optional times are absent",()=>{
+ const good=suppliedCopyOrderFixture("2026-01-03T00:00:00.000Z");assert.equal(good.run().adoption.state,"conditional");
+ const bad=suppliedCopyOrderFixture("2026-01-01T00:00:00.001Z");blocked(bad.run(),"legacy_batch_observation_order");
+});
+test("supplied-copy ordering contradiction stops before diagnostic effects are captured",()=>{
+ const good=legacyBatchFixture();assert.equal(inspectCommittedMaintenance(pack(good.rows)).adoption.state,"conditional");
+ const bad=legacyBatchFixture({badCutoff:true}),r=inspectCommittedMaintenance(pack(bad.rows));blocked(r,"legacy_batch_observation_order");
+ assert.equal(r.effects,null);assert.equal(r.effects_status,"not_evaluated");assert.equal(r.remaining_effects_unknown,true);
+});
+test("store-wide sequence permits the same ID repeated in legacy, receipt and frozen baseline evidence",()=>{
+ const {f}=completedWithLaterPrune({kind:"prune",keepProof:true}),r=f.run();
+ assert.equal(r.status,"consistent",r.reason);assert.equal(r.adoption.state,"conditional");assert.equal(r.execution_available,false);
+});
+test("declared future day is rejected when recorded_at is present",()=>{
+ for(const transaction of [false,true]){
+  const {f,m}=declaredLegacyFixture({transaction});assert.equal(f.run().adoption.state,"conditional");
+  m.pairs[0].day="2026-01-02";resealLegacyClaim(f,m);blocked(f.run(),"legacy_claim_day_binding");
+ }
+});
+
+test("day comparison allows earlier partitions and does not infer a missing recorded_at",()=>{
+ for(const transaction of [false,true])for(const kind of ["prune","clock_recovery"]){
+  for(const delta of [-1,0,1]){
+   const {f,m}=declaredLegacyFixture({transaction,kind}),r=m.pairs[0];r.day=new Date(Date.parse(r.recorded_at)+delta*86400000).toISOString().slice(0,10);resealLegacyClaim(f,m);
+   const result=f.run();if(delta>0)blocked(result,"legacy_claim_day_binding");else assert.equal(result.adoption.state,"conditional",result.reason);
+  }
+  const {f,m}=declaredLegacyFixture({transaction,kind,recordedAt:null});m.pairs[0].day="2026-05-02";resealLegacyClaim(f,m);
+  const before=canonical(m),result=f.run();assert.equal(result.adoption.state,"conditional",result.reason);assert.equal(canonical(m),before);
+  assert.equal(Object.hasOwn(m.pairs[0],"recorded_at"),false);
+ }
+});
+test("store-wide sequence includes receipt copies outside active inventory",()=>{
+ const good=storeSequenceFixture("legacy_live",2);blocked(inspectCommittedMaintenance(pack(good.records,good.evaluationAt,{}, {inventory:[]})),"unreferenced_receipt");
+ const bad=storeSequenceFixture("legacy_live",1);blocked(inspectCommittedMaintenance(pack(bad.records,bad.evaluationAt,{}, {inventory:[]})),"store_sequence_alias");
 });

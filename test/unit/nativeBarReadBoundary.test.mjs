@@ -28,7 +28,12 @@ test("read-only native extension remains absent from MCP/history integration and
   assert.doesNotMatch(native, /\b(?:unlinkat|renameatx_np|mkdirat|fchmod|fchown|fsync|ftruncate|write|pwrite)\s*\(/);
   assert.doesNotMatch(native, /O_(?:CREAT|WRONLY|RDWR|TRUNC)/);
   const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
-  assert.deepEqual(pkg.files, ["build/**/*.js"]);
+  assert.ok(Array.isArray(pkg.files) && pkg.files.length > 0);
+  for (const file of pkg.files) {
+    assert.equal(typeof file, "string");
+    assert.match(file, /^build\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.js$/);
+    assert.ok(!file.split("/").some((part) => part === "." || part === ".."));
+  }
 });
 test("closing a native inventory releases vector storage before a retained JS handle is collected", () => {
   const native = readFileSync(new URL("../../native/native_bar_fs/native_bar_read.inc", import.meta.url), "utf8");
