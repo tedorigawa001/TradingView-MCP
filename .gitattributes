@@ -1,0 +1,2 @@
+# This fixture is compared byte for byte and binds a fixed physical prefix hash.
+test/fixtures/research-series-relations-v1.jsonl text eol=lf

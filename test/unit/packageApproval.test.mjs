@@ -227,7 +227,8 @@ test('the B loader reads and checks A and test evidence, including missing files
 });
 
 async function prepareFixture({changeAfterTests=false,changeBeforeReadback=false,afterCaptureError=false,priorDrift=false,testCode=0}={}){
-  const source=readFileSync(new URL('../../scripts/prepare-package-reverify.mjs',import.meta.url),'utf8');
+  // This fixture reads code as text. Its simulated approval inputs are hashed separately.
+  const source=readFileSync(new URL('../../scripts/prepare-package-reverify.mjs',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const start=source.indexOf('\ntry{\n  guard=installNoWriteGuard();');assert.ok(start>=0);
   const v=virtual(),repo=VIRTUAL_REPO,writer=claimPreparation(repo,v.io),root=writer.root;
   const report={schema:'package-preparation-status-v2',preparation:C.preparation,run:C.run,status:'running',checks:{}};
