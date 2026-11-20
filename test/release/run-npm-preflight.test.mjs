@@ -13,7 +13,7 @@ const secret = 'mock-token-not-for-logs';
 const account = 'private-test-account';
 const address = '192.0.2.42';
 const responses = [
-  [200, { username: account }], [200, { [account]: 'read-write' }],
+  [200, { username: account }], [200, { [account]: 'write' }],
   [404, { error: 'version not found: 0.1.46' }], [200, { latest: '0.1.45' }],
 ];
 

@@ -185,7 +185,7 @@ test('a new session must match the approved account before sending later GETs', 
 });
 
 test('the four preflight summaries retain no account value or token and never authorize publish', async () => {
-  const rows = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'read-write' }],
+  const rows = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'write' }],
     [404, { error: 'version not found: 0.1.46' }], [200, { latest: '0.1.45' }]];
   const { options, trace } = fixture(rows);
   const saved = [];

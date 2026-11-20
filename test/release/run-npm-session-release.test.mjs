@@ -17,7 +17,7 @@ const pollUrl = 'https://registry.npmjs.org/-/v1/done?sessionId=simulated-poll-i
 const init = [200, { loginUrl: browserUrl, doneUrl: pollUrl }];
 const waiting = [202, {}, { 'retry-after': '1' }];
 const loggedIn = [200, { token: secret }];
-const checks = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'read-write' }],
+const checks = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'write' }],
   [404, { error: 'version not found: 0.1.46' }], [200, { latest: '0.1.45' }]];
 
 test('the rebound preparation accepts only the approved old-to-new tool bindings', () => {

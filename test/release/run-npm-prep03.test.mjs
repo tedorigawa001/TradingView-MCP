@@ -17,7 +17,7 @@ const ip = '192.0.2.71';
 const urls = { loginUrl: 'https://www.npmjs.com/login/cli/mock-prep03', doneUrl: 'https://registry.npmjs.org/-/v1/done/mock-prep03' };
 const token = 'npm_SyntheticPrep03TokenOnly';
 const login = [[200, urls], [200, { token }]];
-const queries = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'read-write' }], [404, 'version not found: 0.1.46'], [200, { latest: '0.1.45' }]];
+const queries = [[200, { username: ACCOUNT }], [200, { [ACCOUNT]: 'write' }], [404, 'version not found: 0.1.46'], [200, { latest: '0.1.45' }]];
 const UTC0 = 1795000000000;
 
 function fixture(t, responses = [...login, ...queries], extra = {}) {

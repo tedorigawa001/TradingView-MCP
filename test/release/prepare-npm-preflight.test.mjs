@@ -9,7 +9,7 @@ const host = 'registry.npmjs.org';
 const token = 'synthetic-credential-never-record';
 const rows = [
   [200, { username: 'fixture-user' }],
-  [200, { 'fixture-user': 'read-write' }],
+  [200, { 'fixture-user': 'write' }],
   [404, { error: 'version not found: 0.1.46' }],
   [200, { latest: '0.1.45' }],
 ];
@@ -139,10 +139,24 @@ test('oversized and incompletely framed responses stop before recording', async 
 });
 
 test('the username returned by whoami must have read-write membership', async () => {
-  const s = scenario({ responses: [rows[0], [200, { 'someone-else': 'read-write', 'fixture-user': 'read-only' }]] });
+  const s = scenario({ responses: [rows[0], [200, { 'someone-else': 'write', 'fixture-user': 'read' }]] });
   await assert.rejects(runPreflight(s.config), /rights_unconfirmed/);
   assert.equal(s.gets.length, 2);
   assert.deepEqual(s.recorded.map(x => x.slot), ['account']);
+});
+
+test('collaborator rights use the registry API value write, not the CLI display name', async () => {
+  const s = scenario();
+  const out = await runPreflight(s.config);
+  assert.deepEqual(out.rights, { username: 'fixture-user', collaborator_permission: 'write', token_publish_permission: 'unconfirmed' });
+  for (const permission of ['read', 'read-write', 'read-only', 'WRITE', '', null]) {
+    const r = scenario({ responses: [rows[0], [200, { 'fixture-user': permission }]] });
+    await assert.rejects(runPreflight(r.config), /rights_unconfirmed/);
+    assert.equal(r.gets.length, 2);
+    assert.deepEqual(r.recorded.map(x => x.slot), ['account']);
+  }
+  const missing = scenario({ responses: [rows[0], [404, { 'fixture-user': 'write' }]] });
+  await assert.rejects(runPreflight(missing.config), /rights_unconfirmed/);
 });
 
 test('a target-version 404 JSON string allows the tag GET and records only the summary', async () => {

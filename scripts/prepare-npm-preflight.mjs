@@ -91,8 +91,10 @@ function summarize(slot, status, bytes, username) {
       requireThat(status === 200 && typeof value.username === 'string' && /^[a-zA-Z0-9_.-]{1,128}$/.test(value.username), 'account_unconfirmed');
       return { username: value.username };
     case 'rights':
-      requireThat(status === 200 && Object.hasOwn(value, username) && value[username] === 'read-write', 'rights_unconfirmed');
-      return { username, collaborator_permission: 'read-write', token_publish_permission: 'unconfirmed' };
+      // The registry API reports raw collaborator permissions ("write"/"read");
+      // npm's CLI only displays "write" as "read-write".
+      requireThat(status === 200 && Object.hasOwn(value, username) && value[username] === 'write', 'rights_unconfirmed');
+      return { username, collaborator_permission: 'write', token_publish_permission: 'unconfirmed' };
     case 'version': {
       const message = typeof value === 'string' ? value : value.error;
       requireThat(status === 404 && typeof message === 'string' &&
