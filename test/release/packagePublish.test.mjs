@@ -15,7 +15,8 @@ const artifact=fs.readFileSync(new URL('../../.release-work/package-2026-11-18-r
 const manifest=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url)));
 const good=await buildPublishEntity(artifact,manifest);
 const token='synthetic-token-never-a-credential';
-function fake({body=Buffer.from('{}'),status=200,headers={},rawHeaders=[],chunks,hang=false,error=false,complete=true,nowChange}={}){
+function fake({body=Buffer.from('{}'),status=200,headers={},rawHeaders=[],chunks,hang=false,error=false,
+  socketEvents=[],responseError,complete=true,nowChange}={}){
   const calls=[];
   function request(url,options,callback){
     const req=new EventEmitter();req.destroy=()=>{req.destroyed=true;};
@@ -23,12 +24,21 @@ function fake({body=Buffer.from('{}'),status=200,headers={},rawHeaders=[],chunks
     req.end=entity=>{
       row.entity=entity;
       queueMicrotask(()=>{
-        if(error){req.emit('error',Error('secret must never escape'));return;}
+        if(socketEvents.length){
+          const socket=new EventEmitter();socket.authorized=socketEvents.includes('secureConnect');
+          req.emit('socket',socket);
+          for(const event of socketEvents){
+            if(event==='lookup')socket.emit(event,null,'192.0.2.1');
+            else if(event!=='assigned')socket.emit(event);
+          }
+        }
+        if(error){req.emit('error',error===true?Error('secret must never escape'):error);return;}
         if(hang)return;
         const res=new EventEmitter();Object.assign(res,{statusCode:status,headers,rawHeaders,complete,statusMessage:'OK'});
         res.destroy=()=>{res.destroyed=true;};row.res=res;callback(res);
         if(res.destroyed)return;
         for(const chunk of chunks??[body]){res.emit('data',chunk);if(res.destroyed)return;}
+        if(responseError){res.emit('error',responseError);return;}
         nowChange?.();res.emit('end');res.emit('close');
       });
     };
@@ -125,6 +135,96 @@ test('native request errors are sanitized and cannot refresh credentials or rese
     assert.equal(e.message,'request_error');assert.ok(!JSON.stringify(e).includes(token));return true;
   });assert.equal(f.calls.length,1);
 });
+
+function registerNetworkDiagnosticTests(test, assert, {transport, preflight, fake}) {
+  const secret = 'do-not-store-synthetic-auth-value';
+  const token = 'synthetic-token-never-a-credential';
+  const makeError = (code, syscall, cause) => Object.assign(Error(secret), {code, syscall, cause});
+
+  test('DNS diagnostics keep the allowlisted code and never claim a connection', async () => {
+    const failure = makeError('ENOTFOUND', 'getaddrinfo');
+    failure.headers = {authorization: 'Bearer '+secret};
+    failure.stack = secret;
+    const f = fake({error:failure, socketEvents:['assigned']});
+    const t = new transport({request:f.request});
+    const records = [];
+    await assert.rejects(preflight(t, token, (slot, value) => records.push([slot,value])), /request_error/);
+    assert.equal(records.length, 1);
+    const {network} = records[0][1];
+    assert.equal(network.error.root.code, 'ENOTFOUND');
+    assert.equal(network.error.root.syscall, 'getaddrinfo');
+    assert.equal(network.observed.socket, true);
+    for (const stage of ['dns_resolved','tcp_connected','tls_authorized','http_response']) assert.equal(network.observed[stage], false);
+    assert.equal(network.status, null);
+    assert.equal(network.dispatches, 1);
+    assert.ok(!JSON.stringify(network).includes(secret));
+    await assert.rejects(t.get('rights', token), /transport_stopped/);
+    assert.equal(f.calls.length, 1);
+  });
+
+  test('error detail bounds causes, removes unknown values, and ignores accessors', async () => {
+    const third = makeError('EAI_AGAIN', 'getaddrinfo');
+    const outer = makeError(secret.repeat(600), secret, makeError('ECONNRESET', 'read', makeError('ETIMEDOUT', 'connect', third)));
+    let access = 0;
+    Object.defineProperty(outer, 'syscall', {get() { access++; return secret; }});
+    const f = fake({error:outer});
+    await assert.rejects(new transport({request:f.request}).get('account',token), error => {
+      const detail = error.safe.error;
+      assert.equal(detail.root.code, 'OTHER');
+      assert.equal(detail.root.syscall, null);
+      assert.equal(detail.causes.length, 2);
+      assert.equal(detail.causes[0].code, 'ECONNRESET');
+      assert.equal(detail.causes[1].code, 'ETIMEDOUT');
+      assert.equal(detail.cause_truncated, true);
+      const saved = JSON.stringify(error.safe);
+      assert.ok(Buffer.byteLength(saved) <= 512);
+      assert.ok(!saved.includes(secret));
+      return true;
+    });
+    assert.equal(access, 0);
+  });
+
+  test('cyclic cause chains stop without retaining raw error objects', async () => {
+    const outer = makeError('ECONNRESET', 'read');
+    outer.cause = makeError('EPIPE', 'write', outer);
+    const f = fake({error:outer});
+    await assert.rejects(new transport({request:f.request}).get('account',token), error => {
+      assert.equal(error.safe.error.causes.length, 1);
+      assert.equal(error.safe.error.cause_truncated, true);
+      assert.ok(!JSON.stringify(error).includes(secret));
+      return true;
+    });
+  });
+
+  test('transport diagnostics distinguish TCP, TLS validation, and HTTP response receipt', async () => {
+    for (const [events, flags] of [
+      [['lookup'],[true,false,false,false]],
+      [['lookup','connect'],[true,true,false,false]],
+      [['lookup','connect','secureConnect'],[true,true,true,true]],
+    ]) {
+      const err = makeError('ECONNRESET','read');
+      const f=fake({socketEvents:events,error:flags[3]?false:err,responseError:flags[3]?err:undefined});
+      await assert.rejects(new transport({request:f.request}).get('account',token), error => {
+        const observed=error.safe.observed;
+        assert.deepEqual([observed.dns_resolved,observed.tcp_connected,observed.tls_authorized,observed.http_response],flags);
+        assert.equal(error.safe.status,flags[3]?200:null);
+        return true;
+      });
+    }
+  });
+
+  test('preflight parsing failures record a fixed reason without recording response text', async () => {
+    const f=fake({body:Buffer.from('invalid-json '+secret)}),t=new transport({request:f.request});
+    const records=[];
+    await assert.rejects(preflight(t,token,(_slot,value)=>records.push(value)),/preflight_failed/);
+    assert.equal(records[0].reason,'preflight_failed');
+    assert.ok(!JSON.stringify(records).includes(secret));
+    assert.equal(f.calls.length,1);
+  });
+}
+
+registerNetworkDiagnosticTests(test, assert, {transport:BoundedTransport, preflight, fake});
+
 test('absolute request timer includes connect and hangs, and destroys once without retry',async()=>{
   let fire,delay;const f=fake({hang:true}),t=new BoundedTransport({request:f.request,
     setTimer:(cb,n)=>{fire=cb;delay=n;return 1;},clearTimer:()=>{}});

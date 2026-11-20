@@ -147,6 +147,53 @@ export const ROUTES=Object.freeze({
 });
 const stages={prepare:['account','rights','version','tag'],
   publish:['account','rights','version','tag','publish','readback-version','readback-tag','tarball']};
+const networkCodes = new Set([
+  'EAI_AGAIN','ENOTFOUND','EACCES','EPERM','ECONNREFUSED','ECONNRESET','EHOSTUNREACH','ENETUNREACH',
+  'ETIMEDOUT','EPIPE','ABORT_ERR','ERR_SOCKET_CLOSED','HPE_HEADER_OVERFLOW','HPE_INVALID_HEADER_TOKEN',
+  'ERR_TLS_CERT_ALTNAME_INVALID','ERR_TLS_HANDSHAKE_TIMEOUT','CERT_HAS_EXPIRED','CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY','ERR_SSL_WRONG_VERSION_NUMBER'
+]);
+const networkSyscalls = new Set(['getaddrinfo','queryA','queryAaaa','connect','read','write','recv','send','lookup']);
+const stopReasons = new Set([
+  'transport_stopped','request_order_or_reuse','publication_not_authorized','request_configuration','stage_timeout',
+  'request_timeout','request_error','request_dispatch_error','response_error','response_aborted','response_incomplete',
+  'response_header_limit','response_encoding','unexpected_http_status','response_body_limit','response_length',
+  'readback_artifact_identity','account_response','publisher_rights','version_already_exists_or_unproven',
+  'tag_response','tag_already_target','unsupported_auth_override','auth_config_format','auth_registry',
+  'unsupported_auth_config','existing_token_unavailable','preflight_failed'
+]);
+const transportErrors = new WeakMap();
+
+function ownErrorValue(error, key) {
+  if (error === null || typeof error !== 'object') return undefined;
+  try { return Object.getOwnPropertyDescriptor(error, key)?.value; }
+  catch { return undefined; }
+}
+
+function safeErrorDetail(error) {
+  const seen = new Set();
+  const causes = [];
+  const project = (value, allow) => allow.has(value) ? value : value === undefined ? null : 'OTHER';
+  const fields = e => ({code:project(ownErrorValue(e, 'code'), networkCodes),
+    syscall:project(ownErrorValue(e, 'syscall'), networkSyscalls)});
+  if (error && typeof error === 'object') seen.add(error);
+  const root = fields(error);
+  let cause = ownErrorValue(error, 'cause');
+  while (cause && causes.length < 2 && !seen.has(cause)) {
+    seen.add(cause);
+    causes.push(fields(cause));
+    cause = ownErrorValue(cause, 'cause');
+  }
+  return {root, causes, cause_truncated: Boolean(cause)};
+}
+
+function preflightFailure(error) {
+  const message = ownErrorValue(error, 'message');
+  const reason = stopReasons.has(message) ? message : 'preflight_failed';
+  return {reason, network:transportErrors.get(error) ?? null};
+}
+
 // Exported for synthetic tests; runtime entrypoint only constructs stage prepare.
 // No publish authorization loader/CLI is provided by this preparation change.
 export class BoundedTransport{
@@ -177,11 +224,18 @@ export class BoundedTransport{
     const deadline=Math.min(isPut?PLAN.putMs:PLAN.getMs,remaining);
     return new Promise((resolve,reject)=>{
       let req,res,timer,settled=false,ended=false,n=0,headersBytes=0,status=null;const chunks=[];
-      const finish=(err,value)=>{
+      const observed={socket:false,dns_resolved:false,tcp_connected:false,tls_authorized:false,http_response:false};
+      const finish=(err,value,original)=>{
         if(settled)return;settled=true;if(timer!==undefined)this.clearTimer(timer);
         if(err){this.stopped=true;res?.destroy();req?.destroy();
-          const e=Error(err);e.safe={slot,status,body_bytes:n,header_bytes:headersBytes,dispatches:this.dispatches,
-            outcome:isPut?'unknown':'preflight_stopped',elapsed_ms:Math.ceil(this.now()-t)};reject(e);
+          const e=Error(err);
+          const counters={slot,status,body_bytes:n,header_bytes:headersBytes,dispatches:this.dispatches,
+            outcome:isPut?'unknown':'preflight_stopped',elapsed_ms:Math.ceil(this.now()-t)};
+          const detail={observed:{...observed},error:safeErrorDetail(original)};
+          const safe={...counters,...detail};
+          e.safe=Object.freeze(Buffer.byteLength(JSON.stringify(safe))<=512?safe:{...counters,detail_truncated:true});
+          transportErrors.set(e,e.safe);
+          reject(e);
         }else resolve(value);
       };
       timer=this.setTimer(()=>finish('request_timeout'),deadline);
@@ -192,7 +246,9 @@ export class BoundedTransport{
         req=this.request(new URL(route,PLAN.registry),{
           method:isPut?'PUT':'GET',agent:false,maxHeaderSize:PLAN.headerMax,headers
         },response=>{
-          res=response;status=res.statusCode;
+          if(settled){response.destroy();return;}
+          res=response;observed.http_response=true;
+          status=Number.isInteger(res.statusCode)&&res.statusCode>=100&&res.statusCode<=599?res.statusCode:null;
           const rh=res.rawHeaders??[];
           headersBytes=Buffer.byteLength('HTTP/1.1 '+status+' '+(res.statusMessage??'')+'\r\n\r\n');
           for(let i=0;i<rh.length;i+=2)headersBytes+=Buffer.byteLength(rh[i]+': '+rh[i+1]+'\r\n');
@@ -208,7 +264,7 @@ export class BoundedTransport{
             n+=b.length;chunks.push(b);
           });
           res.once('aborted',()=>finish('response_aborted'));
-          res.once('error',()=>finish('response_error'));
+          res.once('error',error=>finish('response_error',undefined,error));
           res.once('close',()=>{if(!ended)finish('response_incomplete');});
           res.once('end',()=>{
             ended=true;if(settled)return;
@@ -223,10 +279,16 @@ export class BoundedTransport{
               elapsed_ms:Math.ceil(this.now()-t),dispatches:this.dispatches,entity:entityProof});
           });
         });
-        req.once('error',()=>finish('request_error'));
+        req.once('socket',socket=>{
+          observed.socket=true;
+          socket.once('lookup',(error,address)=>{if(!error&&typeof address==='string'&&address)observed.dns_resolved=true;});
+          socket.once('connect',()=>{observed.tcp_connected=true;});
+          socket.once('secureConnect',()=>{observed.tls_authorized=socket.authorized===true;});
+        });
+        req.once('error',error=>finish('request_error',undefined,error));
         if(entity)invariant(sha(entity)===entityProof.sha256,'entity_changed_before_send');
         req.end(entity);
-      }catch{finish('request_dispatch_error');}
+      }catch(error){finish('request_dispatch_error',undefined,error);}
     });
   }
 }
@@ -263,9 +325,12 @@ export async function preflight(transport,token,record){
         dispatches:response.dispatches,value});
     }catch(e){
       transport.stopped=true;
-      record(slot,{status:'stopped',reason:e.message,network:e.safe??(response?{
+      const {reason,network}=preflightFailure(e);
+      record(slot,{status:'stopped',reason,network:network??(response?{
         slot,status:response.status,body_bytes:response.body_bytes,body_sha256:response.body_sha256,
-        header_bytes:response.header_bytes,dispatches:response.dispatches}:null)});throw e;
+        header_bytes:response.header_bytes,dispatches:response.dispatches}:null)});
+      if(network)throw e;
+      throw Error(reason);
     }
   }
   return values;
@@ -464,14 +529,15 @@ export async function prepare(repo){
   }catch(e){
     // Do not retry tests/network, invent a new ID, or claim success. Even if
     // failure-record IO fails, the root and full reservation stay consumed.
-    const stop={schema:'publication-preparation-status-v1',status:'stopped',phase,reason:e.message,
-      preparation:PLAN.preparation,publication:PLAN.publication,network:e.safe??null,
+    const {reason,network}=phase==='preflight'?preflightFailure(e):{reason:e.message,network:null};
+    const stop={schema:'publication-preparation-status-v1',status:'stopped',phase,reason,
+      preparation:PLAN.preparation,publication:PLAN.publication,network,
       requests:{dispatched:transport?.dispatches??0,PUT:0,retry:false},
       reserved:PLAN.reservation,cumulative:PLAN.cumulative,protected_765_bytes_used:0,
       readback_before_final:writer.readback(),commit_authorized:false,publication_authorized:false,
       publication_id_consumed:false,stop_preserved:true};
     if(!writer.used.has('status.json'))writer.write('status.json',stop);
-    return {status:'stopped',phase,reason:e.message,root:writer.root,readback:writer.readback()};
+    return {status:'stopped',phase,reason,root:writer.root,readback:writer.readback()};
   }finally{guard?.restore();}
 }
 
