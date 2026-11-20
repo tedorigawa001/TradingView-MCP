@@ -145,11 +145,39 @@ test('the username returned by whoami must have read-write membership', async ()
   assert.deepEqual(s.recorded.map(x => x.slot), ['account']);
 });
 
+test('a target-version 404 JSON string allows the tag GET and records only the summary', async () => {
+  for (const message of ['version not found: 0.1.46', 'no match found for version 0.1.46']) {
+    const s = scenario({ responses: [...rows.slice(0, 2), [404, message], rows[3]] });
+    const out = await runPreflight(s.config);
+    assert.deepEqual(out.version, { version: '0.1.46', exists: false });
+    assert.deepEqual(s.gets.map(get => get.path), Object.values(ROUTES));
+    assert.deepEqual(s.recorded.map(entry => entry.slot), Object.keys(ROUTES));
+    assert.equal(s.recorded[2].evidence.http_status, 404);
+    assert.ok(!JSON.stringify(s.recorded).includes(message));
+  }
+});
+
 test('existing versions and ambiguous 404 bodies prevent the tag GET', async () => {
-  for (const response of [[200, { version: '0.1.46' }], [404, { error: 'Not Found' }], [404, { error: 'version not found: 0.1.45' }]]) {
+  for (const response of [
+    [200, { version: '0.1.46' }], [200, 'version not found: 0.1.46'],
+    [404, { error: 'Not Found' }], [404, { error: 'version not found: 0.1.45' }],
+    [404, 'Not Found'], [404, 'version not found: 0.1.45'],
+  ]) {
     const s = scenario({ responses: [...rows.slice(0, 2), response] });
     await assert.rejects(runPreflight(s.config), /version_availability_unconfirmed/);
     assert.equal(s.gets.length, 3);
+    assert.deepEqual(s.recorded.map(entry => entry.slot), ['account', 'rights']);
+  }
+});
+
+test('JSON strings outside the version slot still stop the preflight', async () => {
+  for (const index of [0, 1, 3]) {
+    const responses = rows.slice();
+    responses[index] = [200, 'version not found: 0.1.46'];
+    const s = scenario({ responses });
+    await assert.rejects(runPreflight(s.config), { message: 'response_shape' });
+    assert.equal(s.gets.length, index + 1);
+    assert.equal(s.recorded.length, index);
   }
 });
 

@@ -1,0 +1,88 @@
+{
+  "schema": "npm-preflight-input-rebind-approval-v1",
+  "id": "package-2026-11-20-publish-0.1.46-prep03-input-rebind01",
+  "approval_date_jst": "2026-11-20",
+  "decision": "approved",
+  "scope": "offline input rebinding for the two explicitly listed version-response fix files",
+  "legacy_preparation": {
+    "id": "package-2026-11-19-publish-0.1.46-prep02",
+    "source_commit": "693a9a8",
+    "evidence": [
+      {
+        "file": ".release-work/package-2026-11-19-publish-0.1.46-prep02/inputs.json",
+        "bytes": 2572,
+        "sha256": "76d8e0f7f67c140143696cfbe1d1e226ebe680eea4cb390d14f2e7d1c2ceea6b"
+      },
+      {
+        "file": ".release-work/package-2026-11-19-publish-0.1.46-prep02/preflight-status.json",
+        "bytes": 673,
+        "sha256": "ec8646734f38c414667b85aaa097fb38bd29aba40da5f8dc2c6e176d064827fe"
+      },
+      {
+        "file": ".release-work/package-2026-11-19-publish-0.1.46-prep02/preflight-readback.json",
+        "bytes": 371,
+        "sha256": "8114d9e0df7826685a84164aff541e5dd0dcf99725cb6ed0c8875b82dc8a1b7a"
+      }
+    ]
+  },
+  "release": {
+    "version": "0.1.46",
+    "ci_candidate": "8d97bbaaf2360fe83b2ff6dd36ebef4887c0acc9",
+    "artifact_bytes": 846950,
+    "artifact_sha256": "241353c28201dfaffee179763c8500036aa2f7f821d9cfdf0090c6cb2ab573aa",
+    "reuse_approval": {
+      "file": ".release-work/package-2026-11-19-artifact-reuse-0.1.46-01/approval-reuse.json",
+      "bytes": 2324,
+      "sha256": "267d9a0d20c1bc41e1eb6b2508d9b37294903e6e28674c7b3d210267a4fd7327"
+    }
+  },
+  "approved_input_changes": [
+    {
+      "file": "scripts/prepare-npm-preflight.mjs",
+      "before": {
+        "bytes": 16436,
+        "sha256": "0dd895789d64bd8625033739e0aab3f602adaceb0b23c040d59b72219a8b0835"
+      },
+      "after": {
+        "bytes": 16586,
+        "sha256": "4510938e8420af7a4776186b394b441e11f0d82df10daf0b29ed47c6d0103468"
+      }
+    },
+    {
+      "file": "test/release/prepare-npm-preflight.test.mjs",
+      "before": {
+        "bytes": 9694,
+        "sha256": "4a43fd97dc15498c71ebd00d9aef495fe127943ff7b6271330cba9828589ea24"
+      },
+      "after": {
+        "bytes": 11004,
+        "sha256": "9a61f0de213a0389e1fb9ce589618fc1a628df49310dbfcf8b81e3fba6afff9a"
+      }
+    }
+  ],
+  "unchanged_legacy_tools": [
+    {
+      "file": "scripts/publish-verified-tarball.mjs",
+      "bytes": 34809,
+      "sha256": "c0e2d690604e90523ea177dbda95b1e3a0b2f5e91ea46a7cdc6f0b9b97aeeb20"
+    },
+    {
+      "file": "test/release/packagePublish.test.mjs",
+      "bytes": 24929,
+      "sha256": "abb3791014bcf209d8c22a18aec068312be8c6fe58f2148e18847a7d04c126e5"
+    }
+  ],
+  "requirements_for_later_preparation": [
+    "Preserve and verify all prior evidence. Bind revised inputs and offline test results to a new preparation record.",
+    "Qualify the selected login proof and session identity plus UTC evidence before any preflight plan hash is issued."
+  ],
+  "STOP_preserved": true,
+  "protected_765_bytes_used": 0,
+  "new_release_work_reservation_bytes": 0,
+  "dns_calls": 0,
+  "http_requests": 0,
+  "login_execution_approved": false,
+  "preflight_execution_approved": false,
+  "preflight_execution_plan_sha256": null,
+  "publication_approved": false
+}

@@ -84,7 +84,8 @@ function summarize(slot, status, bytes, username) {
   let value;
   try { value = parse(bytes); }
   catch { fail('response_json'); }
-  requireThat(value && typeof value === 'object' && !Array.isArray(value), 'response_shape');
+  const isObject = value !== null && typeof value === 'object' && !Array.isArray(value);
+  requireThat(isObject || (slot === 'version' && typeof value === 'string'), 'response_shape');
   switch (slot) {
     case 'account':
       requireThat(status === 200 && typeof value.username === 'string' && /^[a-zA-Z0-9_.-]{1,128}$/.test(value.username), 'account_unconfirmed');
@@ -93,9 +94,10 @@ function summarize(slot, status, bytes, username) {
       requireThat(status === 200 && Object.hasOwn(value, username) && value[username] === 'read-write', 'rights_unconfirmed');
       return { username, collaborator_permission: 'read-write', token_publish_permission: 'unconfirmed' };
     case 'version': {
-      requireThat(status === 404 && typeof value.error === 'string' &&
-        (/^version not found:\s*0\.1\.46\s*$/i.test(value.error) ||
-         /^no match found for version 0\.1\.46\s*$/i.test(value.error)), 'version_availability_unconfirmed');
+      const message = typeof value === 'string' ? value : value.error;
+      requireThat(status === 404 && typeof message === 'string' &&
+        (/^version not found:\s*0\.1\.46\s*$/i.test(message) ||
+         /^no match found for version 0\.1\.46\s*$/i.test(message)), 'version_availability_unconfirmed');
       return { version, exists: false };
     }
     case 'tag': {
