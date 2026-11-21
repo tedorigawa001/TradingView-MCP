@@ -5,7 +5,7 @@ import { indicatorTableStudySchema, runIndicatorTableStudy } from "./indicatorTa
 import { withIndicatorTableHashes, withPineSourceHash, withPineSaveHashes } from "./pineHashes.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { CdpClient } from "./cdp.js";
-import type { OhlcvBar, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
+import type { OhlcvBar, StrategyPineIdentity, StrategyReport, StrategyTradeLedger, TradingView } from "./tradingview.js";
 import { BacktestLedgerStore, backtestLedgerSummarySchema, summarizeBacktestLedger } from "./backtestLedger.js";
 import { BacktestSliceJournalStore, backtestSliceResearchIdSchema } from "./backtestSliceJournal.js";
 import { PROXY_SET_SOURCE_PREFIX, ForecastSetStore, forecastSetComponentHashes, forecastSetInputSchema, forecastSetSourceDigest, normalizeInlineForecastSet } from "./forecastSet.js";
@@ -212,6 +212,7 @@ export interface ServerDeps {
     | "loadMoreHistory"
     | "listPineScripts"
     | "getPineSource"
+    | "getFixedPineSourceHashes"
     | "savePineScript"
     | "addPineToChart"
     | "removePineFromChart"
@@ -450,6 +451,8 @@ const SERVER_VERSION: string = (() => {
 
 export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), researchSeriesRelations, zoneResolver }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
+  let fixedPineEvidence: StrategyPineIdentity | undefined;
+  let pineIdentityReadInFlight = false;
   async function readStrategyCorrelationRegime(
     input: z.infer<typeof STRATEGY_CORRELATION_REGIME_SCHEMA>,
     primaryChart: { index: number; symbol: string; timeframe: string },
@@ -3377,7 +3380,10 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Get the full Pine source code of one of the user's OWN saved scripts, for " +
         "review or improvement suggestions. Only 'USER;...' ids from list_pine_scripts " +
         "are accepted; published/protected third-party scripts are refused. Read-only — " +
-        "editing or saving scripts is not supported.",
+        "editing or saving scripts is not supported. With bounded_hash_ledger_id and " +
+        "bounded_hash_report_state_sha256 from a get_strategy_trade_ledger identity read, it " +
+        "returns only byte counts and SHA-256 hashes of that fixed version (no source text, " +
+        "128 KiB response cap), once per identity read.",
       inputSchema: {
         pine_id: z
           .string()
@@ -3388,10 +3394,24 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .regex(/^(last|[0-9]{1,6}(\.[0-9]{1,3})?)$/)
           .optional()
           .describe("Version to fetch, e.g. '3'. Default: 'last'. Older versions are how you revert a bad save"),
+        bounded_hash_ledger_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional()
+          .describe("Verify only hashes of the fixed version associated with a prior identity-only ledger read; 128 KiB response cap"),
+        bounded_hash_report_state_sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional()
+          .describe("The report-state hash returned by the same identity-only ledger read"),
       },
     },
-    async ({ pine_id, version }) => {
+    async ({ pine_id, version, bounded_hash_ledger_id, bounded_hash_report_state_sha256 }) => {
       try {
+        if (bounded_hash_ledger_id !== undefined || bounded_hash_report_state_sha256 !== undefined) {
+          const evidence = fixedPineEvidence;
+          if (!evidence || !version || version === "last" || evidence.ledgerId !== bounded_hash_ledger_id ||
+              evidence.reportStateSha256 !== bounded_hash_report_state_sha256 ||
+              evidence.pineId !== pine_id || evidence.pineVersion !== version) {
+            throw new Error("bounded Pine hashing requires matching identity evidence and a fixed version");
+          }
+          fixedPineEvidence = undefined;
+          return jsonResult(await tv.getFixedPineSourceHashes(pine_id, version), true);
+        }
         return jsonResult(withPineSourceHash(await tv.getPineSource(pine_id, version ?? "last")));
       } catch (err) {
         return errorResult(err);
@@ -6137,7 +6157,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Tester report. Returns entry/exit, direction, profit, quantity, duration, and " +
         "run-up/drawdown/commission when TradingView exposes them. Start with offset 0; " +
         "pass the returned ledgerId as expected_ledger_id on later pages to fail closed if " +
-        "the strategy recalculates. Read-only and requires an active strategy.",
+        "the strategy recalculates. Read-only and requires an active strategy. To bind a " +
+        "fixed Pine version without paging: capture_report_state=true returns ledgerId, " +
+        "studyId and reportStateSha256 (8 KiB cap); a later call with identity_study_id, " +
+        "expected_ledger_id and expected_report_state_sha256 confirms the same report and " +
+        "returns only the Pine identity, which get_pine_source can then hash once.",
       inputSchema: {
         offset: z
           .number()
@@ -6158,10 +6182,66 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .regex(/^sha256:[a-f0-9]{64}$/)
           .optional()
           .describe("ledgerId from page 1; rejects mixed pages after recalculation"),
+        identity_study_id: z.string().regex(/^[\w.-]{1,128}$/).optional()
+          .describe("Return only the bounded Pine identity of this exact active study; requires both captured hashes"),
+        expected_report_state_sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional()
+          .describe("Previously captured pine_report_state_v1 SHA-256 for this ledger and study"),
+        capture_report_state: z.literal(true).optional()
+          .describe("Return only the pine_report_state_v1 capture of the active strategy: ledgerId, studyId, " +
+            "fixed Pine id and version, reportStateSha256 and the hashed state (8 KiB cap). Optional expected_ledger_id; " +
+            "no pagination or identity arguments"),
       },
     },
-    async ({ offset, limit, expected_ledger_id }) =>
-      chartOperations.run(async () => {
+    async ({ offset, limit, expected_ledger_id, identity_study_id, expected_report_state_sha256, capture_report_state }) => {
+      if (capture_report_state !== undefined) {
+        if (identity_study_id !== undefined || expected_report_state_sha256 !== undefined ||
+            offset !== undefined || limit !== undefined) {
+          return errorResult("report state capture takes only an optional expected_ledger_id, " +
+            "without pagination or identity arguments");
+        }
+        return chartOperations.run(async () => {
+          try {
+            const capture = await tv.getStrategyTradeLedger({
+              captureReportState: true,
+              ...(expected_ledger_id === undefined ? {} : { expectedLedgerId: expected_ledger_id }),
+            });
+            const result = jsonResult(capture, true);
+            if (Buffer.byteLength(JSON.stringify(result), "utf8") > 8 * 1024) {
+              throw new Error("report state capture exceeds the byte limit");
+            }
+            return result;
+          } catch (err) {
+            return errorResult(err);
+          }
+        });
+      }
+      if (identity_study_id !== undefined || expected_report_state_sha256 !== undefined) {
+        if (pineIdentityReadInFlight) return errorResult("Pine identity read already in progress");
+        fixedPineEvidence = undefined;
+        pineIdentityReadInFlight = true;
+        try {
+          if (!identity_study_id || !expected_ledger_id || !expected_report_state_sha256 ||
+              offset !== undefined || limit !== undefined) {
+            throw new Error("Pine identity requires a captured ledger id, study id and report state hash, without pagination");
+          }
+          const evidence = await tv.getStrategyTradeLedger({
+            expectedLedgerId: expected_ledger_id,
+            identityStudyId: identity_study_id,
+            expectedReportStateSha256: expected_report_state_sha256,
+          });
+          const result = jsonResult(evidence, true);
+          if (Buffer.byteLength(JSON.stringify(result), "utf8") > 8 * 1024) {
+            throw new Error("Pine identity exceeds the byte limit");
+          }
+          fixedPineEvidence = evidence;
+          return result;
+        } catch (err) {
+          return errorResult(err);
+        } finally {
+          pineIdentityReadInFlight = false;
+        }
+      }
+      return chartOperations.run(async () => {
         try {
           return jsonResult(await tv.getStrategyTradeLedger({
             offset: offset ?? 0,
@@ -6171,7 +6251,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         } catch (err) {
           return errorResult(err);
         }
-      }),
+      });
+    },
   );
 
   server.registerTool(

@@ -373,6 +373,39 @@ export interface StrategyTradeLedger {
   trades: StrategyLedgerTrade[];
 }
 
+export interface StrategyPineIdentity {
+  ledgerId: string;
+  studyId: string;
+  pineId: string;
+  pineVersion: string;
+  reportStateSha256: string;
+}
+
+/**
+ * The capture that a later identity read verifies: the same fields plus the
+ * pine_report_state_v1 object whose canonical page-side JSON was hashed.
+ */
+export interface StrategyReportStateCapture extends StrategyPineIdentity {
+  reportStateSchema: "pine_report_state_v1";
+  reportState: Record<string, unknown>;
+}
+
+interface StrategyLedgerOptions {
+  offset?: number;
+  limit?: number;
+  expectedLedgerId?: string;
+}
+
+export interface FixedPineSourceHashes {
+  pineId: string;
+  version: string;
+  responseBytes: number;
+  sourceBytes: number;
+  rawSourceSha256: string;
+  sourceSha256: string;
+  sourceHashSchema: "pine_source_lf_v1";
+}
+
 export interface StrategyReport {
   strategy: string | null;
   currency: string | null;
@@ -460,6 +493,8 @@ const PINE_ID_PATTERN = /^USER;[\w]{8,64}$/;
 const PINE_VERSION_PATTERN = /^(last|[0-9]{1,6}(\.[0-9]{1,3})?)$/;
 
 const MAX_PINE_SOURCE = 200_000;
+const MAX_PINE_IDENTITY_BYTES = 8 * 1024;
+const MAX_FIXED_PINE_RESPONSE_BYTES = 128 * 1024;
 
 // TradingView removed TradingViewApi.backtestingStrategyApi in a 2026 app
 // update. Current builds keep the same report on the active chart model's
@@ -2023,6 +2058,95 @@ export class TradingView {
   }
 
   /**
+   * Hash a single, explicitly numbered Pine version. The incoming cap covers
+   * the decoded UTF-8 response including its JSON envelope. The page returns
+   * only the hashes and byte counts, so source text never crosses the CDP link.
+   */
+  getFixedPineSourceHashes(pineId: string, version: string): Promise<FixedPineSourceHashes> {
+    if (!PINE_ID_PATTERN.test(pineId) || version === "last" || !PINE_VERSION_PATTERN.test(version)) {
+      throw new Error("fixed Pine source verification requires an own Pine id and a version number");
+    }
+    return this.cdp.evaluate<FixedPineSourceHashes>(`
+      (async () => {
+        const pineId = ${JSON.stringify(pineId)};
+        const version = ${JSON.stringify(version)};
+        const limit = ${MAX_FIXED_PINE_RESPONSE_BYTES};
+        const abort = new AbortController();
+        const timer = setTimeout(() => abort.abort(), 5000);
+        try {
+          const response = await fetch(
+            "https://pine-facade.tradingview.com/pine-facade/get/" + encodeURIComponent(pineId) + "/" + version,
+            { credentials: "include", redirect: "error", cache: "no-store", signal: abort.signal },
+          );
+          if (response.status !== 200 || response.headers.has("content-range") || !response.body) {
+            throw new Error("fixed Pine response is not a complete HTTP 200 response");
+          }
+          const declaredLength = response.headers.get("content-length");
+          if (declaredLength !== null && (!/^\\d+$/.test(declaredLength) || Number(declaredLength) > limit)) {
+            throw new Error("fixed Pine response exceeds the byte limit");
+          }
+          // Each BYOB view is no larger than the remaining budget. At the
+          // boundary, an unresolved EOF fails on abort rather than reading a
+          // further byte. A renderer without byte-reader support fails closed.
+          const reader = response.body.getReader({ mode: "byob" });
+          const bytes = new Uint8Array(limit);
+          let length = 0;
+          while (length < limit) {
+            const { value, done } = await reader.read(new Uint8Array(Math.min(8192, limit - length)));
+            if (value) {
+              if (value.byteLength > limit - length) throw new Error("fixed Pine response exceeds the byte limit");
+              bytes.set(value, length);
+              length += value.byteLength;
+            }
+            if (done) break;
+          }
+          if (length === limit) {
+            if (abort.signal.aborted) throw new Error("fixed Pine response EOF unconfirmed at the byte limit");
+            await new Promise((resolve, reject) => {
+              abort.signal.addEventListener("abort", () => {
+                reject(new Error("fixed Pine response EOF unconfirmed at the byte limit"));
+              }, { once: true });
+              reader.closed.then(resolve, reject);
+            });
+          }
+          const encoding = response.headers.get("content-encoding");
+          if (abort.signal.aborted || (declaredLength !== null && (encoding === null || encoding === "identity") &&
+              length !== Number(declaredLength))) {
+            throw new Error("fixed Pine response is incomplete or its length does not match");
+          }
+          let detail;
+          try {
+            detail = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length)));
+          } catch {
+            throw new Error("fixed Pine response is not complete UTF-8 JSON");
+          }
+          if (detail?.scriptIdPart !== pineId || detail.version !== version || typeof detail.source !== "string") {
+            throw new Error("fixed Pine response identity or source does not match");
+          }
+          const encoder = new TextEncoder();
+          const raw = encoder.encode(detail.source);
+          if (new TextDecoder("utf-8", { ignoreBOM: true }).decode(raw) !== detail.source) {
+            throw new Error("fixed Pine source is not representable as UTF-8");
+          }
+          const sha256 = async (body) => "sha256:" + Array.from(
+            new Uint8Array(await crypto.subtle.digest("SHA-256", body)),
+            (byte) => byte.toString(16).padStart(2, "0"),
+          ).join("");
+          return {
+            pineId, version, responseBytes: length, sourceBytes: raw.byteLength,
+            rawSourceSha256: await sha256(raw),
+            sourceSha256: await sha256(encoder.encode(detail.source.replace(/\\r\\n/g, "\\n"))),
+            sourceHashSchema: "pine_source_lf_v1",
+          };
+        } finally {
+          clearTimeout(timer);
+          abort.abort();
+        }
+      })()
+    `);
+  }
+
+  /**
    * Save Pine source — the only write tool for the user's script library,
    * guarded by a confirm flow. Without confirm=true nothing is written and a
    * dry-run preview is returned. Writes are strictly non-destructive: a new
@@ -2355,11 +2479,21 @@ export class TradingView {
    * caller to reject pages from a report that recalculated between requests.
    */
   getStrategyTradeLedger(options: {
-    offset?: number;
-    limit?: number;
+    identityStudyId: string;
+    expectedLedgerId: string;
+    expectedReportStateSha256: string;
+  }): Promise<StrategyPineIdentity>;
+  getStrategyTradeLedger(options: {
+    captureReportState: true;
     expectedLedgerId?: string;
-  } = {}): Promise<StrategyTradeLedger> {
-    const { offset = 0, limit = 200, expectedLedgerId } = options;
+  }): Promise<StrategyReportStateCapture>;
+  getStrategyTradeLedger(options?: StrategyLedgerOptions): Promise<StrategyTradeLedger>;
+  getStrategyTradeLedger(options: StrategyLedgerOptions & {
+    identityStudyId?: string;
+    expectedReportStateSha256?: string;
+    captureReportState?: boolean;
+  } = {}): Promise<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture> {
+    const { offset = 0, limit = 200, expectedLedgerId, identityStudyId, expectedReportStateSha256, captureReportState } = options;
     if (!Number.isInteger(offset) || offset < 0 || offset > 10_000_000) {
       throw new Error(`offset must be an integer between 0 and 10000000, got ${offset}`);
     }
@@ -2369,12 +2503,23 @@ export class TradingView {
     if (expectedLedgerId !== undefined && !/^sha256:[a-f0-9]{64}$/.test(expectedLedgerId)) {
       throw new Error(`expectedLedgerId must be a sha256 ledger id, got ${JSON.stringify(expectedLedgerId)}`);
     }
-    return this.cdp.evaluate<StrategyTradeLedger>(`
+    if (captureReportState !== undefined &&
+        (captureReportState !== true || identityStudyId !== undefined || expectedReportStateSha256 !== undefined)) {
+      throw new Error("report state capture takes only an optional expected ledger id");
+    }
+    if (identityStudyId !== undefined && (!expectedLedgerId || !/^[\w.-]{1,128}$/.test(identityStudyId) ||
+        !expectedReportStateSha256 || !/^sha256:[a-f0-9]{64}$/.test(expectedReportStateSha256))) {
+      throw new Error("Pine identity requires a captured ledger id, study id and report state hash");
+    }
+    return this.cdp.evaluate<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture>(`
       (async () => {
         const api = window.TradingViewApi;
         const offset = ${offset};
         const limit = ${limit};
         const expectedLedgerId = ${expectedLedgerId === undefined ? "null" : JSON.stringify(expectedLedgerId)};
+        const identityStudyId = ${identityStudyId === undefined ? "null" : JSON.stringify(identityStudyId)};
+        const expectedReportStateSha256 = ${expectedReportStateSha256 === undefined ? "null" : JSON.stringify(expectedReportStateSha256)};
+        const captureState = ${captureReportState === true ? "true" : "false"};
         const chart = api.activeChart();
         ${BACKTESTING_API_SNIPPET}
         const bt = await resolveBacktestingApi(api, chart);
@@ -2470,6 +2615,13 @@ export class TradingView {
         else if (act && typeof act.id === "function") {
           try { activeId = act.id(); } catch (e) {}
         }
+        if (identityStudyId !== null && activeId !== identityStudyId) {
+          throw new Error("captured active study id does not match");
+        }
+        // A capture must name the study by the id a later identity read compares.
+        if (captureState && (typeof activeId !== "string" || !/^[\\w.-]{1,128}$/.test(activeId))) {
+          throw new Error("active strategy study id is unconfirmed for report state capture");
+        }
         const studyCandidates = chart.getAllStudies().filter((study) =>
           activeId !== null ? study.id === activeId : strategy !== null && study.name === strategy);
         const activeStudy = studyCandidates.length === 1 ? studyCandidates[0] : null;
@@ -2477,6 +2629,7 @@ export class TradingView {
         let pineVersion = null;
         let inputs = [];
         let unsupportedInputValue = false;
+        const hidden = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
         if (activeStudy) {
           try {
             const studyApi = chart.getStudyById(activeStudy.id);
@@ -2491,7 +2644,6 @@ export class TradingView {
             pineVersion = typeof values.find((value) => value.id === "pineVersion")?.value === "string"
               ? values.find((value) => value.id === "pineVersion").value
               : null;
-            const hidden = new Set(["text", "pineId", "pineVersion", "pineFeatures", "__profile"]);
             inputs = values.filter((value) => !hidden.has(value.id)).map((input) => {
               const info = infoById[input.id] || {};
               const primitive = typeof input.value === "string" || typeof input.value === "number" || typeof input.value === "boolean";
@@ -2506,6 +2658,8 @@ export class TradingView {
         }
         const dateRange = report.settings && report.settings.dateRange && report.settings.dateRange.backtest;
         const normalizedDateRange = dateRange ? { from: iso(dateRange.from), to: iso(dateRange.to) } : null;
+        const currency = report.currency ?? null;
+        const initialCapital = num(performance.initialCapital);
         const identity = JSON.stringify({
           strategy,
           symbol,
@@ -2513,12 +2667,76 @@ export class TradingView {
           pineId,
           pineVersion,
           inputs,
-          currency: report.currency ?? null,
-          initialCapital: num(performance.initialCapital),
+          currency,
+          initialCapital,
           dateRange: normalizedDateRange,
           totalTrades,
           trades: allTrades,
         });
+        // Keep the existing paginated ledger digest stable. The additional
+        // A1 digest binds report-time settings and metrics to that ledger and
+        // to the specific study, and refuses incomplete Properties.
+        const captureReportState = (stateLedgerId, stateStudyId) => {
+          const performance = report.performance;
+          const all = performance?.all;
+          const settings = report.settings?.properties ?? report.settings;
+          const setting = (name, value) => {
+            if (typeof value === "number" && Number.isFinite(value) ||
+                typeof value === "boolean" ||
+                typeof value === "string" && value.length > 0 && value.length <= 128) return value;
+            if (value === Infinity && (name === "longLeverage" || name === "shortLeverage")) return "Infinity";
+            throw new Error("strategy report Properties unconfirmed: " + name);
+          };
+          const properties = {
+            orderSize: setting("orderSize", settings?.defaultQtyValue),
+            orderSizeType: setting("orderSizeType", settings?.defaultQtyType),
+            pyramiding: setting("pyramiding", settings?.pyramiding),
+            barDetail: setting("barDetail", settings?.barDetalization ?? settings?.useBarMagnifier),
+            scriptExecution: settings?.scriptExecution === undefined ? [
+              setting("calcOnEveryTick", settings?.calcOnEveryTick),
+              setting("calcOnOrderFills", settings?.calcOnOrderFills),
+              settings?.calcOnEveryHistoryTick === undefined ? null
+                : setting("calcOnEveryHistoryTick", settings.calcOnEveryHistoryTick),
+            ] : setting("scriptExecution", settings.scriptExecution),
+            commissionType: setting("commissionType", settings?.commissionType),
+            commissionValue: setting("commissionValue", settings?.commissionValue),
+            longLeverage: setting("longLeverage", settings?.longLeverage ?? settings?.marginLong),
+            shortLeverage: setting("shortLeverage", settings?.shortLeverage ?? settings?.marginShort),
+            slippage: setting("slippage", settings?.slippage),
+            limitOrderExecution: setting("limitOrderExecution",
+              settings?.limitOrderExecution ?? settings?.backtestFillLimitsAssumption),
+            orderExecutionDelay: setting("orderExecutionDelay",
+              settings?.orderExecutionDelay ?? settings?.processOrdersOnClose),
+            standardOhlc: settings?.fillOrdersOnStandardOhlc === undefined ? null
+              : setting("fillOrdersOnStandardOhlc", settings.fillOrdersOnStandardOhlc),
+          };
+          const metrics = {
+            netProfit: metric(all?.netProfit),
+            netProfitPercent: metric(all?.netProfitPercent),
+            maxDrawdown: metric(performance?.maxStrategyDrawDown),
+            maxDrawdownPercent: metric(performance?.maxStrategyDrawDownPercent),
+            totalTrades: metric(all?.totalTrades),
+            winningTrades: metric(all?.numberOfWiningTrades ?? all?.numberOfWinningTrades),
+            profitFactor: metric(all?.profitFactor),
+            percentProfitable: metric(all?.percentProfitable),
+          };
+          const openProfit = metric(performance?.openPL);
+          const totalProfit = metric(performance?.totalPL ?? all?.totalPnL);
+          if (Object.values(metrics).some((value) => value === null) ||
+              (markedOpenIndex >= 0 && openProfit === null) ||
+              !Number.isFinite(performance?.initialCapital) || typeof report.currency !== "string" ||
+              !/^[A-Za-z0-9]{1,12}$/.test(report.currency)) {
+            throw new Error("strategy report key metrics or account Properties unconfirmed");
+          }
+          return JSON.stringify({
+            schema: "pine_report_state_v1", ledgerId: stateLedgerId, studyId: stateStudyId,
+            initialCapital: performance.initialCapital, currency: report.currency, properties, metrics,
+            openProfit, totalProfit,
+          });
+        };
+        // An identity read snapshots the state before hashing the ledger; a
+        // capture needs the computed ledger id first and snapshots below.
+        let reportState = identityStudyId === null ? null : captureReportState(expectedLedgerId, identityStudyId);
         if (!globalThis.crypto || !globalThis.crypto.subtle || typeof TextEncoder !== "function") {
           throw new Error("Web Crypto is unavailable — cannot bind paginated ledger pages safely");
         }
@@ -2527,7 +2745,65 @@ export class TradingView {
           .map((value) => value.toString(16).padStart(2, "0"))
           .join("");
         if (expectedLedgerId !== null && expectedLedgerId !== ledgerId) {
+          if (identityStudyId !== null || captureState) throw new Error("captured strategy ledger does not match");
           throw new Error("strategy report changed between ledger pages: expected " + expectedLedgerId + " but found " + ledgerId);
+        }
+        const boundStudyId = identityStudyId !== null ? identityStudyId : captureState ? activeId : null;
+        if (boundStudyId !== null) {
+          const verifying = identityStudyId !== null;
+          const purpose = verifying ? "Pine identity verification" : "report state capture";
+          const ownId = new RegExp(${JSON.stringify(PINE_ID_PATTERN.source)});
+          const fixedVersion = new RegExp(${JSON.stringify(PINE_VERSION_PATTERN.source)});
+          if (!activeStudy || !ownId.test(pineId ?? "") || pineVersion === "last" ||
+              !fixedVersion.test(pineVersion ?? "") || unsupportedInputValue ||
+              totalTrades === null || totalTrades !== closedTradeCount) {
+            throw new Error("active study or fixed Pine version is unconfirmed");
+          }
+          if (reportState === null) reportState = captureReportState(ledgerId, boundStudyId);
+          const reportStateDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(reportState));
+          const reportStateSha256 = "sha256:" + Array.from(new Uint8Array(reportStateDigest),
+            (value) => value.toString(16).padStart(2, "0")).join("");
+          if (verifying && reportStateSha256 !== expectedReportStateSha256) {
+            throw new Error("captured strategy report metrics or Properties do not match");
+          }
+          if (api.activeChart() !== chart || bt.activeStrategy.value() !== act ||
+              bt.activeStrategyReportData.value() !== report || chart.symbol() !== symbol ||
+              chart.resolution() !== timeframe) {
+            throw new Error("active strategy or report changed during " + purpose);
+          }
+          if (captureReportState(ledgerId, boundStudyId) !== reportState) {
+            throw new Error("strategy report metrics or Properties changed during " + purpose);
+          }
+          const currentRange = report.settings?.dateRange?.backtest;
+          const currentOpenExit = rawTrades[markedOpenIndex]?.exit ?? rawTrades[markedOpenIndex]?.x;
+          const openRowUnchanged = markedOpenIndex < 0 || (currentOpenExit?.id ?? currentOpenExit?.c) === "";
+          if (num(report.performance?.all?.totalTrades) !== totalTrades ||
+              num(report.performance?.initialCapital) !== initialCapital || (report.currency ?? null) !== currency ||
+              iso(currentRange?.from) !== (normalizedDateRange?.from ?? null) ||
+              iso(currentRange?.to) !== (normalizedDateRange?.to ?? null) ||
+              report.trades !== rawTrades || rawTrades.length !== allTrades.length || !openRowUnchanged ||
+              rawTrades.some((trade, index) => JSON.stringify(normalizeTrade(trade, index,
+                index === markedOpenIndex)) !== JSON.stringify(allTrades[index]))) {
+            throw new Error("strategy report contents changed during " + purpose);
+          }
+          const currentValues = chart.getStudyById(boundStudyId).getInputValues();
+          if (currentValues.find((value) => value.id === "pineId")?.value !== pineId ||
+              currentValues.find((value) => value.id === "pineVersion")?.value !== pineVersion) {
+            throw new Error("active Pine version changed during " + (verifying ? "identity verification" : purpose));
+          }
+          const currentInputs = currentValues.filter((value) => !hidden.has(value.id));
+          if (currentInputs.length !== inputs.length || currentInputs.some((value, index) =>
+            value.id !== inputs[index].id || !Object.is(value.value, inputs[index].value))) {
+            throw new Error("active strategy inputs changed during " + purpose);
+          }
+          const result = verifying
+            ? { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256 }
+            : { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256,
+              reportStateSchema: "pine_report_state_v1", reportState: JSON.parse(reportState) };
+          if (new TextEncoder().encode(JSON.stringify(result)).byteLength > ${MAX_PINE_IDENTITY_BYTES}) {
+            throw new Error((verifying ? "Pine identity" : "report state capture") + " exceeds the byte limit");
+          }
+          return result;
         }
         const trades = allTrades.slice(offset, offset + limit);
         const nextOffset = offset + trades.length < allTrades.length ? offset + trades.length : null;

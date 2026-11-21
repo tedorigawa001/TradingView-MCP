@@ -3380,6 +3380,141 @@ test("get_pine_source hashes one returned snapshot and preserves its original CR
   assert.equal(value.sourceSha256, `sha256:${createHash("sha256").update(source.replace(/\r\n/g, "\n"), "utf8").digest("hex")}`);
 });
 
+test("bounded Pine hashing consumes one matching result from a prior identity read", async () => {
+  const ledgerId = "sha256:" + "a".repeat(64);
+  const reportStateSha256 = "sha256:" + "c".repeat(64);
+  const pineId = "USER;12345678abcdef12";
+  const studyId = "study-01";
+  const pineVersion = "4.0";
+  let identities = 0;
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getStrategyTradeLedger: async (args) => {
+      identities += 1;
+      assert.deepEqual(args, { identityStudyId: studyId, expectedLedgerId: ledgerId,
+        expectedReportStateSha256: reportStateSha256 });
+      return { ledgerId, studyId, pineId, pineVersion, reportStateSha256 };
+    },
+    getFixedPineSourceHashes: async (id, version) => {
+      reads += 1;
+      assert.deepEqual([id, version], [pineId, pineVersion]);
+      return { pineId: id, version, rawSourceSha256: "sha256:" + "b".repeat(64) };
+    },
+  } }));
+  const identity = (args) => client.callTool({ name: "get_strategy_trade_ledger", arguments: {
+    identity_study_id: studyId, ...args,
+  } });
+  const source = (version = pineVersion, state = reportStateSha256) => client.callTool({ name: "get_pine_source", arguments: {
+    pine_id: pineId, version, bounded_hash_ledger_id: ledgerId, bounded_hash_report_state_sha256: state,
+  } });
+  assert.equal((await source()).isError, true);
+  assert.equal((await identity({})).isError, true);
+  assert.equal((await identity({ expected_ledger_id: ledgerId })).isError, true);
+  const evidence = { expected_ledger_id: ledgerId, expected_report_state_sha256: reportStateSha256 };
+  assert.equal((await identity({ ...evidence, limit: 1 })).isError, true);
+  assert.equal(identities, 0);
+  assert.equal(reads, 0);
+  const bound = await identity(evidence);
+  assert.deepEqual(JSON.parse(bound.content[0].text), { ledgerId, studyId, pineId, pineVersion, reportStateSha256 });
+  assert.equal((await source("last")).isError, true);
+  assert.equal((await source("4.1")).isError, true);
+  assert.equal((await source(pineVersion, "sha256:" + "d".repeat(64))).isError, true);
+  assert.equal(reads, 0);
+  assert.equal(JSON.parse((await source()).content[0].text).version, pineVersion);
+  assert.equal((await source()).isError, true);
+  assert.equal(reads, 1);
+});
+
+test("report state capture runs under the chart lock and takes no pagination or identity arguments", async () => {
+  const ledgerId = "sha256:" + "a".repeat(64);
+  const capture = {
+    ledgerId, studyId: "study-01", pineId: "USER;12345678abcdef12", pineVersion: "4.0",
+    reportStateSha256: "sha256:" + "c".repeat(64), reportStateSchema: "pine_report_state_v1",
+    reportState: { schema: "pine_report_state_v1", ledgerId, studyId: "study-01" },
+  };
+  let held = false;
+  let locks = 0;
+  let reply = capture;
+  const calls = [];
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => { assert.equal(held, false); held = true; locks += 1; return async () => { held = false; }; } },
+    tv: {
+      getStrategyTradeLedger: async (args) => { assert.equal(held, true, "capture reads under the chart lock"); calls.push(args); return reply; },
+      getFixedPineSourceHashes: async () => { throw new Error("a capture must not enable source hashing"); },
+    },
+  }));
+  const call = (args) => client.callTool({ name: "get_strategy_trade_ledger", arguments: { capture_report_state: true, ...args } });
+  assert.deepEqual(JSON.parse((await call({})).content[0].text), capture);
+  assert.deepEqual(JSON.parse((await call({ expected_ledger_id: ledgerId })).content[0].text), capture);
+  assert.deepEqual(calls, [{ captureReportState: true }, { captureReportState: true, expectedLedgerId: ledgerId }]);
+  for (const extra of [{ identity_study_id: "study-01" }, { expected_report_state_sha256: capture.reportStateSha256 },
+    { offset: 0 }, { limit: 1 }, { capture_report_state: false }]) {
+    assert.equal((await call(extra)).isError, true, JSON.stringify(extra));
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(locks, 2);
+  reply = { ...capture, reportState: { pad: "x".repeat(9000) } };
+  const oversized = await call({});
+  assert.equal(oversized.isError, true);
+  assert.match(oversized.content[0].text, /report state capture exceeds the byte limit/);
+  const hashing = await client.callTool({ name: "get_pine_source", arguments: { pine_id: capture.pineId, version: capture.pineVersion,
+    bounded_hash_ledger_id: ledgerId, bounded_hash_report_state_sha256: capture.reportStateSha256 } });
+  assert.equal(hashing.isError, true, "only an identity read, not a capture, admits one bounded hash");
+});
+
+test("bounded Pine hashing binds the Pine id and loses its evidence on a failed, concurrent or oversized identity read", async () => {
+  const ledgerId = "sha256:" + "a".repeat(64);
+  const reportStateSha256 = "sha256:" + "c".repeat(64);
+  const pineId = "USER;12345678abcdef12";
+  const pineVersion = "4.0";
+  const evidence = { ledgerId, studyId: "study-01", pineId, pineVersion, reportStateSha256 };
+  let identityReply = async () => evidence;
+  let reads = 0;
+  const client = await connectedClient(makeDeps({ tv: {
+    getStrategyTradeLedger: (args) => identityReply(args),
+    getFixedPineSourceHashes: async (id, version) => { reads += 1; return { pineId: id, version }; },
+  } }));
+  const identity = () => client.callTool({ name: "get_strategy_trade_ledger", arguments: {
+    identity_study_id: "study-01", expected_ledger_id: ledgerId, expected_report_state_sha256: reportStateSha256,
+  } });
+  const source = (id = pineId) => client.callTool({ name: "get_pine_source", arguments: {
+    pine_id: id, version: pineVersion, bounded_hash_ledger_id: ledgerId, bounded_hash_report_state_sha256: reportStateSha256,
+  } });
+
+  assert.notEqual((await identity()).isError, true);
+  assert.equal((await source("USER;abcdef1234567890")).isError, true, "another script's id is refused");
+  assert.equal(reads, 0);
+  assert.notEqual((await source()).isError, true, "a refused request does not consume the evidence");
+  assert.equal(reads, 1);
+
+  assert.notEqual((await identity()).isError, true);
+  identityReply = async () => { throw new Error("captured strategy report metrics or Properties do not match"); };
+  assert.equal((await identity()).isError, true);
+  assert.equal((await source()).isError, true, "a failed identity read revokes the earlier evidence");
+  assert.equal(reads, 1);
+
+  let release;
+  let started;
+  const begun = new Promise((resolve) => { started = resolve; });
+  identityReply = () => new Promise((resolve) => { release = () => resolve(evidence); started(); });
+  const first = identity();
+  await begun;
+  const second = await identity();
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /already in progress/);
+  release();
+  assert.notEqual((await first).isError, true);
+  assert.notEqual((await source()).isError, true);
+  assert.equal(reads, 2);
+
+  identityReply = async () => ({ ...evidence, studyId: "s".repeat(9000) });
+  const oversized = await identity();
+  assert.equal(oversized.isError, true);
+  assert.match(oversized.content[0].text, /Pine identity exceeds the byte limit/);
+  assert.equal((await source()).isError, true, "oversized evidence is never kept");
+  assert.equal(reads, 2);
+});
+
 test("save_pine_script defaults to a dry run; confirm must be explicit", async () => {
   const client = await connectedClient(makeDeps());
   const res = await client.callTool({

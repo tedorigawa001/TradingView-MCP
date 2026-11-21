@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import vm from "node:vm";
 import { TradingView } from "../../build/tradingview.js";
 import { summarizeMovingAverages, SMA_TEN_STUDY_ID } from "../../build/movingAverageContext.js";
@@ -743,6 +743,107 @@ test("getPineSource accepts only own USER;… ids and validates before the page"
   assert.ok(!/\/save|\/delete|\/new|method:/i.test(expr), "must stay read-only GET");
 });
 
+test("fixed Pine hashes bind the response identity and preserve original and LF-normalized text", async () => {
+  const pineId = "USER;12345678abcdef12";
+  const version = "4.0";
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  assert.throws(() => tv.getFixedPineSourceHashes(pineId, "last"), /version number/);
+  assert.equal(cdp.calls.length, 0);
+  await tv.getFixedPineSourceHashes(pineId, version);
+  const source = '\uFEFF//@version=5\r\n// café 😀\r\n\n';
+  const body = JSON.stringify({ scriptIdPart: pineId, version, source });
+  const { result, calls } = await fixedPinePage(cdp.calls[0], body);
+  const hash = (value) => "sha256:" + createHash("sha256").update(value).digest("hex");
+  assert.equal(result.rawSourceSha256, hash(source));
+  assert.equal(result.sourceSha256, hash(source.replace(/\r\n/g, "\n")));
+  assert.equal(result.sourceBytes, Buffer.byteLength(source));
+  assert.equal(result.responseBytes, Buffer.byteLength(body));
+  assert.equal(Object.hasOwn(result, "source"), false);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/USER%3B12345678abcdef12\/4\.0$/);
+  assert.equal(calls[0].init.redirect, "error");
+  for (const detail of [
+    { scriptIdPart: pineId, version: "4.1", source },
+    { scriptIdPart: "USER;different000000", version, source },
+    { version, source },
+  ]) {
+    await assert.rejects(fixedPinePage(cdp.calls[0], JSON.stringify(detail)), /identity or source does not match/);
+  }
+  await assert.rejects(fixedPinePage(cdp.calls[0], Buffer.from([0xff])), /complete UTF-8 JSON/);
+});
+
+test("fixed Pine response caps the full envelope before parsing, including at the EOF boundary", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const scriptIdPart = "USER;12345678abcdef12";
+  const version = "4.0";
+  await tv.getFixedPineSourceHashes(scriptIdPart, version);
+  const expr = cdp.calls[0];
+  const makeBody = (source) => JSON.stringify({ scriptIdPart, version, source });
+  const limit = 128 * 1024;
+  const exact = makeBody("a".repeat(limit - Buffer.byteLength(makeBody(""))));
+  const reads = [];
+  const { result } = await fixedPinePage(expr, exact, { reads });
+  assert.equal(result.responseBytes, limit);
+  assert.equal(reads.reduce((a, b) => a + b, 0), limit);
+  const overReads = [];
+  await assert.rejects(fixedPinePage(expr, exact + " ", { reads: overReads, fastDeadline: true }), /EOF unconfirmed/);
+  assert.equal(overReads.reduce((a, b) => a + b, 0), limit, "no extra byte requested to prove EOF");
+  const headerReads = [];
+  await assert.rejects(fixedPinePage(expr, exact, { reads: headerReads, declared: limit + 1 }), /byte limit/);
+  assert.deepEqual(headerReads, [], "oversize Content-Length stops before the first body read");
+});
+
+test("fixed Pine hashes reject partial HTTP responses and incomplete bodies", async () => {
+  const cdp = fakeCdp({});
+  const scriptIdPart = "USER;12345678abcdef12";
+  const version = "4.0";
+  await new TradingView(cdp).getFixedPineSourceHashes(scriptIdPart, version);
+  const expr = cdp.calls[0];
+  const body = JSON.stringify({ scriptIdPart, version, source: "plot(close)\n" });
+  const length = Buffer.byteLength(body);
+  const contentRange = { "Content-Range": "bytes 0-" + (length - 1) + "/" + (length * 2) };
+  for (const [status, headers] of [[206, contentRange], [206, {}], [200, contentRange]]) {
+    const reads = [];
+    await assert.rejects(fixedPinePage(expr, body, { status, headers, reads }), /not a complete HTTP 200 response/);
+    assert.deepEqual(reads, [], "partial response is rejected before reading the body");
+  }
+  await assert.rejects(fixedPinePage(expr, body, { declared: length + 1 }), /length does not match/);
+  await assert.rejects(fixedPinePage(expr, body.slice(0, -1)), /not complete UTF-8 JSON/);
+  assert.equal((await fixedPinePage(expr, body, { declared: length })).result.responseBytes, length);
+});
+
+async function fixedPinePage(expression, body, { reads = [], declared, fastDeadline = false, status = 200, headers = {} } = {}) {
+  const bytes = Buffer.from(body);
+  const calls = [];
+  let offset = 0;
+  const stream = new ReadableStream({
+    type: "bytes",
+    pull(controller) {
+      const request = controller.byobRequest;
+      const size = Math.min(request.view.byteLength, bytes.length - offset);
+      reads.push(request.view.byteLength);
+      request.view.set(bytes.subarray(offset, offset + size));
+      offset += size;
+      request.respond(size);
+      if (offset === bytes.length) controller.close();
+    },
+  });
+  const response = new Response(stream, {
+    status,
+    headers: { ...headers, ...(declared === undefined ? {} : { "Content-Length": String(declared) }) },
+  });
+  const context = vm.createContext({
+    TextEncoder, TextDecoder, AbortController, clearTimeout,
+    setTimeout: fastDeadline ? (callback) => setTimeout(callback, 25) : setTimeout,
+    crypto: webcrypto,
+    fetch: async (url, init) => { calls.push({ url, init }); return response; },
+  });
+  const result = await vm.runInContext(expression, context);
+  return { result, calls };
+}
+
 test("savePineScript validates inputs before touching the page", async () => {
   const cdp = fakeCdp();
   const tv = new TradingView(cdp);
@@ -927,9 +1028,20 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
 
   const report = {
     currency: "USD",
-    settings: { dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } } },
+    settings: {
+      dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } },
+      properties: {
+        defaultQtyValue: 100, defaultQtyType: "percent_of_equity", pyramiding: 1,
+        barDetalization: "default", scriptExecution: "on_bar_close",
+        commissionType: "cash_per_contract", commissionValue: 0.00005,
+        longLeverage: Infinity, shortLeverage: "Infinity", slippage: 1,
+        limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick",
+      },
+    },
     performance: {
       initialCapital: 100_000,
+      maxStrategyDrawDown: 40,
+      maxStrategyDrawDownPercent: 0.0004,
       all: {
         totalTrades: 2,
         netProfit: 125,
@@ -1060,6 +1172,273 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
   assert.equal(withOpenPosition.trades[1].status, "open");
   assert.equal(withOpenPosition.trades[1].exit, null, "mark-to-market pseudo exit is not a real fill");
   assert.ok(!withOpenPosition.qualityIssues.includes("report_trade_count_mismatch"));
+
+  const state = {
+    schema: "pine_report_state_v1", ledgerId: withOpenPosition.ledgerId, studyId: "strategy-1",
+    initialCapital: 100_000, currency: "USD",
+    properties: {
+      orderSize: 100, orderSizeType: "percent_of_equity", pyramiding: 1,
+      barDetail: "default", scriptExecution: "on_bar_close",
+      commissionType: "cash_per_contract", commissionValue: 0.00005,
+      longLeverage: "Infinity", shortLeverage: "Infinity", slippage: 1,
+      limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick", standardOhlc: null,
+    },
+    metrics: {
+      netProfit: 125, netProfitPercent: 0.00125, maxDrawdown: 40, maxDrawdownPercent: 0.0004,
+      totalTrades: 1, winningTrades: 1, profitFactor: 1.2, percentProfitable: 0.5,
+    },
+    openProfit: 25, totalProfit: null,
+  };
+  const reportStateSha256 = "sha256:" + createHash("sha256").update(JSON.stringify(state)).digest("hex");
+  await tv.getStrategyTradeLedger({
+    identityStudyId: "strategy-1", expectedLedgerId: withOpenPosition.ledgerId,
+    expectedReportStateSha256: reportStateSha256,
+  });
+  const identityExpr = cdp.calls.at(-1);
+  const identity = await vm.runInContext(identityExpr, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(identity)), {
+    ledgerId: withOpenPosition.ledgerId, studyId: "strategy-1",
+    pineId: "USER;12345678abcdef12", pineVersion: "4.0", reportStateSha256,
+  });
+  assert.ok(Buffer.byteLength(JSON.stringify(identity)) < 8192);
+  report.settings.properties.commissionValue = 0.0001;
+  assert.equal((await vm.runInContext(cdp.calls[2], context)).ledgerId, withOpenPosition.ledgerId,
+    "ordinary pagination keeps its existing identity schema");
+  await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics or Properties do not match/);
+  delete report.settings.properties.commissionValue;
+  await assert.rejects(vm.runInContext(identityExpr, context), /Properties unconfirmed: commissionValue/);
+  report.settings.properties.commissionValue = 0.00005;
+  for (const [object, key, changed] of [
+    [report.performance.all, "netProfit", 150],
+    [report.performance.all, "profitFactor", 1.4],
+    [report.performance, "maxStrategyDrawDown", 41],
+    [report.performance, "openPL", 26],
+    [report.settings.properties, "slippage", 2],
+  ]) {
+    const before = object[key];
+    object[key] = changed;
+    await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics or Properties do not match/);
+    object[key] = before;
+    let hashes = 0;
+    await assert.rejects(vm.runInContext(identityExpr, vm.createContext({
+      TextEncoder, window: context.window,
+      crypto: { subtle: { digest: async (...args) => {
+        const digest = await webcrypto.subtle.digest(...args);
+        if (++hashes === 2) object[key] = changed;
+        return digest;
+      } } },
+    })), /metrics or Properties changed during Pine identity verification/);
+    object[key] = before;
+  }
+  report.trades[0].q = 11;
+  await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy ledger does not match/);
+  report.trades[0].q = 10;
+  strategySource.id = () => undefined;
+  await assert.rejects(vm.runInContext(identityExpr, context), /captured active study id does not match/);
+  strategySource.id = () => "strategy-1";
+  await assert.rejects(vm.runInContext(identityExpr, vm.createContext({
+    TextEncoder, window: context.window,
+    crypto: { subtle: { digest: async (...args) => {
+      const digest = await webcrypto.subtle.digest(...args);
+      report.trades[0].q = 11;
+      return digest;
+    } } },
+  })), /report contents changed during Pine identity verification/);
+  report.trades[0].q = 10;
+  let versionReads = 0;
+  const getStudyById = activeChart.getStudyById;
+  activeChart.getStudyById = () => ({
+    ...getStudyById(),
+    getInputValues: () => getStudyById().getInputValues().map((value) =>
+      value.id === "pineVersion" && ++versionReads === 2 ? { ...value, value: "4.1" } : value),
+  });
+  await assert.rejects(vm.runInContext(identityExpr, context), /active Pine version changed/);
+});
+
+// A Strategy Tester page with one closed trade and the marked-to-market open row.
+// Every object the page reads is reachable from `fx`, so a test can swap it.
+function strategyLedgerFixture() {
+  const report = {
+    currency: "USD",
+    settings: {
+      dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } },
+      properties: {
+        defaultQtyValue: 100, defaultQtyType: "percent_of_equity", pyramiding: 1,
+        barDetalization: "default", scriptExecution: "on_bar_close",
+        commissionType: "cash_per_contract", commissionValue: 0.00005,
+        longLeverage: Infinity, shortLeverage: "Infinity", slippage: 1,
+        limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick",
+      },
+    },
+    performance: {
+      initialCapital: 100_000, maxStrategyDrawDown: 40, maxStrategyDrawDownPercent: 0.0004, openPL: 25,
+      all: {
+        totalTrades: 1, netProfit: 125, netProfitPercent: 0.00125, numberOfWiningTrades: 1, numberOfLosingTrades: 0,
+        percentProfitable: 0.5, profitFactor: 1.2, grossProfit: 250, grossLoss: -125, commissionPaid: 5,
+      },
+    },
+    trades: [
+      { e: { tm: 1_700_000_000_000, p: 100, c: "Long", tp: "le" }, x: { tm: 1_700_000_060_000, p: 102, c: "Long Exit", tp: "lx" },
+        tp: { v: 250, p: 0.0025 }, cp: { v: 250, p: 0.0025 }, q: 10, cm: 2.5 },
+      { e: { tm: 1_700_000_120_000, p: 102, c: "Long", tp: "le" }, x: { tm: 1_700_000_300_000, p: 103, c: "", tp: "lx" },
+        tp: { v: 25, p: 0.00025 }, cp: { v: 275, p: 0.00275 }, q: 5 },
+    ],
+  };
+  const fx = {
+    report,
+    symbol: "OANDA:EURUSD",
+    inputValues: [
+      { id: "pineId", value: "USER;12345678abcdef12" },
+      { id: "pineVersion", value: "4.0" },
+      { id: "text", value: "secret source is excluded" },
+      { id: "in_0", value: 14 },
+    ],
+  };
+  const studyApi = {
+    getInputsInfo: () => [{ id: "in_0", localizedName: "Length" }],
+    getInputValues: () => fx.inputValues.map((value) => ({ ...value })),
+  };
+  fx.chart = {
+    symbol: () => fx.symbol,
+    resolution: () => "60",
+    getAllStudies: () => [{ id: "strategy-1", name: "Ledger Strategy" }],
+    getStudyById: () => studyApi,
+    _chartWidget: { _lineToolsSynchronizer: { _chartModel: { activeStrategySource: () => ({ value: () => fx.source }) } } },
+  };
+  fx.source = { id: () => "strategy-1", metaInfo: () => ({ description: "Ledger Strategy" }), reportData: () => fx.report };
+  fx.api = { activeChart: () => fx.chart };
+  // onDigest(n) runs after the n-th SHA-256 the page computes: 1 = ledger, 2 = report state.
+  fx.run = (expression, onDigest) => {
+    let digests = 0;
+    const crypto = onDigest ? { subtle: { digest: async (...args) => {
+      const digest = await webcrypto.subtle.digest(...args);
+      onDigest(++digests);
+      return digest;
+    } } } : webcrypto;
+    return vm.runInContext(expression, vm.createContext({ crypto, TextEncoder, window: { TradingViewApi: fx.api } }));
+  };
+  return fx;
+}
+
+const sha256Json = (value) => "sha256:" + createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("report state capture returns the state and hash that a later identity read verifies", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  for (const bad of [{ captureReportState: false }, { captureReportState: true, identityStudyId: "strategy-1" },
+    { captureReportState: true, expectedReportStateSha256: "sha256:" + "c".repeat(64) }]) {
+    assert.throws(() => tv.getStrategyTradeLedger(bad), /report state capture takes only/);
+  }
+  assert.equal(cdp.calls.length, 0);
+  const fx = strategyLedgerFixture();
+  await tv.getStrategyTradeLedger({ captureReportState: true });
+  const captureExpr = cdp.calls.at(-1);
+  const capture = plain(await fx.run(captureExpr));
+  await tv.getStrategyTradeLedger({ offset: 0, limit: 500 });
+  const page = await fx.run(cdp.calls.at(-1));
+  assert.equal(Object.hasOwn(page, "reportStateSha256"), false, "ordinary pages keep their schema");
+  const state = {
+    schema: "pine_report_state_v1", ledgerId: page.ledgerId, studyId: "strategy-1", initialCapital: 100_000, currency: "USD",
+    properties: {
+      orderSize: 100, orderSizeType: "percent_of_equity", pyramiding: 1, barDetail: "default", scriptExecution: "on_bar_close",
+      commissionType: "cash_per_contract", commissionValue: 0.00005, longLeverage: "Infinity", shortLeverage: "Infinity",
+      slippage: 1, limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick", standardOhlc: null,
+    },
+    metrics: {
+      netProfit: 125, netProfitPercent: 0.00125, maxDrawdown: 40, maxDrawdownPercent: 0.0004,
+      totalTrades: 1, winningTrades: 1, profitFactor: 1.2, percentProfitable: 0.5,
+    },
+    openProfit: 25, totalProfit: null,
+  };
+  assert.deepEqual(capture, {
+    ledgerId: page.ledgerId, studyId: "strategy-1", pineId: "USER;12345678abcdef12", pineVersion: "4.0",
+    reportStateSha256: sha256Json(state), reportStateSchema: "pine_report_state_v1", reportState: state,
+  });
+  assert.equal(sha256Json(capture.reportState), capture.reportStateSha256, "the returned state rehashes to the capture");
+  assert.ok(Buffer.byteLength(JSON.stringify(capture)) < 8192);
+
+  await tv.getStrategyTradeLedger({ identityStudyId: capture.studyId, expectedLedgerId: capture.ledgerId,
+    expectedReportStateSha256: capture.reportStateSha256 });
+  assert.deepEqual(plain(await fx.run(cdp.calls.at(-1))), {
+    ledgerId: capture.ledgerId, studyId: "strategy-1", pineId: "USER;12345678abcdef12", pineVersion: "4.0",
+    reportStateSha256: capture.reportStateSha256,
+  });
+  await tv.getStrategyTradeLedger({ captureReportState: true, expectedLedgerId: capture.ledgerId });
+  assert.equal((await fx.run(cdp.calls.at(-1))).reportStateSha256, capture.reportStateSha256);
+  await tv.getStrategyTradeLedger({ captureReportState: true, expectedLedgerId: "sha256:" + "0".repeat(64) });
+  await assert.rejects(fx.run(cdp.calls.at(-1)), /captured strategy ledger does not match/);
+  fx.source.id = () => undefined;
+  await assert.rejects(fx.run(captureExpr), /study id is unconfirmed for report state capture/);
+});
+
+test("capture and identity reads refuse unconfirmed versions, ids, inputs, counts and metrics", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.getStrategyTradeLedger({ captureReportState: true });
+  const captureExpr = cdp.calls.at(-1);
+  const capture = plain(await strategyLedgerFixture().run(captureExpr));
+  // An identity read against whatever the fixture now shows: its current ledger
+  // id and the captured state rebound to that id, so only the guard can refuse.
+  const identityRun = async (fx, stateChanges) => {
+    await tv.getStrategyTradeLedger({ offset: 0, limit: 500 });
+    const { ledgerId } = await fx.run(cdp.calls.at(-1));
+    await tv.getStrategyTradeLedger({ identityStudyId: "strategy-1", expectedLedgerId: ledgerId,
+      expectedReportStateSha256: sha256Json({ ...capture.reportState, ledgerId, ...stateChanges }) });
+    return fx.run(cdp.calls.at(-1));
+  };
+  const cases = [
+    ["moving last version", (fx) => { fx.inputValues[1] = { id: "pineVersion", value: "last" }; }, {}, /fixed Pine version is unconfirmed/],
+    ["foreign Pine id", (fx) => { fx.inputValues[0] = { id: "pineId", value: "PUB;abcdef1234567890" }; }, {}, /fixed Pine version is unconfirmed/],
+    ["unsupported input value", (fx) => { fx.inputValues[3] = { id: "in_0", value: { nested: 1 } }; }, {}, /fixed Pine version is unconfirmed/],
+    ["trade count mismatch", (fx) => { fx.report.performance.all.totalTrades = 3; },
+      { metrics: { ...capture.reportState.metrics, totalTrades: 3 } }, /fixed Pine version is unconfirmed/],
+    ["missing metric", (fx) => { delete fx.report.performance.all.profitFactor; }, {}, /key metrics or account Properties unconfirmed/],
+  ];
+  for (const [name, change, stateChanges, reason] of cases) {
+    const fx = strategyLedgerFixture();
+    change(fx);
+    await assert.rejects(fx.run(captureExpr), reason, name + " (capture)");
+    await assert.rejects(identityRun(fx, stateChanges), reason, name + " (identity)");
+  }
+});
+
+test("capture and identity reads fail closed when the chart, report, trades or inputs change mid-read", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  await tv.getStrategyTradeLedger({ captureReportState: true });
+  const captureExpr = cdp.calls.at(-1);
+  const capture = plain(await strategyLedgerFixture().run(captureExpr));
+  await tv.getStrategyTradeLedger({ identityStudyId: capture.studyId, expectedLedgerId: capture.ledgerId,
+    expectedReportStateSha256: capture.reportStateSha256 });
+  const identityExpr = cdp.calls.at(-1);
+  const changes = [
+    ["active chart", (fx) => { const chart = fx.chart; fx.api.activeChart = () => ({ ...chart }); }, /active strategy or report changed during/],
+    ["active strategy", (fx) => { fx.source = { ...fx.source }; }, /active strategy or report changed during/],
+    ["report object", (fx) => { fx.report = { ...fx.report }; }, /active strategy or report changed during/],
+    ["symbol", (fx) => { fx.symbol = "OANDA:USDJPY"; }, /active strategy or report changed during/],
+    ["trades array", (fx) => { fx.report.trades = fx.report.trades.slice(); }, /report contents changed during/],
+    ["input value", (fx) => { fx.inputValues[3] = { id: "in_0", value: 15 }; }, /inputs changed during/],
+  ];
+  for (const [name, change, reason] of changes) {
+    for (const [mode, expression, purpose] of [["capture", captureExpr, /report state capture/],
+      ["identity", identityExpr, /Pine identity verification/]]) {
+      const fx = strategyLedgerFixture();
+      await assert.doesNotReject(fx.run(expression), name + " " + mode + " control");
+      await assert.rejects(fx.run(expression, (n) => { if (n === 2) change(fx); }), (error) => {
+        assert.match(error.message, reason, name + " " + mode);
+        assert.match(error.message, purpose, name + " " + mode);
+        return true;
+      });
+    }
+  }
+});
+
+test("fixed Pine hashes refuse a source that UTF-8 cannot represent", async () => {
+  const cdp = fakeCdp({});
+  await new TradingView(cdp).getFixedPineSourceHashes("USER;12345678abcdef12", "4.0");
+  const body = JSON.stringify({ scriptIdPart: "USER;12345678abcdef12", version: "4.0", source: "plot(close)\uD800\n" });
+  await assert.rejects(fixedPinePage(cdp.calls[0], body), /not representable as UTF-8/);
 });
 
 test("runBacktest validates inputs and cleans the chart up by default", async () => {

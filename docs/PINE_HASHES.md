@@ -61,8 +61,24 @@ SHA-256(UTF-8(source.replace(/\r\n/g, "\n")))
 
 コンパイルエラーでも本文が保存される既存の動作を保持する。`compileOk`・エラー・警告・復元案内は引き続き別に確認する。`saved:false`・`verified:false`・`sourceSha256:null` でも、保存要求が既に反映されている場合がある。確認失敗を理由に保存や読取りを自動で再試行しない。保存処理自体が例外になった場合のエラー応答形式は変更しない。
 
+## 固定版の照合: pine_report_state_v1
+
+台帳全体を読まずに、アクティブな戦略の固定版Pineソースを照合するための3段階。どの段階も読取り専用で、ソース本文は返さない。
+
+1. 取得: `get_strategy_trade_ledger` に `capture_report_state:true` だけを渡す（任意で `expected_ledger_id`）。`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` と、ハッシュした状態そのもの `reportState`（`reportStateSchema:"pine_report_state_v1"`）を返す。応答は8 KiBまで。通常の台帳と同じくチャート操作ロックの下で読む。
+2. 照合: 後で `identity_study_id`・`expected_ledger_id`・`expected_report_state_sha256` に取得値を渡す。同じ戦略・台帳・状態であることを確認できた場合だけ、`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` を返す。失敗した照合は、それ以前の照合結果も無効にする。
+3. ハッシュ: `get_pine_source` に同じ `pine_id`・番号の `version`・`bounded_hash_ledger_id`・`bounded_hash_report_state_sha256` を渡す。直前の照合結果と一致する場合に1回だけ、`responseBytes`・`sourceBytes`・`rawSourceSha256`（本文そのまま）・`sourceSha256`（`pine_source_lf_v1`）を返す。応答本体は128 KiBまで。
+
+`reportState` のキー順は次のとおりで、ページ側でこのオブジェクトを `JSON.stringify` したUTF-8をハッシュする。返された `reportState` を同じ方法で直列化すれば `reportStateSha256` を再計算できる。
+
+```text
+{ schema, ledgerId, studyId, initialCapital, currency, properties, metrics, openProfit, totalProfit }
+```
+
+`properties` は注文サイズ・ピラミッディング・バー詳細・スクリプト実行・手数料・レバレッジ・スリッページ・指値約定・約定遅延・標準OHLCの設定、`metrics` は純損益・最大ドローダウン・取引数・勝ち数・プロフィットファクター・勝率。いずれかの設定や主要指標が読めない場合、ID付きの戦略スタディが確認できない場合、自分の `USER;…` スクリプトの番号付き版でない場合（`last` を含む）、扱えない入力値がある場合、取引数が要約と一致しない場合は、取得も照合も行わない。読取り中にチャート・戦略・レポート・銘柄・時間足・取引・Pine版・入力値が変わった場合も中止する。通常の台帳の `ledgerId` の計算方法は変更しない。
+
 ## 検証範囲
 
-MCP応答の形と追加取得なし、LF/CRLFの一致、単独CR・BOM・Unicode・空白の区別、不完全な表のハッシュ抑止、プレビュー、正常保存、コンパイルエラー、読戻しの不一致・欠落・取得失敗、所有IDと版の確認を偽の取得・保存経路で検証する。106-2の表ハッシュと後片付け・証跡保持の回帰テストも維持する。
+MCP応答の形と追加取得なし、LF/CRLFの一致、単独CR・BOM・Unicode・空白の区別、不完全な表のハッシュ抑止、プレビュー、正常保存、コンパイルエラー、読戻しの不一致・欠落・取得失敗、所有IDと版の確認を偽の取得・保存経路で検証する。106-2の表ハッシュと後片付け・証跡保持の回帰テストも維持する。固定版の照合は、取得したハッシュでの照合成功、拒否条件、読取り中の変化、応答上限、照合結果の消費と失効を偽のページと偽のサーバー依存で検証する。
 
-実チャートや保存済みスクリプトへの操作は未実施。実機の保存応答・読戻し形式との対応は未確認。
+実チャートや保存済みスクリプトへの操作は未実施。実機の保存応答・読戻し形式との対応は未確認。`pine_report_state_v1` が読むストラテジーテスターの設定・指標のフィールド名と、固定版取得の応答形式も実機では未確認。
