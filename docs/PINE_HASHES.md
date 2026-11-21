@@ -66,7 +66,7 @@ SHA-256(UTF-8(source.replace(/\r\n/g, "\n")))
 台帳全体を読まずに、アクティブな戦略の固定版Pineソースを照合するための3段階。どの段階も読取り専用で、ソース本文は返さない。
 
 1. 取得: `get_strategy_trade_ledger` に `capture_report_state:true` だけを渡す（任意で `expected_ledger_id`）。`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` と、ハッシュした状態そのもの `reportState`（`reportStateSchema:"pine_report_state_v1"`）を返す。応答は8 KiBまで。通常の台帳と同じくチャート操作ロックの下で読む。
-2. 照合: 後で `identity_study_id`・`expected_ledger_id`・`expected_report_state_sha256` に取得値を渡す。同じ戦略・台帳・状態であることを確認できた場合だけ、`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` を返す。失敗した照合は、それ以前の照合結果も無効にする。
+2. 照合: 後で `identity_study_id`・`expected_ledger_id`・`expected_report_state_sha256` に取得値を渡す。同じ戦略・台帳・状態であることを確認できた場合だけ、`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` を返す。取得と同じくチャート操作ロックの下で読む。照合の要求は、引数の誤りやロック待ちを含め、それ以前の照合結果を直ちに無効にする。同時に2つ目の照合は受け付けない。
 3. ハッシュ: `get_pine_source` に同じ `pine_id`・番号の `version`・`bounded_hash_ledger_id`・`bounded_hash_report_state_sha256` を渡す。直前の照合結果と一致する場合に1回だけ、`responseBytes`・`sourceBytes`・`rawSourceSha256`（本文そのまま）・`sourceSha256`（`pine_source_lf_v1`）・`scriptIdEvidence` を返す。応答本体は128 KiBまで。応答の版が要求と完全一致し、本文が文字列であることを必須とする。応答にスクリプトID（`scriptIdPart`）がない場合は要求URLのIDに依拠して `scriptIdEvidence:"request_url_only"`、あれば一致を確認して `"response_field"` とし、異なるIDなら拒否する。不一致は項目ごとの固定の理由で返す。
 
 `reportState` のキー順は次のとおりで、ページ側でこのオブジェクトを `JSON.stringify` したUTF-8をハッシュする。返された `reportState` を同じ方法で直列化すれば `reportStateSha256` を再計算できる。

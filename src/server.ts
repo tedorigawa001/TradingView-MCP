@@ -6225,17 +6225,22 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               offset !== undefined || limit !== undefined) {
             throw new Error("Pine identity requires a captured ledger id, study id and report state hash, without pagination");
           }
-          const evidence = await tv.getStrategyTradeLedger({
-            expectedLedgerId: expected_ledger_id,
-            identityStudyId: identity_study_id,
-            expectedReportStateSha256: expected_report_state_sha256,
+          // Like the capture and ordinary pages, read under the chart operation
+          // lock so no queued or cross-process chart change interleaves. The
+          // in-flight guard and the revocation above stay outside the wait.
+          return await chartOperations.run(async () => {
+            const evidence = await tv.getStrategyTradeLedger({
+              expectedLedgerId: expected_ledger_id,
+              identityStudyId: identity_study_id,
+              expectedReportStateSha256: expected_report_state_sha256,
+            });
+            const result = jsonResult(evidence, true);
+            if (Buffer.byteLength(JSON.stringify(result), "utf8") > 8 * 1024) {
+              throw new Error("Pine identity exceeds the byte limit");
+            }
+            fixedPineEvidence = evidence;
+            return result;
           });
-          const result = jsonResult(evidence, true);
-          if (Buffer.byteLength(JSON.stringify(result), "utf8") > 8 * 1024) {
-            throw new Error("Pine identity exceeds the byte limit");
-          }
-          fixedPineEvidence = evidence;
-          return result;
         } catch (err) {
           return errorResult(err);
         } finally {

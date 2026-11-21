@@ -3462,6 +3462,56 @@ test("report state capture runs under the chart lock and takes no pagination or 
   assert.equal(hashing.isError, true, "only an identity read, not a capture, admits one bounded hash");
 });
 
+test("identity reads run under the chart lock, and refused arguments never take it", async () => {
+  const ledgerId = "sha256:" + "a".repeat(64);
+  const reportStateSha256 = "sha256:" + "c".repeat(64);
+  const pineId = "USER;12345678abcdef12";
+  const evidence = { ledgerId, studyId: "study-01", pineId, pineVersion: "4.0", reportStateSha256 };
+  let held = false;
+  let locks = 0;
+  let gate = null;
+  const client = await connectedClient(makeDeps({
+    chartOperationLock: { acquire: async () => {
+      assert.equal(held, false);
+      if (gate) await gate.promise;
+      held = true;
+      locks += 1;
+      return async () => { held = false; };
+    } },
+    tv: {
+      getStrategyTradeLedger: async () => { assert.equal(held, true, "identity reads the page under the chart lock"); return evidence; },
+      getFixedPineSourceHashes: async (id, version) => ({ pineId: id, version }),
+    },
+  }));
+  const identity = (extra = {}) => client.callTool({ name: "get_strategy_trade_ledger", arguments: {
+    identity_study_id: "study-01", expected_ledger_id: ledgerId, expected_report_state_sha256: reportStateSha256, ...extra,
+  } });
+  const source = () => client.callTool({ name: "get_pine_source", arguments: {
+    pine_id: pineId, version: "4.0", bounded_hash_ledger_id: ledgerId, bounded_hash_report_state_sha256: reportStateSha256,
+  } });
+
+  assert.notEqual((await identity()).isError, true);
+  assert.equal(locks, 1);
+  for (const extra of [{ limit: 1 }, { offset: 0 }]) assert.equal((await identity(extra)).isError, true);
+  assert.equal((await client.callTool({ name: "get_strategy_trade_ledger", arguments: { identity_study_id: "study-01" } })).isError, true);
+  assert.equal(locks, 1, "refused arguments are rejected before the lock");
+  assert.equal((await source()).isError, true, "a refused identity request still revokes the earlier evidence");
+
+  // While one identity read waits for a busy lock, another is refused at once.
+  let open;
+  gate = { promise: new Promise((resolve) => { open = resolve; }) };
+  const waiting = identity();
+  await new Promise((resolve) => setImmediate(resolve));
+  const overlapping = await identity();
+  assert.equal(overlapping.isError, true);
+  assert.match(overlapping.content[0].text, /already in progress/);
+  gate = null;
+  open();
+  assert.notEqual((await waiting).isError, true);
+  assert.equal(locks, 2);
+  assert.notEqual((await source()).isError, true, "the identity read that held the lock admits one hash");
+});
+
 test("bounded Pine hashing binds the Pine id and loses its evidence on a failed, concurrent or oversized identity read", async () => {
   const ledgerId = "sha256:" + "a".repeat(64);
   const reportStateSha256 = "sha256:" + "c".repeat(64);
