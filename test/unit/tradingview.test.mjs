@@ -1028,16 +1028,7 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
 
   const report = {
     currency: "USD",
-    settings: {
-      dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } },
-      properties: {
-        defaultQtyValue: 100, defaultQtyType: "percent_of_equity", pyramiding: 1,
-        barDetalization: "default", scriptExecution: "on_bar_close",
-        commissionType: "cash_per_contract", commissionValue: 0.00005,
-        longLeverage: Infinity, shortLeverage: "Infinity", slippage: 1,
-        limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick",
-      },
-    },
+    settings: { dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } } },
     performance: {
       initialCapital: 100_000,
       maxStrategyDrawDown: 40,
@@ -1174,15 +1165,7 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
   assert.ok(!withOpenPosition.qualityIssues.includes("report_trade_count_mismatch"));
 
   const state = {
-    schema: "pine_report_state_v1", ledgerId: withOpenPosition.ledgerId, studyId: "strategy-1",
-    initialCapital: 100_000, currency: "USD",
-    properties: {
-      orderSize: 100, orderSizeType: "percent_of_equity", pyramiding: 1,
-      barDetail: "default", scriptExecution: "on_bar_close",
-      commissionType: "cash_per_contract", commissionValue: 0.00005,
-      longLeverage: "Infinity", shortLeverage: "Infinity", slippage: 1,
-      limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick", standardOhlc: null,
-    },
+    schema: "pine_report_state_v1", ledgerId: withOpenPosition.ledgerId, studyId: "strategy-1", currency: "USD",
     metrics: {
       netProfit: 125, netProfitPercent: 0.00125, maxDrawdown: 40, maxDrawdownPercent: 0.0004,
       totalTrades: 1, winningTrades: 1, profitFactor: 1.2, percentProfitable: 0.5,
@@ -1201,23 +1184,20 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
     pineId: "USER;12345678abcdef12", pineVersion: "4.0", reportStateSha256,
   });
   assert.ok(Buffer.byteLength(JSON.stringify(identity)) < 8192);
-  report.settings.properties.commissionValue = 0.0001;
+  report.performance.all.netProfit = 150;
   assert.equal((await vm.runInContext(cdp.calls[2], context)).ledgerId, withOpenPosition.ledgerId,
     "ordinary pagination keeps its existing identity schema");
-  await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics or Properties do not match/);
-  delete report.settings.properties.commissionValue;
-  await assert.rejects(vm.runInContext(identityExpr, context), /Properties unconfirmed: commissionValue/);
-  report.settings.properties.commissionValue = 0.00005;
+  await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics do not match/);
+  report.performance.all.netProfit = 125;
   for (const [object, key, changed] of [
     [report.performance.all, "netProfit", 150],
     [report.performance.all, "profitFactor", 1.4],
     [report.performance, "maxStrategyDrawDown", 41],
     [report.performance, "openPL", 26],
-    [report.settings.properties, "slippage", 2],
   ]) {
     const before = object[key];
     object[key] = changed;
-    await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics or Properties do not match/);
+    await assert.rejects(vm.runInContext(identityExpr, context), /captured strategy report metrics do not match/);
     object[key] = before;
     let hashes = 0;
     await assert.rejects(vm.runInContext(identityExpr, vm.createContext({
@@ -1227,7 +1207,7 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
         if (++hashes === 2) object[key] = changed;
         return digest;
       } } },
-    })), /metrics or Properties changed during Pine identity verification/);
+    })), /strategy report metrics changed during Pine identity verification/);
     object[key] = before;
   }
   report.trades[0].q = 11;
@@ -1260,18 +1240,10 @@ test("getStrategyTradeLedger paginates all normalized trades behind a stable led
 function strategyLedgerFixture() {
   const report = {
     currency: "USD",
-    settings: {
-      dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } },
-      properties: {
-        defaultQtyValue: 100, defaultQtyType: "percent_of_equity", pyramiding: 1,
-        barDetalization: "default", scriptExecution: "on_bar_close",
-        commissionType: "cash_per_contract", commissionValue: 0.00005,
-        longLeverage: Infinity, shortLeverage: "Infinity", slippage: 1,
-        limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick",
-      },
-    },
+    // As on the live app: no Properties in settings and no initial capital here.
+    settings: { dateRange: { backtest: { from: 1_700_000_000_000, to: 1_700_100_000_000 } } },
     performance: {
-      initialCapital: 100_000, maxStrategyDrawDown: 40, maxStrategyDrawDownPercent: 0.0004, openPL: 25,
+      maxStrategyDrawDown: 40, maxStrategyDrawDownPercent: 0.0004, openPL: 25,
       all: {
         totalTrades: 1, netProfit: 125, netProfitPercent: 0.00125, numberOfWiningTrades: 1, numberOfLosingTrades: 0,
         percentProfitable: 0.5, profitFactor: 1.2, grossProfit: 250, grossLoss: -125, commissionPaid: 5,
@@ -1292,10 +1264,14 @@ function strategyLedgerFixture() {
       { id: "pineVersion", value: "4.0" },
       { id: "text", value: "secret source is excluded" },
       { id: "in_0", value: 14 },
+      // Strategy Properties arrive as the strategy study's own inputs.
+      { id: "in_1", value: 0.00005 },
+      { id: "in_2", value: 100_000 },
     ],
   };
   const studyApi = {
-    getInputsInfo: () => [{ id: "in_0", localizedName: "Length" }],
+    getInputsInfo: () => [{ id: "in_0", localizedName: "Length" }, { id: "in_1", localizedName: "Commission Value" },
+      { id: "in_2", localizedName: "Initial Capital" }],
     getInputValues: () => fx.inputValues.map((value) => ({ ...value })),
   };
   fx.chart = {
@@ -1339,12 +1315,7 @@ test("report state capture returns the state and hash that a later identity read
   const page = await fx.run(cdp.calls.at(-1));
   assert.equal(Object.hasOwn(page, "reportStateSha256"), false, "ordinary pages keep their schema");
   const state = {
-    schema: "pine_report_state_v1", ledgerId: page.ledgerId, studyId: "strategy-1", initialCapital: 100_000, currency: "USD",
-    properties: {
-      orderSize: 100, orderSizeType: "percent_of_equity", pyramiding: 1, barDetail: "default", scriptExecution: "on_bar_close",
-      commissionType: "cash_per_contract", commissionValue: 0.00005, longLeverage: "Infinity", shortLeverage: "Infinity",
-      slippage: 1, limitOrderExecution: "requested_price", orderExecutionDelay: "one_tick", standardOhlc: null,
-    },
+    schema: "pine_report_state_v1", ledgerId: page.ledgerId, studyId: "strategy-1", currency: "USD",
     metrics: {
       netProfit: 125, netProfitPercent: 0.00125, maxDrawdown: 40, maxDrawdownPercent: 0.0004,
       totalTrades: 1, winningTrades: 1, profitFactor: 1.2, percentProfitable: 0.5,
@@ -1368,6 +1339,18 @@ test("report state capture returns the state and hash that a later identity read
   assert.equal((await fx.run(cdp.calls.at(-1))).reportStateSha256, capture.reportStateSha256);
   await tv.getStrategyTradeLedger({ captureReportState: true, expectedLedgerId: "sha256:" + "0".repeat(64) });
   await assert.rejects(fx.run(cdp.calls.at(-1)), /captured strategy ledger does not match/);
+  // A changed strategy Property is a changed study input: a new ledger id, so the
+  // earlier capture no longer verifies.
+  const identityExpr = cdp.calls.findLast((call) => call.includes('const identityStudyId = "strategy-1"'));
+  fx.inputValues[4] = { id: "in_1", value: 0.0001 };
+  const changed = plain(await fx.run(captureExpr));
+  assert.notEqual(changed.ledgerId, capture.ledgerId);
+  assert.equal(changed.reportState.metrics.netProfit, capture.reportState.metrics.netProfit);
+  await assert.rejects(fx.run(identityExpr), /captured strategy ledger does not match/);
+  fx.inputValues[4] = { id: "in_1", value: 0.00005 };
+  delete fx.report.currency;
+  await assert.rejects(fx.run(captureExpr), /key metrics or currency unconfirmed/);
+  fx.report.currency = "USD";
   fx.source.id = () => undefined;
   await assert.rejects(fx.run(captureExpr), /study id is unconfirmed for report state capture/);
 });
@@ -1393,7 +1376,8 @@ test("capture and identity reads refuse unconfirmed versions, ids, inputs, count
     ["unsupported input value", (fx) => { fx.inputValues[3] = { id: "in_0", value: { nested: 1 } }; }, {}, /fixed Pine version is unconfirmed/],
     ["trade count mismatch", (fx) => { fx.report.performance.all.totalTrades = 3; },
       { metrics: { ...capture.reportState.metrics, totalTrades: 3 } }, /fixed Pine version is unconfirmed/],
-    ["missing metric", (fx) => { delete fx.report.performance.all.profitFactor; }, {}, /key metrics or account Properties unconfirmed/],
+    ["missing metric", (fx) => { delete fx.report.performance.all.profitFactor; }, {}, /key metrics or currency unconfirmed/],
+    ["open position without open profit", (fx) => { delete fx.report.performance.openPL; }, {}, /key metrics or currency unconfirmed/],
   ];
   for (const [name, change, stateChanges, reason] of cases) {
     const fx = strategyLedgerFixture();

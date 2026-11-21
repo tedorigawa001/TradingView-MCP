@@ -3488,7 +3488,7 @@ test("bounded Pine hashing binds the Pine id and loses its evidence on a failed,
   assert.equal(reads, 1);
 
   assert.notEqual((await identity()).isError, true);
-  identityReply = async () => { throw new Error("captured strategy report metrics or Properties do not match"); };
+  identityReply = async () => { throw new Error("captured strategy report metrics do not match"); };
   assert.equal((await identity()).isError, true);
   assert.equal((await source()).isError, true, "a failed identity read revokes the earlier evidence");
   assert.equal(reads, 1);

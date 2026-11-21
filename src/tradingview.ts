@@ -2674,42 +2674,14 @@ export class TradingView {
           trades: allTrades,
         });
         // Keep the existing paginated ledger digest stable. The additional
-        // A1 digest binds report-time settings and metrics to that ledger and
-        // to the specific study, and refuses incomplete Properties.
+        // A1 digest binds the report's key metrics to that ledger and to the
+        // specific study. Strategy Properties (initial capital, order size,
+        // commission, slippage, pyramiding, fills, margins, bar magnifier) are
+        // the strategy study's own input values on the live app, so the ledger
+        // id above already covers them; report.settings does not carry them.
         const captureReportState = (stateLedgerId, stateStudyId) => {
           const performance = report.performance;
           const all = performance?.all;
-          const settings = report.settings?.properties ?? report.settings;
-          const setting = (name, value) => {
-            if (typeof value === "number" && Number.isFinite(value) ||
-                typeof value === "boolean" ||
-                typeof value === "string" && value.length > 0 && value.length <= 128) return value;
-            if (value === Infinity && (name === "longLeverage" || name === "shortLeverage")) return "Infinity";
-            throw new Error("strategy report Properties unconfirmed: " + name);
-          };
-          const properties = {
-            orderSize: setting("orderSize", settings?.defaultQtyValue),
-            orderSizeType: setting("orderSizeType", settings?.defaultQtyType),
-            pyramiding: setting("pyramiding", settings?.pyramiding),
-            barDetail: setting("barDetail", settings?.barDetalization ?? settings?.useBarMagnifier),
-            scriptExecution: settings?.scriptExecution === undefined ? [
-              setting("calcOnEveryTick", settings?.calcOnEveryTick),
-              setting("calcOnOrderFills", settings?.calcOnOrderFills),
-              settings?.calcOnEveryHistoryTick === undefined ? null
-                : setting("calcOnEveryHistoryTick", settings.calcOnEveryHistoryTick),
-            ] : setting("scriptExecution", settings.scriptExecution),
-            commissionType: setting("commissionType", settings?.commissionType),
-            commissionValue: setting("commissionValue", settings?.commissionValue),
-            longLeverage: setting("longLeverage", settings?.longLeverage ?? settings?.marginLong),
-            shortLeverage: setting("shortLeverage", settings?.shortLeverage ?? settings?.marginShort),
-            slippage: setting("slippage", settings?.slippage),
-            limitOrderExecution: setting("limitOrderExecution",
-              settings?.limitOrderExecution ?? settings?.backtestFillLimitsAssumption),
-            orderExecutionDelay: setting("orderExecutionDelay",
-              settings?.orderExecutionDelay ?? settings?.processOrdersOnClose),
-            standardOhlc: settings?.fillOrdersOnStandardOhlc === undefined ? null
-              : setting("fillOrdersOnStandardOhlc", settings.fillOrdersOnStandardOhlc),
-          };
           const metrics = {
             netProfit: metric(all?.netProfit),
             netProfitPercent: metric(all?.netProfitPercent),
@@ -2724,14 +2696,12 @@ export class TradingView {
           const totalProfit = metric(performance?.totalPL ?? all?.totalPnL);
           if (Object.values(metrics).some((value) => value === null) ||
               (markedOpenIndex >= 0 && openProfit === null) ||
-              !Number.isFinite(performance?.initialCapital) || typeof report.currency !== "string" ||
-              !/^[A-Za-z0-9]{1,12}$/.test(report.currency)) {
-            throw new Error("strategy report key metrics or account Properties unconfirmed");
+              typeof report.currency !== "string" || !/^[A-Za-z0-9]{1,12}$/.test(report.currency)) {
+            throw new Error("strategy report key metrics or currency unconfirmed");
           }
           return JSON.stringify({
             schema: "pine_report_state_v1", ledgerId: stateLedgerId, studyId: stateStudyId,
-            initialCapital: performance.initialCapital, currency: report.currency, properties, metrics,
-            openProfit, totalProfit,
+            currency: report.currency, metrics, openProfit, totalProfit,
           });
         };
         // An identity read snapshots the state before hashing the ledger; a
@@ -2764,7 +2734,7 @@ export class TradingView {
           const reportStateSha256 = "sha256:" + Array.from(new Uint8Array(reportStateDigest),
             (value) => value.toString(16).padStart(2, "0")).join("");
           if (verifying && reportStateSha256 !== expectedReportStateSha256) {
-            throw new Error("captured strategy report metrics or Properties do not match");
+            throw new Error("captured strategy report metrics do not match");
           }
           if (api.activeChart() !== chart || bt.activeStrategy.value() !== act ||
               bt.activeStrategyReportData.value() !== report || chart.symbol() !== symbol ||
@@ -2772,7 +2742,7 @@ export class TradingView {
             throw new Error("active strategy or report changed during " + purpose);
           }
           if (captureReportState(ledgerId, boundStudyId) !== reportState) {
-            throw new Error("strategy report metrics or Properties changed during " + purpose);
+            throw new Error("strategy report metrics changed during " + purpose);
           }
           const currentRange = report.settings?.dateRange?.backtest;
           const currentOpenExit = rawTrades[markedOpenIndex]?.exit ?? rawTrades[markedOpenIndex]?.x;
