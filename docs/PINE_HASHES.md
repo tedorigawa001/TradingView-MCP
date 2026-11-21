@@ -67,7 +67,7 @@ SHA-256(UTF-8(source.replace(/\r\n/g, "\n")))
 
 1. 取得: `get_strategy_trade_ledger` に `capture_report_state:true` だけを渡す（任意で `expected_ledger_id`）。`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` と、ハッシュした状態そのもの `reportState`（`reportStateSchema:"pine_report_state_v1"`）を返す。応答は8 KiBまで。通常の台帳と同じくチャート操作ロックの下で読む。
 2. 照合: 後で `identity_study_id`・`expected_ledger_id`・`expected_report_state_sha256` に取得値を渡す。同じ戦略・台帳・状態であることを確認できた場合だけ、`ledgerId`・`studyId`・`pineId`・`pineVersion`・`reportStateSha256` を返す。失敗した照合は、それ以前の照合結果も無効にする。
-3. ハッシュ: `get_pine_source` に同じ `pine_id`・番号の `version`・`bounded_hash_ledger_id`・`bounded_hash_report_state_sha256` を渡す。直前の照合結果と一致する場合に1回だけ、`responseBytes`・`sourceBytes`・`rawSourceSha256`（本文そのまま）・`sourceSha256`（`pine_source_lf_v1`）を返す。応答本体は128 KiBまで。
+3. ハッシュ: `get_pine_source` に同じ `pine_id`・番号の `version`・`bounded_hash_ledger_id`・`bounded_hash_report_state_sha256` を渡す。直前の照合結果と一致する場合に1回だけ、`responseBytes`・`sourceBytes`・`rawSourceSha256`（本文そのまま）・`sourceSha256`（`pine_source_lf_v1`）・`scriptIdEvidence` を返す。応答本体は128 KiBまで。応答の版が要求と完全一致し、本文が文字列であることを必須とする。応答にスクリプトID（`scriptIdPart`）がない場合は要求URLのIDに依拠して `scriptIdEvidence:"request_url_only"`、あれば一致を確認して `"response_field"` とし、異なるIDなら拒否する。不一致は項目ごとの固定の理由で返す。
 
 `reportState` のキー順は次のとおりで、ページ側でこのオブジェクトを `JSON.stringify` したUTF-8をハッシュする。返された `reportState` を同じ方法で直列化すれば `reportStateSha256` を再計算できる。
 
@@ -87,4 +87,4 @@ MCP応答の形と追加取得なし、LF/CRLFの一致、単独CR・BOM・Unico
 
 実チャートや保存済みスクリプトへの操作は未実施。実機の保存応答・読戻し形式との対応は未確認。
 
-`pine_report_state_v1` の項目は、2026-11-21に実機の1戦略（日足のEURUSD、`USER;…` の番号付き版）で、チャートを変えない読取りだけで確認した。主要指標・含み損益・通貨は実機で値を返した。レポートの `settings` にストラテジー設定はなく、`performance.initialCapital` は `null` だった。一方、ストラテジー設定は戦略スタディの入力値として読めた。取得・照合・固定版ハッシュを通した実機での一連の動作と、固定版取得の応答形式は未確認。
+`pine_report_state_v1` の項目は、2026-11-21に実機の1戦略（日足のEURUSD、`USER;…` の番号付き版）で、チャートを変えない読取りだけで確認した。主要指標・含み損益・通貨は実機で値を返した。レポートの `settings` にストラテジー設定はなく、`performance.initialCapital` は `null` だった。一方、ストラテジー設定は戦略スタディの入力値として読めた。同日、取得と照合は実機で通った（取得した状態を手元で直列化したハッシュも一致）。固定版ハッシュは、応答の識別確認で停止したため、上記の項目別の確認に改めた。固定版取得の応答形式と、改めた後の実機での動作は未確認。

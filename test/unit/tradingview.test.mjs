@@ -763,12 +763,24 @@ test("fixed Pine hashes bind the response identity and preserve original and LF-
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/USER%3B12345678abcdef12\/4\.0$/);
   assert.equal(calls[0].init.redirect, "error");
-  for (const detail of [
-    { scriptIdPart: pineId, version: "4.1", source },
-    { scriptIdPart: "USER;different000000", version, source },
-    { version, source },
+  assert.equal(result.scriptIdEvidence, "response_field");
+  // The get endpoint may omit the id: the hashes then rest on the requested URL alone.
+  const withoutId = await fixedPinePage(cdp.calls[0], JSON.stringify({ version, source }));
+  assert.equal(withoutId.result.rawSourceSha256, hash(source));
+  assert.equal(withoutId.result.scriptIdEvidence, "request_url_only");
+  for (const [detail, reason] of [
+    [{ scriptIdPart: "USER;different000000", version, source }, /names a different script/],
+    [{ scriptIdPart: null, version, source }, /names a different script/],
+    [{ scriptIdPart: pineId, version: "4.1", source }, /version does not match: "4\.1"$/],
+    [{ scriptIdPart: pineId, version: 4, source }, /version does not match: number 4$/],
+    [{ scriptIdPart: pineId, source }, /version does not match: undefined$/],
+    [{ scriptIdPart: pineId, version: "4.0 <script>", source }, /version does not match: string$/],
+    [{ scriptIdPart: pineId, version, source: 7 }, /no string source/],
+    [{ scriptIdPart: pineId, version }, /no string source/],
+    [[{ scriptIdPart: pineId, version, source }], /not a JSON object/],
+    [null, /not a JSON object/],
   ]) {
-    await assert.rejects(fixedPinePage(cdp.calls[0], JSON.stringify(detail)), /identity or source does not match/);
+    await assert.rejects(fixedPinePage(cdp.calls[0], JSON.stringify(detail)), reason, JSON.stringify(detail));
   }
   await assert.rejects(fixedPinePage(cdp.calls[0], Buffer.from([0xff])), /complete UTF-8 JSON/);
 });

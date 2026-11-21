@@ -404,6 +404,8 @@ export interface FixedPineSourceHashes {
   rawSourceSha256: string;
   sourceSha256: string;
   sourceHashSchema: "pine_source_lf_v1";
+  /** "response_field" when the reply named the script; "request_url_only" when it omitted the id. */
+  scriptIdEvidence: "response_field" | "request_url_only";
 }
 
 export interface StrategyReport {
@@ -2120,8 +2122,24 @@ export class TradingView {
           } catch {
             throw new Error("fixed Pine response is not complete UTF-8 JSON");
           }
-          if (detail?.scriptIdPart !== pineId || detail.version !== version || typeof detail.source !== "string") {
-            throw new Error("fixed Pine response identity or source does not match");
+          // Each mismatch has its own fixed reason. The get endpoint is not known
+          // to echo scriptIdPart (the existing readbacks never read it), so an
+          // absent id rests on the requested URL; a different id is refused.
+          if (detail === null || typeof detail !== "object" || Array.isArray(detail)) {
+            throw new Error("fixed Pine response is not a JSON object");
+          }
+          const namedScript = Object.hasOwn(detail, "scriptIdPart");
+          if (namedScript && detail.scriptIdPart !== pineId) {
+            throw new Error("fixed Pine response names a different script");
+          }
+          if (detail.version !== version) {
+            const seen = detail.version;
+            const shown = typeof seen === "string" && /^(last|[0-9]{1,6}(\\.[0-9]{1,3})?)$/.test(seen) ? JSON.stringify(seen)
+              : typeof seen === "number" && Number.isFinite(seen) ? "number " + seen : typeof seen;
+            throw new Error("fixed Pine response version does not match: " + shown);
+          }
+          if (typeof detail.source !== "string") {
+            throw new Error("fixed Pine response has no string source");
           }
           const encoder = new TextEncoder();
           const raw = encoder.encode(detail.source);
@@ -2137,6 +2155,7 @@ export class TradingView {
             rawSourceSha256: await sha256(raw),
             sourceSha256: await sha256(encoder.encode(detail.source.replace(/\\r\\n/g, "\\n"))),
             sourceHashSchema: "pine_source_lf_v1",
+            scriptIdEvidence: namedScript ? "response_field" : "request_url_only",
           };
         } finally {
           clearTimeout(timer);
