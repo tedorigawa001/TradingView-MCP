@@ -1013,6 +1013,65 @@ test("getStrategyReport is read-only and refuses stale reports", async () => {
   assert.ok(!expr.includes("createStudy") && !expr.includes("removeEntity"), "must not touch the chart");
 });
 
+test("getStrategyReport reads compact trade rows and marks the live position open", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const fx = strategyLedgerFixture();
+  const asPlain = (value) => JSON.parse(JSON.stringify(value));
+  await tv.getStrategyReport({ tradesLimit: 10 });
+  const report = asPlain(await fx.run(cdp.calls.at(-1)));
+  const side = (time, price, label) => ({ time, timeIso: new Date(time).toISOString(), price, label });
+  assert.deepEqual(report.trades, [
+    { number: null, direction: "long", status: "closed", entry: side(1_700_000_000_000, 100, "Long"),
+      exit: side(1_700_000_060_000, 102, "Long Exit"), profit: 250, profitPercent: 0.0025, cumulativeProfit: 250, quantity: 10 },
+    { number: null, direction: "long", status: "open", entry: side(1_700_000_120_000, 102, "Long"),
+      exit: null, profit: 25, profitPercent: 0.00025, cumulativeProfit: 275, quantity: 5 },
+  ]);
+  assert.equal(report.totalTrades, 1, "the summary still counts closed trades only");
+  await tv.getStrategyReport({ tradesLimit: 1 });
+  const latest = asPlain(await fx.run(cdp.calls.at(-1)));
+  assert.deepEqual(latest.trades.map((trade) => [trade.status, trade.exit, trade.quantity]), [["open", null, 5]]);
+
+  // Without the open row (counts match), the last row is a real closed trade.
+  fx.report.trades = fx.report.trades.slice(0, 1);
+  await tv.getStrategyReport({ tradesLimit: 10 });
+  const closedOnly = asPlain(await fx.run(cdp.calls.at(-1)));
+  assert.deepEqual(closedOnly.trades.map((trade) => [trade.status, trade.exit?.label]), [["closed", "Long Exit"]]);
+  // An empty exit label alone is not the open row when the counts do not say so.
+  fx.report.trades = [{ ...fx.report.trades[0], x: { tm: 1_700_000_060_000, p: 102, c: "", tp: "lx" } }];
+  const unlabeled = asPlain(await fx.run(cdp.calls.at(-1)));
+  assert.deepEqual(unlabeled.trades.map((trade) => [trade.status, trade.exit?.label]), [["closed", ""]]);
+  // Nor is an extra row whose exit carries a real label.
+  fx.report.performance.all.totalTrades = 0;
+  fx.report.trades = [{ ...fx.report.trades[0], x: { tm: 1_700_000_060_000, p: 102, c: "Long Exit", tp: "lx" } }];
+  const labeled = asPlain(await fx.run(cdp.calls.at(-1)));
+  assert.deepEqual(labeled.trades.map((trade) => [trade.status, trade.exit?.label]), [["closed", "Long Exit"]]);
+});
+
+test("getStrategyReport still reads the long-name trade rows of older builds", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const fx = strategyLedgerFixture();
+  const asPlain = (value) => JSON.parse(JSON.stringify(value));
+  fx.report.performance.all.totalTrades = 1;
+  fx.report.trades = [{
+    tradeNumber: 2,
+    entry: { time: 1_700_000_120_000, price: 102, id: "Short", type: "short" },
+    exit: { time: 1_700_000_240_000, price: 103, id: "Short Exit" },
+    profit: { value: -125, percentValue: -0.00125 },
+    cumulativeProfit: { value: 125 },
+    quantity: 5,
+  }];
+  await tv.getStrategyReport({ tradesLimit: 5 });
+  const report = asPlain(await fx.run(cdp.calls.at(-1)));
+  assert.deepEqual(report.trades, [{
+    number: 2, direction: "short", status: "closed",
+    entry: { time: 1_700_000_120_000, timeIso: new Date(1_700_000_120_000).toISOString(), price: 102, label: "Short" },
+    exit: { time: 1_700_000_240_000, timeIso: new Date(1_700_000_240_000).toISOString(), price: 103, label: "Short Exit" },
+    profit: -125, profitPercent: -0.00125, cumulativeProfit: 125, quantity: 5,
+  }]);
+});
+
 test("getStrategyTradeLedger paginates all normalized trades behind a stable ledger id", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);

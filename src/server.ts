@@ -5558,7 +5558,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       description:
         "Read the backtest report (Strategy Tester) of the strategy currently on the " +
         "active TradingView chart: net profit, win rate, profit factor, drawdown, Sharpe/" +
-        "Sortino, and the most recent trades with entry/exit details. Percent-style " +
+        "Sortino, and the most recent trades with entry/exit details. A live position is " +
+        "the last trade with status 'open' and no exit. Percent-style " +
         "fields are fractions (0.33 = 33%). Fails if no strategy is on the chart — use " +
         "run_backtest to test a saved strategy without leaving it on the chart.",
       inputSchema: {

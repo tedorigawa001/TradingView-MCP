@@ -324,6 +324,8 @@ export interface StrategyTradeSide {
 export interface StrategyTrade {
   number: number | null;
   direction: "long" | "short" | null;
+  /** "open" for the live position (no real exit fill), otherwise "closed". */
+  status: "closed" | "open";
   entry: StrategyTradeSide | null;
   exit: StrategyTradeSide | null;
   profit: number | null;
@@ -568,21 +570,43 @@ const FORMAT_REPORT_SNIPPET = `
       } catch (e) {}
     }
     const dr = report.settings && report.settings.dateRange && report.settings.dateRange.backtest;
-    const side = (s) => (s ? { time: num(s.time), timeIso: iso(s.time), price: num(s.price), label: typeof s.id === "string" ? s.id : null } : null);
+    // Current builds send compact trade rows (e/x with tm/p/c/tp, tp/cp as
+    // {v,p}, q); older ones used long names. Read both, as the ledger does.
+    const side = (s) => (s ? {
+      time: num(s.time ?? s.tm),
+      timeIso: iso(s.time ?? s.tm),
+      price: num(s.price ?? s.p),
+      label: typeof (s.id ?? s.c) === "string" ? (s.id ?? s.c) : null,
+    } : null);
     const dirOf = (t) => {
-      const ty = t && t.entry ? String(t.entry.type || "") : "";
+      const entry = t ? (t.entry ?? t.e) : null;
+      const ty = entry ? String(entry.type ?? entry.tp ?? "") : "";
       return ty.startsWith("s") ? "short" : ty.startsWith("l") ? "long" : null;
     };
-    const trades = (Array.isArray(report.trades) ? report.trades : []).slice(-tradesLimit).map((t) => ({
-      number: num(t.tradeNumber),
-      direction: dirOf(t),
-      entry: side(t.entry),
-      exit: side(t.exit),
-      profit: t.profit ? num(t.profit.value) : null,
-      profitPercent: t.profit ? num(t.profit.percentValue) : null,
-      cumulativeProfit: t.cumulativeProfit ? num(t.cumulativeProfit.value) : null,
-      quantity: num(t.quantity),
-    }));
+    const amount = (v) => (typeof v === "number" ? num(v) : v && typeof v === "object" ? num(v.value ?? v.v) : null);
+    const share = (v) => (v && typeof v === "object" ? num(v.percentValue ?? v.p) : null);
+    const rawTrades = Array.isArray(report.trades) ? report.trades : [];
+    // TradingView appends the live position with a synthetic current-price exit
+    // that has an empty label and is absent from performance.all.totalTrades.
+    const closedCount = num(a.totalTrades);
+    const lastExit = rawTrades.length > 0 ? (rawTrades[rawTrades.length - 1].exit ?? rawTrades[rawTrades.length - 1].x) : null;
+    const markedOpenIndex = closedCount !== null && rawTrades.length === closedCount + 1 && lastExit &&
+      (lastExit.id ?? lastExit.c) === "" ? rawTrades.length - 1 : -1;
+    const trades = rawTrades.map((t, index) => ({ t, index })).slice(-tradesLimit).map(({ t, index }) => {
+      const exit = index === markedOpenIndex ? null : side(t.exit ?? t.x);
+      const profit = t.profit ?? t.tp;
+      return {
+        number: num(t.tradeNumber ?? t.number),
+        direction: dirOf(t),
+        status: exit ? "closed" : "open",
+        entry: side(t.entry ?? t.e),
+        exit,
+        profit: amount(profit),
+        profitPercent: share(profit),
+        cumulativeProfit: amount(t.cumulativeProfit ?? t.cp),
+        quantity: num(t.quantity ?? t.q),
+      };
+    });
     return {
       strategy,
       currency: report.currency ?? null,
