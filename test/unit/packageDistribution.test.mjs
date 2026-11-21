@@ -113,7 +113,7 @@ test('verifier identity binds runner, core, tests and allowlist before and after
     ['scripts/prepare-package-reverify.mjs',Buffer.from('prepare')],
     ['test/unit/packageDistribution.test.mjs',Buffer.from('tests')],
     ['test/unit/packageApproval.test.mjs',Buffer.from('approval-tests')],
-    ['packaging/npm-js-0.1.46.json',Buffer.from('paths')]
+    ['packaging/npm-js-0.1.47.json',Buffer.from('paths')]
   ]);
   const before=verifier.captureVerifierInputs(p=>inputs.get(p));
   assert.deepEqual(before.record.files.map(f=>f.path),[...inputs.keys()].sort());
@@ -162,7 +162,7 @@ function finalizeFixture({eventError=null,identity='same',priorFailure=false,pat
   vm.runInNewContext(source.slice(start+marker.length,end),{
     report,captureVerifierInputs:verifier.captureVerifierInputs,assertVerifierInputsUnchanged:verifier.assertVerifierInputsUnchanged,
     path:paths,repo,read,note,budget,writer,json,sha,root,
-    carriedHold:29730619,newRunCeiling:49*MiB,unusedMargin:6*MiB,additionalUnallocated:678085,
+    carriedHold:524288,newRunCeiling:49*MiB,releaseStagesReserved:2*MiB,unusedMargin:6*MiB,additionalUnallocated:6815744,
     guard:{restore(){restores++;}},console:{log(){}},process:processState
   },{timeout:1000});
   const saved=JSON.parse(v.files.get(paths.join(root,'report/result.json')));
@@ -217,24 +217,25 @@ test('actual finalization and writer use Windows paths for success, identity dri
 });
 
 test('fixed 225 paths, package metadata and shared dependencies match',()=>{
-  const m=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.46.json',import.meta.url))),p=JSON.parse(readFileSync(new URL('../../package.json',import.meta.url))),
+  const m=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.47.json',import.meta.url))),p=JSON.parse(readFileSync(new URL('../../package.json',import.meta.url))),
     lock=JSON.parse(readFileSync(new URL('../../package-lock.json',import.meta.url)));
   assert.equal(validateManifest(m,p,lock).length,225);
   for(const mutation of ['swap','missing','version','bin']){
     const a=structuredClone(m),b=structuredClone(p);
     if(mutation==='swap')a.files[0]='build/not-approved.js';
     if(mutation==='missing')b.files=b.files.slice(1);
-    if(mutation==='version')b.version='0.1.45';
+    if(mutation==='version')b.version='0.1.46';
     if(mutation==='bin')b.bin.extra='build/not-approved.js';
     assert.throws(()=>validateManifest(a,b,lock));
   }
 });
-test('release candidate is fixed to 0.1.46 across package, lock and distribution metadata',()=>{
-  assert.equal(verifier.RELEASE_VERSION,'0.1.46');
-  const pkg={name:'candidate',version:'0.1.46'},lock={name:'candidate',version:'0.1.46',packages:{'':{name:'candidate',version:'0.1.46'}}},
-    manifest={targetVersion:'0.1.46',verificationVersion:'0.1.46'};
+test('release candidate is fixed to 0.1.47 across package, lock and distribution metadata',()=>{
+  assert.equal(verifier.RELEASE_VERSION,'0.1.47');
+  assert.equal(verifier.DISTRIBUTION_MANIFEST,'packaging/npm-js-0.1.47.json');
+  const pkg={name:'candidate',version:'0.1.47'},lock={name:'candidate',version:'0.1.47',packages:{'':{name:'candidate',version:'0.1.47'}}},
+    manifest={targetVersion:'0.1.47',verificationVersion:'0.1.47'};
   verifier.validateReleaseVersions(manifest,pkg,lock);
-  for(const version of ['0.1.45','0.1.47'])for(const field of ['package','lock','lockRoot','target','verification']){
+  for(const version of ['0.1.46','0.1.48'])for(const field of ['package','lock','lockRoot','target','verification']){
     const p=structuredClone(pkg),l=structuredClone(lock),m=structuredClone(manifest);
     if(field==='package')p.version=version;if(field==='lock')l.version=version;if(field==='lockRoot')l.packages[''].version=version;
     if(field==='target')m.targetVersion=version;if(field==='verification')m.verificationVersion=version;

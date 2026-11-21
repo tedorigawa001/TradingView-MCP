@@ -43,14 +43,17 @@ function virtual(){
   return {roots,files,io,get writes(){return writes;}};
 }
 const budget=()=>{const b=new WriteBudget();b.reserve('final',64*1024);return b;};
-test('84 MiB campaign accounts for prior reservations, preparation, B and both margins',()=>{
-  assertCampaign();assert.equal(C.campaignCap,84*MiB);assert.equal(C.campaignCap-64*MiB,20*MiB);
-  assert.equal(C.priorReserved,29206331);assert.equal(C.priorReserved+C.prepReserved,29730619);
-  assert.equal(C.priorReserved+C.prepReserved+C.runLimit,81110843);
-  assert.equal(C.fixedMargin,6*MiB);assert.equal(C.unallocated,678085);
-  assert.equal(C.releaseVersion,'0.1.46');assert.equal(C.preparation,'package-2026-11-18-reverify-r02-prep02');
+test('new 64 MiB campaign accounts for preparation, B, release stages and both margins',()=>{
+  assertCampaign();assert.equal(C.campaignCap,64*MiB);assert.equal(C.schema,'package-reverify-campaign-v2');
+  assert.equal(C.priorReserved,0);assert.equal(C.prepReserved,512*1024);assert.equal(C.runLimit,49*MiB);
+  assert.equal(C.prepReserved+C.runLimit,51904512);assert.equal(C.releaseStagesReserved,2*MiB);
+  assert.equal(C.prepReserved+C.runLimit+C.releaseStagesReserved,54001664);
+  assert.equal(C.fixedMargin,6*MiB);assert.equal(C.unallocated,6815744);
+  assert.equal(C.prepReserved+C.runLimit+C.releaseStagesReserved+C.fixedMargin+C.unallocated,67108864);
+  assert.equal(C.releaseVersion,'0.1.47');assert.equal(C.preparation,'package-2026-11-21-reverify-0.1.47-prep01');
+  assert.equal(C.run,'package-2026-11-21-reverify-0.1.47');
   assert.equal(Object.values(PREP_LIMITS).reduce((a,b)=>a+b,0),512*1024);
-  for(const key of ['priorReserved','prepReserved','runLimit','fixedMargin','unallocated','campaignCap','protected765Used'])
+  for(const key of ['priorReserved','prepReserved','runLimit','releaseStagesReserved','fixedMargin','unallocated','campaignCap','protected765Used'])
     assert.throws(()=>assertCampaign({...C,[key]:C[key]+1}),/campaign_changed/);
 });
 test('A claims only its preparation ID and remains consumed after an empty/interrupted start',()=>{
@@ -148,26 +151,58 @@ test('approval input limits and strict UTF-8 fail closed',()=>{
   for(const value of [Buffer.alloc(PREP_LIMITS.approval_b+1),Buffer.from([0xff])])
     assert.throws(()=>authorizeExecutionB({...f.args(),receiptBytes:value}));
 });
-test('old stop and successful reservation totals are fixed, and changed old records reject',()=>{
-  assert.equal(PRIOR_RECORDS.reduce((n,r)=>n+r.reserved,0),C.priorReserved);
+test('the 0.1.46 release is bound as history and carries no reservation into this campaign',()=>{
+  assert.deepEqual(PRIOR_RECORDS.map(r=>r.reserved),[0,0,0,0]);assert.equal(C.priorReserved,0);
+  assert.deepEqual(PRIOR_RECORDS.map(r=>r.role),['previous_release_preparation','previous_release_verification',
+    'previous_release_publication_readback','previous_release_publication']);
+  assert.ok(PRIOR_RECORDS.every(r=>!r.path.includes('0.1.47')&&!r.path.startsWith(C.preparation)&&!r.path.startsWith(C.run)));
   assert.throws(()=>verifyPriorRecords('/virtual',()=>Buffer.from('changed')),/prior_record_changed/);
+  assert.equal(approval.PREVIOUS_RELEASE.version,'0.1.46');assert.equal(approval.PREVIOUS_RELEASE.closedCumulative,50957298);
+  assert.equal(approval.PREVIOUS_RELEASE.campaignCap,84*MiB);
 });
-test('prep01 is an additional accounting-only carry, separate from the legacy success total',()=>{
-  const success={status:'passed',quota:{cumulative_reserved:19244859,carried_hold:9*MiB,campaign_reserved_upper:28682043}},
-    prep={schema:'package-preparation-status-v1',preparation:'package-2026-11-18-reverify-r02-prep01',run:C.run,
-      campaign:{priorReserved:28682043,prepReserved:512*1024},
-      capacity:{prep_reserved:512*1024,cumulative_reserved_before_b:29206331,protected_765_bytes_used:0}};
-  assert.equal(typeof approval.validateHistoricalAccounting,'function');
-  approval.validateHistoricalAccounting(success,prep);
-  assert.equal(PRIOR_RECORDS[2].reserved,512*1024);assert.equal(PRIOR_RECORDS[2].role,'preparation_accounting_only');
-  assert.notEqual(prep.preparation,C.preparation);
-  for(const changed of [{...success,quota:{...success.quota,campaign_reserved_upper:29206331}},
-    {...success,quota:{...success.quota,cumulative_reserved:19244858}}])
-    assert.throws(()=>approval.validateHistoricalAccounting(changed,prep),/prior_accounting/);
-  for(const changed of [{...prep,preparation:C.preparation},{...prep,schema:'package-preparation-status-v2'},
-    {...prep,capacity:{...prep.capacity,prep_reserved:422237}},
-    {...prep,campaign:{...prep.campaign,priorReserved:29206331}}])
-    assert.throws(()=>approval.validateHistoricalAccounting(success,changed),/prior_preparation_accounting/);
+// The four 0.1.46 records as the history check reads them, keyed by path.
+function previousRelease(){
+  const P=approval.PREVIOUS_RELEASE,[prepRecord,,,statusRecord]=PRIOR_RECORDS;
+  return {
+    prep:{schema:'package-preparation-status-v2',status:'ready_for_review',version:P.version,preparation:P.preparation,run:P.run,
+      input_manifest_sha256:'7'.repeat(64)},
+    result:{status:'passed',phase:'complete',version:P.version,run:P.run,
+      approval_b:{preparation_status_sha256:prepRecord.sha256,input_manifest_sha256:'7'.repeat(64)},
+      artifact:{bytes:P.artifactBytes,sha256:P.artifactSha256},quota:{campaign_reserved_upper:P.campaignReservedAfterB}},
+    readback:{status:'verified',verified:true,rows:[{file:'approval.json',sha256:'a'.repeat(64)},
+      {file:'verification-status.json',sha256:statusRecord.sha256}]},
+    status:{status:'verified',reason:null,publication:false,cumulative_reserved:P.closedCumulative,
+      verdicts:{version:'confirmed',tag:'confirmed',tarball:'confirmed',packument:'confirmed'}},
+  };
+}
+const historyValues=h=>new Map([[PRIOR_RECORDS[0].path,bytes(h.prep)],[PRIOR_RECORDS[1].path,bytes(h.result)],
+  [PRIOR_RECORDS[2].path,bytes(h.readback)],[PRIOR_RECORDS[3].path,bytes(h.status)]]);
+test('the history check follows the 0.1.46 preparation, verification and publication chain',()=>{
+  approval.validatePreviousRelease(historyValues(previousRelease()));
+  const cases=[
+    [h=>{h.prep.status='failed';},'previous_preparation'],[h=>{h.prep.version='0.1.47';},'previous_preparation'],
+    [h=>{h.prep.preparation=C.preparation;},'previous_preparation'],[h=>{h.prep.schema='package-preparation-status-v1';},'previous_preparation'],
+    [h=>{h.result.status='failed';},'previous_verification'],[h=>{h.result.phase='pack';},'previous_verification'],
+    [h=>{h.result.approval_b.preparation_status_sha256='0'.repeat(64);},'previous_verification'],
+    [h=>{h.result.approval_b.input_manifest_sha256='0'.repeat(64);},'previous_verification'],
+    [h=>{h.result.artifact.sha256='0'.repeat(64);},'previous_verification'],[h=>{h.result.artifact.bytes=846951;},'previous_verification'],
+    [h=>{h.result.quota.campaign_reserved_upper=49081331;},'previous_verification'],[h=>{h.result.run=C.run;},'previous_verification'],
+    [h=>{h.readback.verified=false;},'previous_publication_readback'],[h=>{h.readback.status='stopped';},'previous_publication_readback'],
+    [h=>{h.readback.rows=h.readback.rows.slice(0,1);},'previous_publication_readback'],
+    [h=>{h.status.status='stopped';},'previous_publication'],[h=>{h.status.reason='publication_unconfirmed';},'previous_publication'],
+    [h=>{h.status.cumulative_reserved=50957299;},'previous_publication'],[h=>{h.status.publication=true;},'previous_publication'],
+    [h=>{h.status.verdicts.version='mismatch';},'previous_publication'],[h=>{delete h.status.verdicts.packument;},'previous_publication'],
+  ];
+  for(const [change,reason]of cases){
+    const h=previousRelease();change(h);
+    assert.throws(()=>approval.validatePreviousRelease(historyValues(h)),new RegExp(reason),change.toString());
+  }
+  const records=new Map([...historyValues(previousRelease())].map(([p,b])=>[p,b]));
+  const hashes=new Map(PRIOR_RECORDS.map(r=>[r.path,r.sha256]));
+  // verifyPriorRecords checks each file's hash before the chain: synthetic bytes never pass it.
+  assert.throws(()=>verifyPriorRecords('/virtual',p=>records.get(path.relative(path.join('/virtual','.release-work'),p).split(path.sep).join('/'))),
+    /prior_record_changed/);
+  assert.equal(hashes.size,4);
 });
 
 test('B rejects missing or altered A bytes before an execution claim',()=>{

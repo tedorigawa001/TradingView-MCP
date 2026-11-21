@@ -1,4 +1,44 @@
-# 0.1.46 distribution candidate (qualification pending)
+# 0.1.47 distribution candidate (preparation pending)
+
+The approved JS allowlist is unchanged: the same 225 paths and SHA-256
+`4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61`, now fixed
+by `npm-js-0.1.47.json`. Since 0.1.46 no source file was added or removed;
+only `src/server.ts` and `src/tradingview.ts` changed. `RELEASE_VERSION`,
+package.json, the two root version fields of package-lock.json and both
+distribution version fields are 0.1.47. Dependency data is not regenerated.
+
+## New 64 MiB campaign
+
+The user approved releasing 0.1.47 by the same procedure as 0.1.46, in a new
+64 MiB campaign. The authoritative configuration is `scripts/package-approval.mjs`:
+
+```
+0 prior + 524,288 preparation + 51,380,224 B maximum + 2,097,152 release stages
++ 6,291,456 fixed margin + 6,815,744 unallocated = 67,108,864 (64 MiB)
+```
+
+* Preparation: `package-2026-11-21-reverify-0.1.47-prep01` (512 KiB, the same
+  six slots as before, including the future approval-b.json slot).
+* Execution B: `package-2026-11-21-reverify-0.1.47` (49 MiB, the same eight
+  buckets as before).
+* The 2 MiB release-stage reservation is held for the later npm login,
+  preflight, publication and readback records. Preparation and B cannot use it.
+* Neither margin is available for automatic use. No refunds after deletion.
+
+The 0.1.46 campaign (84 MiB) closed at 50,957,298 cumulative bytes after its
+publication readback. Its records carry no reservation into the new campaign.
+They are bound as history by SHA-256, and preparation and B check the chain:
+
+* the ready 0.1.46 preparation status,
+* the passed 0.1.46 B result that binds that status and produced the
+  published artifact (846,950 bytes, `241353c2…`),
+* the verify02 readback and its status, which closed the campaign.
+
+This change permits the version/configuration update, synthetic tests and the
+single 0.1.47 preparation with readback only. No B receipt, compiler emission,
+npm pack, commit, publication, DOT or production operation is authorized here.
+
+# 0.1.46 distribution candidate (history)
 
 The approved JS allowlist has 225 paths, fixed by `npm-js-0.1.46.json` and
 SHA-256 `4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61`
@@ -24,7 +64,7 @@ unused. After the explicitly approved continuation below, the campaign instead
 retains 9 MiB for the stopped run and 6 MiB unused. Neither margin is automatically used.
 There are no refunds after deletion. The protected existing 765 bytes are unused.
 
-## Stopped preparation run
+### Stopped preparation run
 
 Run `package-2026-11-18T05-17-30-705Z-ba852d20-3d59-49e4-b0a8-9d9957d16765`
 stopped during the first snapshot write, before npm qualification, compilation
@@ -51,7 +91,7 @@ The user subsequently approved one new run: retain that 9 MiB hold, cap new
 writes/reservations at 49 MiB, and leave 6 MiB unused within the same 64 MiB.
 The runner verifies the stopped record's SHA-256 before accepting this carry.
 
-## Approved continuation: passed
+### Approved continuation: passed
 
 Run `package-2026-11-18T05-28-09-196Z-b7db5ad2-0329-41ef-ae73-42f9ee93afd8`
 passed. The original stopped run was preserved, not restarted. Verification still
@@ -91,7 +131,7 @@ accounting, not RSS, physical disk allocation or a release/publication approval.
 
 Version update, commit, publish, production operations and DOT remain out of scope.
 
-## Review fixes (no new build or pack)
+### Review fixes (no new build or pack)
 
 The preserved continuation result above describes the earlier verifier. It is
 not a qualification run of the following fixes, and has not been rewritten.
@@ -138,7 +178,7 @@ or packaging workflow was rerun. Existing
 STOPs, pending changes and the protected 765 bytes remain in force. No new
 64 MiB reservation, build, pack, version update or release is authorized here.
 
-## Reverification A: approved 84 MiB campaign, B pending
+### Reverification A: approved 84 MiB campaign, B pending
 
 The user approved the 20 MiB addition, 512 KiB preparation reservation and A only.
 The authoritative configuration is `scripts/package-approval.mjs`. Its equation is:
@@ -195,7 +235,7 @@ the preparation root and accompanying chat after readback. This document is
 frozen as an input before that capture; it does not claim a new build/pack/v3 run.
 Version stays 0.1.45. Existing STOPs, pending changes and 765 bytes are retained.
 
-## A evidence and tested-input binding fixes (no preparation rerun)
+### A evidence and tested-input binding fixes (no preparation rerun)
 
 The existing prep01 directory and its five files remain historical, unchanged
 records. Their status-v1 result is not upgraded by these source fixes. Its old
@@ -231,7 +271,7 @@ approved new preparation ID and cumulative accounting that preserves prep01.
 Preparation rerun, B consumption, build, pack, version update, commit, publish
 and DOT remain prohibited in this change.
 
-## Expanded A2: 0.1.46, prep02, B still pending
+### Expanded A2: 0.1.46, prep02, B still pending
 
 The user approved folding the version update into A2 before prep02. The current
 candidate version is 0.1.46 in package.json, the two root version fields of

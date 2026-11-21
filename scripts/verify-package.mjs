@@ -7,7 +7,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {WriteBudget,captureVerifierInputs,assertVerifierInputsUnchanged,
   installNoWriteGuard,validateManifest,checkTsDiagnostics,
-  inspectArtifact,sha,invariant,MiB,RELEASE_VERSION} from './package-verifier-core.mjs';
+  inspectArtifact,sha,invariant,MiB,RELEASE_VERSION,DISTRIBUTION_MANIFEST} from './package-verifier-core.mjs';
 import {REVERIFY_CAMPAIGN,assertCampaign,verifyPriorRecords,loadExecutionAuthorization,claimExecutionB,
   captureApprovedInputs,assertExecutionInputs,assertApprovedInputBytes,assertLoadedInputs} from './package-approval.mjs';
 
@@ -23,10 +23,11 @@ const verifierInputs=captureVerifierInputs(p=>read(path.join(repo,p)));
 // A permits preparation only. A separate, hash-bound B receipt is mandatory.
 assertCampaign();const priorRecords=verifyPriorRecords(repo);
 const authorization=loadExecutionAuthorization(repo);
-const {run:id,runLimit:newRunCeiling,fixedMargin:unusedMargin,unallocated:additionalUnallocated,campaignCap:campaignCeiling}=REVERIFY_CAMPAIGN;
+const {run:id,runLimit:newRunCeiling,releaseStagesReserved,fixedMargin:unusedMargin,unallocated:additionalUnallocated,campaignCap:campaignCeiling}=REVERIFY_CAMPAIGN;
 const carriedHold=REVERIFY_CAMPAIGN.priorReserved+REVERIFY_CAMPAIGN.prepReserved;
 const budget=new WriteBudget();budget.reserve('final',64*1024);
-invariant(Object.values(budget.limits).reduce((a,b)=>a+b,0)===newRunCeiling&&carriedHold+newRunCeiling+unusedMargin+additionalUnallocated===campaignCeiling,'campaign_budget');
+invariant(Object.values(budget.limits).reduce((a,b)=>a+b,0)===newRunCeiling&&
+  carriedHold+newRunCeiling+releaseStagesReserved+unusedMargin+additionalUnallocated===campaignCeiling,'campaign_budget');
 // Deliberately outside try/finally: a consumed approval must not create a failure
 // report or any other new output under a fresh ID. No pack/build occurs here.
 const writer=claimExecutionB(path.join(repo,'.release-work'),budget,authorization),root=writer.root;
@@ -36,7 +37,7 @@ const report={schema:'npm-package-verification-v1',run:id,status:'running',versi
   approval_b:authorization,
   reservation:{run:id,approved_campaign_bytes:campaignCeiling,prior_records:priorRecords,prior_reserved:REVERIFY_CAMPAIGN.priorReserved,
     preparation:REVERIFY_CAMPAIGN.preparation,preparation_reserved:REVERIFY_CAMPAIGN.prepReserved,carried_hold:carriedHold,
-    new_run_ceiling:newRunCeiling,basis:'cumulative new file-content writes; no refunds',unused_margin:unusedMargin,
+    new_run_ceiling:newRunCeiling,release_stages_reserved:releaseStagesReserved,basis:'cumulative new file-content writes; no refunds',unused_margin:unusedMargin,
     additional_unallocated:additionalUnallocated,protected_765_bytes_used:0},
   checks:{},tools:{node:process.versions.node,v8:process.versions.v8,node_sha256:sha(read(process.execPath,256*MiB))}};
 const json=x=>Buffer.from(JSON.stringify(x,null,2)+'\n');
@@ -44,7 +45,7 @@ const note=(event,details={})=>{const p='report/events/'+String(writer.files.len
 try {
   writer.write('logs','report/reservation.json',json(report.reservation));
   const protectedBefore=digestTree(['src','test','docs','build']);
-  const pkg=JSON.parse(read(path.join(repo,'package.json'))),manifest=JSON.parse(verifierInputs.contents.get('packaging/npm-js-0.1.46.json'));
+  const pkg=JSON.parse(read(path.join(repo,'package.json'))),manifest=JSON.parse(verifierInputs.contents.get(DISTRIBUTION_MANIFEST));
   const allowed=validateManifest(manifest,pkg,JSON.parse(read(path.join(repo,'package-lock.json'))));
   const sourceFiles=walk(path.join(repo,'src')).filter(p=>p.endsWith('.ts')&&!p.endsWith('.d.ts')).sort();
   const sourcePaths=sourceFiles.map(p=>'build/'+path.relative(path.join(repo,'src'),p).replace(/\.ts$/,'.js')).sort();
@@ -203,7 +204,7 @@ try {
     }
   }catch(e){report.status='failed';report.reason=e.message;report.phase='recording';}
   report.quota={limits:budget.limits,charged:{...budget.used},cumulative_reserved:budget.total,carried_hold:carriedHold,
-    campaign_reserved_upper:carriedHold+budget.total,new_run_ceiling:newRunCeiling,unused_margin:unusedMargin,
+    campaign_reserved_upper:carriedHold+budget.total,new_run_ceiling:newRunCeiling,release_stages_reserved:releaseStagesReserved,unused_margin:unusedMargin,
     additional_unallocated:additionalUnallocated,protected_765_bytes_used:0};
   const summary=json(report);
   writer.write('final','report/result.json',summary,{reserved:true});

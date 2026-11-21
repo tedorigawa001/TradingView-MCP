@@ -1,30 +1,36 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {WriteBudget,QuotaWriter,LIMITS,VERIFIER_INPUT_PATHS,RELEASE_VERSION,validateManifest,MiB,sha,invariant} from './package-verifier-core.mjs';
+import {WriteBudget,QuotaWriter,LIMITS,VERIFIER_INPUT_PATHS,RELEASE_VERSION,DISTRIBUTION_MANIFEST,validateManifest,MiB,sha,invariant} from './package-verifier-core.mjs';
 
 const KiB=1024;
+// 0.1.47 runs in a new 64 MiB campaign, approved on 2026-11-21. Preparation and
+// the B run keep the 0.1.46 limits; releaseStagesReserved is held for the later
+// npm login, preflight, publication and readback records and is not usable here.
+// The 0.1.46 campaign (84 MiB) closed at 50,957,298 cumulative bytes. Its
+// records are bound below as hash-checked history and carry no reservation.
 export const REVERIFY_CAMPAIGN=Object.freeze({
-  schema:'package-reverify-campaign-v1',
+  schema:'package-reverify-campaign-v2',
   releaseVersion:RELEASE_VERSION,
-  preparation:'package-2026-11-18-reverify-r02-prep02',run:'package-2026-11-18-reverify-r02',
-  priorReserved:29206331,prepReserved:512*KiB,runLimit:49*MiB,
-  fixedMargin:6*MiB,unallocated:678085,campaignCap:84*MiB,protected765Used:0
+  preparation:'package-2026-11-21-reverify-0.1.47-prep01',run:'package-2026-11-21-reverify-0.1.47',
+  priorReserved:0,prepReserved:512*KiB,runLimit:49*MiB,releaseStagesReserved:2*MiB,
+  fixedMargin:6*MiB,unallocated:6815744,campaignCap:64*MiB,protected765Used:0
 });
+// The finished 0.1.46 release: a ready preparation, the passed B verification
+// that produced the published artifact, and the readback check that closed it.
+export const PREVIOUS_RELEASE=Object.freeze({version:'0.1.46',preparation:'package-2026-11-18-reverify-r02-prep02',
+  run:'package-2026-11-18-reverify-r02',artifactBytes:846950,
+  artifactSha256:'241353c28201dfaffee179763c8500036aa2f7f821d9cfdf0090c6cb2ab573aa',
+  campaignCap:84*MiB,campaignReservedAfterB:49081330,closedCumulative:50957298});
 export const PRIOR_RECORDS=Object.freeze([
-  Object.freeze({path:'package-2026-11-18T05-17-30-705Z-ba852d20-3d59-49e4-b0a8-9d9957d16765/report/stopped.json',
-    sha256:'696e5c80e007e7d0292da6d1ae0e326857fb287cdef0f7dc4586d9e09a36ce5f',reserved:9*MiB,role:'legacy_stop'}),
-  Object.freeze({path:'package-2026-11-18T05-28-09-196Z-b7db5ad2-0329-41ef-ae73-42f9ee93afd8/report/result.json',
-    sha256:'c1e6ec3d8516553c569876c00a2d7cfa12b58a973916552571c99cbdc2e10f75',reserved:19244859,role:'legacy_success'}),
-  Object.freeze({path:'package-2026-11-18-reverify-r02-prep01/status.json',
-    sha256:'68b9d49d2db77bdba4a6261327811300c142b6654013837051b6bc15954cbf0a',reserved:512*KiB,role:'preparation_accounting_only'})
-]);
-export const PRIOR_PREPARATION_FILES=Object.freeze([
-  Object.freeze({path:'approval-a.json',bytes:923,sha256:'2caac05b3c0f6c8ba1fd959cff05b1deb038dfea714919855e6942c71a78b929'}),
-  Object.freeze({path:'input-manifest.json',bytes:414044,sha256:'8695f7997822fb72e91fd3aef1869f727fe1e6920bb5557fbbed801adb66df74'}),
-  Object.freeze({path:'test-results.json',bytes:3807,sha256:'d32009b798679326723f8911f105983a74f6bb68cdb38a90339173ac577e63b0'}),
-  Object.freeze({path:'readback.json',bytes:884,sha256:'e2abaa7c6aca5085752709af0bfd94c27ecfa7dd39defb35b62deb0022540199'}),
-  Object.freeze({path:'status.json',bytes:2579,sha256:'68b9d49d2db77bdba4a6261327811300c142b6654013837051b6bc15954cbf0a'})
+  Object.freeze({path:'package-2026-11-18-reverify-r02-prep02/status.json',
+    sha256:'d12feb8160a92a2ae7821a332992eba654b6bf167a74d70b017e01baf59a94c1',reserved:0,role:'previous_release_preparation'}),
+  Object.freeze({path:'package-2026-11-18-reverify-r02/report/result.json',
+    sha256:'9007f4826b10467c8ce8cbf3f6900c6dadc119dcd11a4bf9587ee0b9d66c5fdd',reserved:0,role:'previous_release_verification'}),
+  Object.freeze({path:'package-2026-11-20-publish-0.1.46-verify02/verification-readback.json',
+    sha256:'25a323b5e4ef81b17b76a082dfa143abea0120967760f79c6ec540ba60bfa45a',reserved:0,role:'previous_release_publication_readback'}),
+  Object.freeze({path:'package-2026-11-20-publish-0.1.46-verify02/verification-status.json',
+    sha256:'8431c1ad6ab0ff360ec022b2b8982fdd6940577be43a284561dfd4b9c3ad3355',reserved:0,role:'previous_release_publication'})
 ]);
 export const PREP_LIMITS=Object.freeze({inputs:448*KiB,approval_a:8*KiB,approval_b:8*KiB,
   tests:16*KiB,readback:16*KiB,final:16*KiB});
@@ -32,10 +38,10 @@ export const campaignHash=()=>sha(JSON.stringify(REVERIFY_CAMPAIGN));
 export function assertCampaign(c=REVERIFY_CAMPAIGN){
   invariant(JSON.stringify(c)===JSON.stringify(REVERIFY_CAMPAIGN),'campaign_changed');
   invariant(c.releaseVersion===RELEASE_VERSION,'campaign_version');
-  invariant(c.priorReserved===PRIOR_RECORDS.reduce((n,r)=>n+r.reserved,0),'prior_total');
+  invariant(c.priorReserved===0&&PRIOR_RECORDS.every(r=>r.reserved===0),'prior_total');
   invariant(c.prepReserved===Object.values(PREP_LIMITS).reduce((a,b)=>a+b,0),'prep_total');
   invariant(c.runLimit===Object.values(LIMITS).reduce((a,b)=>a+b,0),'run_total');
-  invariant(c.priorReserved+c.prepReserved+c.runLimit+c.fixedMargin+c.unallocated===c.campaignCap,'campaign_total');
+  invariant(c.priorReserved+c.prepReserved+c.runLimit+c.releaseStagesReserved+c.fixedMargin+c.unallocated===c.campaignCap,'campaign_total');
   invariant(c.protected765Used===0,'protected_capacity');return c;
 }
 const sameStat=(a,b)=>['dev','ino','size','mtimeMs','ctimeMs'].every(k=>a[k]===b[k]);
@@ -77,7 +83,7 @@ const workspaceInput=p=>/\.(?:[cm]?ts|json)$/.test(p)||
   p.startsWith('typescript/lib/')&&p.endsWith('.js')||p.startsWith('zod/')&&/\.[cm]?js$/.test(p);
 export function captureApprovedInputs(repo){
   repo=path.resolve(repo);
-  validateManifest(parseRecord(readRegular(path.join(repo,'packaging/npm-js-0.1.46.json')),32*MiB),
+  validateManifest(parseRecord(readRegular(path.join(repo,DISTRIBUTION_MANIFEST)),32*MiB),
     parseRecord(readRegular(path.join(repo,'package.json')),32*MiB),
     parseRecord(readRegular(path.join(repo,'package-lock.json')),32*MiB));
   const source=filesUnder(path.join(repo,'src')).map(p=>'src/'+p);
@@ -100,15 +106,25 @@ export function captureApprovedInputs(repo){
 export function assertApprovedInputsEqual(expected,current){
   invariant(JSON.stringify(expected)===JSON.stringify(current),'approved_inputs_changed');
 }
-export function validateHistoricalAccounting(previous,prep){
-  const legacyReserved=PRIOR_RECORDS[0].reserved+PRIOR_RECORDS[1].reserved;
-  invariant(previous.status==='passed'&&previous.quota.cumulative_reserved===PRIOR_RECORDS[1].reserved&&
-    previous.quota.carried_hold===PRIOR_RECORDS[0].reserved&&previous.quota.campaign_reserved_upper===legacyReserved,'prior_accounting');
-  // prep01 is retained as a historical charge, never as B's ready evidence.
-  invariant(prep.schema==='package-preparation-status-v1'&&prep.preparation==='package-2026-11-18-reverify-r02-prep01'&&
-    prep.run===REVERIFY_CAMPAIGN.run&&prep.capacity.prep_reserved===PRIOR_RECORDS[2].reserved&&
-    prep.capacity.cumulative_reserved_before_b===REVERIFY_CAMPAIGN.priorReserved&&prep.capacity.protected_765_bytes_used===0&&
-    prep.campaign.priorReserved===legacyReserved&&prep.campaign.prepReserved===PRIOR_RECORDS[2].reserved,'prior_preparation_accounting');
+// The previous release is history: bound by hash, checked for the chain that
+// links its preparation, B verification and publication readback, and never
+// charged to this campaign. `values` maps each PRIOR_RECORDS path to its bytes.
+export function validatePreviousRelease(values){
+  const [prepRecord,resultRecord,readbackRecord,statusRecord]=PRIOR_RECORDS,P=PREVIOUS_RELEASE;
+  const parse=r=>JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(values.get(r.path)));
+  const prep=parse(prepRecord),result=parse(resultRecord),readback=parse(readbackRecord),status=parse(statusRecord);
+  invariant(prep.schema==='package-preparation-status-v2'&&prep.status==='ready_for_review'&&prep.version===P.version&&
+    prep.preparation===P.preparation&&prep.run===P.run,'previous_preparation');
+  invariant(result.status==='passed'&&result.phase==='complete'&&result.version===P.version&&result.run===P.run&&
+    result.approval_b?.preparation_status_sha256===prepRecord.sha256&&
+    result.approval_b.input_manifest_sha256===prep.input_manifest_sha256&&
+    result.artifact?.bytes===P.artifactBytes&&result.artifact.sha256===P.artifactSha256&&
+    result.quota?.campaign_reserved_upper===P.campaignReservedAfterB,'previous_verification');
+  invariant(readback.verified===true&&readback.status==='verified'&&Array.isArray(readback.rows)&&
+    readback.rows.some(r=>r.file==='verification-status.json'&&r.sha256===statusRecord.sha256),'previous_publication_readback');
+  const verdicts=Object.values(status.verdicts??{});
+  invariant(status.status==='verified'&&status.reason===null&&status.publication===false&&
+    status.cumulative_reserved===P.closedCumulative&&verdicts.length===4&&verdicts.every(v=>v==='confirmed'),'previous_publication');
 }
 export function verifyPriorRecords(repo,read=readRegular){
   const values=new Map();
@@ -118,13 +134,7 @@ export function verifyPriorRecords(repo,read=readRegular){
     values.set(r.path,bytes);
     return {...r,bytes:bytes.length};
   });
-  validateHistoricalAccounting(JSON.parse(values.get(PRIOR_RECORDS[1].path)),JSON.parse(values.get(PRIOR_RECORDS[2].path)));
-  const oldRoot=path.join(repo,'.release-work',path.dirname(PRIOR_RECORDS[2].path));
-  records[2].preserved_files=PRIOR_PREPARATION_FILES.map(f=>{
-    const relative=path.join(path.dirname(PRIOR_RECORDS[2].path),f.path);
-    const b=values.get(relative)??read(path.join(oldRoot,f.path),448*KiB);
-    invariant(b.length===f.bytes&&sha(b)===f.sha256,'prior_preparation_changed');return {...f};
-  });
+  validatePreviousRelease(values);
   return records;
 }
 function parseRecord(bytes,max){

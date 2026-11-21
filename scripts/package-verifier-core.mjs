@@ -5,7 +5,9 @@ import { createInflateRaw, crc32 } from 'node:zlib';
 import path from 'node:path';
 
 export const MiB = 1048576;
-export const RELEASE_VERSION = '0.1.46';
+export const RELEASE_VERSION = '0.1.47';
+// The fixed distribution allowlist of the current candidate; older ones stay as history.
+export const DISTRIBUTION_MANIFEST = 'packaging/npm-js-' + RELEASE_VERSION + '.json';
 export const PATH_HASH = '4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61';
 export const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 export const fail = reason => { throw new Error(reason); };
@@ -23,7 +25,7 @@ export const APPROVED_CONTINUATION = Object.freeze({
 export const VERIFIER_INPUT_PATHS = Object.freeze([
   'scripts/verify-package.mjs','scripts/package-verifier-core.mjs',
   'scripts/package-approval.mjs','scripts/prepare-package-reverify.mjs',
-  'test/unit/packageDistribution.test.mjs','test/unit/packageApproval.test.mjs','packaging/npm-js-0.1.46.json'
+  'test/unit/packageDistribution.test.mjs','test/unit/packageApproval.test.mjs',DISTRIBUTION_MANIFEST
 ].sort());
 
 export function captureVerifierInputs(read) {

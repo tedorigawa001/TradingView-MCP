@@ -31,10 +31,10 @@ async function child(args){
 }
 try{
   guard=installNoWriteGuard();
-  const approvalABytes=json({schema:'package-approval-v1',phase:'A',approval_kind:'A2',decision:'approved',
+  const approvalABytes=json({schema:'package-approval-v1',phase:'A',approval_kind:'A',decision:'approved',
     preparation:C.preparation,run:C.run,campaign_sha256:campaignHash(),campaign:C,
-    source:'explicit user approval in this chat',approval_b_granted:false,
-    instruction:'0.1.46への版更新を含む拡張A2を承認。追加未使用額から512 KiBを再配分しprep02の準備・読戻しまで。承認B消費・ビルド・pack・コミット・公開・DOT起動は禁止。'});
+    source:'explicit user approval in this chat (2026-11-21)',approval_b_granted:false,
+    instruction:'0.1.47を0.1.46と同じ手順でリリースし、新しい64 MiBキャンペーンを使うことを承認。0.1.47への版更新とprep01の準備・読戻しまで。承認B消費・ビルド・pack・コミット・公開・DOT起動は禁止。'});
   writer.write('approval_a','approval-a.json',approvalABytes);report.approval_a_sha256=sha(approvalABytes);
   // Freeze the exact candidate BEFORE any test subprocess. Save these same
   // bytes, then bind both post-test and pre-readback checks to this candidate.
@@ -89,6 +89,7 @@ finally{
       note:'Known bytes exclude final status; the whole 512 KiB stays reserved, including the separate future B slot.',
       cumulative_reserved_before_b:C.priorReserved+C.prepReserved,
       maximum_cumulative_with_b:C.priorReserved+C.prepReserved+C.runLimit,
+      release_stages_reserved:C.releaseStagesReserved,
       fixed_margin:C.fixedMargin,additional_unallocated:C.unallocated,campaign_cap:C.campaignCap,protected_765_bytes_used:0};
     const bytes=json(report);writer.write('final','status.json',bytes,{reserved:true});
     const saved=readRegular(path.join(root,'status.json'),PREP_LIMITS.final);invariant(saved.equals(bytes),'final_status_readback');
