@@ -71,6 +71,9 @@ import { buildAnalysisPerformance } from "./analysisPerformance.js";
 import {
   compareStrategyConditions,
   compareStrategyMetrics,
+  compareStrategyInputOverrides,
+  diagnoseStrategyTradeOverlap,
+  strategyOverlapSchema,
   summarizeStrategyEvidence,
 } from "./strategyExperiment.js";
 import { resolveStrategyResearchJournalPath, resolveMeasurementResearchJournalPath, StrategyResearchJournalStore, type EventStudyRecord } from "./strategyResearchJournal.js";
@@ -520,6 +523,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
     variant: ExperimentVariant,
     expectedVersion: string,
     expectedChart?: { symbol: string; timeframe: string },
+    strict?: { chartIndex: number; from: string; to: string; symbol: string; resolution: string },
   ): Promise<{
     evidence: { report: StrategyReport; ledger: StrategyTradeLedger } | null;
     error: string | null;
@@ -534,11 +538,15 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         pineId: variant.pineId,
         tradesLimit: 1,
         keepOnChart: true,
+        ...(strict ? {
+          pineVersion: expectedVersion, chartIndex: strict.chartIndex,
+          expectedChart: { symbol: strict.symbol, resolution: strict.resolution },
+        } : {}),
       });
       studyId = started.studyId;
       if (!studyId) throw new Error("temporary strategy did not return its study id");
       if (variant.inputs.length > 0) {
-        const applied = await tv.setIndicatorInput(studyId, variant.inputs);
+        const applied = await tv.setIndicatorInput(studyId, variant.inputs, strict ? { chartIndex: strict.chartIndex } : undefined);
         if (applied.settled === false) {
           throw new Error(applied.warning ?? "strategy input recalculation did not settle");
         }
@@ -549,8 +557,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           }
         }
       }
-      const report = await tv.getStrategyReport({ tradesLimit: 1 });
-      const first = await tv.getStrategyTradeLedger({ offset: 0, limit: 500 });
+      const binding = strict ? { chartIndex: strict.chartIndex, expectedStudyId: studyId } : {};
+      const report = await tv.getStrategyReport({ tradesLimit: 1, ...binding });
+      const first = await tv.getStrategyTradeLedger({ offset: 0, limit: 500, ...binding });
       const trades = [...first.trades];
       let nextOffset = first.nextOffset;
       while (nextOffset !== null) {
@@ -558,7 +567,13 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           offset: nextOffset,
           limit: 500,
           expectedLedgerId: first.ledgerId,
+          ...binding,
         });
+        if (strict && (page.offset !== nextOffset || page.trades.length === 0 ||
+            (page.nextOffset !== null && (page.nextOffset !== nextOffset + page.trades.length ||
+              page.nextOffset >= first.availableTrades)))) {
+          throw new Error("strategy trade ledger pagination did not advance");
+        }
         trades.push(...page.trades);
         nextOffset = page.nextOffset;
       }
@@ -596,13 +611,36 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           `strategy ledger timeframe changed: expected ${expectedChart.timeframe}, found ${ledger.timeframe}`,
         );
       }
+      if (strict) {
+        const expectedRange = { from: strict.from, to: strict.to };
+        if (JSON.stringify(report.dateRange) !== JSON.stringify(expectedRange) ||
+            JSON.stringify(ledger.dateRange) !== JSON.stringify(expectedRange)) {
+          throw new Error("effective report period does not match the fixed period");
+        }
+        if (ledger.studyId !== studyId || ledger.countMatchesSummary !== true ||
+            trades.length !== ledger.availableTrades || ledger.qualityIssues.length > 0 ||
+            report.totalTrades !== ledger.totalTrades || report.currency !== ledger.currency ||
+            report.initialCapital !== ledger.initialCapital ||
+            Object.entries(ledger.summary).some(([key, value]) => !Object.is(report.summary[key], value))) {
+          throw new Error("strategy report or complete ledger identity could not be verified");
+        }
+        if (new Set(ledger.inputs.map(input => input.id)).size !== ledger.inputs.length ||
+            variant.inputs.some(requested =>
+              !ledger.inputs.some(input => input.id === requested.id && Object.is(input.value, requested.value)))) {
+          throw new Error("fixed-period ledger inputs do not match the applied inputs");
+        }
+        await tv.getStrategyTradeLedger({ limit: 1, expectedLedgerId: ledger.ledgerId, ...binding });
+        if (JSON.stringify(await tv.getStrategyReport({ tradesLimit: 1, ...binding })) !== JSON.stringify(report)) {
+          throw new Error("strategy report changed during ledger collection");
+        }
+      }
       evidence = { report, ledger };
     } catch (err) {
       error = redactSecrets(err instanceof Error ? err.message : String(err));
     } finally {
       if (studyId) {
         try {
-          await tv.removePineFromChart(variant.pineId, studyId);
+          await tv.removePineFromChart(variant.pineId, studyId, strict?.chartIndex);
         } catch (err) {
           cleanupError = redactSecrets(err instanceof Error ? err.message : String(err));
         }
@@ -702,13 +740,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "instant. expected_symbol and expected_timeframe are checked immediately before " +
         "the write. confirm=true is required. Replay Trading orders and autoplay are never used.",
       inputSchema: {
+        chart_index: z.number().int().nonnegative().optional(),
         start_at: z.string().datetime({ offset: true }),
         expected_symbol: SYMBOL_SCHEMA,
         expected_timeframe: z.string().regex(/^[A-Za-z0-9]{1,8}$/),
         confirm: z.boolean().optional().describe("Must be true to enter Bar Replay. Default: false"),
       },
     },
-    async ({ start_at, expected_symbol, expected_timeframe, confirm }) =>
+    async ({ start_at, expected_symbol, expected_timeframe, chart_index, confirm }) =>
       chartOperations.run(async () => {
         try {
           const startMs = Date.parse(start_at);
@@ -719,6 +758,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             ? undefined
             : context.charts.find((chart) => chart.index === activeIndex);
           if (!activeChart) throw new Error("no active chart is available for Bar Replay");
+          if (chart_index !== undefined && activeChart.index !== chart_index) {
+            throw new Error("requested Replay chart is not active");
+          }
           if (activeChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
             throw new Error(`active chart symbol ${activeChart.symbol} does not match expected_symbol ${expected_symbol}`);
           }
@@ -749,6 +791,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               startAt: start_at,
               expectedSymbol: expected_symbol,
               expectedResolution: expected_timeframe,
+              chartIndex: activeChart.index,
             }),
           });
         } catch (err) {
@@ -5563,6 +5606,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "fields are fractions (0.33 = 33%). Fails if no strategy is on the chart — use " +
         "run_backtest to test a saved strategy without leaving it on the chart.",
       inputSchema: {
+        chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
+        expected_study_id: z.string().regex(/^[\w.-]{1,128}$/).optional()
+          .describe("Require the active Strategy Tester report to belong to this study"),
         trades_limit: z
           .number()
           .int()
@@ -5572,10 +5618,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Max most-recent trades to include. Default: 20"),
       },
     },
-    async ({ trades_limit }) =>
+    async ({ trades_limit, chart_index, expected_study_id }) =>
       chartOperations.run(async () => {
         try {
-          return jsonResult(await tv.getStrategyReport({ tradesLimit: trades_limit ?? 20 }));
+          return jsonResult(await tv.getStrategyReport({
+            tradesLimit: trades_limit ?? 20,
+            ...(chart_index === undefined ? {} : { chartIndex: chart_index }),
+            ...(expected_study_id === undefined ? {} : { expectedStudyId: expected_study_id }),
+          }));
         } catch (err) {
           return errorResult(err);
         }
@@ -6164,6 +6214,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "expected_ledger_id and expected_report_state_sha256 confirms the same report and " +
         "returns only the Pine identity, which get_pine_source can then hash once.",
       inputSchema: {
+        chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
+        expected_study_id: z.string().regex(/^[\w.-]{1,128}$/).optional(),
         offset: z
           .number()
           .int()
@@ -6193,7 +6245,12 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             "no pagination or identity arguments"),
       },
     },
-    async ({ offset, limit, expected_ledger_id, identity_study_id, expected_report_state_sha256, capture_report_state }) => {
+    async ({ offset, limit, expected_ledger_id, identity_study_id, expected_report_state_sha256, capture_report_state,
+      chart_index, expected_study_id }) => {
+      const binding = {
+        ...(chart_index === undefined ? {} : { chartIndex: chart_index }),
+        ...(expected_study_id === undefined ? {} : { expectedStudyId: expected_study_id }),
+      };
       if (capture_report_state !== undefined) {
         if (identity_study_id !== undefined || expected_report_state_sha256 !== undefined ||
             offset !== undefined || limit !== undefined) {
@@ -6204,6 +6261,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           try {
             const capture = await tv.getStrategyTradeLedger({
               captureReportState: true,
+              ...binding,
               ...(expected_ledger_id === undefined ? {} : { expectedLedgerId: expected_ledger_id }),
             });
             const result = jsonResult(capture, true);
@@ -6232,6 +6290,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             const evidence = await tv.getStrategyTradeLedger({
               expectedLedgerId: expected_ledger_id,
               identityStudyId: identity_study_id,
+                ...binding,
               expectedReportStateSha256: expected_report_state_sha256,
             });
             const result = jsonResult(evidence, true);
@@ -6249,7 +6308,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       }
       return chartOperations.run(async () => {
         try {
-          return jsonResult(await tv.getStrategyTradeLedger({
+          return jsonResult(await tv.getStrategyTradeLedger({ ...binding,
             offset: offset ?? 0,
             limit: limit ?? 200,
             expectedLedgerId: expected_ledger_id,
@@ -6258,6 +6317,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           return errorResult(err);
         }
       });
+    },
+  );
+
+  server.registerTool(
+    "diagnose_strategy_trade_overlap",
+    {
+      description: "Compare two supplied complete Strategy Tester ledgers for the same Pine version and inputs. " +
+        "Reports the first observed trade difference and boundary state supported by those ledgers. " +
+        "Does not read or change charts or produce a combined backtest.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: strategyOverlapSchema.shape,
+    },
+    async (input) => {
+      try { return jsonResult(diagnoseStrategyTradeOverlap(input)); }
+      catch (err) { return errorResult(err); }
     },
   );
 
@@ -6271,10 +6345,21 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "removed after collection. Returns metric deltas without a synthetic score. " +
         "Without confirm=true it only previews the experiment. It never places orders.",
       inputSchema: {
+        chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
+        fixed_period: z.object({
+          from: z.string().datetime(),
+          to: z.string().datetime(),
+          mode: z.enum(["chart", "deep"]).default("chart"),
+        }).optional().describe("Exact UTC report bar timestamps, including the last bar timestamp"),
+        allowed_input_differences: z.array(z.string().regex(/^[\w$.-]{1,64}$/)).max(20).optional(),
+        expected_experiment_id: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional()
+          .describe("Required on confirmation of a fixed-period preview"),
         expected_symbol: SYMBOL_SCHEMA.describe("Exact active-chart symbol, e.g. OANDA:USDJPY"),
         expected_timeframe: z.string().min(1).max(16).describe("Exact active-chart timeframe, e.g. 240 or 1D"),
         baseline: z.object({
           pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          pine_version: z.string().regex(/^[0-9]{1,6}(\.[0-9]{1,3})?$/).optional(),
+          source_sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
           inputs: z.array(z.object({
             id: z.string().regex(/^[\w$]{1,64}$/),
             value: z.union([z.number(), z.string().max(256), z.boolean()]),
@@ -6282,6 +6367,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }),
         candidate: z.object({
           pine_id: z.string().regex(/^USER;[\w]{8,64}$/),
+          pine_version: z.string().regex(/^[0-9]{1,6}(\.[0-9]{1,3})?$/).optional(),
+          source_sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
           inputs: z.array(z.object({
             id: z.string().regex(/^[\w$]{1,64}$/),
             value: z.union([z.number(), z.string().max(256), z.boolean()]),
@@ -6293,12 +6380,38 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Must be true to temporarily add strategies and run the experiment. Default: false"),
       },
     },
-    async ({ expected_symbol, expected_timeframe, baseline, candidate, minimum_trades, confirm }) =>
+    async ({ expected_symbol, expected_timeframe, baseline, candidate, minimum_trades, confirm,
+      chart_index, fixed_period, allowed_input_differences, expected_experiment_id }) =>
       chartOperations.run(async () => {
         try {
           const minimumTrades = minimum_trades ?? 30;
           const initialContext = await tv.getChartContext();
           const initialChart = chartFingerprint(initialContext);
+          if (chart_index !== undefined && initialChart.index !== chart_index) {
+            throw new Error("requested experiment chart is not active");
+          }
+          if (!fixed_period && (allowed_input_differences !== undefined ||
+              baseline.pine_version || baseline.source_sha256 || candidate.pine_version || candidate.source_sha256)) {
+            throw new Error("fixed versions, source hashes and input differences require fixed_period");
+          }
+          const fixed = fixed_period && {
+            from: new Date(fixed_period.from).toISOString(),
+            to: new Date(fixed_period.to).toISOString(),
+            mode: fixed_period.mode,
+            chartIndex: initialChart.index,
+            symbol: initialChart.symbol,
+            resolution: initialChart.timeframe,
+          };
+          if (fixed && (fixed.from >= fixed.to || !baseline.pine_version || !baseline.source_sha256 ||
+              !candidate.pine_version || !candidate.source_sha256)) {
+            throw new Error("fixed_period requires an increasing range and a numbered Pine version and source hash for each variant");
+          }
+          const allowed = [...(allowed_input_differences ?? [])].sort();
+          if (new Set(allowed).size !== allowed.length) throw new Error("duplicate allowed input difference");
+          if (fixed?.mode === "deep") {
+            return jsonResult({ status: "blocked", reason: "deep_backtesting_not_available_via_mcp",
+              fixedPeriod: fixed, chartState: initialChart });
+          }
           if (initialChart.symbol.toUpperCase() !== expected_symbol.toUpperCase()) {
             throw new Error(`active chart symbol changed: expected ${expected_symbol}, found ${initialChart.symbol}`);
           }
@@ -6312,12 +6425,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             const script = scripts.find((item) => item.pineId === variant.pine_id);
             if (!script) throw new Error(`strategy not found: ${variant.pine_id}`);
             if (script.kind !== "strategy") throw new Error(`${variant.pine_id} is not a saved strategy`);
-            if (typeof script.version !== "string" || script.version.length === 0) {
+            const version = variant.pine_version ?? script.version;
+            if (typeof version !== "string" || version.length === 0) {
               throw new Error(`saved strategy version is unavailable: ${variant.pine_id}`);
             }
             return {
               pineId: variant.pine_id,
-              pineVersion: script.version,
+              pineVersion: version,
+              ...(variant.source_sha256 ? { sourceSha256: variant.source_sha256 } : {}),
               name: script.name,
               inputs: [...(variant.inputs ?? [])].sort((left, right) => left.id.localeCompare(right.id)),
             };
@@ -6331,6 +6446,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             minimumTrades,
             baseline: resolvedBaseline,
             candidate: resolvedCandidate,
+            ...(fixed ? { fixedPeriod: fixed, allowedInputDifferences: allowed } : {}),
           };
           const experimentId = "sha256:" + createHash("sha256")
             .update(JSON.stringify(definition), "utf8")
@@ -6352,6 +6468,34 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             ],
             chartState: initialChart,
           };
+          if ((fixed && confirm === true && expected_experiment_id !== experimentId) ||
+              (expected_experiment_id !== undefined && expected_experiment_id !== experimentId)) {
+            throw new Error("experiment confirmation does not match the current preview");
+          }
+          if (fixed) {
+            const observed = await tv.getStrategyReport({ tradesLimit: 1, chartIndex: fixed.chartIndex });
+            if (observed.dateRange?.from !== fixed.from || observed.dateRange?.to !== fixed.to) {
+              return jsonResult({ status: "blocked", reason: "fixed_period_not_loaded",
+                observedPeriod: observed.dateRange, ...preview });
+            }
+            const checked = new Map<string, string>();
+            for (const variant of [resolvedBaseline, resolvedCandidate]) {
+              const key = `${variant.pineId}/${variant.pineVersion}`;
+              let digest = checked.get(key);
+              if (!digest) {
+                const evidence = await tv.getFixedPineSourceHashes(variant.pineId, variant.pineVersion);
+                if (evidence.pineId !== variant.pineId || evidence.version !== variant.pineVersion) {
+                  throw new Error("fixed Pine source response identity does not match");
+                }
+                digest = evidence.sourceSha256;
+                checked.set(key, digest);
+              }
+              if (digest !== variant.sourceSha256) throw new Error("fixed Pine source hash does not match");
+            }
+            if (JSON.stringify(chartFingerprint(await tv.getChartContext())) !== JSON.stringify(initialChart)) {
+              throw new Error("chart state changed during fixed-period preflight");
+            }
+          }
           if (confirm !== true) return jsonResult({ dryRun: true, status: "preview", ...preview });
 
           const expectedChart = { symbol: initialChart.symbol, timeframe: initialChart.timeframe };
@@ -6359,6 +6503,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
             resolvedBaseline,
             resolvedBaseline.pineVersion,
             expectedChart,
+            fixed,
           );
           let candidateRun: Awaited<ReturnType<typeof collectExperimentVariant>> | null = null;
           if (baselineRun.evidence && !baselineRun.cleanupError) {
@@ -6368,6 +6513,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
                 resolvedCandidate,
                 resolvedCandidate.pineVersion,
                 expectedChart,
+                fixed,
               );
             } else {
               candidateRun = {
@@ -6397,21 +6543,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           const conditions = baselineRun.evidence && candidateRun?.evidence
             ? compareStrategyConditions(baselineRun.evidence.ledger, candidateRun.evidence.ledger)
             : null;
-          const comparison = baselineSummary && candidateSummary
+          const inputDifferences = fixed && baselineRun.evidence && candidateRun?.evidence
+            ? compareStrategyInputOverrides(baselineRun.evidence.ledger, candidateRun.evidence.ledger, allowed)
+            : null;
+          const conditionsVerified = conditions?.matched && (!fixed ||
+            (conditions.qualityIssues.length === 0 && inputDifferences?.length === 0));
+          const complete = Boolean(baselineRun.evidence && candidateRun?.evidence && chartRestored &&
+            !baselineRun.cleanupError && !candidateRun?.cleanupError);
+          const comparison = (!fixed || (complete && conditionsVerified)) && baselineSummary && candidateSummary
             ? compareStrategyMetrics(baselineSummary.metrics, candidateSummary.metrics)
             : null;
           const qualityIssues = [...new Set([
             ...(baselineSummary?.qualityIssues ?? []),
             ...(candidateSummary?.qualityIssues ?? []),
             ...(conditions?.qualityIssues ?? []),
+            ...(inputDifferences?.length ? ["undeclared_input_differences"] : []),
             ...(baselineRun.cleanupError ? ["baseline_cleanup_failed"] : []),
             ...(candidateRun?.cleanupError ? ["candidate_cleanup_failed"] : []),
             ...(chartRestored ? [] : ["chart_state_restore_failed"]),
           ])];
-          const complete = Boolean(baselineRun.evidence && candidateRun?.evidence && chartRestored &&
-            !baselineRun.cleanupError && !candidateRun?.cleanupError);
           const comparisonEligible = Boolean(
-            complete && conditions?.matched && baselineSummary?.minimumTradesMet && candidateSummary?.minimumTradesMet,
+            complete && conditionsVerified && baselineSummary?.minimumTradesMet && candidateSummary?.minimumTradesMet,
           );
           const variantResult = (
             resolved: typeof resolvedBaseline,
@@ -6435,13 +6587,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               ? "eligible"
               : !complete
                 ? "incomplete"
-                : !conditions?.matched
+                : !conditionsVerified
                   ? "conditions_differ"
                   : "insufficient_sample",
             ...preview,
             baseline: variantResult(resolvedBaseline, baselineRun, baselineSummary),
             candidate: variantResult(resolvedCandidate, candidateRun, candidateSummary),
             conditions,
+            ...(fixed ? { unexpectedInputDifferences: inputDifferences } : {}),
             comparison,
             qualityIssues,
             chartState: { before: initialChart, after: finalChart, restored: chartRestored },
@@ -7517,6 +7670,9 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         "Get strategy pine_ids (kind 'strategy') from list_pine_scripts. Combine with " +
         "set_symbol/set_timeframe to test other markets.",
       inputSchema: {
+        chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
+        pine_version: z.string().regex(/^[0-9]{1,6}(\.[0-9]{1,3})?$/).optional()
+          .describe("Exact numbered saved Pine version"),
         pine_id: z
           .string()
           .regex(/^USER;[\w]{8,64}$/)
@@ -7534,7 +7690,7 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Leave the strategy on the chart after the test. Default: false (auto-remove)"),
       },
     },
-    async ({ pine_id, trades_limit, keep_on_chart }) =>
+    async ({ pine_id, trades_limit, keep_on_chart, chart_index, pine_version }) =>
       chartOperations.run(async () => {
         try {
           return jsonResult(
@@ -7542,6 +7698,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
               pineId: pine_id,
               tradesLimit: trades_limit ?? 20,
               keepOnChart: keep_on_chart ?? false,
+              ...(chart_index === undefined ? {} : { chartIndex: chart_index }),
+              ...(pine_version === undefined ? {} : { pineVersion: pine_version }),
             }),
           );
         } catch (err) {

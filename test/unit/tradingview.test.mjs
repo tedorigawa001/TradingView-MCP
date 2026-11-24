@@ -267,6 +267,40 @@ test("startReplay cleans up a partially opened toolbar when date selection fails
   assert.equal(state.toolbar, false);
 });
 
+test("startReplay waits for the selected date and cursor to agree on the requested pane", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const requested = Date.parse("2025-01-01T00:00:00.000Z");
+  await tv.startReplay({ startAt: new Date(requested).toISOString(),
+    expectedSymbol: "OANDA:EURUSD", expectedResolution: "5", chartIndex: 1 });
+  const chart = { symbol: () => "OANDA:EURUSD", resolution: () => "5" };
+  let index = 1;
+  let selected = null;
+  let cursor = Date.parse("2025-08-01T00:00:00.000Z");
+  let stopCalls = 0;
+  let waits = 0;
+  const replay = {
+    currentDate: () => cursor, getReplaySelectedDate: () => selected, replayResolutions: () => ["5"],
+    currentReplayResolution: () => "5", autoReplayResolution: () => "5", autoplayDelay: () => 1000,
+    isReplayAvailable: () => true, isReplayToolbarVisible: () => selected !== null,
+    isReplayStarted: () => selected !== null, isReadyToPlay: () => selected !== null,
+    isJumpToBarModeEnabled: () => false, isAutoplayStarted: () => false,
+    selectDate: async (time) => { selected = time; },
+    stopReplay: async () => { stopCalls++; },
+  };
+  const context = { Date, window: { TradingViewApi: {
+    activeChart: () => chart, activeChartIndex: () => index, replayApi: async () => replay,
+  } }, setTimeout: (fn) => { waits++; cursor = requested; queueMicrotask(fn); } };
+  const result = await vm.runInNewContext(cdp.calls[0], context);
+  assert.equal(waits, 1);
+  assert.equal(result.status.currentTime, requested);
+  assert.equal(stopCalls, 0);
+  index = 0;
+  selected = null;
+  await assert.rejects(vm.runInNewContext(cdp.calls[0], context), /active chart index/);
+  assert.equal(selected, null);
+});
+
 test("stepReplay is bounded, paused-only, and verifies time advancement", async () => {
   const tv = new TradingView(fakeCdp());
   for (const bad of [0, 101, 1.5]) assert.throws(() => tv.stepReplay(bad), /steps must be/);
@@ -1370,6 +1404,39 @@ function strategyLedgerFixture() {
 const sha256Json = (value) => "sha256:" + createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
+test("bound Strategy Tester reads reject a same-name study and a pane change mid-read", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const fx = strategyLedgerFixture();
+  let index = 0;
+  fx.api.activeChartIndex = () => index;
+  await tv.getStrategyReport({ chartIndex: 0, expectedStudyId: "strategy-1" });
+  await tv.getStrategyTradeLedger({ chartIndex: 0, expectedStudyId: "strategy-1" });
+  const [reportExpr, ledgerExpr] = cdp.calls;
+  assert.equal((await fx.run(reportExpr)).totalTrades, 1);
+  assert.equal((await fx.run(ledgerExpr)).studyId, "strategy-1");
+  fx.source.id = () => "another-strategy";
+  await assert.rejects(fx.run(reportExpr), /requested chart or study/);
+  await assert.rejects(fx.run(ledgerExpr), /requested study/);
+  fx.source.id = () => "strategy-1";
+  await assert.rejects(fx.run(ledgerExpr, () => { index = 1; }), /changed during the bound read/);
+});
+
+test("bound trade ledgers reject in-place changes during hashing", async () => {
+  const cdp = fakeCdp({});
+  await new TradingView(cdp).getStrategyTradeLedger({ chartIndex: 0, expectedStudyId: "strategy-1" });
+  const mutations = [
+    [fx => { fx.report.trades[0].q += 1; }, /report contents changed/],
+    [fx => { fx.report.performance.all.netProfit += 1; }, /report summary changed/],
+    [fx => { fx.inputValues[3].value += 1; }, /strategy inputs changed/],
+  ];
+  for (const [change, error] of mutations) {
+    const fx = strategyLedgerFixture();
+    fx.api.activeChartIndex = () => 0;
+    await assert.rejects(fx.run(cdp.calls[0], () => change(fx)), error);
+  }
+});
+
 test("report state capture returns the state and hash that a later identity read verifies", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
@@ -1512,7 +1579,7 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
   const expr = cdp.calls[0];
   assert.ok(expr.includes('"USER;71f1e4e6807c4bb48bd55edb886908a0"'), "pineId quoted as JSON");
   assert.ok(expr.includes("isTVScriptStrategy !== true"), "non-strategy scripts must be refused");
-  assert.ok(expr.includes('{ type: "pine", pineId, version: "last" }'), "insert by pine descriptor");
+  assert.ok(expr.includes('{ type: "pine", pineId, version: fixedVersion ?? "last" }'), "insert by pine descriptor");
   assert.ok(expr.includes("const keep = false"), "auto-remove is the default");
   assert.ok(expr.includes("chart.removeEntity(studyId)"), "must remove the strategy again");
   assert.ok(expr.includes("if (!keep || failure !== null)"),
@@ -1534,15 +1601,17 @@ test("runBacktest validates inputs and cleans the chart up by default", async ()
 
 // BACKLOG 102-22: the backtest's page code run against a fake chart. `fault` makes reading the report throw ("report"),
 // shaping it throw ("format"), or never arrive ("timeout"); `removeFails` makes removing the strategy throw.
-async function backtestPage({ fault = null, removeFails = false, keepOnChart = false } = {}) {
+async function backtestPage({ fault = null, removeFails = false, keepOnChart = false, pineVersion, expectedChart } = {}) {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
-  await tv.runBacktest({ pineId: "USER;71f1e4e6807c4bb48bd55edb886908a0", keepOnChart });
+  const pineId = "USER;71f1e4e6807c4bb48bd55edb886908a0";
+  await tv.runBacktest({ pineId, keepOnChart, pineVersion, chartIndex: pineVersion === undefined ? undefined : 0, expectedChart });
   const removed = [];
+  const descriptors = [];
   let reportReads = 0;
   let clock = 0;
   const report = { currency: "USD", performance: { all: { totalTrades: 1 }, initialCapital: 10_000 }, trades: [] };
-  const source = { metaInfo: () => ({ description: "My Strategy" }) };
+  const source = { id: () => fault === "same name" ? "other" : "st7", metaInfo: () => ({ description: "My Strategy" }) };
   const bt = {
     activeStrategy: { value: () => {
       if (fault === "format") throw new Error("activeStrategy getter exploded");
@@ -1559,7 +1628,12 @@ async function backtestPage({ fault = null, removeFails = false, keepOnChart = f
     } },
   };
   const chart = {
-    createStudy: async () => "st7",
+    createStudy: async (descriptor) => { descriptors.push(plain(descriptor)); return "st7"; },
+    symbol: () => "OANDA:EURUSD",
+    resolution: () => "5",
+    getStudyById: () => ({ getInputValues: () => [
+      { id: "pineId", value: pineId }, { id: "pineVersion", value: fault === "wrong version" ? "9.0" : pineVersion },
+    ] }),
     removeEntity: (id) => {
       if (removeFails) throw new Error("chart refused the removal");
       removed.push(id);
@@ -1572,12 +1646,37 @@ async function backtestPage({ fault = null, removeFails = false, keepOnChart = f
     setTimeout: (fn) => { fn(); return 0; },
     window: { TradingViewApi: {
       activeChart: () => chart,
-      studyMetaIntoRepository: () => ({ findById: async () => ({ isTVScriptStrategy: true, description: "My Strategy" }) }),
+      activeChartIndex: () => 0,
+      studyMetaIntoRepository: () => ({ findById: async (descriptor) => {
+        descriptors.push(plain(descriptor));
+        return { isTVScriptStrategy: true, description: "My Strategy" };
+      } }),
       backtestingStrategyApi: async () => bt,
     } },
   });
-  return { outcome: vm.runInContext(cdp.calls[0], context), removed };
+  return { outcome: vm.runInContext(cdp.calls[0], context), removed, descriptors };
 }
+
+test("a numbered backtest binds the descriptor, active study and actual Pine version", async () => {
+  const page = await backtestPage({ pineVersion: "1.0" });
+  assert.equal((await page.outcome).totalTrades, 1);
+  assert.deepEqual(page.descriptors.map(row => row.version), ["1.0", "1.0"]);
+  assert.deepEqual(page.removed, ["st7"]);
+  for (const [fault, error] of [["same name", /did not appear/], ["wrong version", /requested fixed Pine version/]]) {
+    const rejected = await backtestPage({ fault, pineVersion: "1.0", keepOnChart: true });
+    await assert.rejects(rejected.outcome, error);
+    assert.deepEqual(rejected.removed, ["st7"]);
+  }
+});
+
+test("a fixed experiment rejects a changed symbol or timeframe before creating a strategy", async () => {
+  for (const expectedChart of [{ symbol: "OANDA:GBPUSD", resolution: "5" }, { symbol: "OANDA:EURUSD", resolution: "60" }]) {
+    const page = await backtestPage({ pineVersion: "1.0", expectedChart });
+    await assert.rejects(page.outcome, /active chart symbol or timeframe does not match/);
+    assert.deepEqual(page.descriptors, []);
+    assert.deepEqual(page.removed, []);
+  }
+});
 
 test("a backtest that fails after placing its strategy removes it, kept or not, and names the cause", async () => {
   const causes = {

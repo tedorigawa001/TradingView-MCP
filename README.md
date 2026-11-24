@@ -459,6 +459,7 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `shorten_forward_period` | Stops declaring a tail that starts at least 24 h away and at least 24 h after the declared start, or withdraws a declaration until 24 h before it starts. A shortening recorded within 24 h of the start or later marks the declaration, and the preflight never reaches its review answer for it. See [shortening](docs/FORWARD_PERIOD.md#shortening) |
 | `compare_research_evidence` | Compares declared data/code/runner/rule/parameter/environment hashes; identifies missing evidence and revalidation checks without certifying compatibility. See [comparison contract](docs/RESEARCH_EVIDENCE_COMPARISON.md) |
 | `run_strategy_experiment` | Serially compares baseline and candidate on one chart; dry-run by default, then after confirmation reports exact Pine versions, ledger IDs, inputs, minimum trades, condition match, and metric deltas before removing both |
+| `diagnose_strategy_trade_overlap` | Compares two complete caller-supplied ledgers for the same minute-based timeframe, Pine version and inputs. Reports trade differences and boundary evidence without reading or changing a chart |
 | `run_backtest_matrix` | Runs up to 24 explicit symbol/timeframe/input combinations with a 30-minute soft deadline, per-row full-ledger IDs, insufficiency/failure reasons, and verified restoration; it does not rank results |
 | `run_strategy_walk_forward` | Splits full ledgers for 2-8 candidates into 2-12 explicit train/embargo/test windows, selects on train only, and returns OOS only for the selected candidate with anchored/rolling, tie, minimum-trade, quality, and coverage checks |
 | `validate_research_protocol` | Validates an exact Pine version and frozen protocol, classifying IS/OOS overlap, future windows, forming bars, trial count, minimum trades, missing costs, static Pine risks, and post-OOS changes as blocked or warning |
@@ -468,6 +469,14 @@ This enables a read -> modify -> save -> backtest improvement loop:
 | `get_measurement_hypothesis` | Reads one measurement definition and its hash by ID, or null if absent; no chart access or computation |
 | `record_strategy_experiment` | Binds experiment ID, Pine version, ledger ID, known metrics, guardrails, and decision to the hypothesis |
 | `compare_strategy_experiments` | Compares exact experiment IDs and evidence hashes and rejects population, symbol, timeframe, or methodology mismatches |
+
+### Fixed-period strategy experiments
+
+For `run_strategy_experiment`, set `fixed_period` with the exact UTC timestamps of the first and last report bars, and pass a numbered `pine_version` and the `source_sha256` from the fixed-source hash read for each variant. Declare any intended input overrides in `allowed_input_differences`. Preview first, then pass the returned `experimentId` as `expected_experiment_id` with `confirm: true`. The fixed chart mode requires a report with the requested range already loaded, and checks the range again for each temporary study. Deep Backtesting returns a blocked result.
+
+Use `chart_index` and `expected_study_id` on report and ledger reads to require the intended active pane and study. Replay start checks that the selected time and replay cursor agree before returning. Compare that settled time with the requested timestamp if the experiment needs a particular bar.
+
+Overlap diagnosis reports realized equity based on the closed trades and the positions evidenced by the supplied rows. Indicator state and outstanding orders stay unconfirmed, so the diagnostic never authorizes stitching the intervals into one result.
 
 ## Troubleshooting
 

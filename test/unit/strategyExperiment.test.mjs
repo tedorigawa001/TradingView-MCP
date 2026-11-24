@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   compareStrategyConditions,
   compareStrategyMetrics,
+  diagnoseStrategyTradeOverlap,
+  strategyOverlapSchema,
   summarizeStrategyEvidence,
 } from "../../build/strategyExperiment.js";
 
@@ -85,4 +87,88 @@ test("strategy experiment blocks comparisons whose cost conditions differ", () =
   assert.equal(conditions.matched, false);
   assert.equal(conditions.differences[0].condition, "commission value");
   assert.ok(conditions.qualityIssues.includes("experiment_conditions_differ"));
+});
+
+function overlappingRuns() {
+  const at = minutes => Date.parse("2026-01-01T00:00:00Z") + minutes * 60_000;
+  const iso = minutes => new Date(at(minutes)).toISOString();
+  const trade = (entry, exit, quantity, profit) => ({
+    direction: "long", status: exit === null ? "open" : "closed",
+    entry: { time: at(entry), price: 1.2, label: "buy" },
+    exit: exit === null ? null : { time: at(exit), price: 1.3, label: "exit" },
+    quantity, profit, commission: 0.25,
+  });
+  const ledger = (start, end, trades) => ({
+    ...evidence().ledger, symbol: "OANDA:EURUSD", timeframe: "5",
+    dateRange: { from: iso(start), to: iso(end) },
+    availableTrades: trades.length, totalTrades: trades.filter(row => row.status === "closed").length, trades,
+  });
+  return {
+    earlier: ledger(0, 55, [trade(5, 15, 1, 10), trade(20, 40, 2, 5)]),
+    later: ledger(15, 65, [trade(20, 40, 3, 7)]),
+    from: iso(20), to: iso(50), boundary: iso(25),
+  };
+}
+
+test("trade overlap detects equal-price trades with different quantities and realized equity resets", () => {
+  const input = strategyOverlapSchema.parse(overlappingRuns());
+  const result = diagnoseStrategyTradeOverlap(input);
+  assert.equal(result.counts.matchedByIdentity, 1);
+  assert.equal(result.counts.different, 1);
+  assert.deepEqual(result.firstDifference, { entryTime: Date.parse(input.from), kind: "different", fields: ["quantity", "profit"] });
+  assert.equal(result.boundary.earlier.realizedEquity, 1010);
+  assert.equal(result.boundary.later.realizedEquity, 1000);
+  assert.equal(result.boundary.realizedEquityMatches, false);
+  assert.equal(result.boundary.positionsMatch, false);
+  assert.equal(result.boundary.indicators, "unconfirmed");
+  assert.equal(result.boundary.pendingOrders, "unconfirmed");
+  assert.equal(result.continuity, "discontinuous");
+  assert.equal(result.continuousAggregationEligible, false);
+});
+
+test("trade overlap keeps missing and ambiguous trades out of exact matches", () => {
+  const input = overlappingRuns();
+  input.earlier.trades = [structuredClone(input.later.trades[0])];
+  input.earlier.availableTrades = input.earlier.totalTrades = 1;
+  assert.equal(diagnoseStrategyTradeOverlap(input).counts.identical, 1);
+  input.later.trades[0].commission = null;
+  const missing = diagnoseStrategyTradeOverlap(input);
+  assert.equal(missing.counts.unconfirmed, 1);
+  assert.equal(missing.continuity, "unconfirmed");
+  assert.equal(missing.continuousAggregationEligible, false);
+  input.later.trades.push(structuredClone(input.later.trades[0]));
+  input.later.availableTrades = input.later.totalTrades = 2;
+  assert.equal(diagnoseStrategyTradeOverlap(input).counts.ambiguous, 1);
+  input.later.inputs = [{ id: "in_0", name: "Commission Value", value: 9 }];
+  assert.throws(() => diagnoseStrategyTradeOverlap(input), /identical inputs/);
+  assert.throws(() => diagnoseStrategyTradeOverlap({ ...overlappingRuns(), to: "2026-01-02T00:00:00Z" }), /outside/);
+});
+
+test("trade overlap compares entries while censoring exits after the overlap", () => {
+  const input = overlappingRuns();
+  const closed = input.later.trades[0];
+  input.to = new Date(closed.exit.time).toISOString();
+  input.earlier.trades = [{ ...closed, status: "open", exit: null, commission: null, profit: 100 }];
+  input.earlier.availableTrades = 1;
+  input.earlier.totalTrades = 0;
+  const result = diagnoseStrategyTradeOverlap(input);
+  assert.equal(result.counts.identical, 1);
+  assert.equal(result.firstDifference, null);
+  assert.equal(result.boundary.positionsMatch, true);
+  assert.equal(result.continuity, "unconfirmed");
+  assert.equal(result.continuousAggregationEligible, false);
+});
+
+test("a missing label cannot turn a shared trade into a confirmed discontinuity", () => {
+  const input = overlappingRuns();
+  input.earlier.trades = [structuredClone(input.later.trades[0])];
+  input.earlier.availableTrades = input.earlier.totalTrades = 1;
+  input.later.trades[0].entry.label = null;
+  input.earlier.trades[0].exit.label = null;
+  const result = diagnoseStrategyTradeOverlap(input);
+  assert.equal(result.counts.earlierOnly + result.counts.laterOnly, 0);
+  assert.equal(result.counts.unconfirmed, 1);
+  assert.equal(result.firstDifference.kind, "unconfirmed");
+  assert.equal(result.boundary.positionsMatch, true);
+  assert.equal(result.continuity, "unconfirmed");
 });

@@ -1283,6 +1283,7 @@ test("exposes exactly the expected tools including the indicator table study", a
       "compute_session_profile",
       "create_analysis_alerts",
       "declare_forward_period",
+      "diagnose_strategy_trade_overlap",
       "ensure_analysis_overlay",
       "estimate_carry_panel_effective_sample",
       "evaluate_analysis_overlay_outcome",
@@ -1760,7 +1761,7 @@ async function nativeMcpFixture(t, hooks = {}) {
 test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
   const client = await connectedClient(makeDeps()); t.after(() => client.close());
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 137);
+  assert.equal(tools.length, 138);
   for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
     "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
     assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
@@ -6020,6 +6021,104 @@ test("run_strategy_experiment previews, compares full ledgers, and cleans both v
   assert.equal(removed.length, 2);
   assert.match(result.baseline.ledgerId, /^sha256:[a-f0-9]{64}$/);
   assert.match(result.candidate.ledgerId, /^sha256:[a-f0-9]{64}$/);
+});
+
+test("fixed-period experiment requires a matching preview, saved source and effective range", async () => {
+  const pineId = "USER;fixedstrategy";
+  const sha = "sha256:" + "a".repeat(64);
+  const dateRange = { from: "2025-01-01T00:00:00.000Z", to: "2026-01-01T00:00:00.000Z" };
+  const shortRange = { ...dateRange, from: "2025-11-01T00:00:00.000Z" };
+  let starts = 0;
+  let activeStudy = null;
+  let realRange = dateRange;
+  let initialRange = dateRange;
+  let actualSha = sha;
+  let changed = false;
+  const report = () => ({
+    strategy: "Fixed", currency: "USD", initialCapital: 1000,
+    dateRange: activeStudy ? realRange : initialRange,
+    summary: { totalTrades: 1, netProfit: 2 }, totalTrades: 1, trades: [],
+  });
+  const tv = {
+    getChartContext: async () => ({ layoutName: "test", activeChartIndex: 0, chartsCount: 1,
+      charts: [{ index: 0, symbol: "OANDA:EURUSD", resolution: "5", studies: [] }] }),
+    listPineScripts: async () => [{ pineId, version: "9.0", name: "Fixed", kind: "strategy", usedBy: [] }],
+    getFixedPineSourceHashes: async (id, version) => ({ pineId: id, version, sourceSha256: actualSha }),
+    runBacktest: async (options) => {
+      assert.deepEqual(options, { pineId, pineVersion: "1.0", chartIndex: 0, keepOnChart: true, tradesLimit: 1,
+        expectedChart: { symbol: "OANDA:EURUSD", resolution: "5" } });
+      activeStudy = "study-" + ++starts;
+      return { ...report(), studyId: activeStudy };
+    },
+    getStrategyReport: async (options) => {
+      assert.equal(options.chartIndex, 0);
+      assert.equal(options.expectedStudyId, activeStudy ?? undefined);
+      return report();
+    },
+    getStrategyTradeLedger: async (options) => {
+      assert.equal(options.chartIndex, 0);
+      assert.equal(options.expectedStudyId, activeStudy);
+      const ledgerId = "sha256:" + "b".repeat(64);
+      if (options.expectedLedgerId) assert.equal(options.expectedLedgerId, ledgerId);
+      return {
+        ...report(), ledgerId, studyId: activeStudy, pineId, pineVersion: "1.0",
+        symbol: "OANDA:EURUSD", timeframe: "5", offset: 0, availableTrades: 1,
+        countMatchesSummary: true, nextOffset: null, qualityIssues: [],
+        inputs: [{ id: "cost", name: "Commission Value", value: 0.01 },
+          { id: "undeclared", name: "Multiplier", value: changed && starts % 2 === 0 ? 2 : 1 }],
+        trades: [{ status: "closed", profit: 2 }],
+      };
+    },
+    removePineFromChart: async (id, studyId, chartIndex) => {
+      assert.deepEqual([id, studyId, chartIndex], [pineId, activeStudy, 0]);
+      activeStudy = null;
+    },
+  };
+  const client = await connectedClient(makeDeps({ tv }));
+  const variant = { pine_id: pineId, pine_version: "1.0", source_sha256: sha };
+  const args = { expected_symbol: "OANDA:EURUSD", expected_timeframe: "5", chart_index: 0, minimum_trades: 1,
+    fixed_period: { ...dateRange, mode: "chart" }, baseline: variant, candidate: variant };
+  const raw = arguments_ => client.callTool({ name: "run_strategy_experiment", arguments: arguments_ });
+  const call = async arguments_ => JSON.parse((await raw(arguments_)).content[0].text);
+  const preview = await call(args);
+  assert.equal(preview.status, "preview");
+  const confirmed = { ...args, confirm: true, expected_experiment_id: preview.experimentId };
+  assert.equal((await raw({ ...args, confirm: true })).isError, true);
+  assert.equal((await raw({ ...confirmed, allowed_input_differences: ["undeclared"] })).isError, true);
+  actualSha = "sha256:" + "c".repeat(64);
+  assert.equal((await raw(confirmed)).isError, true);
+  actualSha = sha;
+  assert.equal((await call({ ...args, fixed_period: { ...dateRange, mode: "deep" }, confirm: true })).reason,
+    "deep_backtesting_not_available_via_mcp");
+  initialRange = shortRange;
+  assert.equal((await call(confirmed)).reason, "fixed_period_not_loaded");
+  initialRange = dateRange;
+  assert.equal(starts, 0);
+
+  const result = await call(confirmed);
+  assert.equal(result.status, "complete");
+  assert.equal(result.comparisonStatus, "eligible");
+  assert.equal(result.chartState.restored, true);
+  assert.equal(starts, 2);
+
+  changed = true;
+  const restricted = await call(confirmed);
+  assert.equal(restricted.comparisonStatus, "conditions_differ");
+  assert.deepEqual(restricted.unexpectedInputDifferences, ["undeclared"]);
+  assert.equal(restricted.comparison, null);
+  const allowed = { ...args, allowed_input_differences: ["undeclared"] };
+  const allowedPreview = await call(allowed);
+  assert.equal((await call({ ...allowed, confirm: true, expected_experiment_id: allowedPreview.experimentId }))
+    .comparisonStatus, "eligible");
+  assert.equal(starts, 6);
+
+  realRange = shortRange;
+  const wrongReport = await call(confirmed);
+  assert.equal(wrongReport.status, "partial");
+  assert.match(wrongReport.baseline.error, /effective report period/);
+  assert.equal(wrongReport.comparison, null);
+  assert.equal(starts, 7, "an unexpected baseline period must stop the candidate");
+  assert.equal(activeStudy, null);
 });
 
 test("run_strategy_experiment preserves baseline evidence when the candidate fails", async () => {

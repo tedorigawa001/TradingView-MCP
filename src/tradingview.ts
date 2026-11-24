@@ -396,6 +396,8 @@ interface StrategyLedgerOptions {
   offset?: number;
   limit?: number;
   expectedLedgerId?: string;
+  chartIndex?: number;
+  expectedStudyId?: string;
 }
 
 export interface FixedPineSourceHashes {
@@ -505,6 +507,11 @@ const MAX_FIXED_PINE_RESPONSE_BYTES = 128 * 1024;
 // strategy source. Normalize both layouts behind the WatchedValue-shaped
 // surface consumed by report formatting and recalculation settling.
 const BACKTESTING_API_SNIPPET = `
+  const strategyStudyId = (source) => {
+    if (typeof source === "string") return source;
+    if (typeof source?.id === "string") return source.id;
+    try { return typeof source?.id === "function" ? source.id() : null; } catch (e) { return null; }
+  };
   const resolveBacktestingApi = async (api, chart) => {
     if (typeof api.backtestingStrategyApi === "function") {
       return await api.backtestingStrategyApi();
@@ -751,7 +758,9 @@ export class TradingView {
     startAt: string;
     expectedSymbol: string;
     expectedResolution: string;
+    chartIndex?: number;
   }): Promise<{ requestedStartAt: string; status: ReplayStatus }> {
+    assertChartIndex(options.chartIndex);
     const startMs = Date.parse(options.startAt);
     if (!Number.isFinite(startMs)) throw new Error("startAt must be a valid ISO-8601 timestamp");
     if (startMs >= Date.now()) throw new Error("startAt must be in the past");
@@ -781,6 +790,13 @@ export class TradingView {
         }
         ${REPLAY_STATUS_SNIPPET}
         const before = replayStatus();
+        const expectedIndex = ${JSON.stringify(options.chartIndex ?? null)};
+        if (expectedIndex !== null && before.activeChart.index !== expectedIndex) {
+          throw new Error("active chart index does not match the requested Replay chart");
+        }
+        const sameChart = (status) => status.activeChart.index === before.activeChart.index &&
+          status.activeChart.symbol === before.activeChart.symbol &&
+          status.activeChart.resolution === before.activeChart.resolution;
         if (!before.available) throw new Error("Bar Replay is unavailable for this chart");
         if (before.started || before.toolbarVisible) {
           throw new Error("Bar Replay is already active; stop it before starting another session");
@@ -790,21 +806,25 @@ export class TradingView {
           const deadline = Date.now() + 20000;
           while (Date.now() < deadline) {
             const current = replayStatus();
-            if (current.started && current.currentTime !== null) break;
+            if (!sameChart(current)) {
+              throw new Error("active chart changed while starting Bar Replay");
+            }
+            if (current.started && current.ready && !current.autoplay &&
+                current.selectedTimeIso !== null && current.selectedTimeIso !== before.selectedTimeIso &&
+                current.currentTimeIso === current.selectedTimeIso) {
+              return {
+                requestedStartAt: ${JSON.stringify(new Date(startMs).toISOString())},
+                status: current,
+              };
+            }
             await new Promise((resolve) => setTimeout(resolve, 200));
           }
-          if (!replayStatus().started) {
-            throw new Error("Bar Replay did not start within 20 seconds");
-          }
-          return {
-            requestedStartAt: ${JSON.stringify(new Date(startMs).toISOString())},
-            status: replayStatus(),
-          };
+          throw new Error("Bar Replay did not start within 20 seconds with a settled cursor");
         } catch (error) {
           let rollbackError = null;
           try {
             const partial = replayStatus();
-            if (partial.started || partial.toolbarVisible) {
+            if ((partial.started || partial.toolbarVisible) && sameChart(partial)) {
               await replay.stopReplay();
               const rollbackDeadline = Date.now() + 10000;
               while (Date.now() < rollbackDeadline) {
@@ -2494,8 +2514,12 @@ export class TradingView {
    * Strategy Tester data): performance summary, date range, recent trades.
    * Read-only — fails if no strategy is on the chart.
    */
-  getStrategyReport(options: { tradesLimit?: number } = {}): Promise<StrategyReport> {
-    const { tradesLimit = 20 } = options;
+  getStrategyReport(options: { tradesLimit?: number; chartIndex?: number; expectedStudyId?: string } = {}): Promise<StrategyReport> {
+    const { tradesLimit = 20, chartIndex, expectedStudyId } = options;
+    assertChartIndex(chartIndex);
+    if (expectedStudyId !== undefined && !/^[\w.-]{1,128}$/.test(expectedStudyId)) {
+      throw new Error("invalid expected strategy study id");
+    }
     if (!Number.isInteger(tradesLimit) || tradesLimit < 1 || tradesLimit > 500) {
       throw new Error(`tradesLimit must be an integer between 1 and 500, got ${tradesLimit}`);
     }
@@ -2507,7 +2531,22 @@ export class TradingView {
         ${FORMAT_REPORT_SNIPPET}
         const bt = await resolveBacktestingApi(api, chart);
         if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
+        const chartIndex = ${JSON.stringify(chartIndex ?? null)};
+        const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
+        const bound = chartIndex !== null || expectedStudyId !== null;
+        const source = bound ? bt.activeStrategy.value() : null;
+        const raw = bound ? bt.activeStrategyReportData.value() : null;
+        if ((chartIndex !== null && api.activeChartIndex() !== chartIndex) ||
+            (bound && !chart.getAllStudies().some((study) => study.id === strategyStudyId(source))) ||
+            (expectedStudyId !== null && strategyStudyId(source) !== expectedStudyId)) {
+          throw new Error("strategy report does not match the requested chart or study");
+        }
         const report = formatReport(bt, ${tradesLimit});
+        if (bound && (api.activeChart() !== chart ||
+            (chartIndex !== null && api.activeChartIndex() !== chartIndex) ||
+            bt.activeStrategy.value() !== source || bt.activeStrategyReportData.value() !== raw)) {
+          throw new Error("strategy report changed during the bound read");
+        }
         if (!report) {
           throw new Error("no strategy report available — the active chart has no strategy (or it is still calculating). Add one or use run_backtest");
         }
@@ -2536,7 +2575,12 @@ export class TradingView {
     expectedReportStateSha256?: string;
     captureReportState?: boolean;
   } = {}): Promise<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture> {
-    const { offset = 0, limit = 200, expectedLedgerId, identityStudyId, expectedReportStateSha256, captureReportState } = options;
+    const { offset = 0, limit = 200, expectedLedgerId, identityStudyId, expectedReportStateSha256,
+      captureReportState, chartIndex, expectedStudyId } = options;
+    assertChartIndex(chartIndex);
+    if (expectedStudyId !== undefined && !/^[\w.-]{1,128}$/.test(expectedStudyId)) {
+      throw new Error("invalid expected strategy study id");
+    }
     if (!Number.isInteger(offset) || offset < 0 || offset > 10_000_000) {
       throw new Error(`offset must be an integer between 0 and 10000000, got ${offset}`);
     }
@@ -2563,11 +2607,19 @@ export class TradingView {
         const identityStudyId = ${identityStudyId === undefined ? "null" : JSON.stringify(identityStudyId)};
         const expectedReportStateSha256 = ${expectedReportStateSha256 === undefined ? "null" : JSON.stringify(expectedReportStateSha256)};
         const captureState = ${captureReportState === true ? "true" : "false"};
+        const chartIndex = ${JSON.stringify(chartIndex ?? null)};
+        const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
         const chart = api.activeChart();
+        if (chartIndex !== null && api.activeChartIndex() !== chartIndex) {
+          throw new Error("strategy ledger does not match the requested chart");
+        }
         ${BACKTESTING_API_SNIPPET}
         const bt = await resolveBacktestingApi(api, chart);
         if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
         const act = bt.activeStrategy.value();
+        if (expectedStudyId !== null && strategyStudyId(act) !== expectedStudyId) {
+          throw new Error("strategy ledger does not match the requested study");
+        }
         if (act === null || act === undefined) {
           throw new Error("no active strategy — add a strategy to the chart before requesting its trade ledger");
         }
@@ -2652,12 +2704,7 @@ export class TradingView {
         }
         const symbol = typeof chart.symbol === "function" ? chart.symbol() : null;
         const timeframe = typeof chart.resolution === "function" ? chart.resolution() : null;
-        let activeId = null;
-        if (typeof act === "string") activeId = act;
-        else if (act && typeof act.id === "string") activeId = act.id;
-        else if (act && typeof act.id === "function") {
-          try { activeId = act.id(); } catch (e) {}
-        }
+        const activeId = strategyStudyId(act);
         if (identityStudyId !== null && activeId !== identityStudyId) {
           throw new Error("captured active study id does not match");
         }
@@ -2703,6 +2750,47 @@ export class TradingView {
         const normalizedDateRange = dateRange ? { from: iso(dateRange.from), to: iso(dateRange.to) } : null;
         const currency = report.currency ?? null;
         const initialCapital = num(performance.initialCapital);
+        const readSummary = () => {
+          const stats = report.performance?.all || {};
+          return {
+            netProfit: num(stats.netProfit),
+            netProfitPercent: num(stats.netProfitPercent),
+            totalTrades: num(stats.totalTrades),
+            winningTrades: num(stats.numberOfWiningTrades),
+            losingTrades: num(stats.numberOfLosingTrades),
+            percentProfitable: num(stats.percentProfitable),
+            profitFactor: num(stats.profitFactor),
+            grossProfit: num(stats.grossProfit),
+            grossLoss: num(stats.grossLoss),
+            commissionPaid: num(stats.commissionPaid),
+          };
+        };
+        const bound = chartIndex !== null || expectedStudyId !== null;
+        const summarySnapshot = bound ? readSummary() : null;
+        const verifyLedgerContents = (purpose, studyId) => {
+          const currentRange = report.settings?.dateRange?.backtest;
+          const currentOpenExit = rawTrades[markedOpenIndex]?.exit ?? rawTrades[markedOpenIndex]?.x;
+          const openRowUnchanged = markedOpenIndex < 0 || (currentOpenExit?.id ?? currentOpenExit?.c) === "";
+          if (num(report.performance?.all?.totalTrades) !== totalTrades ||
+              num(report.performance?.initialCapital) !== initialCapital || (report.currency ?? null) !== currency ||
+              iso(currentRange?.from) !== (normalizedDateRange?.from ?? null) ||
+              iso(currentRange?.to) !== (normalizedDateRange?.to ?? null) ||
+              report.trades !== rawTrades || rawTrades.length !== allTrades.length || !openRowUnchanged ||
+              rawTrades.some((trade, index) => JSON.stringify(normalizeTrade(trade, index,
+                index === markedOpenIndex)) !== JSON.stringify(allTrades[index]))) {
+            throw new Error("strategy report contents changed during " + purpose);
+          }
+          const currentValues = chart.getStudyById(studyId).getInputValues();
+          if ((currentValues.find((value) => value.id === "pineId")?.value ?? null) !== pineId ||
+              (currentValues.find((value) => value.id === "pineVersion")?.value ?? null) !== pineVersion) {
+            throw new Error("active Pine version changed during " + purpose);
+          }
+          const currentInputs = currentValues.filter((value) => !hidden.has(value.id));
+          if (currentInputs.length !== inputs.length || currentInputs.some((value, index) =>
+            value.id !== inputs[index].id || !Object.is(value.value, inputs[index].value))) {
+            throw new Error("active strategy inputs changed during " + purpose);
+          }
+        };
         const identity = JSON.stringify({
           strategy,
           symbol,
@@ -2761,6 +2849,20 @@ export class TradingView {
           if (identityStudyId !== null || captureState) throw new Error("captured strategy ledger does not match");
           throw new Error("strategy report changed between ledger pages: expected " + expectedLedgerId + " but found " + ledgerId);
         }
+        const verifyBoundRead = () => {
+          if (!bound) return;
+          if (!activeStudy || api.activeChart() !== chart || (chartIndex !== null && api.activeChartIndex() !== chartIndex) ||
+              bt.activeStrategy.value() !== act || strategyStudyId(act) !== activeId ||
+              bt.activeStrategyReportData.value() !== report ||
+              !chart.getAllStudies().some((study) => study.id === activeId) ||
+              chart.symbol() !== symbol || chart.resolution() !== timeframe) {
+            throw new Error("strategy ledger changed during the bound read");
+          }
+          if (JSON.stringify(readSummary()) !== JSON.stringify(summarySnapshot)) {
+            throw new Error("strategy report summary changed during the bound read");
+          }
+        };
+        verifyBoundRead();
         const boundStudyId = identityStudyId !== null ? identityStudyId : captureState ? activeId : null;
         if (boundStudyId !== null) {
           const verifying = identityStudyId !== null;
@@ -2787,28 +2889,8 @@ export class TradingView {
           if (captureReportState(ledgerId, boundStudyId) !== reportState) {
             throw new Error("strategy report metrics changed during " + purpose);
           }
-          const currentRange = report.settings?.dateRange?.backtest;
-          const currentOpenExit = rawTrades[markedOpenIndex]?.exit ?? rawTrades[markedOpenIndex]?.x;
-          const openRowUnchanged = markedOpenIndex < 0 || (currentOpenExit?.id ?? currentOpenExit?.c) === "";
-          if (num(report.performance?.all?.totalTrades) !== totalTrades ||
-              num(report.performance?.initialCapital) !== initialCapital || (report.currency ?? null) !== currency ||
-              iso(currentRange?.from) !== (normalizedDateRange?.from ?? null) ||
-              iso(currentRange?.to) !== (normalizedDateRange?.to ?? null) ||
-              report.trades !== rawTrades || rawTrades.length !== allTrades.length || !openRowUnchanged ||
-              rawTrades.some((trade, index) => JSON.stringify(normalizeTrade(trade, index,
-                index === markedOpenIndex)) !== JSON.stringify(allTrades[index]))) {
-            throw new Error("strategy report contents changed during " + purpose);
-          }
-          const currentValues = chart.getStudyById(boundStudyId).getInputValues();
-          if (currentValues.find((value) => value.id === "pineId")?.value !== pineId ||
-              currentValues.find((value) => value.id === "pineVersion")?.value !== pineVersion) {
-            throw new Error("active Pine version changed during " + (verifying ? "identity verification" : purpose));
-          }
-          const currentInputs = currentValues.filter((value) => !hidden.has(value.id));
-          if (currentInputs.length !== inputs.length || currentInputs.some((value, index) =>
-            value.id !== inputs[index].id || !Object.is(value.value, inputs[index].value))) {
-            throw new Error("active strategy inputs changed during " + purpose);
-          }
+          verifyBoundRead();
+          verifyLedgerContents(purpose, boundStudyId);
           const result = verifying
             ? { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256 }
             : { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256,
@@ -2818,6 +2900,7 @@ export class TradingView {
           }
           return result;
         }
+        if (bound) verifyLedgerContents("the bound read", activeId);
         const trades = allTrades.slice(offset, offset + limit);
         const nextOffset = offset + trades.length < allTrades.length ? offset + trades.length : null;
         const unavailableFields = [];
@@ -2849,18 +2932,7 @@ export class TradingView {
           currency: report.currency ?? null,
           initialCapital: num(performance.initialCapital),
           dateRange: normalizedDateRange,
-          summary: {
-            netProfit: num(all.netProfit),
-            netProfitPercent: num(all.netProfitPercent),
-            totalTrades,
-            winningTrades: num(all.numberOfWiningTrades),
-            losingTrades: num(all.numberOfLosingTrades),
-            percentProfitable: num(all.percentProfitable),
-            profitFactor: num(all.profitFactor),
-            grossProfit: num(all.grossProfit),
-            grossLoss: num(all.grossLoss),
-            commissionPaid: num(all.commissionPaid),
-          },
+          summary: summarySnapshot ?? readSummary(),
           totalTrades,
           availableTrades: allTrades.length,
           countMatchesSummary: totalTrades === null ? null : totalTrades === closedTradeCount,
@@ -2888,8 +2960,15 @@ export class TradingView {
     pineId: string;
     tradesLimit?: number;
     keepOnChart?: boolean;
+    pineVersion?: string;
+    chartIndex?: number;
+    expectedChart?: { symbol: string; resolution: string };
   }): Promise<BacktestResult> {
-    const { pineId, tradesLimit = 20, keepOnChart = false } = options;
+    const { pineId, tradesLimit = 20, keepOnChart = false, pineVersion, chartIndex, expectedChart } = options;
+    assertChartIndex(chartIndex);
+    if (pineVersion !== undefined && (pineVersion === "last" || !PINE_VERSION_PATTERN.test(pineVersion))) {
+      throw new Error("pineVersion must be a numbered saved version");
+    }
     if (typeof pineId !== "string" || !PINE_ID_PATTERN.test(pineId)) {
       throw new Error(
         `pineId must look like "USER;<id>" (own saved scripts only, from list_pine_scripts) — got ${JSON.stringify(pineId)}`,
@@ -2903,14 +2982,31 @@ export class TradingView {
         const api = window.TradingViewApi;
         const chart = api.activeChart();
         const pineId = ${JSON.stringify(pineId)};
+        const fixedVersion = ${JSON.stringify(pineVersion ?? null)};
         const keep = ${keepOnChart ? "true" : "false"};
+        const chartIndex = ${JSON.stringify(chartIndex ?? null)};
+        const guardStudy = ${pineVersion !== undefined || chartIndex !== undefined || expectedChart !== undefined};
+        const symbol = guardStudy ? chart.symbol() : null;
+        const resolution = guardStudy ? chart.resolution() : null;
+        const expectedChart = ${JSON.stringify(expectedChart ?? null)};
+        if (expectedChart !== null && (symbol !== expectedChart.symbol || resolution !== expectedChart.resolution)) {
+          throw new Error("active chart symbol or timeframe does not match the fixed experiment");
+        }
+        const guardChart = () => {
+          if (guardStudy && (api.activeChart() !== chart ||
+              (chartIndex !== null && api.activeChartIndex() !== chartIndex) ||
+              chart.symbol() !== symbol || chart.resolution() !== resolution)) {
+            throw new Error("active chart changed during the backtest");
+          }
+        };
+        guardChart();
         ${BACKTESTING_API_SNIPPET}
         ${FORMAT_REPORT_SNIPPET}
 
         const repo = api.studyMetaIntoRepository();
         let meta = null;
         try {
-          meta = await repo.findById({ type: "pine", pineId, version: "last" });
+          meta = await repo.findById({ type: "pine", pineId, version: fixedVersion ?? "last" });
         } catch (e) {}
         if (!meta) throw new Error("script not found: " + pineId + " — check list_pine_scripts");
         if (meta.isTVScriptStrategy !== true) {
@@ -2924,7 +3020,8 @@ export class TradingView {
         // version) — remember it so only a report object that replaced it
         // is accepted.
         const staleReport = bt.activeStrategyReportData.value();
-        const studyId = await chart.createStudy({ type: "pine", pineId, version: "last" });
+        guardChart();
+        const studyId = await chart.createStudy({ type: "pine", pineId, version: fixedVersion ?? "last" });
         // Once the strategy is on the chart, every way out passes the removal below (BACKLOG 102-22): a report that
         // could not be read or shaped used to throw past it and leave the strategy on the user's chart.
         // Causes are kept as their messages: an error from another realm (a frame, a worker) is no instance of this
@@ -2945,7 +3042,18 @@ export class TradingView {
             let activeDesc = null;
             try { activeDesc = bt.activeStrategyMetaInfo.value()?.description ?? null; } catch (e) {}
             const raw = bt.activeStrategyReportData.value();
-            if (raw !== null && raw !== staleReport && activeDesc === meta.description) {
+            guardChart();
+            const studyMatches = guardStudy
+              ? String(strategyStudyId(bt.activeStrategy.value())) === String(studyId)
+              : activeDesc === meta.description;
+            if (raw !== null && raw !== staleReport && studyMatches) {
+              if (fixedVersion !== null) {
+                const inputs = chart.getStudyById(studyId).getInputValues();
+                if (inputs.find((input) => input.id === "pineId")?.value !== pineId ||
+                    inputs.find((input) => input.id === "pineVersion")?.value !== fixedVersion) {
+                  throw new Error("active strategy does not match the requested fixed Pine version");
+                }
+              }
               report = formatReport(bt, ${tradesLimit});
               if (report) break;
             }
