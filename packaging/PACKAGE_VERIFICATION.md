@@ -1,4 +1,46 @@
-# 0.1.47 distribution candidate (preparation pending)
+# 0.1.48 distribution candidate (preparation pending)
+
+The approved JS allowlist is unchanged: the same 225 paths and SHA-256
+`4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61`, now fixed
+by `npm-js-0.1.48.json`. Since 0.1.47 no source file was added or removed;
+only `src/server.ts`, `src/strategyExperiment.ts` and `src/tradingview.ts`
+changed. `RELEASE_VERSION`, package.json, the two root version fields of
+package-lock.json and both distribution version fields are 0.1.48. Dependency
+data is not regenerated.
+
+## New 64 MiB campaign
+
+The user approved releasing 0.1.48 by the same procedure as 0.1.47, in a new
+64 MiB campaign. The authoritative configuration is `scripts/package-approval.mjs`:
+
+```
+0 prior + 524,288 preparation + 51,380,224 B maximum + 2,097,152 release stages
++ 6,291,456 fixed margin + 6,815,744 unallocated = 67,108,864 (64 MiB)
+```
+
+* Preparation: `package-2026-11-24-reverify-0.1.48-prep01` (512 KiB, the same
+  six slots as before, including the future approval-b.json slot).
+* Execution B: `package-2026-11-24-reverify-0.1.48` (49 MiB, the same eight
+  buckets as before).
+* The 2 MiB release-stage reservation is held for the later npm login,
+  preflight, publication and readback records. Preparation and B cannot use it.
+* Neither margin is available for automatic use. No refunds after deletion.
+
+The 0.1.47 records carry no reservation into the new campaign. They are bound
+as history by SHA-256, and preparation and B check the chain:
+
+* the ready 0.1.47 preparation status,
+* the passed 0.1.47 B result that binds that status and its input manifest and
+  produced the artifact (851,982 bytes, `625fbbae...`),
+* the verify01 readback and its status: four confirmed verdicts, the
+  release-stage total of 311,296 bytes, and a published version 0.1.47 whose
+  tarball digest equals the B artifact.
+
+This change permits the version/configuration update, synthetic tests and the
+single 0.1.48 preparation with readback only. No B receipt, compiler emission,
+npm pack, commit, publication, DOT or production operation is authorized here.
+
+# 0.1.47 distribution candidate (history)
 
 The approved JS allowlist is unchanged: the same 225 paths and SHA-256
 `4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61`, now fixed
@@ -7,10 +49,29 @@ only `src/server.ts` and `src/tradingview.ts` changed. `RELEASE_VERSION`,
 package.json, the two root version fields of package-lock.json and both
 distribution version fields are 0.1.47. Dependency data is not regenerated.
 
-## New 64 MiB campaign
+### Outcome
+
+* Preparation `package-2026-11-21-reverify-0.1.47-prep01` was ready for
+  review: 57 tests, 6 syntax files, inputs unchanged.
+* With approval B (`56f351f5...`), B passed. The artifact is
+  `verified-0.1.47.tgz`, 851,982 bytes, SHA-256 `625fbbae...`. B charged
+  19,467,978 bytes, so the campaign reached 19,992,266 bytes through B.
+* CI passed on the candidate `c698ba2` (run 44913069796, all five jobs). Tag
+  `v0.1.47` points to that commit.
+* `scripts/run-npm-release-0.1.47.mjs` published it. The registry accepted
+  the second PUT, sent after a web one-time password, with HTTP 202
+  `{"success":true}`. Its readback 30 seconds later still saw the
+  pre-publication state, so pub01 recorded `accepted_readback_unconfirmed`.
+* `scripts/run-npm-verify-0.1.47.mjs` (verify01) confirmed all four anonymous
+  readbacks: the version document, the dist-tag, the tarball bytes and the
+  install packument.
+* The release stages used 311,296 of their 2,097,152 bytes.
+
+### New 64 MiB campaign
 
 The user approved releasing 0.1.47 by the same procedure as 0.1.46, in a new
-64 MiB campaign. The authoritative configuration is `scripts/package-approval.mjs`:
+64 MiB campaign. The authoritative configuration was `scripts/package-approval.mjs`
+at `c698ba2`:
 
 ```
 0 prior + 524,288 preparation + 51,380,224 B maximum + 2,097,152 release stages

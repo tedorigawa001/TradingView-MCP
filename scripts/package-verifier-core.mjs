@@ -5,7 +5,7 @@ import { createInflateRaw, crc32 } from 'node:zlib';
 import path from 'node:path';
 
 export const MiB = 1048576;
-export const RELEASE_VERSION = '0.1.47';
+export const RELEASE_VERSION = '0.1.48';
 // The fixed distribution allowlist of the current candidate; older ones stay as history.
 export const DISTRIBUTION_MANIFEST = 'packaging/npm-js-' + RELEASE_VERSION + '.json';
 export const PATH_HASH = '4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61';

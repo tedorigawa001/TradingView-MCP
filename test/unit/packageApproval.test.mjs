@@ -50,8 +50,8 @@ test('new 64 MiB campaign accounts for preparation, B, release stages and both m
   assert.equal(C.prepReserved+C.runLimit+C.releaseStagesReserved,54001664);
   assert.equal(C.fixedMargin,6*MiB);assert.equal(C.unallocated,6815744);
   assert.equal(C.prepReserved+C.runLimit+C.releaseStagesReserved+C.fixedMargin+C.unallocated,67108864);
-  assert.equal(C.releaseVersion,'0.1.47');assert.equal(C.preparation,'package-2026-11-21-reverify-0.1.47-prep01');
-  assert.equal(C.run,'package-2026-11-21-reverify-0.1.47');
+  assert.equal(C.releaseVersion,'0.1.48');assert.equal(C.preparation,'package-2026-11-24-reverify-0.1.48-prep01');
+  assert.equal(C.run,'package-2026-11-24-reverify-0.1.48');
   assert.equal(Object.values(PREP_LIMITS).reduce((a,b)=>a+b,0),512*1024);
   for(const key of ['priorReserved','prepReserved','runLimit','releaseStagesReserved','fixedMargin','unallocated','campaignCap','protected765Used'])
     assert.throws(()=>assertCampaign({...C,[key]:C[key]+1}),/campaign_changed/);
@@ -151,16 +151,16 @@ test('approval input limits and strict UTF-8 fail closed',()=>{
   for(const value of [Buffer.alloc(PREP_LIMITS.approval_b+1),Buffer.from([0xff])])
     assert.throws(()=>authorizeExecutionB({...f.args(),receiptBytes:value}));
 });
-test('the 0.1.46 release is bound as history and carries no reservation into this campaign',()=>{
+test('the 0.1.47 release is bound as history and carries no reservation into this campaign',()=>{
   assert.deepEqual(PRIOR_RECORDS.map(r=>r.reserved),[0,0,0,0]);assert.equal(C.priorReserved,0);
   assert.deepEqual(PRIOR_RECORDS.map(r=>r.role),['previous_release_preparation','previous_release_verification',
     'previous_release_publication_readback','previous_release_publication']);
-  assert.ok(PRIOR_RECORDS.every(r=>!r.path.includes('0.1.47')&&!r.path.startsWith(C.preparation)&&!r.path.startsWith(C.run)));
+  assert.ok(PRIOR_RECORDS.every(r=>r.path.includes('0.1.47')&&!r.path.includes('0.1.48')&&!r.path.startsWith(C.preparation)&&!r.path.startsWith(C.run)));
   assert.throws(()=>verifyPriorRecords('/virtual',()=>Buffer.from('changed')),/prior_record_changed/);
-  assert.equal(approval.PREVIOUS_RELEASE.version,'0.1.46');assert.equal(approval.PREVIOUS_RELEASE.closedCumulative,50957298);
-  assert.equal(approval.PREVIOUS_RELEASE.campaignCap,84*MiB);
+  assert.equal(approval.PREVIOUS_RELEASE.version,'0.1.47');assert.equal(approval.PREVIOUS_RELEASE.releaseStageCumulative,311296);
+  assert.equal(approval.PREVIOUS_RELEASE.campaignCap,64*MiB);assert.equal(approval.PREVIOUS_RELEASE.campaignReservedAfterB,19992266);
 });
-// The four 0.1.46 records as the history check reads them, keyed by path.
+// The four 0.1.47 records as the history check reads them, keyed by path.
 function previousRelease(){
   const P=approval.PREVIOUS_RELEASE,[prepRecord,,,statusRecord]=PRIOR_RECORDS;
   return {
@@ -171,26 +171,29 @@ function previousRelease(){
       artifact:{bytes:P.artifactBytes,sha256:P.artifactSha256},quota:{campaign_reserved_upper:P.campaignReservedAfterB}},
     readback:{status:'verified',verified:true,rows:[{file:'approval.json',sha256:'a'.repeat(64)},
       {file:'verification-status.json',sha256:statusRecord.sha256}]},
-    status:{status:'verified',reason:null,publication:false,cumulative_reserved:P.closedCumulative,
-      verdicts:{version:'confirmed',tag:'confirmed',tarball:'confirmed',packument:'confirmed'}},
+    status:{status:'verified',reason:null,publication_performed:false,release_stage_cumulative:P.releaseStageCumulative,
+      verdicts:{version:'confirmed',tag:'confirmed',tarball:'confirmed',packument:'confirmed'},
+      published:{version:P.version,tarball_sha256:P.artifactSha256}},
   };
 }
 const historyValues=h=>new Map([[PRIOR_RECORDS[0].path,bytes(h.prep)],[PRIOR_RECORDS[1].path,bytes(h.result)],
   [PRIOR_RECORDS[2].path,bytes(h.readback)],[PRIOR_RECORDS[3].path,bytes(h.status)]]);
-test('the history check follows the 0.1.46 preparation, verification and publication chain',()=>{
+test('the history check follows the 0.1.47 preparation, verification and publication chain',()=>{
   approval.validatePreviousRelease(historyValues(previousRelease()));
   const cases=[
-    [h=>{h.prep.status='failed';},'previous_preparation'],[h=>{h.prep.version='0.1.47';},'previous_preparation'],
+    [h=>{h.prep.status='failed';},'previous_preparation'],[h=>{h.prep.version='0.1.48';},'previous_preparation'],
     [h=>{h.prep.preparation=C.preparation;},'previous_preparation'],[h=>{h.prep.schema='package-preparation-status-v1';},'previous_preparation'],
     [h=>{h.result.status='failed';},'previous_verification'],[h=>{h.result.phase='pack';},'previous_verification'],
     [h=>{h.result.approval_b.preparation_status_sha256='0'.repeat(64);},'previous_verification'],
     [h=>{h.result.approval_b.input_manifest_sha256='0'.repeat(64);},'previous_verification'],
-    [h=>{h.result.artifact.sha256='0'.repeat(64);},'previous_verification'],[h=>{h.result.artifact.bytes=846951;},'previous_verification'],
-    [h=>{h.result.quota.campaign_reserved_upper=49081331;},'previous_verification'],[h=>{h.result.run=C.run;},'previous_verification'],
+    [h=>{h.result.artifact.sha256='0'.repeat(64);},'previous_verification'],[h=>{h.result.artifact.bytes=851983;},'previous_verification'],
+    [h=>{h.result.quota.campaign_reserved_upper=19992267;},'previous_verification'],[h=>{h.result.run=C.run;},'previous_verification'],
     [h=>{h.readback.verified=false;},'previous_publication_readback'],[h=>{h.readback.status='stopped';},'previous_publication_readback'],
     [h=>{h.readback.rows=h.readback.rows.slice(0,1);},'previous_publication_readback'],
     [h=>{h.status.status='stopped';},'previous_publication'],[h=>{h.status.reason='publication_unconfirmed';},'previous_publication'],
-    [h=>{h.status.cumulative_reserved=50957299;},'previous_publication'],[h=>{h.status.publication=true;},'previous_publication'],
+    [h=>{h.status.release_stage_cumulative=311297;},'previous_publication'],[h=>{h.status.publication_performed=true;},'previous_publication'],
+    [h=>{delete h.status.publication_performed;},'previous_publication'],[h=>{h.status.published.version='0.1.46';},'previous_publication'],
+    [h=>{h.status.published.tarball_sha256='0'.repeat(64);},'previous_publication'],[h=>{delete h.status.published;},'previous_publication'],
     [h=>{h.status.verdicts.version='mismatch';},'previous_publication'],[h=>{delete h.status.verdicts.packument;},'previous_publication'],
   ];
   for(const [change,reason]of cases){

@@ -4,33 +4,35 @@ import {createHash} from 'node:crypto';
 import {WriteBudget,QuotaWriter,LIMITS,VERIFIER_INPUT_PATHS,RELEASE_VERSION,DISTRIBUTION_MANIFEST,validateManifest,MiB,sha,invariant} from './package-verifier-core.mjs';
 
 const KiB=1024;
-// 0.1.47 runs in a new 64 MiB campaign, approved on 2026-11-21. Preparation and
-// the B run keep the 0.1.46 limits; releaseStagesReserved is held for the later
+// 0.1.48 runs in a new 64 MiB campaign, approved on 2026-11-24. Preparation and
+// the B run keep the earlier limits; releaseStagesReserved is held for the later
 // npm login, preflight, publication and readback records and is not usable here.
-// The 0.1.46 campaign (84 MiB) closed at 50,957,298 cumulative bytes. Its
-// records are bound below as hash-checked history and carry no reservation.
+// The 0.1.47 campaign (64 MiB) reached 19,992,266 bytes through B and used
+// 311,296 of its 2 MiB release-stage share. Its records are bound below as
+// hash-checked history and carry no reservation.
 export const REVERIFY_CAMPAIGN=Object.freeze({
   schema:'package-reverify-campaign-v2',
   releaseVersion:RELEASE_VERSION,
-  preparation:'package-2026-11-21-reverify-0.1.47-prep01',run:'package-2026-11-21-reverify-0.1.47',
+  preparation:'package-2026-11-24-reverify-0.1.48-prep01',run:'package-2026-11-24-reverify-0.1.48',
   priorReserved:0,prepReserved:512*KiB,runLimit:49*MiB,releaseStagesReserved:2*MiB,
   fixedMargin:6*MiB,unallocated:6815744,campaignCap:64*MiB,protected765Used:0
 });
-// The finished 0.1.46 release: a ready preparation, the passed B verification
-// that produced the published artifact, and the readback check that closed it.
-export const PREVIOUS_RELEASE=Object.freeze({version:'0.1.46',preparation:'package-2026-11-18-reverify-r02-prep02',
-  run:'package-2026-11-18-reverify-r02',artifactBytes:846950,
-  artifactSha256:'241353c28201dfaffee179763c8500036aa2f7f821d9cfdf0090c6cb2ab573aa',
-  campaignCap:84*MiB,campaignReservedAfterB:49081330,closedCumulative:50957298});
+// The finished 0.1.47 release: a ready preparation, the passed B verification
+// that produced the artifact, and the anonymous readback (verify01) that
+// confirmed the registry serves that same artifact.
+export const PREVIOUS_RELEASE=Object.freeze({version:'0.1.47',preparation:'package-2026-11-21-reverify-0.1.47-prep01',
+  run:'package-2026-11-21-reverify-0.1.47',artifactBytes:851982,
+  artifactSha256:'625fbbae18924987691f23e3cbbc7d2efa58e859826a5dcc0b3d9734d239c1aa',
+  campaignCap:64*MiB,campaignReservedAfterB:19992266,releaseStageCumulative:311296});
 export const PRIOR_RECORDS=Object.freeze([
-  Object.freeze({path:'package-2026-11-18-reverify-r02-prep02/status.json',
-    sha256:'d12feb8160a92a2ae7821a332992eba654b6bf167a74d70b017e01baf59a94c1',reserved:0,role:'previous_release_preparation'}),
-  Object.freeze({path:'package-2026-11-18-reverify-r02/report/result.json',
-    sha256:'9007f4826b10467c8ce8cbf3f6900c6dadc119dcd11a4bf9587ee0b9d66c5fdd',reserved:0,role:'previous_release_verification'}),
-  Object.freeze({path:'package-2026-11-20-publish-0.1.46-verify02/verification-readback.json',
-    sha256:'25a323b5e4ef81b17b76a082dfa143abea0120967760f79c6ec540ba60bfa45a',reserved:0,role:'previous_release_publication_readback'}),
-  Object.freeze({path:'package-2026-11-20-publish-0.1.46-verify02/verification-status.json',
-    sha256:'8431c1ad6ab0ff360ec022b2b8982fdd6940577be43a284561dfd4b9c3ad3355',reserved:0,role:'previous_release_publication'})
+  Object.freeze({path:'package-2026-11-21-reverify-0.1.47-prep01/status.json',
+    sha256:'fcc5c5dbb2ee767abd567a49520756c50412495f2aa8246b6fd3635c1b964e86',reserved:0,role:'previous_release_preparation'}),
+  Object.freeze({path:'package-2026-11-21-reverify-0.1.47/report/result.json',
+    sha256:'b1e70f16ff110ae50dfdc0c8e8c2e0a458bec798d56b6c4740eb5f71f6e1a728',reserved:0,role:'previous_release_verification'}),
+  Object.freeze({path:'package-2026-11-22-publish-0.1.47-verify01/verification-readback.json',
+    sha256:'904dc3445b6be84259f364ad8d3784dabb29f1928b4bfcdbd94bdbd64e97b6fd',reserved:0,role:'previous_release_publication_readback'}),
+  Object.freeze({path:'package-2026-11-22-publish-0.1.47-verify01/verification-status.json',
+    sha256:'2a37b996b0b79e3562b10fac01869d8504caa6d668bdc806afc62168688c03ec',reserved:0,role:'previous_release_publication'})
 ]);
 export const PREP_LIMITS=Object.freeze({inputs:448*KiB,approval_a:8*KiB,approval_b:8*KiB,
   tests:16*KiB,readback:16*KiB,final:16*KiB});
@@ -123,8 +125,9 @@ export function validatePreviousRelease(values){
   invariant(readback.verified===true&&readback.status==='verified'&&Array.isArray(readback.rows)&&
     readback.rows.some(r=>r.file==='verification-status.json'&&r.sha256===statusRecord.sha256),'previous_publication_readback');
   const verdicts=Object.values(status.verdicts??{});
-  invariant(status.status==='verified'&&status.reason===null&&status.publication===false&&
-    status.cumulative_reserved===P.closedCumulative&&verdicts.length===4&&verdicts.every(v=>v==='confirmed'),'previous_publication');
+  invariant(status.status==='verified'&&status.reason===null&&status.publication_performed===false&&
+    status.release_stage_cumulative===P.releaseStageCumulative&&verdicts.length===4&&verdicts.every(v=>v==='confirmed')&&
+    status.published?.version===P.version&&status.published.tarball_sha256===P.artifactSha256,'previous_publication');
 }
 export function verifyPriorRecords(repo,read=readRegular){
   const values=new Map();
