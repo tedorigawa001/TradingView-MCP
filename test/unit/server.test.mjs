@@ -1283,6 +1283,7 @@ test("exposes exactly the expected tools including the indicator table study", a
       "compute_session_profile",
       "create_analysis_alerts",
       "declare_forward_period",
+      "diagnose_replay_strategy_bar",
       "diagnose_strategy_trade_overlap",
       "ensure_analysis_overlay",
       "estimate_carry_panel_effective_sample",
@@ -1761,7 +1762,7 @@ async function nativeMcpFixture(t, hooks = {}) {
 test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
   const client = await connectedClient(makeDeps()); t.after(() => client.close());
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 138);
+  assert.equal(tools.length, 139);
   for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
     "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
     assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
@@ -5891,6 +5892,20 @@ test("report and ledger tools pass explicit Replay adoption bindings to TradingV
   assert.deepEqual(JSON.parse(report.content[0].text).options, { tradesLimit: 1, ...binding });
   const ledger = await client.callTool({ name: "get_strategy_trade_ledger", arguments: { ...args, limit: 1 } });
   assert.deepEqual(JSON.parse(ledger.content[0].text).options, { ...binding, offset: 0, limit: 1 });
+});
+
+test("Replay bar diagnosis requires a pane and study and exposes diagnostic evidence only", async () => {
+  const result = { status: "same_bar", chartIndex: 0, studyId: "strategy-1", adoptionAuthorized: false };
+  const client = await connectedClient(makeDeps({ tv: {
+    diagnoseReplayStrategyBar: async binding => {
+      assert.deepEqual(binding, { chartIndex: 0, expectedStudyId: "strategy-1" });
+      return result;
+    },
+  } }));
+  const call = args => client.callTool({ name: "diagnose_replay_strategy_bar", arguments: args });
+  assert.equal((await call({ chart_index: 0 })).isError, true);
+  assert.equal((await call({ expected_study_id: "strategy-1" })).isError, true);
+  assert.deepEqual(JSON.parse((await call({ chart_index: 0, expected_study_id: "strategy-1" })).content[0].text), result);
 });
 
 test("run_strategy_experiment previews, compares full ledgers, and cleans both variants", async () => {

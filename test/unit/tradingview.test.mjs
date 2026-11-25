@@ -1490,6 +1490,120 @@ test("Replay report and ledger adoption require an explicit pane and study and m
   }), /Replay alignment changed during the bound ledger read/);
 });
 
+test("Replay bar diagnosis identifies a native five-minute bar without authorizing adoption", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const binding = { chartIndex: 0, expectedStudyId: "strategy-1" };
+  await tv.diagnoseReplayStrategyBar(binding);
+  await tv.getStrategyReport({ ...binding, requireReplayAlignment: true });
+  await tv.getStrategyTradeLedger({ ...binding, requireReplayAlignment: true });
+  const [diagnostic, strictReport, strictLedger] = cdp.calls;
+  const fx = strategyLedgerFixture();
+  fx.api.activeChartIndex = () => 0;
+  const backtest = fx.report.settings.dateRange.backtest;
+  const open = backtest.to / 1000;
+  const info = { full_name: fx.symbol, timezone: "America/New_York", session: "1700-1700",
+    subsession_id: "regular", bar_fillgaps: false };
+  let tail = open;
+  let prior = open - 300;
+  let end = open + 300;
+  let current = end - 1;
+  let selected = current;
+  let loading = false;
+  const items = [{ value: [prior, 1, 2, 1, 2] }, { value: [tail, 1, 2, 1, 2] }];
+  const series = { symbolInfo: () => info, sessionId: () => "regular", bars: () => ({ _items: items }) };
+  fx.chart.resolution = () => "5";
+  fx.chart.chartType = () => 1;
+  fx.chart.chartModel = () => ({ mainSeries: () => series });
+  const study = fx.chart.getStudyById("strategy-1");
+  study.isLoading = () => loading;
+  fx.chart.barTimeToEndOfPeriod = time => time === prior ? tail : end;
+  fx.chart.endOfPeriodToBarTime = () => tail;
+  fx.api.replayApi = async () => ({
+    getReplaySelectedDate: () => selected, currentDate: () => current,
+    isReplayStarted: () => true, isReadyToPlay: () => true,
+    isAutoplayStarted: () => false, isJumpToBarModeEnabled: () => false,
+  });
+  const read = () => fx.run(diagnostic);
+  const match = await read();
+  assert.equal(match.status, "same_bar");
+  assert.equal(match.barOpen, new Date(open * 1000).toISOString());
+  assert.equal(match.barEndExclusive, new Date(end * 1000).toISOString());
+  assert.equal(match.adoptionAuthorized, false);
+  assert.match(match.ledgerId, /^sha256:[0-9a-f]{64}$/);
+  assert.match(match.reportStateSha256, /^sha256:[0-9a-f]{64}$/);
+  for (const field of ["summary", "trades", "inputs", "reportState"]) assert.equal(Object.hasOwn(match, field), false);
+  await assert.rejects(fx.run(strictReport), /Replay alignment unconfirmed/);
+  await assert.rejects(fx.run(strictLedger), /Replay alignment unconfirmed/);
+
+  current = selected = end;
+  assert.equal((await read()).status, "different_bar");
+  prior = tail;
+  tail = end;
+  end += 300;
+  backtest.to = tail * 1000;
+  items[1].value[0] = tail;
+  items[0].value[0] = prior;
+  assert.equal((await read()).status, "same_bar");
+  end -= 60;
+  assert.equal((await read()).reason, "nonstandard_bar_duration");
+  end += 60;
+  items[0].value[0] -= 300;
+  assert.equal((await read()).reason, "bar_continuity_unconfirmed");
+  items[0].value[0] = tail;
+  assert.equal((await read()).reason, "bar_continuity_unconfirmed");
+  items[0].value[0] = prior;
+  items[0].value[4] = null;
+  assert.equal((await read()).reason, "bar_continuity_unconfirmed");
+  items[0].value[4] = 2;
+  info.bar_fillgaps = true;
+  assert.equal((await read()).reason, "series_gap_handling_unconfirmed");
+  delete info.bar_fillgaps;
+  assert.equal((await read()).reason, "series_gap_handling_unconfirmed");
+  info.bar_fillgaps = false;
+  loading = true;
+  assert.equal((await read()).reason, "strategy_report_unsettled");
+  loading = false;
+  const nativeEnd = fx.chart.barTimeToEndOfPeriod;
+  delete fx.chart.barTimeToEndOfPeriod;
+  assert.equal((await read()).reason, "bar_boundary_unconfirmed");
+  fx.chart.barTimeToEndOfPeriod = nativeEnd;
+  backtest.to -= 300_000;
+  assert.equal((await read()).reason, "report_end_does_not_match_last_bar");
+  backtest.to += 300_000;
+  selected--;
+  assert.equal((await read()).reason, "replay_cursor_unconfirmed");
+  selected++;
+
+  const moveWholeSnapshot = seconds => {
+    tail += seconds;
+    prior += seconds;
+    end += seconds;
+    current += seconds;
+    selected += seconds;
+    items[0].value[0] = prior;
+    items[1].value[0] = tail;
+    backtest.to = tail * 1000;
+  };
+  const mutations = [
+    [() => { fx.report.performance.all.netProfit += 1; }, () => { fx.report.performance.all.netProfit -= 1; }],
+    [() => { fx.report.performance.sharpeRatio = 1; }, () => { delete fx.report.performance.sharpeRatio; }],
+    [() => { fx.inputValues[3].value += 1; }, () => { fx.inputValues[3].value -= 1; }],
+    [() => { info.subsession_id = "extended"; }, () => { info.subsession_id = "regular"; }],
+    [() => { loading = true; }, () => { loading = false; }],
+    [() => { items[0].value[4] += 1; }, () => { items[0].value[4] -= 1; }],
+    [() => { current = ++selected; }, () => { current = --selected; }],
+    [() => { items[1].value[4] += 1; }, () => { items[1].value[4] -= 1; }],
+    [() => moveWholeSnapshot(300), () => moveWholeSnapshot(-300)],
+  ];
+  for (const [change, restore] of mutations) {
+    const result = await fx.run(diagnostic, n => { if (n === 2) change(); });
+    assert.equal(result.reason, "evidence_changed_during_read");
+    assert.equal(result.adoptionAuthorized, false);
+    restore();
+  }
+});
+
 test("Replay status retains its timestamp display when strict report adoption would reject submilliseconds", async () => {
   const cdp = fakeCdp({});
   await new TradingView(cdp).getReplayStatus();

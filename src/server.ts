@@ -221,6 +221,7 @@ export interface ServerDeps {
     | "removePineFromChart"
     | "getStrategyReport"
     | "getStrategyTradeLedger"
+    | "diagnoseReplayStrategyBar"
     | "runBacktest"
     | "listAlerts"
     | "createPriceAlert"
@@ -6324,6 +6325,27 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         }
       });
     },
+  );
+
+  server.registerTool(
+    "diagnose_replay_strategy_bar",
+    {
+      description: "Read-only diagnosis for a bound paused Replay and a standard 5-minute candlestick chart. " +
+        "Compares the selected time, cursor and native report-end bar using verified session boundaries. " +
+        "Returns evidence only and never authorizes adoption or returns performance or trades.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        chart_index: z.number().int().nonnegative(),
+        expected_study_id: z.string().regex(/^[\w.-]{1,128}$/),
+      },
+    },
+    async ({ chart_index, expected_study_id }) => chartOperations.run(async () => {
+      try {
+        return jsonResult(await tv.diagnoseReplayStrategyBar({ chartIndex: chart_index, expectedStudyId: expected_study_id }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }),
   );
 
   server.registerTool(

@@ -478,6 +478,8 @@ Use `chart_index` and `expected_study_id` on report and ledger reads to require 
 
 For Replay results, set `require_replay_alignment: true` on `get_strategy_report` and on every `get_strategy_trade_ledger` read. Both calls require an explicit `chart_index` and `expected_study_id`. The result includes `replayAlignment` only when paused Replay's selected time, actual cursor and the Strategy Tester report's native end timestamp agree in UTC at both the initial and final checks. A missing timestamp or even a one-second difference blocks the read. Use the same alignment evidence on all readings, with `expected_ledger_id` on subsequent ledger pages.
 
+`diagnose_replay_strategy_bar` takes `chart_index` and `expected_study_id`. It compares the paused Replay selection and cursor against the report's last native 5-minute candlestick and that bar's session-aware start and exclusive end. It requires a settled strategy report and two contiguous candles with OHLC on a series whose gap filling is disabled. Short bars, missing boundary evidence, and changes between the two snapshots prevent a positive diagnosis. A diagnostic match returns timestamps and evidence hashes with `adoptionAuthorized: false`. Keep using the strict report and ledger reads for adoption.
+
 Overlap diagnosis reports realized equity based on the closed trades and the positions evidenced by the supplied rows. Indicator state and outstanding orders stay unconfirmed, so the diagnostic never authorizes stitching the intervals into one result.
 
 ## Troubleshooting

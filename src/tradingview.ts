@@ -441,6 +441,27 @@ interface ReplayReportAlignment {
   reportEndTime: string;
 }
 
+interface ReplayStrategyBarDiagnosis {
+  status: "same_bar" | "different_bar" | "held";
+  reason: string | null;
+  chartIndex: number;
+  studyId: string;
+  adoptionAuthorized: false;
+  symbol?: string;
+  resolution?: "5";
+  selectedTime?: string;
+  cursorTime?: string;
+  reportEndTime?: string;
+  barOpen?: string;
+  barEndExclusive?: string;
+  boundarySource?: "tradingview_native_session_period";
+  pineId?: string;
+  pineVersion?: string;
+  ledgerId?: string;
+  reportStateSha256?: string;
+  comparisonScope?: "before_after_snapshots";
+}
+
 export interface BacktestResult extends StrategyReport {
   pineId: string;
   /** Study id while the strategy is on the chart (kept, or its removal failed), otherwise null. */
@@ -743,10 +764,10 @@ const REPLAY_STATUS_SNIPPET = `
 
 const REPLAY_REPORT_ALIGNMENT_SNIPPET = `
   ${REPLAY_CLOCK_SNIPPET}
-  if (requireReplayAlignment && typeof api.replayApi !== "function") {
+  if (needReplay && typeof api.replayApi !== "function") {
     throw new Error("Replay alignment cannot be verified in this app session");
   }
-  const replay = requireReplayAlignment ? await api.replayApi() : null;
+  const replay = needReplay ? await api.replayApi() : null;
   const readReplayAlignment = (rawReport) => {
     if (!requireReplayAlignment) return null;
     if (api.activeChart() !== chart || api.activeChartIndex() !== chartIndex ||
@@ -765,6 +786,68 @@ const REPLAY_REPORT_ALIGNMENT_SNIPPET = `
     }
     return { chartIndex, studyId: expectedStudyId, symbol: chart.symbol(), resolution: chart.resolution(),
       selectedTime, cursorTime, reportEndTime };
+  };
+`;
+
+const REPLAY_BAR_DIAGNOSIS_SNIPPET = `
+  const diagnosis = (status, reason, details = {}) =>
+    ({ status, reason, chartIndex, studyId: expectedStudyId, adoptionAuthorized: false, ...details });
+  const readBarEvidence = () => {
+    const held = (reason) => ({ decision: diagnosis("held", reason), snapshot: null });
+    if (api.activeChart() !== chart || api.activeChartIndex() !== chartIndex ||
+        !replay || unwrapReplay(replay.isReplayStarted()) !== true ||
+        unwrapReplay(replay.isReadyToPlay()) !== true || unwrapReplay(replay.isAutoplayStarted()) !== false ||
+        unwrapReplay(replay.isJumpToBarModeEnabled()) !== false) {
+      return held("paused_replay_unconfirmed");
+    }
+    const selectedTime = replayTimeIso(unwrapReplay(replay.getReplaySelectedDate()), true);
+    const cursorTime = replayTimeIso(unwrapReplay(replay.currentDate()), true);
+    if (cursorTime === null || selectedTime !== cursorTime) return held("replay_cursor_unconfirmed");
+    if (chart.getStudyById(expectedStudyId)?.isLoading?.() !== false) return held("strategy_report_unsettled");
+    const symbol = chart.symbol();
+    if (chart.resolution() !== "5" || chart.chartType?.() !== 1) return held("unsupported_chart_series");
+    const series = chart.chartModel().mainSeries();
+    const info = series.symbolInfo?.();
+    const sessionId = series.sessionId?.();
+    if (!info || info.full_name !== symbol || ![info.timezone, info.session, sessionId].every(s =>
+      typeof s === "string" && s.length > 0 && s.length <= 256)) return held("series_session_unconfirmed");
+    if (info.bar_fillgaps !== false) return held("series_gap_handling_unconfirmed");
+    const bars = series.bars()._items;
+    const bar = bars?.at(-1)?.value;
+    const previousBar = bars?.at(-2)?.value;
+    const hasOhlc = row => Array.isArray(row) && row.length >= 5 && row.slice(1, 5).every(Number.isFinite);
+    const open = bar?.[0];
+    const previous = previousBar?.[0];
+    if (!Number.isSafeInteger(open) || !Number.isSafeInteger(previous) || open - previous !== 300 ||
+        !hasOhlc(bar) || !hasOhlc(previousBar)) {
+      return held("bar_continuity_unconfirmed");
+    }
+    const reportEnd = report.settings?.dateRange?.backtest?.to;
+    if (reportEnd !== open * 1000) return held("report_end_does_not_match_last_bar");
+    let end;
+    try {
+      // Native, session-aware period boundaries in Unix seconds. Cross-check
+      // the inverse against the actual bar, never infer it from the resolution.
+      end = chart.barTimeToEndOfPeriod(open);
+      if (!Number.isSafeInteger(end) || chart.endOfPeriodToBarTime(end) !== open ||
+          chart.barTimeToEndOfPeriod(previous) !== open) {
+        return held("bar_boundary_unconfirmed");
+      }
+    } catch (error) {
+      return held("bar_boundary_unconfirmed");
+    }
+    if (end - open !== 300) return held("nonstandard_bar_duration");
+    const observed = Date.parse(cursorTime);
+    const same = open * 1000 <= observed && observed < end * 1000;
+    const decision = diagnosis(same ? "same_bar" : "different_bar", same ? null : "cursor_outside_half_open_bar", {
+      symbol, resolution: "5", selectedTime, cursorTime, reportEndTime: new Date(reportEnd).toISOString(),
+      barOpen: new Date(open * 1000).toISOString(), barEndExclusive: new Date(end * 1000).toISOString(),
+      boundarySource: "tradingview_native_session_period",
+    });
+    return { decision, snapshot: JSON.stringify({
+      decision, previousBar: previousBar.slice(0, 6), bar: bar.slice(0, 6), sessionId, session: info.session,
+      subsession: info.subsession_id ?? null, timezone: info.timezone
+    }) };
   };
 `;
 
@@ -2589,6 +2672,7 @@ export class TradingView {
         const chartIndex = ${JSON.stringify(chartIndex ?? null)};
         const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
         const requireReplayAlignment = ${requireReplayAlignment === true};
+        const needReplay = requireReplayAlignment;
         ${REPLAY_REPORT_ALIGNMENT_SNIPPET}
         const bt = await resolveBacktestingApi(api, chart);
         if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
@@ -2621,11 +2705,16 @@ export class TradingView {
     `);
   }
 
-  /**
-   * Paginated, read-only trade ledger for the strategy currently active in
-   * Strategy Tester. The ledger id covers every normalized trade, allowing a
-   * caller to reject pages from a report that recalculated between requests.
-   */
+  /** Read-only diagnostic using the same snapshot checks as a bound ledger. */
+  diagnoseReplayStrategyBar(options: { chartIndex: number; expectedStudyId: string }): Promise<ReplayStrategyBarDiagnosis> {
+    return this.getStrategyTradeLedger({ ...options, captureReportState: true, diagnoseReplayBar: true });
+  }
+
+  /** Paginated trade ledger for the active strategy. The ledger id covers every normalized trade. */
+  getStrategyTradeLedger(options: StrategyReadBinding & {
+    captureReportState: true;
+    diagnoseReplayBar: true;
+  }): Promise<ReplayStrategyBarDiagnosis>;
   getStrategyTradeLedger(options: StrategyReadBinding & {
     identityStudyId: string;
     expectedLedgerId: string;
@@ -2640,10 +2729,14 @@ export class TradingView {
     identityStudyId?: string;
     expectedReportStateSha256?: string;
     captureReportState?: boolean;
-  } = {}): Promise<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture> {
+    diagnoseReplayBar?: true;
+  } = {}): Promise<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture | ReplayStrategyBarDiagnosis> {
     const { offset = 0, limit = 200, expectedLedgerId, identityStudyId, expectedReportStateSha256,
-      captureReportState, chartIndex, expectedStudyId, requireReplayAlignment } = options;
+      captureReportState, chartIndex, expectedStudyId, requireReplayAlignment, diagnoseReplayBar } = options;
     assertStrategyReadBinding(options);
+    if (diagnoseReplayBar && (chartIndex === undefined || expectedStudyId === undefined)) {
+      throw new Error("Replay bar diagnosis requires chart_index and expected_study_id");
+    }
     if (!Number.isInteger(offset) || offset < 0 || offset > 10_000_000) {
       throw new Error(`offset must be an integer between 0 and 10000000, got ${offset}`);
     }
@@ -2661,7 +2754,7 @@ export class TradingView {
         !expectedReportStateSha256 || !/^sha256:[a-f0-9]{64}$/.test(expectedReportStateSha256))) {
       throw new Error("Pine identity requires a captured ledger id, study id and report state hash");
     }
-    return this.cdp.evaluate<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture>(`
+    return this.cdp.evaluate<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture | ReplayStrategyBarDiagnosis>(`
       (async () => {
         const api = window.TradingViewApi;
         const offset = ${offset};
@@ -2673,6 +2766,8 @@ export class TradingView {
         const chartIndex = ${JSON.stringify(chartIndex ?? null)};
         const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
         const requireReplayAlignment = ${requireReplayAlignment === true};
+        const diagnoseReplayBar = ${diagnoseReplayBar === true};
+        const needReplay = requireReplayAlignment || diagnoseReplayBar;
         const chart = api.activeChart();
         if (chartIndex !== null && api.activeChartIndex() !== chartIndex) {
           throw new Error("strategy ledger does not match the requested chart");
@@ -2688,11 +2783,15 @@ export class TradingView {
         if (act === null || act === undefined) {
           throw new Error("no active strategy — add a strategy to the chart before requesting its trade ledger");
         }
+        ${diagnoseReplayBar ? REPLAY_BAR_DIAGNOSIS_SNIPPET : ""}
         const report = bt.activeStrategyReportData.value();
         if (!report || !report.performance) {
+          if (diagnoseReplayBar) return diagnosis("held", "strategy_report_unavailable");
           throw new Error("no strategy report available — the active strategy may still be calculating");
         }
         const replayAlignment = readReplayAlignment(report);
+        const barEvidence = diagnoseReplayBar ? readBarEvidence() : null;
+        if (barEvidence && barEvidence.snapshot === null) return barEvidence.decision;
         const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
         const iso = (ms) => (typeof ms === "number" && isFinite(ms) ? new Date(ms).toISOString() : null);
         const metric = (v) => {
@@ -2903,6 +3002,13 @@ export class TradingView {
         };
         // An identity read snapshots the state before hashing the ledger; a
         // capture needs the computed ledger id first and snapshots below.
+        ${diagnoseReplayBar ? `
+          const readDiagnosisReport = () => {
+            ${FORMAT_REPORT_SNIPPET}
+            return JSON.stringify([captureReportState(null, expectedStudyId), formatReport(bt, 1)]);
+          };
+          const initialDiagnosisReport = readDiagnosisReport();
+        ` : ""}
         let reportState = identityStudyId === null ? null : captureReportState(expectedLedgerId, identityStudyId);
         if (!globalThis.crypto || !globalThis.crypto.subtle || typeof TextEncoder !== "function") {
           throw new Error("Web Crypto is unavailable — cannot bind paginated ledger pages safely");
@@ -2931,7 +3037,12 @@ export class TradingView {
             throw new Error("Replay alignment changed during the bound ledger read");
           }
         };
-        verifyBoundRead();
+        try {
+          verifyBoundRead();
+        } catch (error) {
+          if (barEvidence) return diagnosis("held", "evidence_changed_during_read");
+          throw error;
+        }
         const boundStudyId = identityStudyId !== null ? identityStudyId : captureState ? activeId : null;
         if (boundStudyId !== null) {
           const verifying = identityStudyId !== null;
@@ -2953,13 +3064,28 @@ export class TradingView {
           if (api.activeChart() !== chart || bt.activeStrategy.value() !== act ||
               bt.activeStrategyReportData.value() !== report || chart.symbol() !== symbol ||
               chart.resolution() !== timeframe) {
+            if (barEvidence) return diagnosis("held", "evidence_changed_during_read");
             throw new Error("active strategy or report changed during " + purpose);
           }
           if (captureReportState(ledgerId, boundStudyId) !== reportState) {
+            if (barEvidence) return diagnosis("held", "evidence_changed_during_read");
             throw new Error("strategy report metrics changed during " + purpose);
           }
-          verifyBoundRead();
-          verifyLedgerContents(purpose, boundStudyId);
+          try {
+            verifyBoundRead();
+            verifyLedgerContents(purpose, boundStudyId);
+          } catch (error) {
+            if (barEvidence) return diagnosis("held", "evidence_changed_during_read");
+            throw error;
+          }
+          if (barEvidence) {
+            if (readBarEvidence().snapshot !== barEvidence.snapshot ||
+                readDiagnosisReport() !== initialDiagnosisReport) {
+              return diagnosis("held", "evidence_changed_during_read");
+            }
+            return { ...barEvidence.decision, pineId, pineVersion, ledgerId, reportStateSha256,
+              comparisonScope: "before_after_snapshots" };
+          }
           const result = verifying
             ? { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256 }
             : { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256,
