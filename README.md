@@ -476,6 +476,8 @@ For `run_strategy_experiment`, set `fixed_period` with the exact UTC timestamps 
 
 Use `chart_index` and `expected_study_id` on report and ledger reads to require the intended active pane and study. Replay start checks that the selected time and replay cursor agree before returning. Compare that settled time with the requested timestamp if the experiment needs a particular bar.
 
+For Replay results, set `require_replay_alignment: true` on `get_strategy_report` and on every `get_strategy_trade_ledger` read. Both calls require an explicit `chart_index` and `expected_study_id`. The result includes `replayAlignment` only when paused Replay's selected time, actual cursor and the Strategy Tester report's native end timestamp agree in UTC at both the initial and final checks. A missing timestamp or even a one-second difference blocks the read. Use the same alignment evidence on all readings, with `expected_ledger_id` on subsequent ledger pages.
+
 Overlap diagnosis reports realized equity based on the closed trades and the positions evidenced by the supplied rows. Indicator state and outstanding orders stay unconfirmed, so the diagnostic never authorizes stitching the intervals into one result.
 
 ## Troubleshooting

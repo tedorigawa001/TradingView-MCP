@@ -5883,6 +5883,16 @@ test("get_strategy_trade_ledger exposes stable bounded pages", async () => {
   });
 });
 
+test("report and ledger tools pass explicit Replay adoption bindings to TradingView", async () => {
+  const client = await connectedClient(makeDeps());
+  const args = { chart_index: 0, expected_study_id: "strategy-1", require_replay_alignment: true };
+  const binding = { chartIndex: 0, expectedStudyId: "strategy-1", requireReplayAlignment: true };
+  const report = await client.callTool({ name: "get_strategy_report", arguments: { ...args, trades_limit: 1 } });
+  assert.deepEqual(JSON.parse(report.content[0].text).options, { tradesLimit: 1, ...binding });
+  const ledger = await client.callTool({ name: "get_strategy_trade_ledger", arguments: { ...args, limit: 1 } });
+  assert.deepEqual(JSON.parse(ledger.content[0].text).options, { ...binding, offset: 0, limit: 1 });
+});
+
 test("run_strategy_experiment previews, compares full ledgers, and cleans both variants", async () => {
   const baselineId = "USER;baseline123";
   const candidateId = "USER;candidate123";

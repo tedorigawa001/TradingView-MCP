@@ -5609,6 +5609,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
         expected_study_id: z.string().regex(/^[\w.-]{1,128}$/).optional()
           .describe("Require the active Strategy Tester report to belong to this study"),
+        require_replay_alignment: z.literal(true).optional()
+          .describe("Requires chart_index and expected_study_id. Returns results only when paused Replay selection, cursor and report end agree"),
         trades_limit: z
           .number()
           .int()
@@ -5618,13 +5620,14 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
           .describe("Max most-recent trades to include. Default: 20"),
       },
     },
-    async ({ trades_limit, chart_index, expected_study_id }) =>
+    async ({ trades_limit, chart_index, expected_study_id, require_replay_alignment }) =>
       chartOperations.run(async () => {
         try {
           return jsonResult(await tv.getStrategyReport({
             tradesLimit: trades_limit ?? 20,
             ...(chart_index === undefined ? {} : { chartIndex: chart_index }),
             ...(expected_study_id === undefined ? {} : { expectedStudyId: expected_study_id }),
+            ...(require_replay_alignment ? { requireReplayAlignment: true } : {}),
           }));
         } catch (err) {
           return errorResult(err);
@@ -6216,6 +6219,8 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       inputSchema: {
         chart_index: z.number().int().nonnegative().optional().describe("Require this chart index to be active"),
         expected_study_id: z.string().regex(/^[\w.-]{1,128}$/).optional(),
+        require_replay_alignment: z.literal(true).optional()
+          .describe("Requires chart_index and expected_study_id. Returns results only when paused Replay selection, cursor and report end agree"),
         offset: z
           .number()
           .int()
@@ -6246,10 +6251,11 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
       },
     },
     async ({ offset, limit, expected_ledger_id, identity_study_id, expected_report_state_sha256, capture_report_state,
-      chart_index, expected_study_id }) => {
+      chart_index, expected_study_id, require_replay_alignment }) => {
       const binding = {
         ...(chart_index === undefined ? {} : { chartIndex: chart_index }),
         ...(expected_study_id === undefined ? {} : { expectedStudyId: expected_study_id }),
+        ...(require_replay_alignment ? { requireReplayAlignment: true as const } : {}),
       };
       if (capture_report_state !== undefined) {
         if (identity_study_id !== undefined || expected_report_state_sha256 !== undefined ||

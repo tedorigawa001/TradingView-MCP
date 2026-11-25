@@ -373,6 +373,7 @@ export interface StrategyTradeLedger {
   unavailableFields: string[];
   qualityIssues: string[];
   trades: StrategyLedgerTrade[];
+  replayAlignment?: ReplayReportAlignment;
 }
 
 export interface StrategyPineIdentity {
@@ -381,6 +382,7 @@ export interface StrategyPineIdentity {
   pineId: string;
   pineVersion: string;
   reportStateSha256: string;
+  replayAlignment?: ReplayReportAlignment;
 }
 
 /**
@@ -392,12 +394,16 @@ export interface StrategyReportStateCapture extends StrategyPineIdentity {
   reportState: Record<string, unknown>;
 }
 
-interface StrategyLedgerOptions {
+interface StrategyReadBinding {
+  chartIndex?: number;
+  expectedStudyId?: string;
+  requireReplayAlignment?: true;
+}
+
+interface StrategyLedgerOptions extends StrategyReadBinding {
   offset?: number;
   limit?: number;
   expectedLedgerId?: string;
-  chartIndex?: number;
-  expectedStudyId?: string;
 }
 
 export interface FixedPineSourceHashes {
@@ -422,6 +428,17 @@ export interface StrategyReport {
   totalTrades: number | null;
   /** Most recent trades, chronological. */
   trades: StrategyTrade[];
+  replayAlignment?: ReplayReportAlignment;
+}
+
+interface ReplayReportAlignment {
+  chartIndex: number;
+  studyId: string;
+  symbol: string;
+  resolution: string;
+  selectedTime: string;
+  cursorTime: string;
+  reportEndTime: string;
 }
 
 export interface BacktestResult extends StrategyReport {
@@ -669,42 +686,85 @@ function assertChartIndex(chartIndex: number | undefined): void {
   }
 }
 
+function assertStrategyReadBinding({ chartIndex, expectedStudyId, requireReplayAlignment }: StrategyReadBinding): void {
+  assertChartIndex(chartIndex);
+  if (expectedStudyId !== undefined && !/^[\w.-]{1,128}$/.test(expectedStudyId)) {
+    throw new Error("invalid expected strategy study id");
+  }
+  if (requireReplayAlignment && (chartIndex === undefined || expectedStudyId === undefined)) {
+    throw new Error("Replay alignment requires chart_index and expected_study_id");
+  }
+}
+
+const REPLAY_CLOCK_SNIPPET = `
+  const unwrapReplay = (value) => value && typeof value.value === "function" ? value.value() : value;
+  const finiteReplay = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+  const replayTimeIso = (value, exact = false) => {
+    const number = finiteReplay(value);
+    if (number === null) return null;
+    const milliseconds = Math.abs(number) >= 1e12 ? number : number * 1000;
+    if (exact && !Number.isSafeInteger(milliseconds)) return null;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  };
+`;
+
 const REPLAY_STATUS_SNIPPET = `
+  ${REPLAY_CLOCK_SNIPPET}
   const replayStatus = () => {
-    const unwrap = (value) => value && typeof value.value === "function" ? value.value() : value;
-    const finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
-    const iso = (value) => {
-      const number = finite(value);
-      if (number === null) return null;
-      const date = new Date(Math.abs(number) >= 1e12 ? number : number * 1000);
-      return Number.isNaN(date.getTime()) ? null : date.toISOString();
-    };
     const chart = api.activeChart();
     let index = null;
     try { index = api.activeChartIndex(); } catch (e) {}
-    const currentTime = finite(unwrap(replay.currentDate()));
-    const selectedTime = finite(unwrap(replay.getReplaySelectedDate()));
-    const resolutions = unwrap(replay.replayResolutions());
-    const currentResolution = unwrap(replay.currentReplayResolution());
-    const autoResolution = unwrap(replay.autoReplayResolution());
+    const currentTime = finiteReplay(unwrapReplay(replay.currentDate()));
+    const selectedTime = finiteReplay(unwrapReplay(replay.getReplaySelectedDate()));
+    const resolutions = unwrapReplay(replay.replayResolutions());
+    const currentResolution = unwrapReplay(replay.currentReplayResolution());
+    const autoResolution = unwrapReplay(replay.autoReplayResolution());
     return {
-      available: unwrap(replay.isReplayAvailable()) === true,
-      toolbarVisible: unwrap(replay.isReplayToolbarVisible()) === true,
-      started: unwrap(replay.isReplayStarted()) === true,
-      ready: unwrap(replay.isReadyToPlay()) === true,
-      autoplay: unwrap(replay.isAutoplayStarted()) === true,
-      jumpToBarMode: unwrap(replay.isJumpToBarModeEnabled()) === true,
+      available: unwrapReplay(replay.isReplayAvailable()) === true,
+      toolbarVisible: unwrapReplay(replay.isReplayToolbarVisible()) === true,
+      started: unwrapReplay(replay.isReplayStarted()) === true,
+      ready: unwrapReplay(replay.isReadyToPlay()) === true,
+      autoplay: unwrapReplay(replay.isAutoplayStarted()) === true,
+      jumpToBarMode: unwrapReplay(replay.isJumpToBarModeEnabled()) === true,
       currentTime,
-      currentTimeIso: iso(currentTime),
+      currentTimeIso: replayTimeIso(currentTime),
       selectedTime,
-      selectedTimeIso: iso(selectedTime),
+      selectedTimeIso: replayTimeIso(selectedTime),
       currentResolution: typeof currentResolution === "string" ? currentResolution : null,
       replayResolutions: Array.isArray(resolutions)
         ? resolutions.filter((value) => typeof value === "string").slice(0, 100) : [],
       autoResolution: typeof autoResolution === "string" ? autoResolution : null,
-      autoplayDelayMs: finite(replay.autoplayDelay()),
+      autoplayDelayMs: finiteReplay(replay.autoplayDelay()),
       activeChart: { symbol: chart.symbol(), resolution: chart.resolution(), index },
     };
+  };
+`;
+
+const REPLAY_REPORT_ALIGNMENT_SNIPPET = `
+  ${REPLAY_CLOCK_SNIPPET}
+  if (requireReplayAlignment && typeof api.replayApi !== "function") {
+    throw new Error("Replay alignment cannot be verified in this app session");
+  }
+  const replay = requireReplayAlignment ? await api.replayApi() : null;
+  const readReplayAlignment = (rawReport) => {
+    if (!requireReplayAlignment) return null;
+    if (api.activeChart() !== chart || api.activeChartIndex() !== chartIndex ||
+        !replay || unwrapReplay(replay.isReplayStarted()) !== true ||
+        unwrapReplay(replay.isReadyToPlay()) !== true || unwrapReplay(replay.isAutoplayStarted()) !== false) {
+      throw new Error("Replay is not loaded and paused on the requested pane");
+    }
+    const selectedTime = replayTimeIso(unwrapReplay(replay.getReplaySelectedDate()), true);
+    const cursorTime = replayTimeIso(unwrapReplay(replay.currentDate()), true);
+    const end = rawReport?.settings?.dateRange?.backtest?.to;
+    const reportEnd = new Date(Number.isSafeInteger(end) ? end : NaN);
+    const reportEndTime = Number.isFinite(reportEnd.getTime()) ? reportEnd.toISOString() : null;
+    if (selectedTime === null || selectedTime !== cursorTime || cursorTime !== reportEndTime) {
+      throw new Error("Replay alignment unconfirmed: selected=" + selectedTime +
+        ", cursor=" + cursorTime + ", report_end=" + reportEndTime);
+    }
+    return { chartIndex, studyId: expectedStudyId, symbol: chart.symbol(), resolution: chart.resolution(),
+      selectedTime, cursorTime, reportEndTime };
   };
 `;
 
@@ -2514,12 +2574,9 @@ export class TradingView {
    * Strategy Tester data): performance summary, date range, recent trades.
    * Read-only — fails if no strategy is on the chart.
    */
-  getStrategyReport(options: { tradesLimit?: number; chartIndex?: number; expectedStudyId?: string } = {}): Promise<StrategyReport> {
-    const { tradesLimit = 20, chartIndex, expectedStudyId } = options;
-    assertChartIndex(chartIndex);
-    if (expectedStudyId !== undefined && !/^[\w.-]{1,128}$/.test(expectedStudyId)) {
-      throw new Error("invalid expected strategy study id");
-    }
+  getStrategyReport(options: StrategyReadBinding & { tradesLimit?: number } = {}): Promise<StrategyReport> {
+    const { tradesLimit = 20, chartIndex, expectedStudyId, requireReplayAlignment } = options;
+    assertStrategyReadBinding(options);
     if (!Number.isInteger(tradesLimit) || tradesLimit < 1 || tradesLimit > 500) {
       throw new Error(`tradesLimit must be an integer between 1 and 500, got ${tradesLimit}`);
     }
@@ -2529,10 +2586,12 @@ export class TradingView {
         const chart = api.activeChart();
         ${BACKTESTING_API_SNIPPET}
         ${FORMAT_REPORT_SNIPPET}
-        const bt = await resolveBacktestingApi(api, chart);
-        if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
         const chartIndex = ${JSON.stringify(chartIndex ?? null)};
         const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
+        const requireReplayAlignment = ${requireReplayAlignment === true};
+        ${REPLAY_REPORT_ALIGNMENT_SNIPPET}
+        const bt = await resolveBacktestingApi(api, chart);
+        if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
         const bound = chartIndex !== null || expectedStudyId !== null;
         const source = bound ? bt.activeStrategy.value() : null;
         const raw = bound ? bt.activeStrategyReportData.value() : null;
@@ -2541,16 +2600,23 @@ export class TradingView {
             (expectedStudyId !== null && strategyStudyId(source) !== expectedStudyId)) {
           throw new Error("strategy report does not match the requested chart or study");
         }
+        const replayAlignment = readReplayAlignment(raw);
         const report = formatReport(bt, ${tradesLimit});
         if (bound && (api.activeChart() !== chart ||
             (chartIndex !== null && api.activeChartIndex() !== chartIndex) ||
-            bt.activeStrategy.value() !== source || bt.activeStrategyReportData.value() !== raw)) {
+            bt.activeStrategy.value() !== source ||
+            (expectedStudyId !== null && strategyStudyId(source) !== expectedStudyId) ||
+            bt.activeStrategyReportData.value() !== raw)) {
           throw new Error("strategy report changed during the bound read");
         }
         if (!report) {
           throw new Error("no strategy report available — the active chart has no strategy (or it is still calculating). Add one or use run_backtest");
         }
-        return report;
+        if (replayAlignment && (report.dateRange?.to !== replayAlignment.reportEndTime ||
+            JSON.stringify(readReplayAlignment(raw)) !== JSON.stringify(replayAlignment))) {
+          throw new Error("Replay alignment changed during the bound report read");
+        }
+        return replayAlignment ? { ...report, replayAlignment } : report;
       })()
     `);
   }
@@ -2560,12 +2626,12 @@ export class TradingView {
    * Strategy Tester. The ledger id covers every normalized trade, allowing a
    * caller to reject pages from a report that recalculated between requests.
    */
-  getStrategyTradeLedger(options: {
+  getStrategyTradeLedger(options: StrategyReadBinding & {
     identityStudyId: string;
     expectedLedgerId: string;
     expectedReportStateSha256: string;
   }): Promise<StrategyPineIdentity>;
-  getStrategyTradeLedger(options: {
+  getStrategyTradeLedger(options: StrategyReadBinding & {
     captureReportState: true;
     expectedLedgerId?: string;
   }): Promise<StrategyReportStateCapture>;
@@ -2576,11 +2642,8 @@ export class TradingView {
     captureReportState?: boolean;
   } = {}): Promise<StrategyTradeLedger | StrategyPineIdentity | StrategyReportStateCapture> {
     const { offset = 0, limit = 200, expectedLedgerId, identityStudyId, expectedReportStateSha256,
-      captureReportState, chartIndex, expectedStudyId } = options;
-    assertChartIndex(chartIndex);
-    if (expectedStudyId !== undefined && !/^[\w.-]{1,128}$/.test(expectedStudyId)) {
-      throw new Error("invalid expected strategy study id");
-    }
+      captureReportState, chartIndex, expectedStudyId, requireReplayAlignment } = options;
+    assertStrategyReadBinding(options);
     if (!Number.isInteger(offset) || offset < 0 || offset > 10_000_000) {
       throw new Error(`offset must be an integer between 0 and 10000000, got ${offset}`);
     }
@@ -2609,10 +2672,12 @@ export class TradingView {
         const captureState = ${captureReportState === true ? "true" : "false"};
         const chartIndex = ${JSON.stringify(chartIndex ?? null)};
         const expectedStudyId = ${JSON.stringify(expectedStudyId ?? null)};
+        const requireReplayAlignment = ${requireReplayAlignment === true};
         const chart = api.activeChart();
         if (chartIndex !== null && api.activeChartIndex() !== chartIndex) {
           throw new Error("strategy ledger does not match the requested chart");
         }
+        ${REPLAY_REPORT_ALIGNMENT_SNIPPET}
         ${BACKTESTING_API_SNIPPET}
         const bt = await resolveBacktestingApi(api, chart);
         if (!bt) throw new Error("Strategy Tester data model is unavailable in this app session");
@@ -2627,6 +2692,7 @@ export class TradingView {
         if (!report || !report.performance) {
           throw new Error("no strategy report available — the active strategy may still be calculating");
         }
+        const replayAlignment = readReplayAlignment(report);
         const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
         const iso = (ms) => (typeof ms === "number" && isFinite(ms) ? new Date(ms).toISOString() : null);
         const metric = (v) => {
@@ -2861,6 +2927,9 @@ export class TradingView {
           if (JSON.stringify(readSummary()) !== JSON.stringify(summarySnapshot)) {
             throw new Error("strategy report summary changed during the bound read");
           }
+          if (replayAlignment && JSON.stringify(readReplayAlignment(report)) !== JSON.stringify(replayAlignment)) {
+            throw new Error("Replay alignment changed during the bound ledger read");
+          }
         };
         verifyBoundRead();
         const boundStudyId = identityStudyId !== null ? identityStudyId : captureState ? activeId : null;
@@ -2895,6 +2964,7 @@ export class TradingView {
             ? { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256 }
             : { ledgerId, studyId: boundStudyId, pineId, pineVersion, reportStateSha256,
               reportStateSchema: "pine_report_state_v1", reportState: JSON.parse(reportState) };
+          if (replayAlignment) result.replayAlignment = replayAlignment;
           if (new TextEncoder().encode(JSON.stringify(result)).byteLength > ${MAX_PINE_IDENTITY_BYTES}) {
             throw new Error((verifying ? "Pine identity" : "report state capture") + " exceeds the byte limit");
           }
@@ -2922,6 +2992,7 @@ export class TradingView {
         return {
           schemaVersion: "1.0",
           ledgerId,
+          ...(replayAlignment ? { replayAlignment } : {}),
           strategy,
           symbol,
           timeframe,

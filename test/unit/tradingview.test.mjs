@@ -1437,6 +1437,77 @@ test("bound trade ledgers reject in-place changes during hashing", async () => {
   }
 });
 
+test("Replay report and ledger adoption require an explicit pane and study and matching end times", async () => {
+  const cdp = fakeCdp({});
+  const tv = new TradingView(cdp);
+  const binding = { chartIndex: 0, expectedStudyId: "strategy-1", requireReplayAlignment: true };
+  assert.throws(() => tv.getStrategyReport({ expectedStudyId: binding.expectedStudyId, requireReplayAlignment: true }),
+    /requires chart_index and expected_study_id/);
+  assert.throws(() => tv.getStrategyTradeLedger({ chartIndex: 0, requireReplayAlignment: true }),
+    /requires chart_index and expected_study_id/);
+  await tv.getStrategyReport(binding);
+  await tv.getStrategyTradeLedger(binding);
+  const fx = strategyLedgerFixture();
+  fx.api.activeChartIndex = () => 0;
+  const range = fx.report.settings.dateRange.backtest;
+  const end = range.to;
+  let selected = end;
+  let cursor = end / 1000;
+  let started = true;
+  fx.api.replayApi = async () => ({
+    getReplaySelectedDate: () => ({ value: () => selected }),
+    currentDate: () => cursor,
+    isReplayStarted: () => started,
+    isReadyToPlay: () => true,
+    isAutoplayStarted: () => false,
+  });
+  const time = new Date(end).toISOString();
+  const expected = { chartIndex: 0, studyId: "strategy-1", symbol: "OANDA:EURUSD", resolution: "60",
+    selectedTime: time, cursorTime: time, reportEndTime: time };
+  for (const expr of cdp.calls) {
+    assert.deepEqual(plain((await fx.run(expr)).replayAlignment), expected);
+    range.to = end + 1000;
+    await assert.rejects(fx.run(expr), /Replay alignment unconfirmed/);
+    range.to = null;
+    await assert.rejects(fx.run(expr), /report_end=null/);
+    range.to = end;
+    cursor--;
+    await assert.rejects(fx.run(expr), /Replay alignment unconfirmed/);
+    cursor = end / 1000 + 0.0004;
+    await assert.rejects(fx.run(expr), /cursor=null/);
+    cursor = end / 1000;
+    started = false;
+    await assert.rejects(fx.run(expr), /not loaded and paused/);
+    started = true;
+    fx.source.id = () => "other";
+    await assert.rejects(fx.run(expr), /requested (chart or )?study/);
+    fx.source.id = () => "strategy-1";
+  }
+  await assert.rejects(fx.run(cdp.calls[1], () => {
+    selected += 1000;
+    cursor++;
+    range.to += 1000;
+  }), /Replay alignment changed during the bound ledger read/);
+});
+
+test("Replay status retains its timestamp display when strict report adoption would reject submilliseconds", async () => {
+  const cdp = fakeCdp({});
+  await new TradingView(cdp).getReplayStatus();
+  const fx = strategyLedgerFixture();
+  const end = fx.report.settings.dateRange.backtest.to;
+  fx.api.activeChartIndex = () => 0;
+  fx.api.replayApi = async () => ({
+    currentDate: () => end + 0.25, getReplaySelectedDate: () => end,
+    replayResolutions: () => ["60"], currentReplayResolution: () => "60", autoReplayResolution: () => "60",
+    isReplayAvailable: () => true, isReplayToolbarVisible: () => true, isReplayStarted: () => true,
+    isReadyToPlay: () => true, isAutoplayStarted: () => false, isJumpToBarModeEnabled: () => false,
+    autoplayDelay: () => 1000,
+  });
+  const status = await fx.run(cdp.calls[0]);
+  assert.equal(status.currentTime, end + 0.25);
+  assert.equal(status.currentTimeIso, new Date(end).toISOString());
+});
+
 test("report state capture returns the state and hash that a later identity read verifies", async () => {
   const cdp = fakeCdp({});
   const tv = new TradingView(cdp);
