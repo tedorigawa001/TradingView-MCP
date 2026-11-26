@@ -66,6 +66,8 @@ import { nativeBarTargetsSchema, nativeBarId, nativeBarHash, nativeBarTimestamp,
 import { buildOhlcvKeyLevels } from "./ohlcvKeyLevels.js";
 import { buildMovingAverageContext } from "./movingAverageContext.js";
 import { buildExecutionSnapshot } from "./executionSnapshot.js";
+import { checkReplayAdoptionCandidate } from "./replayAdoptionCandidate.js";
+import { createReplayAdoptionReader, type ReplayPublisherReader } from "./replayAdoptionReader.js";
 import { selectDueAnalyses, type JournalAnalysisRecord } from "./dueAnalyses.js";
 import { buildAnalysisPerformance } from "./analysisPerformance.js";
 import {
@@ -259,6 +261,11 @@ export interface ServerDeps {
   researchSeriesRelations?: Pick<ResearchSeriesRelationStore, "recordBatch" | "withSnapshot" | "filePath">;
   /** Test seam for tzdata drift (design H6); production uses the runtime's Intl data. */
   zoneResolver?: ZoneResolver;
+  /**
+   * Verified Replay publisher for check_replay_adoption_candidate. The CDP
+   * adapter has none, so production leaves it unset and the check holds.
+   */
+  replayPublisher?: ReplayPublisherReader;
   /** Test seam; production uses the process-wide file lock by default. */
   chartOperationLock?: Pick<ChartOperationLock, "acquire">;
 }
@@ -453,7 +460,7 @@ const SERVER_VERSION: string = (() => {
   }
 })();
 
-export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), researchSeriesRelations, zoneResolver }: ServerDeps): McpServer {
+export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journal, researchJournal, measurementJournal = new StrategyResearchJournalStore(resolveMeasurementResearchJournalPath()), nativeBarHistory = new NativeBarHistory(), futuresOpenInterestHistory, policyRateHistory, policyRateHeartbeats, policyRateOfficialHistory, cmeGoldOpenInterest, bookmapFlowDirectory, chartOperationLock, backtestLedgers = new BacktestLedgerStore(), backtestSliceJournal = new BacktestSliceJournalStore(), researchPeriodUsage = new ResearchPeriodUsageStore(undefined, undefined, { researchJournalPath: resolveStrategyResearchJournalPath() }), forecastSets = new ForecastSetStore(), forecastLossJournal = new ForecastLossJournalStore(), barSeries = new BarSeriesStore(), proxySets = new ProxySetStore(), realizedCovarianceJournal = new RealizedCovarianceJournalStore(), riskBacktestJournal = new RiskBacktestJournalStore(), researchTrials = new ResearchTrialStore(), researchSeriesRelations, zoneResolver, replayPublisher }: ServerDeps): McpServer {
   const chartOperations = new SerialOperationQueue(chartOperationLock ?? new ChartOperationLock());
   let fixedPineEvidence: StrategyPineIdentity | undefined;
   let pineIdentityReadInFlight = false;
@@ -6346,6 +6353,45 @@ export function createServer({ cdp, tv, scanner, calendar, cot, realYield, journ
         return errorResult(err);
       }
     }),
+  );
+
+  server.registerTool(
+    "check_replay_adoption_candidate",
+    {
+      description: "Read-only check of a paused 5-minute Replay strategy report against a caller-bound target, " +
+        "using evidence from a verified Replay publisher only. No publisher is configured for the CDP adapter, " +
+        "so it returns held (publisher_unavailable) without reading the chart. " +
+        "It never returns performance, trades or adoption authority.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        chart_index: z.number().int().nonnegative(),
+        expected_study_id: z.string().regex(/^[\w.-]{1,128}$/),
+        expected_pine_id: z.string().regex(/^USER;\w{8,64}$/),
+        expected_pine_version: z.string().regex(/^[0-9]{1,6}(?:\.[0-9]{1,3})?$/),
+        expected_symbol: z.string().regex(/^[\w.:-]{1,110}$/),
+      },
+    },
+    async ({ chart_index, expected_study_id, expected_pine_id, expected_pine_version, expected_symbol }) => {
+      const target = {
+        chartIndex: chart_index, studyId: expected_study_id, pineId: expected_pine_id,
+        pineVersion: expected_pine_version, symbol: expected_symbol,
+        seriesId: `candles:regular:${expected_symbol}:5`, timeframe: "5" as const,
+      };
+      const publisher = replayPublisher;
+      if (!publisher) {
+        return jsonResult({ status: "held", reason: "publisher_unavailable", adoptionAuthorized: false, target });
+      }
+      return chartOperations.run(async () => {
+        try {
+          // Evidence comes from the publisher only; the reader must not fall back to page reads.
+          const refuse = async (): Promise<never> => { throw new Error("Replay adoption evidence comes only from the publisher"); };
+          const reader = createReplayAdoptionReader({ evaluate: refuse, diagnose: refuse, publisher });
+          return jsonResult({ ...(await checkReplayAdoptionCandidate(target, reader)), target });
+        } catch (err) {
+          return errorResult(err);
+        }
+      });
+    },
   );
 
   server.registerTool(

@@ -1260,6 +1260,7 @@ test("exposes exactly the expected tools including the indicator table study", a
       "audit_pine_indicator",
       "backtest_risk_forecast",
       "carry_panel_preflight",
+      "check_replay_adoption_candidate",
       "check_research_period_usage",
       "check_research_series_history",
       "check_research_trials",
@@ -1762,7 +1763,7 @@ async function nativeMcpFixture(t, hooks = {}) {
 test("105-3 MCP exposes nine gated tools, strict no-import inputs and accurate side-effect hints", async (t) => {
   const client = await connectedClient(makeDeps()); t.after(() => client.close());
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 139);
+  assert.equal(tools.length, 140);
   for (const name of ["prepare_native_bar_recording", "get_native_bar_recording_status", "get_native_bar_history",
     "get_native_bar_history_as_of", "prepare_native_bar_history_prune", "prepare_native_bar_clock_recovery"]) {
     assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true);
@@ -5906,6 +5907,146 @@ test("Replay bar diagnosis requires a pane and study and exposes diagnostic evid
   assert.equal((await call({ chart_index: 0 })).isError, true);
   assert.equal((await call({ expected_study_id: "strategy-1" })).isError, true);
   assert.deepEqual(JSON.parse((await call({ chart_index: 0, expected_study_id: "strategy-1" })).content[0].text), result);
+});
+
+const REPLAY_ARGS = Object.freeze({
+  chart_index: 0, expected_study_id: "strategy-1", expected_pine_id: "USER;abcdef12",
+  expected_pine_version: "13.0", expected_symbol: "OANDA:AUDUSD",
+});
+const REPLAY_TARGET = Object.freeze({
+  chartIndex: 0, studyId: "strategy-1", pineId: "USER;abcdef12", pineVersion: "13.0",
+  symbol: "OANDA:AUDUSD", seriesId: "candles:regular:OANDA:AUDUSD:5", timeframe: "5",
+});
+
+// A publisher whose proof satisfies the Stage B reader for evidenceTarget.
+function replayPublisherFake({ evidenceTarget = REPLAY_TARGET, onRead = () => {} } = {}) {
+  const sha = (c) => "sha256:" + c.repeat(64);
+  const open = 1_795_607_700_000;
+  const live = { appInstanceId: "publisher-app", replaySessionId: "publisher-replay", revision: 14 };
+  const update = { seriesId: evidenceTarget.seriesId, openTimeMs: open, updateId: "publisher-bar-update" };
+  const start = { id: "checkpoint-start", liveRevision: { ...live, revision: 11 } };
+  const end = { id: "checkpoint-end", liveRevision: { ...live } };
+  const identity = { snapshotId: "publisher-snapshot", ledgerId: sha("a"), reportStateSha256: sha("b"), settingsSha256: sha("c") };
+  const { chartIndex, studyId, pineId, pineVersion } = evidenceTarget;
+  const streams = [
+    { publisherId: "chart-publisher", streamId: "chart", domains: ["replay", "bar", "settings"],
+      start: { checkpointId: start.id, streamEpoch: "chart-epoch", sequence: 20 },
+      end: { checkpointId: end.id, streamEpoch: "chart-epoch", sequence: 21, publicationComplete: true },
+      receivedSequences: [21] },
+    { publisherId: "strategy-publisher", streamId: "strategy", domains: ["report", "ledger"],
+      start: { checkpointId: start.id, streamEpoch: "strategy-epoch", sequence: 88 },
+      end: { checkpointId: end.id, streamEpoch: "strategy-epoch", sequence: 89, publicationComplete: true },
+      receivedSequences: [89] },
+  ];
+  const proof = {
+    start, end, bar: { finalized: true, update: { ...update } },
+    report: { complete: true, calculationId: "calculation", calculatedFrom: { ...update }, checkpointId: end.id,
+      settingsSha256: identity.settingsSha256, target: { chartIndex, studyId, pineId, pineVersion } },
+    ledger: { ...identity, calculationId: "calculation" },
+    streamManifest: { startCheckpointId: start.id, endCheckpointId: end.id, complete: true,
+      requiredStreams: streams.map(({ publisherId, streamId, domains, start: s }) => ({
+        publisherId, streamId, domains: [...domains], streamEpoch: s.streamEpoch })) },
+    streams,
+  };
+  const evidence = {
+    binding: { ...identity, liveRevision: { ...live } }, target: { ...evidenceTarget },
+    replay: { paused: true, selectedTimeMs: open + 299_000, cursorTimeMs: open + 299_000 },
+    bar: { update: { ...update }, endTimeMs: open + 300_000, nativeBoundaryConfirmed: true,
+      continuityConfirmed: true, finalUpdateConfirmed: true },
+    report: { endTimeMs: open, calculatedFrom: { ...update }, calculationComplete: true, availableTrades: 2, closedTrades: 1 },
+  };
+  const requests = [];
+  return {
+    requests,
+    async readLiveRevision(target) { onRead(); requests.push(["revision", target]); return { ...live }; },
+    async readEvidence(target) { onRead(); requests.push(["evidence", target]); return structuredClone({ evidence, proof }); },
+    async readLedgerPage(target, range) {
+      onRead(); requests.push(["page", target, range]);
+      return { checkpointId: end.id, calculationId: "calculation", page: {
+        binding: structuredClone(evidence.binding), offset: 0, nextOffset: null, availableTrades: 2,
+        trades: [{ reportIndex: 0, status: "closed" }, { reportIndex: 1, status: "open" }] } };
+    },
+  };
+}
+
+async function replayAdoptionClient(t, { publisher, lock } = {}) {
+  const deps = makeDeps(lock ? { chartOperationLock: lock } : {});
+  const forbidden = new Proxy({}, { get() { throw new Error("page reads are not publisher evidence"); } });
+  deps.cdp = forbidden; deps.tv = forbidden;
+  if (publisher) deps.replayPublisher = publisher;
+  const client = await connectedClient(deps); t.after(() => client.close());
+  return (args) => client.callTool({ name: "check_replay_adoption_candidate", arguments: args });
+}
+
+test("Replay adoption check holds without a publisher and reads no chart, page or chart lock", async (t) => {
+  const deps = makeDeps(); let accesses = 0;
+  const forbidden = new Proxy({}, { get() { accesses++; throw new Error("chart access forbidden"); } });
+  for (const key of ["cdp", "tv", "chartOperationLock"]) deps[key] = forbidden;
+  const client = await connectedClient(deps); t.after(() => client.close());
+  const tool = (await client.listTools()).tools.find((entry) => entry.name === "check_replay_adoption_candidate");
+  assert.equal(tool.annotations.readOnlyHint, true);
+  assert.equal(tool.annotations.openWorldHint, false);
+  const result = await client.callTool({ name: "check_replay_adoption_candidate", arguments: REPLAY_ARGS });
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(JSON.parse(result.content[0].text),
+    { status: "held", reason: "publisher_unavailable", adoptionAuthorized: false, target: REPLAY_TARGET });
+  const other = await client.callTool({ name: "check_replay_adoption_candidate", arguments: { ...REPLAY_ARGS, chart_index: 2 } });
+  assert.deepEqual(JSON.parse(other.content[0].text).target, { ...REPLAY_TARGET, chartIndex: 2 });
+  assert.equal(accesses, 0);
+});
+
+test("Replay adoption check refuses incomplete or malformed targets before any read", async (t) => {
+  const call = await replayAdoptionClient(t, { publisher: replayPublisherFake({ onRead: () => { throw new Error("read"); } }) });
+  for (const key of Object.keys(REPLAY_ARGS)) {
+    const args = { ...REPLAY_ARGS }; delete args[key];
+    assert.equal((await call(args)).isError, true, key);
+  }
+  for (const [key, value] of [
+    ["chart_index", -1], ["chart_index", 0.5], ["expected_study_id", "bad id"], ["expected_pine_id", "PUB;abcdef12"],
+    ["expected_pine_id", "USER;short"], ["expected_pine_version", "v13"], ["expected_pine_version", "13.0001"],
+    ["expected_symbol", "CME_MINI:ES1!"], ["expected_symbol", "A".repeat(111)],
+  ]) assert.equal((await call({ ...REPLAY_ARGS, [key]: value })).isError, true, `${key}=${value}`);
+});
+
+test("Replay adoption check binds the caller's target and returns only the publisher-backed decision", async (t) => {
+  let held = false;
+  let locks = 0;
+  const publisher = replayPublisherFake({ onRead: () => assert.equal(held, true) });
+  const call = await replayAdoptionClient(t, { publisher, lock: {
+    acquire: async () => { assert.equal(held, false); held = true; locks++; return async () => { held = false; }; },
+  } });
+  const result = await call(REPLAY_ARGS);
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(JSON.parse(result.content[0].text), { status: "candidate", adoptionAuthorized: false, target: REPLAY_TARGET });
+  assert.equal(locks, 1);
+  assert.equal(held, false);
+  assert.deepEqual(publisher.requests.map(([kind]) => kind),
+    ["revision", "evidence", "revision", "page", "revision", "evidence", "revision"]);
+  for (const [, target] of publisher.requests) assert.deepEqual(target, REPLAY_TARGET);
+  assert.deepEqual(publisher.requests.filter(([kind]) => kind === "page").map(([, , range]) => range), [{ offset: 0, limit: 500 }]);
+});
+
+test("Replay adoption check holds publisher evidence for another target and survives publisher failures", async (t) => {
+  for (const [args, evidenceTarget, reason] of [
+    [{ ...REPLAY_ARGS, expected_pine_version: "12.0" }, REPLAY_TARGET, "report_evidence_unconfirmed"],
+    [{ ...REPLAY_ARGS, expected_study_id: "strategy-2" }, REPLAY_TARGET, "report_evidence_unconfirmed"],
+    [{ ...REPLAY_ARGS, expected_symbol: "OANDA:EURUSD" }, REPLAY_TARGET, "target_changed"],
+    [REPLAY_ARGS, { ...REPLAY_TARGET, seriesId: "candles:extended:OANDA:AUDUSD:5" }, "target_changed"],
+  ]) {
+    const call = await replayAdoptionClient(t, { publisher: replayPublisherFake({ evidenceTarget }) });
+    const decision = JSON.parse((await call(args)).content[0].text);
+    assert.deepEqual(Object.keys(decision).sort(), ["adoptionAuthorized", "reason", "status", "target"]);
+    assert.deepEqual([decision.status, decision.reason, decision.adoptionAuthorized], ["held", reason, false], reason);
+  }
+  let releases = 0;
+  const failing = replayPublisherFake({ onRead: () => { throw new Error("publisher disconnected"); } });
+  const call = await replayAdoptionClient(t, { publisher: failing,
+    lock: { acquire: async () => async () => { releases++; } } });
+  const result = await call(REPLAY_ARGS);
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(JSON.parse(result.content[0].text),
+    { status: "held", reason: "evidence_read_failed", adoptionAuthorized: false, target: REPLAY_TARGET });
+  assert.equal(releases, 1);
 });
 
 test("run_strategy_experiment previews, compares full ledgers, and cleans both variants", async () => {

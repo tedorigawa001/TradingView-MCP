@@ -480,6 +480,8 @@ For Replay results, set `require_replay_alignment: true` on `get_strategy_report
 
 `diagnose_replay_strategy_bar` takes `chart_index` and `expected_study_id`. It compares the paused Replay selection and cursor against the report's last native 5-minute candlestick and that bar's session-aware start and exclusive end. It requires a settled strategy report and two contiguous candles with OHLC on a series whose gap filling is disabled. Short bars, missing boundary evidence, and changes between the two snapshots prevent a positive diagnosis. A diagnostic match returns timestamps and evidence hashes with `adoptionAuthorized: false`. Keep using the strict report and ledger reads for adoption.
 
+`check_replay_adoption_candidate` takes `chart_index`, `expected_study_id`, `expected_pine_id`, `expected_pine_version` and `expected_symbol`. It binds that target to a 5-minute chart whose series is `candles:regular:<symbol>:5`, and accepts evidence only from a verified Replay publisher: checkpoints, complete event-stream manifests and a calculation bound to every ledger page. The CDP connection provides no such publisher, and page observations do not count. So it returns `held` with `publisher_unavailable` without reading the chart. Every result has `adoptionAuthorized: false`, and none includes performance or trades.
+
 Overlap diagnosis reports realized equity based on the closed trades and the positions evidenced by the supplied rows. Indicator state and outstanding orders stay unconfirmed, so the diagnostic never authorizes stitching the intervals into one result.
 
 ## Troubleshooting
