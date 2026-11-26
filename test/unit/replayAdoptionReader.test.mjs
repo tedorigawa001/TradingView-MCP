@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { checkReplayAdoptionCandidate } from "../../build/replayAdoptionCandidate.js";
-import { RECORDER_LOG_LIMIT, createReplayAdoptionReader, deriveReplayEvidence, installReplayRecorder, readReplayTarget,
+import { RECORDER_LOG_LIMIT, createReplayAdoptionReader, installReplayRecorder, readReplayTarget,
   recorderScript, removeReplayRecorder } from "../../build/replayAdoptionReader.js";
 
 const OPEN = Date.parse("2026-11-25T12:25:00Z") / 1000;
@@ -69,33 +69,20 @@ function page() {
   return { s, ev, evaluate, start, step };
 }
 
-function deps(p, { closed = 2, open = 1, ledgerId = sha("a"), diagnosis = {} } = {}) {
-  const total = closed + open;
-  const trades = Array.from({ length: total }, (_, i) => ({ reportIndex: i, status: i < closed ? "closed" : "open" }));
-  const calls = [];
+function deps(p) {
   return {
-    calls,
     evaluate: p.evaluate,
-    async diagnose(options) {
-      calls.push(["diagnose", options]);
+    async diagnose() {
       return { status: "same_bar", reason: null, chartIndex: 0, studyId: "atcWgh", adoptionAuthorized: false, symbol: "OANDA:AUDUSD",
         resolution: "5", selectedTime: iso(p.s.selected), cursorTime: iso(p.s.cursor), reportEndTime: iso(OPEN), barOpen: iso(OPEN),
-        barEndExclusive: iso(OPEN + 300), pineId: target.pineId, pineVersion: "13.0", ledgerId, reportStateSha256: sha("b"), ...diagnosis };
-    },
-    async ledger(options) {
-      calls.push(["ledger", options]);
-      if (options.expectedLedgerId !== undefined && options.expectedLedgerId !== ledgerId) throw new Error("ledger changed");
-      const page = trades.slice(options.offset, options.offset + options.limit);
-      const next = options.offset + page.length;
-      return { ledgerId, availableTrades: total, totalTrades: closed, offset: options.offset, nextOffset: next < total ? next : null,
-        currency: "USD", initialCapital: 100000, inputs: [{ id: "in_0", name: "Length", value: 20 }], trades: page };
+        barEndExclusive: iso(OPEN + 300), pineId: target.pineId, pineVersion: "13.0" };
     },
   };
 }
 
-async function installed(options) {
+async function installed() {
   const p = page();
-  const dep = deps(p, options);
+  const dep = deps(p);
   const install = await installReplayRecorder(dep, 0, "atcWgh");
   return { p, dep, install };
 }
@@ -124,22 +111,21 @@ test("the recorder subscribes passively, needs a stopped Replay, and removes eve
   assert.throws(() => recorderScript("revision", { chartIndex: -1, studyId: "atcWgh" }), /chartIndex/);
 });
 
-test("every delegate fire and every unannounced change advances the revision", async () => {
+test("observed delegate notifications and visible changes advance the diagnostic sequence", async () => {
   const { p } = await installed();
-  const reader = createReplayAdoptionReader(deps(p));
-  let last = (await reader.readLiveRevision(target)).revision;
+  let last = (await snapshot(p)).seq;
   for (const [name, delegate] of Object.entries(p.ev)) {
     delegate.fire();
-    const next = (await reader.readLiveRevision(target)).revision;
+    const next = (await snapshot(p)).seq;
     assert.ok(next > last, name);
     last = next;
   }
   for (const change of [s => { s.reportEnd = 1; }, s => { s.inputs = [{ id: "in_0", value: 21 }]; }, s => { s.turnaround++; },
     s => { s.chartSession = "cs_other"; }, s => { s.bars[1][4] = 9; }, s => { s.resolution = "1"; }]) {
     change(p.s);
-    const next = (await reader.readLiveRevision(target)).revision;
+    const next = (await snapshot(p)).seq;
     assert.equal(next, last + 1);
-    assert.equal((await reader.readLiveRevision(target)).revision, next, "a settled state keeps its revision");
+    assert.equal((await snapshot(p)).seq, next, "a settled observation keeps its sequence");
     last = next;
   }
   const log = (await snapshot(p)).log;
@@ -147,148 +133,327 @@ test("every delegate fire and every unannounced change advances the revision", a
   assert.ok(log.every((e, i) => e.seq === i + 1), "sequence numbers are never reused");
 });
 
-test("the observed start derives a final bar update and the report calculated from it", async () => {
-  const { p, install } = await installed();
+test("the recorder holds without publisher evidence even when its observations look complete", async () => {
+  const { p, dep } = await installed();
   p.start();
-  const snap = await snapshot(p);
-  const derived = deriveReplayEvidence(snap, target.seriesId);
-  assert.equal(derived.reason, null);
-  assert.equal(derived.finalUpdateConfirmed, true);
-  assert.equal(derived.calculationComplete, true);
-  assert.deepEqual(derived.calculatedFrom, derived.update);
-  assert.equal(derived.update.openTimeMs, OPEN * 1000);
-  assert.match(derived.update.updateId, new RegExp("^" + install.recorderId + ":[0-9]+$"));
-  const result = await checkReplayAdoptionCandidate(target, createReplayAdoptionReader(deps(p)));
-  assert.deepEqual(result, { status: "candidate", adoptionAuthorized: false });
-  assert.deepEqual(await readReplayTarget(deps(p), 0, "atcWgh"), target);
+  assert.deepEqual(await readReplayTarget(dep, 0, "atcWgh"), target);
+  const before = await snapshot(p);
+  assert.ok(before.log.some(event => event.name === "seriesCompleted"));
+  assert.ok(before.log.some(event => event.name === "reportChanged"));
+
+  // A transient change with no notification leaves the recorder's sequence untouched.
+  const previousInputs = p.s.inputs;
+  p.s.inputs = [{ id: "in_0", value: 21 }];
+  p.s.cursor += 300;
+  p.s.inputs = previousInputs;
+  p.s.cursor -= 300;
+  assert.equal((await snapshot(p)).seq, before.seq);
+
+  const reader = createReplayAdoptionReader({
+    evaluate: async () => { throw new Error("observations must not be used as publisher evidence"); },
+    diagnose: async () => { throw new Error("a same-bar diagnosis is not publisher evidence"); },
+  });
+  assert.deepEqual(await checkReplayAdoptionCandidate(target, reader),
+    { status: "held", reason: "live_revision_unconfirmed", adoptionAuthorized: false });
 });
 
-test("a recorder that did not see this Replay start cannot supply provenance", async () => {
-  const { p } = await installed();
-  p.start();
-  const snap = await snapshot(p);
-  const unseen = { ...snap, log: snap.log.filter(e => e.name !== "replaySession") };
-  assert.equal(deriveReplayEvidence(unseen, target.seriesId).reason, "replay_start_unobserved");
-  const other = { ...snap, current: { ...snap.current, replaySession: "rs_restored" } };
-  assert.equal(deriveReplayEvidence(other, target.seriesId).reason, "replay_start_unobserved");
-  assert.equal(deriveReplayEvidence({ ...snap, overflow: true }, target.seriesId).reason, "recorder_overflow");
-  const result = await checkReplayAdoptionCandidate(target, createReplayAdoptionReader(deps(p, { diagnosis: {} })));
-  assert.equal(result.status, "candidate");
-  p.s.session = "rs_restored";
-  const held = await checkReplayAdoptionCandidate(target, createReplayAdoptionReader(deps(p)));
-  assert.equal(held.status, "held");
+test("failed subscriptions roll back even when subscribe throws after registering", async () => {
+  const p = page();
+  const subscribe = p.ev.reportChanged.subscribe.bind(p.ev.reportChanged);
+  p.ev.reportChanged.subscribe = (object, member) => {
+    subscribe(object, member);
+    throw new Error("subscribe failed after registration");
+  };
+  await assert.rejects(installReplayRecorder(deps(p), 0, "atcWgh"), /subscribe failed after registration/);
+  assert.ok(Object.values(p.ev).every(delegate => delegate._listeners.length === 0));
+  assert.deepEqual(await removeReplayRecorder(deps(p), 0, "atcWgh"), { removed: false });
 });
 
-test("a step, an unannounced change or a missing final report keeps the read held", async () => {
-  const stepped = await installed();
-  stepped.p.start(); stepped.p.step();
-  assert.equal(deriveReplayEvidence(await snapshot(stepped.p), target.seriesId).reason, "bar_final_update_unconfirmed");
-
-  const changed = await installed();
-  changed.p.start();
-  changed.p.s.reportEnd = (OPEN - 300) * 1000;
-  await changed.p.evaluate(recorderScript("revision", { chartIndex: 0, studyId: "atcWgh" }));
-  changed.p.s.reportEnd = OPEN * 1000;
-  assert.equal(deriveReplayEvidence(await snapshot(changed.p), target.seriesId).reason, "replay_session_changed");
-
-  const noReport = page();
-  await installReplayRecorder(deps(noReport), 0, "atcWgh");
-  noReport.ev.reportChanged.fire = () => {};
-  noReport.start();
-  assert.equal(deriveReplayEvidence(await snapshot(noReport), target.seriesId).reason, "report_final_update_unconfirmed");
-
-  for (const [change, reason] of [[s => { s.replayResolution = null; s.auto = "1"; }, "bar_final_update_unconfirmed"],
-    [s => { s.autoplay = true; }, "bar_final_update_unconfirmed"], [s => { s.loading = true; }, "report_final_update_unconfirmed"]]) {
-    const run = await installed();
-    run.p.start();
-    change(run.p.s);
-    const snap = await snapshot(run.p);
-    // The read above recorded the change itself, so the evidence is superseded first.
-    assert.equal(deriveReplayEvidence(snap, target.seriesId).reason, "replay_session_changed");
-    const unrecorded = { ...snap, log: snap.log.filter(e => e.name !== "unobserved_change") };
-    assert.equal(deriveReplayEvidence(unrecorded, target.seriesId).reason, reason);
+test("cleanup retains failed removals and enforces the original pane and study", async () => {
+  const { p, dep, install } = await installed();
+  const unsubscribe = p.ev.reportChanged.unsubscribeAll.bind(p.ev.reportChanged);
+  p.ev.reportChanged.unsubscribeAll = () => { throw new Error("unsubscribe failed"); };
+  for (const [chart, study] of [[1, "atcWgh"], [0, "another"]]) {
+    await assert.rejects(removeReplayRecorder(dep, chart, study), /another chart or study/);
   }
+  assert.ok(Object.values(p.ev).every(delegate => delegate._listeners.length === 1));
+  assert.deepEqual(await removeReplayRecorder(dep, 0, "atcWgh"),
+    { removed: false, left: 1, recorderId: install.recorderId });
+  await assert.rejects(snapshot(p), /cleanup is pending/);
+  await assert.rejects(installReplayRecorder(dep, 0, "atcWgh"), /awaiting cleanup/);
+  p.ev.reportChanged.unsubscribeAll = unsubscribe;
+  assert.deepEqual(await removeReplayRecorder(dep, 0, "atcWgh"),
+    { removed: true, left: 0, recorderId: install.recorderId });
+  assert.ok(Object.values(p.ev).every(delegate => delegate._listeners.length === 0));
 });
 
-test("the stage A check holds on ledger, report and revision problems seen through the reader", async () => {
-  const wrongCount = await installed({ closed: 2, open: 1 });
-  wrongCount.p.start();
-  const reader = createReplayAdoptionReader({ ...wrongCount.dep, ledger: async options => {
-    const page = await wrongCount.dep.ledger(options);
-    return { ...page, trades: page.trades.map(t => ({ ...t, status: "closed" })) };
-  } });
-  assert.deepEqual(await checkReplayAdoptionCandidate(target, reader), { status: "held", reason: "ledger_count_unconfirmed", adoptionAuthorized: false });
-
-  const moving = await installed();
-  moving.p.start();
-  let fired = false;
-  const during = createReplayAdoptionReader({ ...moving.dep, ledger: async options => {
-    const page = await moving.dep.ledger(options);
-    if (options.limit > 1 && !fired) { fired = true; moving.p.ev.sourceUpdated.fire(); }
-    return page;
-  } });
-  assert.deepEqual(await checkReplayAdoptionCandidate(target, during), { status: "held", reason: "live_revision_changed", adoptionAuthorized: false });
-
-  const notSame = await installed();
-  notSame.p.start();
-  const r = await checkReplayAdoptionCandidate(target, createReplayAdoptionReader(deps(notSame.p, { diagnosis: { status: "different_bar", reason: "cursor_outside_half_open_bar" } })));
-  assert.deepEqual(r, { status: "held", reason: "bar_boundary_unconfirmed", adoptionAuthorized: false });
-
-  const big = await installed({ closed: 700, open: 1 });
-  big.p.start();
-  assert.equal((await checkReplayAdoptionCandidate(target, createReplayAdoptionReader(big.dep))).status, "candidate");
-  const pages = big.dep.calls.filter(([kind, o]) => kind === "ledger" && o.limit === 500);
-  assert.deepEqual(pages.map(([, o]) => [o.offset, o.expectedLedgerId]), [[0, sha("a")], [500, sha("a")]]);
-
-  const otherTarget = await installed();
-  otherTarget.p.start();
-  assert.equal((await checkReplayAdoptionCandidate({ ...target, seriesId: "candles:extended:OANDA:AUDUSD:5" },
-    createReplayAdoptionReader(otherTarget.dep))).reason, "target_changed");
+test("installation retains cleanup state when rollback cannot remove a listener", async () => {
+  const p = page();
+  const subscribe = p.ev.reportChanged.subscribe.bind(p.ev.reportChanged);
+  const unsubscribe = p.ev.reportChanged.unsubscribeAll.bind(p.ev.reportChanged);
+  p.ev.reportChanged.subscribe = (object, member) => {
+    subscribe(object, member);
+    throw new Error("subscribe failed");
+  };
+  p.ev.reportChanged.unsubscribeAll = () => { throw new Error("unsubscribe failed"); };
+  await assert.rejects(installReplayRecorder(deps(p), 0, "atcWgh"), /cleanup is pending/);
+  assert.equal(Object.values(p.ev).reduce((n, delegate) => n + delegate._listeners.length, 0), 1);
+  await assert.rejects(snapshot(p), /cleanup is pending/);
+  p.ev.reportChanged.unsubscribeAll = unsubscribe;
+  assert.equal((await removeReplayRecorder(deps(p), 0, "atcWgh")).removed, true);
+  assert.ok(Object.values(p.ev).every(delegate => delegate._listeners.length === 0));
 });
 
-test("the recorder log is bounded and an overflow is reported", async () => {
+test("the diagnostic recorder bounds the number of observations", async () => {
   const { p } = await installed();
   for (let i = 0; i < RECORDER_LOG_LIMIT + 5; i++) p.ev.sourceUpdated.fire();
   const snap = await snapshot(p);
   assert.equal(snap.log.length, RECORDER_LOG_LIMIT);
   assert.equal(snap.overflow, true);
   assert.equal(snap.seq, RECORDER_LOG_LIMIT + 5);
-  p.start();
-  assert.equal(deriveReplayEvidence(await snapshot(p), target.seriesId).reason, "recorder_overflow");
 });
 
-test("each final-update and report condition is required on its own", async () => {
-  const cases = [
-    [{ complete: false }, null, "bar_final_update_unconfirmed"],
-    [{ pointAfterUpdate: true }, null, "bar_final_update_unconfirmed"],
-    [{ cursor: OPEN + 150 }, null, "bar_final_update_unconfirmed"],
-    [{}, p => p.ev.dataUpdated.fire({}, false, {}), "bar_final_update_unconfirmed"],
-    [{ status: false }, null, "report_final_update_unconfirmed"],
-    [{}, p => p.ev.completed.fire({}), "report_final_update_unconfirmed"],
-    [{}, p => p.ev.replayEnd.fire(), "replay_session_changed"],
-    [{}, p => p.ev.modified.fire(), "bar_final_update_unconfirmed"],
-    [{}, p => p.ev.loading.fire(1), "bar_final_update_unconfirmed"],
-    [{ pointBeforeCursor: true }, null, "replay_point_unobserved"],
-  ];
-  for (const [options, after, reason] of cases) {
-    const { p } = await installed();
-    p.start(options);
-    after?.(p);
-    assert.equal(deriveReplayEvidence(await snapshot(p), target.seriesId).reason, reason, JSON.stringify(options) + String(after));
+function publisherFixture({ snapshotId = "publisher-snapshot-1", requestedTarget = target, additionalLedger = false } = {}) {
+  const live = { appInstanceId: "publisher-app", replaySessionId: "publisher-replay", revision: 14 };
+  const update = { seriesId: target.seriesId, openTimeMs: OPEN * 1000, updateId: "publisher-bar-update" };
+  const start = { id: "publisher-checkpoint-start", liveRevision: { ...live, revision: 11 } };
+  const end = { id: "publisher-checkpoint-end", liveRevision: { ...live } };
+  const identity = { snapshotId, ledgerId: sha("a"), reportStateSha256: sha("b"), settingsSha256: sha("c") };
+  const { chartIndex, studyId, pineId, pineVersion } = target;
+  const proof = {
+    start, end, bar: { finalized: true, update: { ...update } },
+    report: { complete: true, calculationId: "publisher-calculation", calculatedFrom: { ...update },
+      checkpointId: end.id, settingsSha256: identity.settingsSha256, target: { chartIndex, studyId, pineId, pineVersion } },
+    ledger: { ...identity, calculationId: "publisher-calculation" },
+    streams: [
+      { publisherId: "chart-publisher", streamId: "chart", domains: ["replay", "bar", "settings"],
+        start: { checkpointId: start.id, streamEpoch: "chart-epoch", sequence: 20 },
+        end: { checkpointId: end.id, streamEpoch: "chart-epoch", sequence: 22, publicationComplete: true },
+        receivedSequences: [21, 22] },
+      { publisherId: "strategy-publisher", streamId: "strategy", domains: ["report", "ledger"],
+        start: { checkpointId: start.id, streamEpoch: "strategy-epoch", sequence: 88 },
+        end: { checkpointId: end.id, streamEpoch: "strategy-epoch", sequence: 91, publicationComplete: true },
+        receivedSequences: [89, 90, 91] },
+    ],
+  };
+  if (additionalLedger) {
+    const extraStream = structuredClone(proof.streams[1]);
+    extraStream.streamId = "additional-ledger";
+    extraStream.domains = ["ledger"];
+    proof.streams.push(extraStream);
+  }
+  proof.streamManifest = {
+    startCheckpointId: start.id, endCheckpointId: end.id, complete: true,
+    requiredStreams: proof.streams.map(({ publisherId, streamId, domains, start }) => ({
+      publisherId, streamId, domains: [...domains], streamEpoch: start.streamEpoch,
+    })),
+  };
+  const evidence = {
+    binding: { ...identity, liveRevision: { ...live } }, target: { ...requestedTarget },
+    replay: { paused: true, selectedTimeMs: CURSOR * 1000, cursorTimeMs: CURSOR * 1000 },
+    bar: { update: { ...update }, endTimeMs: (OPEN + 300) * 1000, nativeBoundaryConfirmed: true,
+      continuityConfirmed: true, finalUpdateConfirmed: true },
+    report: { endTimeMs: OPEN * 1000, calculatedFrom: { ...update }, calculationComplete: true,
+      availableTrades: 501, closedTrades: 500 },
+  };
+  const calls = [];
+  const fx = { live, proof, evidence, calls, requestedTarget };
+  const reader = createReplayAdoptionReader({
+    evaluate: async () => { throw new Error("unexpected recorder read"); },
+    diagnose: async () => { throw new Error("unexpected page diagnosis"); },
+    publisher: {
+      async readLiveRevision() { return { ...live }; },
+      async readEvidence(requested) {
+        assert.deepEqual(requested, requestedTarget);
+        const packet = structuredClone({ evidence, proof });
+        fx.onEvidence?.(packet);
+        return packet;
+      },
+      async readLedgerPage(requested, range) {
+        assert.deepEqual(requested, requestedTarget);
+        assert.deepEqual(Object.keys(range).sort(), ["limit", "offset"]);
+        calls.push(range.offset);
+        const next = Math.min(range.offset + range.limit, evidence.report.availableTrades);
+        const packet = {
+          checkpointId: end.id, calculationId: proof.report.calculationId,
+          page: {
+            binding: structuredClone(evidence.binding), offset: range.offset,
+            nextOffset: next < evidence.report.availableTrades ? next : null,
+            availableTrades: evidence.report.availableTrades,
+            trades: Array.from({ length: next - range.offset }, (_, i) => {
+              const reportIndex = range.offset + i;
+              return { reportIndex, status: reportIndex < evidence.report.closedTrades ? "closed" : "open" };
+            }),
+          },
+        };
+        fx.onPage?.(packet);
+        return packet;
+      },
+    },
+  });
+  return Object.assign(fx, { reader });
+}
+
+const run = fx => checkReplayAdoptionCandidate(fx.requestedTarget, fx.reader);
+const expectHeld = async (fx, reason) => assert.deepEqual(await run(fx), {
+  status: "held", reason, adoptionAuthorized: false,
+});
+
+test("publisher evidence binds the final bar update, calculation and all ledger pages", async () => {
+  for (const snapshotId of ["publisher-snapshot-1", null]) {
+    const fx = publisherFixture({ snapshotId });
+    assert.deepEqual(await run(fx), { status: "candidate", adoptionAuthorized: false });
+    assert.deepEqual(fx.calls, [0, 500]);
   }
 });
 
-test("ledger identity must agree between the bar diagnosis, the first page and every later page", async () => {
-  const split = await installed();
-  split.p.start();
-  const mismatch = createReplayAdoptionReader(deps(split.p, { diagnosis: { ledgerId: sha("c") } }));
-  assert.deepEqual(await checkReplayAdoptionCandidate(target, mismatch), { status: "held", reason: "evidence_read_failed", adoptionAuthorized: false });
+test("publisher evidence rejects mismatched final updates, calculations and report bindings", async () => {
+  for (const change of [
+    p => { p.bar.finalized = false; },
+    p => { p.report.complete = false; },
+    p => { delete p.report.target; },
+    p => { delete p.report.settingsSha256; },
+    p => { p.report.checkpointId = p.start.id; },
+    p => { p.report.calculatedFrom.updateId = "different-bar-update"; },
+    p => { p.report.calculatedFrom.seriesId = "different-series"; },
+    p => { p.report.calculatedFrom.openTimeMs -= 300_000; },
+    p => { p.ledger.calculationId = "different-calculation"; },
+    p => { p.ledger.reportStateSha256 = sha("e"); },
+    p => { p.ledger.settingsSha256 = sha("e"); },
+  ]) {
+    const fx = publisherFixture();
+    change(fx.proof);
+    await expectHeld(fx, "report_evidence_unconfirmed");
+    assert.deepEqual(fx.calls, []);
+  }
+  const bothPointToTheWrongUpdate = publisherFixture();
+  bothPointToTheWrongUpdate.proof.report.calculatedFrom.updateId = "different-bar-update";
+  bothPointToTheWrongUpdate.evidence.report.calculatedFrom.updateId = "different-bar-update";
+  await expectHeld(bothPointToTheWrongUpdate, "report_evidence_unconfirmed");
+  assert.deepEqual(bothPointToTheWrongUpdate.calls, []);
+});
 
-  const drift = await installed();
-  drift.p.start();
-  const reader = createReplayAdoptionReader({ ...drift.dep, ledger: async options => {
-    const page = await drift.dep.ledger({ ...options, expectedLedgerId: undefined });
-    return options.limit > 1 ? { ...page, ledgerId: sha("e") } : page;
-  } });
-  assert.deepEqual(await checkReplayAdoptionCandidate(target, reader), { status: "held", reason: "ledger_page_binding_mismatch", adoptionAuthorized: false });
+test("publisher calculation evidence cannot be reused for a different target or settings", async () => {
+  for (const overrides of [
+    { chartIndex: 1 },
+    { studyId: "other-study" },
+    { pineId: "USER;0123456789abcdef" },
+    { pineVersion: "1.0" },
+  ]) {
+    const fx = publisherFixture({ requestedTarget: { ...target, ...overrides } });
+    await expectHeld(fx, "report_evidence_unconfirmed");
+    assert.deepEqual(fx.calls, []);
+  }
+  const fx = publisherFixture();
+  fx.evidence.binding.settingsSha256 = fx.proof.ledger.settingsSha256 = sha("e");
+  await expectHeld(fx, "report_evidence_unconfirmed");
+  assert.deepEqual(fx.calls, []);
+});
+
+test("publisher evidence holds when a required event stream is entirely missing", async () => {
+  const fx = publisherFixture({ additionalLedger: true });
+  assert.deepEqual(await run(fx), { status: "candidate", adoptionAuthorized: false });
+  assert.deepEqual(fx.calls, [0, 500]);
+  fx.calls.length = 0;
+  fx.proof.streams.pop();
+  await expectHeld(fx, "report_evidence_unconfirmed");
+  assert.deepEqual(fx.calls, []);
+});
+
+test("the required event stream manifest must be complete and bound to the same checkpoints and sources", async () => {
+  for (const change of [
+    p => { delete p.streamManifest; },
+    p => { p.streamManifest.complete = false; },
+    p => { p.streamManifest.startCheckpointId = "other-start-checkpoint"; },
+    p => { p.streamManifest.endCheckpointId = "other-end-checkpoint"; },
+    p => { p.streamManifest.requiredStreams.push(structuredClone(p.streamManifest.requiredStreams[1])); },
+    p => { p.streamManifest.requiredStreams[1].publisherId = "other-publisher"; },
+    p => { p.streamManifest.requiredStreams[1].streamId = "other-stream"; },
+    p => { p.streamManifest.requiredStreams[1].streamEpoch = "other-epoch"; },
+    p => { p.streamManifest.requiredStreams[1].domains = ["report"]; },
+    p => { p.streamManifest.requiredStreams.pop(); },
+  ]) {
+    const fx = publisherFixture();
+    change(fx.proof);
+    await expectHeld(fx, "report_evidence_unconfirmed");
+    assert.deepEqual(fx.calls, []);
+  }
+});
+
+test("publisher evidence holds when matching stream lists omit the ledger domain", async () => {
+  const fx = publisherFixture();
+  const received = fx.proof.streams[1];
+  const required = fx.proof.streamManifest.requiredStreams[1];
+  received.domains = received.domains.filter(domain => domain !== "ledger");
+  required.domains = required.domains.filter(domain => domain !== "ledger");
+  await expectHeld(fx, "report_evidence_unconfirmed");
+  assert.deepEqual(fx.calls, []);
+});
+
+test("publisher evidence rejects gaps, duplicates, missing tails and inconsistent checkpoints", async () => {
+  for (const change of [
+    p => { p.streams[1].receivedSequences = [89, 91]; },
+    p => { p.streams[1].receivedSequences = [89, 89, 91]; },
+    p => { p.streams[1].receivedSequences = [90, 89, 91]; },
+    p => { p.streams[1].receivedSequences.pop(); },
+    p => { delete p.streams[1].end.sequence; },
+    p => { p.streams[1].end.publicationComplete = false; },
+    p => { p.streams[1].end.checkpointId = "other-end-checkpoint"; },
+    p => { p.streams[1].start.checkpointId = "other-start-checkpoint"; },
+    p => { p.streams[1].end.streamEpoch = "reconnected-stream"; },
+    p => { p.streams[1].domains = ["report"]; },
+    p => { p.streams.push(structuredClone(p.streams[1])); },
+    p => { p.start.liveRevision.replaySessionId = "other-session"; },
+    p => { p.end.liveRevision.appInstanceId = "other-app"; },
+  ]) {
+    const fx = publisherFixture();
+    change(fx.proof);
+    await expectHeld(fx, "report_evidence_unconfirmed");
+    assert.deepEqual(fx.calls, []);
+  }
+});
+
+test("publisher live revision detects a change and restoration even with identical snapshot metadata", async () => {
+  const fx = publisherFixture();
+  const baseline = structuredClone(fx.evidence);
+  fx.onPage = () => {
+    const original = fx.evidence.replay.cursorTimeMs;
+    fx.evidence.replay.cursorTimeMs += 300_000;
+    fx.live.revision++;
+    fx.evidence.replay.cursorTimeMs = original;
+    fx.live.revision++;
+  };
+  await expectHeld(fx, "live_revision_changed");
+  assert.deepEqual(fx.evidence, baseline);
+  assert.deepEqual(fx.calls, [0]);
+});
+
+test("the page binding is read independently and rejects mixed checkpoints, calculations, and hashes", async () => {
+  const original = publisherFixture();
+  await original.reader.readEvidence(target);
+  const request = { ...original.evidence.binding, snapshotId: "unrelated", reportStateSha256: sha("e") };
+  const page = await original.reader.readLedgerPage(target, { binding: request, offset: 0, limit: 500 });
+  assert.deepEqual(page.binding, original.evidence.binding);
+  for (const change of [
+    p => { p.checkpointId = "different-page-checkpoint"; },
+    p => { p.calculationId = "different-page-calculation"; },
+    p => { p.page.binding.snapshotId = "different-page-snapshot"; },
+    p => { p.page.binding.reportStateSha256 = sha("e"); },
+    p => { p.page.binding.settingsSha256 = sha("e"); },
+    p => { p.page.binding.liveRevision.revision++; },
+  ]) {
+    const fx = publisherFixture();
+    fx.onPage = p => { if (p.page.offset === 500) change(p); };
+    await expectHeld(fx, "ledger_page_binding_mismatch");
+  }
+});
+
+test("the final evidence read cannot replace the publisher baselines with a shorter interval", async () => {
+  const fx = publisherFixture();
+  fx.onEvidence = packet => {
+    if (fx.calls.length === 0) return;
+    packet.proof.streams[0].start.sequence++;
+    packet.proof.streams[0].receivedSequences.shift();
+  };
+  await expectHeld(fx, "evidence_changed_during_read");
 });

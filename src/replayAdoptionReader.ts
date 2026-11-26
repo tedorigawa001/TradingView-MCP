@@ -1,24 +1,17 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { z } from "zod";
 import type { ReplayCandidateReader } from "./replayAdoptionCandidate.js";
 
 /**
- * Stage B: a live ReplayCandidateReader. A passive page-side recorder is
- * installed before Replay starts. It counts every fire of the TradingView
- * delegates that move the evidence (Replay session and point, main-series
- * data, strategy data, status and report) and keeps a bounded log with a
- * native fingerprint per event. Reads compare the current fingerprint with
- * the last recorded one, so a change that no delegate announced still bumps
- * the revision. The evidence is derived only from what the recorder saw
- * after it observed this Replay session start: the last bar's final update,
- * the strategy's completed calculation and the report change that followed.
- * There is no MCP entry point; adoption stays unauthorized.
+ * Stage B. The page-side recorder records observations for diagnosis.
+ * Its notifications, fingerprints and local sequence cannot establish
+ * publisher provenance or completeness. The candidate reader requires a
+ * separately verified publisher connection. No live publisher is configured
+ * by the CDP adapter, and there is no MCP entry point.
  */
 
 export const RECORDER_KEY = "tradingview-mcp.replayAdoptionRecorder.v1";
 export const RECORDER_LOG_LIMIT = 512;
-const BAR_SECONDS = 300;
-const ID = /^[\w:;.-]{1,128}$/;
-const SHA = /^sha256:[a-f0-9]{64}$/;
 
 export interface ReplayFingerprint {
   chartSession: string | null;
@@ -83,29 +76,13 @@ interface ReplayBarDiagnosis {
   barEndExclusive?: string;
   pineId?: string;
   pineVersion?: string;
-  ledgerId?: string;
-  reportStateSha256?: string;
-}
-
-interface LedgerRead {
-  ledgerId: string;
-  availableTrades: number;
-  totalTrades: number | null;
-  offset: number;
-  nextOffset: number | null;
-  currency: string | null;
-  initialCapital: number | null;
-  inputs: Array<{ id: string; name: string; value: unknown }>;
-  trades: Array<{ reportIndex: number; status: "closed" | "open" }>;
 }
 
 /** What the reader needs from a page connection; TradingView and CdpClient satisfy it. */
 export interface ReplayReaderDeps {
   evaluate<T>(expression: string): Promise<T>;
   diagnose(options: { chartIndex: number; expectedStudyId: string }): Promise<ReplayBarDiagnosis>;
-  ledger(options: {
-    chartIndex: number; expectedStudyId: string; offset: number; limit: number; expectedLedgerId?: string;
-  }): Promise<LedgerRead>;
+  publisher?: ReplayPublisherReader;
 }
 
 /** Adapter over the existing CDP client and TradingView operations. */
@@ -113,15 +90,11 @@ export function replayReaderDeps(
   cdp: { evaluate<T>(expression: string): Promise<T> },
   tv: {
     diagnoseReplayStrategyBar(options: { chartIndex: number; expectedStudyId: string }): Promise<ReplayBarDiagnosis>;
-    getStrategyTradeLedger(options: {
-      chartIndex: number; expectedStudyId: string; offset: number; limit: number; expectedLedgerId?: string;
-    }): Promise<LedgerRead>;
   },
 ): ReplayReaderDeps {
   return {
     evaluate: expression => cdp.evaluate(expression),
     diagnose: options => tv.diagnoseReplayStrategyBar(options),
-    ledger: options => tv.getStrategyTradeLedger(options),
   };
 }
 
@@ -145,19 +118,31 @@ export function recorderScript(mode: "install" | "revision" | "evidence" | "remo
       const mode = ${JSON.stringify(mode)};
       const chartIndex = ${options.chartIndex};
       const studyId = ${JSON.stringify(options.studyId)};
+      const unsubscribe = state => {
+        state.ready = false;
+        state.delegates = state.delegates.filter(delegate => {
+          try { delegate.unsubscribeAll(state.token); } catch (e) {}
+          try {
+            return !Array.isArray(delegate._listeners) ||
+              delegate._listeners.some(l => l && l.object === state.token);
+          } catch (e) {
+            return true;
+          }
+        });
+        return state.delegates.length;
+      };
+      if (mode === "remove") {
+        const existing = window[KEY];
+        if (!existing) return { removed: false };
+        if (existing.chartIndex !== chartIndex || existing.studyId !== studyId) {
+          throw new Error("The recorder watches another chart or study");
+        }
+        const left = unsubscribe(existing);
+        if (left === 0) delete window[KEY];
+        return { removed: left === 0, left, recorderId: existing.recorderId };
+      }
       const api = window.TradingViewApi;
       if (!api || typeof api.replayApi !== "function") throw new Error("Replay API unavailable");
-      const existing = window[KEY];
-      if (mode === "remove") {
-        if (!existing) return { removed: false };
-        let left = 0;
-        for (const delegate of existing.delegates) {
-          try { delegate.unsubscribeAll(existing.token); } catch (e) {}
-          if (Array.isArray(delegate._listeners) && delegate._listeners.some(l => l && l.object === existing.token)) left++;
-        }
-        delete window[KEY];
-        return { removed: true, left, recorderId: existing.recorderId };
-      }
       const chart = api.chart(chartIndex);
       const model = chart._chartWidget._lineToolsSynchronizer._chartModel;
       const series = model.mainSeries();
@@ -214,9 +199,12 @@ export function recorderScript(mode: "install" | "revision" | "evidence" | "remo
         } else state.overflow = true;
       };
       if (mode === "install") {
-        if (existing) throw new Error("A replay recorder is already installed");
+        if (window[KEY]) throw new Error("A replay recorder is already installed or awaiting cleanup");
         if (unwrap(replay.isReplayStarted()) !== false) throw new Error("Install the recorder before Replay starts");
-        if (sourceNow() === null) throw new Error("No active strategy on the chart");
+        const source = sourceNow();
+        if (attempt(() => typeof source.id === "function" ? source.id() : source.id) !== studyId) {
+          throw new Error("The requested strategy is not active on the chart");
+        }
         const dataEvents = series.dataEvents();
         const pick = (owner, name) => attempt(() => typeof owner[name] === "function" ? owner[name]() : owner["_" + name]);
         const sources = {
@@ -225,29 +213,41 @@ export function recorderScript(mode: "install" | "revision" | "evidence" | "remo
           barReceived: () => pick(dataEvents, "barReceived"), seriesUpdated: () => pick(dataEvents, "dataUpdated"),
           seriesCompleted: () => pick(dataEvents, "completed"), seriesModified: () => pick(dataEvents, "modified"),
           seriesLoading: () => pick(dataEvents, "loading"), seriesCleared: () => pick(dataEvents, "cleared"),
-          sourceUpdated: () => sourceNow().onDataUpdated(), sourceStatus: () => sourceNow().onStatusChanged(),
-          reportChanged: () => sourceNow().reportChanged(),
+          sourceUpdated: () => source.onDataUpdated(), sourceStatus: () => source.onStatusChanged(),
+          reportChanged: () => source.reportChanged(),
         };
         const state = { recorderId: ${JSON.stringify(options.recorderId ?? "")}, token: {}, seq: 0, overflow: false,
-          log: [], delegates: [], last: null, studyId, chartIndex };
-        for (const [name, get] of Object.entries(sources)) {
-          const delegate = attempt(get);
-          // Only TradingView delegates: subscribe(owner, member) with an owner token to remove later.
-          if (!delegate || typeof delegate.subscribe !== "function" || typeof delegate.unsubscribeAll !== "function" ||
-              typeof delegate.fire !== "function" || !Array.isArray(delegate._listeners)) {
-            for (const done of state.delegates) attempt(() => done.unsubscribeAll(state.token));
-            throw new Error("Replay recorder source unavailable: " + name);
-          }
-          delegate.subscribe(state.token, (...args) => record(state, name, args));
-          state.delegates.push(delegate);
-        }
-        state.last = fingerprint();
+          log: [], delegates: [], last: null, studyId, chartIndex, ready: false };
         window[KEY] = state;
+        try {
+          for (const [name, get] of Object.entries(sources)) {
+            const delegate = attempt(get);
+            if (!delegate || typeof delegate.subscribe !== "function" || typeof delegate.unsubscribeAll !== "function" ||
+                typeof delegate.fire !== "function" || !Array.isArray(delegate._listeners)) {
+              throw new Error("Replay recorder source unavailable: " + name);
+            }
+            if (!state.delegates.includes(delegate)) state.delegates.push(delegate);
+            delegate.subscribe(state.token, (...args) => {
+              if (state.ready) record(state, name, args);
+            });
+            if (!delegate._listeners.some(l => l && l.object === state.token)) {
+              throw new Error("Replay recorder subscription unconfirmed: " + name);
+            }
+          }
+          state.last = fingerprint();
+          state.ready = true;
+        } catch (error) {
+          if (unsubscribe(state) === 0) delete window[KEY];
+          else throw new Error("Replay recorder installation failed; cleanup is pending");
+          throw error;
+        }
         return { recorderId: state.recorderId, seq: state.seq, sources: Object.keys(sources) };
       }
+      const existing = window[KEY];
       if (!existing) throw new Error("No replay recorder is installed");
       if (existing.chartIndex !== chartIndex || existing.studyId !== studyId) throw new Error("The recorder watches another chart or study");
-      // A change that no delegate announced is recorded as its own revision.
+      if (!existing.ready) throw new Error("Replay recorder cleanup is pending");
+      // A difference visible between observations is recorded for diagnosis.
       const now = fingerprint();
       if (JSON.stringify(now) !== JSON.stringify(existing.last)) record(existing, "unobserved_change", []);
       const snapshot = { recorderId: existing.recorderId, seq: existing.seq, overflow: existing.overflow, current: existing.last };
@@ -256,76 +256,126 @@ export function recorderScript(mode: "install" | "revision" | "evidence" | "remo
   `;
 }
 
-const SERIES_DATA = new Set(["barReceived", "seriesUpdated", "seriesModified", "seriesLoading", "seriesCleared"]);
-const AFTER_REPORT = new Set(["sourceUpdated", "sourceStatus", "reportChanged"]);
-
-export interface DerivedReplayEvidence {
-  reason: string | null;
-  update: { seriesId: string; openTimeMs: number; updateId: string } | null;
-  finalUpdateConfirmed: boolean;
-  calculatedFrom: { seriesId: string; openTimeMs: number; updateId: string } | null;
-  calculationComplete: boolean;
-}
-
-const sameBar = (a: number[] | null, b: number[] | null) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
-function lastIndex<T>(items: T[], predicate: (item: T, index: number) => boolean): number {
-  for (let i = items.length - 1; i >= 0; i--) if (predicate(items[i], i)) return i;
-  return -1;
-}
+type ReaderTarget = Parameters<ReplayCandidateReader["readLiveRevision"]>[0];
 
 /**
- * Pure: the bar update and report provenance from a recorder snapshot.
- * Every step must have been seen after this Replay session started.
+ * The dependency must read genuine publisher metadata, including a live
+ * revision that advances for every covered change. It must detect resets,
+ * reconnects and incomplete publication at the source. The report scope is
+ * recorded by the publisher for that calculation. The stream manifest is the
+ * publisher's complete list for the start-to-end checkpoint interval, obtained
+ * independently of which event streams the reader received.
+ * A page request carries no expected IDs or hashes to copy into its response.
  */
-export function deriveReplayEvidence(snapshot: RecorderSnapshot, seriesId: string): DerivedReplayEvidence {
-  const none = (reason: string): DerivedReplayEvidence =>
-    ({ reason, update: null, finalUpdateConfirmed: false, calculatedFrom: null, calculationComplete: false });
-  const log = snapshot.log ?? [];
-  const current = snapshot.current;
-  if (snapshot.overflow) return none("recorder_overflow");
-  const session = current.replaySession;
-  if (!session) return none("replay_session_unconfirmed");
-  // The start: the session id changed to this session after installation.
-  const start = lastIndex(log, e => e.name === "replaySession" && e.args[0] === session);
-  if (start < 0) return none("replay_start_unobserved");
-  const after = log.slice(start + 1);
-  if (after.some(e => e.name === "replaySession" || e.name === "unobserved_change" || e.name === "replayEnd")) {
-    return none("replay_session_changed");
-  }
-  const bar = current.lastBar;
-  if (!bar) return none("bar_unconfirmed");
-  const open = bar[1];
-  const point = lastIndex(after, e => e.name === "replayPoint");
-  if (point < 0 || after[point].fp.replay.cursor !== current.replay.cursor) return none("replay_point_unobserved");
-  const updateAt = lastIndex(after, e => (e.name === "barReceived" || e.name === "seriesUpdated") && sameBar(e.fp.lastBar, bar));
-  if (updateAt < 0) return none("bar_update_unobserved");
-  const updateEvent = after[updateAt];
-  const update = { seriesId, openTimeMs: open * 1000, updateId: `${snapshot.recorderId}:${updateEvent.seq}` };
-  const completeAt = after.findIndex((e, i) => i > updateAt && e.name === "seriesCompleted" && sameBar(e.fp.lastBar, bar));
-  const laterSeries = after.some((e, i) => i > updateAt && (SERIES_DATA.has(e.name) || e.name === "replayPoint" || e.name === "replayModified"));
-  const replay = current.replay;
-  // laterSeries also rules out a Replay point after the update, so the point preceded it.
-  const finalUpdateConfirmed = completeAt >= 0 && !laterSeries && replay.started === true &&
-    replay.autoplay === false && replay.resolution === "5" && current.resolution === "5" &&
-    replay.cursor === open + BAR_SECONDS - 1;
-  if (!finalUpdateConfirmed) return { ...none("bar_final_update_unconfirmed"), update };
-  // The report: the strategy finished after that final update and the report then changed to end at the bar.
-  const reportAt = lastIndex(after, (e, i) => i > completeAt && e.name === "reportChanged" &&
-    e.fp.reportEnd === open * 1000 && e.fp.loading === false && sameBar(e.fp.lastBar, bar));
-  const settled = reportAt >= 0 && after.some((e, i) => i > completeAt && i <= reportAt && e.name === "sourceStatus" && e.fp.loading === false);
-  const clean = reportAt >= 0 && after.slice(reportAt + 1).every(e => AFTER_REPORT.has(e.name) &&
-    e.fp.reportEnd === open * 1000 && e.fp.loading === false && sameBar(e.fp.lastBar, bar));
-  const calculationComplete = settled && clean && current.loading === false && current.completed === true &&
-    current.reportEnd === open * 1000;
-  if (!calculationComplete) return { ...none("report_final_update_unconfirmed"), update, finalUpdateConfirmed };
-  return { reason: null, update, finalUpdateConfirmed, calculatedFrom: { ...update }, calculationComplete };
+export interface ReplayPublisherReader {
+  readLiveRevision(target: ReaderTarget): Promise<unknown>;
+  readEvidence(target: ReaderTarget): Promise<unknown>;
+  readLedgerPage(target: ReaderTarget, range: { offset: number; limit: number }): Promise<unknown>;
 }
 
-const sha256 = (value: unknown) => "sha256:" + createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const timeMs = (iso: string | undefined) => {
-  const value = iso === undefined ? NaN : Date.parse(iso);
-  return Number.isSafeInteger(value) ? value : -1;
-};
+const publisherId = z.string().regex(/^[\w:;.-]{1,128}$/);
+const publisherHash = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+const sequence = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const revisionSchema = z.strictObject({
+  appInstanceId: publisherId, replaySessionId: publisherId, revision: sequence,
+});
+const checkpointSchema = z.strictObject({ id: publisherId, liveRevision: revisionSchema });
+const updateSchema = z.strictObject({ seriesId: publisherId, openTimeMs: sequence, updateId: publisherId });
+const domainSchema = z.enum(["replay", "bar", "settings", "report", "ledger"]);
+const positionSchema = z.strictObject({ checkpointId: publisherId, streamEpoch: publisherId, sequence });
+const streamSourceSchema = z.strictObject({
+  publisherId, streamId: publisherId,
+  domains: z.array(domainSchema).min(1).max(domainSchema.options.length),
+});
+const resultIdentitySchema = z.strictObject({
+  snapshotId: publisherId.nullable(), ledgerId: publisherHash,
+  reportStateSha256: publisherHash, settingsSha256: publisherHash,
+});
+const publisherProofSchema = z.strictObject({
+  start: checkpointSchema,
+  end: checkpointSchema,
+  bar: z.strictObject({ finalized: z.literal(true), update: updateSchema }),
+  report: z.strictObject({
+    complete: z.literal(true), calculationId: publisherId, calculatedFrom: updateSchema,
+    checkpointId: publisherId, settingsSha256: publisherHash,
+    target: z.strictObject({
+      chartIndex: sequence, studyId: publisherId, pineId: publisherId, pineVersion: publisherId,
+    }),
+  }),
+  ledger: resultIdentitySchema.extend({ calculationId: publisherId }),
+  streamManifest: z.strictObject({
+    startCheckpointId: publisherId, endCheckpointId: publisherId, complete: z.literal(true),
+    requiredStreams: z.array(streamSourceSchema.extend({ streamEpoch: publisherId })).min(1).max(RECORDER_LOG_LIMIT),
+  }),
+  streams: z.array(streamSourceSchema.extend({
+    start: positionSchema,
+    end: positionSchema.extend({ publicationComplete: z.literal(true) }),
+    receivedSequences: z.array(sequence).max(RECORDER_LOG_LIMIT),
+  })).min(1).max(RECORDER_LOG_LIMIT),
+});
+
+const evidencePacketSchema = z.strictObject({
+  proof: publisherProofSchema,
+  // Only the fields used to bind the proof are read here. Stage A still
+  // validates the full evidence and page schemas.
+  evidence: z.looseObject({
+    binding: resultIdentitySchema.extend({ liveRevision: revisionSchema }),
+    bar: z.looseObject({ update: updateSchema, finalUpdateConfirmed: z.literal(true) }),
+    report: z.looseObject({ calculatedFrom: updateSchema, calculationComplete: z.literal(true) }),
+  }),
+});
+const pagePacketSchema = z.strictObject({
+  checkpointId: publisherId, calculationId: publisherId, page: z.unknown(),
+});
+const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+
+function publisherCheckpoint(packet: z.infer<typeof evidencePacketSchema>, target: ReaderTarget) {
+  const { proof, evidence } = packet;
+  const before = proof.start.liveRevision;
+  const after = proof.end.liveRevision;
+  const { liveRevision, ...resultIdentity } = evidence.binding;
+  const { calculationId, ...ledgerIdentity } = proof.ledger;
+  const { chartIndex, studyId, pineId, pineVersion } = target;
+  if (before.appInstanceId !== after.appInstanceId || before.replaySessionId !== after.replaySessionId ||
+      before.revision > after.revision || !equal(after, liveRevision) ||
+      (proof.start.id === proof.end.id && !equal(before, after)) ||
+      !equal(proof.bar.update, proof.report.calculatedFrom) ||
+      !equal(proof.bar.update, evidence.bar.update) ||
+      !equal(proof.report.calculatedFrom, evidence.report.calculatedFrom) ||
+      !equal(proof.report.target, { chartIndex, studyId, pineId, pineVersion }) ||
+      proof.report.checkpointId !== proof.end.id ||
+      proof.report.settingsSha256 !== resultIdentity.settingsSha256 ||
+      calculationId !== proof.report.calculationId || !equal(resultIdentity, ledgerIdentity)) return null;
+
+  const manifest = proof.streamManifest;
+  if (manifest.startCheckpointId !== proof.start.id || manifest.endCheckpointId !== proof.end.id) return null;
+  const requiredStreams = new Map<string, (typeof manifest.requiredStreams)[number]>();
+  for (const stream of manifest.requiredStreams) {
+    const id = JSON.stringify([stream.publisherId, stream.streamId]);
+    if (requiredStreams.has(id)) return null;
+    requiredStreams.set(id, stream);
+  }
+
+  const domains = new Set<string>();
+  let receivedCount = 0;
+  for (const stream of proof.streams) {
+    const id = JSON.stringify([stream.publisherId, stream.streamId]);
+    const required = requiredStreams.get(id);
+    if (!required || required.streamEpoch !== stream.start.streamEpoch ||
+        !equal([...required.domains].sort(), [...stream.domains].sort()) ||
+        stream.start.checkpointId !== proof.start.id || stream.end.checkpointId !== proof.end.id ||
+        stream.start.streamEpoch !== stream.end.streamEpoch ||
+        (proof.start.id === proof.end.id && stream.start.sequence !== stream.end.sequence) ||
+        stream.end.sequence - stream.start.sequence !== stream.receivedSequences.length ||
+        stream.receivedSequences.some((value, index) => value !== stream.start.sequence + index + 1)) return null;
+    receivedCount += stream.receivedSequences.length;
+    if (receivedCount > RECORDER_LOG_LIMIT) return null;
+    requiredStreams.delete(id);
+    for (const domain of stream.domains) domains.add(domain);
+  }
+  if (requiredStreams.size !== 0 || domains.size !== domainSchema.options.length) return null;
+  return { checkpointId: proof.end.id, calculationId, proof };
+}
 
 /** The live target to bind before calling checkReplayAdoptionCandidate. */
 export async function readReplayTarget(deps: ReplayReaderDeps, chartIndex: number, studyId: string): Promise<ReplayReaderTarget> {
@@ -356,62 +406,34 @@ export async function removeReplayRecorder(deps: ReplayReaderDeps, chartIndex: n
   return deps.evaluate<{ removed: boolean; left?: number; recorderId?: string }>(recorderScript("remove", { chartIndex, studyId }));
 }
 
-/** A ReplayCandidateReader over the installed recorder and the existing strict report reads. */
+/** A ReplayCandidateReader that holds unless a publisher supplies the evidence. */
 export function createReplayAdoptionReader(deps: ReplayReaderDeps): ReplayCandidateReader {
-  const revisionOf = (snapshot: RecorderSnapshot) => ({
-    appInstanceId: snapshot.recorderId, replaySessionId: snapshot.current.replaySession ?? "", revision: snapshot.seq,
-  });
+  const publisher = deps.publisher;
+  // Stage A uses a fresh target object for each read and retains it through
+  // the last page. Keep concurrent reads' checkpoint associations independent.
+  const checkpoints = new WeakMap<ReaderTarget, NonNullable<ReturnType<typeof publisherCheckpoint>>>();
   return {
     async readLiveRevision(target) {
-      const snapshot = await deps.evaluate<RecorderSnapshot>(recorderScript("revision", target));
-      return revisionOf(snapshot);
+      return publisher ? publisher.readLiveRevision(target) : null;
     },
-    async readEvidence(target, expected) {
-      const diagnosis = await deps.diagnose({ chartIndex: target.chartIndex, expectedStudyId: target.studyId });
-      const first = await deps.ledger({ chartIndex: target.chartIndex, expectedStudyId: target.studyId, offset: 0, limit: 1,
-        ...(expected ? { expectedLedgerId: expected.ledgerId } : {}) });
-      const snapshot = await deps.evaluate<RecorderSnapshot>(recorderScript("evidence", target));
-      const live = liveTarget(target.chartIndex, diagnosis, snapshot.current);
-      const derived = deriveReplayEvidence(snapshot, live.seriesId);
-      const sameBarStatus = diagnosis.status === "same_bar" && diagnosis.reason === null;
-      const open = timeMs(diagnosis.barOpen);
-      if (!SHA.test(diagnosis.ledgerId ?? "") || diagnosis.ledgerId !== first.ledgerId || !SHA.test(diagnosis.reportStateSha256 ?? "") ||
-          first.totalTrades === null || !ID.test(snapshot.recorderId)) {
-        throw new Error("Replay report binding unconfirmed");
-      }
-      const settings = { currency: first.currency, initialCapital: first.initialCapital, inputs: first.inputs };
-      return {
-        binding: {
-          liveRevision: revisionOf(snapshot), snapshotId: `${snapshot.recorderId}:${snapshot.seq}`,
-          ledgerId: first.ledgerId, reportStateSha256: diagnosis.reportStateSha256, settingsSha256: sha256(settings),
-        },
-        target: live,
-        replay: {
-          paused: snapshot.current.replay.started === true && snapshot.current.replay.autoplay === false,
-          selectedTimeMs: timeMs(diagnosis.selectedTime), cursorTimeMs: timeMs(diagnosis.cursorTime),
-        },
-        bar: {
-          update: derived.update ?? { seriesId: live.seriesId, openTimeMs: open, updateId: "unconfirmed" },
-          endTimeMs: timeMs(diagnosis.barEndExclusive),
-          nativeBoundaryConfirmed: sameBarStatus, continuityConfirmed: sameBarStatus,
-          finalUpdateConfirmed: derived.finalUpdateConfirmed,
-        },
-        report: {
-          endTimeMs: timeMs(diagnosis.reportEndTime),
-          calculatedFrom: derived.calculatedFrom ?? { seriesId: live.seriesId, openTimeMs: -1, updateId: "unconfirmed" },
-          calculationComplete: derived.calculationComplete,
-          availableTrades: first.availableTrades, closedTrades: first.totalTrades,
-        },
-      };
+    async readEvidence(target) {
+      const previous = checkpoints.get(target);
+      checkpoints.delete(target);
+      if (!publisher) return null;
+      const packet = evidencePacketSchema.safeParse(await publisher.readEvidence(target));
+      if (!packet.success) return null;
+      const checkpoint = publisherCheckpoint(packet.data, target);
+      if (!checkpoint || (previous && !equal(previous, checkpoint))) return null;
+      checkpoints.set(target, checkpoint);
+      return packet.data.evidence;
     },
     async readLedgerPage(target, request) {
-      const page = await deps.ledger({ chartIndex: target.chartIndex, expectedStudyId: target.studyId, offset: request.offset,
-        limit: request.limit, expectedLedgerId: request.binding.ledgerId });
-      return {
-        binding: page.ledgerId === request.binding.ledgerId ? request.binding : { ...request.binding, ledgerId: page.ledgerId },
-        offset: page.offset, nextOffset: page.nextOffset, availableTrades: page.availableTrades,
-        trades: page.trades.map(trade => ({ reportIndex: trade.reportIndex, status: trade.status })),
-      };
+      const checkpoint = checkpoints.get(target);
+      if (!publisher || !checkpoint) return null;
+      const packet = pagePacketSchema.safeParse(await publisher.readLedgerPage(target, { offset: request.offset, limit: request.limit }));
+      if (!packet.success || packet.data.checkpointId !== checkpoint.checkpointId ||
+          packet.data.calculationId !== checkpoint.calculationId) return null;
+      return packet.data.page;
     },
   };
 }
