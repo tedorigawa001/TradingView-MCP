@@ -4,35 +4,35 @@ import {createHash} from 'node:crypto';
 import {WriteBudget,QuotaWriter,LIMITS,VERIFIER_INPUT_PATHS,RELEASE_VERSION,DISTRIBUTION_MANIFEST,validateManifest,MiB,sha,invariant} from './package-verifier-core.mjs';
 
 const KiB=1024;
-// 0.1.48 runs in a new 64 MiB campaign, approved on 2026-11-24. Preparation and
+// 0.1.49 runs in a new 64 MiB campaign, approved on 2026-11-27. Preparation and
 // the B run keep the earlier limits; releaseStagesReserved is held for the later
 // npm login, preflight, publication and readback records and is not usable here.
-// The 0.1.47 campaign (64 MiB) reached 19,992,266 bytes through B and used
+// The 0.1.48 campaign (64 MiB) reached 20,138,561 bytes through B and used
 // 311,296 of its 2 MiB release-stage share. Its records are bound below as
 // hash-checked history and carry no reservation.
 export const REVERIFY_CAMPAIGN=Object.freeze({
   schema:'package-reverify-campaign-v2',
   releaseVersion:RELEASE_VERSION,
-  preparation:'package-2026-11-24-reverify-0.1.48-prep01',run:'package-2026-11-24-reverify-0.1.48',
+  preparation:'package-2026-11-27-reverify-0.1.49-prep01',run:'package-2026-11-27-reverify-0.1.49',
   priorReserved:0,prepReserved:512*KiB,runLimit:49*MiB,releaseStagesReserved:2*MiB,
   fixedMargin:6*MiB,unallocated:6815744,campaignCap:64*MiB,protected765Used:0
 });
-// The finished 0.1.47 release: a ready preparation, the passed B verification
+// The finished 0.1.48 release: a ready preparation, the passed B verification
 // that produced the artifact, and the anonymous readback (verify01) that
 // confirmed the registry serves that same artifact.
-export const PREVIOUS_RELEASE=Object.freeze({version:'0.1.47',preparation:'package-2026-11-21-reverify-0.1.47-prep01',
-  run:'package-2026-11-21-reverify-0.1.47',artifactBytes:851982,
-  artifactSha256:'625fbbae18924987691f23e3cbbc7d2efa58e859826a5dcc0b3d9734d239c1aa',
-  campaignCap:64*MiB,campaignReservedAfterB:19992266,releaseStageCumulative:311296});
+export const PREVIOUS_RELEASE=Object.freeze({version:'0.1.48',preparation:'package-2026-11-24-reverify-0.1.48-prep01',
+  run:'package-2026-11-24-reverify-0.1.48',artifactBytes:858226,
+  artifactSha256:'b7d736a5020c70f92447f3ca4ef755242972c73a5ddb4df1a3cfb972b9c48355',
+  campaignCap:64*MiB,campaignReservedAfterB:20138561,releaseStageCumulative:311296});
 export const PRIOR_RECORDS=Object.freeze([
-  Object.freeze({path:'package-2026-11-21-reverify-0.1.47-prep01/status.json',
-    sha256:'fcc5c5dbb2ee767abd567a49520756c50412495f2aa8246b6fd3635c1b964e86',reserved:0,role:'previous_release_preparation'}),
-  Object.freeze({path:'package-2026-11-21-reverify-0.1.47/report/result.json',
-    sha256:'b1e70f16ff110ae50dfdc0c8e8c2e0a458bec798d56b6c4740eb5f71f6e1a728',reserved:0,role:'previous_release_verification'}),
-  Object.freeze({path:'package-2026-11-22-publish-0.1.47-verify01/verification-readback.json',
-    sha256:'904dc3445b6be84259f364ad8d3784dabb29f1928b4bfcdbd94bdbd64e97b6fd',reserved:0,role:'previous_release_publication_readback'}),
-  Object.freeze({path:'package-2026-11-22-publish-0.1.47-verify01/verification-status.json',
-    sha256:'2a37b996b0b79e3562b10fac01869d8504caa6d668bdc806afc62168688c03ec',reserved:0,role:'previous_release_publication'})
+  Object.freeze({path:'package-2026-11-24-reverify-0.1.48-prep01/status.json',
+    sha256:'223947c641f4893d85e80306d981f472cd18bc1f050a2304307c9b4539d2c8a2',reserved:0,role:'previous_release_preparation'}),
+  Object.freeze({path:'package-2026-11-24-reverify-0.1.48/report/result.json',
+    sha256:'87df1478618ee4846b3e661c61b7ae006520ce3f16c9d7a71e27727d572a179c',reserved:0,role:'previous_release_verification'}),
+  Object.freeze({path:'package-2026-11-24-publish-0.1.48-verify01/verification-readback.json',
+    sha256:'d825efe68340c1c51aacd241f864560892a2b365554b804ae7b95f31f8a54bbb',reserved:0,role:'previous_release_publication_readback'}),
+  Object.freeze({path:'package-2026-11-24-publish-0.1.48-verify01/verification-status.json',
+    sha256:'a108da624e1c41daf22844a6c4e359b80e290f313f93218338ab303d5ce1dce0',reserved:0,role:'previous_release_publication'})
 ]);
 export const PREP_LIMITS=Object.freeze({inputs:448*KiB,approval_a:8*KiB,approval_b:8*KiB,
   tests:16*KiB,readback:16*KiB,final:16*KiB});
@@ -89,7 +89,7 @@ export function captureApprovedInputs(repo){
     parseRecord(readRegular(path.join(repo,'package.json')),32*MiB),
     parseRecord(readRegular(path.join(repo,'package-lock.json')),32*MiB));
   const source=filesUnder(path.join(repo,'src')).map(p=>'src/'+p);
-  invariant(source.length===231&&source.every(p=>p.endsWith('.ts')),'source_set_changed');
+  invariant(source.length===233&&source.every(p=>p.endsWith('.ts')),'source_set_changed');
   const extras=['package.json','package-lock.json','tsconfig.json','README.md','LICENSE','packaging/PACKAGE_VERIFICATION.md',
     ...VERIFIER_INPUT_PATHS,'test/helpers/committedConnectionFixture.mjs','test/helpers/committedPagingFixture.mjs',
     'test/fixtures/committed-v3-connection-golden.json'];

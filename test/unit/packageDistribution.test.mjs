@@ -113,7 +113,7 @@ test('verifier identity binds runner, core, tests and allowlist before and after
     ['scripts/prepare-package-reverify.mjs',Buffer.from('prepare')],
     ['test/unit/packageDistribution.test.mjs',Buffer.from('tests')],
     ['test/unit/packageApproval.test.mjs',Buffer.from('approval-tests')],
-    ['packaging/npm-js-0.1.48.json',Buffer.from('paths')]
+    ['packaging/npm-js-0.1.49.json',Buffer.from('paths')]
   ]);
   const before=verifier.captureVerifierInputs(p=>inputs.get(p));
   assert.deepEqual(before.record.files.map(f=>f.path),[...inputs.keys()].sort());
@@ -216,28 +216,29 @@ test('actual finalization and writer use Windows paths for success, identity dri
   }
 });
 
-test('published 0.1.48 paths stay fixed and the working package adds the Replay dependencies',()=>{
-  const m=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.48.json',import.meta.url))),p=JSON.parse(readFileSync(new URL('../../package.json',import.meta.url))),
-    lock=JSON.parse(readFileSync(new URL('../../package-lock.json',import.meta.url)));
-  const published={...p,files:m.files};
-  assert.equal(validateManifest(m,published,lock).length,225);
-  assert.deepEqual(p.files,[...m.files,'build/replayAdoptionCandidate.js','build/replayAdoptionReader.js'].sort());
+test('fixed 227 paths add the Replay adoption modules to the published 0.1.48 paths',()=>{
+  const m=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.49.json',import.meta.url))),p=JSON.parse(readFileSync(new URL('../../package.json',import.meta.url))),
+    lock=JSON.parse(readFileSync(new URL('../../package-lock.json',import.meta.url))),
+    previous=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.48.json',import.meta.url)));
+  assert.equal(validateManifest(m,p,lock).length,227);
+  assert.deepEqual(m.files,[...previous.files,'build/replayAdoptionCandidate.js','build/replayAdoptionReader.js'].sort());
+  assert.deepEqual([m.excluded,m.requiredShared],[previous.excluded,previous.requiredShared]);
   for(const mutation of ['swap','missing','version','bin']){
-    const a=structuredClone(m),b=structuredClone(published);
+    const a=structuredClone(m),b=structuredClone(p);
     if(mutation==='swap')a.files[0]='build/not-approved.js';
     if(mutation==='missing')b.files=b.files.slice(1);
-    if(mutation==='version')b.version='0.1.47';
+    if(mutation==='version')b.version='0.1.48';
     if(mutation==='bin')b.bin.extra='build/not-approved.js';
     assert.throws(()=>validateManifest(a,b,lock));
   }
 });
-test('release candidate is fixed to 0.1.48 across package, lock and distribution metadata',()=>{
-  assert.equal(verifier.RELEASE_VERSION,'0.1.48');
-  assert.equal(verifier.DISTRIBUTION_MANIFEST,'packaging/npm-js-0.1.48.json');
-  const pkg={name:'candidate',version:'0.1.48'},lock={name:'candidate',version:'0.1.48',packages:{'':{name:'candidate',version:'0.1.48'}}},
-    manifest={targetVersion:'0.1.48',verificationVersion:'0.1.48'};
+test('release candidate is fixed to 0.1.49 across package, lock and distribution metadata',()=>{
+  assert.equal(verifier.RELEASE_VERSION,'0.1.49');
+  assert.equal(verifier.DISTRIBUTION_MANIFEST,'packaging/npm-js-0.1.49.json');
+  const pkg={name:'candidate',version:'0.1.49'},lock={name:'candidate',version:'0.1.49',packages:{'':{name:'candidate',version:'0.1.49'}}},
+    manifest={targetVersion:'0.1.49',verificationVersion:'0.1.49'};
   verifier.validateReleaseVersions(manifest,pkg,lock);
-  for(const version of ['0.1.47','0.1.49'])for(const field of ['package','lock','lockRoot','target','verification']){
+  for(const version of ['0.1.48','0.1.50'])for(const field of ['package','lock','lockRoot','target','verification']){
     const p=structuredClone(pkg),l=structuredClone(lock),m=structuredClone(manifest);
     if(field==='package')p.version=version;if(field==='lock')l.version=version;if(field==='lockRoot')l.packages[''].version=version;
     if(field==='target')m.targetVersion=version;if(field==='verification')m.verificationVersion=version;

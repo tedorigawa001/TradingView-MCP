@@ -49,7 +49,7 @@ try {
   const allowed=validateManifest(manifest,pkg,JSON.parse(read(path.join(repo,'package-lock.json'))));
   const sourceFiles=walk(path.join(repo,'src')).filter(p=>p.endsWith('.ts')&&!p.endsWith('.d.ts')).sort();
   const sourcePaths=sourceFiles.map(p=>'build/'+path.relative(path.join(repo,'src'),p).replace(/\.ts$/,'.js')).sort();
-  invariant(sourcePaths.length===231&&JSON.stringify(sourcePaths.filter(p=>!manifest.excluded.includes(p)))===JSON.stringify(allowed),'source_set_changed');
+  invariant(sourcePaths.length===233&&JSON.stringify(sourcePaths.filter(p=>!manifest.excluded.includes(p)))===JSON.stringify(allowed),'source_set_changed');
   guard=installNoWriteGuard();
   // Prove that the tripwire refuses BEFORE invoking an unmanaged filesystem write.
   const probe=path.join(root,'unmanaged-probe');
@@ -101,7 +101,7 @@ try {
   const program=ts.createProgram(parsed.fileNames,opts,host);
   checkTsDiagnostics([...parsed.errors,...ts.getPreEmitDiagnostics(program)]);
   const emission=program.emit();checkTsDiagnostics(emission.diagnostics,emission.emitSkipped);
-  invariant(emitted.size===231,'emit_count');report.checks.typescript={errors:0,files:emitted.size};note('compiled');
+  invariant(emitted.size===233,'emit_count');report.checks.typescript={errors:0,files:emitted.size};note('compiled');
 
   phase='staging';
   const expected=new Map();
@@ -137,9 +137,9 @@ try {
   const tarPath=writer.write('tarball','artifact/verified-'+RELEASE_VERSION+'.tgz',tarball);
   const artifact=read(tarPath);invariant(sha(artifact)===sha(tarball),'saved_artifact_changed');
   const inspected=await inspectArtifact(artifact,expected);
-  invariant(inspected.entries.size===228,'package_entry_count');
+  invariant(inspected.entries.size===230,'package_entry_count');
   for(const p of canaries)invariant(!inspected.entries.has('package/'+p),'canary_shipped');
-  report.artifact={path:path.relative(root,tarPath),bytes:artifact.length,sha256:inspected.sha256,regular_files:228,JS:225};
+  report.artifact={path:path.relative(root,tarPath),bytes:artifact.length,sha256:inspected.sha256,regular_files:230,JS:227};
   phase='extract';
   for(const [p,e]of inspected.entries)writer.write('extract','unpacked/'+p,inspected.raw.subarray(e.start,e.start+e.size));
   for(const [p,want]of expected)invariant(sha(read(path.join(root,'unpacked',p)))===want.sha256,'extraction_hash');

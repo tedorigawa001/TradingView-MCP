@@ -1,4 +1,51 @@
-# 0.1.48 distribution candidate (preparation pending)
+# 0.1.49 distribution candidate (preparation pending)
+
+The approved JS allowlist grows from 225 to 227 paths, fixed by
+`npm-js-0.1.49.json` with SHA-256
+`1941967d883425b664363faaaf89ae15bd431aaae59c1494784c00148e9a9fee`. Since
+0.1.48 two source files were added, and both are shipped:
+`build/replayAdoptionCandidate.js` and `build/replayAdoptionReader.js`, which
+`src/server.ts` imports for the Replay adoption check. `src/server.ts` and
+`src/tradingview.ts` also changed. The six excluded modules and the three
+required shared modules are unchanged. The verifier now expects 233
+TypeScript sources, 233 emitted files and 230 regular package files: 227 JS
+files, package.json, README.md and LICENSE. `RELEASE_VERSION`, package.json,
+the two root version fields of package-lock.json and both distribution
+version fields are 0.1.49. Dependency data is not regenerated.
+
+## New 64 MiB campaign
+
+The user approved releasing 0.1.49 by the same procedure as 0.1.48, in a new
+64 MiB campaign. The authoritative configuration is `scripts/package-approval.mjs`:
+
+```
+0 prior + 524,288 preparation + 51,380,224 B maximum + 2,097,152 release stages
++ 6,291,456 fixed margin + 6,815,744 unallocated = 67,108,864 (64 MiB)
+```
+
+* Preparation: `package-2026-11-27-reverify-0.1.49-prep01` (512 KiB, the same
+  six slots as before, including the future approval-b.json slot).
+* Execution B: `package-2026-11-27-reverify-0.1.49` (49 MiB, the same eight
+  buckets as before).
+* The 2 MiB release-stage reservation is held for the later npm login,
+  preflight, publication and readback records. Preparation and B cannot use it.
+* Neither margin is available for automatic use. No refunds after deletion.
+
+The 0.1.48 records carry no reservation into the new campaign. They are bound
+as history by SHA-256, and preparation and B check the chain:
+
+* the ready 0.1.48 preparation status,
+* the passed 0.1.48 B result that binds that status and its input manifest and
+  produced the artifact (858,226 bytes, `b7d736a5...`),
+* the verify01 readback and its status: four confirmed verdicts, the
+  release-stage total of 311,296 bytes, and a published version 0.1.48 whose
+  tarball digest equals the B artifact.
+
+This change permits the version/configuration update, synthetic tests and the
+single 0.1.49 preparation with readback only. No B receipt, compiler emission,
+npm pack, commit, publication, DOT or production operation is authorized here.
+
+# 0.1.48 distribution candidate (history)
 
 The approved JS allowlist is unchanged: the same 225 paths and SHA-256
 `4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61`, now fixed
@@ -8,10 +55,29 @@ changed. `RELEASE_VERSION`, package.json, the two root version fields of
 package-lock.json and both distribution version fields are 0.1.48. Dependency
 data is not regenerated.
 
-## New 64 MiB campaign
+### Outcome
+
+* Preparation `package-2026-11-24-reverify-0.1.48-prep01` was ready for
+  review: 57 tests, 6 syntax files, inputs unchanged.
+* With approval B (`9c72a273...`), B passed. The artifact is
+  `verified-0.1.48.tgz`, 858,226 bytes, SHA-256 `b7d736a5...`. B charged
+  19,614,273 bytes, so the campaign reached 20,138,561 bytes through B.
+* CI passed on the candidate `2e33e3b` (run 45377632749, all five jobs). Tag
+  `v0.1.48` points to that commit.
+* `scripts/run-npm-release-0.1.48.mjs` published it. The registry accepted
+  the second PUT, sent after a web one-time password, with HTTP 202
+  `{"success":true}`. Its readback 30 seconds later still saw the
+  pre-publication state, so pub01 recorded `accepted_readback_unconfirmed`.
+* `scripts/run-npm-verify-0.1.48.mjs` (verify01) confirmed all four anonymous
+  readbacks: the version document, the dist-tag, the tarball bytes and the
+  install packument.
+* The release stages used 311,296 of their 2,097,152 bytes.
+
+### New 64 MiB campaign
 
 The user approved releasing 0.1.48 by the same procedure as 0.1.47, in a new
-64 MiB campaign. The authoritative configuration is `scripts/package-approval.mjs`:
+64 MiB campaign. The authoritative configuration was `scripts/package-approval.mjs`
+at `2e33e3b`:
 
 ```
 0 prior + 524,288 preparation + 51,380,224 B maximum + 2,097,152 release stages

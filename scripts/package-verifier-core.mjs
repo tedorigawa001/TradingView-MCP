@@ -5,10 +5,10 @@ import { createInflateRaw, crc32 } from 'node:zlib';
 import path from 'node:path';
 
 export const MiB = 1048576;
-export const RELEASE_VERSION = '0.1.48';
+export const RELEASE_VERSION = '0.1.49';
 // The fixed distribution allowlist of the current candidate; older ones stay as history.
 export const DISTRIBUTION_MANIFEST = 'packaging/npm-js-' + RELEASE_VERSION + '.json';
-export const PATH_HASH = '4ed01e849833b02fa949a844dca219af607cce8b58529c04b495060c15517c61';
+export const PATH_HASH = '1941967d883425b664363faaaf89ae15bd431aaae59c1494784c00148e9a9fee';
 export const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 export const fail = reason => { throw new Error(reason); };
 export function invariant(ok, reason) { if (!ok) fail(reason); }
@@ -126,7 +126,7 @@ export function validateReleaseVersions(manifest,pkg,lock) {
 }
 export function validateManifest(manifest,pkg,lock) {
   const files=manifest.files;
-  invariant(Array.isArray(files)&&files.length===225&&new Set(files).size===225,'manifest_count');
+  invariant(Array.isArray(files)&&files.length===227&&new Set(files).size===227,'manifest_count');
   invariant(files.every((f,i)=>typeof f==='string'&&/^build\/[A-Za-z0-9_/.-]+\.js$/.test(f)&&!f.split('/').includes('..')&&(!i||files[i-1]<f)),'manifest_paths');
   invariant(sha(files.join('\n')+'\n')===PATH_HASH&&manifest.pathsSha256===PATH_HASH,'manifest_hash');
   invariant(JSON.stringify(pkg.files)===JSON.stringify(files),'package_files');

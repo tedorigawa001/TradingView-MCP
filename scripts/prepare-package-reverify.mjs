@@ -33,8 +33,8 @@ try{
   guard=installNoWriteGuard();
   const approvalABytes=json({schema:'package-approval-v1',phase:'A',approval_kind:'A',decision:'approved',
     preparation:C.preparation,run:C.run,campaign_sha256:campaignHash(),campaign:C,
-    source:'explicit user approval in this chat (2026-11-24)',approval_b_granted:false,
-    instruction:'0.1.48を0.1.47と同じ手順でリリースし、新しい64 MiBキャンペーンを使うことを承認。0.1.48への版更新とprep01の準備・読戻しまで。承認B消費・ビルド・pack・コミット・公開・DOT起動は禁止。'});
+    source:'explicit user approval in this chat (2026-11-27)',approval_b_granted:false,
+    instruction:'0.1.49を0.1.48と同じ手順でリリースし、新しい64 MiBキャンペーンを使うことを承認。0.1.49への版更新とprep01の準備・読戻しまで。承認B消費・ビルド・pack・コミット・公開・DOT起動は禁止。'});
   writer.write('approval_a','approval-a.json',approvalABytes);report.approval_a_sha256=sha(approvalABytes);
   // Freeze the exact candidate BEFORE any test subprocess. Save these same
   // bytes, then bind both post-test and pre-readback checks to this candidate.
