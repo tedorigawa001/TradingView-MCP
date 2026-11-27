@@ -209,6 +209,8 @@
     "build/realizedCovarianceJournal.js",
     "build/realizedCovarianceRules.js",
     "build/redact.js",
+    "build/replayAdoptionCandidate.js",
+    "build/replayAdoptionReader.js",
     "build/researchCollectionCli.js",
     "build/researchCollectionHeartbeat.js",
     "build/researchEvidenceCli.js",

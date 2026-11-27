@@ -216,12 +216,14 @@ test('actual finalization and writer use Windows paths for success, identity dri
   }
 });
 
-test('fixed 225 paths, package metadata and shared dependencies match',()=>{
+test('published 0.1.48 paths stay fixed and the working package adds the Replay dependencies',()=>{
   const m=JSON.parse(readFileSync(new URL('../../packaging/npm-js-0.1.48.json',import.meta.url))),p=JSON.parse(readFileSync(new URL('../../package.json',import.meta.url))),
     lock=JSON.parse(readFileSync(new URL('../../package-lock.json',import.meta.url)));
-  assert.equal(validateManifest(m,p,lock).length,225);
+  const published={...p,files:m.files};
+  assert.equal(validateManifest(m,published,lock).length,225);
+  assert.deepEqual(p.files,[...m.files,'build/replayAdoptionCandidate.js','build/replayAdoptionReader.js'].sort());
   for(const mutation of ['swap','missing','version','bin']){
-    const a=structuredClone(m),b=structuredClone(p);
+    const a=structuredClone(m),b=structuredClone(published);
     if(mutation==='swap')a.files[0]='build/not-approved.js';
     if(mutation==='missing')b.files=b.files.slice(1);
     if(mutation==='version')b.version='0.1.47';
